@@ -180,7 +180,9 @@ pub enum Parsed {
         interrupt: Option<InterruptReceipt>,
     },
     /// Служебный итог `/compact` потреблён без открытого хода: команда сжатия закрыта.
-    CompactResultConsumed,
+    CompactResultConsumed {
+        ok: bool,
+    },
     Ignored,
 }
 
@@ -250,7 +252,10 @@ impl std::fmt::Debug for Parsed {
                 .field("success", success)
                 .field("interrupt", interrupt)
                 .finish(),
-            Self::CompactResultConsumed => f.write_str("CompactResultConsumed"),
+            Self::CompactResultConsumed { ok } => f
+                .debug_struct("CompactResultConsumed")
+                .field("ok", ok)
+                .finish(),
             Self::Ignored => f.write_str("Ignored"),
         }
     }
@@ -285,9 +290,10 @@ pub struct Parser {
     compact_manual: bool,
     /// Сжатие уже объявлено началом: повторный `status=compacting` не дублирует эпизод.
     compact_active: bool,
-    /// Граница сжатия прошла: ближайший `result` без открытого хода — итог служебного
-    /// `/compact`, а не ход прошлой команды.
-    compact_swallow_result: bool,
+    /// `/compact`, записанный адаптером по кнопке: только его итог не принадлежит ходу.
+    compact_command: Option<Uuid>,
+    /// Граница этого `/compact` уже прошла.
+    compact_boundary_seen: bool,
     /// Кадр последней границы сжатия: CLI дублирует границу, повторный эпизод не открывает.
     last_compact_boundary: Option<String>,
     /// Живой расход контекста, уже отданный `ContextProgress`: реже журнала, не чаще каждых
@@ -331,7 +337,8 @@ impl Parser {
             last_usage: None,
             compact_manual: false,
             compact_active: false,
-            compact_swallow_result: false,
+            compact_command: None,
+            compact_boundary_seen: false,
             last_compact_boundary: None,
             progress_sent: 0,
             unknown: HashSet::new(),
@@ -376,8 +383,17 @@ impl Parser {
     }
 
     /// Кнопка «Сжать контекст» отправила `/compact`: ближайшая граница — ручная.
-    pub fn mark_compact_manual(&mut self) {
+    pub fn mark_compact_manual(&mut self, command: Uuid) {
         self.compact_manual = true;
+        self.compact_command = Some(command);
+        self.compact_boundary_seen = false;
+    }
+
+    /// Адаптер больше не ждёт `/compact`: его поздний итог идёт обычным путём.
+    pub fn forget_compact(&mut self) {
+        self.compact_manual = false;
+        self.compact_command = None;
+        self.compact_boundary_seen = false;
     }
 
     /// CLI занят ходом, который начал сам: ввод ему не нужен, перезапуск его оборвал бы.
@@ -543,7 +559,8 @@ impl Parser {
         self.cli_turn = false;
         self.compact_manual = false;
         self.compact_active = false;
-        self.compact_swallow_result = false;
+        self.compact_command = None;
+        self.compact_boundary_seen = false;
         self.progress_sent = 0;
         self.background.clear();
         self.task_calls.clear();
@@ -755,7 +772,9 @@ impl Parser {
                     self.current_model = model.clone();
                     self.session_model.get_or_insert(model.clone());
                 }
-                self.cli_turn = !self.command_open && self.input_command.is_some();
+                self.cli_turn = !self.command_open
+                    && self.compact_command.is_none()
+                    && self.input_command.is_some();
                 out.push(Parsed::Init {
                     session_id: string("session_id"),
                     model,
@@ -807,7 +826,10 @@ impl Parser {
                     .unwrap_or(0);
                 self.compact_active = false;
                 self.compact_manual = false;
-                self.compact_swallow_result = true;
+                // Автоматическая граница итог хода не трогает: он остаётся ходу.
+                if self.compact_command.is_some() {
+                    self.compact_boundary_seen = true;
+                }
                 // После сжатия расход начинается заново: старое значение не должно
                 // пережить границу ни в ходу, ни в индикаторе.
                 self.last_usage = None;
@@ -857,7 +879,8 @@ impl Parser {
             .and_then(serde_json::Value::as_str);
         match event_type {
             Some("message_start") => {
-                if parent.is_none() {
+                // Поток модели во время `/compact` — само сжатие, а не пробуждающий ход.
+                if parent.is_none() && self.compact_command.is_none() {
                     self.adopt_wake_turn(out);
                 }
                 let message = event.and_then(|event| event.get("message"));
@@ -1394,14 +1417,57 @@ impl Parser {
         self.wake.take()
     }
 
+    /// Итог `/compact` кнопки узнаётся по его UUID в `user_message_uuids`. Без списка
+    /// им может быть только итог без открытого и пробуждающего хода: `/compact` уходит
+    /// лишь в простой CLI.
+    fn is_compact_result(&self, value: &serde_json::Value) -> bool {
+        let Some(compact) = self.compact_command else {
+            return false;
+        };
+        if let Some(Parsed::AnswerFrame { user_message_uuids }) = Self::answer_frame(value) {
+            return user_message_uuids.contains(&compact);
+        }
+        !self.command_open
+            && self.wake.is_none()
+            && value
+                .pointer("/origin/kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("task-notification")
+    }
+
     fn feed_result(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
-        // Сжатие оборвалось ошибкой: граница не придёт, эпизод закрывает отказ.
-        if self.compact_active
-            && value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true)
-        {
+        let is_error = value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true);
+        if self.is_compact_result(value) {
+            // Итог служебного `/compact`: ходу прошлой команды он не принадлежит, расход
+            // уже ушёл в границу. Без границы сжатия не было: это отказ.
+            let ok = self.compact_boundary_seen && !is_error;
+            if self.compact_active {
+                self.compact_active = false;
+                out.push(Parsed::Event(AdapterEvent::CompactionFinished {
+                    manual: self.compact_manual,
+                    ok: false,
+                    pre_tokens: 0,
+                    post_tokens: 0,
+                }));
+            }
+            self.forget_compact();
+            self.cli_turn = false;
+            self.last_usage = None;
+            self.progress_sent = 0;
+            out.push(Parsed::Event(AdapterEvent::Phase {
+                phase: Phase::AwaitingInput,
+                tool_name: None,
+                summary: None,
+            }));
+            out.push(Parsed::CompactResultConsumed { ok });
+            self.report_background(out);
+            return;
+        }
+        // Автоматическое сжатие оборвалось ошибкой: граница не придёт, эпизод закрывает
+        // отказ, а итог остаётся ходу.
+        if self.compact_active && is_error {
             self.compact_active = false;
             let manual = std::mem::take(&mut self.compact_manual);
-            self.compact_swallow_result = true;
             self.last_usage = None;
             self.progress_sent = 0;
             out.push(Parsed::Event(AdapterEvent::CompactionFinished {
@@ -1411,22 +1477,6 @@ impl Parser {
                 post_tokens: 0,
             }));
         }
-        // Итог служебного `/compact` между ходами: ходу прошлой команды он не принадлежит,
-        // приписывать его некому, расход уже ушёл в границу сжатия.
-        if self.compact_swallow_result && !self.command_open {
-            self.compact_swallow_result = false;
-            self.cli_turn = false;
-            out.push(Parsed::Event(AdapterEvent::Phase {
-                phase: Phase::AwaitingInput,
-                tool_name: None,
-                summary: None,
-            }));
-            // Служебный итог потреблён: команда сжатия закрывается им, а не границей.
-            out.push(Parsed::CompactResultConsumed);
-            self.report_background(out);
-            return;
-        }
-        self.compact_swallow_result = false;
         if let Some(answer) = Self::answer_frame(value) {
             out.push(answer);
         }

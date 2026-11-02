@@ -330,10 +330,10 @@ impl ClaudeCodeAdapter {
                 }
                 self.events.push_back(event);
             }
-            Parsed::CompactResultConsumed => {
+            Parsed::CompactResultConsumed { ok } => {
                 if self.compact_pending.take().is_some() {
                     self.compact_result_due = false;
-                    self.events.push_back(AdapterEvent::Compacted { ok: true });
+                    self.events.push_back(AdapterEvent::Compacted { ok });
                 }
             }
             Parsed::ToolCallComplete {
@@ -1124,6 +1124,7 @@ impl ClaudeCodeAdapter {
             .is_some_and(|(_, until)| Instant::now() >= until)
         {
             self.compact_pending = None;
+            self.parser.forget_compact();
             let boundary_seen = std::mem::take(&mut self.compact_result_due);
             self.events.push_back(AdapterEvent::Compacted { ok: false });
             if !boundary_seen {
@@ -1345,7 +1346,7 @@ impl Adapter for ClaudeCodeAdapter {
         ) {
             return CompactOutcome::Failed;
         }
-        self.parser.mark_compact_manual();
+        self.parser.mark_compact_manual(command);
         self.compact_pending = Some((command, Instant::now() + COMPACT_TIMEOUT));
         self.compact_result_due = false;
         CompactOutcome::Accepted
