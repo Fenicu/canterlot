@@ -496,7 +496,7 @@ async fn edit_races_outbox_claim_without_losing_the_new_text(pool: PgPool) -> Te
         };
         barrier.wait().await;
         let (edited, claimed) = tokio::join!(edit_task, claim);
-        let claimed = claimed.unwrap()?.expect("steer is still pending");
+        let claimed = claimed.unwrap()?.expect("steer is still pending").row;
         // Диспетчер либо успел первым и правит уже новый текст, либо правка
         // отклонена: старого текста после захвата быть не может.
         match edited.unwrap() {

@@ -74,6 +74,15 @@ impl Worker {
     }
 
     async fn connect_with_journal(hub: &TestHub, machine: &NewMachine, journal: Uuid) -> Self {
+        Self::connect_with_capabilities(hub, machine, journal, &["instructions_v1"]).await
+    }
+
+    async fn connect_with_capabilities(
+        hub: &TestHub,
+        machine: &NewMachine,
+        journal: Uuid,
+        capabilities: &[&str],
+    ) -> Self {
         let hello = Hello {
             installation_id: hub.installation.installation_id.to_string(),
             restore_generation: hub.installation.restore_generation.to_string(),
@@ -83,7 +92,7 @@ impl Worker {
             boot_id: Uuid::now_v7().to_string(),
             protocol_version: canterlot_hub::grpc::PROTOCOL_VERSION,
             stream_kind: StreamKind::Control as i32,
-            optional_capabilities: vec!["instructions_v1".into()],
+            optional_capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             ..Hello::default()
         };
         let (control, rx) = mpsc::channel(8);
@@ -1421,4 +1430,89 @@ async fn steer_input_needs_the_capability() {
         panic!("start expected");
     };
     assert!(start.capabilities.iter().any(|c| c == "send_now_v1"));
+}
+
+/// Вливание ушло по первому соединению, после переподключения его повтор не
+/// попадает в транспорт. Захват прошлого соединения снимать нельзя: воркер уже
+/// мог влить текст, и отмена или правка разошлись бы с тем, что видит агент.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn steer_sent_before_reconnect_keeps_its_claim(pool: PgPool) {
+    use canterlot_hub::delivery::{
+        control::{ControlError, SendNowOutcome, cancel_input, request_send_now},
+        receipts::{InputReceipt, apply_input_receipt},
+    };
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    sqlx::query("update conversations set harness = 'codex' where id = $1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let journal = Uuid::now_v7();
+    let mut worker = Worker::connect_with_capabilities(
+        &hub,
+        &machine,
+        journal,
+        &["instructions_v1", "pilot_v1", "send_now_v1"],
+    )
+    .await;
+    let first = input(&pool, &hub, conversation).await;
+    let deliver = worker.command().await;
+    assert_eq!(deliver.command_id, first.command_id.to_string());
+    for receipt in [
+        InputReceipt::Stored,
+        InputReceipt::TransmissionStarted,
+        InputReceipt::Accepted,
+    ] {
+        apply_input_receipt(&pool, first.command_id, 1, receipt, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let second = input(&pool, &hub, conversation).await;
+    let SendNowOutcome::Requested { steer_command_id } = request_send_now(
+        &pool,
+        hub.installation.owner_id,
+        conversation,
+        second.input_id,
+        "send-now",
+        Uuid::now_v7(),
+        &["send_now_v1".to_owned()],
+    )
+    .await
+    .unwrap() else {
+        panic!("send now must create a steer");
+    };
+    let steer = worker.command().await;
+    assert_eq!(steer.command_id, steer_command_id.to_string());
+    drop(worker);
+    // Новое соединение без send_now_v1: повтор вливания в транспорт не уходит.
+    let _worker = Worker::connect_with_capabilities(
+        &hub,
+        &machine,
+        journal,
+        &["instructions_v1", "pilot_v1"],
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let claimed: bool =
+        sqlx::query_scalar("select dispatch_claimed_at is not null from commands where id = $1")
+            .bind(steer_command_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(claimed, "claim from the first connection must survive");
+    assert!(matches!(
+        cancel_input(
+            &pool,
+            hub.installation.owner_id,
+            second.input_id,
+            "cancel-after-reconnect",
+            Uuid::now_v7(),
+        )
+        .await,
+        Err(ControlError::InvalidRequest {
+            reason: "steer_in_flight"
+        })
+    ));
+    stop(hub).await;
 }
