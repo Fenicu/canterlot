@@ -9,7 +9,7 @@ use canterlot_worker::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, CloseMode, CompactOutcome,
         DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, LimitFact,
-        LimitWindow, Phase, SettingsChange, StartSpec, Started, Transmission, TransmitOutcome,
+        LimitWindow, Phase, SettingsChange, StartSpec, Started, SteerOutcome, Transmission, TransmitOutcome,
         opencode::{
             DiscoverError, OpenCodeAdapter,
             catalog::ModelEntry,
@@ -5916,5 +5916,89 @@ async fn interrupted_compaction_is_reported_as_failed() {
     ));
     events.extend(bench.until_finished(input.command_id).await);
     assert!(text_of(&events, "Error").is_empty());
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn steer_during_a_turn_posts_steer_delivery_and_is_accepted() {
+    // Вливание в идущий период: второй POST на `/prompt` с `delivery: "steer"`,
+    // приём — тот же 200 с нашим id. Шаг при этом прерывается (живой прогон),
+    // так что подпись в PWA предупреждает об этом.
+    let mut script = ready();
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    let path = script.steps[position].expected_path().unwrap().to_owned();
+    // Ответ-приём со своим плейсхолдером: bind подставит id запроса, иначе
+    // ответ унаследовал бы id первого хода из таблицы подстановок.
+    script.steps.insert(
+        position + 1,
+        Step::Expect {
+            method: "POST".into(),
+            path,
+            reply: Reply {
+                status: 200,
+                body: Some(json!({"data": {"id": "msg_steer_bind"}})),
+                ..Default::default()
+            },
+            bind: [("msg_steer_bind".to_owned(), "/id".to_owned())]
+                .into_iter()
+                .collect(),
+        },
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let first = bench.input("one");
+    bench.accepted(&first).await;
+    let second = bench.input("send now");
+    let outcome = tokio::time::timeout(WAIT, bench.adapter.steer(&second))
+        .await
+        .expect("steer must finish");
+    assert!(
+        matches!(
+            outcome,
+            SteerOutcome::Accepted(ref proof) if proof.command_id == second.command_id
+        ),
+        "steer proof: {outcome:?}"
+    );
+    let requests = bench.fake.requests();
+    let prompts: Vec<_> = requests
+        .iter()
+        .filter(|request| path_of(request).ends_with("/prompt"))
+        .collect();
+    assert_eq!(prompts.len(), 2, "normal prompt plus the steer");
+    assert_eq!(prompts[0]["body"]["delivery"], "queue");
+    assert_eq!(prompts[1]["body"]["delivery"], "steer");
+    assert_eq!(
+        prompts[1]["body"]["id"],
+        format!("msg_{}", second.command_id.simple())
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn steer_without_a_turn_sends_nothing() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let input = bench.input("nowhere");
+    let outcome = tokio::time::timeout(WAIT, bench.adapter.steer(&input))
+        .await
+        .expect("steer must finish");
+    assert!(
+        matches!(&outcome, SteerOutcome::NotApplicable(reason) if reason == "no_turn"),
+        "{outcome:?}"
+    );
+    let requests = bench.fake.requests();
+    assert!(
+        !requests
+            .iter()
+            .any(|request| path_of(request).ends_with("/prompt")),
+        "no prompt without a running turn"
+    );
     bench.close(CloseMode::Graceful).await;
 }

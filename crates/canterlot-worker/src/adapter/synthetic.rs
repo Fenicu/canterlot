@@ -844,6 +844,11 @@ impl Adapter for SyntheticAdapter {
         .unwrap_or(InterruptOutcome::Undetermined)
     }
 
+    async fn steer(&mut self, _input: &Transmission) -> SteerOutcome {
+        // Синтетический CLI вливаний не знает: ввод остаётся в очереди.
+        SteerOutcome::NotApplicable("unsupported".into())
+    }
+
     async fn next_event(&mut self) -> AdapterEvent {
         loop {
             if self.pending.is_empty() {

@@ -901,6 +901,20 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Проверка вливания: смена настроек между кадрами хода не применяется,
+    /// хаб настроек и не присылает. Непустая смена — отказ, а не молчаливое
+    /// вливание без неё.
+    fn validate_steer(&self, input: &Transmission) -> Result<(), &'static str> {
+        if input
+            .settings
+            .as_ref()
+            .is_some_and(|change| *change != SettingsChange::default())
+        {
+            return Err("settings_unavailable");
+        }
+        Ok(())
+    }
+
     fn accepted(command_id: Uuid, kind: &'static str) -> TransmitOutcome {
         TransmitOutcome::Accepted(Proof { command_id, kind })
     }
@@ -1326,6 +1340,67 @@ impl Adapter for ClaudeCodeAdapter {
         self.compact_pending = Some((command, Instant::now() + COMPACT_TIMEOUT));
         self.compact_result_due = false;
         CompactOutcome::Accepted
+    }
+
+    /// Влить ожидающее сообщение в идущий ход («Отправить сейчас»): `user`-кадр
+    /// пишется между кадрами хода, CLI ставит его в очередь за текущим вызовом
+    /// инструмента и отвечает тем же ходом. Живой прогон показал, что
+    /// `interrupt(send_now:true)` для этого не годится: он останавливает ход и
+    /// стартует влитое сообщение новым ходом (`send_now: "stopped"` в квитанции).
+    /// Доказательство — кадр `command_lifecycle` CLI с UUID вливания.
+    async fn steer(&mut self, input: &Transmission) -> SteerOutcome {
+        if self.queue.as_mut().is_none() {
+            return SteerOutcome::Undetermined;
+        }
+        {
+            let queue = self.queue.as_ref().unwrap();
+            if queue.is_steer_proven(input.command_id) {
+                let kind = queue
+                    .steer_proof_kind(input.command_id)
+                    .unwrap_or(input::PROOF_KIND_STARTED);
+                return SteerOutcome::Accepted(Proof {
+                    command_id: input.command_id,
+                    kind,
+                });
+            }
+        }
+        if let Err(reason) = self.validate_steer(input) {
+            return SteerOutcome::Rejected(reason.into());
+        }
+        let line = match self.queue.as_mut().unwrap().steer_frame(input) {
+            Ok(line) => line,
+            Err(_) => return SteerOutcome::Rejected("attachment_unreadable".into()),
+        };
+        // Разбор кадров никому не переназначается: итог хода принадлежит чужому вводу.
+        let written_at = Instant::now();
+        if !matches!(
+            timeout_at(written_at + self.deadline, self.cli.as_mut().unwrap().write_line(&line)).await,
+            Ok(Ok(()))
+        ) {
+            self.queue.as_mut().unwrap().drop_steer(input.command_id);
+            return SteerOutcome::Undetermined;
+        }
+        let until = written_at + self.deadline;
+        loop {
+            let queue = self.queue.as_mut().unwrap();
+            if queue.is_steer_proven(input.command_id) {
+                let kind = queue
+                    .steer_proof_kind(input.command_id)
+                    .unwrap_or(input::PROOF_KIND_STARTED);
+                return SteerOutcome::Accepted(Proof {
+                    command_id: input.command_id,
+                    kind,
+                });
+            }
+            if self.eof || self.exited {
+                self.queue.as_mut().unwrap().drop_steer(input.command_id);
+                return SteerOutcome::Undetermined;
+            }
+            if timeout_at(until, self.pump()).await.is_err() {
+                self.unconfirmed.insert(input.command_id);
+                return SteerOutcome::Undetermined;
+            }
+        }
     }
 
     async fn interrupt(&mut self) -> InterruptOutcome {

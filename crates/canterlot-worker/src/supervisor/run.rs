@@ -52,7 +52,7 @@ use crate::{
         Adapter, AdapterContext, AdapterEvent, AgentCallResult, BackgroundKind, BackgroundState,
         BackgroundTask, CloseMode, CompactOutcome, DecisionOutcome, InstructionSpec,
         InterruptOutcome, LimitFact, LocalFile, MediaSource, Phase, SettingsChange, StartSpec,
-        TodoStatus, Transmission, TransmitOutcome, frame_names, registry_with,
+        SteerOutcome, TodoStatus, Transmission, TransmitOutcome, frame_names, registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
     media::{self, Prepared, Skip},
@@ -171,6 +171,7 @@ struct Supervisor {
     pilot_v1: bool,
     todo_v1: bool,
     compact_v1: bool,
+    send_now_v1: bool,
     background_v1: bool,
     session_tools_v1: bool,
     /// HEAD рабочего каталога на конец прошлого хода (или на старт CLI).
@@ -268,13 +269,13 @@ fn safe_event_type(raw: &str) -> String {
 }
 
 fn input_text(command: &canterlot_proto::worker::v1::Command) -> Option<String> {
-    let Some(canterlot_proto::worker::v1::command::Kind::DeliverInput(input)) = &command.kind
-    else {
-        return None;
+    let content = match &command.kind {
+        Some(canterlot_proto::worker::v1::command::Kind::DeliverInput(input)) => &input.content,
+        Some(canterlot_proto::worker::v1::command::Kind::SteerInput(steer)) => &steer.content,
+        _ => return None,
     };
     Some(
-        input
-            .content
+        content
             .iter()
             .filter_map(|block| {
                 block.block.as_ref().and_then(|block| match block {
@@ -285,6 +286,35 @@ fn input_text(command: &canterlot_proto::worker::v1::Command) -> Option<String> 
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+fn input_settings(
+    command: &canterlot_proto::worker::v1::Command,
+) -> Result<Option<SettingsChange>, crate::adapter::InstructionError> {
+    let settings = match &command.kind {
+        Some(canterlot_proto::worker::v1::command::Kind::DeliverInput(input)) => {
+            input.settings.as_ref()
+        }
+        Some(canterlot_proto::worker::v1::command::Kind::SteerInput(steer)) => {
+            steer.settings.as_ref()
+        }
+        _ => None,
+    };
+    settings
+        .map(|settings| {
+            Ok::<_, crate::adapter::InstructionError>(SettingsChange {
+                model: (!settings.model.is_empty()).then(|| settings.model.clone()),
+                effort: (!settings.effort.is_empty()).then(|| settings.effort.clone()),
+                permission_mode: (!settings.permission_mode.is_empty())
+                    .then(|| settings.permission_mode.clone()),
+                instructions: settings
+                    .instructions
+                    .as_ref()
+                    .map(|preset| InstructionSpec::from_proto(Some(preset)))
+                    .transpose()?,
+            })
+        })
+        .transpose()
 }
 
 pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> {
@@ -341,6 +371,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         pilot_v1: false,
         todo_v1: false,
         compact_v1: false,
+        send_now_v1: false,
         background_v1: false,
         session_tools_v1: false,
         git_head: None,
@@ -760,7 +791,20 @@ impl Supervisor {
         match message {
             down::Msg::Attach(_) => self.drop_connection(id),
             down::Msg::StartCli(start) => self.start_cli(start).await?,
-            down::Msg::Deliver(deliver) => self.on_deliver(deliver),
+            down::Msg::Deliver(deliver) => {
+                if matches!(
+                    &deliver.command,
+                    Some(command)
+                        if matches!(
+                            &command.kind,
+                            Some(canterlot_proto::worker::v1::command::Kind::SteerInput(_))
+                        )
+                ) {
+                    self.on_steer(deliver).await?
+                } else {
+                    self.on_deliver(deliver)
+                }
+            }
             down::Msg::Cancel(cancel) => {
                 self.on_cancel(&cancel.target_command_id, cancel.target_dispatch_attempt)?
             }
@@ -1246,6 +1290,7 @@ impl Supervisor {
         self.pilot_v1 = start.pilot_v1;
         self.todo_v1 = start.todo_v1;
         self.compact_v1 = start.compact_v1;
+        self.send_now_v1 = start.send_now_v1;
         self.background_v1 = start.background_v1;
         self.session_tools_v1 = start.session_tools_v1;
         self.workdir = Some(PathBuf::from(&start.workdir));
@@ -1363,27 +1408,7 @@ impl Supervisor {
         let (Some(id), Some(text)) = (parsed, input_text(&command)) else {
             return self.send(ack(command.command_id, command.dispatch_attempt, "invalid"));
         };
-        let settings = match &command.kind {
-            Some(canterlot_proto::worker::v1::command::Kind::DeliverInput(input)) => input
-                .settings
-                .as_ref()
-                .map(|settings| {
-                    Ok::<_, crate::adapter::InstructionError>(SettingsChange {
-                        model: (!settings.model.is_empty()).then(|| settings.model.clone()),
-                        effort: (!settings.effort.is_empty()).then(|| settings.effort.clone()),
-                        permission_mode: (!settings.permission_mode.is_empty())
-                            .then(|| settings.permission_mode.clone()),
-                        instructions: settings
-                            .instructions
-                            .as_ref()
-                            .map(|preset| InstructionSpec::from_proto(Some(preset)))
-                            .transpose()?,
-                    })
-                })
-                .transpose(),
-            _ => Ok(None),
-        };
-        let Ok(settings) = settings else {
+        let Ok(settings) = input_settings(&command) else {
             return self.send(ack(command.command_id, command.dispatch_attempt, "invalid"));
         };
         let attempt = command.dispatch_attempt;
@@ -1439,6 +1464,164 @@ impl Supervisor {
             "accepted_for_gate"
         };
         self.send(ack(command.command_id, attempt, result));
+    }
+
+    /// Влить ожидающий ввод в идущий ход («Отправить сейчас»). Новый ход не
+    /// открывается: доказательство приписывает ввод чужому ходу, слот хода и
+    /// очередь не трогаются. Любой отказ оставляет ввод в очереди хаба —
+    /// следующим ходом он уйдёт сам, дубля нет.
+    async fn on_steer(&mut self, deliver: canterlot_proto::worker::ipc::Deliver) -> Result<(), SupervisorError> {
+        let Some(command) = deliver.command else { return Ok(()) };
+        let ack = |command_id: String, attempt: u32, result: &str| {
+            up::Msg::DeliverAck(DeliverAck {
+                command_id,
+                dispatch_attempt: attempt,
+                result: result.into(),
+            })
+        };
+        // Подтверждения steer каналу управления не нужны: итог едет записью
+        // журнала, хаб маршрутизирует её по виду команды. Строки здесь ни с чем
+        // не пересекаются, управляющая служба их игнорирует.
+        let Some(canterlot_proto::worker::v1::command::Kind::SteerInput(steer)) =
+            command.kind.clone()
+        else {
+            return Ok(());
+        };
+        let (Ok(sid), Ok(_input_id), Some(text)) = (
+            Uuid::parse_str(&command.command_id),
+            Uuid::parse_str(&steer.input_id),
+            input_text(&command),
+        ) else {
+            return Ok(());
+        };
+        let attempt = command.dispatch_attempt;
+        let key = (sid, attempt);
+        let expected: Option<Uuid> = Uuid::parse_str(&steer.expected_running_command_id).ok();
+        let deferred = |supervisor: &mut Self, reason: &str| {
+            supervisor.record(Body::DispatchDeferred(InputDispatchDeferred {
+                command_id: command.command_id.clone(),
+                dispatch_attempt: attempt,
+                reason: reason.into(),
+            }))?;
+            supervisor.send(ack(command.command_id.clone(), attempt, "steer_deferred"));
+            Ok(())
+        };
+        // Проверка в порядке дешевизны: поколение, дубли, затем состояние хода.
+        if command.execution_id != self.spec.execution_id.to_string()
+            || command.execution_generation != self.spec.generation
+            || matches!(self.lifecycle, Lifecycle::Draining { .. })
+        {
+            return deferred(self, "generation_closed");
+        }
+        if !matches!(self.lifecycle, Lifecycle::Running) {
+            return deferred(self, "generation_closed");
+        }
+        if self.inputs.contains_key(&key) {
+            // Повторная выдача той же команды: итог уже записан или пишется.
+            self.send(ack(command.command_id.clone(), attempt, "steer_duplicate"));
+            return Ok(());
+        }
+        if !self.send_now_v1 {
+            return deferred(self, "steer_unsupported");
+        }
+        let running = match self.active_turn {
+            Some(turn) if expected.is_none_or(|want| want == turn) => turn,
+            _ => return deferred(self, "steer_no_turn"),
+        };
+        let _ = running;
+        if self.aborting_turn {
+            return deferred(self, "steer_aborting");
+        }
+        if self.sj.has_open_requests() {
+            return deferred(self, "steer_request_open");
+        }
+        if self.pending_compaction.is_some() || self.compaction_episode.is_some() {
+            return deferred(self, "steer_compacting");
+        }
+        let Some(adapter) = self.adapter.as_mut() else {
+            return deferred(self, "steer_no_turn");
+        };
+        let Ok(settings) = input_settings(&command) else {
+            self.record(Body::InputRejected(InputRejected {
+                command_id: command.command_id.clone(),
+                dispatch_attempt: attempt,
+                reason: "invalid".into(),
+            }))?;
+            self.send(ack(command.command_id.clone(), attempt, "steer_rejected"));
+            return Ok(());
+        };
+        self.inputs.insert(
+            key,
+            Input {
+                state: InputState::Queued,
+                text,
+                accepted: false,
+                files: deliver
+                    .files
+                    .into_iter()
+                    .map(|f| LocalFile {
+                        path: f.path.into(),
+                        name: f.name,
+                        mime: f.mime,
+                        size: f.size,
+                        image: f.image,
+                    })
+                    .collect(),
+                settings,
+            },
+        );
+        let transmission = Transmission {
+            command_id: sid,
+            attempt,
+            text: std::mem::take(&mut self.inputs.get_mut(&key).unwrap().text),
+            files: std::mem::take(&mut self.inputs.get_mut(&key).unwrap().files),
+            settings: self.inputs.get_mut(&key).unwrap().settings.take(),
+        };
+        self.inputs.get_mut(&key).unwrap().state = InputState::Transmitting;
+        let outcome = adapter.steer(&transmission).await;
+        match outcome {
+            SteerOutcome::Accepted(_) => {
+                if let Some(input) = self.inputs.get_mut(&key) {
+                    input.accepted = true;
+                    input.state = InputState::Done;
+                }
+                self.record(Body::InputAccepted(InputAccepted {
+                    command_id: command.command_id.clone(),
+                    dispatch_attempt: attempt,
+                    machine_time_ms: now_ms(),
+                }))?;
+                self.send(ack(command.command_id.clone(), attempt, "steer_accepted"));
+            }
+            SteerOutcome::Rejected(reason) => {
+                let reason: String = reason.chars().take(128).collect();
+                self.inputs.remove(&key);
+                self.record(Body::InputRejected(InputRejected {
+                    command_id: command.command_id.clone(),
+                    dispatch_attempt: attempt,
+                    reason,
+                }))?;
+                self.send(ack(command.command_id.clone(), attempt, "steer_rejected"));
+            }
+            SteerOutcome::NotApplicable(reason) => {
+                self.inputs.remove(&key);
+                self.record(Body::DispatchDeferred(InputDispatchDeferred {
+                    command_id: command.command_id.clone(),
+                    dispatch_attempt: attempt,
+                    reason,
+                }))?;
+                self.send(ack(command.command_id.clone(), attempt, "steer_deferred"));
+            }
+            SteerOutcome::Undetermined => {
+                self.record(Body::AcceptanceUnconfirmed(InputAcceptanceUnconfirmed {
+                    command_id: command.command_id.clone(),
+                    dispatch_attempt: attempt,
+                    reason: "undetermined".into(),
+                }))?;
+                self.reported.insert((sid, attempt, "unconfirmed"));
+                self.send(ack(command.command_id.clone(), attempt, "steer_unconfirmed"));
+            }
+        }
+        Ok(())
     }
 
     fn closed_input_reply(&mut self, target: &str, attempt: u32, result: &str) {
@@ -2649,6 +2832,8 @@ mod tests {
     struct StubState {
         transmit_calls: Vec<Uuid>,
         ack_interrupt: bool,
+        steer_accept: bool,
+        steer_undetermined: bool,
     }
 
     struct StubAdapter {
@@ -2715,6 +2900,20 @@ mod tests {
                 InterruptOutcome::Acknowledged
             } else {
                 InterruptOutcome::NotApplicable
+            }
+        }
+
+        async fn steer(&mut self, input: &Transmission) -> SteerOutcome {
+            let state = self.state.lock().unwrap();
+            if state.steer_accept {
+                SteerOutcome::Accepted(crate::adapter::Proof {
+                    command_id: input.command_id,
+                    kind: "stub_steer",
+                })
+            } else if state.steer_undetermined {
+                SteerOutcome::Undetermined
+            } else {
+                SteerOutcome::NotApplicable("unsupported".into())
             }
         }
 
@@ -2793,6 +2992,7 @@ mod tests {
             pilot_v1: false,
             todo_v1: false,
             compact_v1: true,
+            send_now_v1: true,
             background_v1: false,
             session_tools_v1: false,
             git_head: None,
@@ -2949,9 +3149,212 @@ mod tests {
         assert_delivered_once_with_proof(&mut supervisor, &state, key);
     }
 
+    fn steer_deliver(
+        supervisor: &Supervisor,
+        running_command: Uuid,
+        text: &str,
+    ) -> canterlot_proto::worker::ipc::Deliver {
+        use canterlot_proto::worker::v1::{
+            Command, ContentBlock, SteerInput, TextBlock, command::Kind,
+        };
+        let steer_id = Uuid::now_v7();
+        canterlot_proto::worker::ipc::Deliver {
+            command: Some(Command {
+                command_id: steer_id.to_string(),
+                dispatch_attempt: 0,
+                execution_id: supervisor.spec.execution_id.to_string(),
+                execution_generation: supervisor.spec.generation,
+                kind: Some(Kind::SteerInput(SteerInput {
+                    input_id: Uuid::now_v7().to_string(),
+                    conversation_id: supervisor.spec.conversation_id.to_string(),
+                    content: vec![ContentBlock {
+                        block: Some(
+                            canterlot_proto::worker::v1::content_block::Block::Text(TextBlock {
+                                text: text.to_owned(),
+                            }),
+                        ),
+                    }],
+                    settings: None,
+                    expected_running_command_id: running_command.to_string(),
+                })),
+            }),
+            files: Vec::new(),
+        }
+    }
+
+    fn steer_key(
+        supervisor: &Supervisor,
+        deliver: &canterlot_proto::worker::ipc::Deliver,
+    ) -> (Uuid, u32) {
+        let command = deliver.command.as_ref().unwrap();
+        (
+            Uuid::parse_str(&command.command_id).unwrap(),
+            command.dispatch_attempt,
+        )
+    }
+
     #[tokio::test]
-    async fn acknowledged_interrupt_is_turn_aborted_not_session_stopped() {
+    async fn steer_into_running_turn_is_accepted_without_second_turn() {
         let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().steer_accept = true;
+        // Ход идёт: ввод передан, ход активен.
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        assert_eq!(supervisor.active_turn, Some(first.0));
+        // Вливание второго ввода в тот же ход.
+        let deliver = steer_deliver(&supervisor, first.0, "send now");
+        let key = steer_key(&supervisor, &deliver);
+        supervisor.on_steer(deliver).await.unwrap();
+        // Доказательство записано, ход тот же, сессия бежит.
+        assert!(supervisor.inputs[&key].accepted);
+        assert!(matches!(supervisor.inputs[&key].state, InputState::Done));
+        assert_eq!(supervisor.active_turn, Some(first.0));
+        assert!(matches!(supervisor.lifecycle, Lifecycle::Running));
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(
+            bodies.iter().any(|body| matches!(
+                body,
+                Body::InputAccepted(accepted) if accepted.command_id == key.0.to_string()
+            )),
+            "steer proof shipped: {bodies:?}"
+        );
+        assert!(
+            !bodies.iter().any(|body| matches!(
+                body,
+                Body::TransmissionStarted(started) if started.command_id == key.0.to_string()
+            )) && !bodies.iter().any(|body| matches!(
+                body,
+                Body::DispatchDeferred(_) | Body::InputRejected(_)
+            )),
+            "no second turn, no refusal: {bodies:?}"
+        );
+        // Конец хода закрывает его как обычно, влитый ввод историю не ломает.
+        supervisor
+            .on_adapter_event(AdapterEvent::RunFinished {
+                input_command_id: first.0,
+                usage: Vec::new(),
+                context_tokens: 0,
+                context_window_tokens: 0,
+            })
+            .await
+            .unwrap();
+        assert!(supervisor.active_turn.is_none());
+    }
+
+    #[tokio::test]
+    async fn steer_without_turn_stays_queued_for_next_turn() {
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        let running = Uuid::now_v7();
+        let deliver = steer_deliver(&supervisor, running, "too late");
+        let key = steer_key(&supervisor, &deliver);
+        supervisor.on_steer(deliver).await.unwrap();
+        // Хода нет: ввод не записан, хаб вернёт его в очередь следующим ходом.
+        assert!(!supervisor.inputs.contains_key(&key));
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(
+            bodies.iter().any(|body| matches!(
+                body,
+                Body::DispatchDeferred(deferred)
+                    if deferred.command_id == key.0.to_string() && deferred.reason == "steer_no_turn"
+            )),
+            "steer defers without taking the input: {bodies:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_into_wrong_turn_stays_queued() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().steer_accept = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        // Ход другой команды: вливать некуда.
+        let deliver = steer_deliver(&supervisor, Uuid::now_v7(), "stale");
+        let key = steer_key(&supervisor, &deliver);
+        supervisor.on_steer(deliver).await.unwrap();
+        assert!(!supervisor.inputs.contains_key(&key));
+        assert_eq!(supervisor.active_turn, Some(first.0));
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::DispatchDeferred(deferred)
+                if deferred.command_id == key.0.to_string() && deferred.reason == "steer_no_turn"
+        )));
+        assert_eq!(state.lock().unwrap().transmit_calls, vec![first.0]);
+    }
+
+    #[tokio::test]
+    async fn steer_during_open_request_or_compaction_defers() {
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        // Открытый запрос: вливать некуда, итог хода решит владелец.
+        supervisor
+            .on_adapter_event(AdapterEvent::RequestOpened {
+                request_id: "req-1".into(),
+                kind: "permission".into(),
+                payload: serde_json::json!({"tool": "Bash"}),
+            })
+            .await
+            .unwrap();
+        let deliver = steer_deliver(&supervisor, first.0, "during prompt");
+        supervisor.on_steer(deliver).await.unwrap();
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::DispatchDeferred(deferred) if deferred.reason == "steer_request_open"
+        )));
+        supervisor
+            .on_adapter_event(AdapterEvent::RequestClosed {
+                request_id: "req-1".into(),
+                reason: "answered".into(),
+            })
+            .await
+            .unwrap();
+        // Сжатие: тот же отказ, ввод остаётся в очереди.
+        supervisor.pending_compaction = Some(("compact-1".into(), 1));
+        let deliver = steer_deliver(&supervisor, first.0, "during compact");
+        supervisor.on_steer(deliver).await.unwrap();
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::DispatchDeferred(deferred) if deferred.reason == "steer_compacting"
+        )));
+    }
+
+    #[tokio::test]
+    async fn steer_undetermined_resolves_by_late_proof() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().steer_undetermined = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let deliver = steer_deliver(&supervisor, first.0, "unconfirmed");
+        let key = steer_key(&supervisor, &deliver);
+        supervisor.on_steer(deliver).await.unwrap();
+        assert!(matches!(supervisor.inputs[&key].state, InputState::Transmitting));
+        assert!(
+            supervisor
+                .reported
+                .contains(&(key.0, key.1, "unconfirmed")),
+            "late proof is awaited, not dropped"
+        );
+        // Ход при этом чужой и продолжается.
+        assert_eq!(supervisor.active_turn, Some(first.0));
+        // Позднее доказательство закрывает вливание, ход не трогает.
+        supervisor
+            .on_adapter_event(AdapterEvent::InputAccepted { command_id: key.0 })
+            .await
+            .unwrap();
+        assert!(supervisor.inputs[&key].accepted);
+        assert_eq!(supervisor.active_turn, Some(first.0));
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::InputAccepted(accepted) if accepted.command_id == key.0.to_string()
+        )));
+    }
+
+    #[tokio::test]
+    async fn acknowledged_interrupt_is_turn_aborted_not_session_stopped() {        let (_dir, mut supervisor, state) = test_supervisor();
         state.lock().unwrap().ack_interrupt = true;
         let first = queue_owner(&mut supervisor);
         supervisor.try_transmit().await.unwrap();

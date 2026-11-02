@@ -15,7 +15,7 @@ use uuid::Uuid;
 use super::parser::{InterruptReceipt, Parsed, Parser};
 use super::process::{CliProcess, Signal, StdoutLine};
 use crate::adapter::{
-    AdapterEvent, InterruptOutcome, LocalFile, Proof, SettingsChange, Transmission,
+    AdapterEvent, InterruptOutcome, LocalFile, Proof, SettingsChange, SteerOutcome, Transmission,
     TransmitOutcome, limit_note,
 };
 
@@ -106,6 +106,10 @@ pub struct InputQueue {
     adopted: Option<Uuid>,
     control: Option<PendingControl>,
     interrupt_request: Option<InterruptRequest>,
+    /// Влитые в идущий ход сообщения («Отправить сейчас»): ждут доказательства
+    /// своим `uuid`, ход при этом чужой (`active` не трогается).
+    steered: VecDeque<Queued>,
+    steer_proven: HashMap<Uuid, &'static str>,
     rejected: Vec<(Uuid, &'static str)>,
     proven: HashMap<Uuid, &'static str>,
     weekly_noted: u16,
@@ -137,6 +141,8 @@ impl InputQueue {
             adopted: None,
             control: None,
             interrupt_request: None,
+            steered: VecDeque::new(),
+            steer_proven: HashMap::new(),
             rejected: Vec::new(),
             proven: HashMap::new(),
             weekly_noted: 0,
@@ -175,6 +181,14 @@ impl InputQueue {
 
     pub fn is_proven(&self, command_id: Uuid) -> bool {
         self.proven.contains_key(&command_id)
+    }
+
+    pub fn is_steer_proven(&self, command_id: Uuid) -> bool {
+        self.steer_proven.contains_key(&command_id)
+    }
+
+    pub fn steer_proof_kind(&self, command_id: Uuid) -> Option<&'static str> {
+        self.steer_proven.get(&command_id).copied()
     }
 
     pub fn proof_kind(&self, command_id: Uuid) -> Option<&'static str> {
@@ -245,6 +259,31 @@ impl InputQueue {
         {
             self.control = None;
         }
+    }
+
+    /// Кадр вливания в идущий ход: пишется сразу, ход при этом чужой —
+    /// ни `active`, ни `fifo` не трогаются. Доказательство — кадр
+    /// `command_lifecycle` CLI с этим UUID (или кадр ответа с ним).
+    /// Несколько вливаний подряд хранятся очередью: CLI применяет их по порядку.
+    pub fn steer_frame(&mut self, t: &Transmission) -> std::io::Result<Value> {
+        if self.steer_proven.contains_key(&t.command_id) {
+            return build_message(t.command_id, &t.text, &t.files, None);
+        }
+        let message = build_message(t.command_id, &t.text, &t.files, None)?;
+        self.steered.retain(|queued| queued.command_id != t.command_id);
+        self.steered.push_back(Queued {
+            command_id: t.command_id,
+            attempt: t.attempt,
+            text: t.text.clone(),
+            files: t.files.clone(),
+            settings: None,
+        });
+        Ok(message)
+    }
+
+    /// Убрать влитый ввод, который уже не дождаться (процесс умер).
+    pub fn drop_steer(&mut self, command_id: Uuid) {
+        self.steered.retain(|queued| queued.command_id != command_id);
     }
 
     pub fn take_rejection(&mut self, command_id: Uuid) -> Option<&'static str> {
@@ -379,32 +418,64 @@ impl InputQueue {
     pub fn on_parsed(&mut self, parsed: &Parsed) -> Option<Proof> {
         match parsed {
             Parsed::AnswerFrame { user_message_uuids } => {
-                let turn = self.active.as_mut()?;
-                if turn.delivery_proven || !user_message_uuids.contains(&turn.command_id) {
-                    return None;
+                if let Some(turn) = self.active.as_mut() {
+                    if !turn.delivery_proven && user_message_uuids.contains(&turn.command_id) {
+                        turn.delivery_proven = true;
+                        self.proven.insert(turn.command_id, PROOF_KIND);
+                        return Some(Proof {
+                            command_id: turn.command_id,
+                            kind: PROOF_KIND,
+                        });
+                    }
                 }
-                turn.delivery_proven = true;
-                self.proven.insert(turn.command_id, PROOF_KIND);
-                return Some(Proof {
-                    command_id: turn.command_id,
-                    kind: PROOF_KIND,
-                });
+                // Кадр итога перечисляет все UUID хода, в том числе влитые:
+                // первое совпадение уходит доказательством, остальные ждут
+                // своего вызова (каждый влитый ввод подтверждается отдельно).
+                if let Some(matched) = user_message_uuids
+                    .iter()
+                    .find(|uuid| self.steered.iter().any(|queued| queued.command_id == **uuid))
+                {
+                    let command_id = *matched;
+                    self.steered
+                        .retain(|queued| queued.command_id != command_id);
+                    self.steer_proven.insert(command_id, PROOF_KIND);
+                    return Some(Proof {
+                        command_id,
+                        kind: PROOF_KIND,
+                    });
+                }
+                return None;
             }
             // `started` — CLI начал ход, `completed` — команда уже была исполнена (повтор UUID).
             // `queued` не доказывает приём: команду ещё могут отменить до исполнения.
             Parsed::CommandLifecycle { command_id, state }
                 if matches!(state.as_str(), "started" | "completed") =>
             {
-                let turn = self.active.as_mut()?;
-                if turn.delivery_proven || turn.command_id != *command_id {
-                    return None;
+                if let Some(turn) = self.active.as_mut() {
+                    if !turn.delivery_proven && turn.command_id == *command_id {
+                        turn.delivery_proven = true;
+                        self.proven.insert(turn.command_id, PROOF_KIND_STARTED);
+                        return Some(Proof {
+                            command_id: turn.command_id,
+                            kind: PROOF_KIND_STARTED,
+                        });
+                    }
                 }
-                turn.delivery_proven = true;
-                self.proven.insert(turn.command_id, PROOF_KIND_STARTED);
-                return Some(Proof {
-                    command_id: turn.command_id,
-                    kind: PROOF_KIND_STARTED,
-                });
+                // Доказательство вливания: UUID чужого сообщения, ход при этом чужой.
+                if self
+                    .steered
+                    .iter()
+                    .any(|queued| queued.command_id == *command_id)
+                {
+                    self.steered
+                        .retain(|queued| queued.command_id != *command_id);
+                    self.steer_proven.insert(*command_id, PROOF_KIND_STARTED);
+                    return Some(Proof {
+                        command_id: *command_id,
+                        kind: PROOF_KIND_STARTED,
+                    });
+                }
+                return None;
             }
             Parsed::Event(AdapterEvent::RunAdopted { input_command_id }) => {
                 self.adopted = Some(*input_command_id);
@@ -637,6 +708,13 @@ fn proof(queue: &InputQueue, command_id: Uuid) -> TransmitOutcome {
     })
 }
 
+fn steer_proof(queue: &InputQueue, command_id: Uuid) -> SteerOutcome {
+    SteerOutcome::Accepted(Proof {
+        command_id,
+        kind: queue.steer_proof_kind(command_id).unwrap_or(PROOF_KIND_STARTED),
+    })
+}
+
 impl InputDriver {
     pub fn new(queue: InputQueue, parser: Parser) -> Self {
         Self {
@@ -750,6 +828,53 @@ impl InputDriver {
                 }
                 self.queue.withdraw(command_id);
                 return TransmitOutcome::Rejected("turn_active".into());
+            }
+        }
+    }
+
+    /// Влить сообщение в идущий ход («Отправить сейчас»). Ход при этом чужой:
+    /// `active` не трогается, разбор кадров никому не переназначается.
+    /// Доказательство — кадр `command_lifecycle` CLI с UUID вливания (или кадр
+    /// ответа с ним). В срок не уложились — `Undetermined`: CLI мог взять
+    /// сообщение позже, оно придёт поздним доказательством.
+    pub async fn steer(
+        &mut self,
+        cli: &mut CliProcess,
+        input: &Transmission,
+        deadline: Duration,
+    ) -> SteerOutcome {
+        let command_id = input.command_id;
+        if self.queue.is_steer_proven(command_id) {
+            return steer_proof(&self.queue, command_id);
+        }
+        if let Err(reason) = self.queue.validate(input.settings.as_ref()) {
+            return SteerOutcome::Rejected(reason.into());
+        }
+        let line = match self.queue.steer_frame(input) {
+            Ok(line) => line,
+            Err(_) => return SteerOutcome::Rejected("attachment_unreadable".into()),
+        };
+        let written_at = Instant::now();
+        if tokio::time::timeout_at(written_at + deadline, cli.write_line(&line))
+            .await
+            .is_err()
+        {
+            self.queue.drop_steer(command_id);
+            return SteerOutcome::Undetermined;
+        }
+        loop {
+            if self.queue.is_steer_proven(command_id) {
+                return steer_proof(&self.queue, command_id);
+            }
+            if self.eof {
+                self.queue.drop_steer(command_id);
+                return SteerOutcome::Undetermined;
+            }
+            if tokio::time::timeout_at(written_at + deadline, self.pump(cli))
+                .await
+                .is_err()
+            {
+                return SteerOutcome::Undetermined;
             }
         }
     }

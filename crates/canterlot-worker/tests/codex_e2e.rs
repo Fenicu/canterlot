@@ -8,7 +8,7 @@ use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
         self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, StartSpec, Transmission,
-        TransmitOutcome,
+        TransmitOutcome, SteerOutcome,
         codex::{CodexCatalog, input::model_entries},
     },
     config::CodexConfig,
@@ -90,7 +90,7 @@ for raw in sys.stdin:
     m = msg.get('method') if isinstance(msg,dict) else None
     if not isinstance(m,str):
         flush(); continue
-    if m == 'turn/start':
+    if m in ('turn/start', 'turn/steer'):
         p = msg.get('params') or {}
         if p.get('threadId') and p.get('clientUserMessageId'):
             clients[p['threadId']] = p['clientUserMessageId']
@@ -1273,8 +1273,117 @@ async fn user_message_before_the_response_proves_delivery() {
 }
 
 #[tokio::test]
-async fn adopted_turn_ending_without_a_response_frees_the_next_input() {
+async fn steer_into_active_turn_is_proven_by_client_id_echo() {
+    // Вливание в идущий ход: `turn/steer` с тем же `turnId`, доказательство —
+    // `userMessage` с нашим `clientId`. Нового `turn/start` нет.
     let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(w_out(
+        json!({"id": 10, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}}),
+    ));
+    lines.push(turn_started("thread-mini", "turn-1"));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(w_in(11, "turn/steer", json!({})));
+    lines.push(w_out(json!({"id": 11, "result": {"turnId": "turn-1"}})));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    let mut fake = Fake::with_deadline(lines, Duration::from_secs(2));
+    fake.start().await;
+    let id = fake.start_turn("first").await;
+    let steered = fake.tx("send now");
+    let steer_id = steered.command_id;
+    let outcome = tokio::time::timeout(WAIT, fake.adapter.steer(&steered))
+        .await
+        .expect("steer stays within its limit");
+    assert!(
+        matches!(
+            outcome,
+            SteerOutcome::Accepted(ref proof)
+                if proof.command_id == steer_id && proof.kind == "codex_user_message_item"
+        ),
+        "steer proof: {outcome:?}"
+    );
+    let log = fake.stdin_log();
+    assert_eq!(
+        log.matches(r#""method":"turn/start""#).count(),
+        1,
+        "no second turn is opened"
+    );
+    let steer_line = log
+        .lines()
+        .find(|line| line.contains(r#""method":"turn/steer""#))
+        .expect("turn/steer is sent");
+    let steer_request: Value = serde_json::from_str(steer_line).unwrap();
+    assert_eq!(
+        steer_request["params"]["expectedTurnId"], "turn-1",
+        "steer targets the running turn"
+    );
+    assert_eq!(
+        steer_request["params"]["clientUserMessageId"],
+        steer_id.to_string(),
+        "proof key is the steered input"
+    );
+    let events = fake.finish(id).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == id
+        )),
+        "the running turn ends as usual: {events:?}"
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn steer_with_stale_turn_id_stays_queued() {
+    // Гонка конца хода: сервер отверг `expectedTurnId` (`-32600`) — ввод
+    // остаётся в очереди, следующим ходом уйдёт сам.
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(w_out(
+        json!({"id": 10, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}}),
+    ));
+    lines.push(turn_started("thread-mini", "turn-1"));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(w_in(11, "turn/steer", json!({})));
+    lines.push(w_out(
+        json!({"id": 11, "error": {"code": -32600, "message": "expected active turn id `turn_wrong` but found `turn-1`"}}),
+    ));
+    let mut fake = Fake::with_deadline(lines, Duration::from_secs(2));
+    fake.start().await;
+    let _id = fake.start_turn("first").await;
+    let steered = fake.tx("too late");
+    let outcome = tokio::time::timeout(WAIT, fake.adapter.steer(&steered))
+        .await
+        .expect("steer stays within its limit");
+    assert!(
+        matches!(&outcome, SteerOutcome::NotApplicable(reason) if reason == "stale_turn"),
+        "stale turn is not a refusal: {outcome:?}"
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn steer_without_turn_sends_nothing() {
+    let mut fake = Fake::new(handshake("thread-mini"));
+    fake.start().await;
+    let steered = fake.tx("nowhere");
+    let outcome = tokio::time::timeout(WAIT, fake.adapter.steer(&steered))
+        .await
+        .expect("steer stays within its limit");
+    assert!(
+        matches!(&outcome, SteerOutcome::NotApplicable(reason) if reason == "no_turn"),
+        "{outcome:?}"
+    );
+    assert!(
+        !fake.stdin_log().contains("turn/steer"),
+        "no request without a running turn"
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn adopted_turn_ending_without_a_response_frees_the_next_input() {    let mut lines = handshake("thread-mini");
     lines.push(w_in(10, "turn/start", json!({})));
     lines.push(turn_started("thread-mini", "turn-1"));
     lines.extend(user_message("thread-mini", "turn-1"));

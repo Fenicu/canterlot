@@ -9,7 +9,7 @@ use canterlot_worker::adapter::{
         input::{
             CurrentSettings, INTERRUPT_TIMEOUT, Outbox, PROOF_KIND_HISTORY, PROOF_KIND_MESSAGE,
             background_terminal_terminate_params, background_terminals_list_params,
-            build_turn_start, error_rejection, history_contains, history_lookup_params,
+            build_turn_start, build_turn_steer, error_rejection, history_contains, history_lookup_params,
             interrupt_params, model_entries, terminals_to_terminate, threshold_note,
             validate_settings,
         },
@@ -582,4 +582,67 @@ async fn interrupt_without_turn_is_not_applicable_and_silence_is_undetermined() 
     let outcome = InterruptOutcome::Undetermined;
     assert!(matches!(outcome, InterruptOutcome::Undetermined));
     fake.close().await;
+}
+
+#[test]
+fn recorded_steer_request_targets_the_active_turn_without_overrides() {
+    // Живой прогон: `turn/steer` с `expectedTurnId` активного хода и нашим
+    // `clientUserMessageId`; ходовых переопределений нет.
+    let recorded = evidence_data("turn_steer", 2);
+    assert_eq!(recorded["method"], "turn/steer");
+    let params = &recorded["params"];
+    assert_eq!(
+        params["expectedTurnId"],
+        "01a19cb0-adfd-7eb2-b7ae-60cc863843b1"
+    );
+    assert_eq!(params["clientUserMessageId"], "cmd-2222");
+    for forbidden in ["model", "effort", "sandboxPolicy", "approvalPolicy"] {
+        assert!(
+            params.get(forbidden).is_none(),
+            "steer takes no turn overrides: {forbidden}"
+        );
+    }
+    let response = evidence_data("turn_steer", 3);
+    assert_eq!(
+        response["result"]["turnId"],
+        params["expectedTurnId"],
+        "steer answers with the same turn id"
+    );
+}
+
+#[test]
+fn recorded_steered_message_is_proven_by_client_id_echo() {
+    // Доказательство вливки — та же пара `item/started|completed`, что у
+    // обычной доставки: `userMessage` с нашим `clientId` в том же ходе.
+    for line in [4, 5] {
+        let frame = evidence_data("turn_steer", line);
+        let item = &frame["params"]["item"];
+        assert_eq!(item["type"], "userMessage");
+        assert_eq!(item["clientId"], "cmd-2222");
+        assert_eq!(
+            frame["params"]["turnId"],
+            "01a19cb0-adfd-7eb2-b7ae-60cc863843b1"
+        );
+    }
+}
+
+#[test]
+fn steer_params_carry_text_images_and_no_settings() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("shot.png");
+    std::fs::write(&path, vec![0u8; 8]).unwrap();
+    let t = Transmission {
+        command_id: command_id(),
+        attempt: 1,
+        text: "send now".into(),
+        files: vec![local_file(&path, "shot.png", "image/png", 8, true)],
+        settings: None,
+    };
+    let params = build_turn_steer("thr-1", "turn-9", &t).unwrap();
+    assert_eq!(params["threadId"], "thr-1");
+    assert_eq!(params["expectedTurnId"], "turn-9");
+    assert_eq!(params["clientUserMessageId"], command_id().to_string());
+    let input = params["input"].as_array().unwrap();
+    assert!(input.iter().any(|block| block["type"] == "text"));
+    assert!(input.iter().any(|block| block["type"] == "localImage"));
 }

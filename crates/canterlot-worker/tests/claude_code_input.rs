@@ -7,7 +7,7 @@
 
 use canterlot_worker::adapter::{
     AdapterEvent, InstructionMode, InstructionSpec, InterruptOutcome, LocalFile, SettingsChange,
-    Transmission, TransmitOutcome,
+    SteerOutcome, Transmission, TransmitOutcome,
     claude_code::{
         input::{InputDriver, InputQueue, LaunchSettings, Next, user_message},
         parser::{Parsed, Parser},
@@ -1318,5 +1318,78 @@ fn live_interrupt_and_send_now_frames_parse() {
     assert!(
         queued_saw_new_init,
         "the queued message uuid is listed in still_queued before the new turn"
+    );
+}
+
+#[tokio::test]
+async fn steer_writes_user_frame_into_running_turn_without_new_turn() {
+    let mut fake = Fake::start(|dir| {
+        let turn: Vec<String> = out_lines("interrupt", 5, 38)
+            .into_iter()
+            .map(|(_, frame)| frame)
+            .collect();
+        write_frames(dir, "turn_1.out", &turn);
+    })
+    .await;
+    let mut driver = InputDriver::new(InputQueue::new(launch("ask")), Parser::new());
+    let text = in_line("interrupt", 4)["message"]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let outcome = tokio::time::timeout(
+        WAIT,
+        driver.transmit(
+            &mut fake.cli,
+            &tx(id(SLEEP_INPUT), 1, &text),
+            None,
+            DEADLINE,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, TransmitOutcome::Accepted(_)));
+    let mut seen = Vec::new();
+    tokio::time::timeout(WAIT, async {
+        while !seen.iter().any(|p| matches!(p, Parsed::RateLimit(_))) {
+            driver.pump(&mut fake.cli).await;
+            seen.extend(drain(&mut driver));
+        }
+    })
+    .await
+    .expect("the tool call never started");
+    // Вливание: кадр `user` в идущий ход, доказательство — `command_lifecycle`
+    // CLI с UUID вливания. Ход при этом чужой.
+    let steered = Uuid::now_v7();
+    let started = serde_json::to_string(&serde_json::json!({
+        "type": "command_lifecycle",
+        "command_uuid": steered.to_string(),
+        "session_id": "s",
+        "state": "started",
+        "uuid": Uuid::now_v7().to_string(),
+    }))
+    .unwrap();
+    write_frames(fake.dir.path(), "turn_2.out", &[started]);
+    let outcome = tokio::time::timeout(
+        WAIT,
+        driver.steer(&mut fake.cli, &tx(steered, 1, "send now"), DEADLINE),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            SteerOutcome::Accepted(ref proof)
+                if proof.command_id == steered && proof.kind == "claude_code_command_lifecycle"
+        ),
+        "steer proof: {outcome:?}"
+    );
+    let log = fake.stdin_log();
+    assert_eq!(log.len(), 2, "user message plus one steered user frame");
+    assert_eq!(log[0]["uuid"], SLEEP_INPUT);
+    assert_eq!(log[1]["type"], "user");
+    assert_eq!(log[1]["uuid"], steered.to_string());
+    assert!(
+        driver.queue.active().is_some_and(|turn| turn.command_id == id(SLEEP_INPUT)),
+        "the running turn is untouched by the steer"
     );
 }
