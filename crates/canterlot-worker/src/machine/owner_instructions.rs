@@ -884,7 +884,7 @@ mod tests {
         std::fs::remove_file(r.codex_home.join("AGENTS.md")).unwrap();
         rustix::fs::mknodat(
             rustix::fs::CWD,
-            &r.codex_home.join("AGENTS.md"),
+            r.codex_home.join("AGENTS.md"),
             rustix::fs::FileType::Fifo,
             rustix::fs::Mode::from_raw_mode(0o600),
             0,
@@ -902,7 +902,7 @@ mod tests {
         // Недействительный байт первым: наивная посимвольная подрезка
         // клонировала бы буфер сотни тысяч раз.
         let mut bad = vec![0xff];
-        bad.extend(std::iter::repeat(b'x').take(MAX_OWNER_FILE_BYTES - 1));
+        bad.extend(std::iter::repeat_n(b'x', MAX_OWNER_FILE_BYTES - 1));
         std::fs::write(r.codex_home.join("AGENTS.md"), &bad).unwrap();
         let start = std::time::Instant::now();
         let file = read_one(KIND_CODEX_GLOBAL, "", "", &r, "req");
@@ -921,7 +921,7 @@ mod tests {
         // Двухбайтовая «é» ровно на границе среза: первый байт последний в лимите.
         let mut big = vec![b'x'; MAX_OWNER_FILE_BYTES - 1];
         big.extend([0xc3, 0xa9]);
-        big.extend(std::iter::repeat(b'y').take(100));
+        big.extend(std::iter::repeat_n(b'y', 100));
         std::fs::write(r.codex_home.join("AGENTS.md"), &big).unwrap();
         let file = read_one(KIND_CODEX_GLOBAL, "", "", &r, "req");
         assert!(file.present);
