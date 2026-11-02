@@ -159,9 +159,7 @@ async fn only_the_five_hour_window_can_be_absent(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn opencode_readings_store_and_its_absence_leaves_claude_alone(
-    pool: PgPool,
-) -> TestResult {
+async fn opencode_readings_store_and_its_absence_leaves_claude_alone(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     async fn observe_as(
         pool: &PgPool,
@@ -206,8 +204,18 @@ async fn opencode_readings_store_and_its_absence_leaves_claude_alone(
     observe_as(&pool, &s, "claude", Window::Weekly, 530, at(-30)).await;
     observe_as(&pool, &s, "opencode", Window::FiveHour, 125, at(-30)).await;
     observe_as(&pool, &s, "opencode", Window::Weekly, 340, at(-30)).await;
-    assert_eq!(state(&pool, "opencode").await.five_hour.unwrap().used_permille, 125);
-    assert_eq!(state(&pool, "opencode").await.weekly.unwrap().used_permille, 340);
+    assert_eq!(
+        state(&pool, "opencode")
+            .await
+            .five_hour
+            .unwrap()
+            .used_permille,
+        125
+    );
+    assert_eq!(
+        state(&pool, "opencode").await.weekly.unwrap().used_permille,
+        340
+    );
 
     let mut tx = pool.begin().await?;
     assert!(

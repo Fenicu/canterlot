@@ -495,15 +495,24 @@ fn opencode_reading_uses_window_lengths_and_skips_the_monthly_window() {
     let reading = reading_from_output("opencode", OPENCODEGO.as_bytes(), NOW_MS).unwrap();
     assert_eq!(
         rows(&reading.observations),
-        vec![(FIVE, 125, 1_793_501_361_000), (WEEK, 340, 1_794_182_399_000)]
+        vec![
+            (FIVE, 125, 1_793_501_361_000),
+            (WEEK, 340, 1_794_182_399_000)
+        ]
     );
     assert!(reading.absent.is_empty(), "five hour window is present");
     assert!(
-        reading.observations.iter().all(|o| o.provider == "opencode"),
+        reading
+            .observations
+            .iter()
+            .all(|o| o.provider == "opencode"),
         "hub provider, not the codexbar name"
     );
     assert!(
-        reading.observations.iter().all(|o| o.observed_machine_ms == 1_793_483_361_000),
+        reading
+            .observations
+            .iter()
+            .all(|o| o.observed_machine_ms == 1_793_483_361_000),
         "reading time comes from updatedAt"
     );
 }
@@ -514,7 +523,10 @@ fn opencode_weekly_only_reading_marks_only_its_own_five_hour_window_absent() {
         "primary":{"usedPercent":34,"windowMinutes":10080,"resetsAt":"2026-11-08T23:59:59Z"},
         "updatedAt":"2026-10-31T21:49:21Z"}}]"#;
     let reading = reading_from_output("opencode", body.as_bytes(), NOW_MS).unwrap();
-    assert_eq!(rows(&reading.observations), vec![(WEEK, 340, 1_794_182_399_000)]);
+    assert_eq!(
+        rows(&reading.observations),
+        vec![(WEEK, 340, 1_794_182_399_000)]
+    );
     assert_eq!(reading.absent.len(), 1);
     assert_eq!(reading.absent[0].provider, "opencode");
     assert_eq!(reading.absent[0].window, FIVE);
@@ -543,7 +555,8 @@ async fn opencode_poll_calls_codexbar_with_the_go_provider_name() {
     assert!(fetched.absent.is_empty());
     let args = calls(dir.path());
     assert!(
-        args.iter().any(|call| call == "usage --provider opencodego --format json --no-color"),
+        args.iter()
+            .any(|call| call == "usage --provider opencodego --format json --no-color"),
         "unexpected calls: {args:?}"
     );
 

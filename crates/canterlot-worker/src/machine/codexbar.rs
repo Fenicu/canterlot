@@ -80,9 +80,9 @@ pub fn reading_from_output(
         .as_array()
         .and_then(|items| {
             items.iter().find(|item| {
-                item.get("provider").and_then(Value::as_str).is_some_and(|name| {
-                    name == provider || name == cli_provider(provider)
-                })
+                item.get("provider")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name == provider || name == cli_provider(provider))
             })
         })
         .ok_or(CodexBarError::Output)?;
