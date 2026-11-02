@@ -148,16 +148,33 @@ function nest(
     (a, b) =>
       a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
   );
+  const visible = new Map<string, boolean>();
+  const visiting = new Set<string>();
+  const parentOf = (node: TreeNode): TreeNode | null =>
+    node.item.parent_id ? (nodes.get(node.item.parent_id) ?? null) : null;
+  const attachable = (node: TreeNode, parent: TreeNode | null): boolean =>
+    parent !== null &&
+    parent !== node &&
+    !reaches(parent, node.item.id, nodes);
+  // Видимость идёт по всему поддереву: внук закреплённого корня едет с ним,
+  // хотя сам не закреплён. Петля ссылок не должна прятать строки.
+  const shown = (node: TreeNode): boolean => {
+    const known = visible.get(node.item.id);
+    if (known !== undefined) return known;
+    if (visiting.has(node.item.id)) return false;
+    visiting.add(node.item.id);
+    const parent = parentOf(node);
+    const result =
+      (parent !== null && attachable(node, parent) && shown(parent)) ||
+      tops.has(node.item.id);
+    visiting.delete(node.item.id);
+    visible.set(node.item.id, result);
+    return result;
+  };
   for (const item of order) {
     const node = nodes.get(item.id)!;
-    const parent = item.parent_id ? (nodes.get(item.parent_id) ?? null) : null;
-    // Петля ссылок не должна прятать строки: её участники остаются наверху.
-    if (
-      parent &&
-      parent !== node &&
-      tops.has(parent.item.id) &&
-      !reaches(parent, node.item.id, nodes)
-    ) {
+    const parent = parentOf(node);
+    if (parent !== null && attachable(node, parent) && shown(parent)) {
       parent.children.push(node);
       continue;
     }

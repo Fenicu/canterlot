@@ -134,6 +134,58 @@ describe("sessions/delegated-tree", () => {
     expect(pinned?.items[0]?.children).toEqual([]);
   });
 
+  it("grandchild_of_a_pinned_root_rides_with_the_pinned_tab", () => {
+    const items = [
+      row({ id: "parent", title: "Оркестратор", pinned: true }),
+      row({
+        id: "child",
+        title: "Миграция",
+        parent_id: "parent",
+        spawn_depth: 1,
+      }),
+      row({
+        id: "grandchild",
+        title: "Проверка",
+        parent_id: "child",
+        spawn_depth: 2,
+        activity: { state: "working", evidence: { phase: "generating" } },
+      }),
+    ];
+    const pinned = buildSections(items, groups, { kind: "pinned" }, new Set())[0];
+    expect(pinned?.items.map((node) => node.item.id)).toEqual(["parent"]);
+    expect(pinned?.items[0]?.children.map((node) => node.item.id)).toEqual(["child"]);
+    expect(
+      pinned?.items[0]?.children[0]?.children.map((node) => node.item.id),
+    ).toEqual(["grandchild"]);
+    expect(pinned?.items[0]?.running).toBe(1);
+  });
+
+  it("grandchild_of_a_group_root_rides_with_the_group_tab", () => {
+    const items = [
+      row({ id: "parent", title: "Оркестратор", groups: ["canterlot"] }),
+      row({
+        id: "child",
+        title: "Миграция",
+        parent_id: "parent",
+        spawn_depth: 1,
+      }),
+      row({
+        id: "grandchild",
+        title: "Проверка",
+        parent_id: "child",
+        spawn_depth: 2,
+        activity: { state: "working", evidence: { phase: "generating" } },
+      }),
+    ];
+    const group = buildSections(items, groups, { kind: "group", id: "canterlot" }, new Set())[0];
+    expect(group?.items.map((node) => node.item.id)).toEqual(["parent"]);
+    expect(group?.items[0]?.children.map((node) => node.item.id)).toEqual(["child"]);
+    expect(
+      group?.items[0]?.children[0]?.children.map((node) => node.item.id),
+    ).toEqual(["grandchild"]);
+    expect(group?.items[0]?.running).toBe(1);
+  });
+
   it("depth_stops_growing_at_two", () => {
     const items = [
       row({ id: "a", title: "Корень" }),
