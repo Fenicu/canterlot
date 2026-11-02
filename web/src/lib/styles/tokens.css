@@ -93,6 +93,7 @@
   --reading-max: 720px;
   --index-max: 960px;
   --preview-height: 204px;
+  --request-card-max: min(60dvh, calc(100dvh - 14rem));
   --sheet-context: 64px;
   --chart-height: 104px;
   --gauge-width: 112px;
