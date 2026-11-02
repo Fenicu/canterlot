@@ -272,41 +272,52 @@ async fn cancel_queued_input_cancels_pending_steer(pool: PgPool) -> TestResult {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn cancel_refuses_steer_already_handed_to_machine(pool: PgPool) -> TestResult {
-    let seed = testkit::seed(&pool).await;
-    sqlx::query("update conversations set harness = 'codex' where id = $1")
-        .bind(seed.conversation_id)
-        .execute(&pool)
-        .await?;
-    running(&pool, &seed).await;
-    let first = input(&pool, &seed).await;
-    let second = input(&pool, &seed).await;
-    dispatch(&pool, seed.conversation_id).await;
-    accept_turn(&pool, first.command_id).await;
-    let SendNowOutcome::Requested { steer_command_id } =
-        send_now(&pool, &seed, second.input_id).await?
-    else {
-        panic!("send now must create a steer");
-    };
-    sqlx::query("update commands set delivery_state = 'stored_on_machine' where id = $1")
-        .bind(steer_command_id)
-        .execute(&pool)
-        .await?;
+    for claimed in [true, false] {
+        let seed = testkit::seed(&pool).await;
+        sqlx::query("update conversations set harness = 'codex' where id = $1")
+            .bind(seed.conversation_id)
+            .execute(&pool)
+            .await?;
+        running(&pool, &seed).await;
+        let first = input(&pool, &seed).await;
+        let second = input(&pool, &seed).await;
+        dispatch(&pool, seed.conversation_id).await;
+        accept_turn(&pool, first.command_id).await;
+        let SendNowOutcome::Requested { steer_command_id } =
+            send_now(&pool, &seed, second.input_id).await?
+        else {
+            panic!("send now must create a steer");
+        };
+        let handed = if claimed {
+            sqlx::query("update commands set dispatch_claimed_at = now() where id = $1")
+                .bind(steer_command_id)
+                .execute(&pool)
+                .await?;
+            "pending"
+        } else {
+            sqlx::query("update commands set delivery_state = 'stored_on_machine' where id = $1")
+                .bind(steer_command_id)
+                .execute(&pool)
+                .await?;
+            "stored_on_machine"
+        };
 
-    assert!(matches!(
-        cancel_input(
-            &pool,
-            seed.owner_id,
-            second.input_id,
-            "cancel-steered",
-            Uuid::now_v7()
-        )
-        .await,
-        Err(ControlError::InvalidRequest {
-            reason: "steer_in_flight"
-        })
-    ));
-    assert_eq!(state(&pool, second.input_id).await, InputState::Queued);
-    assert_eq!(steer(&pool, second.command_id).await.1, "stored_on_machine");
+        assert!(matches!(
+            cancel_input(
+                &pool,
+                seed.owner_id,
+                second.input_id,
+                "cancel-steered",
+                Uuid::now_v7()
+            )
+            .await,
+            Err(ControlError::InvalidRequest {
+                reason: "steer_in_flight"
+            })
+        ));
+        assert_eq!(state(&pool, second.input_id).await, InputState::Queued);
+        assert_eq!(steer(&pool, second.command_id).await.1, handed);
+    }
     Ok(())
 }
 

@@ -120,8 +120,8 @@ pub async fn cancel_input(
             // погасить его в той же транзакции, иначе отменённый текст всё равно
             // уедет в идущий ход. Ушедшее на машину вливание отменяем только
             // отказом: вслепую помечать его завершённым нельзя.
-            let steers: Vec<(Uuid, String)> = sqlx::query_as(
-                "select id, delivery_state from commands
+            let steers: Vec<(Uuid, String, bool)> = sqlx::query_as(
+                "select id, delivery_state, dispatch_claimed_at is not null from commands
                  where kind = 'steer_input' and target_command_id = $1
                    and delivery_state <> 'completed'
                  order by created_at, id",
@@ -129,13 +129,16 @@ pub async fn cancel_input(
             .bind(command_id)
             .fetch_all(&mut *conn)
             .await?;
-            if steers.iter().any(|(_, state)| state != "pending") {
+            if steers
+                .iter()
+                .any(|(_, state, claimed)| state != "pending" || *claimed)
+            {
                 return Err(ControlError::InvalidRequest {
                     reason: "steer_in_flight",
                 });
             }
             if !steers.is_empty() {
-                let ids: Vec<Uuid> = steers.into_iter().map(|(id, _)| id).collect();
+                let ids: Vec<Uuid> = steers.into_iter().map(|(id, _, _)| id).collect();
                 sqlx::query(
                     "update commands set delivery_state = 'completed',
                             completed_at = coalesce(completed_at, now()),
@@ -1232,15 +1235,26 @@ pub async fn request_edit_input(
                     reason: "revision_conflict",
                 });
             }
-            // Вливание уже ушло на машину: править поздно, текст бы разошёлся.
-            let steer_in_flight: bool = sqlx::query_scalar(
-                "select exists(select 1 from commands where kind = 'steer_input'
-                 and target_command_id = $1 and delivery_state = 'stored_on_machine')",
+            // Outbox уже выбрал вливание или обычную выдачу: payload мог уйти
+            // на машину, поэтому правка закрыта до квитанции.
+            let steer: Option<(bool, bool)> = sqlx::query_as(
+                "select dispatch_claimed_at is not null,
+                        delivery_state = 'stored_on_machine'
+                 from commands where kind = 'steer_input'
+                   and target_command_id = $1 and delivery_state <> 'completed'
+                 order by created_at, id limit 1",
+            )
+            .bind(deliver_command_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let deliver_claimed: bool = sqlx::query_scalar(
+                "select delivery_state = 'pending' and dispatch_claimed_at is not null
+                 from commands where id = $1",
             )
             .bind(deliver_command_id)
             .fetch_one(&mut *conn)
             .await?;
-            if steer_in_flight {
+            if deliver_claimed || steer.is_some_and(|(claimed, stored)| claimed || stored) {
                 return Err(ControlError::InvalidRequest {
                     reason: "steer_in_flight",
                 });
