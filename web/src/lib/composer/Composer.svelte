@@ -8,6 +8,7 @@
   import InterruptButton from '#lib/composer/InterruptButton.svelte';
   import SendLater from '#lib/composer/SendLater.svelte';
   import { bindDraft } from '#lib/composer/draftBinding.js';
+  import { filesFromPayload, hasFileDrag } from '#lib/composer/intake.js';
   import { ComposerModel, EMPTY_DRAFT_REASON, type Limits } from '#lib/composer/model.svelte.js';
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
   import { getEnterPref } from '#lib/composer/prefs.js';
@@ -52,6 +53,8 @@
   let file = $state<HTMLInputElement | null>(null);
   let later = $state(false);
   let composing = $state(false);
+  let receiving = $state(false);
+  let dropDepth = 0;
   let held = false;
   let timer = 0;
   let tick = $state(0);
@@ -104,6 +107,17 @@
       if (node) node.value = text;
     });
     const stopReturned = bindReturned(chat.id, (returned) => model.takeBack(returned));
+    // Файл, брошенный мимо композера, не должен уводить приложение на этот файл.
+    const blockDrop = (event: DragEvent) => {
+      if (hasFileDrag(event.dataTransfer)) event.preventDefault();
+    };
+    const endDrop = () => {
+      dropDepth = 0;
+      receiving = false;
+    };
+    window.addEventListener('dragover', blockDrop);
+    window.addEventListener('drop', blockDrop);
+    window.addEventListener('dragend', endDrop);
     void loadConfig()
       .then((cfg) => {
         limits = cfg.limits;
@@ -115,6 +129,9 @@
     return () => {
       stop();
       stopReturned();
+      window.removeEventListener('dragover', blockDrop);
+      window.removeEventListener('drop', blockDrop);
+      window.removeEventListener('dragend', endDrop);
       clearInterval(pulse);
       window.clearTimeout(timer);
     };
@@ -171,6 +188,30 @@
     if (file) file.value = '';
   }
 
+  function pasted(event: ClipboardEvent) {
+    const files = filesFromPayload(event.clipboardData);
+    if (files.length) model.attach(files);
+  }
+
+  function dragEnter(event: DragEvent) {
+    if (!hasFileDrag(event.dataTransfer)) return;
+    event.preventDefault();
+    dropDepth += 1;
+    receiving = true;
+  }
+
+  function dragOver(event: DragEvent) {
+    if (!hasFileDrag(event.dataTransfer)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  }
+
+  function dragLeave() {
+    if (dropDepth === 0) return;
+    dropDepth -= 1;
+    if (dropDepth === 0) receiving = false;
+  }
+
   function markSend(node: HTMLButtonElement) {
     $effect(() => {
       void tick;
@@ -179,20 +220,32 @@
   }
 
   function dropped(event: DragEvent) {
-    const files = event.dataTransfer?.files;
-    if (!files?.length) return;
+    const files = filesFromPayload(event.dataTransfer);
+    dropDepth = 0;
+    receiving = false;
+    if (!files.length) return;
     event.preventDefault();
     model.attach(files);
   }
 </script>
 
-<section class="composer" data-composer role="group" aria-label="Поле ввода" ondragover={(event) => event.preventDefault()} ondrop={dropped}>
+<section
+  class="composer"
+  data-composer
+  role="group"
+  aria-label="Поле ввода"
+  ondragenter={dragEnter}
+  ondragover={dragOver}
+  ondragleave={dragLeave}
+  ondrop={dropped}
+>
   {#if notice}
     <p class="reason" id={reasonId}>{notice}</p>
   {:else}
     <p class="sr-only" id={reasonId}>{model.gate.ok ? '' : EMPTY_DRAFT_REASON}</p>
   {/if}
-  <div class="capsule">
+  <div class="capsule" class:receiving>
+    {#if receiving}<p class="dropzone" aria-hidden="true">Отпустите файлы</p>{/if}
     <input bind:this={file} class="file" type="file" multiple tabindex="-1" aria-label="Выбрать файлы" onchange={picked} />
     <AttachmentTray {uploads} conversationId={chat.id} />
     <textarea
@@ -220,6 +273,7 @@
       oncompositionstart={() => (composing = true)}
       oncompositionend={() => (composing = false)}
       onkeydown={onKey}
+      onpaste={pasted}
     ></textarea>
     <span class="attach"><IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} /></span>
     <ContextIndicator {chat} />
@@ -280,7 +334,10 @@
     padding: var(--s1) var(--s3) var(--s3);
     border-radius: var(--radius-composer);
     background: var(--surface);
+    position: relative;
   }
+  .capsule.receiving { outline: var(--focus-width) dashed var(--accent); outline-offset: var(--s1); background: var(--accent-soft); }
+  .dropzone { position: absolute; inset: var(--s1); z-index: 1; display: flex; align-items: center; justify-content: center; margin: 0; border-radius: var(--radius-card); background: var(--accent-soft); color: var(--text); font-size: var(--fs-meta); pointer-events: none; }
   .capsule:has(:global(.tray)) {
     grid-template-areas: 'tray tray tray tray tray' 'input input input input input' 'attach context extras clock send';
   }
