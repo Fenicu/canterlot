@@ -5802,6 +5802,7 @@
       "ConfigView": {
         "type": "object",
         "required": [
+          "version",
           "schema_version",
           "limits",
           "ws",
@@ -5834,6 +5835,9 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "version": {
+            "type": "string"
           },
           "ws": {
             "$ref": "#/components/schemas/WsView"

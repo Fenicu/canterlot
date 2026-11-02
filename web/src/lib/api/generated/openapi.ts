@@ -1122,6 +1122,7 @@ export interface components {
             machines: components["schemas"]["MachinesView"];
             /** Format: int32 */
             schema_version: number;
+            version: string;
             ws: components["schemas"]["WsView"];
         };
         /**

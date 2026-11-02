@@ -1726,6 +1726,7 @@ async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
     assert_eq!(
         response.json::<Value>(),
         json!({
+            "version": env!("CARGO_PKG_VERSION"),
             "schema_version": 1,
             "limits": {
                 "max_input_text_bytes": MAX_INPUT_TEXT_BYTES,

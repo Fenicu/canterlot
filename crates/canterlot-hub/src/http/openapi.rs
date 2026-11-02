@@ -22,7 +22,7 @@ use super::{
 #[openapi(
     info(
         title = "canterlot hub API",
-        version = "1.0.0",
+        version = env!("CARGO_PKG_VERSION"),
         description = "HTTP и WSS контракт хаба. Личность задаёт прокси перед хабом; изменяющим запросам нужны Origin, X-Canterlot-Client: 1 и Idempotency-Key."
     ),
     components(schemas(

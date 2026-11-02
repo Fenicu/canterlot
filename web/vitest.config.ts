@@ -1,8 +1,15 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { workspaceVersion } from './scripts/workspace-version.mjs';
 
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(workspaceVersion())
+  },
   plugins: [svelte({ configFile: false })],
+  server: {
+    fs: { allow: ['..'] }
+  },
   resolve: {
     conditions: ['browser'],
     alias: {

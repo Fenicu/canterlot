@@ -201,6 +201,7 @@ pub struct AuthView {
 
 #[derive(Serialize, ToSchema)]
 pub struct ConfigView {
+    pub version: String,
     pub schema_version: u32,
     pub limits: LimitsView,
     pub ws: WsView,
@@ -219,6 +220,7 @@ pub struct ConfigView {
 ))]
 async fn config(_owner: Owner, State(state): State<AppState>) -> Json<ConfigView> {
     Json(ConfigView {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
         schema_version: 1,
         limits: LimitsView {
             max_input_text_bytes: MAX_INPUT_TEXT_BYTES as u64,
