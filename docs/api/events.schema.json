@@ -137,6 +137,15 @@
     },
     {
       "$ref": "#/$defs/instruction_preset_changed"
+    },
+    {
+      "$ref": "#/$defs/compaction_started"
+    },
+    {
+      "$ref": "#/$defs/compaction_finished"
+    },
+    {
+      "$ref": "#/$defs/context_changed"
     }
   ],
   "$defs": {
@@ -5173,6 +5182,15 @@
                 },
                 {
                   "$ref": "#/$defs/instruction_preset_changed"
+                },
+                {
+                  "$ref": "#/$defs/compaction_started"
+                },
+                {
+                  "$ref": "#/$defs/compaction_finished"
+                },
+                {
+                  "$ref": "#/$defs/context_changed"
                 }
               ]
             }
@@ -5818,6 +5836,273 @@
       "required": [
         "kind",
         "chain_depth"
+      ],
+      "additionalProperties": false
+    },
+    "compaction_started": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "compaction_started"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "trigger": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "trigger"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "compaction_finished": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "compaction_finished"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "trigger": {
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "trigger",
+            "ok"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "context_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "context_changed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "tokens": {
+              "oneOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "window_tokens": {
+              "oneOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "tokens",
+            "window_tokens"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
       ],
       "additionalProperties": false
     }
