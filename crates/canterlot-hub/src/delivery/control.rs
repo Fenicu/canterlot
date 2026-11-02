@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
@@ -10,7 +10,7 @@ use crate::{
     events::{self, NewEvent, Scope},
     executions,
     idempotency::{self, Begin},
-    model::{CompactionProgress, ExecutionState, InputState, PauseReason, RunSlot},
+    model::{CompactionProgress, ExecutionState, HoldReason, InputState, PauseReason, RunSlot},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -931,4 +931,416 @@ fn queue_event(
         payload: json!({"pause_reasons": queue.pause_reasons.0}),
         correlation_id,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SendNowOutcome {
+    Requested { steer_command_id: Uuid },
+    AlreadyRequested { steer_command_id: Uuid },
+}
+
+/// «Отправить сейчас»: влить ожидающий ввод в идущий ход, не открывая нового.
+/// Действителен, только пока ввод ещё в очереди, а ход идёт; иначе 400 с
+/// причиной, которую PWA показывает подписью. Идемпотентен по ключу, а при
+/// другом ключе на тот же ввод возвращает существующую команду.
+pub async fn request_send_now(
+    pool: &PgPool,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    input_id: Uuid,
+    idempotency_key: &str,
+    _correlation_id: Uuid,
+    machine_capabilities: &[String],
+) -> Result<SendNowOutcome, ControlError> {
+    idempotency::validate_key(idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
+    const OPERATION: &str = "request_send_now";
+    let hash = idempotency::request_hash(
+        OPERATION,
+        &json!({"conversation_id": conversation_id, "input_id": input_id}),
+    );
+    let idempotency_key = idempotency_key.to_owned();
+    let machine_capabilities = machine_capabilities.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            if let Some(outcome) =
+                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
+            {
+                return Ok(outcome);
+            }
+            let input: Option<(String, Uuid, Value)> = sqlx::query_as(
+                "select i.state, i.command_id, i.content from inputs i
+                 where i.id = $1 and i.conversation_id = $2",
+            )
+            .bind(input_id)
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let (state, deliver_command_id, content) = input.ok_or(ControlError::NotFound)?;
+            if state != InputState::Queued.as_str() {
+                return Err(ControlError::InvalidRequest {
+                    reason: "input_not_queued",
+                });
+            }
+            // Ход идёт, только если слот занят им и исполнение живое.
+            let live = executions::live(&mut *conn, conversation_id).await?;
+            let (execution_id, generation, exec_state) = live.ok_or(ControlError::InvalidRequest {
+                reason: "no_running_turn",
+            })?;
+            if !matches!(exec_state, ExecutionState::Running) {
+                return Err(ControlError::InvalidRequest {
+                    reason: "no_running_turn",
+                });
+            }
+            if !matches!(queue.slot()?, RunSlot::Running { .. }) {
+                return Err(ControlError::InvalidRequest {
+                    reason: "no_running_turn",
+                });
+            }
+            let running_input_id = match queue.slot()? {
+                RunSlot::Running { input_id } => input_id,
+                _ => {
+                    return Err(ControlError::InvalidRequest {
+                        reason: "no_running_turn",
+                    });
+                }
+            };
+            let running_command_id: Uuid =
+                sqlx::query_scalar("select command_id from inputs where id = $1")
+                    .bind(running_input_id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            let (harness, machine_id): (String, Uuid) =
+                sqlx::query_as("select harness, machine_id from conversations where id = $1")
+                    .bind(conversation_id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            if !matches!(harness.as_str(), "claude_code" | "codex" | "opencode") {
+                return Err(ControlError::InvalidRequest {
+                    reason: "unsupported_harness",
+                });
+            }
+            if !machine_capabilities
+                .iter()
+                .any(|capability| capability == crate::session::CAPABILITY_SEND_NOW_V1)
+            {
+                return Err(ControlError::InvalidRequest {
+                    reason: "capability_missing",
+                });
+            }
+            // Открытый запрос или сжатие: вливать некуда, отказ с подписью.
+            let open_requests: i64 = sqlx::query_scalar(crate::requests::LIVE_OPEN_REQUESTS)
+                .bind(conversation_id)
+                .fetch_one(&mut *conn)
+                .await?;
+            let awaiting: bool = sqlx::query_scalar::<_, Option<bool>>(
+                "select phase in ('awaiting_permission', 'awaiting_answer') from executions
+                 where id = $1",
+            )
+            .bind(execution_id)
+            .fetch_one(&mut *conn)
+            .await?
+            .unwrap_or(false);
+            if open_requests > 0 || awaiting {
+                return Err(ControlError::InvalidRequest {
+                    reason: "request_open",
+                });
+            }
+            if queue.hold_reasons.0.contains(&HoldReason::ContextMaintenance) {
+                return Err(ControlError::InvalidRequest {
+                    reason: "compacting",
+                });
+            }
+            let compacting: bool = sqlx::query_scalar(
+                "select exists(select 1 from commands where conversation_id = $1
+                 and kind = 'compact_session' and execution_id = $2 and delivery_state <> 'completed')",
+            )
+            .bind(conversation_id)
+            .bind(execution_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if compacting {
+                return Err(ControlError::InvalidRequest {
+                    reason: "compacting",
+                });
+            }
+            // Повтор другим ключом: та же команда, нового хода нет.
+            let existing: Option<Uuid> = sqlx::query_scalar(
+                "select id from commands where kind = 'steer_input' and target_command_id = $1
+                 and delivery_state <> 'completed' order by created_at, id limit 1",
+            )
+            .bind(deliver_command_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let outcome = if let Some(existing) = existing {
+                SendNowOutcome::AlreadyRequested {
+                    steer_command_id: existing,
+                }
+            } else {
+                let attachment_ids: Value = sqlx::query_scalar(
+                    "select coalesce(payload->'attachment_ids', '[]'::jsonb) from commands where id = $1",
+                )
+                .bind(deliver_command_id)
+                .fetch_optional(&mut *conn)
+                .await?
+                .unwrap_or(Value::Array(Vec::new()));
+                let steer_command_id = Uuid::now_v7();
+                sqlx::query(
+                    "insert into commands (id, machine_id, conversation_id, execution_id,
+                                   execution_generation, kind, payload, target_command_id, delivery_state,
+                                   dispatch_attempt)
+                 values ($1, $2, $3, $4, $5, 'steer_input', $6, $7, 'pending', 0)",
+                )
+                .bind(steer_command_id)
+                .bind(machine_id)
+                .bind(conversation_id)
+                .bind(execution_id)
+                .bind(generation)
+                .bind(json!({
+                    "input_id": input_id,
+                    "conversation_id": conversation_id,
+                    "content": content,
+                    "attachment_ids": attachment_ids,
+                    "expected_running_command_id": running_command_id.to_string(),
+                }))
+                .bind(deliver_command_id)
+                .execute(&mut *conn)
+                .await?;
+                notify_outbox(&mut *conn, machine_id).await?;
+                SendNowOutcome::Requested { steer_command_id }
+            };
+            record(
+                &mut *conn,
+                owner_id,
+                &idempotency_key,
+                OPERATION,
+                &hash,
+                conversation_id,
+                &outcome,
+            )
+            .await?;
+            Ok(outcome)
+        })
+    })
+    .await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct EditInputOutcome {
+    pub input_id: Uuid,
+    pub revision: i64,
+}
+
+/// Параметры правки ожидающего ввода.
+pub struct EditInput {
+    pub owner_id: Uuid,
+    pub conversation_id: Uuid,
+    pub input_id: Uuid,
+    pub text: String,
+    pub attachment_ids: Vec<Uuid>,
+    pub expected_revision: i64,
+    pub idempotency_key: String,
+    pub correlation_id: Uuid,
+}
+
+/// Правка ожидающего ввода: замена текста и списка вложений сравнением-и-заменой
+/// по ревизии. Действует, только пока ввод ещё в `queued`: выдача, передача,
+/// приём и отмена идут мимо. Решение принимается под тем же замком очереди,
+/// что и выдача, поэтому правка никогда не гоняется с диспетчером: либо новое
+/// содержимое едет следующим ходом целиком, либо правка отклоняется.
+pub async fn request_edit_input(
+    pool: &PgPool,
+    edit: EditInput,
+) -> Result<EditInputOutcome, ControlError> {
+    let EditInput {
+        owner_id,
+        conversation_id,
+        input_id,
+        text,
+        attachment_ids,
+        expected_revision,
+        idempotency_key,
+        correlation_id,
+    } = edit;
+    idempotency::validate_key(&idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
+    const OPERATION: &str = "edit_input";
+    let hash = idempotency::request_hash(
+        OPERATION,
+        &json!({"conversation_id": conversation_id, "input_id": input_id, "text": text, "attachment_ids": attachment_ids, "expected_revision": expected_revision}),
+    );
+    let idempotency_key = idempotency_key.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            if let Some(outcome) =
+                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
+            {
+                return Ok(outcome);
+            }
+            let input: Option<(String, i64, Uuid)> = sqlx::query_as(
+                "select i.state, i.revision, i.command_id from inputs i
+                 where i.id = $1 and i.conversation_id = $2",
+            )
+            .bind(input_id)
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let (state, revision, deliver_command_id) = input.ok_or(ControlError::NotFound)?;
+            if state != InputState::Queued.as_str() {
+                // Та же граница, что у «Отправить сейчас» и выдачи: выданное,
+                // переданное, принятое и отменённое правится только отзывом.
+                return Err(ControlError::InvalidRequest {
+                    reason: "input_not_queued",
+                });
+            }
+            if revision != expected_revision {
+                return Err(ControlError::InvalidRequest {
+                    reason: "revision_conflict",
+                });
+            }
+            // Вливание уже ушло на машину: править поздно, текст бы разошёлся.
+            let steer_in_flight: bool = sqlx::query_scalar(
+                "select exists(select 1 from commands where kind = 'steer_input'
+                 and target_command_id = $1 and delivery_state = 'stored_on_machine')",
+            )
+            .bind(deliver_command_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if steer_in_flight {
+                return Err(ControlError::InvalidRequest {
+                    reason: "steer_in_flight",
+                });
+            }
+            if text.trim().is_empty() && attachment_ids.is_empty() {
+                return Err(ControlError::InvalidRequest {
+                    reason: "empty_content",
+                });
+            }
+            let mut blocks = vec![crate::delivery::submit::ContentBlock::Text { text }];
+            if !attachment_ids.is_empty() {
+                if crate::attachments::check_ids(&attachment_ids).is_err() {
+                    return Err(ControlError::InvalidRequest {
+                        reason: "attachment_unavailable",
+                    });
+                }
+                let (catalog, machine) =
+                    crate::attachments::gate_for(&mut *conn, conversation_id).await?;
+                sqlx::query("delete from input_attachments where input_id = $1")
+                    .bind(input_id)
+                    .execute(&mut *conn)
+                    .await?;
+                let refs = crate::attachments::link_in_tx(
+                    &mut *conn,
+                    owner_id,
+                    conversation_id,
+                    input_id,
+                    &attachment_ids,
+                    &catalog,
+                    &machine,
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::attachments::AttachmentError::NotReady => {
+                        ControlError::InvalidRequest {
+                            reason: "attachment_not_ready",
+                        }
+                    }
+                    crate::attachments::AttachmentError::NotFound => {
+                        ControlError::InvalidRequest {
+                            reason: "attachment_not_found",
+                        }
+                    }
+                    _ => ControlError::InvalidRequest {
+                        reason: "attachment_unavailable",
+                    },
+                })?;
+                for reference in &refs {
+                    blocks.push(
+                        crate::delivery::submit::ContentBlock::from_ref(reference)
+                            .map_err(|_| ControlError::InvalidRequest {
+                                reason: "attachment_unavailable",
+                            })?,
+                    );
+                }
+            } else {
+                sqlx::query("delete from input_attachments where input_id = $1")
+                    .bind(input_id)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            crate::delivery::submit::check_bounds(&blocks).map_err(|_| {
+                ControlError::InvalidRequest {
+                    reason: "content_too_long",
+                }
+            })?;
+            let content = serde_json::to_value(&blocks)
+                .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+            // Единственный источник текста для выдачи — строка команды: воркер
+            // читает её при каждой выдаче и повторе, старого текста у него нет.
+            sqlx::query("update inputs set content = $2, revision = revision + 1 where id = $1")
+                .bind(input_id)
+                .bind(&content)
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "update commands set payload = payload || jsonb_build_object('content', $2::jsonb, 'attachment_ids', $3::jsonb)
+                 where id = $1",
+            )
+            .bind(deliver_command_id)
+            .bind(&content)
+            .bind(json!(attachment_ids))
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "update commands set payload = payload || jsonb_build_object('content', $2::jsonb, 'attachment_ids', $3::jsonb)
+                 where kind = 'steer_input' and target_command_id = $1 and delivery_state = 'pending'",
+            )
+            .bind(deliver_command_id)
+            .bind(&content)
+            .bind(json!(attachment_ids))
+            .execute(&mut *conn)
+            .await?;
+            let outcome = EditInputOutcome {
+                input_id,
+                revision: revision + 1,
+            };
+            events::append(
+                &mut *conn,
+                NewEvent {
+                    scope: Scope::Conversation {
+                        id: queue.conversation_id,
+                    },
+                    kind: "input_state_changed",
+                    conversation_id: Some(queue.conversation_id),
+                    execution_id: None,
+                    payload: json!({
+                        "input_id": input_id,
+                        "state": "queued",
+                        "attempt": 0,
+                        "cause": "edited",
+                        "revision": revision + 1,
+                        "content": content,
+                    }),
+                    correlation_id,
+                },
+            )
+            .await?;
+            record(
+                &mut *conn,
+                owner_id,
+                &idempotency_key,
+                OPERATION,
+                &hash,
+                conversation_id,
+                &outcome,
+            )
+            .await?;
+            Ok(outcome)
+        })
+    })
+    .await
 }

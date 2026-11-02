@@ -173,3 +173,79 @@ describe("timeline/QueueActions", () => {
     );
   });
 });
+
+describe("timeline/QueueActions sendNow", () => {
+  it("send_now_posts_to_the_running_turn_and_maps_refusal_reasons", async () => {
+    const { sendNow, sendNowCaption } = await import("#lib/timeline/QueueActions.js");
+    const { ApiError } = await import("#lib/api/http.js");
+    const input: InputView = freshInput("k1", "В ход", Date.now());
+    input.id = "inp-uuid-1";
+    input.state = "queued";
+
+    const posted: Array<[string, string, string]> = [];
+    const res = await sendNow(input, "conv-1", {
+      clientSendNow: async (conv, id, key) => {
+        posted.push([conv, id, key]);
+        return { data: { requested: {} } };
+      },
+    });
+    expect(res).toBe("requested");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]![0]).toBe("conv-1");
+    expect(posted[0]![1]).toBe("inp-uuid-1");
+
+    const refused = await sendNow(input, "conv-1", {
+      clientSendNow: async () => {
+        throw new ApiError(400, "invalid_request", "Некорректный запрос", "browser", "never", "c", {
+          reason: "request_open",
+        });
+      },
+    });
+    expect(refused).toEqual({ reason: "request_open" });
+    expect(sendNowCaption("request_open")).toBe("Дождитесь ответа на запрос");
+    expect(sendNowCaption("compacting")).toBe("Дождитесь конца сжатия");
+    expect(sendNowCaption("no_running_turn")).toBe("Ход уже кончился: сообщение уйдёт следующим");
+    expect(sendNowCaption("capability_missing")).toBeNull();
+
+    const idless: InputView = freshInput("k2", "Черновик", Date.now());
+    expect(await sendNow(idless, "conv-1")).toBe("noop");
+  });
+});
+
+describe("timeline/QueueActions editInput", () => {
+  it("edit_posts_text_attachments_and_revision_and_maps_refusals", async () => {
+    const { editInput, editInputCaption } = await import("#lib/timeline/QueueActions.js");
+    const { ApiError } = await import("#lib/api/http.js");
+    const input: InputView = freshInput("k1", "Старый текст", Date.now());
+    input.id = "inp-uuid-1";
+    input.state = "queued";
+    input.revision = 2;
+
+    const posted: Array<{ text: string; attachment_ids: string[]; expected_revision: number }> = [];
+    const res = await editInput(input, "conv-1", "Новый текст", ["a1"], 2, {
+      clientEditInput: async (_conv, _id, body) => {
+        posted.push(body);
+        return { data: { input_id: "inp-uuid-1", revision: 3 } };
+      },
+    });
+    expect(res).toBe("saved");
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toEqual({ text: "Новый текст", attachment_ids: ["a1"], expected_revision: 2 });
+
+    const stale = await editInput(input, "conv-1", "Поздно", [], 1, {
+      clientEditInput: async () => {
+        throw new ApiError(400, "invalid_request", "Некорректный запрос", "browser", "never", "c", {
+          reason: "revision_conflict",
+        });
+      },
+    });
+    expect(stale).toEqual({ reason: "revision_conflict" });
+    expect(editInputCaption("revision_conflict")).toBe("Сообщение уже изменено в другом месте");
+    expect(editInputCaption("input_not_queued")).toBe("Сообщение уже ушло, править поздно");
+    expect(editInputCaption("steer_in_flight")).toBe("Сообщение вливается в ход, дождитесь конца хода");
+    expect(editInputCaption("capability_missing")).toBe("Машина сейчас не принимает вложения");
+
+    const idless: InputView = freshInput("k2", "Черновик", Date.now());
+    expect(await editInput(idless, "conv-1", "x", [], 1)).toBe("noop");
+  });
+});

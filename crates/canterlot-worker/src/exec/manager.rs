@@ -17,10 +17,10 @@ use canterlot_proto::{
         },
         v1::{
             AttachmentFailed, AttachmentReady, AttachmentRef, CancelInput, Command,
-            CommandRejected, CompactionState, CompactionStatus, DecisionNotApplied, ExecutionState,
-            InputCancelLost, InputCancelWon, InputDispatchDeferred, InputWithdrawn, InterruptState,
-            InterruptStatus, MediaHeader, RemoveWorktree, StartExecution, WithdrawInput,
-            WorktreeRemoved, command::Kind, content_block, record_body::Body,
+            CommandRejected, CompactionState, CompactionStatus, ContentBlock, DecisionNotApplied,
+            ExecutionState, InputCancelLost, InputCancelWon, InputDispatchDeferred, InputWithdrawn,
+            InterruptState, InterruptStatus, MediaHeader, RemoveWorktree, StartExecution,
+            WithdrawInput, WorktreeRemoved, command::Kind, content_block, record_body::Body,
         },
     },
 };
@@ -698,7 +698,12 @@ pub(super) async fn answer_without_execution(
     let (cid, attempt) = (command.command_id.clone(), command.dispatch_attempt);
     if matches!(
         command.kind,
-        Some(Kind::DeliverInput(_) | Kind::CancelInput(_) | Kind::WithdrawInput(_))
+        Some(
+            Kind::DeliverInput(_)
+                | Kind::SteerInput(_)
+                | Kind::CancelInput(_)
+                | Kind::WithdrawInput(_)
+        )
     ) {
         let owned = match id {
             Some(id) => {
@@ -734,7 +739,9 @@ pub(super) async fn answer_without_execution(
             )
             .await
         }
-        Some(Kind::DeliverInput(_)) => defer_unhanded(shared, command).await,
+        Some(Kind::DeliverInput(_)) | Some(Kind::SteerInput(_)) => {
+            defer_unhanded(shared, command).await
+        }
         Some(Kind::CancelInput(CancelInput {
             target_command_id,
             target_dispatch_attempt,
@@ -1254,6 +1261,7 @@ impl Actor {
                 background_v1: start.capabilities.iter().any(|c| c == "background_v1"),
                 session_tools_v1: start.capabilities.iter().any(|c| c == "session_tools_v1"),
                 isolate_mcp: start.isolate_mcp,
+                send_now_v1: start.capabilities.iter().any(|c| c == "send_now_v1"),
             }))
             .await;
         Ok(())
@@ -1881,69 +1889,10 @@ impl Actor {
                 Ok(())
             }
             Some(Kind::DeliverInput(input)) => {
-                let Ok(cid) = Uuid::parse_str(&cid_text) else {
-                    return Ok(());
-                };
-                if self.cancelled_local.contains(&(cid, attempt)) {
-                    return self.shared.cj(vec![], self_terminal).await;
-                }
-                if !live || command.execution_generation != self.generation {
-                    if live && !self.handed.iter().any(|(id, _)| *id == cid) {
-                        return defer_unhanded(&self.shared, &command).await;
-                    }
-                    return answer_without_execution(&self.shared, &command).await;
-                }
-                if self.fetching.contains_key(&(cid, attempt)) {
-                    return Ok(());
-                }
-                let references: Vec<_> = input
-                    .content
-                    .into_iter()
-                    .filter_map(|b| match b.block {
-                        Some(content_block::Block::Attachment(r)) => Some(r),
-                        _ => None,
-                    })
-                    .collect();
-                if references.is_empty() {
-                    return self.deliver(command, vec![]).await;
-                }
-                if self.discard_closed_fetch((cid, attempt)).await? {
-                    return Ok(());
-                }
-                let obsolete: Vec<_> = self
-                    .fetching
-                    .keys()
-                    .copied()
-                    .filter(|(id, old_attempt)| *id == cid && *old_attempt != attempt)
-                    .collect();
-                for key in obsolete {
-                    self.cancel_fetch(key).await;
-                }
-                let command_id = cid_text;
-                let pilot = self
-                    .shared
-                    .store
-                    .call(move |slot| {
-                        Ok(open(slot)?
-                            .command_state(&command_id)?
-                            .is_some_and(|s| s.pilot_v1))
-                    })
-                    .await?;
-                if !pilot {
-                    return reject(&self.shared, &command, "attachment_unavailable").await;
-                }
-                if self.attachments.is_none() {
-                    let dir = self
-                        .exec_dir
-                        .as_ref()
-                        .ok_or(ExecError::Verify("exec_dir"))?;
-                    self.attachments = Some(Arc::new(AttachmentStore::with_slots(
-                        dir,
-                        self.shared.fetch_slots.clone(),
-                    )?));
-                }
-                self.start_fetch(command, references);
-                Ok(())
+                self.deliver_input_like(command, input.content, live).await
+            }
+            Some(Kind::SteerInput(steer)) => {
+                self.deliver_input_like(command, steer.content, live).await
             }
             Some(Kind::CancelInput(CancelInput {
                 target_command_id,
@@ -2148,6 +2097,81 @@ impl Actor {
                 ],
             )
             .await
+    }
+
+    /// Общий путь ввода и steer: вложения, пилот, доставка сопровождению.
+    /// Вид команды (`deliver_input`/`steer_input`) едет дальше как есть:
+    /// сопровождение решает, открывать ход или вливать в идущий.
+    async fn deliver_input_like(
+        &mut self,
+        command: Command,
+        content: Vec<ContentBlock>,
+        live: bool,
+    ) -> Result<(), ExecError> {
+        let (cid_text, attempt) = (command.command_id.clone(), command.dispatch_attempt);
+        let self_terminal = vec![(cid_text.clone(), attempt)];
+        let Ok(cid) = Uuid::parse_str(&cid_text) else {
+            return Ok(());
+        };
+        if self.cancelled_local.contains(&(cid, attempt)) {
+            return self.shared.cj(vec![], self_terminal).await;
+        }
+        if !live || command.execution_generation != self.generation {
+            if live && !self.handed.iter().any(|(id, _)| *id == cid) {
+                return defer_unhanded(&self.shared, &command).await;
+            }
+            return answer_without_execution(&self.shared, &command).await;
+        }
+        if self.fetching.contains_key(&(cid, attempt)) {
+            return Ok(());
+        }
+        let references: Vec<_> = content
+            .into_iter()
+            .filter_map(|b| match b.block {
+                Some(content_block::Block::Attachment(r)) => Some(r),
+                _ => None,
+            })
+            .collect();
+        if references.is_empty() {
+            return self.deliver(command, vec![]).await;
+        }
+        if self.discard_closed_fetch((cid, attempt)).await? {
+            return Ok(());
+        }
+        let obsolete: Vec<_> = self
+            .fetching
+            .keys()
+            .copied()
+            .filter(|(id, old_attempt)| *id == cid && *old_attempt != attempt)
+            .collect();
+        for key in obsolete {
+            self.cancel_fetch(key).await;
+        }
+        let command_id = cid_text;
+        let pilot = self
+            .shared
+            .store
+            .call(move |slot| {
+                Ok(open(slot)?
+                    .command_state(&command_id)?
+                    .is_some_and(|s| s.pilot_v1))
+            })
+            .await?;
+        if !pilot {
+            return reject(&self.shared, &command, "attachment_unavailable").await;
+        }
+        if self.attachments.is_none() {
+            let dir = self
+                .exec_dir
+                .as_ref()
+                .ok_or(ExecError::Verify("exec_dir"))?;
+            self.attachments = Some(Arc::new(AttachmentStore::with_slots(
+                dir,
+                self.shared.fetch_slots.clone(),
+            )?));
+        }
+        self.start_fetch(command, references);
+        Ok(())
     }
 
     async fn deliver(&mut self, command: Command, files: Vec<LocalFile>) -> Result<(), ExecError> {

@@ -1,7 +1,7 @@
 use super::{
     AppState,
     auth::{Correlation, IdempotencyKey, Owner},
-    error::{ApiError, ErrorCode},
+    error::{ApiError, ErrorCode, ErrorDetails},
     extract::{ApiJson, ApiPath, ApiQuery},
 };
 use crate::conversations::{
@@ -28,6 +28,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(continue_queue))
         .routes(routes!(resolve_owner_lost))
         .routes(routes!(cancel_input))
+        .routes(routes!(send_now))
+        .routes(routes!(edit_input))
         .routes(routes!(settings))
         .routes(routes!(submit))
         .routes(routes!(start_execution))
@@ -277,6 +279,87 @@ async fn cancel_input(
     if let Some(id) = conversation {
         s.dispatcher.trigger(id);
     }
+    Ok(Json(result))
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/inputs/{input_id}/send-now",tag="conversations",params(("id"=Uuid,Path),("input_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Ожидающий ввод влит в идущий ход",body=crate::delivery::control::SendNowOutcome)))]
+async fn send_now(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, input_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<crate::delivery::control::SendNowOutcome>, ApiError> {
+    let machine_id: Option<Uuid> =
+        sqlx::query_scalar("select machine_id from conversations where id = $1 and owner_id = $2")
+            .bind(id)
+            .bind(o.owner_id)
+            .fetch_optional(&s.pool)
+            .await?;
+    let capabilities = machine_id.map(|machine| s.registry.capabilities(machine));
+    let result = crate::delivery::control::request_send_now(
+        &s.pool,
+        o.owner_id,
+        id,
+        input_id,
+        &key,
+        c,
+        &capabilities.unwrap_or_default(),
+    )
+    .await
+    .map_err(|error| match error {
+        crate::delivery::control::ControlError::InvalidRequest { reason } => {
+            ApiError::new(ErrorCode::InvalidRequest).with_details(ErrorDetails {
+                reason: Some(reason.into()),
+                ..Default::default()
+            })
+        }
+        error => error.into(),
+    })?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditInputBody {
+    text: String,
+    #[serde(default)]
+    attachment_ids: Vec<Uuid>,
+    expected_revision: i64,
+}
+
+#[utoipa::path(patch,path="/api/v1/conversations/{id}/inputs/{input_id}",tag="conversations",params(("id"=Uuid,Path),("input_id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=EditInputBody,responses((status=200,description="Ожидающий ввод исправлен",body=crate::delivery::control::EditInputOutcome)))]
+async fn edit_input(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, input_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(body): ApiJson<EditInputBody>,
+) -> Result<Json<crate::delivery::control::EditInputOutcome>, ApiError> {
+    let result = crate::delivery::control::request_edit_input(
+        &s.pool,
+        crate::delivery::control::EditInput {
+            owner_id: o.owner_id,
+            conversation_id: id,
+            input_id,
+            text: body.text,
+            attachment_ids: body.attachment_ids,
+            expected_revision: body.expected_revision,
+            idempotency_key: key,
+            correlation_id: c,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        crate::delivery::control::ControlError::InvalidRequest { reason } => {
+            ApiError::new(ErrorCode::InvalidRequest).with_details(ErrorDetails {
+                reason: Some(reason.into()),
+                ..Default::default()
+            })
+        }
+        error => error.into(),
+    })?;
     Ok(Json(result))
 }
 #[derive(Clone, PartialEq, Eq, Deserialize, serde::Serialize, ToSchema)]

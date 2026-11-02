@@ -1284,6 +1284,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         background_v1: true,
         session_tools_v1: true,
         isolate_mcp: true,
+        send_now_v1: true,
     });
     assert_roundtrip(ipc::CompactRequest {
         command_id: "command".into(),
@@ -1894,4 +1895,13 @@ fn isolate_mcp_is_additive_on_both_hops() {
     // Старый получатель пропускает незнакомое поле; флаг по умолчанию не занимает байтов.
     assert!(StartExecution::default().encode_to_vec().is_empty());
     assert!(ipc::StartCli::default().encode_to_vec().is_empty());
+    assert_eq!(
+        ipc::StartCli {
+            send_now_v1: true,
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        [0x78, 1],
+        "StartCli.send_now_v1 is field 15"
+    );
 }

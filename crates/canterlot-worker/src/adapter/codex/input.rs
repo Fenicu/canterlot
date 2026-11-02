@@ -250,6 +250,40 @@ fn is_local_image(file: &LocalFile) -> bool {
     file.image && IMAGE_MIMES.contains(&file.mime.as_str()) && file.size <= MAX_IMAGE_BYTES
 }
 
+/// Параметры `turn/steer`: тот же текст и картинки, что у `turn/start`, но без
+/// ходовых переопределений — steer их не принимает. `clientUserMessageId`
+/// возвращается эхом как `clientId` элемента `userMessage` и служит
+/// доказательством, как у обычного хода.
+pub fn build_turn_steer(
+    thread_id: &str,
+    expected_turn_id: &str,
+    t: &Transmission,
+) -> std::io::Result<Value> {
+    let mut parts = Vec::new();
+    if !t.text.is_empty() {
+        parts.push(t.text.clone());
+    }
+    if !t.files.is_empty() {
+        parts.push(attachment_lines(&t.files)?);
+    }
+    let text = parts.join("\n\n");
+    if text.len() > canterlot_proto::limits::MAX_INPUT_TEXT_BYTES {
+        return Err(std::io::Error::other("input_too_long"));
+    }
+    let mut input = vec![json!({"type": "text", "text": text, "text_elements": []})];
+    for file in &t.files {
+        if is_local_image(file) {
+            input.push(json!({"type": "localImage", "path": file.path.to_string_lossy()}));
+        }
+    }
+    Ok(json!({
+        "threadId": thread_id,
+        "expectedTurnId": expected_turn_id,
+        "clientUserMessageId": t.command_id.to_string(),
+        "input": input,
+    }))
+}
+
 // Файлового ввода у Codex нет: путь в тексте, агент читает сам.
 pub(crate) fn attachment_lines(files: &[LocalFile]) -> std::io::Result<String> {
     let mut list = String::new();

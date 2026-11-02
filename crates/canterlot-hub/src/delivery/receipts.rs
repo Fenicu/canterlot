@@ -81,6 +81,7 @@ struct ReceiptTarget {
     delivery_state: String,
     execution_id: Option<Uuid>,
     execution_state: Option<String>,
+    command_kind: String,
 }
 
 pub async fn apply_input_receipt(
@@ -115,18 +116,30 @@ pub async fn apply_input_receipt_in_tx(
     .await?;
     let target: Option<ReceiptTarget> = sqlx::query_as(
         "select i.id as input_id, i.state, i.cancel_requested, c.dispatch_attempt, c.last_status_rank,
-                c.delivery_state, c.execution_id, e.state as execution_state
-         from commands c join inputs i on i.command_id = c.id
+                c.delivery_state, c.execution_id, e.state as execution_state, c.kind as command_kind
+         from commands c join inputs i on i.command_id = case when c.kind = 'steer_input'
+                then c.target_command_id else c.id end
          left join executions e on e.id = c.execution_id
-         where c.id = $1 and c.kind = 'deliver_input'",
+         where c.id = $1 and c.kind in ('deliver_input', 'steer_input')",
     ).bind(command_id).fetch_optional(&mut *conn).await?;
     let (Some(mut queue), Some(target)) = (queue, target) else {
         return Ok(ApplyOutcome::Ignored(Ignored::UnknownCommand));
     };
+    // Итог steer-команды: ввод влился в идущий ход (или остался в очереди),
+    // слот хода при этом не трогается — второй ход не открывается.
+    let steer = target.command_kind == "steer_input";
     let state: InputState = target
         .state
         .parse()
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    if steer
+        && matches!(
+            receipt,
+            InputReceipt::Withdrawn | InputReceipt::CancelWon | InputReceipt::CancelLost
+        )
+    {
+        return Ok(ApplyOutcome::Ignored(Ignored::NotMonotonic));
+    }
     if matches!(
         receipt,
         InputReceipt::Withdrawn
@@ -157,6 +170,21 @@ pub async fn apply_input_receipt_in_tx(
         InputState::Accepted | InputState::Rejected | InputState::Cancelled
     ) {
         Some(Ignored::Terminal)
+    } else if steer {
+        // Steer действует только на ввод, который всё ещё ждёт в очереди
+        // (или на запоздалое доказательство непринятого): ушедший дальше ввод
+        // принадлежит обычной доставке. Хранение и начало передачи steer
+        // не присылает.
+        if state != InputState::Queued && !late_acceptance
+            || matches!(
+                receipt,
+                InputReceipt::Stored | InputReceipt::TransmissionStarted
+            )
+        {
+            Some(Ignored::NotMonotonic)
+        } else {
+            None
+        }
     } else if state == InputState::Queued
         || (state == InputState::Transmitting
             && matches!(
@@ -216,7 +244,9 @@ pub async fn apply_input_receipt_in_tx(
                 });
                 // Доказательство пришло после паузы, но ход уже начался: слот снова занят.
                 // Иначе хаб до конца хода считал бы исполнение свободным.
-                if slot == RunSlot::Free
+                // Steer слот не занимает: влитый ввод принадлежит чужому ходу.
+                if !steer
+                    && slot == RunSlot::Free
                     && matches!(
                         target.execution_state.as_deref(),
                         Some("created" | "starting" | "running" | "stopping")
@@ -226,7 +256,8 @@ pub async fn apply_input_receipt_in_tx(
                         input_id: target.input_id,
                     };
                 }
-            } else if matches!(slot, RunSlot::Dispatching { input_id, .. } if input_id == target.input_id)
+            } else if !steer
+                && matches!(slot, RunSlot::Dispatching { input_id, .. } if input_id == target.input_id)
             {
                 slot = if matches!(
                     target.execution_state.as_deref(),
@@ -248,14 +279,19 @@ pub async fn apply_input_receipt_in_tx(
             if !queue.pause_reasons.0.contains(&pause) {
                 queue.pause_reasons.0.push(pause);
             }
-            slot = RunSlot::Free;
+            // Steer не открывал ход: слот чужого хода остаётся занят.
+            if !steer {
+                slot = RunSlot::Free;
+            }
             delivery = "completed";
             InputState::AcceptanceUnconfirmed
         }
         InputReceipt::ExplicitRejection { .. }
         | InputReceipt::RejectedBeforeTransmission { .. } => {
             reject_reason = reason.as_deref();
-            slot = RunSlot::Free;
+            if !steer {
+                slot = RunSlot::Free;
+            }
             delivery = "completed";
             InputState::Rejected
         }
@@ -266,27 +302,35 @@ pub async fn apply_input_receipt_in_tx(
         }
         InputReceipt::CancelLost => state,
         InputReceipt::Withdrawn | InputReceipt::DispatchDeferred { .. } => {
-            if let InputReceipt::DispatchDeferred { reason } = &receipt
-                && executions::live(conn, queue.conversation_id)
-                    .await?
-                    .is_some_and(|(id, _, _)| Some(id) == target.execution_id)
-            {
-                let hold = if reason == "storage_low" {
-                    HoldReason::StorageLow
-                } else {
-                    HoldReason::NoLiveExecution
-                };
-                if !queue.hold_reasons.0.contains(&hold) {
-                    queue.hold_reasons.0.push(hold);
-                }
-            }
-            slot = RunSlot::Free;
-            if target.cancel_requested {
+            if steer {
+                // Ход кончился между кликом и доставкой: ввод остаётся в очереди
+                // и уйдёт следующим ходом, дубля нет. Отказ воркера (запрос,
+                // сжатие) — та же ветвь: ввод не потерян, подпись показала хаб.
                 delivery = "completed";
-                InputState::Cancelled
-            } else {
-                delivery = "held";
                 InputState::Queued
+            } else {
+                if let InputReceipt::DispatchDeferred { reason } = &receipt
+                    && executions::live(conn, queue.conversation_id)
+                        .await?
+                        .is_some_and(|(id, _, _)| Some(id) == target.execution_id)
+                {
+                    let hold = if reason == "storage_low" {
+                        HoldReason::StorageLow
+                    } else {
+                        HoldReason::NoLiveExecution
+                    };
+                    if !queue.hold_reasons.0.contains(&hold) {
+                        queue.hold_reasons.0.push(hold);
+                    }
+                }
+                slot = RunSlot::Free;
+                if target.cancel_requested {
+                    delivery = "completed";
+                    InputState::Cancelled
+                } else {
+                    delivery = "held";
+                    InputState::Queued
+                }
             }
         }
     };

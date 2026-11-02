@@ -1632,6 +1632,168 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/inputs/{input_id}": {
+      "patch": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "patch__api_v1_conversations__id__inputs__input_id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "input_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Ожидающий ввод исправлен",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EditInputOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/inputs/{input_id}/send-now": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "post__api_v1_conversations__id__inputs__input_id__send_now",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "input_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ожидающий ввод влит в идущий ход",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendNowOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/interrupt": {
       "post": {
         "tags": [
@@ -6317,6 +6479,47 @@
           }
         }
       },
+      "EditInputBody": {
+        "type": "object",
+        "required": [
+          "text",
+          "expected_revision"
+        ],
+        "properties": {
+          "attachment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "expected_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EditInputOutcome": {
+        "type": "object",
+        "required": [
+          "input_id",
+          "revision"
+        ],
+        "properties": {
+          "input_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "EffectiveSettings": {
         "type": "object",
         "required": [
@@ -7525,6 +7728,7 @@
           "content",
           "attachments",
           "state",
+          "revision",
           "created_seq",
           "created_at"
         ],
@@ -7577,6 +7781,11 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ревизия текста и вложений: правка ожидающего ввода идёт сравнением-и-заменой."
           },
           "state": {
             "type": "string"
@@ -9437,6 +9646,50 @@
             "$ref": "#/components/schemas/JobState"
           }
         }
+      },
+      "SendNowOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "requested"
+            ],
+            "properties": {
+              "requested": {
+                "type": "object",
+                "required": [
+                  "steer_command_id"
+                ],
+                "properties": {
+                  "steer_command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "already_requested"
+            ],
+            "properties": {
+              "already_requested": {
+                "type": "object",
+                "required": [
+                  "steer_command_id"
+                ],
+                "properties": {
+                  "steer_command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
+        ]
       },
       "SessionView": {
         "type": "object",

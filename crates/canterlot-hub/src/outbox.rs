@@ -5,7 +5,8 @@ use canterlot_proto::{
     worker::v1::{
         CancelInput, Command, CompactSession, ControlDown, DeliverDecision, DeliverInput,
         Instructions, Interrupt, RemoveWorktree, ResolveOwnerLost, SettingsOverride,
-        StartExecution, StopExecution, WithdrawInput, WorktreeSpec, command, control_down,
+        StartExecution, SteerInput, StopExecution, WithdrawInput, WorktreeSpec, command,
+        control_down,
     },
 };
 use prost::Message;
@@ -100,6 +101,22 @@ struct WorktreePayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SteerPayload {
+    input_id: Uuid,
+    conversation_id: Uuid,
+    content: Vec<submit::ContentBlock>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    attachment_ids: Vec<Uuid>,
+    settings: Option<SettingsPayload>,
+    #[allow(dead_code)]
+    settings_rev: Option<i64>,
+    #[serde(default)]
+    expected_running_command_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RemoveWorktreePayload {
     source_workdir: String,
     path: String,
@@ -189,6 +206,11 @@ fn to_proto_with_capability(
     if row.kind == "resolve_owner_lost" && !has(crate::session::CAPABILITY_OWNER_EXIT_V1) {
         return Err(OutboxError::CapabilityMissing);
     }
+    // Старый воркер отклонил бы неизвестный вид команды чисто, но ввод при этом
+    // остался бы выданным без исполнителя: не выпускаем команду из хаба.
+    if row.kind == "steer_input" && !has(crate::session::CAPABILITY_SEND_NOW_V1) {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "deliver_input"
         && !pilot
         && (row.payload.get("settings").is_some()
@@ -208,6 +230,7 @@ fn to_proto_with_capability(
             crate::session::CAPABILITY_COMPACT_V1,
             crate::session::CAPABILITY_BACKGROUND_V1,
             crate::session::CAPABILITY_SESSION_TOOLS_V1,
+            crate::session::CAPABILITY_SEND_NOW_V1,
         ]
         .into_iter()
         .filter(|capability| has(capability))
@@ -355,6 +378,26 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             })
         }
         "interrupt" => command::Kind::Interrupt(Interrupt {}),
+        "steer_input" => {
+            let steer: SteerPayload = serde_json::from_value(row.payload.clone())
+                .map_err(|_| OutboxError::InvalidCommand)?;
+            command::Kind::SteerInput(SteerInput {
+                input_id: steer.input_id.to_string(),
+                conversation_id: steer.conversation_id.to_string(),
+                content: steer
+                    .content
+                    .iter()
+                    .map(submit::ContentBlock::to_proto)
+                    .collect(),
+                settings: steer.settings.map(|s| SettingsOverride {
+                    model: s.model.unwrap_or_default(),
+                    effort: s.effort.unwrap_or_default(),
+                    permission_mode: s.permission_mode.unwrap_or_default(),
+                    instructions: instructions_proto(&s.instructions),
+                }),
+                expected_running_command_id: steer.expected_running_command_id,
+            })
+        }
         "compact_session" => command::Kind::CompactSession(CompactSession {}),
         "remove_worktree" => {
             let remove: RemoveWorktreePayload = serde_json::from_value(row.payload.clone())

@@ -68,6 +68,15 @@ pub fn prompt_body(input: &Transmission, images: bool) -> Result<Value, &'static
     Ok(body)
 }
 
+/// Тело `POST .../prompt` для вливания в идущий ход: `delivery: "steer"`
+/// прерывает текущий шаг и перенаправляет сессию сразу, а не следующим периодом.
+/// Хаб показывает действие с подписью про прерывание шага.
+pub fn prompt_body_steer(input: &Transmission, images: bool) -> Result<Value, &'static str> {
+    let mut body = prompt_body(input, images)?;
+    body["delivery"] = "steer".into();
+    Ok(body)
+}
+
 /// Напоминание модели после выхода из `read_only`. Лежит только в тексте для сервера: лента,
 /// журнал и хаб хранят ввод как набран.
 pub const READ_ONLY_EXIT_NOTE: &str = "<system-reminder>\nRead-only mode is over. Your tools `shell`, `question`, `write`, `edit` and the others are available again and are called directly by name, not through `execute`. Ignore any Code Mode wording that says tools cannot be called directly: it applies only to the tools listed in its catalog.\n</system-reminder>";

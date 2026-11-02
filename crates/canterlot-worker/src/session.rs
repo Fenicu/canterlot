@@ -43,6 +43,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "session_tools_v1",
     "owner_exit_v1",
     "owner_instructions_v1",
+    "send_now_v1",
 ];
 
 #[derive(Clone)]

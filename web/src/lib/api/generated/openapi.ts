@@ -256,6 +256,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/inputs/{input_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch: operations["patch__api_v1_conversations__id__inputs__input_id_"];
+        trace?: never;
+    };
+    "/api/v1/conversations/{id}/inputs/{input_id}/send-now": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_conversations__id__inputs__input_id__send_now"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/interrupt": {
         parameters: {
             query?: never;
@@ -1252,6 +1284,18 @@ export interface components {
             /** Format: int64 */
             total_bytes: number;
         };
+        EditInputBody: {
+            attachment_ids?: string[];
+            /** Format: int64 */
+            expected_revision: number;
+            text: string;
+        };
+        EditInputOutcome: {
+            /** Format: uuid */
+            input_id: string;
+            /** Format: int64 */
+            revision: number;
+        };
         EffectiveSettings: {
             effort: string;
             instruction_preset: components["schemas"]["AppliedPreset"];
@@ -1555,6 +1599,11 @@ export interface components {
             origin?: components["schemas"]["InputOrigin"] | null;
             /** Format: uuid */
             retry_of?: string | null;
+            /**
+             * Format: int64
+             * @description Ревизия текста и вложений: правка ожидающего ввода идёт сравнением-и-заменой.
+             */
+            revision: number;
             state: string;
         };
         /** @enum {string} */
@@ -2040,6 +2089,17 @@ export interface components {
             /** Format: date-time */
             run_at: string;
             state: components["schemas"]["JobState"];
+        };
+        SendNowOutcome: {
+            requested: {
+                /** Format: uuid */
+                steer_command_id: string;
+            };
+        } | {
+            already_requested: {
+                /** Format: uuid */
+                steer_command_id: string;
+            };
         };
         SessionView: {
             activity_state: string;
@@ -3148,6 +3208,86 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubmittedInput"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    patch__api_v1_conversations__id__inputs__input_id_: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+                input_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EditInputBody"];
+            };
+        };
+        responses: {
+            /** @description Ожидающий ввод исправлен */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EditInputOutcome"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_conversations__id__inputs__input_id__send_now: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+                input_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ожидающий ввод влит в идущий ход */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendNowOutcome"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

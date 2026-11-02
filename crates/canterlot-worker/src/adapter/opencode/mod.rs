@@ -33,8 +33,8 @@ use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
         CompactOutcome, DecisionOutcome, HarnessCatalog, InstructionMode, InstructionSpec,
-        InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support,
-        Transmission, TransmitOutcome,
+        InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started,
+        SteerOutcome, Support, Transmission, TransmitOutcome,
         canterlot_mcp::{Broker, BrokerEvent, ToolSet},
         cli_version::{CliVersion, VersionError},
         held_tool::HeldTools,
@@ -2132,6 +2132,56 @@ impl Adapter for OpenCodeAdapter {
 
     // Карточки супервизор уже закрыл. Сервер снимает потомков вместе с родителем, а всё,
     // что он не снял, получает отказ: иначе вызовы ждали бы ответа вечно.
+    /// Влить ожидающее сообщение в идущий период (`delivery: "steer"`): сервер
+    /// прерывает текущий шаг и перенаправляет сессию сразу. Живой прогон:
+    /// сессия цела, очередь сервера согласована, влитое сообщение применяется
+    /// следующим шагом; вливка между шагами ложится мягко, в шаг — с обрывом
+    /// шага (`step.failed(aborted)` + `execution.interrupted`). Отсюда подпись
+    /// в PWA: действие прерывает текущий шаг.
+    async fn steer(&mut self, input: &Transmission) -> SteerOutcome {
+        let command = input.command_id;
+        if self.delivery.active.is_none() {
+            return SteerOutcome::NotApplicable("no_turn".into());
+        }
+        if let Some(reason) = input
+            .settings
+            .as_ref()
+            .and_then(|change| self.settings_error(change))
+        {
+            return SteerOutcome::Rejected(reason.into());
+        }
+        let model = input
+            .settings
+            .as_ref()
+            .and_then(|change| change.model.as_deref())
+            .unwrap_or(&self.model);
+        let images = self.image_models.get(model).copied().unwrap_or(false);
+        let body = match input::prompt_body_steer(input, images) {
+            Ok(body) => body,
+            Err(reason) => return SteerOutcome::Rejected(reason.into()),
+        };
+        let Some(http) = self.http.clone() else {
+            return SteerOutcome::Undetermined;
+        };
+        let id = input::message_id(command);
+        let path = format!("/api/session/{}/prompt", self.session);
+        match http.post(&path, &body, self.deadline).await {
+            Ok(reply) if input::accepted_id(&reply) == Some(id.as_str()) => {
+                SteerOutcome::Accepted(Proof {
+                    command_id: command,
+                    kind: input::PROOF_KIND,
+                })
+            }
+            Err(HttpError::Status { status, tag }) if input::is_rejection(status) => {
+                SteerOutcome::Rejected(tag)
+            }
+            _ => {
+                self.start_lookup(command);
+                SteerOutcome::Undetermined
+            }
+        }
+    }
+
     async fn interrupt(&mut self) -> InterruptOutcome {
         let Some(http) = self.http.clone() else {
             return InterruptOutcome::NotApplicable;

@@ -31,11 +31,12 @@ const TOOL_LAUNCHED_SUMMARY: &str = "async_launched";
 const MAX_UNKNOWN_TYPES: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
 
-const IGNORED_SYSTEM: [&str; 4] = [
+const IGNORED_SYSTEM: [&str; 5] = [
     "api_retry",
     "task_progress",
     "task_updated",
     "thinking_tokens",
+    "commands_changed",
 ];
 const IGNORED_STREAM_EVENTS: [&str; 1] = ["message_stop"];
 const IGNORED_DELTAS: [&str; 1] = ["signature_delta"];
@@ -124,6 +125,15 @@ struct TrackedTask {
     ended_unsent: bool,
 }
 
+/// Квитанция прерывания: снимок очереди CLI, взятый в момент обработки
+/// управляющего запроса (приходит раньше `result` прерванного хода).
+/// Итог хода читают вместе с ней, очередь после итога уже другая.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InterruptReceipt {
+    pub still_queued: Vec<Uuid>,
+    pub cancelled: Vec<Uuid>,
+}
+
 /// Parsed output of one NDJSON line; several events may come out of order.
 pub enum Parsed {
     Event(AdapterEvent),
@@ -165,6 +175,9 @@ pub enum Parsed {
     ControlResponse {
         request_id: String,
         success: bool,
+        /// Квитанция `interrupt`: снимок очереди CLI в момент прерывания
+        /// (`still_queued`/`cancelled`), только у успешных ответов на прерывание.
+        interrupt: Option<InterruptReceipt>,
     },
     /// Служебный итог `/compact` потреблён без открытого хода: команда сжатия закрыта.
     CompactResultConsumed,
@@ -230,10 +243,12 @@ impl std::fmt::Debug for Parsed {
             Self::ControlResponse {
                 request_id,
                 success,
+                interrupt,
             } => f
                 .debug_struct("ControlResponse")
                 .field("request_id", request_id)
                 .field("success", success)
+                .field("interrupt", interrupt)
                 .finish(),
             Self::CompactResultConsumed => f.write_str("CompactResultConsumed"),
             Self::Ignored => f.write_str("Ignored"),
@@ -1538,11 +1553,39 @@ impl Parser {
             .and_then(|response| response.get("subtype"))
             .and_then(serde_json::Value::as_str)
             == Some("success");
+        // Квитанцию несёт только ответ на `interrupt`: у смены модели и режима
+        // этих ключей нет. Пустые списки тоже квитанция: очередь была пуста.
+        let inner = success
+            .then(|| response.and_then(|response| response.get("response")))
+            .flatten();
+        let interrupt = inner.and_then(|inner| {
+            let queued = inner.get("still_queued").is_some();
+            let cancelled = inner.get("cancelled").is_some();
+            (queued || cancelled).then(|| InterruptReceipt {
+                still_queued: inner.get("still_queued").map(uuid_list).unwrap_or_default(),
+                cancelled: inner.get("cancelled").map(uuid_list).unwrap_or_default(),
+            })
+        });
         out.push(Parsed::ControlResponse {
             request_id,
             success,
+            interrupt,
         });
     }
+}
+
+/// Список UUID из кадра, мусор пропускается, длина ограничена.
+fn uuid_list(value: &serde_json::Value) -> Vec<Uuid> {
+    value
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter_map(|id| Uuid::parse_str(id).ok())
+                .take(128)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl std::fmt::Debug for Parser {

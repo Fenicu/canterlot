@@ -1,6 +1,7 @@
 //! Ввод Claude Code: строго один ход за раз, сообщения пользователя с вложениями,
 //! доказательство доставки кадром `command_lifecycle` (запасное — кадром ответа),
-//! смена модели и режима между ходами, прерывание только SIGINT (решение владельца OD-2).
+//! смена модели и режима между ходами, прерывание управляющим запросом
+//! `interrupt` с запасным SIGINT, если квитанции нет в срок.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -11,10 +12,10 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::parser::{Parsed, Parser};
+use super::parser::{InterruptReceipt, Parsed, Parser};
 use super::process::{CliProcess, Signal, StdoutLine};
 use crate::adapter::{
-    AdapterEvent, InterruptOutcome, LocalFile, Proof, SettingsChange, Transmission,
+    AdapterEvent, InterruptOutcome, LocalFile, Proof, SettingsChange, SteerOutcome, Transmission,
     TransmitOutcome, limit_note,
 };
 
@@ -78,6 +79,13 @@ struct PendingControl {
     deadline: Instant,
 }
 
+/// Запрос прерывания: квитанция приходит раньше итога прерванного хода.
+struct InterruptRequest {
+    request_id: String,
+    deadline: Instant,
+    receipt: Option<InterruptReceipt>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Interrupt {
     None,
@@ -97,6 +105,11 @@ pub struct InputQueue {
     /// Команда, на которую приписан пробуждающий ход: его тоже можно прервать.
     adopted: Option<Uuid>,
     control: Option<PendingControl>,
+    interrupt_request: Option<InterruptRequest>,
+    /// Влитые в идущий ход сообщения («Отправить сейчас»): ждут доказательства
+    /// своим `uuid`, ход при этом чужой (`active` не трогается).
+    steered: VecDeque<Queued>,
+    steer_proven: HashMap<Uuid, &'static str>,
     rejected: Vec<(Uuid, &'static str)>,
     proven: HashMap<Uuid, &'static str>,
     weekly_noted: u16,
@@ -127,6 +140,9 @@ impl InputQueue {
             active: None,
             adopted: None,
             control: None,
+            interrupt_request: None,
+            steered: VecDeque::new(),
+            steer_proven: HashMap::new(),
             rejected: Vec::new(),
             proven: HashMap::new(),
             weekly_noted: 0,
@@ -165,6 +181,14 @@ impl InputQueue {
 
     pub fn is_proven(&self, command_id: Uuid) -> bool {
         self.proven.contains_key(&command_id)
+    }
+
+    pub fn is_steer_proven(&self, command_id: Uuid) -> bool {
+        self.steer_proven.contains_key(&command_id)
+    }
+
+    pub fn steer_proof_kind(&self, command_id: Uuid) -> Option<&'static str> {
+        self.steer_proven.get(&command_id).copied()
     }
 
     pub fn proof_kind(&self, command_id: Uuid) -> Option<&'static str> {
@@ -235,6 +259,33 @@ impl InputQueue {
         {
             self.control = None;
         }
+    }
+
+    /// Кадр вливания в идущий ход: пишется сразу, ход при этом чужой —
+    /// ни `active`, ни `fifo` не трогаются. Доказательство — кадр
+    /// `command_lifecycle` CLI с этим UUID (или кадр ответа с ним).
+    /// Несколько вливаний подряд хранятся очередью: CLI применяет их по порядку.
+    pub fn steer_frame(&mut self, t: &Transmission) -> std::io::Result<Value> {
+        if self.steer_proven.contains_key(&t.command_id) {
+            return build_message(t.command_id, &t.text, &t.files, None);
+        }
+        let message = build_message(t.command_id, &t.text, &t.files, None)?;
+        self.steered
+            .retain(|queued| queued.command_id != t.command_id);
+        self.steered.push_back(Queued {
+            command_id: t.command_id,
+            attempt: t.attempt,
+            text: t.text.clone(),
+            files: t.files.clone(),
+            settings: None,
+        });
+        Ok(message)
+    }
+
+    /// Убрать влитый ввод, который уже не дождаться (процесс умер).
+    pub fn drop_steer(&mut self, command_id: Uuid) {
+        self.steered
+            .retain(|queued| queued.command_id != command_id);
     }
 
     pub fn take_rejection(&mut self, command_id: Uuid) -> Option<&'static str> {
@@ -369,32 +420,67 @@ impl InputQueue {
     pub fn on_parsed(&mut self, parsed: &Parsed) -> Option<Proof> {
         match parsed {
             Parsed::AnswerFrame { user_message_uuids } => {
-                let turn = self.active.as_mut()?;
-                if turn.delivery_proven || !user_message_uuids.contains(&turn.command_id) {
-                    return None;
+                if let Some(turn) = self.active.as_mut()
+                    && !turn.delivery_proven
+                    && user_message_uuids.contains(&turn.command_id)
+                {
+                    turn.delivery_proven = true;
+                    self.proven.insert(turn.command_id, PROOF_KIND);
+                    return Some(Proof {
+                        command_id: turn.command_id,
+                        kind: PROOF_KIND,
+                    });
                 }
-                turn.delivery_proven = true;
-                self.proven.insert(turn.command_id, PROOF_KIND);
-                return Some(Proof {
-                    command_id: turn.command_id,
-                    kind: PROOF_KIND,
-                });
+                // Кадр итога перечисляет все UUID хода, в том числе влитые:
+                // первое совпадение уходит доказательством, остальные ждут
+                // своего вызова (каждый влитый ввод подтверждается отдельно).
+                if let Some(matched) = user_message_uuids.iter().find(|uuid| {
+                    self.steered
+                        .iter()
+                        .any(|queued| queued.command_id == **uuid)
+                }) {
+                    let command_id = *matched;
+                    self.steered
+                        .retain(|queued| queued.command_id != command_id);
+                    self.steer_proven.insert(command_id, PROOF_KIND);
+                    return Some(Proof {
+                        command_id,
+                        kind: PROOF_KIND,
+                    });
+                }
+                return None;
             }
             // `started` — CLI начал ход, `completed` — команда уже была исполнена (повтор UUID).
             // `queued` не доказывает приём: команду ещё могут отменить до исполнения.
             Parsed::CommandLifecycle { command_id, state }
                 if matches!(state.as_str(), "started" | "completed") =>
             {
-                let turn = self.active.as_mut()?;
-                if turn.delivery_proven || turn.command_id != *command_id {
-                    return None;
+                if let Some(turn) = self.active.as_mut()
+                    && !turn.delivery_proven
+                    && turn.command_id == *command_id
+                {
+                    turn.delivery_proven = true;
+                    self.proven.insert(turn.command_id, PROOF_KIND_STARTED);
+                    return Some(Proof {
+                        command_id: turn.command_id,
+                        kind: PROOF_KIND_STARTED,
+                    });
                 }
-                turn.delivery_proven = true;
-                self.proven.insert(turn.command_id, PROOF_KIND_STARTED);
-                return Some(Proof {
-                    command_id: turn.command_id,
-                    kind: PROOF_KIND_STARTED,
-                });
+                // Доказательство вливания: UUID чужого сообщения, ход при этом чужой.
+                if self
+                    .steered
+                    .iter()
+                    .any(|queued| queued.command_id == *command_id)
+                {
+                    self.steered
+                        .retain(|queued| queued.command_id != *command_id);
+                    self.steer_proven.insert(*command_id, PROOF_KIND_STARTED);
+                    return Some(Proof {
+                        command_id: *command_id,
+                        kind: PROOF_KIND_STARTED,
+                    });
+                }
+                return None;
             }
             Parsed::Event(AdapterEvent::RunAdopted { input_command_id }) => {
                 self.adopted = Some(*input_command_id);
@@ -412,12 +498,25 @@ impl InputQueue {
             Parsed::ControlResponse {
                 request_id,
                 success,
+                interrupt,
             } => {
                 if let Some(control) = self
                     .control
                     .take_if(|control| control.request_id == *request_id)
                 {
                     self.finish_control(control, *success);
+                } else if let Some(pending) = self
+                    .interrupt_request
+                    .as_mut()
+                    .filter(|pending| pending.request_id == *request_id)
+                {
+                    // Отказ прерывания квитанции не даст: итога ждём так же,
+                    // запасной SIGINT решит срок.
+                    if *success {
+                        pending.receipt = Some(interrupt.clone().unwrap_or_default());
+                    } else {
+                        self.interrupt_request = None;
+                    }
                 }
             }
             Parsed::Init {
@@ -442,6 +541,48 @@ impl InputQueue {
             _ => {}
         }
         None
+    }
+
+    /// Запрос прерывания строкой stdin: `None`, если хода нет и прерывать нечего.
+    /// Квитанция (`control_response`) приходит раньше итога прерванного хода;
+    /// её отсутствие в срок — повод для запасного SIGINT, а не для отказа.
+    pub fn interrupt_request(&mut self) -> Option<Value> {
+        if self.active.is_none() && self.adopted.is_none() {
+            return None;
+        }
+        let request_id = format!("canterlot-{}", Uuid::now_v7());
+        self.interrupt_request = Some(InterruptRequest {
+            request_id: request_id.clone(),
+            deadline: Instant::now() + self.control_timeout,
+            receipt: None,
+        });
+        self.interrupt = Interrupt::Sent;
+        Some(json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "interrupt"},
+        }))
+    }
+
+    /// Квитанция прерывания уже пришла: SIGINT не нужен, ждём итог хода.
+    pub fn interrupt_receipt(&self) -> Option<&InterruptReceipt> {
+        self.interrupt_request
+            .as_ref()
+            .and_then(|pending| pending.receipt.as_ref())
+    }
+
+    /// Срок ожидания квитанции, если её ещё нет: пробуждение для запасного SIGINT.
+    pub fn interrupt_receipt_bound(&self) -> Option<Instant> {
+        self.interrupt_request
+            .as_ref()
+            .and_then(|pending| pending.receipt.is_none().then_some(pending.deadline))
+    }
+
+    /// Срок квитанции вышел, а её нет: пора в запасной SIGINT.
+    pub fn interrupt_receipt_expired(&self) -> bool {
+        self.interrupt_request
+            .as_ref()
+            .is_some_and(|pending| pending.receipt.is_none() && Instant::now() >= pending.deadline)
     }
 
     /// Отметить отправку SIGINT; `false`, если хода нет и прерывать нечего.
@@ -571,6 +712,15 @@ fn proof(queue: &InputQueue, command_id: Uuid) -> TransmitOutcome {
     })
 }
 
+fn steer_proof(queue: &InputQueue, command_id: Uuid) -> SteerOutcome {
+    SteerOutcome::Accepted(Proof {
+        command_id,
+        kind: queue
+            .steer_proof_kind(command_id)
+            .unwrap_or(PROOF_KIND_STARTED),
+    })
+}
+
 impl InputDriver {
     pub fn new(queue: InputQueue, parser: Parser) -> Self {
         Self {
@@ -688,19 +838,69 @@ impl InputDriver {
         }
     }
 
-    /// SIGINT процессу CLI и ничего больше: подтверждение = `result` с `aborted_tools` или `aborted_streaming`,
-    /// после него CLI выходит с кодом 0 (исполнение заканчивается `stopped(user_stop)`).
+    /// Влить сообщение в идущий ход («Отправить сейчас»). Ход при этом чужой:
+    /// `active` не трогается, разбор кадров никому не переназначается.
+    /// Доказательство — кадр `command_lifecycle` CLI с UUID вливания (или кадр
+    /// ответа с ним). В срок не уложились — `Undetermined`: CLI мог взять
+    /// сообщение позже, оно придёт поздним доказательством.
+    pub async fn steer(
+        &mut self,
+        cli: &mut CliProcess,
+        input: &Transmission,
+        deadline: Duration,
+    ) -> SteerOutcome {
+        let command_id = input.command_id;
+        if self.queue.is_steer_proven(command_id) {
+            return steer_proof(&self.queue, command_id);
+        }
+        if let Err(reason) = self.queue.validate(input.settings.as_ref()) {
+            return SteerOutcome::Rejected(reason.into());
+        }
+        let line = match self.queue.steer_frame(input) {
+            Ok(line) => line,
+            Err(_) => return SteerOutcome::Rejected("attachment_unreadable".into()),
+        };
+        let written_at = Instant::now();
+        if tokio::time::timeout_at(written_at + deadline, cli.write_line(&line))
+            .await
+            .is_err()
+        {
+            self.queue.drop_steer(command_id);
+            return SteerOutcome::Undetermined;
+        }
+        loop {
+            if self.queue.is_steer_proven(command_id) {
+                return steer_proof(&self.queue, command_id);
+            }
+            if self.eof {
+                self.queue.drop_steer(command_id);
+                return SteerOutcome::Undetermined;
+            }
+            if tokio::time::timeout_at(written_at + deadline, self.pump(cli))
+                .await
+                .is_err()
+            {
+                return SteerOutcome::Undetermined;
+            }
+        }
+    }
+
+    /// Прерывание управляющим запросом `interrupt`: CLI останавливает ход,
+    /// процесс жив и принимает следующий ввод. Подтверждение — `result`
+    /// с `aborted_tools` или `aborted_streaming`, квитанция `control_response`
+    /// приходит раньше него. SIGINT — только запасной: квитанции нет в срок.
     pub async fn interrupt(
         &mut self,
         cli: &mut CliProcess,
         deadline: Duration,
     ) -> InterruptOutcome {
-        if !self.queue.interrupt_sent() {
+        let Some(line) = self.queue.interrupt_request() else {
             return InterruptOutcome::NotApplicable;
-        }
-        if cli.signal(Signal::Int).is_err() {
+        };
+        if cli.write_line(&line).await.is_err() {
             return InterruptOutcome::Undetermined;
         }
+        let mut sigint_sent = false;
         let limit = Instant::now() + deadline;
         loop {
             if self.queue.interrupt_acknowledged() {
@@ -709,9 +909,26 @@ impl InputDriver {
             if self.eof {
                 return InterruptOutcome::Undetermined;
             }
-            if tokio::time::timeout_at(limit, self.pump(cli))
+            if !sigint_sent && self.queue.interrupt_receipt_expired() {
+                // Запасной путь: квитанции нет, останавливаем ход сигналом.
+                // Дальше ждём то же подтверждение: итог хода един для обоих путей.
+                if cli.signal(Signal::Int).is_err() {
+                    return InterruptOutcome::Undetermined;
+                }
+                sigint_sent = true;
+            }
+            // Без кадров stdout ожидание упирается в срок квитанции,
+            // иначе запасной SIGINT никогда бы не наступил.
+            let bound = self
+                .queue
+                .interrupt_receipt_bound()
+                .filter(|_| !sigint_sent)
+                .map(|bound| bound.min(limit))
+                .unwrap_or(limit);
+            if tokio::time::timeout_at(bound, self.pump(cli))
                 .await
                 .is_err()
+                && sigint_sent
             {
                 return InterruptOutcome::Undetermined;
             }

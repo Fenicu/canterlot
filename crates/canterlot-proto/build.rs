@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.DecisionApplied",
             ".canterlot.worker.v1.TextBlock",
             ".canterlot.worker.v1.DeliverInput",
+            ".canterlot.worker.v1.SteerInput",
             ".canterlot.worker.v1.Command",
             ".canterlot.worker.v1.BlockDelta",
             ".canterlot.worker.v1.BlockFinal",

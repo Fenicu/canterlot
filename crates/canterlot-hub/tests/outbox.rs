@@ -495,6 +495,10 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
         ),
         ("interrupt", json!({})),
         ("compact_session", json!({})),
+        (
+            "steer_input",
+            json!({"input_id": Uuid::now_v7(), "conversation_id": Uuid::now_v7(), "content": [{"type":"text", "text":"steered"}], "expected_running_command_id": target}),
+        ),
         ("stop_execution", json!({"force":true})),
         ("resolve_owner_lost", json!({})),
     ];
@@ -507,6 +511,10 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
         assert_eq!(command.dispatch_attempt, 1);
         match command.kind.unwrap() {
             command::Kind::ResolveOwnerLost(_) => {}
+            command::Kind::SteerInput(value) => {
+                assert_eq!(value.content.len(), 1);
+                assert_eq!(value.expected_running_command_id, target.to_string());
+            }
             command::Kind::DeliverInput(value) => assert_eq!(value.content.len(), 1),
             command::Kind::StartExecution(value) => {
                 assert_eq!(
@@ -1372,4 +1380,45 @@ async fn delegated_start_carries_the_isolation_flag_only_with_the_capability() {
         !start_of(json!({"harness": "claude_code", "workdir": "/tmp/w", "isolate_mcp": false}))
             .isolate_mcp
     );
+}
+
+#[tokio::test]
+async fn steer_input_needs_the_capability() {
+    use canterlot_hub::outbox::{OutboxError, to_proto_for_session};
+    let machine = Uuid::now_v7();
+    let registry = canterlot_hub::session::Registry::new(Default::default());
+    let row = || canterlot_hub::outbox::CommandRow {
+        machine_id: machine,
+        ..command_row(
+            "steer_input",
+            json!({"input_id": Uuid::now_v7(), "conversation_id": Uuid::now_v7(), "content": [{"type":"text", "text":"steered"}]}),
+        )
+    };
+    {
+        let _old = registry.connect_for_tests(machine, &["pilot_v1".to_owned()]);
+        assert!(matches!(
+            to_proto_for_session(&row(), &registry),
+            Err(OutboxError::CapabilityMissing)
+        ));
+    }
+    // Старый воркер команду бы чисто отклонил, а ввод остался бы выданным без
+    // исполнителя: хаб не выпускает её и держит ввод в очереди.
+    let _new =
+        registry.connect_for_tests(machine, &["pilot_v1".to_owned(), "send_now_v1".to_owned()]);
+    let command = to_proto_for_session(&row(), &registry).unwrap();
+    assert!(matches!(command.kind, Some(command::Kind::SteerInput(_))));
+    // Возможность прокидывается исполнению, как остальные.
+    let start = canterlot_hub::outbox::CommandRow {
+        machine_id: machine,
+        ..command_row(
+            "start_execution",
+            json!({"harness": "synthetic", "workdir": "/tmp/w"}),
+        )
+    };
+    let Some(command::Kind::StartExecution(start)) =
+        to_proto_for_session(&start, &registry).unwrap().kind
+    else {
+        panic!("start expected");
+    };
+    assert!(start.capabilities.iter().any(|c| c == "send_now_v1"));
 }

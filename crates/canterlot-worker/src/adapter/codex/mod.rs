@@ -26,9 +26,9 @@ use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
         CompactOutcome, DecisionOutcome, DecisionProof, InstructionMode, InstructionSpec,
-        InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support,
-        Transmission, TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent,
-        held_tool::HeldTools, reaped,
+        InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started,
+        SteerOutcome, Support, Transmission, TransmitOutcome, canterlot_mcp::Broker,
+        canterlot_mcp::BrokerEvent, held_tool::HeldTools, reaped,
     },
     config::CodexConfig,
     containment::Containment,
@@ -2009,6 +2009,95 @@ impl Adapter for CodexAdapter {
         self.pending_writes.extend(self.requests.refuse_subagents());
         self.requests.drop_all();
         InterruptOutcome::Acknowledged
+    }
+
+    /// Влить ожидающий ввод в идущий ход (`turn/steer`): тот же ход,
+    /// доказательство — элемент `userMessage` с нашим `clientId`.
+    /// Протухший `expectedTurnId` (`-32600`) — не отказ, а конец хода:
+    /// ввод остаётся в очереди и уйдёт следующим ходом.
+    async fn steer(&mut self, input: &Transmission) -> SteerOutcome {
+        let Some(active) = self.outbox.active().cloned() else {
+            return SteerOutcome::NotApplicable("no_turn".into());
+        };
+        let expected = active.turn_id.clone();
+        let request = match input::build_turn_steer(&self.thread_id(), &expected, input) {
+            Ok(request) => request,
+            Err(error) => {
+                return SteerOutcome::Rejected(
+                    if error.to_string().contains("input_too_long") {
+                        "input_too_long"
+                    } else {
+                        "input_build_failed"
+                    }
+                    .into(),
+                );
+            }
+        };
+        // До записи: `item/started` вливки может обогнать ответ.
+        let (id, message) = self.rpc.request("turn/steer", request);
+        self.proof_for = Some(input.command_id);
+        self.proof_seen = false;
+        if !self.write_request(message).await {
+            self.proof_for = None;
+            return SteerOutcome::Undetermined;
+        }
+        let limit = Instant::now() + self.deadline;
+        let response = self.wait_response(id, limit).await;
+        match response {
+            None => {
+                self.proof_for = None;
+                if self.proof_seen {
+                    return SteerOutcome::Accepted(Proof {
+                        command_id: input.command_id,
+                        kind: input::PROOF_KIND_MESSAGE,
+                    });
+                }
+                self.unconfirmed.insert(input.command_id);
+                SteerOutcome::Undetermined
+            }
+            Some(Err(error)) => {
+                self.proof_for = None;
+                if error.code == -32600 {
+                    // Хода уже нет или `expectedTurnId` протух: ввод остаётся
+                    // в очереди, следующим ходом уйдёт сам.
+                    let stale = error.message.contains("expected active turn id");
+                    SteerOutcome::NotApplicable(if stale { "stale_turn" } else { "no_turn" }.into())
+                } else {
+                    SteerOutcome::Rejected(input::error_rejection(&error))
+                }
+            }
+            Some(Ok(value)) => {
+                let same = value
+                    .get("turnId")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|turn| turn == expected);
+                if !same {
+                    // Ответ признал чужой ход: доказательство может прийти поздно.
+                    self.proof_for = None;
+                    self.unconfirmed.insert(input.command_id);
+                    return SteerOutcome::Undetermined;
+                }
+                loop {
+                    if self.proof_seen {
+                        self.proof_for = None;
+                        return SteerOutcome::Accepted(Proof {
+                            command_id: input.command_id,
+                            kind: input::PROOF_KIND_MESSAGE,
+                        });
+                    }
+                    // Ход кончился без элемента вливки: ждать нечего.
+                    if self.eof || self.exited || self.outbox.active().is_none() {
+                        self.proof_for = None;
+                        return SteerOutcome::Undetermined;
+                    }
+                    if timeout_at(limit, self.pump_once()).await.is_err() {
+                        self.proof_for = None;
+                        self.unconfirmed.insert(input.command_id);
+                        return SteerOutcome::Undetermined;
+                    }
+                }
+            }
+        }
     }
 
     async fn next_event(&mut self) -> AdapterEvent {

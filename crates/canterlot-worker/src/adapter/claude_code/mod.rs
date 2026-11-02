@@ -909,6 +909,20 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Проверка вливания: смена настроек между кадрами хода не применяется,
+    /// хаб настроек и не присылает. Непустая смена — отказ, а не молчаливое
+    /// вливание без неё.
+    fn validate_steer(&self, input: &Transmission) -> Result<(), &'static str> {
+        if input
+            .settings
+            .as_ref()
+            .is_some_and(|change| *change != SettingsChange::default())
+        {
+            return Err("settings_unavailable");
+        }
+        Ok(())
+    }
+
     fn accepted(command_id: Uuid, kind: &'static str) -> TransmitOutcome {
         TransmitOutcome::Accepted(Proof { command_id, kind })
     }
@@ -1146,7 +1160,7 @@ impl Adapter for ClaudeCodeAdapter {
             approvals: Support::Supported,
             questions: Support::Supported,
             background_work: Support::Supported,
-            interrupt_keeps_process: false,
+            interrupt_keeps_process: true,
         }
     }
     async fn start(
@@ -1337,25 +1351,82 @@ impl Adapter for ClaudeCodeAdapter {
         CompactOutcome::Accepted
     }
 
+    /// Влить ожидающее сообщение в идущий ход («Отправить сейчас»): `user`-кадр
+    /// пишется между кадрами хода, CLI ставит его в очередь за текущим вызовом
+    /// инструмента и отвечает тем же ходом. Живой прогон показал, что
+    /// `interrupt(send_now:true)` для этого не годится: он останавливает ход и
+    /// стартует влитое сообщение новым ходом (`send_now: "stopped"` в квитанции).
+    /// Доказательство — кадр `command_lifecycle` CLI с UUID вливания.
+    async fn steer(&mut self, input: &Transmission) -> SteerOutcome {
+        if self.queue.as_mut().is_none() {
+            return SteerOutcome::Undetermined;
+        }
+        {
+            let queue = self.queue.as_ref().unwrap();
+            if queue.is_steer_proven(input.command_id) {
+                let kind = queue
+                    .steer_proof_kind(input.command_id)
+                    .unwrap_or(input::PROOF_KIND_STARTED);
+                return SteerOutcome::Accepted(Proof {
+                    command_id: input.command_id,
+                    kind,
+                });
+            }
+        }
+        if let Err(reason) = self.validate_steer(input) {
+            return SteerOutcome::Rejected(reason.into());
+        }
+        let line = match self.queue.as_mut().unwrap().steer_frame(input) {
+            Ok(line) => line,
+            Err(_) => return SteerOutcome::Rejected("attachment_unreadable".into()),
+        };
+        // Разбор кадров никому не переназначается: итог хода принадлежит чужому вводу.
+        let written_at = Instant::now();
+        if !matches!(
+            timeout_at(
+                written_at + self.deadline,
+                self.cli.as_mut().unwrap().write_line(&line)
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            self.queue.as_mut().unwrap().drop_steer(input.command_id);
+            return SteerOutcome::Undetermined;
+        }
+        let until = written_at + self.deadline;
+        loop {
+            let queue = self.queue.as_mut().unwrap();
+            if queue.is_steer_proven(input.command_id) {
+                let kind = queue
+                    .steer_proof_kind(input.command_id)
+                    .unwrap_or(input::PROOF_KIND_STARTED);
+                return SteerOutcome::Accepted(Proof {
+                    command_id: input.command_id,
+                    kind,
+                });
+            }
+            if self.eof || self.exited {
+                self.queue.as_mut().unwrap().drop_steer(input.command_id);
+                return SteerOutcome::Undetermined;
+            }
+            if timeout_at(until, self.pump()).await.is_err() {
+                self.unconfirmed.insert(input.command_id);
+                return SteerOutcome::Undetermined;
+            }
+        }
+    }
+
     async fn interrupt(&mut self) -> InterruptOutcome {
         if self.exited || self.eof {
             return InterruptOutcome::NotApplicable;
         }
-        let Some(queue) = self.queue.as_mut() else {
+        let Some(line) = self
+            .queue
+            .as_mut()
+            .and_then(|queue| queue.interrupt_request())
+        else {
             return InterruptOutcome::NotApplicable;
         };
-        if !queue.interrupt_sent() {
-            return InterruptOutcome::NotApplicable;
-        }
-        if self
-            .cli
-            .as_ref()
-            .unwrap()
-            .signal(process::Signal::Int)
-            .is_err()
-        {
-            return InterruptOutcome::Undetermined;
-        }
         for request_id in self.requests.keys() {
             self.events.push_back(AdapterEvent::RequestClosed {
                 request_id: request_id.clone(),
@@ -1363,12 +1434,44 @@ impl Adapter for ClaudeCodeAdapter {
             });
         }
         self.requests.clear();
+        // Управляющий запрос останавливает ход, процесс жив: следующий ввод
+        // уйдёт в тот же CLI без перезапуска. SIGINT — только запасной.
+        if self.cli.as_mut().unwrap().write_line(&line).await.is_err() {
+            return InterruptOutcome::Undetermined;
+        }
+        let mut sigint_sent = false;
         let until = Instant::now() + self.deadline;
         loop {
             if self.queue.as_ref().unwrap().interrupt_acknowledged() {
                 return InterruptOutcome::Acknowledged;
             }
-            if self.eof || timeout_at(until, self.pump()).await.is_err() {
+            if self.eof {
+                return InterruptOutcome::Undetermined;
+            }
+            if !sigint_sent && self.queue.as_ref().unwrap().interrupt_receipt_expired() {
+                // Запасной путь: квитанции нет в срок, останавливаем ход сигналом.
+                if self
+                    .cli
+                    .as_ref()
+                    .unwrap()
+                    .signal(process::Signal::Int)
+                    .is_err()
+                {
+                    return InterruptOutcome::Undetermined;
+                }
+                sigint_sent = true;
+            }
+            // Без кадров stdout ожидание упирается в срок квитанции,
+            // иначе запасной SIGINT никогда бы не наступил.
+            let bound = self
+                .queue
+                .as_ref()
+                .unwrap()
+                .interrupt_receipt_bound()
+                .filter(|_| !sigint_sent)
+                .map(|bound| bound.min(until))
+                .unwrap_or(until);
+            if timeout_at(bound, self.pump()).await.is_err() && sigint_sent {
                 return InterruptOutcome::Undetermined;
             }
         }

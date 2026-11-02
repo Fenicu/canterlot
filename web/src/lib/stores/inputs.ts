@@ -30,6 +30,8 @@ export interface InputView {
 	text: string;
 	attachments: AttachmentRef[];
 	state: InputUiState;
+	/** Ревизия текста и вложений: правка ожидающего ввода идёт сравнением-и-заменой. */
+	revision: number;
 	placement: InputPlacement;
 	marks: { saved: boolean; accepted: boolean };
 	cancelRequested: boolean;
@@ -80,6 +82,7 @@ export function freshInput(key: string, text: string, createdAt: number, attachm
 		marks: marksFor('saving'),
 		cancelRequested: false,
 		attempt: null,
+		revision: 1,
 		createdSeq: null,
 		feedSeq: null,
 		createdAt,

@@ -201,6 +201,8 @@ export interface InputStateChanged {
       | "rejected";
     attempt?: number;
     cause?: string;
+    revision?: number;
+    content?: ContentBlock[];
     command_id?: Uuid;
     reason?: string;
     retry_of?: Uuid | null;

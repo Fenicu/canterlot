@@ -169,6 +169,9 @@ pub async fn dispatch_next(
     }
     let head: Option<(Uuid, Uuid)> = sqlx::query_as(
         "select id, command_id from inputs where conversation_id = $1 and state = 'queued'
+         and not exists (select 1 from commands where kind = 'steer_input'
+                         and target_command_id = inputs.command_id
+                         and delivery_state <> 'completed')
          order by input_seq limit 1",
     )
     .bind(conversation_id)

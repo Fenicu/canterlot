@@ -168,6 +168,18 @@ pub enum InterruptOutcome {
     Undetermined,
     NotApplicable,
 }
+/// Исход вливания ожидающего ввода в идущий ход («Отправить сейчас»).
+/// В отличие от `transmit`, ход не открывается: доказательство приписывает
+/// ввод чужому ходу, а конец хода его не закрывает.
+#[derive(Debug)]
+pub enum SteerOutcome {
+    Accepted(Proof),
+    Rejected(String),
+    /// Вливать некуда (хода уже нет, запрос открыт, сжатие) или нечего:
+    /// ввод остаётся в очереди и уйдёт следующим ходом.
+    NotApplicable(String),
+    Undetermined,
+}
 #[derive(Debug, PartialEq, Eq)]
 pub enum CompactOutcome {
     /// Сервер принял запрос, итог придёт событием `Compacted`.
@@ -917,6 +929,10 @@ pub trait Adapter: Send {
         let _ = self.deliver_decision(request_id, &deny).await;
     }
     async fn interrupt(&mut self) -> InterruptOutcome;
+    /// Влить ожидающий ввод в идущий ход («Отправить сейчас»). Вызывается,
+    /// только когда ход идёт; новый ход не открывается, слот хода не трогается.
+    /// Отказ — через `NotApplicable` с причиной для подписи в очереди.
+    async fn steer(&mut self, input: &Transmission) -> SteerOutcome;
     /// Сжать контекст по действию владельца. Сжимает только адаптер, который это умеет.
     async fn compact(&mut self, _command: Uuid) -> CompactOutcome {
         CompactOutcome::NotApplicable
