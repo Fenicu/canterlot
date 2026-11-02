@@ -206,6 +206,19 @@ fn catalog_lists_claude_code_with_canterlot_permission_modes_when_configured() {
             ("haiku", "Haiku"),
         ]
     );
+    // Варианты 1M отдают окно 1M, а не 200K: индикатор считает долю от него.
+    assert_eq!(
+        c.models
+            .iter()
+            .map(|m| (m.id.as_str(), m.context_window))
+            .collect::<Vec<_>>(),
+        [
+            ("opus[1m]", Some(1_000_000)),
+            ("sonnet[1m]", Some(1_000_000)),
+            ("fable[1m]", Some(1_000_000)),
+            ("haiku", Some(200_000)),
+        ]
+    );
     for m in &c.models {
         assert_eq!(
             m.efforts,
@@ -2269,5 +2282,58 @@ async fn running_turn_without_init_is_accepted_at_ready_deadline_with_a_diagnost
         seen.push(e);
     }
     assert_eq!(events_of(&seen, "cli_init_missing"), 1, "{seen:?}");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn compact_sends_slash_compact_and_reports_the_manual_boundary() {
+    use canterlot_worker::adapter::CompactOutcome;
+    let mut f = Fake::new(vec![
+        answer_turn(),
+        vec![
+            json!({"type":"system","subtype":"status","status":"compacting"}),
+            json!({"type":"system","subtype":"compact_boundary",
+                "compact_metadata":{"pre_tokens":41000,"trigger":"manual"}}),
+            json!({"type":"result","subtype":"success","is_error":false,"modelUsage":{}}),
+        ],
+    ]);
+    f.start().await;
+    let id = Uuid::now_v7();
+    f.send(&tx(id)).await;
+    let _ = f.finish().await;
+    let outcome = tokio::time::timeout(WAIT, f.adapter.compact(Uuid::now_v7()))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CompactOutcome::Accepted), "{outcome:?}");
+    let mut compacted = None;
+    let mut finished = None;
+    for _ in 0..100 {
+        match tokio::time::timeout(Duration::from_secs(2), f.adapter.next_event()).await {
+            Ok(AdapterEvent::Compacted { ok }) => compacted = Some(ok),
+            Ok(AdapterEvent::CompactionFinished {
+                manual,
+                ok,
+                pre_tokens,
+            }) => finished = Some((manual, ok, pre_tokens)),
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+        if compacted.is_some() && finished.is_some() {
+            break;
+        }
+    }
+    assert_eq!(compacted, Some(true), "command flow must complete");
+    assert_eq!(finished, Some((true, true, 41_000)), "manual episode with tokens");
+    let written: Vec<Value> = std::fs::read_to_string(f.dir.path().join("stdin.log"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        written
+            .iter()
+            .any(|message| message["message"]["content"] == "/compact"),
+        "compact goes as a /compact input: {written:?}"
+    );
     f.close().await;
 }

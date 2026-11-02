@@ -727,11 +727,12 @@ pub struct HarnessCatalog {
 // Первая модель харнесса — выбор формы по умолчанию. `haiku[1m]` CLI отказывает в
 // `set_model`, поэтому у Haiku варианта 1M нет. Обычные варианты убраны из каталога,
 // но сессии на них продолжают работать: каталог ограничивает только новый выбор.
-const CLAUDE_MODELS: &[(&str, &str)] = &[
-    ("opus[1m]", "Opus 1M"),
-    ("sonnet[1m]", "Sonnet 1M"),
-    ("fable[1m]", "Fable 1M"),
-    ("haiku", "Haiku"),
+/// Окно контекста моделей Claude Code: варианты 1M отдают 1M, а не 200K.
+const CLAUDE_MODELS: &[(&str, &str, u64)] = &[
+    ("opus[1m]", "Opus 1M", 1_000_000),
+    ("sonnet[1m]", "Sonnet 1M", 1_000_000),
+    ("fable[1m]", "Fable 1M", 1_000_000),
+    ("haiku", "Haiku", 200_000),
 ];
 
 pub fn catalog() -> Vec<HarnessCatalog> {
@@ -756,13 +757,14 @@ pub fn catalog_with(
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
             models: CLAUDE_MODELS
                 .iter()
-                .map(|&(id, title)| ModelCatalog {
+                .map(|&(id, title, context_window)| ModelCatalog {
                     id: id.into(),
                     title: title.into(),
                     efforts: ["low", "medium", "high", "xhigh", "max"]
                         .into_iter()
                         .map(str::to_owned)
                         .collect(),
+                    context_window: Some(context_window),
                     ..Default::default()
                 })
                 .collect(),

@@ -25,7 +25,8 @@ use self::{
 use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
-        DecisionOutcome, DecisionProof, InstructionMode, InstructionSpec, InterruptOutcome,
+        CompactOutcome, DecisionOutcome, DecisionProof, InstructionMode, InstructionSpec,
+        InterruptOutcome,
         ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support, Transmission,
         TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent, held_tool::HeldTools,
         reaped,
@@ -149,6 +150,8 @@ pub struct CodexAdapter {
     unconfirmed: HashSet<Uuid>,
     /// turn/start без разобранного ответа: в пути или опоздал к сроку.
     pending_turn: Option<PendingTurn>,
+    /// Кнопка «Сжать контекст» запустила `thread/compact/start`: ближайший эпизод ручной.
+    compact_manual: bool,
     eof: bool,
     exited: bool,
     start_attempted: bool,
@@ -231,6 +234,7 @@ impl CodexAdapter {
             proof_seen: false,
             unconfirmed: HashSet::new(),
             pending_turn: None,
+            compact_manual: false,
             eof: false,
             exited: false,
             start_attempted: false,
@@ -575,6 +579,30 @@ impl CodexAdapter {
     // запроса: вызов отпускается с пометкой, и вывод идёт вживую. Прочие события
     // отложенного блока ждут вместе с ним.
     fn on_block_event(&mut self, event: AdapterEvent) {
+        // Кнопочное сжатие Codex идёт методом `thread/compact/start`: кадры триггера не
+        // несут, ручным эпизод помечает флаг запроса.
+        let event = match event {
+            AdapterEvent::CompactionStarted { manual: false } if self.compact_manual => {
+                AdapterEvent::CompactionStarted { manual: true }
+            }
+            AdapterEvent::CompactionFinished {
+                manual: false,
+                ok,
+                pre_tokens,
+            } if self.compact_manual => {
+                self.compact_manual = false;
+                AdapterEvent::CompactionFinished {
+                    manual: true,
+                    ok,
+                    pre_tokens,
+                }
+            }
+            AdapterEvent::CompactionFinished { .. } => {
+                self.compact_manual = false;
+                event
+            }
+            _ => event,
+        };
         if let AdapterEvent::BlockStarted {
             kind: BlockKind::ToolResult,
             parent: Some(parent),
@@ -1845,6 +1873,36 @@ impl Adapter for CodexAdapter {
         if let Some(broker) = self.broker.as_mut() {
             broker.answer_agent_tool(call_id, &result).await;
         }
+    }
+
+    /// Сжатие по кнопке методом app-server `thread/compact/start` между ходами.
+    /// Итог приходит парой `contextCompaction`, ручным эпизод помечает флаг.
+    async fn compact(&mut self, _command: Uuid) -> CompactOutcome {
+        if self.turn_running() || self.compact_manual {
+            return CompactOutcome::NotApplicable;
+        }
+        if self.eof || self.exited {
+            return CompactOutcome::Failed;
+        }
+        let thread_id = self.thread_id();
+        if thread_id.is_empty() {
+            return CompactOutcome::Failed;
+        }
+        let (id, message) = self.rpc.request(
+            "thread/compact/start",
+            serde_json::json!({ "threadId": thread_id }),
+        );
+        if !self.write_request(message).await {
+            return CompactOutcome::Failed;
+        }
+        if !matches!(
+            self.wait_response(id, Instant::now() + self.deadline).await,
+            Some(Ok(_))
+        ) {
+            return CompactOutcome::Failed;
+        }
+        self.compact_manual = true;
+        CompactOutcome::Accepted
     }
 
     async fn interrupt(&mut self) -> InterruptOutcome {
