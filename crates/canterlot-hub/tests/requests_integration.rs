@@ -133,6 +133,7 @@ async fn request_keeps_its_place_in_history_among_the_blocks(pool: PgPool) -> Te
             TimelineItem::Block(block) => block.id.to_string(),
             TimelineItem::Request(view) => view.id.to_string(),
             TimelineItem::Input(view) => view.id.to_string(),
+            TimelineItem::Compaction(view) => view.id.to_string(),
         })
         .collect();
     assert_eq!(
