@@ -9,6 +9,7 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import type { TimelineSource } from '#lib/stores/timeline.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
+  import EventEntry from '#lib/timeline/EventEntry.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
   import { FeedFolds } from '#lib/timeline/folds.js';
   import { blockLinks, buildRows, dayStart, shownInCard, tailKey, type Row } from '#lib/timeline/rows.js';
@@ -369,6 +370,8 @@
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
           <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} />
+        {:else if row.kind === 'event' && row.entries[0]?.kind === 'input'}
+          <EventEntry input={row.entries[0].input} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
           <RequestCard request={row.entries[0].request} onDecision={async () => undefined} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
