@@ -1124,6 +1124,12 @@ impl Adapter for ClaudeCodeAdapter {
         true
     }
 
+    /// Служебный `/compact` идёт вводом stream-json между ходами: итог чужого
+    /// хода приписался бы вводу владельца без hold.
+    fn holds_input_during_compaction(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: Support::Supported,

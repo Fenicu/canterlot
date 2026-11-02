@@ -1567,12 +1567,22 @@ impl Supervisor {
         self.queue.retain(|queued| *queued != key);
     }
 
+    /// Hold — решение адаптера: серверное сжатие очереди ввода не держит.
+    /// Без адаптера держим: передать всё равно некому, а потерять нельзя.
+    fn compaction_holds_input(&self) -> bool {
+        self.pending_compaction.is_some()
+            && self
+                .adapter
+                .as_ref()
+                .is_none_or(|adapter| adapter.holds_input_during_compaction())
+    }
+
     async fn try_transmit(&mut self) -> Result<(), SupervisorError> {
         if !matches!(self.lifecycle, Lifecycle::Running)
             || self.adapter_exited
             || !self.ready
             || self.active_turn.is_some()
-            || self.pending_compaction.is_some()
+            || self.compaction_holds_input()
             || self.faults.gate_held(&self.exec_dir)
         {
             return Ok(());
@@ -2638,10 +2648,15 @@ mod tests {
 
     struct StubAdapter {
         state: std::sync::Arc<std::sync::Mutex<StubState>>,
+        hold_compaction: bool,
     }
 
     #[async_trait::async_trait]
     impl Adapter for StubAdapter {
+        fn holds_input_during_compaction(&self) -> bool {
+            self.hold_compaction
+        }
+
         fn capabilities(&self) -> crate::adapter::Capabilities {
             crate::adapter::Capabilities {
                 streaming: crate::adapter::Support::Supported,
@@ -2712,12 +2727,23 @@ mod tests {
         Supervisor,
         std::sync::Arc<std::sync::Mutex<StubState>>,
     ) {
+        test_supervisor_with_hold(true)
+    }
+
+    fn test_supervisor_with_hold(
+        hold_compaction: bool,
+    ) -> (
+        tempfile::TempDir,
+        Supervisor,
+        std::sync::Arc<std::sync::Mutex<StubState>>,
+    ) {
         let dir = tempfile::TempDir::new().unwrap();
         let sj = Sj::create(dir.path()).unwrap();
         let (media_jobs, _prepared) = mpsc::unbounded_channel();
         let state = std::sync::Arc::new(std::sync::Mutex::new(StubState::default()));
         let adapter: Option<Box<dyn Adapter>> = Some(Box::new(StubAdapter {
             state: state.clone(),
+            hold_compaction,
         }));
         let supervisor = Supervisor {
             attach_deadline: None,
@@ -2899,6 +2925,17 @@ mod tests {
             .on_adapter_event(AdapterEvent::Compacted { ok: true })
             .await
             .unwrap();
+        supervisor.try_transmit().await.unwrap();
+        assert_delivered_once_with_proof(&mut supervisor, &state, key);
+    }
+
+    #[tokio::test]
+    async fn server_side_compaction_does_not_hold_owner_input() {
+        let (_dir, mut supervisor, state) = test_supervisor_with_hold(false);
+        // Сжатие серверное (delivery "queue", как у OpenCode): hold не нужен,
+        // ввод уходит сразу, как до фикса.
+        supervisor.pending_compaction = Some(("compact-1".into(), 1));
+        let key = queue_owner(&mut supervisor);
         supervisor.try_transmit().await.unwrap();
         assert_delivered_once_with_proof(&mut supervisor, &state, key);
     }

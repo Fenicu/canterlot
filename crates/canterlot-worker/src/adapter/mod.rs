@@ -888,6 +888,12 @@ pub trait Adapter: Send {
     async fn compact(&mut self, _command: Uuid) -> CompactOutcome {
         CompactOutcome::NotApplicable
     }
+    /// Ввод ждёт итога сжатия: служебный ввод этого CLI идёт тем же каналом между
+    /// ходами, и чужой итог приписался бы ходу владельца. По умолчанию сжатие
+    /// серверное (`delivery: "queue"`), гонки нет, hold не нужен.
+    fn holds_input_during_compaction(&self) -> bool {
+        false
+    }
     async fn next_event(&mut self) -> AdapterEvent;
     /// Применить смену настроек, отложенную до конца фоновой работы; см. `DeferredRestartDue`.
     async fn apply_deferred(&mut self, _group: &dyn Containment) {}

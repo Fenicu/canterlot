@@ -1724,6 +1724,12 @@ impl Adapter for CodexAdapter {
         true
     }
 
+    /// Пара `contextCompaction` приходит тем же каналом между ходами: итог чужого
+    /// хода приписался бы вводу владельца без hold.
+    fn holds_input_during_compaction(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: Support::Supported,
