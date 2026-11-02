@@ -175,7 +175,22 @@ message Command {
     RemoveWorktree remove_worktree = 18;
     // Только при согласованной возможности owner_exit_v1.
     ResolveOwnerLost resolve_owner_lost = 19;
+    // Только при согласованной возможности send_now_v1: влить ожидающий ввод
+    // в идущий ход, не открывая нового.
+    SteerInput steer_input = 20;
   }
+}
+
+/// Влить ожидающий ввод в идущий ход («Отправить сейчас»). Несёт тот же ввод,
+/// что `deliver_input`, плюс ход, к которому его присоединить: воркер вольно
+/// отказаться (хода уже нет, запрос открыт, сжатие), тогда ввод остаётся в очереди.
+message SteerInput {
+  string input_id = 1;
+  string conversation_id = 2;
+  repeated ContentBlock content = 3;
+  SettingsOverride settings = 4;
+  // Команда `deliver_input`, чей ход принимает ввод; пусто — любой идущий ход.
+  string expected_running_command_id = 5;
 }
 
 // Решение владельца: завершить остаток группы потерянного исполнения.

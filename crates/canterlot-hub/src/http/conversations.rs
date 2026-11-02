@@ -28,6 +28,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(continue_queue))
         .routes(routes!(resolve_owner_lost))
         .routes(routes!(cancel_input))
+        .routes(routes!(send_now))
         .routes(routes!(settings))
         .routes(routes!(submit))
         .routes(routes!(start_execution))
@@ -277,6 +278,35 @@ async fn cancel_input(
     if let Some(id) = conversation {
         s.dispatcher.trigger(id);
     }
+    Ok(Json(result))
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/inputs/{input_id}/send-now",tag="conversations",params(("id"=Uuid,Path),("input_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Ожидающий ввод влит в идущий ход",body=crate::delivery::control::SendNowOutcome)))]
+async fn send_now(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, input_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<crate::delivery::control::SendNowOutcome>, ApiError> {
+    let machine_id: Option<Uuid> = sqlx::query_scalar(
+        "select machine_id from conversations where id = $1 and owner_id = $2",
+    )
+    .bind(id)
+    .bind(o.owner_id)
+    .fetch_optional(&s.pool)
+    .await?;
+    let capabilities = machine_id.map(|machine| s.registry.capabilities(machine));
+    let result = crate::delivery::control::request_send_now(
+        &s.pool,
+        o.owner_id,
+        id,
+        input_id,
+        &key,
+        c,
+        &capabilities.unwrap_or_default(),
+    )
+    .await?;
     Ok(Json(result))
 }
 #[derive(Clone, PartialEq, Eq, Deserialize, serde::Serialize, ToSchema)]

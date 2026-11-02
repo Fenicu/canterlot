@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::worker::v1::{Command, DeliverInput, TextBlock, command};
+use crate::worker::v1::{Command, DeliverInput, SteerInput, TextBlock, command};
 
 impl fmt::Debug for TextBlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -16,6 +16,20 @@ impl fmt::Debug for DeliverInput {
             .field("input_id", &self.input_id)
             .field("conversation_id", &self.conversation_id)
             .field("content", &self.content)
+            .finish()
+    }
+}
+
+impl fmt::Debug for SteerInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SteerInput")
+            .field("input_id", &self.input_id)
+            .field("conversation_id", &self.conversation_id)
+            .field("content", &self.content)
+            .field(
+                "expected_running_command_id",
+                &self.expected_running_command_id,
+            )
             .finish()
     }
 }
@@ -47,6 +61,7 @@ impl fmt::Debug for command::Kind {
             Self::ResolveOwnerLost(input) => {
                 f.debug_tuple("ResolveOwnerLost").field(input).finish()
             }
+            Self::SteerInput(input) => f.debug_tuple("SteerInput").field(input).finish(),
         }
     }
 }
