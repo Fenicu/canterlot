@@ -1,3 +1,4 @@
+import { failureLabel, providerLabel } from '#lib/format/labels.js';
 import { fmt } from '#lib/format/ru.js';
 import type { InputOrigin } from '#lib/stores/inputs.js';
 
@@ -37,6 +38,42 @@ export function eventSessionId(origin: InputOrigin | null | undefined): string |
   return origin?.event?.session_id ?? origin?.from ?? null;
 }
 
+const LIMIT_WINDOWS: Record<string, string> = {
+  five_hour: '5 часов',
+  weekly: 'неделя'
+};
+
+const PHASES: Record<string, string> = {
+  generating: 'генерирует ответ',
+  running_tool: 'выполняет инструмент',
+  context_maintenance: 'сжимает контекст',
+  starting: 'запускается',
+  stopping: 'останавливается',
+  delivering_attachments: 'передаёт файлы',
+  awaiting_permission: 'ждёт разрешения',
+  awaiting_answer: 'ждёт ответа',
+  no_link: 'нет связи с машиной'
+};
+
+function windowLabel(value: string): string {
+  return LIMIT_WINDOWS[value] ?? 'другое окно';
+}
+
+function phaseLabel(value: string): string {
+  return PHASES[value] ?? 'работает';
+}
+
+function reasonLabel(value: string): string {
+  const label = failureLabel(value);
+  return label === 'причина неизвестна' ? value : label;
+}
+
+function moment(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const ts = Date.parse(value);
+  return Number.isFinite(ts) ? fmt.resetAt(ts, ts) : null;
+}
+
 export function eventFacts(event: HubEvent): HubFact[] {
   const facts: HubFact[] = [];
   if (event.turns != null) facts.push({ label: 'ходы', value: String(event.turns) });
@@ -46,6 +83,18 @@ export function eventFacts(event: HubEvent): HubFact[] {
     facts.push({ label: 'коммиты', value: String(event.commits.length) });
   if (event.changed_files != null)
     facts.push({ label: 'файлы', value: String(event.changed_files) });
+  if (event.question) facts.push({ label: 'вопрос', value: event.question });
+  if (event.reason) facts.push({ label: 'причина', value: reasonLabel(event.reason) });
+  if (event.provider)
+    facts.push({ label: 'провайдер', value: providerLabel(event.provider) });
+  if (event.window)
+    facts.push({ label: 'окно лимита', value: windowLabel(event.window) });
+  const until = moment(event.until);
+  if (until) facts.push({ label: 'лимит до', value: until });
+  if (event.phase)
+    facts.push({ label: 'последнее действие', value: phaseLabel(event.phase) });
+  const last = moment(event.last_event_at);
+  if (last) facts.push({ label: 'последнее событие', value: last });
   return facts;
 }
 

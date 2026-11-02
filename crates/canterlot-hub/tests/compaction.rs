@@ -4,6 +4,8 @@
 //! итог сжатия снимает паузу.
 
 use canterlot_hub::{
+    blocks::ExecutionRef,
+    compactions,
     delivery::control::{self, CompactOutcome, ControlError},
     executions,
     ingest::{Ingest, IngestOutcome, JournalKind},
@@ -11,8 +13,8 @@ use canterlot_hub::{
     testkit::{self, Seed},
 };
 use canterlot_proto::worker::v1::{
-    CompactionState, CompactionStatus, JournalOpened, JournalRecord, JournalRecords, RecordBody,
-    SessionStuck, record_body::Body,
+    CompactionState, CompactionStatus, ContextProgress, JournalOpened, JournalRecord,
+    JournalRecords, RecordBody, SessionStuck, record_body::Body,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -552,6 +554,217 @@ async fn context_progress_keeps_only_the_latest(pool: PgPool) {
     assert!(
         snapshot.data.context.is_none(),
         "cleared context hides the indicator"
+    );
+}
+
+async fn store_context(
+    pool: &PgPool,
+    seed: &Seed,
+    execution_id: Uuid,
+    generation: i64,
+    tokens: u64,
+    window: u64,
+) {
+    let mut conn = pool.acquire().await.unwrap();
+    compactions::apply_progress(
+        &mut conn,
+        &ExecutionRef {
+            execution_id,
+            conversation_id: seed.conversation_id,
+            machine_id: seed.machine_id,
+        },
+        &ContextProgress {
+            execution_id: execution_id.to_string(),
+            generation: generation as u64,
+            context_tokens: tokens,
+            context_window_tokens: window,
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn terminal_execution_closes_open_compactions(pool: PgPool) {
+    let mut run = Run::start(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(
+        &pool,
+        compaction_event(
+            id,
+            run.execution.execution_id,
+            run.execution.generation as u64,
+            true,
+            false,
+            false,
+            0,
+        ),
+    )
+    .await;
+    let open: (Option<bool>, bool) =
+        sqlx::query_as("select ok, finished_at is not null from compactions where id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(open, (None, false));
+
+    executions::set_state(
+        &pool,
+        run.execution.execution_id,
+        ExecutionState::Stopping,
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    executions::set_state(
+        &pool,
+        run.execution.execution_id,
+        ExecutionState::Failed,
+        Some("crashed"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+
+    let closed: (Option<bool>, bool) =
+        sqlx::query_as("select ok, finished_at is not null from compactions where id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(closed, (Some(false), true));
+    let kinds = event_kinds(&pool, run.seed.conversation_id).await;
+    assert!(
+        kinds.contains(&"compaction_finished".to_owned()),
+        "the open chat must learn the episode ended: {kinds:?}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn open_compaction_of_a_finished_execution_is_not_running(pool: PgPool) {
+    let mut run = Run::start(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(
+        &pool,
+        compaction_event(
+            id,
+            run.execution.execution_id,
+            run.execution.generation as u64,
+            true,
+            false,
+            false,
+            0,
+        ),
+    )
+    .await;
+    // Строка осталась от версии до исправления: состояние исполнения уже терминально,
+    // а запись сжатия так и не закрыта.
+    sqlx::query("update executions set state = 'failed', outcome = 'crashed' where id = $1")
+        .bind(run.execution.execution_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let page = canterlot_hub::history::page(
+        &mut pool.acquire().await.unwrap(),
+        run.seed.owner_id,
+        run.seed.conversation_id,
+        canterlot_hub::history::HistoryCursor::Tail,
+        50,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let shown = page.items.iter().find_map(|item| match item {
+        canterlot_hub::history::TimelineItem::Compaction(view) if view.id == id => Some(view.ok),
+        _ => None,
+    });
+    assert_eq!(
+        shown,
+        Some(Some(false)),
+        "a finished execution must not keep a compaction running"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cleared_context_of_the_latest_execution_hides_the_indicator(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    let first = executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, first.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    store_context(
+        &pool,
+        &seed,
+        first.execution_id,
+        first.generation,
+        640_000,
+        1_000_000,
+    )
+    .await;
+    executions::set_state(
+        &pool,
+        first.execution_id,
+        ExecutionState::Stopping,
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    executions::set_state(
+        &pool,
+        first.execution_id,
+        ExecutionState::Stopped,
+        Some("normal_exit"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+
+    let second = executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, second.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    store_context(
+        &pool,
+        &seed,
+        second.execution_id,
+        second.generation,
+        50_000,
+        1_000_000,
+    )
+    .await;
+    let snapshot =
+        canterlot_hub::snapshot::conversation(&pool, seed.owner_id, seed.conversation_id, 50)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        snapshot.data.context.as_ref().map(|c| c.tokens),
+        Some(50_000)
+    );
+
+    // Неизвестный размер после сжатия очищает живое значение: старое исполнение не всплывает.
+    store_context(&pool, &seed, second.execution_id, second.generation, 0, 0).await;
+    let snapshot =
+        canterlot_hub::snapshot::conversation(&pool, seed.owner_id, seed.conversation_id, 50)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        snapshot.data.context.is_none(),
+        "the latest execution has no context: the indicator stays hidden"
     );
 }
 

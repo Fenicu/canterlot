@@ -718,6 +718,26 @@ export class ChatStore {
         void this.reloadTail();
         return;
       case "compaction_started":
+        if (event.kind === "compaction_started") {
+          const id = event.payload.id;
+          const key = `compaction:${id}`;
+          const known = this.timeline.entries.find((entry) => entry.key === key);
+          // История уже знает итог: запоздавший старт не возвращает анимацию.
+          if (known?.kind === "compaction" && known.compaction.ok !== null) return;
+          this.timeline.upsert({
+            kind: "compaction",
+            key,
+            seq: event.scope_seq,
+            compaction: {
+              id,
+              trigger: event.payload.trigger,
+              preTokens: null,
+              ok: null,
+              createdAt: Date.parse(event.committed_at),
+              finishedAt: null,
+            },
+          });
+        }
         return;
       case "queue_state_changed":
         if (event.kind === "queue_state_changed") {

@@ -441,6 +441,31 @@ pub async fn set_state_in_tx(
                     *compaction = Some(CompactionProgress::Failed);
                 }
             }
+            // Открытая строка сжатия закрывается тем же переходом: иначе она идёт вечно.
+            let closed: Vec<(Uuid, String)> = sqlx::query_as(
+                "update compactions set ok = false, finished_at = coalesce(finished_at, now())
+                 where execution_id = $1 and ok is null
+                 returning id, trigger",
+            )
+            .bind(execution_id)
+            .fetch_all(&mut *conn)
+            .await?;
+            for (id, trigger) in closed {
+                events::append(
+                    conn,
+                    NewEvent {
+                        scope: Scope::Conversation {
+                            id: queue.conversation_id,
+                        },
+                        kind: "compaction_finished",
+                        conversation_id: Some(queue.conversation_id),
+                        execution_id: Some(execution_id),
+                        payload: json!({"id": id, "trigger": trigger, "ok": false}),
+                        correlation_id,
+                    },
+                )
+                .await?;
+            }
             if matches!(slot, RunSlot::Running { .. }) {
                 slot = RunSlot::Free;
                 queue

@@ -48,17 +48,21 @@ pub(crate) async fn latest_context(
     conn: &mut PgConnection,
     conversation_id: Uuid,
 ) -> Result<Option<ContextSnapshot>, sqlx::Error> {
-    let row: Option<(i64, Option<i64>)> = sqlx::query_as(
+    let row: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
         "select context_tokens, context_window_tokens from executions
-         where conversation_id = $1 and context_tokens is not null
-         order by updated_at desc, generation desc limit 1",
+         where conversation_id = $1
+         order by generation desc limit 1",
     )
     .bind(conversation_id)
     .fetch_optional(&mut *conn)
     .await?;
-    Ok(row.map(|(tokens, window_tokens)| ContextSnapshot {
-        tokens,
-        window_tokens,
+    // Свежее исполнение без размера — это сжатие с неизвестным итогом: старое значение
+    // не возвращаем, иначе индикатор оживёт после перезагрузки.
+    Ok(row.and_then(|(tokens, window_tokens)| {
+        tokens.map(|tokens| ContextSnapshot {
+            tokens,
+            window_tokens,
+        })
     }))
 }
 
@@ -66,17 +70,31 @@ pub(crate) async fn compaction_view(
     conn: &mut PgConnection,
     id: Uuid,
 ) -> Result<CompactionView, sqlx::Error> {
-    let row = sqlx::query("select * from compactions where id = $1")
-        .bind(id)
-        .fetch_one(&mut *conn)
-        .await?;
+    let row = sqlx::query(
+        "select c.*, e.state as execution_state
+         from compactions c join executions e on e.id = c.execution_id
+         where c.id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
     let created: DateTime<Utc> = row.try_get("created_at")?;
     let finished: Option<DateTime<Utc>> = row.try_get("finished_at")?;
+    let mut ok: Option<bool> = row.try_get("ok")?;
+    // Строка, оставшаяся от версии до исправления, не должна идти вечно.
+    if ok.is_none()
+        && matches!(
+            row.try_get::<String, _>("execution_state")?.as_str(),
+            "stopped" | "failed"
+        )
+    {
+        ok = Some(false);
+    }
     Ok(CompactionView {
         id,
         trigger: row.try_get("trigger")?,
         pre_tokens: row.try_get("pre_tokens")?,
-        ok: row.try_get("ok")?,
+        ok,
         created_seq: row
             .try_get::<Option<i64>, _>("created_seq")?
             .map(|seq| seq.to_string()),

@@ -300,6 +300,20 @@ export class FakeHubApi {
 		return started;
 	}
 
+	/** Закрывает уже начатый эпизод сжатия: так хаб присылает финиш. */
+	finishCompaction(id: string, compactionId: string, ok = true): HubEvent {
+		const items = this.histories.get(id) ?? [];
+		const row = items.find((item) => item.kind === 'compaction' && item.id === compactionId);
+		if (!row || row.kind !== 'compaction') throw new Error(`unknown compaction ${compactionId}`);
+		row.ok = ok;
+		row.finished_at = new Date().toISOString();
+		return this.hub.append(`conversation:${id}`, {
+			kind: 'compaction_finished',
+			conversation_id: id,
+			payload: { id: compactionId, trigger: row.trigger, ok }
+		});
+	}
+
 	/** Как `background_work_changed` хаба: только изменившиеся задачи. */
 	pushBackground(id: string, tasks: BackgroundTask[]): HubEvent {
 		return this.hub.append(`conversation:${id}`, {
