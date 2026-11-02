@@ -718,3 +718,34 @@ async fn read_only_agent_cannot_write_presets(pool: PgPool) {
     }
     assert_eq!(fx.text(own["id"].as_str().unwrap()).await, "текст");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delegated_session_cannot_apply_the_owner_preset(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.set_session("bypass", json!({}), 1).await;
+    let response = fx
+        .agent("presets.apply", json!({"id": "owner"}), &Uuid::now_v7())
+        .await;
+    assert_eq!(response.error_code, "preset_not_allowed");
+    let pending: Value =
+        sqlx::query_scalar("select pending_settings from conversations where id=$1")
+            .bind(fx.conversation)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert!(pending.get("instruction_profile").is_none(), "{pending}");
+    let response = fx
+        .agent("presets.apply", json!({"id": "clean"}), &Uuid::now_v7())
+        .await;
+    assert_eq!(response.error_code, "", "{}", response.error_message);
+
+    fx.set_session("bypass", json!({}), 0).await;
+    let response = fx
+        .agent("presets.apply", json!({"id": "owner"}), &Uuid::now_v7())
+        .await;
+    assert_eq!(
+        response.error_code, "",
+        "a root session may: {}",
+        response.error_message
+    );
+}

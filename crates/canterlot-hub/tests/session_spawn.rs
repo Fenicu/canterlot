@@ -1539,3 +1539,12 @@ async fn approved_wider_child_is_rechecked_against_a_narrowed_parent(pool: PgPoo
         Some("permission_mode_too_wide")
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn child_cannot_start_with_the_owner_preset(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let mut args = inside();
+    args["preset"] = json!("owner");
+    assert_eq!(code(f.spawn(args).await), Code::ProfileUnknown);
+    assert!(f.child().await.is_none());
+}

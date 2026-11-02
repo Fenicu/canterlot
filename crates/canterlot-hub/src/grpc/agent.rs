@@ -209,19 +209,24 @@ async fn applied_and_pending(
 /// Режим и глубина сессии вызывающего агента для правил пресетов.
 struct CallerSession {
     read_only: bool,
+    delegated: bool,
 }
 
 async fn caller_session(pool: &sqlx::PgPool, conversation: Uuid) -> Result<CallerSession, Status> {
-    let read_only: bool = sqlx::query_scalar(
+    let (read_only, delegated): (bool, bool) = sqlx::query_as(
         "select permission_mode='read_only'
-                  or coalesce(pending_settings->>'permission_mode','')='read_only'
+                  or coalesce(pending_settings->>'permission_mode','')='read_only',
+                spawn_depth>0
          from conversations where id=$1",
     )
     .bind(conversation)
     .fetch_one(pool)
     .await
     .map_err(|_| Status::internal("database"))?;
-    Ok(CallerSession { read_only })
+    Ok(CallerSession {
+        read_only,
+        delegated,
+    })
 }
 
 async fn list(
@@ -383,6 +388,15 @@ async fn apply(
         Ok(args) => args,
         Err(_) => return Ok(err("invalid_arguments", "Некорректный вызов".into())),
     };
+    // Пресет owner включает память владельца: делегату её не дают.
+    if args.id == crate::presets::BUILTIN_OWNER_ID
+        && caller_session(pool, conversation).await?.delegated
+    {
+        return Ok(err(
+            "preset_not_allowed",
+            "Делегированной сессии пресет owner недоступен".into(),
+        ));
+    }
     // Ссылка проверяется сменой настроек; висячая смена видна в PWA.
     let key = format!("agent:{call_id}");
     if let Err(error) = crate::conversations::change_settings(

@@ -275,7 +275,7 @@ fn preset_tool_description(mcp_name: &str) -> &'static str {
             "Create a preset (no `id`) or replace the title, description and text of a preset this session created (`id` + `base_revision` from the list); built-ins and presets of the owner or other sessions cannot be changed, and a read_only session cannot save; saving never changes running sessions; the preset is marked as made by an agent."
         }
         "canterlot_preset_apply" => {
-            "Apply a preset to this session only, from the next turn; canterlot restarts the agent between turns with the conversation history kept; in Claude Code the restart waits until the background tasks of this session finish, they are not stopped; call it once, not in a loop."
+            "Apply a preset to this session only, from the next turn; a session started by another agent cannot apply `owner`; canterlot restarts the agent between turns with the conversation history kept; in Claude Code the restart waits until the background tasks of this session finish, they are not stopped; call it once, not in a loop."
         }
         _ => "Preset tool.",
     }

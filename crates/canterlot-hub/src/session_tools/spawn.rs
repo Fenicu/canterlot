@@ -334,6 +334,13 @@ async fn resolve_preset(
 ) -> Result<String, ToolError> {
     let unknown = || ToolError::new(ToolErrorCode::ProfileUnknown);
     let reference = PresetRef::parse(requested.unwrap_or(DEFAULT_PRESET)).map_err(|_| unknown())?;
+    // Пресет owner включает память владельца, а потомок всегда делегирован.
+    if reference == PresetRef::Owner {
+        return Err(ToolError::with_message(
+            ToolErrorCode::ProfileUnknown,
+            "The owner preset is not available to delegated sessions",
+        ));
+    }
     if let PresetRef::Custom(id) = &reference {
         let alive: bool = sqlx::query_scalar(
             "select exists(select 1 from instruction_presets
