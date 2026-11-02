@@ -11,7 +11,7 @@ import { OpJournal } from "#lib/ops/journal.js";
 import { sendOp } from "#lib/ops/request.js";
 import { openDb, type Idb } from "#lib/storage/idb.js";
 import { bindOwner, onOwnerRetired } from "#lib/storage/owner.js";
-import { staleness } from "#lib/pwa/offline.js";
+import { staleness } from "#lib/pwa/sync-state.js";
 import { sweepShares } from "#lib/pwa/share.js";
 import { ListStore, type ListSnapshot } from "#lib/stores/list.svelte.js";
 import {

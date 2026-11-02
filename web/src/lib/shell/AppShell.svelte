@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page, updated } from '$app/state';
+  import { version as appVersion } from '$app/env';
   import { clock } from '#lib/clock.js';
   import { browserRuntime, leaseChatSession } from '#lib/screens/chat/open.js';
   import SessionList from '#lib/screens/sessions/SessionList.svelte';
@@ -14,7 +15,6 @@
   import { applyMotion } from '#lib/screens/settings/preferences.js';
   import { installation, register } from '#lib/pwa/register.js';
   import type { UpdateController } from '#lib/pwa/update.js';
-  import { staleness } from '#lib/pwa/offline.js';
   import { announce } from '#lib/a11y/announce.js';
   import { followSignout, watchSignout } from '#lib/pwa/signout.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -28,7 +28,6 @@
   let update = $state<UpdateController | null>(null);
   let updateState = $state('idle');
   let updateMessage = $state('');
-  let offlineLabel = $state('');
   let updateError = $state('');
   const mode: LayoutMode = $derived(layoutMode(width || 412));
   const path = $derived(page.url.pathname);
@@ -96,32 +95,30 @@
     const stopSignout = watchSignout(() => {
       void followSignout({ ls: localStorage, reload: () => window.location.reload() });
     });
-    const offlineChanged = () => { offlineLabel = staleness.label(Date.now()); };
-    const online = () => staleness.setOnline(navigator.onLine);
     const loadRuntime = () => {
       void browserRuntime().then((value) => {
         runtime = value;
-        offlineChanged();
       }).catch(() => undefined);
     };
     const retryRuntime = () => {
       if (!runtime && !document.hidden) loadRuntime();
     };
-    staleness.addEventListener('change', offlineChanged);
-    window.addEventListener('online', online);
     window.addEventListener('online', retryRuntime);
-    window.addEventListener('offline', online);
     window.addEventListener('pageshow', retryRuntime);
     document.addEventListener('visibilitychange', retryRuntime);
-    online();
     const changed = () => { updateState = update?.state ?? 'idle'; updateMessage = update?.message ?? ''; };
     const incompatible = () => update?.incompatible();
+    const checkUpdate = () => { void update?.check().catch(() => undefined); };
     window.addEventListener('canterlot:incompatible', incompatible);
+    window.addEventListener('focus', checkUpdate);
+    window.addEventListener('pageshow', checkUpdate);
+    window.addEventListener('online', checkUpdate);
     void register({
       isSafe: () => !runtime?.drafts.pending && !(document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest('[data-composer]') && document.activeElement.value.length > 0),
       flushDrafts: async () => {
         await runtime?.drafts.flush();
-      }
+      },
+      version: appVersion
     }).then((value) => {
       if (!alive) {
         value?.destroy();
@@ -132,9 +129,10 @@
       update = value;
       update?.addEventListener('change', changed);
       changed();
+      void update?.check().catch(() => undefined);
     }).catch(() => { updateError = 'Не удалось подготовить обновление. Повторите при восстановлении связи'; });
     const visibility = () => {
-      if (document.hidden && update?.state === 'ready') void applyUpdate(false);
+      if (document.hidden && update?.state === 'available') void applyUpdate(false);
       else if (!document.hidden) void update?.check().catch(() => undefined);
     };
     document.addEventListener('visibilitychange', visibility);
@@ -151,13 +149,13 @@
       stopSignout();
       update?.removeEventListener('change', changed);
       update?.destroy();
-      staleness.removeEventListener('change', offlineChanged);
-      window.removeEventListener('online', online);
       window.removeEventListener('online', retryRuntime);
-      window.removeEventListener('offline', online);
       window.removeEventListener('pageshow', retryRuntime);
       document.removeEventListener('visibilitychange', retryRuntime);
       window.removeEventListener('canterlot:incompatible', incompatible);
+      window.removeEventListener('focus', checkUpdate);
+      window.removeEventListener('pageshow', checkUpdate);
+      window.removeEventListener('online', checkUpdate);
       document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('resize', read);
       window.clearInterval(timer);
@@ -177,9 +175,8 @@
     if (runtime?.connection.status.phase === 'incompatible') update?.incompatible();
   });
   $effect(() => {
-    if (offlineLabel) announce(offlineLabel);
-    else if (updateState === 'failed' && updateMessage) announce(updateMessage);
-    else if (updateState === 'available' || updateState === 'ready') announce('Доступна новая версия');
+    if (updateState === 'failed' && updateMessage) announce(updateMessage);
+    else if (updateState === 'available') announce('Доступна новая версия');
   });
 </script>
 
@@ -190,7 +187,6 @@
       since={runtime?.connection.status.since ?? 0}
       now={now}
       scope={runtime?.list.status ?? 'idle'}
-      offline={offlineLabel}
       update={updateState}
       updateMessage={updateMessage}
       failure={updateError}

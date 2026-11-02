@@ -10,7 +10,6 @@
     since,
     now,
     scope,
-    offline = '',
     update = 'idle',
     updateMessage = '',
     failure = '',
@@ -22,7 +21,6 @@
     since: number;
     now: number;
     scope: ScopeStatus;
-    offline?: string;
     update?: string;
     updateMessage?: string;
     failure?: string;
@@ -50,7 +48,6 @@
 
   // Баннер всегда один: при нескольких состояниях показывается самое важное.
   const view = $derived.by((): View | null => {
-    if (offline) return { kind: 'offline', text: offline, tone: 'warning' };
     if (update === 'failed') return { kind: 'update', text: updateMessage || 'Не удалось обновить приложение', tone: 'danger', action: { label: 'Повторить', run: () => onupdate?.() } };
     if (update !== 'idle') {
       return update === 'applying'
@@ -66,7 +63,7 @@
     if (phase === 'live' && now < until) return { kind: 'link', text: 'Связь восстановлена', tone: 'success' };
     return null;
   });
-  const message = $derived(view && view.kind !== 'offline' && view.kind !== 'update' ? view.text : '');
+  const message = $derived(view && view.kind !== 'update' ? view.text : '');
 
   $effect(() => {
     if (message) announce(message);
@@ -77,8 +74,7 @@
   <div
     class="banner"
     data-tone={view.tone}
-    data-banner={view.kind === 'offline' || view.kind === 'update' || view.kind === 'failure' ? undefined : view.kind}
-    data-offline={view.kind === 'offline' ? '' : undefined}
+    data-banner={view.kind === 'update' || view.kind === 'failure' ? undefined : view.kind}
     data-update={view.kind === 'update' ? '' : undefined}
   >
     <Icon name={view.tone === 'warning' || view.tone === 'danger' ? 'warning' : 'info'} />

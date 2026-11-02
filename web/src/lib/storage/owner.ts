@@ -55,11 +55,7 @@ export async function bindOwner(
   if (typeof caches !== "undefined" && typeof caches.keys === "function") {
     try {
       const cacheKeys = await caches.keys();
-      await Promise.all(
-        cacheKeys
-          .filter((k) => !k.startsWith("canterlot-shell-"))
-          .map((k) => caches.delete(k)),
-      );
+      await Promise.all(cacheKeys.map((k) => caches.delete(k)));
     } catch {
       // Игнорируем ошибки доступа к ServiceWorker cache
     }

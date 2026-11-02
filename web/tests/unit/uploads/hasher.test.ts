@@ -43,7 +43,7 @@ describe("uploads/hasher", () => {
     sliceSpy.mockRestore();
   });
 
-  it("production_csp_allows_a_module_worker", () => {
+  it("production_csp_allows_the_hashing_module_worker", () => {
     expect(productionCsp()).toContain("worker-src 'self' blob:");
   });
 });

@@ -14,8 +14,7 @@ export function manifest(css) {
       { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
       { src: '/icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
     ],
-    shortcuts: [{ name: 'Новая сессия', url: '/new' }],
-    share_target: { action: '/_share', method: 'POST', enctype: 'multipart/form-data', params: { title: 'title', text: 'text', url: 'url', files: [{ name: 'files', accept: ['*/*'] }] } }
+    shortcuts: [{ name: 'Новая сессия', url: '/new' }]
   };
 }
 
