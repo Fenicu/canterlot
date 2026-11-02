@@ -2201,6 +2201,8 @@ impl Supervisor {
             self.faults.abort_at("before_first_byte");
             self.ready = false;
             self.aborting_turn = false;
+            // Новый ход: выход процесса после него — уже не остановка пользователем.
+            self.interrupted = false;
             self.active_turn = Some(key.0);
             let Some(adapter) = self.adapter.as_mut() else {
                 break;
@@ -4095,5 +4097,42 @@ mod tests {
             "the request stays open for the owner"
         );
         assert!(state.lock().unwrap().refused.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupt_mark_does_not_outlive_the_next_turn() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        supervisor.on_interrupt("int-1".into(), 1).await.unwrap();
+        assert!(supervisor.interrupted);
+        supervisor
+            .on_adapter_event(AdapterEvent::RunFinished {
+                input_command_id: first.0,
+                usage: Vec::new(),
+                context_tokens: 0,
+                context_window_tokens: 0,
+            })
+            .await
+            .unwrap();
+        assert!(
+            supervisor.interrupted,
+            "an exit right after it is still a user stop"
+        );
+        supervisor
+            .on_adapter_event(AdapterEvent::Phase {
+                phase: crate::adapter::Phase::AwaitingInput,
+                tool_name: None,
+                summary: None,
+            })
+            .await
+            .unwrap();
+        queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        assert!(
+            !supervisor.interrupted,
+            "a later clean exit is a normal exit"
+        );
     }
 }
