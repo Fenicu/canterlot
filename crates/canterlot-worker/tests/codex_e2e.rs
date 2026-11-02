@@ -3066,6 +3066,7 @@ async fn compact_starts_thread_compaction_and_marks_the_episode_manual() {
         .unwrap();
     assert!(matches!(outcome, CompactOutcome::Accepted));
     let mut finished = None;
+    let mut compacted = None;
     for _ in 0..50 {
         match tokio::time::timeout(Duration::from_secs(2), fake.adapter.next_event()).await {
             Ok(AdapterEvent::CompactionFinished {
@@ -3075,16 +3076,26 @@ async fn compact_starts_thread_compaction_and_marks_the_episode_manual() {
                 post_tokens,
             }) => {
                 finished = Some((manual, ok, pre_tokens, post_tokens));
-                break;
+            }
+            Ok(AdapterEvent::Compacted { ok }) => {
+                compacted = Some(ok);
             }
             Ok(_) => continue,
             Err(_) => break,
+        }
+        if finished.is_some() && compacted.is_some() {
+            break;
         }
     }
     assert_eq!(
         finished,
         Some((true, true, 0, 0)),
         "manual episode must finish"
+    );
+    assert_eq!(
+        compacted,
+        Some(true),
+        "manual compaction must complete the hub command"
     );
     assert!(
         fake.stdin_methods()
