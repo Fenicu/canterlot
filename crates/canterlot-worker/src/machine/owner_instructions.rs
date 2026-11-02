@@ -208,7 +208,10 @@ fn verified_meta(file: &std::fs::File) -> Option<std::fs::Metadata> {
 
 /// Открыть ожидаемый путь и проверить дескриптор. Единственная проверка
 /// по пути — родительский каталог до открытия; дальше только дескриптор.
-fn open_checked(expected: &Path, base: &Path) -> Result<(std::fs::File, std::fs::Metadata), ReadOutcome> {
+fn open_checked(
+    expected: &Path,
+    base: &Path,
+) -> Result<(std::fs::File, std::fs::Metadata), ReadOutcome> {
     let (Some(parent), Some(name)) = (expected.parent(), expected.file_name()) else {
         return Err(ReadOutcome::Absent);
     };
@@ -867,7 +870,10 @@ mod tests {
         std::fs::remove_file(r.codex_home.join("AGENTS.md")).unwrap();
         hard_link(vault.join("creds"), r.codex_home.join("AGENTS.md")).unwrap();
         let global = read_one(KIND_CODEX_GLOBAL, "", "", &r, "req");
-        assert!(!global.present, "жёсткая ссылка на месте AGENTS.md не читается");
+        assert!(
+            !global.present,
+            "жёсткая ссылка на месте AGENTS.md не читается"
+        );
         assert!(global.content.is_empty());
     }
 
