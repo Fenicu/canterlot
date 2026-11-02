@@ -277,6 +277,9 @@ pub enum PutError {
     Rejected,
     #[error("io")]
     Io,
+    /// Файл пришёл без идентификатора блока: блок нельзя связать с лентой.
+    #[error("share_block_missing")]
+    NoBlock,
 }
 
 impl PutError {
@@ -287,6 +290,7 @@ impl PutError {
             Self::Conflict => "conflict",
             Self::Rejected => "rejected",
             Self::Io => "io",
+            Self::NoBlock => "share_block_missing",
         }
     }
 }

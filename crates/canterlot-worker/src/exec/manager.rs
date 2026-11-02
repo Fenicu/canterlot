@@ -1735,6 +1735,11 @@ impl Actor {
             up::Msg::SjBatch(batch) => self.on_batch(batch).await?,
             up::Msg::MediaUpload(request) => self.start_upload(request),
             up::Msg::ShareUpload(request) => self.start_share(request),
+            up::Msg::ShareCancel(cancel) => {
+                if let Ok(share_id) = Uuid::parse_str(&cancel.share_id) {
+                    self.uploads.remove(&share_id);
+                }
+            }
             up::Msg::Exited(exited) => {
                 self.cancel_fetches().await?;
                 self.uploads.clear();
@@ -2246,8 +2251,15 @@ impl Actor {
             .clone();
         let sink = self.shared.media_sink.subscribe();
         let backoff_cap = self.shared.attachment_config.fetch_backoff_cap;
-        // Тот же блок, что в записи BlockFile: иначе хаб отвергнет загрузку без UUID.
-        let block_id = Uuid::parse_str(&request.block_id).unwrap_or(share_id);
+        // Тот же блок, что в записи BlockFile: без него хаб молча не свяжет файл,
+        // поэтому угадывать нельзя — отказ возвращается агенту.
+        let Ok(block_id) = Uuid::parse_str(&request.block_id) else {
+            let _ = sender.send(Msg::ShareFinished {
+                share_id,
+                result: Err(PutError::NoBlock),
+            });
+            return;
+        };
         let header = MediaHeader {
             media_id: request.share_id,
             execution_id: self.id.to_string(),
@@ -2837,6 +2849,91 @@ mod tests {
                 .call(move |store| Ok(open(store)?.command_state(&cid)?.unwrap().terminal))
                 .await
                 .unwrap()
+        );
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn share_without_block_id_is_refused_to_the_agent() {
+        let root = tempfile::tempdir().unwrap();
+        let store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let id = Uuid::now_v7();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        actor.exec_dir = Some(root.path().to_owned());
+        let (self_tx, mut self_rx) = mpsc::unbounded_channel();
+        manager
+            .shared
+            .actors
+            .lock()
+            .unwrap()
+            .insert(id, self_tx);
+        let share_id = Uuid::now_v7();
+        actor
+            .on_up(up::Msg::ShareUpload(
+                canterlot_proto::worker::ipc::ShareUpload {
+                    share_id: share_id.to_string(),
+                    call_id: Uuid::now_v7().to_string(),
+                    name: "doc.txt".into(),
+                    title: String::new(),
+                    note: String::new(),
+                    mime: "text/plain".into(),
+                    size: 6,
+                    sha256: "e".repeat(64),
+                    width: 0,
+                    height: 0,
+                    block_id: String::new(),
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(actor.uploads.is_empty(), "nothing is uploaded");
+        match self_rx.try_recv().expect("refusal") {
+            Msg::ShareFinished {
+                share_id: refused,
+                result: Err(error),
+            } => {
+                assert_eq!(refused, share_id);
+                assert_eq!(error.reason(), "share_block_missing");
+            }
+            _ => panic!("a share without a block id must be refused"),
+        }
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn share_cancel_aborts_the_upload_task() {
+        let root = tempfile::tempdir().unwrap();
+        let store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let id = Uuid::now_v7();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        let share_id = Uuid::now_v7();
+        actor.uploads.insert(
+            share_id,
+            MediaTask(tokio::spawn(std::future::pending::<()>())),
+        );
+        actor
+            .on_up(up::Msg::ShareCancel(
+                canterlot_proto::worker::ipc::ShareCancel {
+                    share_id: share_id.to_string(),
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(
+            actor.uploads.is_empty(),
+            "the worker upload task is cancelled"
         );
         drop(actor);
         manager.shutdown().await;
