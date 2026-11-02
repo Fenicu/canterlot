@@ -14,7 +14,7 @@ use canterlot_proto::limits::MAX_SHARE_BYTES;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::owner_instructions::denied_name;
+use super::{nofollow, owner_instructions::denied_name};
 use crate::media;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +172,21 @@ pub fn mime_for(name: &str, head: &[u8]) -> String {
     .into()
 }
 
+/// Открыть файл в уже проверенном раскрытом каталоге: каталог открывается от корня
+/// без ссылок, финал от его дескриптора. Подмена каталога ссылкой после проверки даёт отказ.
+fn open_resolved(resolved_parent: &Path, name: &str) -> Result<fs::File, ShareError> {
+    let link_or = |error, otherwise| {
+        if nofollow::is_link_error(error) {
+            ShareError::Symlink
+        } else {
+            otherwise
+        }
+    };
+    let parent = nofollow::open_dir(resolved_parent)
+        .map_err(|error| link_or(error, ShareError::Unreadable))?;
+    nofollow::open_file(&parent, name).map_err(|error| link_or(error, ShareError::Unreadable))
+}
+
 /// Скопировать проверенный файл в `exec_dir/media/<id>` и посчитать SHA-256.
 pub fn prepare(
     exec_dir: &Path,
@@ -194,26 +209,7 @@ pub fn prepare(
     if denied_lexical(path) || denied_resolved(&resolved_parent.join(&name)) {
         return Err(ShareError::Denied);
     }
-    let parent_fd = rustix::fs::open(
-        &resolved_parent,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|_| ShareError::Unreadable)?;
-    let file = rustix::fs::openat(
-        &parent_fd,
-        name.as_str(),
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK,
-        rustix::fs::Mode::empty(),
-    )
-    .map(fs::File::from)
-    .map_err(|error| {
-        if error == rustix::io::Errno::LOOP {
-            ShareError::Symlink
-        } else {
-            ShareError::Unreadable
-        }
-    })?;
+    let file = open_resolved(&resolved_parent, &name)?;
     let meta = file.metadata().map_err(|_| ShareError::Unreadable)?;
     if meta.file_type().is_symlink() {
         return Err(ShareError::Symlink);
@@ -301,6 +297,25 @@ pub fn prepare(
 mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt, symlink};
+
+    #[test]
+    fn a_parent_swapped_for_a_link_between_check_and_open_is_refused() {
+        let dir = dir();
+        let secret = dir.path().join("secret");
+        fs::create_dir(&secret).unwrap();
+        fs::write(secret.join("id_ed25519"), b"private").unwrap();
+        let shared = dir.path().join("d");
+        fs::create_dir(&shared).unwrap();
+        fs::write(shared.join("id_ed25519"), b"public").unwrap();
+        let resolved = fs::canonicalize(&shared).unwrap();
+        assert!(!denied_resolved(&resolved.join("id_ed25519")));
+        fs::rename(&shared, dir.path().join("d.old")).unwrap();
+        symlink(&secret, &shared).unwrap();
+        assert_eq!(
+            open_resolved(&resolved, "id_ed25519").unwrap_err(),
+            ShareError::Symlink
+        );
+    }
 
     fn dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
