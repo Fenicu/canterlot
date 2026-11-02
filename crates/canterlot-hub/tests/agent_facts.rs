@@ -1776,3 +1776,80 @@ async fn migration_closes_runs_of_ended_executions_and_clears_their_overlap(
     assert!(!overlapped(&pool, &ib).await);
     Ok(())
 }
+
+async fn wait_request(pool: &PgPool, r: &Run, from: i64, to: i64, state: &str) {
+    sqlx::query(
+        "insert into requests(id,conversation_id,execution_id,generation,kind,native_request_id,state,request_payload,created_at,updated_at)
+         values($1,$2,$3,$4,'permission',$5,$6,'{}',$7,$8)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(r.seed.conversation_id)
+    .bind(r.execution.execution_id)
+    .bind(r.execution.generation)
+    .bind(format!("wait:{from}"))
+    .bind(state)
+    .bind(DateTime::from_timestamp_millis(from).unwrap())
+    .bind(DateTime::from_timestamp_millis(to).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+async fn stored_working(pool: &PgPool, i: &SubmittedInput) -> Option<i64> {
+    sqlx::query_scalar("select working_ms from runs where input_command_id=$1")
+        .bind(i.command_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+// Рабочее время закрытого хода считается один раз при закрытии, а не на каждый снимок списка.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn closed_runs_store_their_working_time(pool: PgPool) -> TestResult {
+    let a = Run::new(&pool).await;
+    let ms = Utc::now().timestamp_millis() - 600_000;
+    let ia = begin_run(&pool, &a, ms).await;
+    wait_request(&pool, &a, ms + 60_000, ms + 360_000, "decision_applied").await;
+    end_run(&pool, &a, &ia, ms, 600_000).await;
+    assert_eq!(stored_working(&pool, &ia).await, Some(300_000));
+    sqlx::query("delete from requests").execute(&pool).await?;
+    assert_eq!(working(&pool, &ia).await, 300_000);
+
+    let b = Run::new(&pool).await;
+    let ib = begin_run(&pool, &b, ms).await;
+    wait_request(&pool, &b, ms + 60_000, ms + 60_000, "open").await;
+    stop(&pool, &b, ExecutionState::Stopped, "normal_exit").await;
+    let (duration, stored): (i64, Option<i64>) =
+        sqlx::query_as("select duration_ms,working_ms from runs where input_command_id=$1")
+            .bind(ib.command_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored, Some(60_000.min(duration)));
+    Ok(())
+}
+
+// Миграция сохраняет рабочее время уже закрытых ходов.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn migration_stores_working_time_of_closed_runs(pool: PgPool) -> TestResult {
+    let a = Run::new(&pool).await;
+    let ms = Utc::now().timestamp_millis() - 600_000;
+    let ia = begin_run(&pool, &a, ms).await;
+    wait_request(&pool, &a, ms + 60_000, ms + 360_000, "decision_applied").await;
+    end_run(&pool, &a, &ia, ms, 600_000).await;
+    let b = Run::new(&pool).await;
+    let open = begin_run(&pool, &b, Utc::now().timestamp_millis()).await;
+    sqlx::raw_sql(
+        "drop view run_working; alter table runs drop column working_ms;
+         create view run_working as select input_command_id, conversation_id, 0::bigint working_ms from runs",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!("../migrations/0046_run_working_union.sql"))
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql(include_str!("../migrations/0051_run_working_stored.sql"))
+        .execute(&pool)
+        .await?;
+    assert_eq!(stored_working(&pool, &ia).await, Some(300_000));
+    assert_eq!(stored_working(&pool, &open).await, None);
+    Ok(())
+}
