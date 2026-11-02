@@ -20,10 +20,14 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get))
         .routes(routes!(recent))
         .routes(routes!(suggest))
+        .routes(routes!(owner_overview))
+        .routes(routes!(owner_file))
 }
 
 /// Дольше воркера: его собственный срок 2 с, ответ о пустом списке ещё должен дойти.
 const SUGGEST_WAIT: Duration = Duration::from_secs(3);
+/// Чтение файла владельца: воркер читает с диска, срок с запасом.
+const OWNER_WAIT: Duration = Duration::from_secs(5);
 #[derive(Serialize, ToSchema)]
 pub struct MachineView {
     pub id: Uuid,
@@ -277,6 +281,227 @@ async fn require_owned(conn: &mut PgConnection, owner: Uuid, id: Uuid) -> Result
     } else {
         Err(ApiError::new(ErrorCode::NotFound))
     }
+}
+
+/// Вид файла инструкций владельца: только из списка, путь строит воркер.
+fn valid_owner_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "claude_user"
+            | "claude_home"
+            | "codex_global"
+            | "codex_override"
+            | "opencode_global"
+            | "memory_index"
+            | "memory_file"
+    )
+}
+
+fn valid_owner_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-' || b == b'=')
+}
+
+fn valid_owner_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.ends_with(".md")
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains('\0')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+}
+
+fn owner_mtime(mtime_ms: u64) -> Option<String> {
+    if mtime_ms == 0 {
+        return None;
+    }
+    chrono::DateTime::from_timestamp_millis(i64::try_from(mtime_ms).ok()?)
+        .map(|time| conversations::time(time.with_timezone(&chrono::Utc)))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OwnerFileView {
+    pub kind: String,
+    pub harness: String,
+    pub path: String,
+    pub present: bool,
+    pub size: u64,
+    pub mtime: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OwnerMemoryProjectView {
+    pub id: String,
+    pub files: u64,
+    pub has_index: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OwnerOverviewView {
+    pub files: Vec<OwnerFileView>,
+    pub memory_projects: Vec<OwnerMemoryProjectView>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OwnerMemoryFileView {
+    pub name: String,
+    pub size: u64,
+    pub mtime: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OwnerFileContent {
+    pub kind: String,
+    pub harness: String,
+    pub path: String,
+    pub present: bool,
+    pub size: u64,
+    pub mtime: Option<String>,
+    pub truncated: bool,
+    pub content: String,
+    pub files: Vec<OwnerMemoryFileView>,
+}
+
+#[derive(Deserialize, IntoParams)]
+pub struct OwnerFileParams {
+    pub kind: String,
+    #[serde(default)]
+    pub project: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+fn owner_harness(kind: &str) -> &'static str {
+    if kind.starts_with("claude_") || kind.starts_with("memory_") {
+        "claude"
+    } else if kind.starts_with("codex_") {
+        "codex"
+    } else {
+        "opencode"
+    }
+}
+
+fn map_owner_error(error: crate::session::OwnerReadError) -> ApiError {
+    match error {
+        crate::session::OwnerReadError::CapabilityMissing => {
+            ApiError::new(ErrorCode::CapabilityMissing)
+        }
+        crate::session::OwnerReadError::Unavailable => {
+            ApiError::new(ErrorCode::MachineUnavailable)
+        }
+    }
+}
+
+#[utoipa::path(get,path="/api/v1/machines/{id}/owner-instructions",tag="machines",params(("id"=Uuid,Path)),responses((status=200,description="Метаданные инструкций владельца и проекты памяти",body=OwnerOverviewView),(status=409,description="Воркер без возможности или машина недоступна")))]
+async fn owner_overview(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<OwnerOverviewView>, ApiError> {
+    let mut conn = s.pool.acquire().await?;
+    require_owned(&mut conn, o.owner_id, id).await?;
+    drop(conn);
+    let reply = s
+        .registry
+        .owner_overview(id, OWNER_WAIT)
+        .await
+        .map_err(map_owner_error)?;
+    // Ответ воркера доверен частично: виды только из списка, остальное — данные.
+    let mut files = Vec::new();
+    for file in reply.files {
+        if !valid_owner_kind(&file.kind) {
+            continue;
+        }
+        files.push(OwnerFileView {
+            harness: owner_harness(&file.kind).into(),
+            kind: file.kind,
+            path: file.path,
+            present: file.present,
+            size: file.size,
+            mtime: owner_mtime(file.mtime_ms),
+        });
+    }
+    let mut memory_projects = Vec::new();
+    for project in reply.projects.into_iter().take(200) {
+        if !valid_owner_id(&project.id) {
+            continue;
+        }
+        memory_projects.push(OwnerMemoryProjectView {
+            id: project.id,
+            files: project.files,
+            has_index: project.has_index,
+        });
+    }
+    Ok(Json(OwnerOverviewView {
+        files,
+        memory_projects,
+    }))
+}
+
+#[utoipa::path(get,path="/api/v1/machines/{id}/owner-instructions/file",tag="machines",params(("id"=Uuid,Path),OwnerFileParams),responses((status=200,description="Содержимое одного файла инструкций владельца",body=OwnerFileContent),(status=409,description="Воркер без возможности или машина недоступна")))]
+async fn owner_file(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiQuery(p): ApiQuery<OwnerFileParams>,
+) -> Result<Json<OwnerFileContent>, ApiError> {
+    let mut conn = s.pool.acquire().await?;
+    require_owned(&mut conn, o.owner_id, id).await?;
+    drop(conn);
+    if !valid_owner_kind(&p.kind) {
+        return Err(ApiError::new(ErrorCode::InvalidRequest));
+    }
+    let needs_project = p.kind == "memory_index" || p.kind == "memory_file";
+    if needs_project {
+        if !valid_owner_id(&p.project) {
+            return Err(ApiError::new(ErrorCode::InvalidRequest));
+        }
+        if p.kind == "memory_file" && !valid_owner_name(&p.name) {
+            return Err(ApiError::new(ErrorCode::InvalidRequest));
+        }
+        if p.kind == "memory_index" && !p.name.is_empty() {
+            return Err(ApiError::new(ErrorCode::InvalidRequest));
+        }
+    } else if !p.project.is_empty() || !p.name.is_empty() {
+        return Err(ApiError::new(ErrorCode::InvalidRequest));
+    }
+    // Содержимое не кэшируется в базе: только ответ живого воркера.
+    let reply = s
+        .registry
+        .owner_file(id, &p.kind, &p.project, &p.name, OWNER_WAIT)
+        .await
+        .map_err(map_owner_error)?;
+    if reply.kind != p.kind {
+        return Err(ApiError::new(ErrorCode::InvalidRequest));
+    }
+    let mut files = Vec::new();
+    for file in reply.files.into_iter().take(50) {
+        if !valid_owner_name(&file.name) {
+            continue;
+        }
+        files.push(OwnerMemoryFileView {
+            name: file.name,
+            size: file.size,
+            mtime: owner_mtime(file.mtime_ms),
+        });
+    }
+    Ok(Json(OwnerFileContent {
+        harness: owner_harness(&reply.kind).into(),
+        kind: reply.kind,
+        path: reply.path,
+        present: reply.present,
+        size: reply.size,
+        mtime: owner_mtime(reply.mtime_ms),
+        truncated: reply.truncated,
+        content: reply.content,
+        files,
+    }))
 }
 
 #[derive(ToSchema)]

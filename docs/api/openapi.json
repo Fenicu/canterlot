@@ -3512,6 +3512,172 @@
         }
       }
     },
+    "/api/v1/machines/{id}/owner-instructions": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "operationId": "get__api_v1_machines__id__owner_instructions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Метаданные инструкций владельца и проекты памяти",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerOverviewView"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Воркер без возможности или машина недоступна",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{id}/owner-instructions/file": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "operationId": "get__api_v1_machines__id__owner_instructions_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Содержимое одного файла инструкций владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerFileContent"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Воркер без возможности или машина недоступна",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{id}/workdirs/recent": {
       "get": {
         "tags": [
@@ -8002,6 +8168,156 @@
           }
         },
         "additionalProperties": false
+      },
+      "OwnerFileContent": {
+        "type": "object",
+        "required": [
+          "kind",
+          "harness",
+          "path",
+          "present",
+          "size",
+          "truncated",
+          "content",
+          "files"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnerMemoryFileView"
+            }
+          },
+          "harness": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "mtime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "OwnerFileView": {
+        "type": "object",
+        "required": [
+          "kind",
+          "harness",
+          "path",
+          "present",
+          "size"
+        ],
+        "properties": {
+          "harness": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "mtime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "OwnerMemoryFileView": {
+        "type": "object",
+        "required": [
+          "name",
+          "size"
+        ],
+        "properties": {
+          "mtime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "OwnerMemoryProjectView": {
+        "type": "object",
+        "required": [
+          "id",
+          "files",
+          "has_index"
+        ],
+        "properties": {
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "has_index": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "OwnerOverviewView": {
+        "type": "object",
+        "required": [
+          "files",
+          "memory_projects"
+        ],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnerFileView"
+            }
+          },
+          "memory_projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnerMemoryProjectView"
+            }
+          }
+        }
       },
       "PartView": {
         "type": "object",
