@@ -485,8 +485,8 @@ fn unknown_and_non_json_lines_never_end_the_stream() {
         if line.contains("command_lifecycle") {
             lifecycles += 1;
             assert!(
-                matches!(parser.feed(line), single if single.len() == 1 && matches!(single[0], Parsed::Ignored)),
-                "lifecycle frames are ignored"
+                matches!(parser.feed(line), single if single.len() == 1 && matches!(single[0], Parsed::CommandLifecycle { .. })),
+                "lifecycle frames are recognized as the CLI's receipt"
             );
         }
     }

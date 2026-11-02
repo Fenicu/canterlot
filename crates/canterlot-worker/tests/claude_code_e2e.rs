@@ -137,7 +137,14 @@ impl Fake {
         {
             TransmitOutcome::Accepted(p) => {
                 assert_eq!(p.command_id, t.command_id);
-                assert_eq!(p.kind, "claude_code_answer_frame");
+                assert!(
+                    matches!(
+                        p.kind,
+                        "claude_code_answer_frame" | "claude_code_command_lifecycle"
+                    ),
+                    "unexpected proof kind {}",
+                    p.kind
+                );
             }
             other => panic!("delivery: {other:?}"),
         }
@@ -1137,6 +1144,41 @@ async fn request_closed_by_interrupt_is_not_closed_again_on_relay_disconnect() {
         }
     }
     assert_eq!(closed, 1);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn command_lifecycle_proves_delivery_before_a_slow_first_answer_frame() {
+    let id = Uuid::now_v7();
+    let mut f = Fake::new(vec![vec![
+        json!({"type":"command_lifecycle","command_uuid":"@input","state":"started"}),
+        json!("@sleep:900"),
+        json!({"type":"stream_event","parent_tool_use_id":null,"user_message_uuids":["@input"],"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"],"modelUsage":{}}),
+    ]]);
+    // Срок доставки короче паузы двойника перед первым кадром ответа: приём доказывает
+    // кадр CLI о старте команды, а не ожидание холодного кэша модели.
+    f.adapter = Box::new(adapter::claude_code::ClaudeCodeAdapter::new(
+        ClaudeCodeConfig {
+            executable: f.dir.path().join("fake-cli"),
+            ..Default::default()
+        },
+        f.dir.path().join("exec"),
+        Duration::from_millis(300),
+    ));
+    f.start().await;
+    let outcome = tokio::time::timeout(WAIT, f.adapter.transmit(&tx(id), &f.group))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            TransmitOutcome::Accepted(ref p)
+                if p.command_id == id && p.kind == "claude_code_command_lifecycle"
+        ),
+        "the started frame proves delivery before the answer, got {outcome:?}"
+    );
+    let _ = f.finish().await;
     f.close().await;
 }
 

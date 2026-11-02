@@ -31,10 +31,6 @@ const TOOL_LAUNCHED_SUMMARY: &str = "async_launched";
 const MAX_UNKNOWN_TYPES: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
 
-/// Кадры, которые CLI шлёт на самом деле и которым реакция не нужна. Источник:
-/// записи в `docs/stage0/evidence/claude-code` и фикстуры воркера; новое имя
-/// сюда добавляют только по записанному кадру.
-const IGNORED_FRAMES: [&str; 1] = ["command_lifecycle"];
 const IGNORED_SYSTEM: [&str; 4] = [
     "api_retry",
     "task_progress",
@@ -143,6 +139,12 @@ pub enum Parsed {
     Replay {
         uuid: Uuid,
     },
+    /// Недокументированный, но записанный кадр CLI о судьбе нашего UUID: `queued`, `started`,
+    /// `completed` или `cancelled`. Раньше первого кадра модели доказывает приём.
+    CommandLifecycle {
+        command_id: Uuid,
+        state: String,
+    },
     ToolCallComplete {
         block_id: Uuid,
         tool_use_id: String,
@@ -190,6 +192,11 @@ impl std::fmt::Debug for Parsed {
                 .field("user_message_uuids", user_message_uuids)
                 .finish(),
             Self::Replay { uuid } => f.debug_struct("Replay").field("uuid", uuid).finish(),
+            Self::CommandLifecycle { command_id, state } => f
+                .debug_struct("CommandLifecycle")
+                .field("command_id", command_id)
+                .field("state", state)
+                .finish(),
             Self::ToolCallComplete {
                 block_id,
                 tool_use_id,
@@ -686,7 +693,10 @@ impl Parser {
                 }
             }
             Some("control_response") => self.feed_control_response(&value, &mut out),
-            Some(kind) if !IGNORED_FRAMES.contains(&kind) => {
+            Some("command_lifecycle") => {
+                self.feed_command_lifecycle(&value, &mut out);
+            }
+            Some(kind) => {
                 self.note_unknown(&mut out, "", Some(kind), Some(&value));
                 if out.is_empty() {
                     out.push(Parsed::Ignored);
@@ -695,6 +705,24 @@ impl Parser {
             _ => out.push(Parsed::Ignored),
         }
         out
+    }
+
+    fn feed_command_lifecycle(&self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+        let command_id = value
+            .get("command_uuid")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok());
+        let state = value
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .filter(|state| !state.is_empty());
+        match (command_id, state) {
+            (Some(command_id), Some(state)) => out.push(Parsed::CommandLifecycle {
+                command_id,
+                state: state.to_owned(),
+            }),
+            _ => out.push(Parsed::Ignored),
+        }
     }
 
     fn feed_system(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {

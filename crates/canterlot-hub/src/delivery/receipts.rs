@@ -214,6 +214,18 @@ pub async fn apply_input_receipt_in_tx(
                             input_id: target.input_id,
                         }
                 });
+                // Доказательство пришло после паузы, но ход уже начался: слот снова занят.
+                // Иначе хаб до конца хода считал бы исполнение свободным.
+                if slot == RunSlot::Free
+                    && matches!(
+                        target.execution_state.as_deref(),
+                        Some("created" | "starting" | "running" | "stopping")
+                    )
+                {
+                    slot = RunSlot::Running {
+                        input_id: target.input_id,
+                    };
+                }
             } else if matches!(slot, RunSlot::Dispatching { input_id, .. } if input_id == target.input_id)
             {
                 slot = if matches!(

@@ -43,8 +43,10 @@ for n,line in enumerate(sys.stdin,1):
         elif isinstance(frame,str) and frame.startswith('@sleep:'): time.sleep(int(frame.split(':')[1])/1000)
         elif frame=='@exit': sys.exit(7)
         else:
-            # "@input" в user_message_uuids заменяется uuid присланного ввода: хаб выдаёт его сам.
-            if isinstance(frame,dict) and frame.get('user_message_uuids')==['@input']: frame=dict(frame,user_message_uuids=[v['uuid']])
+            # "@input" в user_message_uuids и command_uuid заменяется UUID присланного ввода.
+            if isinstance(frame,dict):
+                if frame.get('user_message_uuids')==['@input']: frame=dict(frame,user_message_uuids=[v['uuid']])
+                if frame.get('command_uuid')=='@input': frame=dict(frame,command_uuid=v['uuid'])
             emit(frame)
     if init_mode=='after': emit(init)
 if relay is not None:

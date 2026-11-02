@@ -1,8 +1,8 @@
 //! Ввод Claude Code: строго один ход за раз, сообщения пользователя с вложениями,
-//! доказательство доставки кадром ответа, смена модели и режима между ходами,
-//! прерывание только SIGINT (решение владельца OD-2).
+//! доказательство доставки кадром `command_lifecycle` (запасное — кадром ответа),
+//! смена модели и режима между ходами, прерывание только SIGINT (решение владельца OD-2).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::Duration;
 
@@ -20,6 +20,8 @@ use crate::adapter::{
 
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PROOF_KIND: &str = "claude_code_answer_frame";
+/// CLI сам подтвердил наш UUID кадром `command_lifecycle` до первого кадра модели.
+pub const PROOF_KIND_STARTED: &str = "claude_code_command_lifecycle";
 const MAX_NATIVE_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 const NATIVE_IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
@@ -96,7 +98,7 @@ pub struct InputQueue {
     adopted: Option<Uuid>,
     control: Option<PendingControl>,
     rejected: Vec<(Uuid, &'static str)>,
-    proven: HashSet<Uuid>,
+    proven: HashMap<Uuid, &'static str>,
     weekly_noted: u16,
     interrupt: Interrupt,
 }
@@ -126,7 +128,7 @@ impl InputQueue {
             adopted: None,
             control: None,
             rejected: Vec::new(),
-            proven: HashSet::new(),
+            proven: HashMap::new(),
             weekly_noted: 0,
             interrupt: Interrupt::None,
         }
@@ -162,7 +164,11 @@ impl InputQueue {
     }
 
     pub fn is_proven(&self, command_id: Uuid) -> bool {
-        self.proven.contains(&command_id)
+        self.proven.contains_key(&command_id)
+    }
+
+    pub fn proof_kind(&self, command_id: Uuid) -> Option<&'static str> {
+        self.proven.get(&command_id).copied()
     }
 
     pub fn control_deadline(&self) -> Option<Instant> {
@@ -206,7 +212,7 @@ impl InputQueue {
     }
 
     pub fn enqueue(&mut self, t: &Transmission) {
-        if self.proven.contains(&t.command_id) {
+        if self.proven.contains_key(&t.command_id) {
             return;
         }
         self.fifo.retain(|queued| queued.command_id != t.command_id);
@@ -249,7 +255,7 @@ impl InputQueue {
         }
         while let Some(front) = self.fifo.front() {
             let command_id = front.command_id;
-            if self.proven.contains(&command_id) {
+            if self.proven.contains_key(&command_id) {
                 self.fifo.pop_front();
                 continue;
             }
@@ -368,10 +374,26 @@ impl InputQueue {
                     return None;
                 }
                 turn.delivery_proven = true;
-                self.proven.insert(turn.command_id);
+                self.proven.insert(turn.command_id, PROOF_KIND);
                 return Some(Proof {
                     command_id: turn.command_id,
                     kind: PROOF_KIND,
+                });
+            }
+            // `started` — CLI начал ход, `completed` — команда уже была исполнена (повтор UUID).
+            // `queued` не доказывает приём: команду ещё могут отменить до исполнения.
+            Parsed::CommandLifecycle { command_id, state }
+                if matches!(state.as_str(), "started" | "completed") =>
+            {
+                let turn = self.active.as_mut()?;
+                if turn.delivery_proven || turn.command_id != *command_id {
+                    return None;
+                }
+                turn.delivery_proven = true;
+                self.proven.insert(turn.command_id, PROOF_KIND_STARTED);
+                return Some(Proof {
+                    command_id: turn.command_id,
+                    kind: PROOF_KIND_STARTED,
                 });
             }
             Parsed::Event(AdapterEvent::RunAdopted { input_command_id }) => {
@@ -542,10 +564,10 @@ impl fmt::Debug for InputDriver {
     }
 }
 
-fn proof(command_id: Uuid) -> TransmitOutcome {
+fn proof(queue: &InputQueue, command_id: Uuid) -> TransmitOutcome {
     TransmitOutcome::Accepted(Proof {
         command_id,
-        kind: PROOF_KIND,
+        kind: queue.proof_kind(command_id).unwrap_or(PROOF_KIND),
     })
 }
 
@@ -594,8 +616,9 @@ impl InputDriver {
         self.feed(line);
     }
 
-    /// Ввод уходит в stdin только между ходами; `Accepted` только по кадру ответа с его UUID.
-    /// `deadline` отсчитывается от записи сообщения, управляющий запрос ждёт свой срок.
+    /// Ввод уходит в stdin только между ходами; `Accepted` — по кадру ответа с UUID ввода
+    /// или по кадру `command_lifecycle` CLI с этим UUID до первого кадра модели. `deadline`
+    /// отсчитывается от записи сообщения, управляющий запрос ждёт свой срок.
     pub async fn transmit(
         &mut self,
         cli: &mut CliProcess,
@@ -605,7 +628,7 @@ impl InputDriver {
     ) -> TransmitOutcome {
         let command_id = input.command_id;
         if self.queue.is_proven(command_id) {
-            return proof(command_id);
+            return proof(&self.queue, command_id);
         }
         if let Err(reason) = self.queue.validate(input.settings.as_ref()) {
             return TransmitOutcome::Rejected(reason.into());
@@ -615,7 +638,7 @@ impl InputDriver {
         let mut written: Option<Instant> = None;
         loop {
             if self.queue.is_proven(command_id) {
-                return proof(command_id);
+                return proof(&self.queue, command_id);
             }
             if let Some(reason) = self.queue.take_rejection(command_id) {
                 return TransmitOutcome::Rejected(reason.into());
