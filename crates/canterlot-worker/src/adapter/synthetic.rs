@@ -801,6 +801,13 @@ impl Adapter for SyntheticAdapter {
             {
                 return;
             }
+            // Новый CLI уже ждёт ввод: без этой фазы сопровождение оставит ready=false
+            // и следующий ввод не передаст.
+            self.pending.push_back(AdapterEvent::Phase {
+                phase: Phase::AwaitingInput,
+                tool_name: None,
+                summary: None,
+            });
         }
         self.pending.push_back(AdapterEvent::Diagnostic {
             kind: "deferred_restart_applied",

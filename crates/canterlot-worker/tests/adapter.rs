@@ -6,7 +6,7 @@ use std::{path::PathBuf, time::Duration};
 use canterlot_worker::{
     adapter::{
         Adapter, AdapterEvent, BlockKind, CloseMode, InstructionMode, InstructionSpec,
-        InterruptOutcome, StartSpec, Transmission, TransmitOutcome, registry,
+        InterruptOutcome, Phase, StartSpec, Transmission, TransmitOutcome, registry,
         synthetic::SyntheticAdapter,
     },
     containment::{Containment, Termination, TreeContainment},
@@ -69,6 +69,7 @@ cases!(
     read_attachment_step_echoes_the_file_sha256,
     catalog_lists_synthetic_harnesses_with_models_and_efforts,
     synthetic_codex_profile_has_provider_codex,
+    deferred_restart_announces_ready,
 );
 
 async fn event(adapter: &mut SyntheticAdapter) -> AdapterEvent {
@@ -317,6 +318,48 @@ async fn adapter_child() {
                     }
                 }
             }
+        }
+        "deferred_restart_announces_ready" => {
+            let transmission =
+                input(r#"{"synthetic":[{"restart_due":true,"restart":true},{"delta":"ход"}]}"#);
+            assert!(matches!(
+                adapter.transmit(&transmission, &group).await,
+                TransmitOutcome::Accepted(_)
+            ));
+            // Вычерпываем ход и запрос отложенного перезапуска вместе с хвостовой фазой
+            // старого CLI: дальше события должен дать только сам перезапуск.
+            while tokio::time::timeout(Duration::from_millis(100), adapter.next_event())
+                .await
+                .is_ok()
+            {}
+            tokio::time::timeout(Duration::from_secs(5), adapter.apply_deferred(&group))
+                .await
+                .expect("apply_deferred completes");
+            let mut restarted = false;
+            let mut ready = false;
+            loop {
+                let Ok(event) =
+                    tokio::time::timeout(Duration::from_millis(500), adapter.next_event()).await
+                else {
+                    break;
+                };
+                match event {
+                    AdapterEvent::CliRestarted { .. } => restarted = true,
+                    AdapterEvent::Phase {
+                        phase: Phase::AwaitingInput,
+                        ..
+                    } => {
+                        ready = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(restarted, "the deferred restart must start a new CLI");
+            assert!(
+                ready,
+                "after the deferred restart the adapter must announce awaiting input"
+            );
         }
         name if PILOT_CASES.contains(&name) => {
             pilot_case(name, &mut adapter, &group, &directory, &input).await;

@@ -2485,6 +2485,51 @@ async fn deferred_restart_runs_only_between_turns() {
     harness.shutdown().await;
 }
 
+// После отложенного перезапуска новый CLI уже ждёт ввод: следующий ход должен начаться.
+#[tokio::test]
+async fn deferred_restart_leaves_the_session_ready_for_input() {
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    let (first, second, third) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    let applied = |bodies: &[Body]| {
+        bodies
+            .iter()
+            .filter(
+                |b| matches!(b, Body::AdapterDiagnostic(f) if f.event_type == "deferred_restart_applied"),
+            )
+            .count()
+    };
+    harness
+        .deliver(first, 1, &script(r#"{"restart_due":true,"restart":true}"#))
+        .await;
+    harness
+        .wait_records("turn", |b| run_finished(b, first))
+        .await;
+    harness
+        .deliver(
+            second,
+            1,
+            &script(r#"{"restart_due":true,"restart":true,"after_turn":true}"#),
+        )
+        .await;
+    harness
+        .wait_records("applied", |b| applied(b) > 0 && run_finished(b, second))
+        .await;
+    harness
+        .deliver(third, 1, &script(r#"{"delta":"после перезапуска"}"#))
+        .await;
+    let bodies = harness
+        .wait_records("input after restart", |b| run_finished(b, third))
+        .await;
+    assert!(
+        bodies
+            .iter()
+            .any(|b| matches!(b, Body::InputAccepted(f) if f.command_id == third.to_string()))
+    );
+    harness.shutdown().await;
+}
+
 fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
