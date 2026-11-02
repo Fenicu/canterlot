@@ -11,6 +11,10 @@ pub const TIMELINE_KEYS_SQL: &str = "select * from (
   where conversation_id=$1 and (not $3 or created_seq>$2) and (not $4 or created_seq<$2)
   order by created_seq desc limit $5)
  union all
+ (select id, 'compaction' item_kind, created_seq seq from compactions
+  where conversation_id=$1 and created_seq is not null and (not $3 or created_seq>$2) and (not $4 or created_seq<$2)
+  order by created_seq desc limit $5)
+ union all
  (select id, 'input' item_kind, feed_seq seq from inputs
   where conversation_id=$1 and feed_seq is not null and (not $3 or feed_seq>$2) and (not $4 or feed_seq<$2)
   order by feed_seq desc limit $5)
@@ -22,6 +26,10 @@ pub const TIMELINE_KEYS_SQL: &str = "select * from (
 const FORWARD_KEYS_SQL: &str = "select * from (
  (select block_id id, 'block' item_kind, created_seq seq from blocks
   where conversation_id=$1 and (not $3 or created_seq>$2) and (not $4 or created_seq<$2)
+  order by created_seq asc limit $5)
+ union all
+ (select id, 'compaction' item_kind, created_seq seq from compactions
+  where conversation_id=$1 and created_seq is not null and (not $3 or created_seq>$2) and (not $4 or created_seq<$2)
   order by created_seq asc limit $5)
  union all
  (select id, 'input' item_kind, feed_seq seq from inputs
@@ -110,6 +118,7 @@ pub enum TimelineItem {
     Input(Box<InputView>),
     Block(Box<BlockView>),
     Request(Box<RequestItemView>),
+    Compaction(Box<crate::compactions::CompactionView>),
 }
 #[derive(Serialize, ToSchema)]
 pub struct HistoryPage {
@@ -278,6 +287,11 @@ pub async fn page(
             "request" => {
                 items.push(TimelineItem::Request(Box::new(
                     request_view(conn, id).await?,
+                )));
+            }
+            "compaction" => {
+                items.push(TimelineItem::Compaction(Box::new(
+                    crate::compactions::compaction_view(conn, id).await?,
                 )));
             }
             _ => items.push(TimelineItem::Block(Box::new(block_view(conn, id).await?))),

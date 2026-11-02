@@ -121,6 +121,8 @@ fn next_offset(row: &Value) -> Option<usize> {
 fn message(item: &TimelineItem) -> Option<Value> {
     match item {
         TimelineItem::Request(_) => None,
+        // Служебная строка ленты для PWA; в сообщениях агенту её нет, как и запросов.
+        TimelineItem::Compaction(_) => None,
         TimelineItem::Block(block) if block.kind == "reasoning" => None,
         TimelineItem::Block(block) => {
             let mut row = clipped(&block.content, block.content_bytes, block.content_truncated);

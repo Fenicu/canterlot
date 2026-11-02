@@ -284,7 +284,8 @@ fn set_compaction(queue: &mut LockedQueue, wanted: Option<CompactionProgress>) -
     found
 }
 
-/// Сжатие тратит токены, поэтому только по действию владельца и только из застрявшей сессии.
+/// Сжатие тратит токены, поэтому только по действию владельца: между ходами живого
+/// исполнения, в застрявшей сессии с пометкой прогресса в причине паузы.
 pub async fn request_compaction(
     pool: &PgPool,
     owner_id: Uuid,
@@ -318,11 +319,8 @@ pub async fn request_compaction(
                     reason: "no_live_execution",
                 });
             };
-            if !set_compaction(&mut queue, Some(CompactionProgress::Requested)) {
-                return Err(ControlError::InvalidRequest {
-                    reason: "session_not_stuck",
-                });
-            }
+            // Кнопка доступна и вне застрявшей паузы; в ней помечаем прогресс в причине.
+            set_compaction(&mut queue, Some(CompactionProgress::Requested));
             let existing: Option<Uuid> = sqlx::query_scalar(
                 "select id from commands where conversation_id = $1 and kind = 'compact_session'
                  and execution_id = $2 and execution_generation = $3
@@ -411,7 +409,8 @@ pub async fn on_session_stuck_in_tx(
     Ok(())
 }
 
-/// Итог сжатия: удача снимает паузу и очередь идёт дальше, отказ оставляет карточку.
+/// Итог сжатия: удача снимает застрявшую паузу и очередь идёт дальше, отказ оставляет
+/// карточку. Вне паузы очередь не трогаем: лишнее `queue_resumed` дёрнуло бы ленту.
 pub async fn on_compaction_done_in_tx(
     conn: &mut PgConnection,
     run: &ExecutionRef,
@@ -419,6 +418,14 @@ pub async fn on_compaction_done_in_tx(
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let mut queue = lock_run(conn, run).await?;
+    if !queue
+        .pause_reasons
+        .0
+        .iter()
+        .any(|reason| matches!(reason, PauseReason::SessionStuck { .. }))
+    {
+        return Ok(());
+    }
     if ok {
         queue
             .pause_reasons

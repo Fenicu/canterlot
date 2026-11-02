@@ -5403,6 +5403,53 @@
           "failed"
         ]
       },
+      "CompactionView": {
+        "type": "object",
+        "description": "Строка ленты сжатия.",
+        "required": [
+          "id",
+          "trigger",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "created_seq": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ok": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`None` — сжатие ещё идёт."
+          },
+          "pre_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "trigger": {
+            "type": "string"
+          }
+        }
+      },
       "CompleteBody": {
         "type": "object",
         "properties": {
@@ -5540,6 +5587,26 @@
           }
         }
       },
+      "ContextSnapshot": {
+        "type": "object",
+        "description": "Последний известный расход контекста разговора для индикатора: живое исполнение\nили свежий законченный ход. `None` — данных ещё нет, индикатор скрыт.",
+        "required": [
+          "tokens"
+        ],
+        "properties": {
+          "tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "window_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
       "ContinueOutcome": {
         "type": "object",
         "required": [
@@ -5653,6 +5720,17 @@
             "items": {
               "$ref": "#/components/schemas/BackgroundTaskView"
             }
+          },
+          "context": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ContextSnapshot",
+                "description": "Последний известный расход контекста; `None` — данных нет, индикатор скрыт."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "detail": {
             "$ref": "#/components/schemas/ConversationDetail"
@@ -8851,6 +8929,17 @@
                   "$ref": "#/components/schemas/BackgroundTaskView"
                 }
               },
+              "context": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ContextSnapshot",
+                    "description": "Последний известный расход контекста; `None` — данных нет, индикатор скрыт."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "detail": {
                 "$ref": "#/components/schemas/ConversationDetail"
               },
@@ -9236,6 +9325,27 @@
                     "type": "string",
                     "enum": [
                       "request"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CompactionView"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "compaction"
                     ]
                   }
                 }
