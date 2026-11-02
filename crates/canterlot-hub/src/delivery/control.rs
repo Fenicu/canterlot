@@ -1126,3 +1126,206 @@ pub async fn request_send_now(
     })
     .await
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct EditInputOutcome {
+    pub input_id: Uuid,
+    pub revision: i64,
+}
+
+/// Правка ожидающего ввода: замена текста и списка вложений сравнением-и-заменой
+/// по ревизии. Действует, только пока ввод ещё в `queued`: выдача, передача,
+/// приём и отмена идут мимо. Решение принимается под тем же замком очереди,
+/// что и выдача, поэтому правка никогда не гоняется с диспетчером: либо новое
+/// содержимое едет следующим ходом целиком, либо правка отклоняется.
+pub async fn request_edit_input(
+    pool: &PgPool,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    input_id: Uuid,
+    text: String,
+    attachment_ids: Vec<Uuid>,
+    expected_revision: i64,
+    idempotency_key: &str,
+    correlation_id: Uuid,
+) -> Result<EditInputOutcome, ControlError> {
+    idempotency::validate_key(idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
+    const OPERATION: &str = "edit_input";
+    let hash = idempotency::request_hash(
+        OPERATION,
+        &json!({"conversation_id": conversation_id, "input_id": input_id, "text": text, "attachment_ids": attachment_ids, "expected_revision": expected_revision}),
+    );
+    let idempotency_key = idempotency_key.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            if let Some(outcome) =
+                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
+            {
+                return Ok(outcome);
+            }
+            let input: Option<(String, i64, Uuid)> = sqlx::query_as(
+                "select i.state, i.revision, i.command_id from inputs i
+                 where i.id = $1 and i.conversation_id = $2",
+            )
+            .bind(input_id)
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let (state, revision, deliver_command_id) = input.ok_or(ControlError::NotFound)?;
+            if state != InputState::Queued.as_str() {
+                // Та же граница, что у «Отправить сейчас» и выдачи: выданное,
+                // переданное, принятое и отменённое правится только отзывом.
+                return Err(ControlError::InvalidRequest {
+                    reason: "input_not_queued",
+                });
+            }
+            if revision != expected_revision {
+                return Err(ControlError::InvalidRequest {
+                    reason: "revision_conflict",
+                });
+            }
+            // Вливание уже ушло на машину: править поздно, текст бы разошёлся.
+            let steer_in_flight: bool = sqlx::query_scalar(
+                "select exists(select 1 from commands where kind = 'steer_input'
+                 and target_command_id = $1 and delivery_state = 'stored_on_machine')",
+            )
+            .bind(deliver_command_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if steer_in_flight {
+                return Err(ControlError::InvalidRequest {
+                    reason: "steer_in_flight",
+                });
+            }
+            if text.trim().is_empty() && attachment_ids.is_empty() {
+                return Err(ControlError::InvalidRequest {
+                    reason: "empty_content",
+                });
+            }
+            let mut blocks = vec![crate::delivery::submit::ContentBlock::Text { text }];
+            if !attachment_ids.is_empty() {
+                if crate::attachments::check_ids(&attachment_ids).is_err() {
+                    return Err(ControlError::InvalidRequest {
+                        reason: "attachment_unavailable",
+                    });
+                }
+                let (catalog, machine) =
+                    crate::attachments::gate_for(&mut *conn, conversation_id).await?;
+                sqlx::query("delete from input_attachments where input_id = $1")
+                    .bind(input_id)
+                    .execute(&mut *conn)
+                    .await?;
+                let refs = crate::attachments::link_in_tx(
+                    &mut *conn,
+                    owner_id,
+                    conversation_id,
+                    input_id,
+                    &attachment_ids,
+                    &catalog,
+                    &machine,
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::attachments::AttachmentError::NotReady => {
+                        ControlError::InvalidRequest {
+                            reason: "attachment_not_ready",
+                        }
+                    }
+                    crate::attachments::AttachmentError::NotFound => {
+                        ControlError::InvalidRequest {
+                            reason: "attachment_not_found",
+                        }
+                    }
+                    _ => ControlError::InvalidRequest {
+                        reason: "attachment_unavailable",
+                    },
+                })?;
+                for reference in &refs {
+                    blocks.push(
+                        crate::delivery::submit::ContentBlock::from_ref(reference)
+                            .map_err(|_| ControlError::InvalidRequest {
+                                reason: "attachment_unavailable",
+                            })?,
+                    );
+                }
+            } else {
+                sqlx::query("delete from input_attachments where input_id = $1")
+                    .bind(input_id)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            crate::delivery::submit::check_bounds(&blocks).map_err(|_| {
+                ControlError::InvalidRequest {
+                    reason: "content_too_long",
+                }
+            })?;
+            let content = serde_json::to_value(&blocks)
+                .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+            // Единственный источник текста для выдачи — строка команды: воркер
+            // читает её при каждой выдаче и повторе, старого текста у него нет.
+            sqlx::query("update inputs set content = $2, revision = revision + 1 where id = $1")
+                .bind(input_id)
+                .bind(&content)
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "update commands set payload = payload || jsonb_build_object('content', $2::jsonb, 'attachment_ids', $3::jsonb)
+                 where id = $1",
+            )
+            .bind(deliver_command_id)
+            .bind(&content)
+            .bind(json!(attachment_ids))
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "update commands set payload = payload || jsonb_build_object('content', $2::jsonb, 'attachment_ids', $3::jsonb)
+                 where kind = 'steer_input' and target_command_id = $1 and delivery_state = 'pending'",
+            )
+            .bind(deliver_command_id)
+            .bind(&content)
+            .bind(json!(attachment_ids))
+            .execute(&mut *conn)
+            .await?;
+            let outcome = EditInputOutcome {
+                input_id,
+                revision: revision + 1,
+            };
+            events::append(
+                &mut *conn,
+                NewEvent {
+                    scope: Scope::Conversation {
+                        id: queue.conversation_id,
+                    },
+                    kind: "input_state_changed",
+                    conversation_id: Some(queue.conversation_id),
+                    execution_id: None,
+                    payload: json!({
+                        "input_id": input_id,
+                        "state": "queued",
+                        "attempt": 0,
+                        "cause": "edited",
+                        "revision": revision + 1,
+                        "content": content,
+                    }),
+                    correlation_id,
+                },
+            )
+            .await?;
+            record(
+                &mut *conn,
+                owner_id,
+                &idempotency_key,
+                OPERATION,
+                &hash,
+                conversation_id,
+                &outcome,
+            )
+            .await?;
+            Ok(outcome)
+        })
+    })
+    .await
+}

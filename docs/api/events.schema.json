@@ -645,6 +645,16 @@
             "cause": {
               "type": "string"
             },
+            "revision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ContentBlock"
+              }
+            },
             "command_id": {
               "$ref": "#/$defs/Uuid"
             },

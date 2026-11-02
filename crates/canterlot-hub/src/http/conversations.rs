@@ -29,6 +29,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(resolve_owner_lost))
         .routes(routes!(cancel_input))
         .routes(routes!(send_now))
+        .routes(routes!(edit_input))
         .routes(routes!(settings))
         .routes(routes!(submit))
         .routes(routes!(start_execution))
@@ -304,6 +305,48 @@ async fn send_now(
         &key,
         c,
         &capabilities.unwrap_or_default(),
+    )
+    .await
+    .map_err(|error| match error {
+        crate::delivery::control::ControlError::InvalidRequest { reason } => {
+            ApiError::new(ErrorCode::InvalidRequest).with_details(ErrorDetails {
+                reason: Some(reason.into()),
+                ..Default::default()
+            })
+        }
+        error => error.into(),
+    })?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditInputBody {
+    text: String,
+    #[serde(default)]
+    attachment_ids: Vec<Uuid>,
+    expected_revision: i64,
+}
+
+#[utoipa::path(patch,path="/api/v1/conversations/{id}/inputs/{input_id}",tag="conversations",params(("id"=Uuid,Path),("input_id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=EditInputBody,responses((status=200,description="Ожидающий ввод исправлен",body=crate::delivery::control::EditInputOutcome)))]
+async fn edit_input(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, input_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(body): ApiJson<EditInputBody>,
+) -> Result<Json<crate::delivery::control::EditInputOutcome>, ApiError> {
+    let result = crate::delivery::control::request_edit_input(
+        &s.pool,
+        o.owner_id,
+        id,
+        input_id,
+        body.text,
+        body.attachment_ids,
+        body.expected_revision,
+        &key,
+        c,
     )
     .await
     .map_err(|error| match error {

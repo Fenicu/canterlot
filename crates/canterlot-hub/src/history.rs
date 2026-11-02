@@ -48,6 +48,8 @@ pub struct InputView {
     pub content: Vec<InputContentBlock>,
     pub attachments: Vec<AttachmentView>,
     pub state: String,
+    /// Ревизия текста и вложений: правка ожидающего ввода идёт сравнением-и-заменой.
+    pub revision: i64,
     pub created_seq: String,
     pub feed_seq: Option<String>,
     pub created_at: String,
@@ -160,6 +162,7 @@ pub(crate) fn input_view(r: PgRow) -> Result<InputView, sqlx::Error> {
         content,
         attachments,
         state: r.try_get("state")?,
+        revision: r.try_get::<Option<i64>, _>("revision")?.unwrap_or(1),
         created_seq: r.try_get::<i64, _>("created_seq")?.to_string(),
         feed_seq: r
             .try_get::<Option<i64>, _>("feed_seq")?
