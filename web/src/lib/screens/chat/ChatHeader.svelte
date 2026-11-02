@@ -45,7 +45,9 @@
 		onOpenDiagnostics,
 		onOpenDelegation,
 		onAccept,
-		parentTitle = null
+		parentTitle = null,
+		childRunning = 0,
+		hasChildren = false
 	}: {
 		chat: ChatStore;
 		providers?: ProviderLimits[];
@@ -58,11 +60,15 @@
 		onAccept?: () => void;
 		/** Название сессии, запустившей эту; пусто, пока список её не знает. */
 		parentTitle?: string | null;
+		/** Живых делегированных сессий: идут в счётчик делегирования. */
+		childRunning?: number;
+		/** У сессии есть делегированные: вход в делегирование виден и без субагентов. */
+		hasChildren?: boolean;
 	} = $props();
 
 	let menuOpen = $state(false);
-	const delegated = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
-	const running = $derived(!pane.desktop && delegated ? runningCount(liveNodes(chat)) : 0);
+	const delegated = $derived(hasChildren || chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
+	const running = $derived(!pane.desktop && delegated ? runningCount(liveNodes(chat)) + childRunning : 0);
 	let confirmingForce = $state(false);
 	let actionError = $state<string | null>(null);
 
