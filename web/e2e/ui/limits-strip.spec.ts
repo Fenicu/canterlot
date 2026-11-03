@@ -82,6 +82,10 @@ test('expanded_strip_puts_resets_beside_meters_and_offers_the_refresh_button', a
   expect(summaryStyle.radius).toBeLessThanOrEqual(28);
   expect(summaryStyle.paddingLeft).toBeGreaterThanOrEqual(8);
   expect(summaryStyle.paddingRight).toBeGreaterThanOrEqual(8);
+  // Строка «обновлено» начинается там же, где названия провайдеров, без зигзага.
+  const updated = (await strip.locator('.updated').boundingBox())!;
+  const provider = (await strip.locator('.pname').first().boundingBox())!;
+  expect(Math.abs(updated.x - provider.x)).toBeLessThanOrEqual(1);
   await shot(page, 'strip-expanded');
   await page.getByRole('button', { name: 'Сменить тему' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');

@@ -160,7 +160,7 @@
   .chevron { flex: none; color: var(--secondary); transition: transform var(--duration-fast) var(--ease); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .limits[open] .chevron { transform: rotate(180deg); }
-  .open { padding-bottom: var(--s4); }
+  .open { padding: var(--s0) var(--s6) var(--s4); }
   .status { display: flex; align-items: center; gap: var(--s4); color: var(--secondary); }
   .status a { margin-inline-start: auto; }
   .refresh.pending :global(svg) { animation: spin var(--duration-stage-spin) var(--ease-stage-spin) infinite; }
