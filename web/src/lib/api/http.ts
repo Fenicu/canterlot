@@ -1,6 +1,28 @@
 import { clock } from "#lib/clock.js";
-import { httpHealth } from "#lib/api/gate.js";
 import type { components } from "#lib/api/generated/openapi.js";
+
+class HttpHealthTracker {
+  #lastOkAt: number | null = null;
+
+  get lastOkAt(): number | null {
+    return this.#lastOkAt;
+  }
+
+  /** Совместимость с уже написанными проверками. */
+  get lastSuccessAt(): number {
+    return this.#lastOkAt ?? 0;
+  }
+
+  recordSuccess(timestamp = Date.now()): void {
+    this.#lastOkAt = timestamp;
+  }
+
+  reset(): void {
+    this.#lastOkAt = null;
+  }
+}
+
+export const httpHealth = new HttpHealthTracker();
 
 export type ErrorCode = components["schemas"]["ErrorCode"];
 export type ErrorScope = components["schemas"]["ErrorScope"];
