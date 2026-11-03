@@ -557,17 +557,28 @@ pub struct FileView {
     pub height: Option<i32>,
 }
 
-pub async fn files_for_block(
+/// Файлы блоков страницы одним запросом.
+pub async fn files_for_blocks(
     conn: &mut PgConnection,
-    block_id: Uuid,
-) -> Result<Vec<FileView>, sqlx::Error> {
-    sqlx::query_as(
-        "select attachment_id, name, mime, size_bytes size, title, note, width, height
-         from block_files where block_id=$1 and attached_at is not null order by attached_seq, id",
+    block_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<FileView>>, sqlx::Error> {
+    let rows = sqlx::query(
+        "select block_id, attachment_id, name, mime, size_bytes size, title, note, width, height
+         from block_files where block_id=any($1) and attached_at is not null
+         order by block_id, attached_seq, id",
     )
-    .bind(block_id)
+    .bind(block_ids)
     .fetch_all(conn)
-    .await
+    .await?;
+    let mut files: std::collections::HashMap<Uuid, Vec<FileView>> = Default::default();
+    for row in &rows {
+        use sqlx::{FromRow, Row};
+        files
+            .entry(row.try_get("block_id")?)
+            .or_default()
+            .push(FileView::from_row(row)?);
+    }
+    Ok(files)
 }
 
 /// Запись `BlockFile`: ссылка появляется только на опубликованную строку того же исполнения,
@@ -669,17 +680,27 @@ pub struct MediaView {
     pub height: Option<i32>,
 }
 
-pub async fn for_block(
+/// Картинки блоков страницы одним запросом.
+pub async fn for_blocks(
     conn: &mut PgConnection,
-    block_id: Uuid,
-) -> Result<Vec<MediaView>, sqlx::Error> {
-    sqlx::query_as(
-        "select id media_id, mime, size_bytes size, width, height from block_media
-         where block_id=$1 and attached_at is not null order by attached_seq, id",
+    block_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<MediaView>>, sqlx::Error> {
+    let rows = sqlx::query(
+        "select block_id, id media_id, mime, size_bytes size, width, height from block_media
+         where block_id=any($1) and attached_at is not null order by block_id, attached_seq, id",
     )
-    .bind(block_id)
+    .bind(block_ids)
     .fetch_all(conn)
-    .await
+    .await?;
+    let mut media: std::collections::HashMap<Uuid, Vec<MediaView>> = Default::default();
+    for row in &rows {
+        use sqlx::{FromRow, Row};
+        media
+            .entry(row.try_get("block_id")?)
+            .or_default()
+            .push(MediaView::from_row(row)?);
+    }
+    Ok(media)
 }
 
 /// Связанная с блоком картинка владельца для выдачи браузеру.

@@ -663,3 +663,108 @@ async fn legacy_input_and_block_keys_do_not_collide_after_migration(pool: PgPool
     }
     assert_eq!(seen, std::collections::BTreeSet::from([i.input_id, b]));
 }
+
+/// Считает запросы, которые sqlx отправил базой, по его событиям журнала.
+struct QueryCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl tracing::Subscriber for QueryCounter {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if event.metadata().target() == "sqlx::query" {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+// Страница истории читает элементы пачками по виду, а у вывода инструмента берёт только
+// показываемые 4 КБ: число запросов не зависит от числа блоков.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn history_page_reads_items_in_batches(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let e = f.execution().await;
+    let big = "строка вывода\n".repeat(20000);
+    let mut tool = None;
+    for n in 1..=40 {
+        let (kind, text) = if n % 2 == 0 {
+            ("tool_result", big.as_str())
+        } else {
+            ("text", "ответ")
+        };
+        let id = f.block(e, n * 2, kind, text).await;
+        tool = tool.or((n % 2 == 0).then_some(id));
+    }
+    for n in 1..=5 {
+        let i = f.input(&format!("i{n}")).await;
+        sqlx::query("update inputs set feed_seq=$2,state='accepted' where id=$1")
+            .bind(i.input_id)
+            .bind(n * 2 + 1)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    let streaming = f.block(e, 200, "text", "").await;
+    sqlx::query("update blocks set state='streaming' where block_id=$1")
+        .bind(streaming)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    for (seq, text) in [(1i64, "по"), (2, "ток")] {
+        sqlx::query("insert into block_chunks(block_id,seq,text) values($1,$2,$3)")
+            .bind(streaming)
+            .bind(seq)
+            .bind(text)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut conn = f.pool.acquire().await.unwrap();
+    let page = {
+        let _guard =
+            tracing::dispatcher::set_default(&tracing::Dispatch::new(QueryCounter(count.clone())));
+        history::page(
+            &mut conn,
+            f.seed.owner_id,
+            f.seed.conversation_id,
+            history::HistoryCursor::Tail,
+            100,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    };
+    let queries = count.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(page.items.len(), 46);
+    assert!(queries <= 8, "{queries} queries for one page");
+    let page = serde_json::to_value(&page).unwrap();
+    let items = page["items"].as_array().unwrap();
+    let tool = items
+        .iter()
+        .find(|item| item["id"] == tool.unwrap().to_string())
+        .unwrap();
+    assert_eq!(tool["content_truncated"], true);
+    assert!(tool["content"].as_str().unwrap().len() <= 4096);
+    assert!(big.starts_with(tool["content"].as_str().unwrap()));
+    assert_eq!(tool["content_bytes"], big.len());
+    assert_eq!(tool["line_count"], 20000);
+    let last = items.last().unwrap();
+    assert_eq!(
+        (last["content"].as_str(), last["line_count"].as_i64()),
+        (Some("поток"), Some(1))
+    );
+    assert_eq!(items[0]["content"], "ответ");
+}
