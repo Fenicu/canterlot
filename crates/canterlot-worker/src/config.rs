@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -251,6 +252,22 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
             ConfigErrorCategory::PaidModelPollUnsupported,
         ));
     }
+    if let Some(opencode) = &config.opencode {
+        for (provider, patterns) in &opencode.provider_models {
+            if provider != "opencode-go" && !opencode.providers.iter().any(|p| p == provider) {
+                return Err(ConfigError::new(path, ConfigErrorCategory::Parse));
+            }
+            for pattern in patterns {
+                if pattern
+                    .chars()
+                    .enumerate()
+                    .any(|(i, c)| c == '*' && i != 0 && i != pattern.len().saturating_sub(1))
+                {
+                    return Err(ConfigError::new(path, ConfigErrorCategory::Parse));
+                }
+            }
+        }
+    }
     Ok(config)
 }
 
@@ -406,6 +423,9 @@ pub struct OpenCodeConfig {
     pub refuse_paths: Vec<PathBuf>,
     /// Провайдеры в каталоге моделей сверх `opencode-go`.
     pub providers: Vec<String>,
+    /// Фильтр моделей по провайдеру: пустой список — ничего, отсутствие записи — все.
+    #[serde(default)]
+    pub provider_models: BTreeMap<String, Vec<String>>,
     /// Модель, которая идёт первой в каталоге; без неё порядок задаёт OpenCode.
     pub default_model: Option<String>,
     /// Каталог конфигурации владельца; по умолчанию `$XDG_CONFIG_HOME/opencode`.
@@ -419,6 +439,7 @@ impl Default for OpenCodeConfig {
             data_root: None,
             refuse_paths: Vec::new(),
             providers: Vec::new(),
+            provider_models: BTreeMap::new(),
             default_model: None,
             owner_config: None,
         }

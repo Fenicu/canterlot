@@ -95,6 +95,7 @@ fn table_survives_the_supervisor_spec() {
         data_root: None,
         refuse_paths: vec![PathBuf::from("/srv/shared")],
         providers: vec!["anthropic".into()],
+        provider_models: Default::default(),
         owner_config: Some(PathBuf::from("/home/user/.config/opencode")),
         default_model: None,
     };

@@ -2,7 +2,7 @@
 //! отсюда выходит только перечисленное, а сам ответ не хранится и не журналируется.
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Провайдер, который в каталоге всегда: подписка владельца (решение 2 спеки).
 pub const GO_PROVIDER: &str = "opencode-go";
@@ -81,13 +81,40 @@ pub fn variants(models: &Value) -> HashMap<String, Vec<String>> {
         .collect()
 }
 
+fn match_pattern(pattern: &str, id: &str) -> bool {
+    let (prefix_star, rest) = if let Some(r) = pattern.strip_prefix('*') {
+        (true, r)
+    } else {
+        (false, pattern)
+    };
+    let (suffix_star, core) = if let Some(r) = rest.strip_suffix('*') {
+        (true, r)
+    } else {
+        (false, rest)
+    };
+    if prefix_star && suffix_star {
+        id.contains(core)
+    } else if prefix_star {
+        id.ends_with(core)
+    } else if suffix_star {
+        id.starts_with(core)
+    } else {
+        id == core
+    }
+}
+
 fn usable(model: &Value) -> bool {
     model.get("enabled").and_then(Value::as_bool) != Some(false)
         && model.get("status").and_then(Value::as_str) != Some("deprecated")
 }
 
 /// Записи каталога машины: Go и явно включённые провайдеры, выбор по умолчанию первым.
-pub fn entries(models: &Value, default: Option<&Value>, providers: &[String]) -> Vec<ModelEntry> {
+pub fn entries(
+    models: &Value,
+    default: Option<&Value>,
+    providers: &[String],
+    provider_models: &BTreeMap<String, Vec<String>>,
+) -> Vec<ModelEntry> {
     let default = default.and_then(|reply| qualified(reply.get("data")?));
     let mut entries: Vec<ModelEntry> = models
         .get("data")
@@ -102,6 +129,17 @@ pub fn entries(models: &Value, default: Option<&Value>, providers: &[String]) ->
                 .is_some_and(|provider| {
                     provider == GO_PROVIDER || providers.iter().any(|name| name == provider)
                 })
+        })
+        .filter(|model| {
+            let provider = model
+                .get("providerID")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let id = model.get("id").and_then(Value::as_str).unwrap_or("");
+            match provider_models.get(provider) {
+                None => true,
+                Some(patterns) => patterns.iter().any(|pattern| match_pattern(pattern, id)),
+            }
         })
         .filter_map(|model| {
             let id = qualified(model)?;
@@ -151,7 +189,7 @@ mod tests {
     #[test]
     fn key_never_leaves_the_reply() {
         let list = json!({"data": [model("opencode-go", "a")]});
-        let shown = format!("{:?}", entries(&list, None, &[]));
+        let shown = format!("{:?}", entries(&list, None, &[], &BTreeMap::new()));
         assert!(shown.contains("opencode-go/a"));
         assert!(!shown.contains("секрет"));
         assert!(!shown.contains("secret.example"));
@@ -164,7 +202,7 @@ mod tests {
         let mut old = model("opencode-go", "old");
         old["status"] = "deprecated".into();
         let list = json!({"data": [disabled, old, model("opencode-go", "ok")]});
-        let found = entries(&list, None, &[]);
+        let found = entries(&list, None, &[], &BTreeMap::new());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "opencode-go/ok");
     }
@@ -175,7 +213,7 @@ mod tests {
             model("opencode-go", "a"), model("opencode-go", "b"), model("opencode-go", "c"),
         ]});
         let default = json!({"data": {"id": "b", "providerID": "opencode-go"}});
-        let ids: Vec<String> = entries(&list, Some(&default), &[])
+        let ids: Vec<String> = entries(&list, Some(&default), &[], &BTreeMap::new())
             .into_iter()
             .map(|entry| entry.id)
             .collect();
@@ -185,7 +223,7 @@ mod tests {
     #[test]
     fn preferred_model_goes_first_and_an_unknown_one_changes_nothing() {
         let list = json!({"data": [model("opencode-go", "a"), model("opencode-go", "b")]});
-        let mut found = entries(&list, None, &[]);
+        let mut found = entries(&list, None, &[], &BTreeMap::new());
         prefer(&mut found, "opencode-go/b");
         assert_eq!(found[0].id, "opencode-go/b");
         prefer(&mut found, "opencode-go/absent");
@@ -196,7 +234,7 @@ mod tests {
     fn model_without_variants_has_one_effort() {
         let mut plain = model("opencode-go", "plain");
         plain["variants"] = json!([]);
-        let found = entries(&json!({"data": [plain]}), None, &[]);
+        let found = entries(&json!({"data": [plain]}), None, &[], &BTreeMap::new());
         assert_eq!(found[0].efforts, [NO_VARIANT]);
     }
 
@@ -207,11 +245,16 @@ mod tests {
         let mut plain = model("opencode-go", "plain");
         plain["capabilities"] = json!({"input": ["text"]});
         let list = json!({"data": [vision, plain]});
-        let found = entries(&list, None, &[]);
+        let found = entries(&list, None, &[], &BTreeMap::new());
         assert_eq!(found[0].images, Some(true));
         assert_eq!(found[0].context_window, Some(1000));
         assert_eq!(found[1].images, Some(false));
-        let silent = entries(&json!({"data": [model("opencode-go", "old")]}), None, &[]);
+        let silent = entries(
+            &json!({"data": [model("opencode-go", "old")]}),
+            None,
+            &[],
+            &BTreeMap::new(),
+        );
         assert_eq!(silent[0].images, None, "the reply says nothing");
         let support = image_support(&list);
         assert_eq!(support.get("opencode-go/vision"), Some(&true));
@@ -222,7 +265,7 @@ mod tests {
     #[test]
     fn id_with_a_slash_stays_whole() {
         let list = json!({"data": [model("openrouter", "anthropic/fable")]});
-        let found = entries(&list, None, &["openrouter".to_owned()]);
+        let found = entries(&list, None, &["openrouter".to_owned()], &BTreeMap::new());
         assert_eq!(found[0].id, "openrouter/anthropic/fable");
     }
 }
