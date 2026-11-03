@@ -472,7 +472,7 @@ export class ChatStore {
       const known = this.blocks.get(item.id);
       // Живое событие могло обогнать ответ: более новую ревизию не затирает снимок.
       const block =
-        known && known.rev >= item.rev && known.state !== "stale"
+        known && known.rev >= item.rev && known.state !== "stale" && !known.provisional
           ? known
           : this.#blockFromHistory({ ...item, kind: "block" }, false);
       return {
@@ -1327,6 +1327,11 @@ export class ChatStore {
 
   #blockFromHistory(item: HistoryBlock, wholesale: boolean): BlockModel {
     let block = this.blocks.get(item.id);
+    // Финал без начала создал модель наугад, текстом: вид, родителя и тело даёт только история.
+    if (block?.provisional) {
+      block = undefined;
+      wholesale = true;
+    }
     if (!block) {
       block = new BlockModel(item.id, item.block_kind);
       this.blocks.set(item.id, block);

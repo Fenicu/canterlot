@@ -111,6 +111,8 @@ export class BlockModel {
   sawGap = false;
   ticket = 0;
   pending: PendingDelta[] = [];
+  /** Модель создана финалом без начала: вид блока неизвестен, история заменит её целиком. */
+  provisional = false;
 
   #text = cell("");
   #rev = cell(0);
@@ -250,6 +252,7 @@ function ensure(blocks: Map<string, BlockModel>, id: string): BlockModel {
   let block = blocks.get(id);
   if (!block) {
     block = new BlockModel(id, "text");
+    block.provisional = true;
     blocks.set(id, block);
   }
   return block;

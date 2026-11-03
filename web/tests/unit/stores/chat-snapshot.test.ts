@@ -241,3 +241,41 @@ describe("лента дальше 3000 записей", () => {
     expect(chat.blocks.get(id)).toBeUndefined();
   });
 });
+
+describe("финал блока за окном снимка", () => {
+  const CALL = "00000000-0000-4000-8000-0000000000c1";
+  const history = (state: string): HistoryItem => ({
+    kind: "block",
+    id: CALL,
+    block_kind: "tool_call",
+    tool_name: "Task",
+    content: "{}",
+    content_bytes: 2,
+    content_truncated: false,
+    created_seq: "10",
+    created_at: "2026-10-28T12:00:00.000Z",
+    rev: 3,
+    state,
+  });
+  const final = ev("block_final", { block_id: CALL, rev: 3, text: "{}", text_omitted: false, checksum: "x", summary: null }, "900");
+
+  it("старшая страница возвращает вызову субагента его вид", async () => {
+    const chat = chatOf({ history: async () => ({ items: [history("final")], next_before: null }) });
+    apply(chat, final);
+    await chat.loadOlder();
+    const block = chat.blocks.get(CALL)!;
+    expect(block.kind).toBe("tool_call");
+    expect(block.toolName).toBe("Task");
+    const entry = chat.timeline.entries.find((item) => item.key === `block:${CALL}`);
+    expect(entry?.kind === "block" && entry.block).toBe(block);
+  });
+
+  it("лента субагента тоже берёт вид из истории", async () => {
+    const chat = chatOf({
+      lane: async () => ({ root: { ...history("final"), kind: undefined } as never, items: [] }),
+    });
+    apply(chat, final);
+    const page = await chat.loadLane(CALL);
+    expect(page.entries[0]!.kind === "block" && page.entries[0]!.block.kind).toBe("tool_call");
+  });
+});
