@@ -10,15 +10,13 @@ const rows = vi.hoisted(() => ({ calls: 0 }));
 
 vi.mock("#lib/timeline/rows.js", async (original) => {
   const actual = await original<typeof import("#lib/timeline/rows.js")>();
-  class CountedRowsCache extends actual.RowsCache {
-    override build(
-      ...args: Parameters<InstanceType<typeof actual.RowsCache>["build"]>
-    ) {
+  return {
+    ...actual,
+    buildRows: (...args: Parameters<typeof actual.buildRows>) => {
       rows.calls += 1;
-      return super.build(...args);
-    }
-  }
-  return { ...actual, RowsCache: CountedRowsCache };
+      return actual.buildRows(...args);
+    },
+  };
 });
 
 vi.mock("#lib/timeline/AnswerCard.svelte", () => ({ default: () => undefined }));
