@@ -4,11 +4,11 @@ export function prefersReducedMotion(): boolean {
 }
 export function motionScale(): number {
   if (typeof document === 'undefined') return 1;
-  const value = Number(
-    getComputedStyle(document.documentElement)
-      .getPropertyValue('--motion-scale')
-      .trim(),
-  );
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue('--motion-scale')
+    .trim();
+  if (raw === '') return 1;
+  const value = Number(raw);
   return Number.isFinite(value) ? value : 1;
 }
 export function durationMs(token: DurationToken): number {

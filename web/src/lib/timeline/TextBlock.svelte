@@ -36,16 +36,35 @@
     now: wallNow(),
     instant: true
   });
-  let settled = $state(!initial.live);
-  let view = $state({ text: reveal.text, newWords: 0, animate: false });
-  let animate = false;
-  let frame = 0;
 
-  const rendered = $derived(
-    settled
-      ? engine.update(block.text, true, finalKey)
-      : engine.update(view.text, false, undefined, { prosePlain: true })
-  );
+  /** Кадр проявления: его смена перерисовывает показанный префикс. */
+  let clock = $state(0);
+  let frame = 0;
+  let animate = $state(false);
+  let shownBefore = '';
+
+  const shown = $derived.by(() => {
+    void clock;
+    const final = block.state !== 'streaming' && block.state !== 'stale';
+    const next = reveal.text;
+    // Хвост растёт только вперёд; замена снимка не должна переигрываться.
+    const delta = next.startsWith(shownBefore) ? next.slice(shownBefore.length) : '';
+    const newWords = countWords(delta);
+    shownBefore = next;
+    return { text: next, newWords, settled: final && reveal.done };
+  });
+
+  // Разбор хвоста идёт только на новое слово, а не на каждый кадр проявления.
+  let parsedText = '';
+  let parsed: ReturnType<StreamingMarkdown['update']> | null = null;
+  const rendered = $derived.by(() => {
+    if (shown.settled) return engine.update(block.text, true, finalKey);
+    if (parsed === null || parsedText !== shown.text) {
+      parsedText = shown.text;
+      parsed = engine.update(shown.text, false, undefined, { prosePlain: true });
+    }
+    return parsed;
+  });
 
   function wallNow(): number {
     return typeof performance === 'undefined' ? Date.now() : performance.now();
@@ -55,45 +74,31 @@
     return value.match(/\S+/g)?.length ?? 0;
   }
 
-  function schedule(): void {
+  // Дельты не перерисовывают текст сами: один показ на кадр, а не на событие.
+  function ensureFrame(): void {
     if (frame) return;
-    frame = requestAnimationFrame(tick);
-  }
-
-  function tick(): void {
-    frame = 0;
-    if (settled) return;
-    reveal.tick(wallNow());
-    pump();
-  }
-
-  function pump(): void {
-    if (settled) return;
-    const next = reveal.text;
-    if (next !== view.text) {
-      // Хвост растёт только вперёд; замена снимка не должна переигрываться.
-      const delta = next.startsWith(view.text) ? next.slice(view.text.length) : '';
-      view = { text: next, newWords: countWords(delta), animate };
-    }
-    if (!reveal.done) schedule();
-    else if (!streaming) settled = true;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      reveal.tick(wallNow());
+      clock = wallNow();
+      if (!reveal.done) ensureFrame();
+    });
   }
 
   $effect(() => {
     const text = block.text;
-    const state = block.state;
-    const done = state !== 'streaming' && state !== 'stale';
-    if (settled && done) return;
+    const live = block.state === 'streaming' || block.state === 'stale';
     const instant = prefersReducedMotion() || motionScale() === 0;
     animate = !instant;
     reveal.update(text, {
-      final: done,
+      final: !live,
       now: wallNow(),
       instant,
       scale: instant ? 0 : motionScale(),
       finishMs: durationMs('--duration-text-reveal')
     });
-    pump();
+    if (instant || !reveal.done || reveal.text !== shownBefore || !live)
+      ensureFrame();
   });
 
   onDestroy(() => {
@@ -161,9 +166,9 @@
     <Html html={chunk.html} copy source={streaming ? undefined : block.text} final={!streaming} />
   {/each}
   {#if rendered.tail.plain}
-    <div class="tail"><div use:revealTail={{ text: rendered.tail.text ?? '', animate: view.animate }}></div>{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
+    <div class="tail"><div use:revealTail={{ text: rendered.tail.text ?? '', animate }}></div>{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
   {:else if rendered.tail.html}
-    <div class="tail"><Html html={markRevealWords(rendered.tail.html, view.animate ? view.newWords : 0)} copy />{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
+    <div class="tail"><Html html={markRevealWords(rendered.tail.html, animate ? shown.newWords : 0)} copy />{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
   {:else if streaming}
     <span class="caret" aria-hidden="true"></span>
   {/if}
