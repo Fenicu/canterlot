@@ -71,7 +71,7 @@
       tabindex={same(item.tab, current) ? 0 : -1}
       onclick={() => onselect(item.tab)}
     >
-      {item.label}{#if counted}{' '}<span class="count">{item.count}</span>{/if}
+      {item.label} {#if counted}<span class="count">{item.count}</span>{/if}
     </button>
   {/each}
 </div>
