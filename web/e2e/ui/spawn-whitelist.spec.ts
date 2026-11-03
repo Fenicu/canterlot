@@ -1,8 +1,23 @@
+import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { bootSecondary } from './secondary-fixture';
 
+// Строка «Последняя синхронизация» появляется над разделом на первом секундном такте после связи и
+// сдвигает его на строку вниз. Клик, нацеленный до сдвига, приходится мимо кнопки, поэтому
+// нажимать можно, только когда она уже на месте. Строка приходит со снимком списка сессий, это часть
+// загрузки страницы, поэтому срок как у остальных ожиданий загрузки.
+async function settled(page: Page) {
+  await expect(page.getByText(/^Последняя синхронизация/)).toBeVisible({ timeout: 15_000 });
+}
+
+async function openSettings(page: Page) {
+  const booted = await bootSecondary(page, '/settings');
+  await settled(page);
+  return booted;
+}
+
 test('edit_save_reload', async ({ page }) => {
-  const { api } = await bootSecondary(page, '/settings');
+  const { api } = await openSettings(page);
   const section = page.locator('section[data-spawn-whitelist]');
   await expect(section.getByRole('heading', { name: 'Делегирование' })).toBeVisible();
   await expect(section.getByText('Сессии, которые агент запускает без вопроса')).toBeVisible();
@@ -27,9 +42,10 @@ test('edit_save_reload', async ({ page }) => {
 });
 
 test('reset_to_default', async ({ page }) => {
-  const { api } = await bootSecondary(page, '/settings');
+  const { api } = await openSettings(page);
   api.spawnWhitelist = [{ harness: 'claude', model: 'removed-model' }];
   await page.reload();
+  await settled(page);
   const section = page.locator('section[data-spawn-whitelist]');
   await expect(section.getByText('Нет в каталоге машины')).toBeVisible();
   await section.getByRole('button', { name: 'Сбросить к списку по умолчанию' }).click();
@@ -44,7 +60,7 @@ test('reset_to_default', async ({ page }) => {
 
 test('whitelist_screen_fits_360px_and_refuses_duplicates', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
-  await bootSecondary(page, '/settings');
+  await openSettings(page);
   const section = page.locator('section[data-spawn-whitelist]');
   await expect(section).toBeVisible();
   await section.getByLabel('Агент', { exact: true }).selectOption('claude');

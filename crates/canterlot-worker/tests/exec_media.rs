@@ -290,7 +290,9 @@ async fn media_upload_resumes_after_reconnect_without_duplicate_record(pool: PgP
     f.accepted(&input).await;
     // Перезапуск управляющей службы посреди загрузки: сопровождение повторяет запрос новой службе.
     f.stop_worker().await;
-    held.send(()).unwrap();
+    // Соединение воркера закрыто: хаб снимает обработчик прерванной загрузки вместе с её паузой.
+    // Отпускать паузу нечего, ждать нужно именно этого, иначе send гонится с закрытием потока.
+    until(async || held.is_closed()).await;
     sleep(Duration::from_millis(200)).await;
     assert!(rows(&f).await.is_empty());
     assert_eq!(shipped_media(&f), 0);

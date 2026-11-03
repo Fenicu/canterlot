@@ -495,8 +495,20 @@ async fn serve_starts_http_beside_grpc_and_stops_on_shutdown(pool: PgPool) {
         busy, 0,
         "no task keeps a pool connection after the shutdown"
     );
-    let locks_after: i64 = sqlx::query_scalar(locks).fetch_one(&pool).await.unwrap();
-    assert_eq!(locks_after, 0, "no singleton lock outlives the shutdown");
+    // Замок держит своё соединение, а запись в `pg_locks` исчезает, когда серверный процесс
+    // закрытого соединения завершится, то есть асинхронно: ждём условие, а не мгновение.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while sqlx::query_scalar::<_, i64>(locks)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            > 0
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("no singleton lock outlives the shutdown");
 }
 
 #[sqlx::test(migrations = "./migrations")]

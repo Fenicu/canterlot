@@ -569,7 +569,12 @@ async fn delegated_session_starts_the_cli_with_a_strict_mcp_config() {
             .iter()
             .any(|a| a == "--strict-mcp-config")
     );
-    assert_eq!(recorded(&owner, "connectors.json").await, Value::Null);
+    // Сессия владельца наследует окружение как есть. Проверки, запущенные из делегированной сессии,
+    // уже несут ENABLE_CLAUDEAI_MCP_SERVERS=false, поэтому сверка идёт с окружением процесса.
+    let ambient = std::env::var("ENABLE_CLAUDEAI_MCP_SERVERS")
+        .ok()
+        .map_or(Value::Null, Value::from);
+    assert_eq!(recorded(&owner, "connectors.json").await, ambient);
     owner.close().await;
 
     let mut delegated = Fake::new(vec![]);

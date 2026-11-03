@@ -55,6 +55,9 @@ async function bootChat(
 	await installChatRoutes(page, hub, api, OWNER);
 	await page.goto(`/c/${id}`);
 	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+	// Снимок фальшивого хаба берёт курсор по голове журнала, а данные из засеянного состояния: событие,
+	// добавленное до снимка, оказалось бы за курсором и не пришло бы. Тесты добавляют события после подписки.
+	await expect.poll(() => hub.subscribed(`conversation:${id}`), { timeout: 15_000 }).toBe(true);
 
 	return { hub, api, id };
 }
