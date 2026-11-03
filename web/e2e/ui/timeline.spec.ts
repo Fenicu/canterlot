@@ -694,3 +694,28 @@ for (const theme of ['dark', 'light'] as const) {
     await page.screenshot({ path: `/tmp/shots-t10/attachments-viewer-${theme}-${info.project.name}.png` });
   });
 }
+
+test('empty_chat_says_so_and_a_loading_chat_shows_placeholders', async ({ page }) => {
+  // Пока снимок в пути, вместо пустоты три полосы заготовки, как в шапке.
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const id = seedConversation(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/snapshot', async (route) => { await held; await route.fallback(); });
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-feed-loading] .skeleton')).toHaveCount(3);
+  release();
+  await expect(page.locator('[data-feed-loading]')).toHaveCount(0);
+  await expect(page.locator('[data-feed-empty]')).toHaveText('Сообщений пока нет. Напишите агенту задачу');
+});
+
+test('a_chat_with_history_never_flashes_the_empty_line', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { __empty: number }).__empty = 0;
+    new MutationObserver(() => { if (document.querySelector('[data-feed-empty]')) (window as unknown as { __empty: number }).__empty += 1; }).observe(document, { childList: true, subtree: true });
+  });
+  await boot(page, 5);
+  expect(await page.evaluate(() => (window as unknown as { __empty: number }).__empty)).toBe(0);
+});
