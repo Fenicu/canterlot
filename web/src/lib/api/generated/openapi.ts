@@ -224,6 +224,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/groups/{group_id}/pin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["put__api_v1_conversations__id__groups__group_id__pin"];
+        post?: never;
+        delete: operations["delete__api_v1_conversations__id__groups__group_id__pin"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/history": {
         parameters: {
             query?: never;
@@ -972,6 +988,7 @@ export interface components {
             archived: boolean;
             color?: string | null;
             created_at: string;
+            group_pins: components["schemas"]["GroupPinView"][];
             groups: string[];
             harness: components["schemas"]["HarnessRef"];
             /** Format: uuid */
@@ -1425,6 +1442,12 @@ export interface components {
             name?: string | null;
             /** Format: int32 */
             position?: number | null;
+        };
+        /** @description Закрепление сессии внутри одной группы; глобальное `pinned` живёт отдельно. */
+        GroupPinView: {
+            /** Format: uuid */
+            group_id: string;
+            pinned_at: string;
         };
         GroupsBody: {
             group_ids: string[];
@@ -3197,6 +3220,102 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConversationDetail"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_conversations__id__groups__group_id__pin: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сессия закреплена в группе */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationDetail"];
+                };
+            };
+            /** @description not_found или group_not_found */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_conversations__id__groups__group_id__pin: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сессия откреплена в группе */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description not_found или group_not_found */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

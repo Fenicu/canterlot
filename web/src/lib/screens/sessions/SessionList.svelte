@@ -149,6 +149,12 @@
       ? (rows.find((item) => item.id === sheetId) ?? null)
       : null
   );
+  // Меню открыто с вкладки группы: закрепление относится к ней, а не к «Все».
+  const sheetGroup = $derived.by(() => {
+    if (tab.kind !== 'group') return null;
+    const id = tab.id;
+    return groups.find((group) => group.id === id) ?? null;
+  });
   const groupCounts = $derived.by(() => {
     // Делегированные сессии групп не занимают: считают только верхний уровень.
     const counts: Record<string, number> = {};
@@ -339,7 +345,7 @@
           {...section}
           now={now}
           current={openRow?.id ?? ''}
-          heading={tab.kind === 'all' && !results}
+          heading={!results && (tab.kind === 'all' || (tab.kind === 'group' && sections.some((section) => section.id.startsWith('pinned:'))))}
           ontoggle={toggle}
           ontoggleKids={toggleKids}
           onopen={openSheet}
@@ -351,6 +357,7 @@
     {#key sheetItem.id}<SessionSheet
       item={sheetItem}
       groups={groups}
+      group={sheetGroup}
       machine={runtime?.machines.items.get(sheetItem.machine.id) ?? null}
       anchor={sheetRow.bottom}
       anchorTop={sheetRow.top}

@@ -239,6 +239,12 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[group, conversation],
     )
     .await;
+    exec(
+        pool,
+        "insert into conversation_group_pins(conversation_id,group_id) values($1,$2)",
+        &[conversation, group],
+    )
+    .await;
     sqlx::query(
         "insert into idempotency_keys(owner_id,key,operation,request_hash,response,conversation_id)
          values($1,$2,'seed',''::bytea,'{}',$3)",

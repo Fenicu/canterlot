@@ -509,6 +509,7 @@ export interface ConversationCreated {
     pinned: boolean;
     archived: boolean;
     groups: Uuid[];
+    group_pins?: GroupPin[];
     machine: {
       id: Uuid;
       name: string;
@@ -540,6 +541,10 @@ export interface ConversationCreated {
       path: string;
     } | null;
   };
+}
+export interface GroupPin {
+  group_id: Uuid;
+  pinned_at: Time;
 }
 export interface Activity {
   state: "idle" | "working" | "waiting_for_user" | "stalled" | "quota_paused" | "failed" | "stopped";
@@ -580,6 +585,7 @@ export interface ConversationUpdated {
     pinned: boolean;
     archived: boolean;
     groups: Uuid[];
+    group_pins?: GroupPin[];
     machine: {
       id: Uuid;
       name: string;

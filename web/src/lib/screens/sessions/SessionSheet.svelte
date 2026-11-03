@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ApiError } from '#lib/api/http.js';
-  import { deleteConversation, getConversation, patchConversation, setConversationGroups, patchSettings, setCrunch } from '#lib/api/client.js';
+  import { deleteConversation, getConversation, patchConversation, pinConversationInGroup, setConversationGroups, patchSettings, setCrunch, unpinConversationInGroup } from '#lib/api/client.js';
   import { errorText } from '#lib/api/errors.js';
   import { intents } from '#lib/ops/intent.js';
   import { stopSession } from '#lib/screens/chat/controls.js';
@@ -24,11 +24,13 @@
   import type { MachineRecord } from '#lib/stores/machines.svelte.js';
   import { turnRunning, turnText, type Activity } from './activityText';
   import { COLOR_KEYS, COLOR_NAMES } from './colors';
+  import { groupPinAt } from './grouping';
   import { menuTop } from './menuPlace';
 
   let {
     item,
     groups,
+    group = null,
     machine = null,
     touch = isTouchPrimary(),
     anchor = 0,
@@ -39,6 +41,8 @@
   }: {
     item: ListRow;
     groups: { id: string; name: string }[];
+    /** Открыто с вкладки группы: закрепление относится к ней. */
+    group?: { id: string; name: string } | null;
     machine?: MachineRecord | null;
     touch?: boolean;
     anchor?: number;
@@ -51,8 +55,11 @@
   const STOP_POLLS = 60;
   const STOP_POLL_MS = 500;
   const seed = untrack(() => item);
+  // Окно живёт до смены строки или вкладки: группа закрепления не меняется на лету.
+  const pinGroup = untrack(() => group);
   let title = $state(seed.title);
   let pinned = $state(seed.pinned);
+  let groupPinned = $state(!!pinGroup && groupPinAt(seed, pinGroup.id) !== null);
   let chosen = $state(seed.color ?? 'neutral');
   let members = $state(seed.groups.slice());
   let model = $state(seed.model ?? 'opus');
@@ -70,6 +77,7 @@
   const stopKey = crypto.randomUUID();
   let sentTitle = seed.title;
   let sentPin = seed.pinned;
+  let sentGroupPin = !!pinGroup && groupPinAt(seed, pinGroup.id) !== null;
   let sentCrunch = seed.crunch?.enabled ?? false;
   // В строке списка текста продолжения нет, а хаб заменил бы сохранённый текст присланным.
   const seeded = getConversation(seed.id)
@@ -101,6 +109,25 @@
       sentPin = !value;
       pinned = !value;
     });
+  });
+  $effect(() => {
+    const value = groupPinned;
+    const target = pinGroup;
+    if (!target || value === sentGroupPin) return;
+    sentGroupPin = value;
+    const conversation = item.id;
+    void attempt(
+      value ? 'Не удалось закрепить в группе' : 'Не удалось открепить в группе',
+      () =>
+        intents.run(`group-pin:${conversation}:${target.id}:${value}`, async (key) => {
+          if (value) await pinConversationInGroup(conversation, target.id, key);
+          else await unpinConversationInGroup(conversation, target.id, key);
+        }),
+      () => {
+        sentGroupPin = !value;
+        groupPinned = !value;
+      }
+    );
   });
   $effect(() => {
     const value = crunch;
@@ -345,7 +372,16 @@
       <ColorSwatches label="Цвет" options={swatches} value={chosen} onchange={(key) => void saveColor(key)} />
     </div>
     <div class="rows">
-      <Toggle block icon="pin" label="Закрепить" bind:checked={pinned} />
+      {#if pinGroup}
+        <Toggle
+          block
+          icon="pin"
+          label={groupPinned ? `Открепить в группе «${pinGroup.name}»` : `Закрепить в группе «${pinGroup.name}»`}
+          bind:checked={groupPinned}
+        />
+      {:else}
+        <Toggle block icon="pin" label="Закрепить" bind:checked={pinned} />
+      {/if}
       <div class="groups">
         <div class="line">
           <span class="caption">Группы</span>
