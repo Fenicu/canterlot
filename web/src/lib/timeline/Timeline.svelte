@@ -413,7 +413,7 @@
     {:else if rows.length === 0 && !feed && !chat.detail}
       <!-- Пока снимок не пришёл, лента показывает заготовку, как шапка, а не пустоту. -->
       <div class="loading" data-feed-loading aria-hidden="true"><span class="skeleton" style:width="var(--bar-74)"></span><span class="skeleton" style:width="var(--bar-56)"></span><span class="skeleton" style:width="var(--bar-81)"></span></div>
-    {:else if rows.length === 0 && !feed && !compacting}
+    {:else if rows.length === 0 && !feed && !compacting && chat.requests.items.size === 0}
       <p class="empty" data-feed-empty>Сообщений пока нет. Напишите агенту задачу</p>
     {/if}
   </div>
