@@ -2586,12 +2586,11 @@ async fn steered_input_gets_agent_confirmation_time(pool: PgPool) -> TestResult 
             ),
         )
         .await?;
-    let (state, confirmed): (String, Option<i64>) = sqlx::query_as(
-        "select state, agent_confirmed_machine_ms from inputs where id = $1",
-    )
-    .bind(queued.input_id)
-    .fetch_one(&pool)
-    .await?;
+    let (state, confirmed): (String, Option<i64>) =
+        sqlx::query_as("select state, agent_confirmed_machine_ms from inputs where id = $1")
+            .bind(queued.input_id)
+            .fetch_one(&pool)
+            .await?;
     assert_eq!((state.as_str(), confirmed), ("accepted", Some(505)));
     Ok(())
 }

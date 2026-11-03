@@ -983,7 +983,7 @@ pub async fn request_send_now(
     conversation_id: Uuid,
     input_id: Uuid,
     idempotency_key: &str,
-    _correlation_id: Uuid,
+    correlation_id: Uuid,
     machine_capabilities: &[String],
 ) -> Result<SendNowOutcome, ControlError> {
     idempotency::validate_key(idempotency_key)
@@ -1002,6 +1002,11 @@ pub async fn request_send_now(
                 lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
             {
                 return Ok(outcome);
+            }
+            if queue.closed {
+                return Err(ControlError::InvalidRequest {
+                    reason: "conversation_closed",
+                });
             }
             let input: Option<(String, Uuid, Value)> = sqlx::query_as(
                 "select i.state, i.command_id, i.content from inputs i
@@ -1142,6 +1147,26 @@ pub async fn request_send_now(
                 .execute(&mut *conn)
                 .await?;
                 notify_outbox(&mut *conn, machine_id).await?;
+                // Другие вкладки видят, что ввод уже вливается.
+                events::append(
+                    &mut *conn,
+                    NewEvent {
+                        scope: Scope::Conversation {
+                            id: conversation_id,
+                        },
+                        kind: "input_state_changed",
+                        conversation_id: Some(conversation_id),
+                        execution_id: Some(execution_id),
+                        payload: json!({
+                            "input_id": input_id,
+                            "state": "queued",
+                            "cause": "steer_requested",
+                            "command_id": steer_command_id,
+                        }),
+                        correlation_id,
+                    },
+                )
+                .await?;
                 SendNowOutcome::Requested { steer_command_id }
             };
             record(
@@ -1213,6 +1238,11 @@ pub async fn request_edit_input(
                 lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
             {
                 return Ok(outcome);
+            }
+            if queue.closed {
+                return Err(ControlError::InvalidRequest {
+                    reason: "conversation_closed",
+                });
             }
             let input: Option<(String, i64, Uuid)> = sqlx::query_as(
                 "select i.state, i.revision, i.command_id from inputs i

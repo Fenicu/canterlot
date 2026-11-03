@@ -901,3 +901,73 @@ async fn later_input_waits_for_the_steered_head(pool: PgPool) -> TestResult {
     assert_eq!(state(&pool, third_id).await, InputState::Queued);
     Ok(())
 }
+
+/// Запрос вливания виден другим вкладкам событием; закрытый разговор не
+/// принимает ни вливание, ни правку.
+#[sqlx::test(migrations = "./migrations")]
+async fn send_now_emits_event_and_respects_closed_queue(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    harness(&pool, &seed, "codex").await;
+    running(&pool, &seed).await;
+    let (_, first_cmd) = input(&pool, &seed, "first").await;
+    let (second_id, _) = input(&pool, &seed, "second").await;
+    let (third_id, _) = input(&pool, &seed, "third").await;
+    gate_dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first_cmd).await;
+    let correlation_id = Uuid::now_v7();
+    let SendNowOutcome::Requested { steer_command_id } = request_send_now(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        second_id,
+        "k",
+        correlation_id,
+        &caps(),
+    )
+    .await?
+    else {
+        panic!("not requested");
+    };
+    let (payload, correlation): (Value, Uuid) = sqlx::query_as(
+        "select payload, correlation_id from events where kind = 'input_state_changed'
+         and payload->>'input_id' = $1 order by scope_seq desc limit 1",
+    )
+    .bind(second_id.to_string())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        payload,
+        json!({"input_id": second_id, "state": "queued", "cause": "steer_requested", "command_id": steer_command_id})
+    );
+    assert_eq!(correlation, correlation_id);
+    sqlx::query("update queue_state set closed = true where conversation_id = $1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        send_now(&pool, &seed, third_id, "k2", &caps()).await,
+        Err(ControlError::InvalidRequest {
+            reason: "conversation_closed"
+        })
+    ));
+    assert!(matches!(
+        canterlot_hub::delivery::control::request_edit_input(
+            &pool,
+            canterlot_hub::delivery::control::EditInput {
+                owner_id: seed.owner_id,
+                conversation_id: seed.conversation_id,
+                input_id: third_id,
+                text: "правка".into(),
+                attachment_ids: Vec::new(),
+                expected_revision: 1,
+                idempotency_key: "edit-closed".into(),
+                correlation_id: Uuid::now_v7(),
+            },
+        )
+        .await,
+        Err(ControlError::InvalidRequest {
+            reason: "conversation_closed"
+        })
+    ));
+    Ok(())
+}
