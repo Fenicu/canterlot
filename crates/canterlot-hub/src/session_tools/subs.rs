@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, types::Json};
 use uuid::Uuid;
 
+use super::completion;
 use super::settle::{self, SettleConfig, SettleFacts, Settled};
 use crate::activity::{self, Activity, ActivityState, Evidence, QueueFacts};
 
@@ -297,6 +298,9 @@ pub async fn evaluate_in_tx(
     let Some(state) = settle::settled(activity, queue, facts, config) else {
         return Ok(false);
     };
+    if !completion::is_completion(state) {
+        return Ok(false);
+    }
     let fingerprint =
         settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
     // Удаление подписчика держит его строку и потом удаляет подписку: без блокировки строки

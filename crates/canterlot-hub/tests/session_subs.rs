@@ -1226,8 +1226,9 @@ async fn queue_full_keeps_the_event_for_a_day(pool: PgPool) {
     assert_eq!((state.as_str(), attempts, failures), ("pending", 6, 0));
     assert_eq!(result, Some(json!({"error":"queue_full"})));
 
-    // Другие отказы считаются по-прежнему: терпение относится только к полной очереди.
-    sqlx::query("update scheduled_jobs set created_at=$1 where kind='session_task'")
+    // Другие отказы считаются по-прежнему: терпение относится только к полной очереди
+    // и отсчитывается от первой блокировки, а не от создания задания.
+    sqlx::query("update scheduled_jobs set blocked_since=$1 where kind='session_task'")
         .bind(at - TimeDelta::hours(24) + TimeDelta::seconds(1))
         .execute(&pool)
         .await

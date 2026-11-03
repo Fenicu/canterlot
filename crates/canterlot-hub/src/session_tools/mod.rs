@@ -7,6 +7,7 @@
 
 pub mod accept;
 pub mod access;
+pub mod completion;
 pub mod control;
 pub mod jobs;
 pub mod origin;
