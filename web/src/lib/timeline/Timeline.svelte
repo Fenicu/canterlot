@@ -75,7 +75,9 @@
     const sends = chat.ownSends;
     if (sends === seenSends) return;
     seenSends = sends;
-    void tick().then(() => controller?.jumpToBottom());
+    // Окно далеко от хвоста: к своему сообщению ведёт свежий хвост, а не низ окна.
+    if (!feed && untrack(() => chat.timeline.tailDetached)) void jumpToLatest();
+    else void tick().then(() => controller?.jumpToBottom());
   });
   let seenRows: string | null = null;
   $effect(() => {
@@ -226,6 +228,22 @@
     finally { loading = false; }
   }
 
+  async function pullNewer(): Promise<void> {
+    if (loading || feed || !chat.timeline.tailDetached) return;
+    loading = true;
+    try { await chat.loadNewer(); }
+    catch { /* следующая прокрутка вниз попробует снова */ }
+    finally { loading = false; }
+  }
+
+  async function jumpToLatest(): Promise<void> {
+    held = null;
+    try { await chat.reloadTail(); }
+    catch { return; }
+    await tick();
+    controller?.jumpToBottom();
+  }
+
   async function loadBlock(blockId: string, offset: number): Promise<BlockPage> {
     const pages = await chat.blockContent(blockId);
     let last: BlockPage | null = null;
@@ -307,10 +325,17 @@
     if (!el || !controller) return;
     untrack(() => {
       const keys = list.map((row) => row.key);
-      const prepended = previous.length > 0 && keys.length > previous.length && contentKey(keys) !== contentKey(previous) && keys[keys.length - 1] === previous[previous.length - 1];
+      // Низ оторванного окна не хвост: следовать за ним значило бы перепрыгнуть пришедшую страницу.
+      if (!feed && chat.timeline.tailDetached && controller?.pinned) {
+        controller.release();
+        hold();
+      }
+      // Сверху пришла старшая страница или окно обрезано при подгрузке вниз: читаемая строка стоит на месте.
+      const headMoved = previous.length > 0 && contentKey(keys) !== contentKey(previous);
       const tail = tailKey(list);
       const grew = previous.length > 0 && tail !== previousTail;
-      const anchor = prepended && held ? captureAnchor(ix, previous, el.scrollTop) : null;
+      const captured = headMoved && held ? captureAnchor(ix, previous, el.scrollTop) : null;
+      const anchor = captured && keys.includes(captured.key) ? captured : null;
       previous = keys;
       previousTail = tail;
       layout(list, el.scrollTop, el.clientHeight || 1);
@@ -357,6 +382,7 @@
       settle();
       const overflow = host.scrollHeight - host.clientHeight;
       if (host.scrollTop < PIN_PX && !(controller?.pinned && overflow > PIN_PX)) void pullOlder();
+      else if (overflow - host.scrollTop < host.clientHeight) void pullNewer();
     };
     scroller.addEventListener('scroll', onScroll, { passive: true });
     return () => {
@@ -412,7 +438,7 @@
     {#if rows.length === 0 && !navigator.onLine}<p class="day">История недоступна без связи</p>{/if}
   </div>
   {#if !feed && chat.timeline.tailDetached}
-    <button type="button" class="jump" onclick={() => chat.reloadTail()}>К последним сообщениям</button>
+    <button type="button" class="jump" onclick={() => void jumpToLatest()}>К последним сообщениям</button>
   {:else if controller?.showJump}
     <button type="button" class="jump" onclick={() => controller?.jumpToBottom()}>К новым сообщениям</button>
   {/if}

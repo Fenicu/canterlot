@@ -180,7 +180,9 @@ describe("lane feed", () => {
     ]);
     expect(chat.blocks.has(inLane)).toBe(true);
     expect(chat.blocks.has(nested)).toBe(true);
-    expect(chat.blocks.has(foreign)).toBe(false);
+    // Чужой блок живёт в модели, но в ленту не встаёт: оторванное окно его только считает.
+    expect(chat.blocks.has(foreign)).toBe(true);
+    expect(chat.timeline.entries.map((entry) => entry.key)).not.toContain(`block:${foreign}`);
     const keys = feed.entries.map((entry) => entry.key);
     expect(keys).toContain(`block:${inLane}`);
     expect(keys).toContain(`block:${nested}`);
@@ -197,7 +199,7 @@ describe("lane feed", () => {
     feed.stop();
     expect(chat.laneLive).toHaveLength(0);
     chat.applier.applyEvents([{ event: started("late".padEnd(36, "0"), 903, ROOT), overlap: false }]);
-    expect(chat.blocks.has("late".padEnd(36, "0"))).toBe(false);
+    expect(chat.laneLive).toHaveLength(0);
   });
 
   test("a_live_revision_newer_than_the_page_is_kept", async () => {

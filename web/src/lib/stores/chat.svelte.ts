@@ -229,6 +229,25 @@ function textOf(content: HistoryInput["content"]): string {
 
 const MAX_DELTA_MARKS = 512;
 const MAX_DIAGNOSTICS = 200;
+/** Сколько событий ленты ждут страницу истории; больше — состояние берётся из нового снимка. */
+const MAX_HELD = 2000;
+/** События, которые меняют строки ленты: их порядок со страницей истории важен. */
+const SHAPING: ReadonlySet<string> = new Set([
+  "input_queued",
+  "input_state_changed",
+  "block_started",
+  "block_delta",
+  "block_final",
+  "block_incomplete",
+  "block_file_attached",
+  "block_media_attached",
+  "compaction_started",
+  "compaction_finished",
+  "request_opened",
+  "request_closed",
+  "request_decided",
+  "request_transmitting",
+]);
 
 function scopeOf(id: string): ScopeName {
   return `conversation:${id}`;
@@ -310,11 +329,17 @@ export class ChatStore {
   readonly #sync: BlockSync;
   #sub: {
     release(): void;
+    resync(): void;
     readonly status: ScopeStatus;
     readonly cursor: string;
   } | null = null;
-  #hold = false;
+  /** Сколько страниц хвоста сейчас в пути: пока их больше нуля, события ленты ждут. */
+  #holds = 0;
   #held: HubEvent[] = [];
+  /** Ожидание переполнилось: события потеряны, нужен новый снимок. */
+  #lost = false;
+  /** Номер снимка: страница, запрошенная до него, уже устарела. */
+  #epoch = 0;
   #lanes = new SvelteMap<string, number>();
   #laneLive = rawCell<TimelineEntry[]>([]);
   #readSeq = 0n;
@@ -461,29 +486,49 @@ export class ChatStore {
   }
 
   async loadNewer(): Promise<void> {
-    this.#hold = true;
+    const epoch = this.#epoch;
+    this.#holds += 1;
     try {
       const page = await this.deps.api.history(this.id, {
         after: this.timeline.newestSeq() ?? undefined,
       });
+      if (epoch !== this.#epoch) return;
       this.#ingest(page.items, "newer");
+      if (page.next_after) return;
       this.timeline.tailDetached = false;
       this.timeline.newerCount = 0;
     } finally {
-      this.#hold = false;
-      this.#flushHeld();
+      this.#release();
     }
   }
 
   async reloadTail(): Promise<void> {
-    this.#hold = true;
+    const epoch = this.#epoch;
+    this.#holds += 1;
     try {
       const page = await this.deps.api.history(this.id, {});
+      if (epoch !== this.#epoch) return;
+      if (this.timeline.tailDetached) {
+        // Окно далеко от хвоста: склеенные, они дали бы ленту с дырой посередине.
+        this.timeline.applyHistoryPage([], "tail");
+        this.timeline.hasOlder = Boolean(page.next_before);
+      }
       this.#ingest(page.items, "tail");
     } finally {
-      this.#hold = false;
-      this.#flushHeld();
+      this.#release();
     }
+  }
+
+  #release(): void {
+    this.#holds = Math.max(0, this.#holds - 1);
+    if (this.#holds > 0) return;
+    if (this.#lost) {
+      this.#lost = false;
+      this.#held = [];
+      this.#sub?.resync();
+      return;
+    }
+    this.#flushHeld();
   }
 
   markRead(createdSeq: string): void {
@@ -612,18 +657,14 @@ export class ChatStore {
       this.background.apply(event.payload.tasks);
       return;
     }
-    if (this.#hold || this.timeline.tailDetached) {
-      // Открытая лента субагента живёт независимо от прокрутки ленты разговора.
-      if (!this.#hold && this.#inOpenLane(event)) {
-        this.#dispatch(event);
-        return;
-      }
+    // Пока страница хвоста в пути, события ленты ждут её; остальное состояние живёт сразу.
+    // Оторванное окно ничего не держит: новые строки только считаются и придут страницами.
+    if (this.#holds > 0 && SHAPING.has(event.kind)) {
+      if (this.#lost) return;
       this.#held.push(event);
-      if (
-        this.timeline.tailDetached &&
-        (event.kind === "block_started" || event.kind === "input_queued")
-      ) {
-        this.timeline.newerCount += 1;
+      if (this.#held.length > MAX_HELD) {
+        this.#held = [];
+        this.#lost = true;
       }
       return;
     }
@@ -647,19 +688,6 @@ export class ChatStore {
   /** Записи блоков открытых лент, пришедших живыми, пока лента разговора оторвана от хвоста. */
   get laneLive(): TimelineEntry[] {
     return this.#laneLive.get();
-  }
-
-  #inOpenLane(event: HubEvent): boolean {
-    if (this.#lanes.size === 0) return false;
-    if (event.kind === "block_started")
-      return this.#underOpenLane(event.payload.parent_block_id);
-    if (
-      event.kind === "block_delta" ||
-      event.kind === "block_final" ||
-      event.kind === "block_incomplete"
-    )
-      return this.#underOpenLane(event.payload.block_id);
-    return false;
   }
 
   #underOpenLane(start: string | null): boolean {
@@ -729,7 +757,7 @@ export class ChatStore {
         return;
       case "compaction_finished":
         // Тихая строка уже в истории: подтягиваем хвост, переживает перезагрузку.
-        void this.reloadTail();
+        this.reloadTail().catch(() => undefined);
         return;
       case "compaction_started":
         if (event.kind === "compaction_started") {
@@ -1153,6 +1181,10 @@ export class ChatStore {
 
 
   #applySnapshot(data: SnapshotData): void {
+    // Снимок новее всего, что ждало страницу: повтор этих событий вернул бы старое.
+    this.#epoch += 1;
+    this.#held = [];
+    this.#lost = false;
     if (data.detail) {
       this.detail = data.detail;
       this.turnRecorded = data.detail.turn_recorded === true;

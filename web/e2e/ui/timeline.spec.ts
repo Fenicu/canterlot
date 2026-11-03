@@ -48,6 +48,67 @@ test('memory_is_bounded_after_scrolling_through_10000_items', async ({ page }) =
   await expect(page.getByRole('button', { name: 'К последним сообщениям' })).toBeVisible();
 });
 
+async function detachTail(page: import('@playwright/test').Page): Promise<void> {
+  const feed = page.locator('.feed');
+  const jump = page.getByRole('button', { name: 'К последним сообщениям' });
+  for (let step = 0; step < 120; step++) {
+    await feed.evaluate((el) => { el.scrollTop = 0; });
+    if (await jump.isVisible()) return;
+    await page.waitForTimeout(100);
+  }
+  await expect(jump).toBeVisible();
+}
+
+test('detached_window_stays_live_and_the_jump_button_returns_to_the_tail', async ({ page }) => {
+  test.setTimeout(120_000);
+  const { hub, api, id } = await boot(page, 3200);
+  await detachTail(page);
+  const scope = `conversation:${id}`;
+  hub.append(scope, {
+    kind: 'derived_changed',
+    conversation_id: id,
+    payload: {
+      conversation_id: id,
+      activity: { state: 'working', evidence: {}, since: AT },
+      unread_count: 0,
+      queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
+      last_activity_at: AT,
+      settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
+      crunch: { enabled: false }
+    }
+  });
+  hub.append(scope, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [], hold_reasons: [], run_slot: { running: { input_id: api.id() } } } });
+  const blockId = api.id();
+  const opened = hub.append(scope, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
+  hub.append(scope, { kind: 'block_delta', conversation_id: id, payload: { block_id: blockId, base_rev: 0, rev: 1, append: 'свежий ответ' } });
+  // Настоящий хаб пишет блок в историю вместе с событием.
+  api.histories.get(id)!.push({ ...textBlock(api, 'свежий ответ', opened.scope_seq, 'streaming'), id: blockId });
+  api.blocks.set(blockId, { text: 'свежий ответ', rev: 1, state: 'streaming' });
+  hub.flush();
+  // Состояние хода живёт, пока читают старое: кнопка прерывания видна сразу.
+  await expect(page.getByRole('button', { name: 'Прервать' })).toBeVisible();
+  const jump = page.getByRole('button', { name: 'К последним сообщениям' });
+  await jump.click();
+  await expect(jump).toBeHidden();
+  await expect(page.getByText('свежий ответ')).toBeVisible();
+  await expect(page.locator('.feed')).toHaveAttribute('data-pinned', '');
+});
+
+test('scrolling_down_a_detached_window_loads_newer_pages_back_to_the_tail', async ({ page }) => {
+  test.setTimeout(120_000);
+  await boot(page, 3200);
+  await detachTail(page);
+  const feed = page.locator('.feed');
+  const jump = page.getByRole('button', { name: 'К последним сообщениям' });
+  for (let step = 0; step < 120 && (await jump.isVisible()); step++) {
+    await feed.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+    await page.waitForTimeout(100);
+  }
+  await expect(jump).toBeHidden();
+  expect(Number(await feed.getAttribute('data-loaded'))).toBeLessThanOrEqual(3000);
+  await expect(page.locator('[data-row]').last()).toContainText('3200');
+});
+
 // QUARANTINE: подгрузка не укладывается в 5 с под нагрузкой (1 раз при нагрузке 40; 8 из 8 отдельно)
 test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the_viewport', () => {
   test.describe.configure({ retries: 2 });

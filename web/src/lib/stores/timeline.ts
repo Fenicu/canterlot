@@ -1,6 +1,7 @@
 import type { BlockModel } from './blocks';
 import type { InputView } from './inputs';
 import type { RequestItem } from './requests.svelte';
+import { untrack } from 'svelte';
 import { rawCell } from './cell.svelte';
 
 export interface CompactionModel {
@@ -42,10 +43,25 @@ export function cmpSeq(a: string, b: string): number {
 
 export class TimelineModel {
 	readonly maxLoaded = 3000;
-	tailDetached = false;
-	newerCount = 0;
 	#entries = rawCell<TimelineEntry[]>([]);
 	#hasOlder = rawCell(false);
+	#tailDetached = rawCell(false);
+	#newerCount = rawCell(0);
+
+	/** Окно ушло от хвоста: новые записи считаются, но в ленту не встают, пока его не вернут. */
+	get tailDetached(): boolean {
+		return this.#tailDetached.get();
+	}
+	set tailDetached(value: boolean) {
+		this.#tailDetached.set(value);
+	}
+
+	get newerCount(): number {
+		return this.#newerCount.get();
+	}
+	set newerCount(value: number) {
+		this.#newerCount.set(value);
+	}
 
 	// Лента кэширует признак в $derived: без сигнала она навсегда запоминала значение до первой страницы.
 	get hasOlder(): boolean {
@@ -107,7 +123,7 @@ export class TimelineModel {
 
 	upsert(entry: TimelineEntry): void {
 		if (this.tailDetached) {
-			this.newerCount += 1;
+			untrack(() => (this.newerCount += 1));
 			return;
 		}
 		const current = this.entries.find((item) => item.key === entry.key);
