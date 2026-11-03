@@ -1,9 +1,9 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use canterlot_proto::{
@@ -33,7 +33,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{ExecError, Shared, SjRelay, lost, open, procfs, spawn};
+use super::{ExecError, Shared, SjRelay, lost, maintenance, open, procfs, spawn};
 use crate::{
     adapter,
     attachments::{AttachmentStore, FetchError, RetryPolicy},
@@ -299,6 +299,124 @@ pub(super) fn spawn_actor(shared: &Arc<Shared>, id: Uuid, start: Start) {
     let actor = Actor::new(shared.clone(), id, generation, receiver);
     let task = tokio::spawn(actor.run(start));
     shared.tasks.lock().expect("tasks lock").push(task);
+}
+
+/// Сокеты и каталоги прерванных запусков: только то, на что нет записи принадлежности.
+pub(super) async fn sweep_runtime(shared: &Shared) -> Result<(), ExecError> {
+    let data_dir = shared.data_dir().await?.clone();
+    let runtime_dir = shared.runtime_dir.clone();
+    let spawn_timeout = shared.config.spawn_timeout;
+    maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref())?;
+    let executions_dir = data_dir.join("executions");
+    let now = SystemTime::now();
+    let (executions, sockets) = tokio::task::spawn_blocking({
+        let data_dir = data_dir.clone();
+        let runtime_dir = runtime_dir.clone();
+        move || {
+            Ok::<_, io::Error>((
+                maintenance::stale_executions(
+                    &data_dir,
+                    runtime_dir.as_deref(),
+                    spawn_timeout,
+                    now,
+                )?,
+                maintenance::stale_sockets(&data_dir, runtime_dir.as_deref())?,
+            ))
+        }
+    })
+    .await
+    .map_err(|_| ExecError::Shutdown)??;
+    for execution in executions {
+        before_recheck(&execution.id.to_string()).await;
+        shared
+            .store
+            .call(move |slot| {
+                if open(slot)?.ownership().get(execution.id).is_some() {
+                    return Ok(());
+                }
+                maintenance::remove_stale_execution(&execution, spawn_timeout, SystemTime::now())?;
+                Ok(())
+            })
+            .await?;
+    }
+    for (id, path) in sockets {
+        before_recheck(&id.to_string()).await;
+        let executions_dir = executions_dir.clone();
+        shared
+            .store
+            .call(move |slot| {
+                let store = open(slot)?;
+                let unreleased = store
+                    .ownership()
+                    .unreleased()
+                    .iter()
+                    .any(|record| Path::new(&record.ipc_socket) == path.as_path());
+                if unreleased {
+                    return Ok(());
+                }
+                maintenance::remove_stale_socket(id, &path, &executions_dir)?;
+                Ok(())
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+/// Тестовый барьер между перечислением и удалением: проверяет, что решение перечитывается.
+#[cfg(test)]
+pub(super) type BeforeRecheck = std::sync::Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
+#[cfg(test)]
+pub(super) static BEFORE_RECHECK: std::sync::Mutex<Option<BeforeRecheck>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+async fn before_recheck(key: &str) {
+    let hook = BEFORE_RECHECK
+        .lock()
+        .expect("maintenance hook lock")
+        .clone();
+    if let Some(hook) = hook {
+        hook(key.to_owned()).await;
+    }
+}
+
+#[cfg(not(test))]
+async fn before_recheck(_: &str) {}
+
+/// Сборка в рабочей копии без живого исполнения: `target` и кэш узлов старше шести часов.
+pub(super) async fn gc_worktrees(shared: &Shared) -> Result<(), ExecError> {
+    let data_dir = shared.data_dir().await?.clone();
+    let idle_worktrees = tokio::task::spawn_blocking(move || {
+        maintenance::idle_worktrees(&data_dir, SystemTime::now(), Duration::from_secs(6 * 3600))
+    })
+    .await
+    .map_err(|_| ExecError::Shutdown)??;
+    for worktree in idle_worktrees {
+        before_recheck(&worktree.conversation_id).await;
+        let conversation_id = worktree.conversation_id.clone();
+        let path = worktree.path.clone();
+        // Проверка и удаление в потоке хранилища: запись принадлежности не вклинится между ними.
+        shared
+            .store
+            .call(move |slot| {
+                let store = open(slot)?;
+                let live = store
+                    .ownership()
+                    .unreleased()
+                    .iter()
+                    .any(|record| record.conversation_id == conversation_id);
+                if live {
+                    return Ok(());
+                }
+                maintenance::remove_build(&path)?;
+                Ok(())
+            })
+            .await?;
+    }
+    Ok(())
 }
 
 pub(super) async fn cleanup_released(shared: &Shared) -> Result<(), ExecError> {
@@ -1217,7 +1335,7 @@ impl Actor {
             self.cancel_start().await?;
             return Ok(false);
         }
-        let mut child = match spawn::spawn_supervisor(&exe, &dir) {
+        let mut child = match spawn::spawn_supervisor(&exe, &dir, self.shared.config.build_jobs) {
             Ok(child) => child,
             Err(_) => {
                 return self
@@ -2524,7 +2642,12 @@ mod tests {
             .unwrap();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         actor
@@ -2585,7 +2708,12 @@ mod tests {
             store.accept_command(&command).unwrap();
             let thread = StoreThread::new(store);
             let (relay, _rx) = mpsc::channel(1);
-            let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+            let manager = ExecutionManager::new_with_runtime_dir(
+                ExecutionConfig::default(),
+                thread.client(),
+                relay,
+                Some(root.path().join("runtime")),
+            );
             let (_tx, rx) = mpsc::unbounded_channel();
             let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
             actor.handed.insert((cid, 1));
@@ -2672,7 +2800,12 @@ mod tests {
         store.accept_command(&stop).unwrap();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         let attachment = Uuid::now_v7();
@@ -2740,7 +2873,12 @@ mod tests {
             .unwrap();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         actor.fetching.insert(
@@ -2799,7 +2937,12 @@ mod tests {
         store.accept_command_with_pilot(&input, true).unwrap();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         let cancel = CancellationToken::new();
@@ -2859,7 +3002,12 @@ mod tests {
         assert!(!store.command_state(&cid).unwrap().unwrap().terminal);
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         let journal = Uuid::now_v7();
@@ -2891,6 +3039,149 @@ mod tests {
         thread.close().await.unwrap();
     }
 
+    fn age_tree(path: &Path) {
+        let old = SystemTime::now() - Duration::from_secs(8 * 3600);
+        fs::File::open(path).unwrap().set_modified(old).unwrap();
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                age_tree(&entry.path());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gc_keeps_build_when_ownership_appears_after_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let conversation = Uuid::now_v7();
+        let worktree = data.join("worktrees").join(conversation.to_string());
+        fs::create_dir_all(worktree.join("target/debug")).unwrap();
+        fs::write(worktree.join("target/debug/old"), "old").unwrap();
+        age_tree(&worktree.join("target"));
+
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        let client = thread.client();
+        *BEFORE_RECHECK.lock().unwrap() = Some(std::sync::Arc::new(move |_| {
+            let client = client.clone();
+            Box::pin(async move {
+                client
+                    .call(move |slot| {
+                        open(slot)?.ownership_mut()?.append(Ownership {
+                            execution_id: Uuid::now_v7().to_string(),
+                            conversation_id: conversation.to_string(),
+                            phase: OwnershipPhase::Attached as i32,
+                            ..Default::default()
+                        })?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            })
+        }));
+        super::gc_worktrees(&manager.shared).await.unwrap();
+        *BEFORE_RECHECK.lock().unwrap() = None;
+        assert!(worktree.join("target/debug/old").exists());
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_socket_when_ownership_appears_after_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let id = Uuid::now_v7();
+        let runtime = root.path().join("runtime");
+        let sockets = runtime.join("canterlot");
+        fs::create_dir_all(&sockets).unwrap();
+        let socket = sockets.join(format!("{id}.sock"));
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(runtime.clone()),
+        );
+        let client = thread.client();
+        let hook_socket = socket.clone();
+        *BEFORE_RECHECK.lock().unwrap() = Some(std::sync::Arc::new(move |_| {
+            let client = client.clone();
+            let socket = hook_socket.clone();
+            Box::pin(async move {
+                client
+                    .call(move |slot| {
+                        open(slot)?.ownership_mut()?.append(Ownership {
+                            execution_id: id.to_string(),
+                            ipc_socket: socket.to_string_lossy().into_owned(),
+                            phase: OwnershipPhase::Attached as i32,
+                            ..Default::default()
+                        })?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            })
+        }));
+        super::sweep_runtime(&manager.shared).await.unwrap();
+        *BEFORE_RECHECK.lock().unwrap() = None;
+        assert!(socket.exists());
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_execution_when_ownership_appears_after_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let id = Uuid::now_v7();
+        let exec_dir = data.join("executions").join(id.to_string());
+        fs::create_dir_all(&exec_dir).unwrap();
+        age_tree(&exec_dir);
+
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        let client = thread.client();
+        *BEFORE_RECHECK.lock().unwrap() = Some(std::sync::Arc::new(move |_| {
+            let client = client.clone();
+            Box::pin(async move {
+                client
+                    .call(move |slot| {
+                        open(slot)?.ownership_mut()?.append(Ownership {
+                            execution_id: id.to_string(),
+                            phase: OwnershipPhase::Attached as i32,
+                            ..Default::default()
+                        })?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            })
+        }));
+        super::sweep_runtime(&manager.shared).await.unwrap();
+        *BEFORE_RECHECK.lock().unwrap() = None;
+        assert!(exec_dir.exists());
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn share_without_block_id_is_refused_to_the_agent() {
         let root = tempfile::tempdir().unwrap();
@@ -2898,7 +3189,12 @@ mod tests {
         let id = Uuid::now_v7();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         actor.exec_dir = Some(root.path().to_owned());
@@ -2948,7 +3244,12 @@ mod tests {
         let id = Uuid::now_v7();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         let share_id = Uuid::now_v7();

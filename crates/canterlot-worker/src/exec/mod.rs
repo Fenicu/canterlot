@@ -32,6 +32,7 @@ use crate::{
 mod group;
 mod ipc_caps;
 mod lost;
+mod maintenance;
 mod manager;
 mod procfs;
 mod spawn;
@@ -259,6 +260,7 @@ pub(crate) struct Shared {
     /// Уборки рабочих копий в работе: повтор той же команды не запускает вторую.
     pub worktree_jobs: Mutex<HashSet<String>>,
     pub runtime_dir: Option<PathBuf>,
+    pub maintenance_started: AtomicBool,
     pub data_dir: OnceCell<PathBuf>,
     pub boot_id: OnceCell<String>,
     #[cfg(feature = "fault-injection")]
@@ -396,6 +398,10 @@ impl Shared {
     }
 }
 
+pub(crate) fn runtime_dir_from_env() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
+}
+
 pub struct ExecutionManager {
     shared: Arc<Shared>,
     shutdown: watch::Sender<bool>,
@@ -413,7 +419,23 @@ impl ExecutionManager {
         store: StoreClient,
         relay: mpsc::Sender<SjRelay>,
     ) -> ExecutionManager {
-        Self::new_with_attachments(config, store, relay, WorkerAttachmentsConfig::default())
+        Self::new_with_runtime_dir(config, store, relay, runtime_dir_from_env())
+    }
+
+    /// Тот же менеджер с явным каталогом сокетов: тесты не трогают общий `XDG_RUNTIME_DIR`.
+    pub fn new_with_runtime_dir(
+        config: ExecutionConfig,
+        store: StoreClient,
+        relay: mpsc::Sender<SjRelay>,
+        runtime_dir: Option<PathBuf>,
+    ) -> ExecutionManager {
+        Self::new_with_attachments_and_runtime_dir(
+            config,
+            store,
+            relay,
+            WorkerAttachmentsConfig::default(),
+            runtime_dir,
+        )
     }
 
     pub fn new_with_attachments(
@@ -421,6 +443,22 @@ impl ExecutionManager {
         store: StoreClient,
         relay: mpsc::Sender<SjRelay>,
         attachment_config: WorkerAttachmentsConfig,
+    ) -> Self {
+        Self::new_with_attachments_and_runtime_dir(
+            config,
+            store,
+            relay,
+            attachment_config,
+            runtime_dir_from_env(),
+        )
+    }
+
+    pub fn new_with_attachments_and_runtime_dir(
+        config: ExecutionConfig,
+        store: StoreClient,
+        relay: mpsc::Sender<SjRelay>,
+        attachment_config: WorkerAttachmentsConfig,
+        runtime_dir: Option<PathBuf>,
     ) -> Self {
         let (shutdown, shutdown_rx) = watch::channel(false);
         ExecutionManager {
@@ -446,7 +484,8 @@ impl ExecutionManager {
                 actors: Mutex::default(),
                 tasks: Mutex::default(),
                 worktree_jobs: Mutex::default(),
-                runtime_dir: std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+                runtime_dir,
+                maintenance_started: AtomicBool::new(false),
                 data_dir: OnceCell::new(),
                 boot_id: OnceCell::new(),
                 #[cfg(feature = "fault-injection")]
@@ -680,9 +719,47 @@ impl ExecutionManager {
         }
     }
 
+    fn start_maintenance(&self) {
+        if self
+            .shared
+            .maintenance_started
+            .swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        let shared = self.shared.clone();
+        let mut shutdown = self.shared.shutdown.clone();
+        let task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(3600));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        if let Err(error) = manager::sweep_runtime(&shared).await {
+                            tracing::warn!(reason = %error, "runtime sweep failed");
+                        }
+                        if let Err(error) = manager::gc_worktrees(&shared).await {
+                            tracing::warn!(reason = %error, "worktree build gc failed");
+                        }
+                    }
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        self.shared.tasks.lock().expect("tasks lock").push(task);
+    }
+
     pub async fn startup_verify(&self) -> Result<Vec<Uuid>, ExecError> {
         let _route = self.shared.route_lock.lock().await;
         manager::cleanup_released(&self.shared).await?;
+        manager::sweep_runtime(&self.shared).await?;
+        manager::gc_worktrees(&self.shared).await?;
+        self.start_maintenance();
         let records = self
             .shared
             .store

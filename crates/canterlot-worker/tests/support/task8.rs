@@ -173,7 +173,13 @@ async fn seed_execution(
     use canterlot_worker::{exec::ExecutionManager, session_store::StoreThread};
     let thread = StoreThread::new(store);
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    let manager = ExecutionManager::new(config.execution.clone(), thread.client(), tx);
+    let runtime = config.data_dir.join("runtime");
+    let manager = ExecutionManager::new_with_runtime_dir(
+        config.execution.clone(),
+        thread.client(),
+        tx,
+        Some(runtime),
+    );
     let command = start_command(execution, conversation, &config.data_dir);
     let copy = command.clone();
     let accept = thread

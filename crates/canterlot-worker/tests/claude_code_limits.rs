@@ -364,8 +364,9 @@ async fn empty_poll_sends_no_report() {
             ..Default::default()
         })
         .await;
-        let worker =
-            Worker::new(hub.config.clone(), store).with_limits_source(Arc::new(ClaudeOnlySource));
+        let worker = Worker::new(hub.config.clone(), store)
+            .with_runtime_dir(hub.config.data_dir.join("runtime"))
+            .with_limits_source(Arc::new(ClaudeOnlySource));
         let mut state = worker.state();
         let (stop, shutdown) = watch::channel(false);
         let join = tokio::spawn(worker.run(shutdown));
@@ -422,8 +423,9 @@ async fn absence_alone_is_reported_to_the_hub() {
             ..Default::default()
         })
         .await;
-        let worker =
-            Worker::new(hub.config.clone(), store).with_limits_source(Arc::new(AbsenceOnlySource));
+        let worker = Worker::new(hub.config.clone(), store)
+            .with_runtime_dir(hub.config.data_dir.join("runtime"))
+            .with_limits_source(Arc::new(AbsenceOnlySource));
         let mut state = worker.state();
         let (stop, shutdown) = watch::channel(false);
         let join = tokio::spawn(worker.run(shutdown));
@@ -475,7 +477,9 @@ async fn idle_ticker_requests_a_claude_poll_each_interval() {
         hub.config.machine.limits_poll_interval = Duration::from_secs(900);
         let interval = Duration::from_secs(900);
         let source = Arc::new(CountingSource::default());
-        let worker = Worker::new(hub.config.clone(), store).with_limits_source(source.clone());
+        let worker = Worker::new(hub.config.clone(), store)
+            .with_runtime_dir(hub.config.data_dir.join("runtime"))
+            .with_limits_source(source.clone());
         let started = Instant::now();
         let mut state = worker.state();
         let (stop, shutdown) = watch::channel(false);

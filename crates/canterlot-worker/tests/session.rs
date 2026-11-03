@@ -102,7 +102,8 @@ fn start(
     watch::Receiver<SessionState>,
     JoinHandle<Result<(), WorkerError>>,
 ) {
-    let worker = Worker::new(config, store);
+    let runtime_dir = config.data_dir.join("runtime");
+    let worker = Worker::new(config, store).with_runtime_dir(runtime_dir);
     let state = worker.state();
     let (stop, shutdown) = watch::channel(false);
     (stop, state, tokio::spawn(worker.run(shutdown)))
@@ -1472,7 +1473,8 @@ async fn pilot_worker() -> (
     })
     .await;
     hub.config.machine.metrics_interval = Duration::from_millis(45);
-    let worker = Worker::new(hub.config.clone(), store);
+    let worker = Worker::new(hub.config.clone(), store)
+        .with_runtime_dir(hub.config.data_dir.join("runtime"));
     let cache = worker.limits_cache();
     let (stop, shutdown) = watch::channel(false);
     let join = tokio::spawn(worker.run(shutdown));
@@ -1557,7 +1559,9 @@ impl FrozenWorker {
         })
         .await;
         hub.config.machine.metrics_interval = metrics_interval;
-        let worker = Worker::new(hub.config.clone(), store).with_metrics_source(metrics);
+        let worker = Worker::new(hub.config.clone(), store)
+            .with_runtime_dir(hub.config.data_dir.join("runtime"))
+            .with_metrics_source(metrics);
         let state = worker.state();
         let (stop, shutdown) = watch::channel(false);
         let join = tokio::spawn(worker.run(shutdown));

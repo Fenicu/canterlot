@@ -1,4 +1,4 @@
-import { mkdtempSync, truncateSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
@@ -547,12 +547,16 @@ test('attachment_tray_shows_progress_errors_and_limits', async ({ page }) => {
   });
   await expect(page.getByText('Файл пустой')).toBeVisible();
   const dir = mkdtempSync(join(tmpdir(), 'canterlot-attach-'));
-  const over = join(dir, 'over.bin');
-  writeFileSync(over, '');
-  truncateSync(over, 104_857_601);
-  await page.setInputFiles('input[type=file]', over);
-  await expect(page.getByText('Файл больше 100 МиБ')).toBeVisible();
-  await expect(page.getByText('over.bin')).toHaveCount(0);
+  try {
+    const over = join(dir, 'over.bin');
+    writeFileSync(over, '');
+    truncateSync(over, 104_857_601);
+    await page.setInputFiles('input[type=file]', over);
+    await expect(page.getByText('Файл больше 100 МиБ')).toBeVisible();
+    await expect(page.getByText('over.bin')).toHaveCount(0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('reload_between_press_and_response_does_not_duplicate_the_input', async ({ page }) => {

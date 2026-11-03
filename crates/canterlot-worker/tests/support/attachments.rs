@@ -235,7 +235,9 @@ impl Fixture {
         let store = WorkerStore::open(&self.config.data_dir)
             .unwrap()
             .with_probe(self.store_probe.clone());
-        let worker = Worker::new(self.config.clone(), store).with_session_probe(self.probe.clone());
+        let worker = Worker::new(self.config.clone(), store)
+            .with_runtime_dir(self.config.data_dir.join("runtime"))
+            .with_session_probe(self.probe.clone());
         let state = worker.state();
         let (stop, rx) = watch::channel(false);
         self.worker = Some((stop, state, tokio::spawn(worker.run(rx))));

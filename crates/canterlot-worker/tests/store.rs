@@ -448,6 +448,20 @@ fn config_loads_with_defaults() {
     assert_eq!(config.timers.backoff_min, Duration::from_millis(250));
     assert_eq!(config.timers.backoff_max, Duration::from_secs(30));
     assert_eq!(config.timers.backoff_reset_after, Duration::from_secs(30));
+    assert_eq!(config.execution.build_jobs, 6);
+}
+
+#[test]
+fn config_execution_build_jobs_can_be_set() {
+    let dir = private_dir();
+    let path = dir.path().join("worker.toml");
+    fs::write(
+        &path,
+        format!("{}\n[execution]\nbuild_jobs = 2\n", config_text()),
+    )
+    .unwrap();
+    let config = load(&path).unwrap();
+    assert_eq!(config.execution.build_jobs, 2);
 }
 
 #[test]

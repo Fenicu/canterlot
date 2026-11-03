@@ -611,6 +611,7 @@ backoff_reset_after = "30s"
 allowed_workdir_roots = ["/"]
 supervisor_exe = "/usr/local/bin/canterlot-worker"  # current_exe по умолчанию
 spawn_timeout = "10s"
+build_jobs = 6                                      # CARGO_BUILD_JOBS для сессий, если он ещё не задан
 
 [execution.supervisor]
 attach_wait = "30s"

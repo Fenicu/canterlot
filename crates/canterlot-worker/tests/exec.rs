@@ -6,7 +6,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use canterlot_proto::worker::{
@@ -163,6 +163,7 @@ struct Env {
     config: ExecutionConfig,
     thread: Option<StoreThread>,
     manager: Option<ExecutionManager>,
+    runtime: TempDir,
     relay: mpsc::Receiver<SjRelay>,
     bodies: Vec<Body>,
     seen: HashSet<(Uuid, u64)>,
@@ -195,6 +196,7 @@ impl Env {
             allowed_workdir_roots: vec![work.clone()],
             supervisor_exe: Some(supervisor_exe.clone()),
             spawn_timeout: Duration::from_secs(10),
+            build_jobs: 7,
             supervisor: SupervisorTimers {
                 stop_grace: Duration::from_secs(1),
                 stop_retry: Duration::from_millis(200),
@@ -203,7 +205,16 @@ impl Env {
         };
         let thread = open_store(root.path());
         let (sender, relay) = mpsc::channel(64);
-        let manager = ExecutionManager::new(config.clone(), thread.client(), sender);
+        let runtime = tempfile::Builder::new()
+            .prefix("cl-rt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let manager = ExecutionManager::new_with_runtime_dir(
+            config.clone(),
+            thread.client(),
+            sender,
+            Some(runtime.path().to_path_buf()),
+        );
         Env {
             guard: ProcessGuard::for_executable(root.path(), &supervisor_exe),
             root,
@@ -211,6 +222,7 @@ impl Env {
             config,
             thread: Some(thread),
             manager: Some(manager),
+            runtime,
             relay,
             bodies: Vec::new(),
             seen: HashSet::new(),
@@ -377,10 +389,11 @@ impl Env {
     fn reopen(&mut self) {
         let thread = open_store(self.root.path());
         let (sender, relay) = mpsc::channel(64);
-        self.manager = Some(ExecutionManager::new(
+        self.manager = Some(ExecutionManager::new_with_runtime_dir(
             self.config.clone(),
             thread.client(),
             sender,
+            Some(self.runtime.path().to_path_buf()),
         ));
         self.thread = Some(thread);
         self.relay = relay;
@@ -576,13 +589,58 @@ async fn ownership_is_durable_before_cli_start() {
     assert_eq!(record.sj_journal_id, journal);
     assert_eq!(record.secret_sha256.len(), 32);
     assert!(!record.boot_id.is_empty());
-    let expected = match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(runtime) => Path::new(&runtime)
-            .join("canterlot")
-            .join(format!("{}.sock", env.execution)),
-        None => Path::new(&record.exec_dir).join("ipc.sock"),
-    };
+    let expected = env
+        .runtime
+        .path()
+        .join("canterlot")
+        .join(format!("{}.sock", env.execution));
     assert_eq!(Path::new(&record.ipc_socket), expected);
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn startup_sweeps_stale_runtime_state() {
+    let mut env = Env::new().await;
+    let sockets = env.runtime.path().join("canterlot");
+    fs::create_dir_all(&sockets).unwrap();
+    let id = Uuid::now_v7();
+    let path = sockets.join(format!("{id}.sock"));
+    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    let worktree = env
+        .root
+        .path()
+        .join("store/worktrees")
+        .join(Uuid::now_v7().to_string());
+    fs::create_dir_all(worktree.join("target")).unwrap();
+    fs::write(worktree.join("target/old"), "old").unwrap();
+    let old = SystemTime::now() - Duration::from_secs(8 * 3600);
+    for path in [
+        worktree.join("target/old"),
+        worktree.join("target"),
+        worktree.clone(),
+    ] {
+        fs::File::open(path).unwrap().set_modified(old).unwrap();
+    }
+    env.manager().startup_verify().await.unwrap();
+    assert!(!path.exists());
+    assert!(!worktree.join("target").exists());
+    env.close_manager().await;
+}
+
+#[tokio::test]
+async fn spawned_cli_gets_cargo_build_jobs() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    let environ = fs::read(format!("/proc/{}/environ", record.cli_pid)).unwrap();
+    let value = environ
+        .split(|byte| *byte == 0)
+        .find_map(|entry| entry.strip_prefix(b"CARGO_BUILD_JOBS="))
+        .map(|value| String::from_utf8_lossy(value).into_owned());
+    let expected = std::env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| "7".into());
+    assert_eq!(value.as_deref(), Some(expected.as_str()));
     env.stop().await;
 }
 

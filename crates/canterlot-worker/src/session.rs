@@ -1,4 +1,11 @@
-use std::{collections::VecDeque, fs, future::Future, pin::Pin, time::Duration};
+use std::{
+    collections::VecDeque,
+    fs,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    time::Duration,
+};
 
 use canterlot_proto::{
     limits::{MAX_EVENT_BATCH_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, check_record_batch},
@@ -398,6 +405,7 @@ pub struct Worker {
     config: WorkerConfig,
     store: StoreThread,
     state: watch::Sender<SessionState>,
+    runtime_dir: Option<PathBuf>,
     manager: Option<ExecutionManager>,
     relay: Option<mpsc::Receiver<SjRelay>>,
     limits_cache: LimitsCache,
@@ -454,6 +462,17 @@ impl Pending {
         self.retried = false;
         self.deadline = Some(Instant::now() + after);
     }
+}
+
+/// Юнит-тесты не трогают общий `XDG_RUNTIME_DIR`: сокеты лежат рядом с их хранилищем.
+#[cfg(test)]
+fn default_runtime_dir(data_dir: &Path) -> Option<PathBuf> {
+    Some(data_dir.join("runtime"))
+}
+
+#[cfg(not(test))]
+fn default_runtime_dir(_: &Path) -> Option<PathBuf> {
+    None
 }
 
 impl Worker {
@@ -521,6 +540,7 @@ impl Worker {
         let workdirs = crate::machine::workdirs::WorkdirSuggester::new(
             config.execution.allowed_workdir_roots.clone(),
         );
+        let runtime_dir = default_runtime_dir(&config.data_dir);
         Self {
             limits_cache,
             limits_source,
@@ -537,6 +557,7 @@ impl Worker {
             config,
             store: StoreThread::new(store),
             state: watch::channel(SessionState::Disconnected).0,
+            runtime_dir,
             manager: None,
             relay: None,
         }
@@ -558,6 +579,11 @@ impl Worker {
         source: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
     ) -> Self {
         self.metrics = source;
+        self
+    }
+
+    pub fn with_runtime_dir(mut self, runtime_dir: impl Into<PathBuf>) -> Self {
+        self.runtime_dir = Some(runtime_dir.into());
         self
     }
 
@@ -623,11 +649,16 @@ impl Worker {
                 }
             };
         }
-        let manager = ExecutionManager::new_with_attachments(
+        let runtime_dir = self
+            .runtime_dir
+            .clone()
+            .or_else(crate::exec::runtime_dir_from_env);
+        let manager = ExecutionManager::new_with_attachments_and_runtime_dir(
             self.config.execution.clone(),
             self.store.client(),
             sender,
             self.config.attachments.clone(),
+            runtime_dir,
         );
         if let Some(cfg) = &self.config.opencode {
             self.opencode_catalog =

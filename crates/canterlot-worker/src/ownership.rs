@@ -123,7 +123,6 @@ impl OwnershipStore {
             .collect()
     }
 
-    /// Записи, по которым процесс ещё может быть жив, в том числе потерянные.
     pub(crate) fn unreleased(&self) -> Vec<Ownership> {
         self.latest
             .values()

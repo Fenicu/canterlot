@@ -436,6 +436,7 @@ mod layout {
             ("LANG", "ru_RU.UTF-8"),
             ("TERM", "xterm"),
             ("XDG_CONFIG_HOME", "/home/owner/.config"),
+            ("CARGO_BUILD_JOBS", "6"),
             ("XDG_DATA_HOME", "/home/owner/.local/share"),
             ("OPENCODE_API_KEY", "secret"),
             ("OPENAI_API_KEY", "secret"),
@@ -459,6 +460,7 @@ mod layout {
         };
         assert_eq!(get("PATH"), Some("/usr/bin"));
         assert_eq!(get("XDG_CONFIG_HOME"), Some("/home/owner/.config"));
+        assert_eq!(get("CARGO_BUILD_JOBS"), Some("6"));
         assert_eq!(get("XDG_DATA_HOME"), Some("/srv/data/opencode/data"));
         assert_eq!(get("XDG_STATE_HOME"), Some("/srv/data/opencode/state"));
         assert_eq!(get("XDG_CACHE_HOME"), Some("/srv/data/opencode/cache"));
