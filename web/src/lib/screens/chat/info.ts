@@ -1,4 +1,5 @@
 import { harnessLabel, modelLabel } from "#lib/format/labels.js";
+import { fmt } from "#lib/format/ru.js";
 import type { RunInfo } from "#lib/stores/run.js";
 import { isMainAgent } from "#lib/timeline/present.js";
 
@@ -8,6 +9,8 @@ export interface InfoModel {
   duration: string | null;
   context: { used: number; window: number } | null;
   limit: { text: string; note: string | null } | null;
+  /** Строки скорости по моделям; модель называется, только если их несколько. */
+  speed: string[];
   pending: boolean;
 }
 
@@ -149,12 +152,21 @@ export function summarizeRun(
     },
   ];
 
+  const measured = (info.speed ?? []).filter(
+    (s) => s.tokens_per_second != null || s.first_token_ms != null,
+  );
+  const speed = measured.map((s) => {
+    const line = fmt.speed(s.tokens_per_second, s.first_token_ms);
+    return measured.length > 1 ? `${modelLabel(s.model)}: ${line}` : line;
+  });
+
   return {
     parts,
     tokens,
     ["duration"]: duration,
     context,
     limit,
+    speed,
     pending,
   };
 }

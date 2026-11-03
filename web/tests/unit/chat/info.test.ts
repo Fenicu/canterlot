@@ -179,4 +179,27 @@ describe("summarizeRun", () => {
     expect(parts.map((part) => part.model)).toEqual(["Opus 1M", "Opus 5.5", "Haiku 4.5"]);
     expect(summarizeRun(info).parts[0]?.model).toBe("Opus 5.5");
   });
+
+  test("speed_line_shows_generation_and_first_token_and_names_models_only_when_several", () => {
+    const base = {
+      run_id: "00000000-0000-4000-8000-000000000041",
+      input_id: "00000000-0000-4000-8000-000000000042",
+      started_at: "2026-10-26T22:12:00.000Z",
+      finished_at: "2026-10-26T22:12:03.000Z",
+      duration_ms: 3000,
+      parts: [],
+      usage: [],
+    };
+    const one = { ...base, speed: [{ model: "opus", output_tokens: 400, generation_ms: 2817, tokens_per_second: 142, first_token_ms: 1800 }] } as RunInfo;
+    expect(summarizeRun(one).speed).toEqual(["генерация 142 ток/с · первый токен 1,8 с"]);
+    const two = {
+      ...base,
+      speed: [
+        { model: "claude-opus-5-5", output_tokens: 400, tokens_per_second: 80, first_token_ms: null },
+        { model: "claude-haiku-4-5", output_tokens: 10, tokens_per_second: null, first_token_ms: 600 },
+      ],
+    } as RunInfo;
+    expect(summarizeRun(two).speed).toEqual(["Opus 5.5: генерация 80 ток/с", "Haiku 4.5: первый токен 0,6 с"]);
+    expect(summarizeRun({ ...base } as RunInfo).speed).toEqual([]);
+  });
 });

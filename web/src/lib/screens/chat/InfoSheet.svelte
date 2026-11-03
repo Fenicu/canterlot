@@ -153,6 +153,15 @@
 				</div>
 			{/if}
 
+			{#if summary.speed.length > 0}
+				<div class="key-value speed" data-role="run-speed">
+					<span>Скорость</span>
+					<strong>
+						{#each summary.speed as line (line)}<span class="speed-line">{line}</span>{/each}
+					</strong>
+				</div>
+			{/if}
+
 			{#if summary.context}
 				<div class="key-value">
 					<span>Контекст</span>
@@ -239,6 +248,15 @@
 	}
 	.key-value strong {
 		font-variant-numeric: tabular-nums;
+	}
+	.speed {
+		gap: var(--s3);
+	}
+	.speed strong {
+		text-align: end;
+	}
+	.speed-line {
+		display: block;
 	}
 	.rule {
 		height: var(--s4);

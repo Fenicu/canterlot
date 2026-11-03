@@ -1,4 +1,5 @@
-import { providerLabel } from '#lib/format/labels.js';
+import { modelLabel, providerLabel } from '#lib/format/labels.js';
+import { fmt } from '#lib/format/ru.js';
 import type { components } from '#lib/api/generated/openapi.js';
 import { remainingPct } from '#lib/stores/limits.js';
 type Series = components['schemas']['ProviderSeries'];
@@ -42,6 +43,30 @@ export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<str
     approximate: true,
     overlapped: row.overlapped_runs > 0
   }));
+}
+
+type Speed = components['schemas']['ModelSpeedSummary'];
+type SpeedStats = components['schemas']['SpeedStats'];
+
+function speedCell(stats: SpeedStats) {
+  return {
+    speed: stats.tokens_per_second != null ? fmt.tokensPerSecond(stats.tokens_per_second) : null,
+    firstToken: stats.first_token_ms != null ? `первый токен ${fmt.firstToken(stats.first_token_ms)}` : null
+  };
+}
+
+/** Медианы скорости по моделям: сначала быстрые за неделю, модели без чисел не показываются. */
+export function speedRows(speed: Speed[]) {
+  return speed
+    .filter(row => row.period.tokens_per_second != null || row.period.first_token_ms != null)
+    .sort((a, b) => (b.period.tokens_per_second ?? -1) - (a.period.tokens_per_second ?? -1) || a.model.localeCompare(b.model))
+    .map(row => ({
+      id: `${row.provider}:${row.model}`,
+      model: modelLabel(row.model),
+      provider: providerLabel(row.provider),
+      today: speedCell(row.today),
+      period: speedCell(row.period)
+    }));
 }
 
 export function historyRange(now: Date) {

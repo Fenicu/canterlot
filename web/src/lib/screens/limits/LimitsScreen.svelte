@@ -11,11 +11,13 @@
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import UsageChart from './UsageChart.svelte';
   import UsageTable from './UsageTable.svelte';
-  import { limitsSubtitle, providerName, sevenDays, usageRows, historyRange } from './model.js';
+  import SpeedTable from './SpeedTable.svelte';
+  import { limitsSubtitle, providerName, sevenDays, usageRows, historyRange, speedRows } from './model.js';
   import '../secondary.css';
   let runtime = $state<Runtime | null>(null);
   let series = $state<components['schemas']['ProviderSeries'][]>([]);
   let usage = $state<components['schemas']['UsageDay'][]>([]);
+  let speed = $state<components['schemas']['ModelSpeedSummary'][]>([]);
   let days = $state<string[]>([]); let zone = $state(''); let error = $state(''); let loading = $state(true);
   let now = $state(clock.serverNow());
   let thresholds = $state({ stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 });
@@ -28,8 +30,11 @@
       runtime = rt; thresholds = cfg.limit_thresholds;
       zone = Intl.DateTimeFormat().resolvedOptions().timeZone; days = sevenDays(new Date(clock.serverNow()));
       const range = historyRange(new Date(clock.serverNow()));
-      const replies = await Promise.all(['claude', 'codex'].map(provider => limitsHistory({ provider, ...range, tz: zone })));
+      // OpenCode нужен только для скорости: график и расход по сессиям остаются как были.
+      const [claude, codex, opencode] = await Promise.all(['claude', 'codex', 'opencode'].map(provider => limitsHistory({ provider, ...range, tz: zone })));
+      const replies = [claude!, codex!];
       series = replies.flatMap(r => r.data.series); usage = replies.flatMap(r => r.data.usage);
+      speed = [...replies, opencode!].flatMap(r => r.data.speed ?? []);
     } catch { error = 'Не удалось загрузить историю лимитов. Повторите при восстановлении связи'; }
     finally { loading = false; }
   }
@@ -59,6 +64,7 @@
         </section>
       {/each}</div>
       <UsageTable {rows} />
+      <SpeedTable rows={speedRows(speed)} />
     {/if}
   </div></div>
 </main>

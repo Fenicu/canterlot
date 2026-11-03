@@ -1196,11 +1196,17 @@ export async function seedSecondaryScreens(page: Page, api: FakeHubApi, ids: { m
   await page.route('**/api/v1/limits/history?*', r => {
     const query = new URL(r.request().url()).searchParams; historyRequests.push(query);
     const provider = query.get('provider') ?? 'claude';
+    const speed = {
+      claude: [{ provider: 'claude', model: 'claude-opus-5-5', today: { runs: 3, tokens_per_second: 68.4, first_token_ms: 2100 }, period: { runs: 41, tokens_per_second: 71.2, first_token_ms: 1900 } }],
+      opencode: [{ provider: 'opencode', model: 'beam', today: { runs: 0, tokens_per_second: null, first_token_ms: null }, period: { runs: 12, tokens_per_second: 1240, first_token_ms: 420 } }]
+    }[provider] ?? [];
+    if (provider === 'opencode') return r.fulfill({ json: { series: [], usage: [], speed } });
     const start = new Date(query.get('from')!);
     const days = Array.from({ length: 7 }, (_, n) => { const date = new Date(start); date.setDate(date.getDate() + n); return date; });
     return r.fulfill({ json: {
       series: [{ provider, five_hour: days.map((date, n) => ({ observed_at: date.toISOString(), used_permille: 180 + n * 30, used_pct: 18 + n * 3 })), weekly: days.map((date, n) => ({ observed_at: date.toISOString(), used_permille: 560 + n * 60, used_pct: 56 + n * 6 })) }],
-      usage: [{ day: new Intl.DateTimeFormat('en-CA', { timeZone: query.get('tz') ?? 'UTC' }).format(days.at(-1)!), conversation_id: ids.pinned, provider, agent: 'main', model: 'opus', input_tokens: 126000, output_tokens: 8400, cache_read_tokens: 1000, cache_write_tokens: 2000, weekly_delta_permille: 32, runs: 2, overlapped_runs: 0 }, { day: new Intl.DateTimeFormat('en-CA', { timeZone: query.get('tz') ?? 'UTC' }).format(days.at(-1)!), conversation_id: ids.pinned, provider, agent: 'agent-1', model: 'haiku', input_tokens: 18000, output_tokens: 1200, cache_read_tokens: 0, cache_write_tokens: 0, weekly_delta_permille: 2, runs: 1, overlapped_runs: 1 }]
+      usage: [{ day: new Intl.DateTimeFormat('en-CA', { timeZone: query.get('tz') ?? 'UTC' }).format(days.at(-1)!), conversation_id: ids.pinned, provider, agent: 'main', model: 'opus', input_tokens: 126000, output_tokens: 8400, cache_read_tokens: 1000, cache_write_tokens: 2000, weekly_delta_permille: 32, runs: 2, overlapped_runs: 0 }, { day: new Intl.DateTimeFormat('en-CA', { timeZone: query.get('tz') ?? 'UTC' }).format(days.at(-1)!), conversation_id: ids.pinned, provider, agent: 'agent-1', model: 'haiku', input_tokens: 18000, output_tokens: 1200, cache_read_tokens: 0, cache_write_tokens: 0, weekly_delta_permille: 2, runs: 1, overlapped_runs: 1 }],
+      speed
     } });
   });
   return { metrics, historyRequests };
