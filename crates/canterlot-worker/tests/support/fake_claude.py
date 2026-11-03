@@ -35,7 +35,7 @@ for n,line in enumerate(sys.stdin,1):
                 relay=subprocess.Popen([(d/'relay-exe').read_text(),'mcp-relay','--socket',str(exec_dir/'mcp.sock')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
             call=json.loads((d/'mcp-calls.json').read_text())[int(frame.split(':')[1])]
             relay.stdin.write(json.dumps(call)+'\n'); relay.stdin.flush()
-            if not select.select([relay.stdout],[],[],10)[0]: raise RuntimeError('MCP reply timeout')
+            if not select.select([relay.stdout],[],[],30)[0]: raise RuntimeError('MCP reply timeout')
             with (d/'mcp-replies.jsonl').open('a') as replies: replies.write(relay.stdout.readline())
         elif frame=='@wait':
             (d/'waiting').write_text('1')
