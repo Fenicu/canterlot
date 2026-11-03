@@ -15,9 +15,9 @@
 </script>
 <div class="chart" role="img" aria-label={summary}>
   <div class="legend" aria-hidden="true">
-    {#each model as provider (provider.provider)}{#if provider.showFive}<span><i class:codex={provider.provider === 'codex'}></i>{providerName(provider.provider)} · 5ч</span><span><i class="week" class:codex={provider.provider === 'codex'}></i>неделя</span>{:else}<span><i class="week" class:codex={provider.provider === 'codex'}></i>{providerName(provider.provider)} · неделя</span>{/if}{/each}
+    {#each model as provider (provider.provider)}<span class="group" data-legend={provider.provider}>{providerName(provider.provider)}:{#if provider.showFive}<span><i class:codex={provider.provider === 'codex'}></i>5ч</span>{/if}<span><i class="week" class:codex={provider.provider === 'codex'}></i>неделя</span></span>{/each}
   </div>
-  <div class="chart-wrap" aria-hidden="true"><div class="axis"><span>100%</span><span>50%</span><span>0</span></div><div class="plot">
+  <div class="chart-wrap" aria-hidden="true"><div class="axis"><span>100%</span><span>50%</span><span>0%</span></div><div class="plot">
     {#each days as day, index (day)}<div class="day"><div class="bars">
       {#each model as provider (provider.provider)}
         {@const point = provider.days[index]!}
@@ -33,7 +33,9 @@
 <style>
   .chart { background: var(--surface); padding: var(--s8); border-radius: var(--radius-card); }
   .legend { display: flex; flex-wrap: wrap; gap: var(--s4) var(--s8); font-size: var(--fs-meta); margin-bottom: var(--s10); }
-  .legend span { display: inline-flex; align-items: center; gap: var(--s3); }
+  /* Пара «5ч, неделя» не расходится по строкам с названием своего провайдера. */
+  .legend .group { display: inline-flex; align-items: center; gap: var(--s5); white-space: nowrap; }
+  .legend .group > span { display: inline-flex; align-items: center; gap: var(--s3); }
   i { display: inline-block; width: var(--s6); height: var(--s6); background: var(--accent); border: var(--hairline) solid var(--accent); }
   i.codex { background: var(--chart-secondary); border-color: var(--chart-secondary); }
   .chart-wrap { display: flex; gap: var(--s4); }
