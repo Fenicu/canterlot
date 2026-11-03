@@ -3,17 +3,23 @@
 
 //! `/usage` Antigravity на `fake-agy`: закреплённый бинарник, cwd = data_dir, без хода.
 
-use canterlot_proto::worker::v1::LimitWindow;
+use canterlot_proto::worker::v1::{ControlDown, LimitWindow, PollLimits, control_down};
 use canterlot_worker::{
     adapter::antigravity::{limits::AntigravityLimitsSource, replay::Script},
     config::AntigravityConfig,
     machine::limits::{LimitsSource, LiveLimits},
+    session::{SessionState, Worker},
 };
 use serde_json::Value;
 use std::{path::Path, time::Duration};
+use tokio::sync::watch;
 
 #[path = "support/antigravity.rs"]
 mod antigravity;
+
+#[allow(dead_code)]
+#[path = "support/mod.rs"]
+mod support;
 
 fn usage_json() -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -78,6 +84,53 @@ async fn usage_runs_the_pinned_copy_in_the_data_dir_without_a_turn() {
             .all(|entry| entry["frame"]["method"] != "session/prompt")
     );
     fake.wait_gone().await;
+}
+
+#[tokio::test]
+async fn a_disabled_profile_never_starts_a_usage_probe() {
+    let fake = antigravity::Fake::new(Script {
+        usage: Some(usage_json()),
+        ..Default::default()
+    });
+    let (hub, store) = support::ProtocolHub::start(support::Behavior {
+        capabilities: vec!["pilot_v1".into()],
+        ..Default::default()
+    })
+    .await;
+    let mut config = hub.config.clone();
+    config.antigravity = Some(AntigravityConfig {
+        enabled: false,
+        binary: Some(fake.exe.clone()),
+        data_dir: Some(fake.data_dir()),
+    });
+    let worker =
+        Worker::new(config.clone(), store).with_runtime_dir(config.data_dir.join("runtime"));
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    state
+        .wait_for(|state| *state == SessionState::Live)
+        .await
+        .unwrap();
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::PollLimits(PollLimits {
+            provider: "antigravity".into(),
+            owner_refresh: false,
+        })),
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let entries = fake.entries();
+    assert!(
+        entries.is_empty(),
+        "a disabled profile must not run agy: {entries:?}"
+    );
+    stop.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), join)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

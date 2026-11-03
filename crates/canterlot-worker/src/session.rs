@@ -523,7 +523,9 @@ impl Worker {
             idle_ticker.register("opencode", limits_interval);
             routes.insert("opencode".into(), codexbar(None));
         }
-        if let Some(cfg) = &config.antigravity {
+        if let Some(cfg) = &config.antigravity
+            && cfg.enabled
+        {
             // `/usage` идёт закреплённой копией из каталога данных воркера.
             let mut cfg = cfg.clone();
             cfg.data_dir = Some(config.data_dir.clone());
