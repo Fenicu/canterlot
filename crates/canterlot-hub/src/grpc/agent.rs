@@ -159,6 +159,7 @@ async fn handle(
                 pool: grpc.pool.clone(),
                 config: grpc.session_tools.clone(),
                 settle: grpc.settle,
+                alarms_enabled: grpc.alarms_enabled,
                 dispatcher: grpc.dispatcher.clone(),
                 registry: grpc.registry.clone(),
                 shutdown: grpc.shutdown.clone(),

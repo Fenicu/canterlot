@@ -510,6 +510,7 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
         settle: SettleConfig {
             idle_quiet: std::time::Duration::from_secs(5),
         },
+        alarms_enabled: true,
         dispatcher: None,
         registry: canterlot_hub::session::Registry::new(Default::default()),
         shutdown: tokio_util::sync::CancellationToken::new(),

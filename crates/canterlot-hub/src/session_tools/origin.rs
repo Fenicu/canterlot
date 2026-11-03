@@ -113,6 +113,13 @@ pub struct HubEvent {
     pub closed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// `alarm`: сработавший будильник.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alarm_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alarm_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fired_reason: Option<String>,
 }
 
 impl HubEvent {

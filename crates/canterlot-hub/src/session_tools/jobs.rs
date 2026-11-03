@@ -40,16 +40,18 @@ enum Action {
     Spawn,
     SpawnClose,
     Cleanup,
+    AlarmDeliver,
 }
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Event,
         Self::Note,
         Self::Spawn,
         Self::SpawnClose,
         Self::Cleanup,
+        Self::AlarmDeliver,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -59,6 +61,7 @@ impl Action {
             "spawn" => Some(Self::Spawn),
             "spawn_close" => Some(Self::SpawnClose),
             "cleanup" => Some(Self::Cleanup),
+            "alarm_deliver" => Some(Self::AlarmDeliver),
             _ => None,
         }
     }
@@ -116,6 +119,9 @@ pub async fn run_in_tx(
         Action::SpawnClose => spawn::close_job(conn, job, subscriber, correlation_id).await,
         Action::Cleanup => {
             Ok(accept::cleanup_job(conn, job, subscriber, now, correlation_id).await?)
+        }
+        Action::AlarmDeliver => {
+            crate::session_tools::alarms::deliver_job_in_tx(conn, job, now, correlation_id).await
         }
     }
 }
@@ -207,6 +213,10 @@ pub async fn abandon_in_tx(
         Action::Cleanup => {
             accept::abandon_cleanup_in_tx(conn, owner_id, conversation, now, correlation_id).await
         }
+        Action::AlarmDeliver => {
+            crate::session_tools::alarms::abandon_deliver_in_tx(conn, conversation, payload, now)
+                .await
+        }
     }
 }
 
@@ -234,6 +244,9 @@ mod tests {
                     "reason": "job_failed",
                 }),
                 Action::Cleanup => json!({"action": "cleanup"}),
+                Action::AlarmDeliver => {
+                    json!({"action": "alarm_deliver", "alarm_id": Uuid::now_v7()})
+                }
             };
             abandon_in_tx(
                 &mut conn,
