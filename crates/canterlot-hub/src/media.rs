@@ -597,6 +597,17 @@ pub async fn attach_file_in_tx(
     };
     let id = parse(&fact.attachment_id)?;
     let block_id = parse(&fact.block_id)?;
+    // Сборщик освобождает вложение под блокировкой его строки, а затем удаляет строку файла:
+    // порядок тот же, освобождённое вложение уже без blob.
+    let ready: bool = sqlx::query_scalar(
+        "select coalesce((select state='ready' from attachments where id=$1 for update), false)",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !ready {
+        return Ok(true);
+    }
     let row: Option<(String, String, i64, String, String, String, bool)> = sqlx::query_as(
         "select mime, name, size_bytes, sha256, title, note, attached_at is not null
          from block_files where id=$1 and execution_id=$2 and conversation_id=$3
