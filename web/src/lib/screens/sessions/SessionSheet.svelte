@@ -112,11 +112,17 @@
     });
   });
   const harness = $derived(machine?.harnesses.find((entry) => entry.id === item.harness.id));
+  const provider = $derived(harness?.provider ?? item.harness?.provider);
+  // У Antigravity модель и её единственный effort — одно решение каталога.
+  const modelEffort = (value: string) => {
+    const efforts = harness?.models.find((entry) => entry.id === value)?.efforts ?? [];
+    return provider === 'antigravity' && efforts.length === 1 ? (efforts[0] ?? null) : null;
+  };
   const known = (values: string[], current: string) => (values.includes(current) ? values : [current, ...values]);
   const modelOptions = $derived(known(harness?.models.map((entry) => entry.id) ?? [], model).map((value) => ({ value, label: harness?.models.find((entry) => entry.id === value)?.title || value })));
   const effortOptions = $derived(known(harness?.models.find((entry) => entry.id === model)?.efforts ?? ['low', 'medium', 'high'], effort).map((value) => ({ value, label: effortLabel(value) })));
   const permissionOptions = $derived(known(
-    (harness?.permission_modes ?? [...PERMISSION_MODES]).filter((mode) => !((harness?.provider ?? item.harness?.provider) === 'antigravity' && mode === 'read_only')),
+    (harness?.permission_modes ?? [...PERMISSION_MODES]).filter((mode) => !(provider === 'antigravity' && mode === 'read_only')),
     permission
   ).map((value) => ({ value, label: permissionLabel(value) })));
   const swatches = COLOR_KEYS.map((key) => ({ key, name: COLOR_NAMES[key] }));
@@ -211,11 +217,20 @@
 
   async function saveModel(val: string) {
     const before = savedModel;
+    const beforeEffort = savedEffort;
+    const beforeEffortValue = effort;
+    const paired = modelEffort(val);
     model = val;
     savedModel = val;
-    await saveSetting({ model: val }, () => {
+    if (paired !== null) {
+      effort = paired;
+      savedEffort = paired;
+    }
+    await saveSetting(paired === null ? { model: val } : { model: val, effort: paired }, () => {
       model = before;
       savedModel = before;
+      effort = beforeEffortValue;
+      savedEffort = beforeEffort;
     });
   }
 
@@ -368,7 +383,7 @@
         <div class="fields">
           <div class="pair">
             <Select id="sheet-model" label="Модель" options={modelOptions} bind:value={model} onchange={() => void saveModel(model)} />
-            {#if (harness?.provider ?? item.harness?.provider) !== 'antigravity'}
+            {#if provider !== 'antigravity'}
               <Select id="sheet-effort" label="Усилие" options={effortOptions} bind:value={effort} onchange={() => void saveEffort(effort)} />
             {/if}
           </div>

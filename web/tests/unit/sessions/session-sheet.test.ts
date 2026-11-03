@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
-import { getConversation, setCrunch } from "#lib/api/client.js";
+import { getConversation, patchSettings, setCrunch } from "#lib/api/client.js";
 import SessionSheet from "#lib/screens/sessions/SessionSheet.svelte";
 import type { ListRow } from "#lib/stores/list.svelte.js";
+import type { MachineRecord } from "#lib/stores/machines.svelte.js";
 
 vi.mock("#lib/ui/Sheet.svelte", () => ({ default: () => undefined }));
 vi.mock("#lib/api/client.js", () => ({
@@ -68,4 +69,64 @@ describe("sessions/SessionSheet", () => {
       expect.any(String),
     );
   });
+
+  it("antigravity_model_saves_its_single_effort_with_the_model", async () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const antigravity = machine();
+    instance = mount(SessionSheet, {
+      target,
+      props: {
+        item: {
+          ...row,
+          harness: { id: "antigravity", title: "Antigravity", provider: "antigravity" },
+          model: "gemini-3.8-flash-high",
+          effort: "high",
+          permission_mode: "bypass",
+        } as unknown as ListRow,
+        groups: [],
+        machine: antigravity,
+        touch: false,
+        onclose: () => undefined,
+      },
+    });
+    flushSync();
+    // У Antigravity модель и её единственный effort — одно и то же решение.
+    expect(target.querySelector("#sheet-effort")).toBeNull();
+
+    const select = target.querySelector<HTMLSelectElement>("#sheet-model")!;
+    select.value = "gemini-3.8-flash-low";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+
+    await vi.waitFor(() => expect(patchSettings).toHaveBeenCalledTimes(1));
+    expect(patchSettings).toHaveBeenCalledWith(
+      "conv-1",
+      { model: "gemini-3.8-flash-low", effort: "low" },
+      expect.any(String),
+    );
+  });
 });
+
+function machine(): MachineRecord {
+  return {
+    id: "m1",
+    name: "workstation",
+    availability: "ready",
+    os: "linux",
+    warnings: [],
+    metrics: null,
+    harnesses: [
+      {
+        id: "antigravity",
+        title: "Antigravity",
+        provider: "antigravity",
+        models: [
+          { id: "gemini-3.8-flash-high", title: "Gemini 3.8 Flash (High)", efforts: ["high"] },
+          { id: "gemini-3.8-flash-low", title: "Gemini 3.8 Flash (Low)", efforts: ["low"] },
+        ],
+        permission_modes: ["owner", "ask", "bypass"],
+      },
+    ],
+  };
+}
