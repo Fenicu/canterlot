@@ -1302,7 +1302,16 @@ impl Env {
         let record = self.ownership(self.execution).await.unwrap();
         assert_eq!(record.phase, OwnershipPhase::Released as i32);
         assert_eq!(record.released_reason, outcome);
-        assert!(!self.exec_dir().exists(), "execution directory is removed");
+        // Итог и освобождение пишутся одной записью, каталог удаляется уже после неё: итог в CJ
+        // виден раньше, чем каталог исчезнет.
+        let dir = self.exec_dir();
+        timeout(WAIT, async {
+            while dir.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("execution directory is removed");
     }
 }
 
