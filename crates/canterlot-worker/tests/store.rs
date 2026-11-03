@@ -568,6 +568,7 @@ fn config_error_conversions_discard_source_errors() {
         path,
         category,
         location,
+        detail: _,
     } = error;
     assert!(path.as_os_str().is_empty());
     assert_eq!(category, ConfigErrorCategory::Parse);

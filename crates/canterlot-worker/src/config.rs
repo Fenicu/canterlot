@@ -129,6 +129,7 @@ pub struct ConfigError {
     pub path: PathBuf,
     pub category: ConfigErrorCategory,
     pub location: Option<(usize, usize)>,
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +148,7 @@ impl ConfigError {
             path: path.to_path_buf(),
             category,
             location: None,
+            detail: None,
         }
     }
 }
@@ -188,7 +190,11 @@ impl fmt::Display for ConfigError {
                 "{}: claude_code.allow_paid_model_poll is not supported in the pilot",
                 self.path.display()
             ),
+        }?;
+        if let Some(detail) = &self.detail {
+            write!(f, ": {detail}")?;
         }
+        Ok(())
     }
 }
 
@@ -229,6 +235,7 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
             });
         ConfigError {
             location,
+            detail: None,
             ..ConfigError::new(path, ConfigErrorCategory::Parse)
         }
     })?;
@@ -255,15 +262,20 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
     if let Some(opencode) = &config.opencode {
         for (provider, patterns) in &opencode.provider_models {
             if provider != "opencode-go" && !opencode.providers.iter().any(|p| p == provider) {
-                return Err(ConfigError::new(path, ConfigErrorCategory::Parse));
+                let mut err = ConfigError::new(path, ConfigErrorCategory::Parse);
+                err.detail = Some(format!(
+                    "opencode.provider_models: unknown provider {provider}"
+                ));
+                return Err(err);
             }
             for pattern in patterns {
-                if pattern
-                    .chars()
-                    .enumerate()
-                    .any(|(i, c)| c == '*' && i != 0 && i != pattern.len().saturating_sub(1))
-                {
-                    return Err(ConfigError::new(path, ConfigErrorCategory::Parse));
+                let core = pattern.trim_start_matches('*').trim_end_matches('*');
+                if core.contains('*') {
+                    let mut err = ConfigError::new(path, ConfigErrorCategory::Parse);
+                    err.detail = Some(format!(
+                        "opencode.provider_models: invalid pattern {pattern} for {provider}"
+                    ));
+                    return Err(err);
                 }
             }
         }
@@ -424,7 +436,6 @@ pub struct OpenCodeConfig {
     /// Провайдеры в каталоге моделей сверх `opencode-go`.
     pub providers: Vec<String>,
     /// Фильтр моделей по провайдеру: пустой список — ничего, отсутствие записи — все.
-    #[serde(default)]
     pub provider_models: BTreeMap<String, Vec<String>>,
     /// Модель, которая идёт первой в каталоге; без неё порядок задаёт OpenCode.
     pub default_model: Option<String>,

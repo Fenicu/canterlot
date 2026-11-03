@@ -82,16 +82,9 @@ pub fn variants(models: &Value) -> HashMap<String, Vec<String>> {
 }
 
 fn match_pattern(pattern: &str, id: &str) -> bool {
-    let (prefix_star, rest) = if let Some(r) = pattern.strip_prefix('*') {
-        (true, r)
-    } else {
-        (false, pattern)
-    };
-    let (suffix_star, core) = if let Some(r) = rest.strip_suffix('*') {
-        (true, r)
-    } else {
-        (false, rest)
-    };
+    let prefix_star = pattern.starts_with('*');
+    let suffix_star = pattern.ends_with('*');
+    let core = pattern.trim_start_matches('*').trim_end_matches('*');
     if prefix_star && suffix_star {
         id.contains(core)
     } else if prefix_star {
