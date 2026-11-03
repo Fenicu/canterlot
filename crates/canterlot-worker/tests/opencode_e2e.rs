@@ -531,8 +531,22 @@ async fn relay_from_the_boot_config_reaches_the_broker_of_the_supervisor() {
         .iter()
         .filter_map(Value::as_str)
         .collect();
+    // OpenCode запускает локальный сервер с его `environment`: там секрет сокета.
+    let environment: Vec<(String, String)> = server["environment"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
+        .collect();
+    assert!(
+        environment
+            .iter()
+            .any(|(key, _)| key == "CANTERLOT_MCP_SECRET"),
+        "{server}"
+    );
     let mut relay = Process::new(command[0])
         .args(&command[1..])
+        .envs(environment)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

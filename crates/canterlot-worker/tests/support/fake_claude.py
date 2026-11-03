@@ -31,8 +31,10 @@ for n,line in enumerate(sys.stdin,1):
             if select.select([sys.stdin],[],[],0.2)[0]: (d/'early').write_text('early input')
         elif isinstance(frame,str) and frame.startswith('@request:'):
             if relay is None:
-                exec_dir=pathlib.Path(sys.argv[sys.argv.index('--mcp-config')+1]).parent
-                relay=subprocess.Popen([(d/'relay-exe').read_text(),'mcp-relay','--socket',str(exec_dir/'mcp.sock')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+                mcp_config=pathlib.Path(sys.argv[sys.argv.index('--mcp-config')+1])
+                exec_dir=mcp_config.parent
+                server_env=json.loads(mcp_config.read_text())['mcpServers']['canterlot'].get('env',{})
+                relay=subprocess.Popen([(d/'relay-exe').read_text(),'mcp-relay','--socket',str(exec_dir/'mcp.sock')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,env={**os.environ,**server_env})
             call=json.loads((d/'mcp-calls.json').read_text())[int(frame.split(':')[1])]
             relay.stdin.write(json.dumps(call)+'\n'); relay.stdin.flush()
             if not select.select([relay.stdout],[],[],10)[0]: raise RuntimeError('MCP reply timeout')
