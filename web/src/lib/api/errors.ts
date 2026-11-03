@@ -146,7 +146,7 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
   },
   harness_unknown: {
     action: "none",
-    message: "Харнесс отсутствует в каталоге машины",
+    message: "Этот агент не установлен на машине",
   },
   model_unknown: {
     action: "none",
@@ -210,7 +210,7 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
   },
   offset_mismatch: {
     action: "none",
-    message: "Смещение загрузки не совпадает с принятым",
+    message: "Загрузка сбилась, файл передаётся заново",
   },
   upload_in_progress: {
     action: "none",
