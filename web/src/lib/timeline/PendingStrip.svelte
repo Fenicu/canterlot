@@ -2,6 +2,7 @@
   import { ApiError } from '#lib/api/http.js';
   import { deleteScheduled, interrupt, patchScheduled } from '#lib/api/client.js';
   import { getRuntime } from '#lib/app/runtime.js';
+  import { unconfirmed } from '#lib/ops/journal.js';
   import { returnToComposer } from '#lib/composer/returned.js';
   import { cancelInput } from '#lib/timeline/QueueActions.js';
   import { editInput, editInputCaption, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
@@ -245,7 +246,7 @@
         <p class="note">Передача уже началась, обычная отмена невозможна</p>
         <span class="actions"><Button onclick={() => interrupt(chat.id, crypto.randomUUID())}>Прервать исполнение</Button></span>
       {/if}
-      {#if op?.state === 'unknown'}
+      {#if unconfirmed(op)}
         <p class="note">Отправка не подтверждена, повторяю</p>
         <span class="actions"><Button onclick={() => retryUnknown(input.key)}>Повторить сейчас</Button></span>
       {/if}

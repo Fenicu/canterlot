@@ -4,6 +4,7 @@ import { flushSync } from "svelte";
 import {
   closeOpenJournals,
   OpJournal,
+  unconfirmed,
   type JournalEnv,
   type Op,
 } from "#lib/ops/journal.js";
@@ -191,6 +192,30 @@ describe("ops/journal", () => {
     expect(keys).toEqual([op.key, op.key, op.key]);
     expect(serverInputs).toEqual([op.key]);
     expect(op.state).toBe("committed");
+  });
+
+  it("first_attempt_in_flight_is_not_shown_as_unconfirmed", async () => {
+    let fail = true;
+    let release: (() => void) | undefined;
+    const send = vi.fn(async () => {
+      if (fail) {
+        fail = false;
+        await new Promise<void>((resolve) => { release = resolve; });
+        throw new NetworkError("Connection failed");
+      }
+      return { id: "inp-1" };
+    });
+    const ops = journal(send);
+    const op = await ops.begin("input", { text: "медленно" }, { conversationId: "c-1", persist: true });
+    const running = ops.run(op);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(unconfirmed(op)).toBe(false);
+    release?.();
+    await vi.waitFor(() => expect(env.scheduled).toContain(1000));
+    expect(unconfirmed(op)).toBe(true);
+    await env.advance(1000);
+    await running;
+    expect(unconfirmed(op)).toBe(false);
   });
 
   it("refused_operation_returns_text_to_the_draft_and_drops_the_key", async () => {

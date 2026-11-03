@@ -20,6 +20,13 @@ export interface Op<B = unknown> {
   createdAt: number;
   refusal?: { code: string; message: string };
   result?: unknown;
+  /** Первая попытка ещё в пути: ответа нет, но и неудачи не было. В базу не пишется. */
+  trying?: boolean;
+}
+
+/** Хаб не подтвердил операцию после неудачной попытки или без связи; первая попытка в пути не в счёт. */
+export function unconfirmed(op: Op | undefined): boolean {
+  return op?.state === "unknown" && !(op.trying && op.attempts === 1);
 }
 
 export interface JournalEnv {
@@ -149,8 +156,10 @@ export class OpJournal {
         // Запись уже лежит в журнале с begin, а recover одинаково повторяет saving и unknown:
         // транзакция пометки создана до запроса, и IndexedDB выполнит её раньше следующих записей.
         void this.#persist(op).catch(() => undefined);
+        op.trying = true;
         try {
           const result = await this.#send(op);
+          op.trying = false;
           if (this.#stopped.has(op.key)) return;
           op.result = result;
           op.state = "committed";
@@ -158,6 +167,7 @@ export class OpJournal {
           if (this.#stopped.has(op.key)) return;
           return;
         } catch (err) {
+          op.trying = false;
           if (this.#stopped.has(op.key)) return;
           if (err instanceof AuthRequired) {
             op.state = "unknown";

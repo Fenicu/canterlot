@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getRuntime } from '#lib/app/runtime.js';
+  import { unconfirmed } from '#lib/ops/journal.js';
   import { durationMs } from '#lib/motion.js';
   import { rejectionLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
@@ -68,7 +69,7 @@
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
     viewing = Math.max(0, images.findIndex((file) => file.attachment_id === attachmentId));
   }
-  const unsure = $derived(getRuntime().journal.ops.get(input.key)?.state === 'unknown');
+  const unsure = $derived(unconfirmed(getRuntime().journal.ops.get(input.key)));
 
   // Входит только пузырь, который владелец отправил сейчас: ряды, вернувшиеся в окно при прокрутке, не оживают.
   function enter(node: HTMLElement): void {
