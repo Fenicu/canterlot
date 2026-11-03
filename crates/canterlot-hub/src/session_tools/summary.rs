@@ -27,7 +27,7 @@ const SHORT_FIELD: usize = 200;
 const PATH_FIELD: usize = 1024;
 
 /// Ход для итога: команда, длительность, git-факты и рабочее время.
-type RunRow = (Uuid, Option<i64>, Option<Value>, Option<i64>);
+type RunRow = (Uuid, Option<i64>, Option<Value>, Option<i64>, bool);
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -101,11 +101,11 @@ pub struct SessionSummary {
     pub harness: String,
     pub model: String,
     state: String,
-    turns: usize,
-    duration_ms: i64,
-    working_ms: i64,
-    tokens_in: i64,
-    tokens_out: i64,
+    turns: Option<usize>,
+    duration_ms: Option<i64>,
+    working_ms: Option<i64>,
+    /// `None`, пока ход идёт и расход ещё не записан.
+    tokens: Option<(i64, i64)>,
     git: Option<Git>,
     worktree: Option<(String, String)>,
     detail: Detail,
@@ -205,11 +205,19 @@ pub async fn build(
         return Ok(None);
     };
     let runs: Vec<RunRow> = sqlx::query_as(
-        "select r.input_command_id,r.duration_ms,r.git,w.working_ms from runs r
+        "select r.input_command_id,
+                coalesce(r.duration_ms,
+                  (extract(epoch from (coalesce(r.finished_at,now()) - r.started_at)) * 1000)::bigint),
+                r.git,w.working_ms,r.finished_at is null
+         from runs r
          left join run_working w on w.input_command_id=r.input_command_id
-         where r.conversation_id=$1 and r.finished_at is not null
-           and ($2::timestamptz is null or r.finished_at >= $2)
-         order by r.finished_at,r.started_at,r.input_command_id",
+         where r.conversation_id=$1
+           and ((r.finished_at is not null
+                 and ($2::timestamptz is null or r.finished_at >= $2))
+                or (r.finished_at is null
+                    and exists(select 1 from executions e where e.id=r.execution_id
+                               and e.state in ('created','starting','running','stopping'))))
+         order by coalesce(r.finished_at,r.started_at),r.started_at,r.input_command_id",
     )
     .bind(target_id)
     .bind(armed_at)
@@ -223,7 +231,36 @@ pub async fn build(
     .bind(&run_ids)
     .fetch_one(&mut *conn)
     .await?;
-    let git: Vec<Option<Value>> = runs.iter().map(|run| run.2.clone()).collect();
+    let any_open = runs.iter().any(|run| run.4);
+    let active: bool = sqlx::query_scalar(
+        "select exists(select 1 from executions where conversation_id=$1
+                       and state in ('created','starting','running','stopping'))",
+    )
+    .bind(target_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    // У идущего хода расход ещё не записан: показываем «unknown», а не нули.
+    let (turns, tokens) = if runs.is_empty() && active {
+        (None, None)
+    } else {
+        (
+            Some(runs.len()),
+            (!any_open).then_some((tokens_in, tokens_out)),
+        )
+    };
+    let git_values: Vec<Option<Value>> = runs.iter().map(|run| run.2.clone()).collect();
+    let mut git = aggregate_git(&git_values);
+    if git.is_none() {
+        let previous: Option<Value> = sqlx::query_scalar(
+            "select git from runs where conversation_id=$1 and git is not null
+             and git->>'available' = 'true'
+             order by started_at desc limit 1",
+        )
+        .bind(target_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        git = aggregate_git(&[previous]);
+    }
     let answer: Option<(Uuid, String, i64)> = sqlx::query_as(
         "select block_id,left(content,$4::int),octet_length(content)::bigint from blocks
          where conversation_id=$1 and kind='text' and parent_block_id is null
@@ -255,12 +292,19 @@ pub async fn build(
         harness: one_line(&harness, SHORT_FIELD),
         model: one_line(&model, SHORT_FIELD),
         state: state.to_owned(),
-        turns: runs.len(),
-        duration_ms: runs.iter().filter_map(|run| run.1).sum(),
-        working_ms: runs.iter().filter_map(|run| run.3).sum(),
-        tokens_in,
-        tokens_out,
-        git: aggregate_git(&git),
+        turns,
+        duration_ms: if turns.is_some() {
+            Some(runs.iter().filter_map(|run| run.1).sum())
+        } else {
+            None
+        },
+        working_ms: if turns.is_some() {
+            Some(runs.iter().filter_map(|run| run.3).sum())
+        } else {
+            None
+        },
+        tokens,
+        git,
         worktree,
         detail,
         answer: answer.map(|(block_id, head, total)| Answer {
@@ -395,9 +439,13 @@ fn list(lines: impl ExactSizeIterator<Item = String>, budget: usize, noun: &str)
     out
 }
 
-fn git_section(git: Option<&Git>) -> String {
+fn git_section(git: Option<&Git>, worktree: Option<&(String, String)>) -> String {
     let Some(git) = git else {
-        return "Git: unavailable\n".to_owned();
+        return if worktree.is_some() {
+            "Git: no finished turn yet.\n".to_owned()
+        } else {
+            "Git: unavailable\n".to_owned()
+        };
     };
     let mut out = String::new();
     let after = short(&git.head_after);
@@ -521,15 +569,24 @@ pub fn render(summary: &SessionSummary) -> String {
         summary.title, summary.id, summary.harness, summary.model, summary.state
     );
     head.push_str(&detail_section(&summary.detail));
+    let turns = summary
+        .turns
+        .map_or_else(|| "unknown".to_owned(), |turns| turns.to_string());
+    let duration = summary
+        .duration_ms
+        .map_or_else(|| "unknown".to_owned(), duration);
+    let tokens = summary.tokens.map_or_else(
+        || "unknown".to_owned(),
+        |(input, output)| format!("{input}/{output}"),
+    );
     let _ = writeln!(
         head,
-        "Turns: {}, duration {}, tokens in/out {}/{}.",
-        summary.turns,
-        duration(summary.duration_ms),
-        summary.tokens_in,
-        summary.tokens_out
+        "Turns: {turns}, duration {duration}, tokens in/out {tokens}."
     );
-    head.push_str(&git_section(summary.git.as_ref()));
+    head.push_str(&git_section(
+        summary.git.as_ref(),
+        summary.worktree.as_ref(),
+    ));
     if let Some((path, branch)) = &summary.worktree {
         let _ = writeln!(head, "Worktree: {path}, branch {branch}.");
     }
@@ -585,11 +642,11 @@ impl SessionSummary {
             kind: kind.to_owned(),
             state: Some(self.state.clone()),
             session_id: Some(self.id),
-            turns: Some(self.turns as i64),
-            duration_ms: Some(self.duration_ms),
-            working_ms: Some(self.working_ms),
-            tokens_in: Some(self.tokens_in),
-            tokens_out: Some(self.tokens_out),
+            turns: self.turns.map(|turns| turns as i64),
+            duration_ms: self.duration_ms,
+            working_ms: self.working_ms,
+            tokens_in: self.tokens.map(|(input, _)| input),
+            tokens_out: self.tokens.map(|(_, output)| output),
             commits: self.git.as_ref().map(|git| {
                 git.commits
                     .iter()

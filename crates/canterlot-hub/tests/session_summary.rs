@@ -507,6 +507,102 @@ async fn summary_without_git(pool: PgPool) {
     }
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_running_turn_reports_its_own_turn_and_duration(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let now = Utc::now();
+    let command = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state)
+         values($1,$2,$3,$4,$5,'deliver_input','{}','completed')",
+    )
+    .bind(command)
+    .bind(f.machine)
+    .bind(f.target)
+    .bind(f.execution.execution_id)
+    .bind(f.execution.generation)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into runs(input_command_id,execution_id,conversation_id,started_at)
+         values($1,$2,$3,$4)",
+    )
+    .bind(command)
+    .bind(f.execution.execution_id)
+    .bind(f.target)
+    .bind(now - TimeDelta::minutes(5))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("update conversations set worktree=$2 where id=$1")
+        .bind(f.target)
+        .bind(json!({"source_workdir":"/w","path":"/data/worktrees/x","branch":"canterlot/0190abcd","base":"HEAD","state":"active"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let text = text_for(&pool, &f, "stalled", None).await;
+    assert!(text.contains("Turns: 1, duration "), "{text}");
+    assert!(!text.contains("Turns: 0"), "{text}");
+    assert!(!text.contains("duration 0s"), "{text}");
+    assert!(text.contains("tokens in/out unknown."), "{text}");
+    assert!(!text.contains("Git: unavailable"), "{text}");
+    assert!(text.contains("Git: no finished turn yet."), "{text}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn running_turn_keeps_git_facts_from_the_last_finished_turn(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let now = Utc::now();
+    add_run(
+        &pool,
+        &f,
+        Run {
+            finished_at: now - TimeDelta::minutes(20),
+            duration_ms: 60_000,
+            git: Some(git(
+                "1a2b3c4d5e6f",
+                "5d6e7f8a9b0c",
+                false,
+                &[("5d6e7f8a9b0c", "Parse the header")],
+                &[],
+            )),
+            tokens: (100, 20),
+        },
+    )
+    .await;
+    let open = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state)
+         values($1,$2,$3,$4,$5,'deliver_input','{}','completed')",
+    )
+    .bind(open)
+    .bind(f.machine)
+    .bind(f.target)
+    .bind(f.execution.execution_id)
+    .bind(f.execution.generation)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into runs(input_command_id,execution_id,conversation_id,started_at)
+         values($1,$2,$3,$4)",
+    )
+    .bind(open)
+    .bind(f.execution.execution_id)
+    .bind(f.target)
+    .bind(now - TimeDelta::minutes(3))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let text = text_for(&pool, &f, "stalled", Some(now - TimeDelta::minutes(5))).await;
+    assert!(text.contains("Turns: 1, duration "), "{text}");
+    assert!(text.contains("HEAD 1a2b3c4 -> 5d6e7f8"), "{text}");
+    assert!(!text.contains("Git: unavailable"), "{text}");
+}
+
 async fn set_activity(pool: &PgPool, id: Uuid, state: S, evidence: E) {
     let thresholds = Thresholds {
         stalled_generating: Duration::from_secs(300),
