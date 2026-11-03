@@ -13,13 +13,17 @@
     request,
     onDecision,
     open,
-    onToggle
+    onToggle,
+    harnessId = '',
+    permissionMode = ''
   }: {
     request: RequestItem;
     onDecision: (d: DecisionBody) => Promise<void>;
     /** Лента хранит раскрытое сама: строка снимается с экрана и возвращается. */
     open?: boolean;
     onToggle?: () => void;
+    harnessId?: string;
+    permissionMode?: string;
   } = $props();
 
   const stages: Stage[] = [
@@ -163,7 +167,7 @@
     {#if shown}
       <div class="applied-body">
         {#if request.kind === 'permission'}
-          <PermissionCard {request} {onDecision} disabled={true} />
+          <PermissionCard {request} {onDecision} {harnessId} {permissionMode} disabled={true} />
         {:else if request.kind === 'spawn_approval'}
           <SpawnApprovalCard {request} {onDecision} disabled={true} />
         {:else}
@@ -199,7 +203,7 @@
     {/if}
 
     {#if request.kind === 'permission'}
-      <PermissionCard {request} {onDecision} disabled={request.state !== 'open'} />
+      <PermissionCard {request} {onDecision} {harnessId} {permissionMode} disabled={request.state !== 'open'} />
     {:else if request.kind === 'spawn_approval'}
       <SpawnApprovalCard {request} {onDecision} disabled={request.state !== 'open'} />
     {:else}

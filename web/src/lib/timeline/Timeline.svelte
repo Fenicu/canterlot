@@ -103,6 +103,11 @@
   const streaming = $derived(entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
   const failed = $derived(entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || (entry.block.state === 'incomplete' && shownInCard(entry.block)))));
   const harness = $derived(chat.detail?.harness as { title?: string; provider?: string } | undefined);
+  const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
+  const permissionMode = $derived(
+    (chat.settings.effective as { permission_mode?: string } | null | undefined)?.permission_mode ??
+      ((chat.detail?.permission_mode as string | undefined) ?? '')
+  );
   // Строка «Ход прерван»: прерывание остановило ход, а не сессию. Видна, пока
   // очередь на паузе `user_stop` и новый ход не идёт: продолжение и следующий
   // ход её снимают. От остановленной сессии отличается живой исполняеммостью.
@@ -431,7 +436,7 @@
         {:else if row.kind === 'event' && row.entries[0]?.kind === 'input'}
           <EventEntry input={row.entries[0].input} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
-          <RequestCard request={row.entries[0].request} onDecision={async () => undefined} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
+          <RequestCard request={row.entries[0].request} onDecision={async () => undefined} {harnessId} {permissionMode} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
           <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
         {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}

@@ -91,6 +91,11 @@
 		return parentId ? (runtime?.list.items.get(parentId)?.title ?? null) : null;
 	});
 	const accept = $derived(acceptView(chat.detail as AcceptDetail | null));
+	const sessionHarnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
+	const sessionPermissionMode = $derived(
+		(chat.settings.effective as { permission_mode?: string } | null | undefined)?.permission_mode ??
+			((chat.detail?.permission_mode as string | undefined) ?? '')
+	);
 	let showAccept = $state(false);
 	let acceptError = $state<string | null>(null);
 
@@ -171,6 +176,8 @@
 			{#each docked as req (req.id)}
 				<RequestCard
 					request={req}
+					harnessId={sessionHarnessId}
+					permissionMode={sessionPermissionMode}
 					onDecision={async (decision) => {
 						await chat.requests.submitDecision(req.id, decision, chat.ops);
 					}}
