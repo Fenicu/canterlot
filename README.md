@@ -31,9 +31,22 @@ Canterlot — self-hosted хаб для агентов программиров�
 
 ## Скриншоты
 
-<!-- скриншоты: docs/screenshots/ -->
+Телефон и рабочий стол: темы Аквамарин, Стандартная и VS Code.
 
-Скриншоты будут добавлены после того, как появится тема оформления.
+<table align="center">
+  <tr>
+    <td align="center"><a href="docs/screenshots/sessions-dark.png"><img src="docs/screenshots/sessions-dark.png" width="240" alt="Список сессий с лимитами и группами"></a><br><sub>Сессии, лимиты и группы</sub></td>
+    <td align="center"><a href="docs/screenshots/chat-dark.png"><img src="docs/screenshots/chat-dark.png" width="240" alt="Чат с кодом, инструментами и заполнением контекста"></a><br><sub>Чат, код и инструменты</sub></td>
+    <td align="center"><a href="docs/screenshots/permission-light.png"><img src="docs/screenshots/permission-light.png" width="240" alt="Карточка разрешения на команду"></a><br><sub>Разрешения агента</sub></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><a href="docs/screenshots/question-dark.png"><img src="docs/screenshots/question-dark.png" width="240" alt="Карточка вопроса с вариантами ответа"></a><br><sub>Вопросы с вариантами</sub></td>
+    <td align="center" valign="top" colspan="2"><a href="docs/screenshots/limits-light.png"><img src="docs/screenshots/limits-light.png" width="200" alt="История лимитов и скорость моделей"></a><br><sub>История лимитов и скорость</sub></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="3"><a href="docs/screenshots/desktop.png"><img src="docs/screenshots/desktop.png" width="760" alt="Рабочий стол: список сессий и чат рядом"></a><br><sub>Рабочий стол: список и чат рядом</sub></td>
+  </tr>
+</table>
 
 ## Документация
 

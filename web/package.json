@@ -19,6 +19,7 @@
     "test:stack": "playwright test e2e/stack",
     "test:perf": "playwright test e2e/perf --project=phone",
     "test:parity": "playwright test e2e/parity",
+    "screenshots": "PW_SCREENSHOTS=1 playwright test e2e/screenshots/readme.spec.ts --project=phone",
     "stack:build": "cargo build -p canterlot-hub -p canterlot-worker --features canterlot-worker/synthetic-adapter"
   },
   "dependencies": {
