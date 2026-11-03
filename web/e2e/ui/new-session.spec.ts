@@ -253,6 +253,7 @@ test('new_session_agent_radio_keeps_its_place_when_suggestions_appear', async ({
   await pathField(page).pressSequentially('/srv/c');
   await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toBeVisible();
   expect(await gap()).toBe(before);
+  await pathField(page).press('Escape');
   await radio.check();
   await expect(radio).toBeChecked();
 });
@@ -327,6 +328,55 @@ test('new_session_ignores_a_late_answer_for_an_older_input', async ({ page }) =>
   await page.waitForTimeout(100);
   await expect(hint(page, '/srv/notes')).toBeVisible();
   await expect(page.getByRole('option', { name: '/srv/late-answer' })).toHaveCount(0);
+});
+
+test('new_session_escape_closes_the_folder_list_before_the_answer_arrives', async ({ page }) => {
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  const list = page.getByRole('listbox', { name: 'Подсказки папок' });
+  await pathField(page).fill('/srv/c');
+  await pathField(page).press('Escape');
+  await page.waitForTimeout(400);
+  await expect(list).toHaveCount(0);
+  await expect(pathField(page)).toBeVisible();
+  await expect(pathField(page)).toBeFocused();
+});
+
+test('new_session_escape_keeps_the_folder_list_closed_when_a_late_answer_arrives', async ({ page }) => {
+  const { api } = await boot(page, { solo: true });
+  let release: (() => Promise<void>) | undefined;
+  const held = new Promise<void>((resolve) => {
+    void page.route('**/api/v1/machines/*/workdirs/suggest?*', async (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get('path') === '/srv/c') {
+        release = () => route.fulfill({ json: { workdirs: ['/srv/canterlot'] } }).catch(() => undefined);
+        resolve();
+        return;
+      }
+      await route.fulfill({ json: api.suggestWorkdirs(url.searchParams.get('path') ?? '') });
+    });
+  });
+  await openWithMachine(page);
+  await pathField(page).fill('/srv/c');
+  await held;
+  await pathField(page).press('Escape');
+  await release?.();
+  await page.waitForTimeout(400);
+  await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toHaveCount(0);
+  await expect(pathField(page)).toBeVisible();
+});
+
+test('new_session_outside_press_closes_the_folder_list_and_reaches_the_control', async ({ page }) => {
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  const list = page.getByRole('listbox', { name: 'Подсказки папок' });
+  await pathField(page).fill('/srv/c');
+  await expect(list).toBeVisible();
+  const crunch = page.getByRole('switch', { name: 'Кранч' });
+  await crunch.scrollIntoViewIfNeeded();
+  await crunch.click();
+  await expect(crunch).toBeChecked();
+  await expect(list).toBeHidden();
 });
 
 test('new_session_with_suggestions_has_no_axe_violations', async ({ page }) => {

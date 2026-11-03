@@ -106,6 +106,19 @@ describe("sessions/workdir suggestions", () => {
     expect(last()).toEqual([]);
   });
 
+  it("suggestions_clear_drops_an_answer_that_was_already_on_the_way", async () => {
+    const late = deferred();
+    const { suggester, last } = setup((_id, path) =>
+      path === "/srv/c" ? late.promise : Promise.resolve([]),
+    );
+    suggester.input("m1", "/srv/c");
+    await vi.advanceTimersByTimeAsync(200);
+    suggester.clear();
+    late.resolve(["/srv/canterlot"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(last()).toEqual([]);
+  });
+
   it("suggestions_after_a_choice_are_requested_at_once", async () => {
     const { suggester, load } = setup(async () => ["/srv/x/inner"]);
     suggester.input("m1", "/srv/x/", 0);

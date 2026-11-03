@@ -68,7 +68,16 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (items.length === 0 || event.isComposing) return;
+    if (event.isComposing) return;
+    if (event.key === 'Escape') {
+      // Escape гасим всегда, даже когда список ещё не успел показаться: иначе лист закроется, а отложенный ответ
+      // откроет список уже поверх формы.
+      event.preventDefault();
+      event.stopPropagation();
+      suggester.clear();
+      return;
+    }
+    if (items.length === 0) return;
     const chosen = items[active];
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
@@ -78,11 +87,6 @@
     } else if (event.key === 'Enter' && chosen) {
       event.preventDefault();
       pick(chosen);
-    } else if (event.key === 'Escape') {
-      // Лист закрылся бы вместе со списком.
-      event.preventDefault();
-      event.stopPropagation();
-      suggester.clear();
     }
   }
 </script>
