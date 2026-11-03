@@ -66,41 +66,50 @@ pub(crate) async fn latest_context(
     }))
 }
 
-pub(crate) async fn compaction_view(
+/// Сжатия страницы ленты одним запросом.
+pub(crate) async fn compaction_views(
     conn: &mut PgConnection,
-    id: Uuid,
-) -> Result<CompactionView, sqlx::Error> {
-    let row = sqlx::query(
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, CompactionView>, sqlx::Error> {
+    let rows = sqlx::query(
         "select c.*, e.state as execution_state
          from compactions c join executions e on e.id = c.execution_id
-         where c.id = $1",
+         where c.id = any($1)",
     )
-    .bind(id)
-    .fetch_one(&mut *conn)
+    .bind(ids)
+    .fetch_all(&mut *conn)
     .await?;
-    let created: DateTime<Utc> = row.try_get("created_at")?;
-    let finished: Option<DateTime<Utc>> = row.try_get("finished_at")?;
-    let mut ok: Option<bool> = row.try_get("ok")?;
-    // Строка, оставшаяся от версии до исправления, не должна идти вечно.
-    if ok.is_none()
-        && matches!(
-            row.try_get::<String, _>("execution_state")?.as_str(),
-            "stopped" | "failed"
-        )
-    {
-        ok = Some(false);
+    let mut views = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let id: Uuid = row.try_get("id")?;
+        let created: DateTime<Utc> = row.try_get("created_at")?;
+        let finished: Option<DateTime<Utc>> = row.try_get("finished_at")?;
+        let mut ok: Option<bool> = row.try_get("ok")?;
+        // Строка, оставшаяся от версии до исправления, не должна идти вечно.
+        if ok.is_none()
+            && matches!(
+                row.try_get::<String, _>("execution_state")?.as_str(),
+                "stopped" | "failed"
+            )
+        {
+            ok = Some(false);
+        }
+        views.insert(
+            id,
+            CompactionView {
+                id,
+                trigger: row.try_get("trigger")?,
+                pre_tokens: row.try_get("pre_tokens")?,
+                ok,
+                created_seq: row
+                    .try_get::<Option<i64>, _>("created_seq")?
+                    .map(|seq| seq.to_string()),
+                created_at: time(created),
+                finished_at: finished.map(time),
+            },
+        );
     }
-    Ok(CompactionView {
-        id,
-        trigger: row.try_get("trigger")?,
-        pre_tokens: row.try_get("pre_tokens")?,
-        ok,
-        created_seq: row
-            .try_get::<Option<i64>, _>("created_seq")?
-            .map(|seq| seq.to_string()),
-        created_at: time(created),
-        finished_at: finished.map(time),
-    })
+    Ok(views)
 }
 
 fn execution_of(fact_execution: &str, run: &ExecutionRef) -> Result<(), sqlx::Error> {

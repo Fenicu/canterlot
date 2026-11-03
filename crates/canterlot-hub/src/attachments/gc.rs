@@ -110,6 +110,11 @@ async fn release(
             .bind(id)
             .execute(&mut *conn)
             .await?;
+            // Файл агента без ссылки из блока: поздняя ссылка указывала бы на удалённый blob.
+            sqlx::query("delete from block_files where attachment_id=$1 and attached_at is null")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
             state_event(
                 &mut *conn,
                 conversation_id,

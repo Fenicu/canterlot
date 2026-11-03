@@ -599,6 +599,8 @@ pub async fn refresh_with_metrics(
     let thresholds = *thresholds;
     let (refresh, fired) = crate::db::in_tx::<_, sqlx::Error, _>(pool, move |conn| {
         Box::pin(async move {
+    // До блокировки очереди: её ждёт приём журналов.
+    let working_ms:i64=sqlx::query_scalar("select coalesce(sum(working_ms),0)::bigint from run_working where conversation_id=$1").bind(conversation_id).fetch_one(&mut *conn).await?;
     sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
         .bind(conversation_id)
         .fetch_one(&mut *conn)
@@ -614,7 +616,6 @@ pub async fn refresh_with_metrics(
         serde_json::to_value(&activity.evidence).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     let unread:i64=sqlx::query_scalar("select count(*) from blocks where conversation_id=$1 and kind in ('text','warning','error') and state in ('streaming','final') and created_seq>$2").bind(conversation_id).bind(read_seq).fetch_one(&mut *conn).await?;
     let last_activity:Option<DateTime<Utc>>=sqlx::query_scalar("select date_trunc('minute',greatest((select max(committed_at) from inputs where conversation_id=$1),(select max(created_at) from blocks where conversation_id=$1)))").bind(conversation_id).fetch_one(&mut *conn).await?;
-    let working_ms:i64=sqlx::query_scalar("select coalesce(sum(working_ms),0)::bigint from run_working where conversation_id=$1").bind(conversation_id).fetch_one(&mut *conn).await?;
     let old = sqlx::query("select * from conversation_derived where conversation_id=$1 for update")
         .bind(conversation_id)
         .fetch_optional(&mut *conn)

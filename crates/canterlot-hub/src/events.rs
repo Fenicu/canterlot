@@ -71,14 +71,51 @@ pub async fn append(conn: &mut PgConnection, ev: NewEvent) -> Result<StoredEvent
     Ok(stored)
 }
 
+/// Строк в одном операторе удаления срока хранения.
+const PURGE_BATCH: i64 = 5000;
+
 pub async fn purge_older_than(pool: &PgPool, age: std::time::Duration) -> Result<u64, sqlx::Error> {
-    Ok(sqlx::query(
-        "delete from events where committed_at < clock_timestamp() - $1 * interval '1 second'",
-    )
-    .bind(age.as_secs_f64())
-    .execute(pool)
-    .await?
-    .rows_affected())
+    purge_older_than_in_batches(pool, age, PURGE_BATCH).await
+}
+
+/// Журнал области нумерован по времени записи, поэтому устаревшие строки лежат в её начале:
+/// каждая область чистится от старых к новым по первичному ключу пачками по `batch` строк,
+/// без чтения всей таблицы. Пачка, где нашлась свежая строка, последняя для области.
+pub async fn purge_older_than_in_batches(
+    pool: &PgPool,
+    age: std::time::Duration,
+    batch: i64,
+) -> Result<u64, sqlx::Error> {
+    let cutoff: DateTime<Utc> =
+        sqlx::query_scalar("select clock_timestamp() - $1 * interval '1 second'")
+            .bind(age.as_secs_f64())
+            .fetch_one(pool)
+            .await?;
+    let scopes: Vec<String> = sqlx::query_scalar("select scope from scope_counters order by scope")
+        .fetch_all(pool)
+        .await?;
+    let mut purged = 0;
+    for scope in scopes {
+        loop {
+            let deleted = sqlx::query(
+                "with batch as (select scope, scope_seq from events where scope = $1
+                                order by scope_seq limit $3)
+                 delete from events e using batch b
+                 where e.scope = b.scope and e.scope_seq = b.scope_seq and e.committed_at < $2",
+            )
+            .bind(&scope)
+            .bind(cutoff)
+            .bind(batch)
+            .execute(pool)
+            .await?
+            .rows_affected();
+            purged += deleted;
+            if deleted < batch as u64 {
+                break;
+            }
+        }
+    }
+    Ok(purged)
 }
 
 #[derive(Debug)]

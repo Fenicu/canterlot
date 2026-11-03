@@ -953,3 +953,74 @@ async fn media_uploads_are_limited_per_machine_and_one_body_per_id(pool: PgPool)
     stop.cancel();
     timeout(WAIT, task).await.unwrap().unwrap();
 }
+
+// Файл, который сборщик освободил, пока запись BlockFile ждала в журнале: его blob удалён,
+// поэтому поздняя ссылка не появляется, а строка без ссылки уходит вместе с вложением.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn late_block_file_after_release_is_not_attached(pool: PgPool) {
+    let mut f = Media::new(pool.clone()).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let mut shared = Vec::new();
+    for n in 0..2 {
+        let bytes = format!("%PDF-1.7\nотчёт {n}").into_bytes();
+        let id = Uuid::now_v7();
+        let header = MediaHeader {
+            media_id: id.to_string(),
+            execution_id: f.execution.to_string(),
+            block_id: block.to_string(),
+            mime: "application/pdf".into(),
+            size: bytes.len() as u64,
+            sha256: sha(&bytes),
+            name: "report.pdf".into(),
+            share: true,
+            ..Default::default()
+        };
+        put(&mut client, &f.token, header, &bytes).await.unwrap();
+        shared.push((id, bytes));
+    }
+    let file = |id: Uuid, bytes: &[u8]| {
+        Body::BlockFile(BlockFile {
+            block_id: block.to_string(),
+            attachment_id: id.to_string(),
+            name: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size: bytes.len() as u64,
+            sha256: sha(bytes),
+            ..Default::default()
+        })
+    };
+    let (released, ref released_bytes) = shared[0];
+    sqlx::query(
+        "update attachments set updated_at=clock_timestamp()-interval '30 hours' where id=$1",
+    )
+    .bind(released)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let report = gc::run_once(&pool, f.files.blobs(), Utc::now(), DAY)
+        .await
+        .unwrap();
+    assert_eq!(report.released, 1);
+    let rows: i64 = sqlx::query_scalar("select count(*) from block_files where id=$1")
+        .bind(released)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    // Строка, оставшаяся от освобождения до исправления, тоже не даёт ссылки.
+    let (stale, ref stale_bytes) = shared[1];
+    sqlx::query("update attachments set state='released' where id=$1")
+        .bind(stale)
+        .execute(&pool)
+        .await
+        .unwrap();
+    f.committed(vec![
+        file(released, released_bytes),
+        file(stale, stale_bytes),
+    ])
+    .await;
+    assert_eq!(f.history_block(block).await["files"], json!([]));
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap();
+}

@@ -249,6 +249,7 @@ pub async fn finalize(
     if fact.text_omitted && (block.revision_gap || mismatch) {
         sqlx::query("update blocks set content = $2, rev = $3, state = 'incomplete', checksum = null, incomplete_reason = 'revision_gap', updated_at = clock_timestamp() where block_id = $1")
             .bind(block_id).bind(content).bind(rev(fact.rev)?).execute(&mut *conn).await?;
+        seal_chunks(conn, block_id).await?;
         if mismatch {
             emit(
                 conn,
@@ -276,6 +277,7 @@ pub async fn finalize(
     }
     sqlx::query("update blocks set content = $2, rev = $3, state = 'final', checksum = $4, incomplete_reason = null, updated_at = clock_timestamp() where block_id = $1")
         .bind(block_id).bind(content).bind(rev(fact.rev)?).bind(&expected).execute(&mut *conn).await?;
+    seal_chunks(conn, block_id).await?;
     let event = emit(conn, run, "block_final", json!({"block_id": block_id, "rev": fact.rev, "text": text, "checksum": expected, "text_omitted": fact.text_omitted, "summary": non_empty(&fact.summary)}), correlation_id).await?;
     sqlx::query("update blocks set finished_at=$2,summary=coalesce(nullif($3,''),summary),line_count=case when kind='tool_result' then $4 else line_count end where block_id=$1").bind(block_id).bind(event.committed_at).bind(&fact.summary).bind(content.bytes().filter(|b|*b==b'\n').count() as i32).execute(&mut *conn).await?;
     if mismatch {
@@ -312,28 +314,76 @@ async fn stored_checksum(
     })
 }
 
+/// Сумма по дельтам блока в том виде, как их прислал воркер.
+macro_rules! raw_checksum_sql {
+    () => {
+        "select encode(sha256(string_agg(coalesce(c.raw, convert_to(c.text, 'UTF8')), ''::bytea order by c.seq)), 'hex') from block_chunks c"
+    };
+}
+
 /// Сумма дельт в том виде, как их прислал воркер; `None`, если ни одна не менялась.
+/// У закрытого блока дельт уже нет, сумма сохранена при закрытии.
 async fn raw_chunks_checksum(
     conn: &mut PgConnection,
     block_id: Uuid,
 ) -> Result<Option<String>, sqlx::Error> {
-    let chunks: Vec<Vec<u8>> = sqlx::query_scalar(
-        "select coalesce(c.raw, convert_to(c.text, 'UTF8')) from block_chunks c
-         where c.block_id = $1
-           and exists (select 1 from block_chunks r where r.block_id = $1 and r.raw is not null)
-         order by c.seq",
-    )
+    sqlx::query_scalar(concat!(
+        "select case when b.state = 'streaming' then (",
+        raw_checksum_sql!(),
+        " where c.block_id = b.block_id having bool_or(c.raw is not null))
+         else b.raw_checksum end from blocks b where b.block_id = $1"
+    ))
     .bind(block_id)
-    .fetch_all(conn)
+    .fetch_one(conn)
+    .await
+}
+
+/// Закрытый блок хранит текст в `content`: дельты больше не нужны, остаётся только сумма
+/// оригинала с NUL для сверки повторного финала.
+async fn seal_chunks(conn: &mut PgConnection, block_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(concat!(
+        "update blocks b set raw_checksum = s.sum from (",
+        raw_checksum_sql!(),
+        " where c.block_id = $1 having bool_or(c.raw is not null)) s(sum) where b.block_id = $1"
+    ))
+    .bind(block_id)
+    .execute(&mut *conn)
     .await?;
-    if chunks.is_empty() {
-        return Ok(None);
+    sqlx::query("delete from block_chunks where block_id = $1")
+        .bind(block_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Дельты блоков, закрытых до того, как закрытие стало их удалять. Идёт по блокам пачками
+/// по `batch` в отдельных транзакциях; возвращает число очищенных блоков.
+pub async fn purge_sealed_chunks(pool: &sqlx::PgPool, batch: i64) -> Result<u64, sqlx::Error> {
+    let mut after = Uuid::nil();
+    let mut purged = 0;
+    loop {
+        let mut tx = pool.begin().await?;
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            "select b.block_id from blocks b
+             where b.block_id > $1 and b.state <> 'streaming'
+               and exists (select 1 from block_chunks c where c.block_id = b.block_id)
+             order by b.block_id limit $2
+             for update of b skip locked",
+        )
+        .bind(after)
+        .bind(batch)
+        .fetch_all(&mut *tx)
+        .await?;
+        let Some(last) = ids.last().copied() else {
+            return Ok(purged);
+        };
+        for id in &ids {
+            seal_chunks(&mut tx, *id).await?;
+        }
+        tx.commit().await?;
+        purged += ids.len() as u64;
+        after = last;
     }
-    let mut digest = Sha256::new();
-    for chunk in &chunks {
-        digest.update(chunk);
-    }
-    Ok(Some(hex(&digest.finalize())))
 }
 
 pub async fn mark_incomplete(
@@ -351,6 +401,7 @@ pub async fn mark_incomplete(
     }
     sqlx::query("update blocks set content = coalesce((select string_agg(text, '' order by seq) from block_chunks where block_id = $1), ''), state = 'incomplete', rev = $2, incomplete_reason = $3, updated_at = clock_timestamp() where block_id = $1")
         .bind(block_id).bind(rev(fact.rev)?).bind(&fact.reason).execute(&mut *conn).await?;
+    seal_chunks(conn, block_id).await?;
     let event = emit(
         conn,
         run,

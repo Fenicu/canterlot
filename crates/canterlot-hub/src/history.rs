@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{blocks, conversations::time};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -181,66 +183,107 @@ pub(crate) fn prefix(text: &str, max: usize) -> &str {
     }
     &text[..end]
 }
-async fn request_view(conn: &mut PgConnection, id: Uuid) -> Result<RequestItemView, sqlx::Error> {
+async fn request_views(
+    conn: &mut PgConnection,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, RequestItemView>, sqlx::Error> {
     // Как в снимке: незавершённому запросу остановленного исполнения ответа уже не будет.
-    let r = sqlx::query(
-        "select r.kind,case when r.state in ('open','decision_saved','decision_transmitting') and e.state in ('stopped','failed','owner_lost') then 'closed_without_decision' else r.state end state,r.request_payload,r.decision_payload,r.created_seq,r.created_at from requests r join executions e on e.id=r.execution_id where r.id=$1",
+    let rows = sqlx::query(
+        "select r.id,r.kind,case when r.state in ('open','decision_saved','decision_transmitting') and e.state in ('stopped','failed','owner_lost') then 'closed_without_decision' else r.state end state,r.request_payload,r.decision_payload,r.created_seq,r.created_at from requests r join executions e on e.id=r.execution_id where r.id=any($1)",
     )
-    .bind(id)
-    .fetch_one(conn)
+    .bind(ids)
+    .fetch_all(conn)
     .await?;
-    Ok(RequestItemView {
-        id,
-        request_kind: r.try_get("kind")?,
-        state: r.try_get("state")?,
-        request_payload: r.try_get("request_payload")?,
-        decision_payload: r.try_get("decision_payload")?,
-        created_seq: r.try_get::<i64, _>("created_seq")?.to_string(),
-        created_at: time(r.try_get("created_at")?),
-    })
+    let mut views = HashMap::with_capacity(rows.len());
+    for r in rows {
+        let id: Uuid = r.try_get("id")?;
+        views.insert(
+            id,
+            RequestItemView {
+                id,
+                request_kind: r.try_get("kind")?,
+                state: r.try_get("state")?,
+                request_payload: r.try_get("request_payload")?,
+                decision_payload: r.try_get("decision_payload")?,
+                created_seq: r.try_get::<i64, _>("created_seq")?.to_string(),
+                created_at: time(r.try_get("created_at")?),
+            },
+        );
+    }
+    Ok(views)
 }
-async fn block_view(conn: &mut PgConnection, id: Uuid) -> Result<BlockView, sqlx::Error> {
-    let r = sqlx::query("select * from blocks where block_id=$1")
-        .bind(id)
-        .fetch_one(&mut *conn)
+/// Предел показываемого текста вызова и вывода инструмента; остальное читается по запросу.
+const TOOL_PREVIEW_BYTES: usize = 4096;
+/// Текст блока читается на стороне базы: у вывода инструмента наружу уходит только начало
+/// (символов не меньше, чем байт в пределе), а размер и число строк считаются там же.
+const BLOCK_VIEWS_SQL: &str = "select b.block_id,b.kind,b.agent,b.model,b.parent_block_id,b.input_command_id,
+ b.tool_name,b.summary,b.approved_by,b.state,b.created_seq,b.created_at,b.finished_at,b.rev,b.revision_gap,b.incomplete_reason,
+ octet_length(t.text)::bigint content_bytes,
+ (length(t.text)-length(replace(t.text,E'\\n',''))+(t.text<>'' and right(t.text,1)<>E'\\n')::int)::bigint line_count,
+ case when b.kind in ('tool_call','tool_result') then left(t.text,$2) else t.text end content
+ from blocks b cross join lateral (
+  select case when b.state='streaming'
+   then coalesce((select string_agg(c.text,'' order by c.seq) from block_chunks c where c.block_id=b.block_id),'')
+   else b.content end text offset 0) t
+ where b.block_id=any($1)";
+async fn block_views(
+    conn: &mut PgConnection,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, BlockView>, sqlx::Error> {
+    let rows = sqlx::query(BLOCK_VIEWS_SQL)
+        .bind(ids)
+        .bind(TOOL_PREVIEW_BYTES as i32)
+        .fetch_all(&mut *conn)
         .await?;
-    let content = blocks::read_text(conn, id).await?;
-    let kind: String = r.try_get("kind")?;
-    let cut = if matches!(kind.as_str(), "tool_call" | "tool_result") {
-        prefix(&content, 4096)
-    } else {
-        &content
-    };
-    let at = time(r.try_get("created_at")?);
-    let media = crate::media::for_block(conn, id).await?;
-    let files = crate::media::files_for_block(conn, id).await?;
-    Ok(BlockView {
-        id,
-        kind,
-        agent: r.try_get("agent")?,
-        model: r.try_get("model")?,
-        parent_block_id: r.try_get("parent_block_id")?,
-        input_command_id: r.try_get("input_command_id")?,
-        tool_name: r.try_get("tool_name")?,
-        summary: r.try_get("summary")?,
-        approved_by: r.try_get("approved_by")?,
-        state: r.try_get("state")?,
-        created_seq: r.try_get::<i64, _>("created_seq")?.to_string(),
-        created_at: at.clone(),
-        started_at: at,
-        finished_at: r
-            .try_get::<Option<DateTime<Utc>>, _>("finished_at")?
-            .map(time),
-        line_count: content.lines().count() as i64,
-        content: cut.to_owned(),
-        content_truncated: cut.len() < content.len(),
-        content_bytes: content.len() as i64,
-        rev: r.try_get("rev")?,
-        revision_gap: r.try_get("revision_gap")?,
-        incomplete_reason: r.try_get("incomplete_reason")?,
-        media,
-        files,
-    })
+    let mut media = crate::media::for_blocks(conn, ids).await?;
+    let mut files = crate::media::files_for_blocks(conn, ids).await?;
+    let mut views = HashMap::with_capacity(rows.len());
+    for r in rows {
+        let id: Uuid = r.try_get("block_id")?;
+        let kind: String = r.try_get("kind")?;
+        let content: String = r.try_get("content")?;
+        let content_bytes: i64 = r.try_get("content_bytes")?;
+        let content = if matches!(kind.as_str(), "tool_call" | "tool_result") {
+            prefix(&content, TOOL_PREVIEW_BYTES).to_owned()
+        } else {
+            content
+        };
+        let at = time(r.try_get("created_at")?);
+        views.insert(
+            id,
+            BlockView {
+                id,
+                kind,
+                agent: r.try_get("agent")?,
+                model: r.try_get("model")?,
+                parent_block_id: r.try_get("parent_block_id")?,
+                input_command_id: r.try_get("input_command_id")?,
+                tool_name: r.try_get("tool_name")?,
+                summary: r.try_get("summary")?,
+                approved_by: r.try_get("approved_by")?,
+                state: r.try_get("state")?,
+                created_seq: r.try_get::<i64, _>("created_seq")?.to_string(),
+                created_at: at.clone(),
+                started_at: at,
+                finished_at: r
+                    .try_get::<Option<DateTime<Utc>>, _>("finished_at")?
+                    .map(time),
+                line_count: r.try_get("line_count")?,
+                content_truncated: (content.len() as i64) < content_bytes,
+                content,
+                content_bytes,
+                rev: r.try_get("rev")?,
+                revision_gap: r.try_get("revision_gap")?,
+                incomplete_reason: r.try_get("incomplete_reason")?,
+                media: media.remove(&id).unwrap_or_default(),
+                files: files.remove(&id).unwrap_or_default(),
+            },
+        );
+    }
+    Ok(views)
+}
+fn missing(kind: &str) -> sqlx::Error {
+    sqlx::Error::Protocol(format!("timeline {kind} disappeared"))
 }
 pub async fn page(
     conn: &mut PgConnection,
@@ -280,29 +323,55 @@ pub async fn page(
     }
     let first = keys.first().map(|r| r.get::<i64, _>("seq"));
     let last = keys.last().map(|r| r.get::<i64, _>("seq"));
-    let mut items = Vec::with_capacity(keys.len());
-    for k in keys {
-        let id: Uuid = k.try_get("id")?;
-        match k.try_get::<&str, _>("item_kind")? {
-            "input" => {
-                let r = sqlx::query("select * from inputs where id=$1")
-                    .bind(id)
-                    .fetch_one(&mut *conn)
-                    .await?;
-                items.push(TimelineItem::Input(Box::new(input_view(r)?)));
-            }
-            "request" => {
-                items.push(TimelineItem::Request(Box::new(
-                    request_view(conn, id).await?,
-                )));
-            }
-            "compaction" => {
-                items.push(TimelineItem::Compaction(Box::new(
-                    crate::compactions::compaction_view(conn, id).await?,
-                )));
-            }
-            _ => items.push(TimelineItem::Block(Box::new(block_view(conn, id).await?))),
+    let mut wanted: HashMap<&str, Vec<Uuid>> = HashMap::new();
+    for k in &keys {
+        wanted
+            .entry(k.try_get("item_kind")?)
+            .or_default()
+            .push(k.try_get("id")?);
+    }
+    let ids = |kind: &str| wanted.get(kind).map(Vec::as_slice).unwrap_or_default();
+    let mut blocks = block_views(conn, ids("block")).await?;
+    let mut inputs = HashMap::new();
+    if !ids("input").is_empty() {
+        for r in sqlx::query("select * from inputs where id=any($1)")
+            .bind(ids("input"))
+            .fetch_all(&mut *conn)
+            .await?
+        {
+            let view = input_view(r)?;
+            inputs.insert(view.id, view);
         }
+    }
+    let mut requests = if ids("request").is_empty() {
+        HashMap::new()
+    } else {
+        request_views(conn, ids("request")).await?
+    };
+    let mut compactions = if ids("compaction").is_empty() {
+        HashMap::new()
+    } else {
+        crate::compactions::compaction_views(conn, ids("compaction")).await?
+    };
+    let mut items = Vec::with_capacity(keys.len());
+    for k in &keys {
+        let id: Uuid = k.try_get("id")?;
+        items.push(match k.try_get::<&str, _>("item_kind")? {
+            "input" => TimelineItem::Input(Box::new(
+                inputs.remove(&id).ok_or_else(|| missing("input"))?,
+            )),
+            "request" => TimelineItem::Request(Box::new(
+                requests.remove(&id).ok_or_else(|| missing("request"))?,
+            )),
+            "compaction" => TimelineItem::Compaction(Box::new(
+                compactions
+                    .remove(&id)
+                    .ok_or_else(|| missing("compaction"))?,
+            )),
+            _ => TimelineItem::Block(Box::new(
+                blocks.remove(&id).ok_or_else(|| missing("block"))?,
+            )),
+        });
     }
     Ok(Some(HistoryPage {
         items,
@@ -515,12 +584,20 @@ pub async fn lane(
     keys.truncate(limit as usize);
     keys.reverse();
     let first = keys.first().map(|r| r.get::<i64, _>("created_seq"));
-    let mut items = Vec::with_capacity(keys.len());
-    for key in keys {
-        items.push(block_view(conn, key.try_get("block_id")?).await?);
-    }
+    let mut ids = keys
+        .iter()
+        .map(|key| key.try_get("block_id"))
+        .collect::<Result<Vec<Uuid>, _>>()?;
+    ids.push(root_id);
+    let mut views = block_views(conn, &ids).await?;
+    let root = views.remove(&root_id).ok_or_else(|| missing("block"))?;
+    ids.pop();
+    let items = ids
+        .iter()
+        .map(|id| views.remove(id).ok_or_else(|| missing("block")))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(LanePage {
-        root: block_view(conn, root_id).await?,
+        root,
         items,
         next_before: if more {
             first.map(|n| n.to_string())

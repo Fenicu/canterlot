@@ -557,17 +557,28 @@ pub struct FileView {
     pub height: Option<i32>,
 }
 
-pub async fn files_for_block(
+/// Файлы блоков страницы одним запросом.
+pub async fn files_for_blocks(
     conn: &mut PgConnection,
-    block_id: Uuid,
-) -> Result<Vec<FileView>, sqlx::Error> {
-    sqlx::query_as(
-        "select attachment_id, name, mime, size_bytes size, title, note, width, height
-         from block_files where block_id=$1 and attached_at is not null order by attached_seq, id",
+    block_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<FileView>>, sqlx::Error> {
+    let rows = sqlx::query(
+        "select block_id, attachment_id, name, mime, size_bytes size, title, note, width, height
+         from block_files where block_id=any($1) and attached_at is not null
+         order by block_id, attached_seq, id",
     )
-    .bind(block_id)
+    .bind(block_ids)
     .fetch_all(conn)
-    .await
+    .await?;
+    let mut files: std::collections::HashMap<Uuid, Vec<FileView>> = Default::default();
+    for row in &rows {
+        use sqlx::{FromRow, Row};
+        files
+            .entry(row.try_get("block_id")?)
+            .or_default()
+            .push(FileView::from_row(row)?);
+    }
+    Ok(files)
 }
 
 /// Запись `BlockFile`: ссылка появляется только на опубликованную строку того же исполнения,
@@ -586,6 +597,17 @@ pub async fn attach_file_in_tx(
     };
     let id = parse(&fact.attachment_id)?;
     let block_id = parse(&fact.block_id)?;
+    // Сборщик освобождает вложение под блокировкой его строки, а затем удаляет строку файла:
+    // порядок тот же, освобождённое вложение уже без blob.
+    let ready: bool = sqlx::query_scalar(
+        "select coalesce((select state='ready' from attachments where id=$1 for update), false)",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !ready {
+        return Ok(true);
+    }
     let row: Option<(String, String, i64, String, String, String, bool)> = sqlx::query_as(
         "select mime, name, size_bytes, sha256, title, note, attached_at is not null
          from block_files where id=$1 and execution_id=$2 and conversation_id=$3
@@ -669,17 +691,27 @@ pub struct MediaView {
     pub height: Option<i32>,
 }
 
-pub async fn for_block(
+/// Картинки блоков страницы одним запросом.
+pub async fn for_blocks(
     conn: &mut PgConnection,
-    block_id: Uuid,
-) -> Result<Vec<MediaView>, sqlx::Error> {
-    sqlx::query_as(
-        "select id media_id, mime, size_bytes size, width, height from block_media
-         where block_id=$1 and attached_at is not null order by attached_seq, id",
+    block_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<MediaView>>, sqlx::Error> {
+    let rows = sqlx::query(
+        "select block_id, id media_id, mime, size_bytes size, width, height from block_media
+         where block_id=any($1) and attached_at is not null order by block_id, attached_seq, id",
     )
-    .bind(block_id)
+    .bind(block_ids)
     .fetch_all(conn)
-    .await
+    .await?;
+    let mut media: std::collections::HashMap<Uuid, Vec<MediaView>> = Default::default();
+    for row in &rows {
+        use sqlx::{FromRow, Row};
+        media
+            .entry(row.try_get("block_id")?)
+            .or_default()
+            .push(MediaView::from_row(row)?);
+    }
+    Ok(media)
 }
 
 /// Связанная с блоком картинка владельца для выдачи браузеру.

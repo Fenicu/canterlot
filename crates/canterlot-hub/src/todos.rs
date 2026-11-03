@@ -142,16 +142,25 @@ pub async fn apply(
     Ok(false)
 }
 
-/// Дорожки разговора: основной агент первым.
+/// Дорожек субагентов в снимке: долгая сессия копит их без конца.
+const RECENT_LANES: i64 = 50;
+
+/// Дорожки разговора: основной агент первым, затем недавно обновлённые дорожки субагентов.
 pub async fn list(
     conn: &mut PgConnection,
     conversation_id: Uuid,
 ) -> Result<Vec<TodoListView>, sqlx::Error> {
     let rows: Vec<TodoRow> = sqlx::query_as(
         "select lane_block_id, revision, items, omitted from agent_todos
-         where conversation_id = $1 order by lane_block_id nulls first",
+         where conversation_id = $1
+           and (lane_block_id is null
+                or lane_block_id in (select r.lane_block_id from agent_todos r
+                                     where r.conversation_id = $1 and r.lane_block_id is not null
+                                     order by r.updated_at desc limit $2))
+         order by lane_block_id nulls first",
     )
     .bind(conversation_id)
+    .bind(RECENT_LANES)
     .fetch_all(conn)
     .await?;
     Ok(rows

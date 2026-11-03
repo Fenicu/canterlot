@@ -924,3 +924,87 @@ async fn simultaneous_replays_succeed_at_the_pending_limit_and_after_cancellatio
         deadlocks
     );
 }
+
+// Срок хранения событий идёт по каждой области от старых к новым пачками ограниченного размера:
+// ни один оператор не держит и не читает весь журнал.
+#[sqlx::test(migrations = "./migrations")]
+async fn event_retention_deletes_in_bounded_batches_per_scope(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    let other = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
+    for id in [s.conversation_id, other] {
+        for _ in 0..5 {
+            notice(&pool, id, "old").await;
+        }
+        notice(&pool, id, "fresh").await;
+    }
+    sqlx::query(
+        "update events set committed_at=clock_timestamp()-interval '8 days' where kind='old'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "create table purge_batches(n bigint);
+         create function log_purge_batch() returns trigger language plpgsql as
+           $$ begin insert into purge_batches select count(*) from gone; return null; end $$;
+         create trigger log_purge_batch after delete on events referencing old table as gone
+           for each statement execute function log_purge_batch();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let purged = events::purge_older_than_in_batches(&pool, Duration::from_secs(7 * 86400), 2)
+        .await
+        .unwrap();
+    assert_eq!(purged, 10);
+    assert_eq!(
+        count(&pool, "select count(*) from events where kind='old'").await,
+        0
+    );
+    assert_eq!(
+        count(&pool, "select count(*) from events where kind='fresh'").await,
+        2
+    );
+    assert_eq!(
+        count(&pool, "select coalesce(max(n),0) from purge_batches").await,
+        2
+    );
+}
+
+// Уборка идёт своей службой: сканирование журнала не задерживает тик планировщика.
+#[sqlx::test(migrations = "./migrations")]
+async fn maintenance_runs_as_its_own_service(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    notice(&pool, s.conversation_id, "old").await;
+    sqlx::query(
+        "update events set committed_at=clock_timestamp()-interval '8 days' where kind='old'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let sch = scheduler(
+        &pool,
+        SchedulerConfig {
+            idle_poll: Duration::from_millis(20),
+            ..Default::default()
+        },
+    );
+    let (stop, rx) = watch::channel(false);
+    let ticking = tokio::spawn(sch.clone().run(rx.clone()));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        count(&pool, "select count(*) from events where kind='old'").await,
+        1
+    );
+    let cleaning = tokio::spawn(sch.run_maintenance(rx));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while count(&pool, "select count(*) from events where kind='old'").await > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("maintenance purges at start");
+    stop.send(true).unwrap();
+    ticking.await.unwrap();
+    cleaning.await.unwrap();
+}

@@ -978,8 +978,6 @@ impl Scheduler {
 
     pub async fn run(self, shutdown: watch::Receiver<bool>) {
         crate::singleton::supervise(&self.pool, "scheduler", shutdown, || async {
-            let mut maintenance = tokio::time::interval(Duration::from_secs(3600));
-            maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 let next = match self.tick(Utc::now()).await {
                     Ok(r) => r.next_due,
@@ -988,9 +986,32 @@ impl Scheduler {
                         None
                     }
                 };
-                tokio::select! {
-                    _=self.wait_for_due(next,Utc::now())=>{},
-                    _=maintenance.tick()=>if let Err(e)=self.maintenance().await{log_error(&e);},
+                self.wait_for_due(next, Utc::now()).await;
+            }
+        })
+        .await;
+    }
+
+    /// Срок хранения и уборка идут своей службой: долгий проход по журналу событий
+    /// не задерживает тик планировщика.
+    pub async fn run_maintenance(self, shutdown: watch::Receiver<bool>) {
+        crate::singleton::supervise(&self.pool, "maintenance", shutdown, || async {
+            // Дельты блоков, закрытых до того, как закрытие стало их удалять.
+            match crate::blocks::purge_sealed_chunks(&self.pool, 200).await {
+                Ok(0) => {}
+                Ok(blocks) => tracing::info!(
+                    kind = "sealed_chunks_purged",
+                    blocks,
+                    "leftover block chunks removed"
+                ),
+                Err(e) => log_error(&e),
+            }
+            let mut maintenance = tokio::time::interval(Duration::from_secs(3600));
+            maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                maintenance.tick().await;
+                if let Err(e) = self.maintenance().await {
+                    log_error(&e);
                 }
             }
         })

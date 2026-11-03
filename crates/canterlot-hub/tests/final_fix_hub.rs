@@ -647,11 +647,12 @@ async fn delta_and_incomplete_need_no_content_select_privilege(pool: PgPool) -> 
     sqlx::query("reset role").execute(&mut *tx).await?;
     let text = blocks::read_text(&mut tx, id).await?;
     assert!(text == "first second");
+    // Закрытый блок держит текст в content, дельты удалены той же транзакцией.
     let count: i64 = sqlx::query_scalar("select count(*) from block_chunks where block_id = $1")
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
-    assert_eq!(count, 2);
+    assert_eq!(count, 0);
     tx.rollback().await?;
     let mut conn = pool.acquire().await?;
     assert!(blocks::read_text(&mut conn, id).await? == "first");

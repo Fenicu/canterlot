@@ -208,7 +208,7 @@ pub async fn finish_in_tx(
     if let Some(provider) = provider {
         lock_provider_runs(conn, provider, started).await?;
     }
-    let changed=sqlx::query("update runs set finished_at=started_at+($2::bigint * interval '1 millisecond'),duration_ms=$2,context_tokens=$3,context_window_tokens=$4,weekly_after_permille=(select weekly_used_permille from provider_limits where provider=runs.provider),exact=exact and $5,git=coalesce($6,git) where input_command_id=$1 and finished_at is null")
+    let changed=sqlx::query("update runs set finished_at=started_at+($2::bigint * interval '1 millisecond'),duration_ms=$2,context_tokens=$3,context_window_tokens=$4,weekly_after_permille=(select weekly_used_permille from provider_limits where provider=runs.provider),exact=exact and $5,git=coalesce($6,git),forced_close=false,working_ms=null where input_command_id=$1 and (finished_at is null or forced_close)")
         .bind(command).bind(duration).bind(number(fact.context_tokens)?).bind(number(fact.context_window_tokens)?).bind(now - at <= EXACT_WINDOW).bind(git_json(fact)?).execute(&mut *conn).await?.rows_affected();
     if changed == 0 {
         if fact.adopted {
@@ -216,6 +216,7 @@ pub async fn finish_in_tx(
         }
         return Ok(());
     }
+    store_working(conn, command).await?;
     for usage in &fact.usage {
         sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) values($1,$2,$3,$4,$5,$6,$7) on conflict(input_command_id,model,agent) do update set input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens")
             .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).execute(&mut *conn).await?;
@@ -223,6 +224,44 @@ pub async fn finish_in_tx(
     if let Some(provider) = provider {
         refresh_overlap(conn, provider, started).await?;
     }
+    Ok(())
+}
+
+/// Исполнение закончилось, а конца хода не было (CLI умер посреди хода): открытые ходы
+/// закрываются временем конечного перехода и исключаются из точной оценки лимита.
+pub async fn close_open_in_tx(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let open: Vec<(String, DateTime<Utc>)> = sqlx::query_as(
+        "select provider, min(started_at) from runs
+         where execution_id=$1 and finished_at is null and provider is not null group by provider",
+    )
+    .bind(execution_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (provider, since) in &open {
+        lock_provider_runs(conn, provider, *since).await?;
+    }
+    let closed: Vec<Uuid> = sqlx::query_scalar("update runs set finished_at=greatest(started_at,now()),duration_ms=(extract(epoch from (greatest(started_at,now())-started_at))*1000)::bigint,exact=false,forced_close=true where execution_id=$1 and finished_at is null returning input_command_id")
+        .bind(execution_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    for command in closed {
+        store_working(conn, command).await?;
+    }
+    for (provider, since) in &open {
+        refresh_overlap(conn, provider, *since).await?;
+    }
+    Ok(())
+}
+
+/// Рабочее время закрытого хода: представление считает его, пока `working_ms` пуст.
+async fn store_working(conn: &mut PgConnection, command: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("update runs r set working_ms=w.working_ms from run_working w where w.input_command_id=r.input_command_id and r.input_command_id=$1")
+        .bind(command)
+        .execute(conn)
+        .await?;
     Ok(())
 }
 

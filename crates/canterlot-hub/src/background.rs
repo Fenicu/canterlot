@@ -57,6 +57,10 @@ impl Background {
                 )),
             ),
             (
+                "maintenance_task_error",
+                tokio::spawn(scheduler.clone().run_maintenance(stopped.clone())),
+            ),
+            (
                 "scheduler_task_error",
                 tokio::spawn(scheduler.run(stopped.clone())),
             ),

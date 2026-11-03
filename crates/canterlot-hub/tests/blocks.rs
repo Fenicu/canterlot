@@ -868,3 +868,115 @@ async fn resumed_execution_repeats_nothing_and_closes_the_old_call(pool: PgPool)
     assert_eq!(block(&pool, result).await.0, "прерван");
     Ok(())
 }
+
+async fn chunks(pool: &PgPool, id: Uuid) -> i64 {
+    sqlx::query_scalar("select count(*) from block_chunks where block_id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+// Дельты нужны, только пока блок пишется: потом текст лежит в blocks.content.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn sealed_blocks_keep_no_chunks(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let [done, omitted, broken, open] = [(); 4].map(|_| Uuid::now_v7());
+    run.send(vec![
+        start(done),
+        delta(done, 0, 1, "раз"),
+        delta(done, 1, 2, " два"),
+        final_fact(done, 3, "раз два"),
+        start(omitted),
+        delta(omitted, 0, 1, "длинный"),
+        omitted_final(omitted, 2, hash("длинный")),
+        start(broken),
+        delta(broken, 0, 1, "обрыв"),
+        Body::BlockIncomplete(BlockIncomplete {
+            block_id: broken.to_string(),
+            rev: 2,
+            reason: "interrupted".into(),
+        }),
+        start(open),
+        delta(open, 0, 1, "пишется"),
+    ])
+    .await;
+    for id in [done, omitted, broken] {
+        assert_eq!(chunks(&pool, id).await, 0);
+    }
+    assert_eq!(block(&pool, done).await.0, "раз два");
+    assert_eq!(block(&pool, omitted).await.0, "длинный");
+    assert_eq!(block(&pool, broken).await.0, "обрыв");
+    assert_eq!(chunks(&pool, open).await, 1);
+    assert_eq!(block(&pool, open).await.0, "пишется");
+    Ok(())
+}
+
+// Сумму оригинала с NUL хаб помнит и без дельт: поздний финал после обрыва проверяется по ней.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn omitted_nul_final_after_incomplete_is_verified_without_chunks(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(vec![
+        start(id),
+        delta(id, 0, 1, NUL_TEXT),
+        Body::BlockIncomplete(BlockIncomplete {
+            block_id: id.to_string(),
+            rev: 1,
+            reason: "interrupted".into(),
+        }),
+    ])
+    .await;
+    assert_eq!(chunks(&pool, id).await, 0);
+    run.send(vec![omitted_final(id, 2, hash(NUL_TEXT))]).await;
+    let row = block(&pool, id).await;
+    assert_eq!((row.0.as_str(), row.2.as_str()), (NUL_STORED, "final"));
+    assert!(!kinds(&events(&pool, id).await).contains(&"block_checksum_mismatch"));
+    Ok(())
+}
+
+// Дельты блоков, закрытых до исправления, убираются пачками; пишущийся блок не трогается.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn purge_sealed_chunks_removes_leftovers_in_batches(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let [plain, nul, open] = [(); 3].map(|_| Uuid::now_v7());
+    run.send(vec![
+        start(plain),
+        delta(plain, 0, 1, "текст"),
+        final_fact(plain, 2, "текст"),
+        start(nul),
+        delta(nul, 0, 1, NUL_TEXT),
+        omitted_final(nul, 2, hash(NUL_TEXT)),
+        start(open),
+        delta(open, 0, 1, "пишется"),
+    ])
+    .await;
+    // Состояние до исправления: дельты остались, суммы оригинала нет.
+    sqlx::query("update blocks set raw_checksum = null")
+        .execute(&pool)
+        .await?;
+    sqlx::query("insert into block_chunks (block_id, seq, text) values ($1, 1, 'текст')")
+        .bind(plain)
+        .execute(&pool)
+        .await?;
+    sqlx::query("insert into block_chunks (block_id, seq, text, raw) values ($1, 1, $2, $3)")
+        .bind(nul)
+        .bind(NUL_STORED)
+        .bind(NUL_TEXT.as_bytes())
+        .execute(&pool)
+        .await?;
+    let purged = canterlot_hub::blocks::purge_sealed_chunks(&pool, 1).await?;
+    assert_eq!(purged, 2);
+    assert_eq!(
+        (chunks(&pool, plain).await, chunks(&pool, nul).await),
+        (0, 0)
+    );
+    assert_eq!(chunks(&pool, open).await, 1);
+    assert_eq!(
+        canterlot_hub::blocks::purge_sealed_chunks(&pool, 1).await?,
+        0
+    );
+    run.send(vec![omitted_final(nul, 2, hash(NUL_TEXT))]).await;
+    assert!(!kinds(&events(&pool, nul).await).contains(&"block_conflicting_final"));
+    Ok(())
+}

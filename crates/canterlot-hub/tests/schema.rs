@@ -865,3 +865,81 @@ async fn migration_adds_session_tools_schema(pool: PgPool) -> Result<(), sqlx::E
     );
     Ok(())
 }
+
+// Удаление разговора проверяет каждый внешний ключ на удаляемые строки: без индекса на
+// ссылающемся столбце это полное чтение таблицы на каждую строку.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn foreign_keys_into_deleted_history_have_indexes(pool: PgPool) -> Result<(), sqlx::Error> {
+    // Малые таблицы, которые удаление читает одним проходом.
+    const SMALL: &[&str] = &[
+        "block_files.execution_id",
+        "block_media.execution_id",
+        "idempotency_keys.conversation_id",
+        "instruction_preset_revisions.edited_conversation_id",
+        "instruction_presets.origin_conversation_id",
+        "journal_cursors.execution_id",
+    ];
+    let missing: Vec<String> = sqlx::query_scalar(
+        "select c.conrelid::regclass::text || '.' || a.attname
+         from pg_constraint c
+         join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+         where c.contype = 'f' and array_length(c.conkey, 1) = 1
+           and c.confrelid::regclass::text in
+               ('conversations', 'executions', 'commands', 'inputs', 'runs', 'attachments')
+           and not exists (select 1 from pg_index i
+                           where i.indrelid = c.conrelid and i.indkey[0] = c.conkey[1])
+         order by 1",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let missing: Vec<&String> = missing
+        .iter()
+        .filter(|name| !SMALL.contains(&name.as_str()))
+        .collect();
+    assert!(missing.is_empty(), "no index on {missing:?}");
+    Ok(())
+}
+
+async fn plan(pool: &PgPool, query: &str) -> Result<String, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    sqlx::query("set enable_seqscan = off")
+        .execute(&mut *conn)
+        .await?;
+    let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("explain {query}")))
+        .fetch_all(&mut *conn)
+        .await?;
+    sqlx::query("reset enable_seqscan")
+        .execute(&mut *conn)
+        .await?;
+    Ok(lines.join("\n"))
+}
+
+// Горячие пути команд и проверки ключей при удалении не читают таблицу целиком.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn command_and_block_lookups_use_indexes(pool: PgPool) -> Result<(), sqlx::Error> {
+    let id = "'00000000-0000-7000-8000-000000000000'::uuid";
+    for query in [
+        format!("select 1 from blocks where input_command_id = {id}"),
+        format!("select 1 from blocks where execution_id = {id}"),
+        format!("select 1 from commands where target_command_id = {id}"),
+        format!("select 1 from commands where execution_id = {id}"),
+        format!("select id from commands where conversation_id = {id} and kind = 'interrupt'"),
+        format!("select 1 from inputs where retry_of = {id}"),
+        format!("select 1 from runs where execution_id = {id}"),
+        format!(
+            "select id from inputs where conversation_id = {id} and state = 'queued'
+             and not exists (select 1 from commands where kind = 'steer_input'
+                             and target_command_id = inputs.command_id
+                             and delivery_state <> 'completed')
+             order by input_seq limit 1"
+        ),
+        format!(
+            "select * from inputs where conversation_id = {id} and feed_seq is null
+             and state in ('queued','dispatched','on_machine') order by input_seq limit 100"
+        ),
+    ] {
+        let plan = plan(&pool, &query).await?;
+        assert!(!plan.contains("Seq Scan"), "{query}\n{plan}");
+    }
+    Ok(())
+}
