@@ -7,7 +7,7 @@ use std::{
 };
 
 use canterlot_proto::{
-    limits::IPC_PROTOCOL_VERSION,
+    limits::{IPC_CAP_COMPACT, IPC_CAP_STEER, IPC_PROTOCOL_VERSION},
     worker::{
         ipc::{
             CliStarted, CompactRequest, ControlToSupervisor, Deliver, DeliverAck, InterruptRequest,
@@ -642,6 +642,9 @@ pub(super) async fn reject(
     Ok(())
 }
 
+/// Сопровождение этого исполнения не объявило нужную возможность IPC.
+const CAPABILITY_MISSING: &str = "capability_missing";
+
 pub(super) async fn reject_invalid(shared: &Shared, command: &Command) -> Result<(), ExecError> {
     reject(shared, command, "unsupported_command").await
 }
@@ -863,6 +866,8 @@ pub(super) struct Actor {
     pending: VecDeque<Msg>,
     waiting: VecDeque<Command>,
     link: Option<Link>,
+    /// Возможности IPC сопровождения из последнего `Attached`; пусто — сборка 1.0.0 или старше.
+    ipc_caps: HashSet<String>,
     exec_dir: Option<PathBuf>,
     ipc_socket: Option<PathBuf>,
     supervisor: Option<(u32, u64)>,
@@ -905,6 +910,7 @@ impl Actor {
             pending: VecDeque::new(),
             waiting: VecDeque::new(),
             link: None,
+            ipc_caps: HashSet::new(),
             exec_dir: None,
             ipc_socket: None,
             supervisor: None,
@@ -1020,7 +1026,13 @@ impl Actor {
     }
 
     fn relink(&mut self, linked: spawn::Linked) {
-        let attached = linked.attached;
+        #[allow(unused_mut)]
+        let mut attached = linked.attached;
+        #[cfg(feature = "fault-injection")]
+        if *self.shared.strip_caps.lock().expect("caps fault lock") {
+            attached.ipc_capabilities.clear();
+        }
+        self.ipc_caps = attached.ipc_capabilities.iter().cloned().collect();
         self.journal_id = Uuid::parse_str(&attached.sj_journal_id).ok();
         self.last_seq = attached.last_sj_seq;
         self.acked_seq = attached.acked_sj_seq;
@@ -1898,6 +1910,9 @@ impl Actor {
                 self.deliver_input_like(command, input.content, live).await
             }
             Some(Kind::SteerInput(steer)) => {
+                if live && !self.ipc_caps.contains(IPC_CAP_STEER) {
+                    return reject(&self.shared, &command, CAPABILITY_MISSING).await;
+                }
                 self.deliver_input_like(command, steer.content, live).await
             }
             Some(Kind::CancelInput(CancelInput {
@@ -1957,6 +1972,10 @@ impl Actor {
             }
             Some(Kind::CompactSession(_)) => {
                 if live && command.execution_generation == self.generation {
+                    // Сборка без сжатия порвала бы связь на незнакомом сообщении.
+                    if !self.ipc_caps.contains(IPC_CAP_COMPACT) {
+                        return reject(&self.shared, &command, CAPABILITY_MISSING).await;
+                    }
                     if !self
                         .send(down::Msg::Compact(CompactRequest {
                             command_id: cid_text,

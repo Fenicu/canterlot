@@ -2873,3 +2873,91 @@ async fn remove_worktree_answers_through_cj_and_survives_a_restart() {
     assert!(env.terminal(&forced).await);
     assert!(!target.exists());
 }
+
+fn capability_rejected(cj: &[Body], id: Uuid) -> bool {
+    cj.iter().any(|b| {
+        matches!(b, Body::CommandRejected(f) if f.command_id == id.to_string() && f.reason == "capability_missing")
+    })
+}
+
+fn steer_command(id: Uuid, env: &Env) -> Command {
+    command(
+        id,
+        1,
+        env.execution,
+        1,
+        Kind::SteerInput(canterlot_proto::worker::v1::SteerInput {
+            input_id: Uuid::now_v7().to_string(),
+            conversation_id: env.conversation.to_string(),
+            content: vec![ContentBlock {
+                block: Some(content_block::Block::Text(TextBlock { text: "now".into() })),
+            }],
+            ..Default::default()
+        }),
+    )
+}
+
+// Сопровождение без списка возможностей (как 1.0.0 и старше): новые виды команд ему не
+// уходят, хаб получает отказ, и связь остаётся.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn supervisor_without_capabilities_gets_no_compact_or_steer() {
+    let mut env = Env::new().await;
+    env.manager().strip_ipc_capabilities();
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let compact = Uuid::now_v7();
+    env.send(command(
+        compact,
+        1,
+        env.execution,
+        1,
+        Kind::CompactSession(canterlot_proto::worker::v1::CompactSession {}),
+    ))
+    .await;
+    let steer = Uuid::now_v7();
+    env.send(steer_command(steer, &env)).await;
+    env.wait_cj("both refused", |cj| {
+        capability_rejected(cj, compact) && capability_rejected(cj, steer)
+    })
+    .await;
+    let probe = Uuid::now_v7();
+    env.send(deliver_command(
+        probe,
+        1,
+        env.execution,
+        1,
+        env.conversation,
+        "probe",
+    ))
+    .await;
+    env.wait("the link still delivers", |b| finished(b, probe))
+        .await;
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn supervisor_with_capabilities_gets_compact() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let compact = Uuid::now_v7();
+    env.send(command(
+        compact,
+        1,
+        env.execution,
+        1,
+        Kind::CompactSession(canterlot_proto::worker::v1::CompactSession {}),
+    ))
+    .await;
+    env.wait("compaction answered by the supervisor", |b| {
+        b.iter()
+            .any(|x| matches!(x, Body::CompactionStatus(f) if f.command_id == compact.to_string()))
+    })
+    .await;
+    let cj = env.wait_cj("nothing refused", |_| true).await;
+    assert!(!capability_rejected(&cj, compact));
+    env.stop().await;
+}
