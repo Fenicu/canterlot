@@ -220,6 +220,7 @@ impl Fake {
                 ..Default::default()
             }),
             opencode: None,
+            antigravity: None,
         };
         let adapter = adapter::registry_with("codex", &context).expect("Codex registered");
         let spec = StartSpec {
@@ -401,12 +402,12 @@ fn model_list_catalog() -> CodexCatalog {
 #[test]
 fn catalog_lists_codex_models_from_model_list_when_configured() {
     assert!(
-        adapter::catalog_with(None, None, None, None)
+        adapter::catalog_with(None, None, None, None, None)
             .iter()
             .all(|entry| entry.harness != "codex")
     );
     let catalog = model_list_catalog();
-    let entries = adapter::catalog_with(None, None, Some(&catalog), None);
+    let entries = adapter::catalog_with(None, None, Some(&catalog), None, None);
     let entry = entries
         .iter()
         .find(|entry| entry.harness == "codex")
@@ -439,6 +440,7 @@ fn registry_builds_codex_adapter_from_context() {
         claude_code: None,
         codex: Some(CodexConfig::default()),
         opencode: None,
+        antigravity: None,
     };
     let adapter = adapter::registry_with("codex", &context).expect("Codex registered");
     let capabilities = adapter.capabilities();
@@ -476,6 +478,7 @@ fn registry_builds_codex_adapter_from_context() {
                 claude_code: None,
                 codex: None,
                 opencode: None,
+                antigravity: None,
             }
         )
         .is_none()
@@ -1863,7 +1866,7 @@ async fn restart_resumes_thread_by_id() {
 #[test]
 fn catalog_strings_are_owned_and_synthetic_catalog_unchanged() {
     let catalog = model_list_catalog();
-    let entries = adapter::catalog_with(None, None, Some(&catalog), None);
+    let entries = adapter::catalog_with(None, None, Some(&catalog), None, None);
     let codex = entries
         .iter()
         .find(|entry| entry.harness == "codex")
@@ -1924,6 +1927,7 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
                 ..Default::default()
             }),
             opencode: None,
+            antigravity: None,
         };
         let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
         let mut spec = StartSpec {
@@ -1976,6 +1980,7 @@ async fn start_fails_when_app_server_exits_at_once() {
             ..Default::default()
         }),
         opencode: None,
+        antigravity: None,
     };
     let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
     let spec = StartSpec {
@@ -2719,6 +2724,7 @@ async fn live_smoke() {
         claude_code: None,
         codex: Some(config),
         opencode: None,
+        antigravity: None,
     };
     let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
     let group = TreeContainment::new().unwrap();
@@ -2944,6 +2950,7 @@ async fn live_smoke() {
         claude_code: None,
         codex: Some(CodexConfig::default()),
         opencode: None,
+        antigravity: None,
     };
     let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
     let spec = StartSpec {
@@ -3025,6 +3032,7 @@ async fn live_smoke() {
             claude_code: None,
             codex: Some(home_config()),
             opencode: None,
+            antigravity: None,
         },
     )
     .expect("Codex registered");
@@ -3067,6 +3075,7 @@ async fn live_smoke() {
             claude_code: None,
             codex: Some(home_config()),
             opencode: None,
+            antigravity: None,
         },
     )
     .expect("Codex registered");

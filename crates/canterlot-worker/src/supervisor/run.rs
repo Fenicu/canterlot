@@ -1658,6 +1658,7 @@ impl Supervisor {
             claude_code: self.spec.claude_code.clone(),
             codex: self.spec.codex.clone(),
             opencode: self.spec.opencode.clone(),
+            antigravity: self.spec.antigravity.clone(),
         };
         let Some(mut adapter) = registry_with(&start.profile, &context) else {
             tracing::warn!(
@@ -3431,6 +3432,7 @@ mod tests {
                 claude_code: None,
                 codex: None,
                 opencode: None,
+                antigravity: None,
             },
             exec_dir: dir.path().to_owned(),
             secret: Vec::new(),

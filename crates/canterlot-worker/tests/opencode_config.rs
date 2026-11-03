@@ -34,6 +34,7 @@ fn context(opencode: Option<OpenCodeConfig>) -> AdapterContext {
         claude_code: None,
         codex: None,
         opencode,
+        antigravity: None,
     }
 }
 
@@ -42,7 +43,7 @@ fn worker_without_table_has_no_opencode() {
     let config: WorkerConfig = toml::from_str(&worker_toml("")).unwrap();
     assert!(config.opencode.is_none());
     assert!(adapter::registry_with("opencode", &context(None)).is_none());
-    let entries = adapter::catalog_with(None, None, None, None);
+    let entries = adapter::catalog_with(None, None, None, None, None);
     assert!(entries.iter().all(|entry| entry.provider != "opencode"));
 }
 
@@ -134,7 +135,7 @@ fn catalog_shows_the_harness_only_with_a_probe_result() {
             context_window: Some(1_048_576),
         }],
     };
-    let entries = adapter::catalog_with(None, None, None, Some(&catalog));
+    let entries = adapter::catalog_with(None, None, None, Some(&catalog), None);
     let entry = entries
         .iter()
         .find(|entry| entry.harness == "opencode")

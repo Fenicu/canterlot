@@ -348,6 +348,11 @@ rate_limits_poll_interval_s = 300
 # default_model = "opencode-go/muse-spark-1.3-contributor" # Первая в каталоге, форма выбирает её.
 # owner_config = "/home/user/.config/opencode" # Каталог конфигурации владельца, по умолчанию $XDG_CONFIG_HOME/opencode.
 # refuse_paths = [] # Каталоги, где базу держать нельзя, сверх данных владельца.
+
+# Необязательная таблица: без неё харнесс Antigravity не показывается и не запускается.
+# [antigravity]
+# enabled = true # false прячет харнесс, не убирая таблицу.
+# binary = "/home/user/.local/bin/agy" # Источник закреплённой копии; по умолчанию ~/.local/bin/agy.
 ```
 
 Замените `/home/user` своим домашним каталогом; `~` внутри TOML не раскрывается.
@@ -436,6 +441,8 @@ scripts/opencode-schema-check.sh
 ```
 
 OpenCode включается таблицей `[opencode]`: без неё харнесс не показывается и не запускается.
+
+Адаптер Antigravity (`src/adapter/antigravity`) говорит с `agy acp` по stdio JSON-RPC. Таблица `[antigravity]` включает харнесс; ключи: `enabled` (по умолчанию `true`; `false` прячет харнесс) и `binary` — исходный `agy` (по умолчанию `~/.local/bin/agy`). Воркер проверяет `agy --version` (минимум и проверенная версия 1.4.12, более новая допускается с диагностикой `untested_cli_version`), копирует бинарник в `<data_dir>/antigravity/bin/agy-<версия>` и запускает только копию: `<bin> acp --log-file <exec_dir>/agy.log --disable-telemetry [--dangerously-skip-permissions]`, cwd — рабочий каталог, `--gemini-dir` не передаётся. Окружение собирается заново из `PATH`, `HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`, `SSH_AUTH_SOCK`, `CARGO_BUILD_JOBS` и `GEMINI_FORCE_FILE_STORAGE=true`. Каталог моделей берётся из `session/new` (`models.availableModels`) без хода; `configOptions.model` — семейство, а не id модели. Возобновление — через `session/list` и `session/resume`, `session/load` не используется. Режимы: `owner`, `ask`, `bypass`; `read_only` не поддерживается.
 
 Сопровождение добавляет свой MCP-сервер для разрешений, вопросов, чтения лимитов и работы с пресетами: `canterlot_presets_list`, `canterlot_preset_save` и `canterlot_preset_apply` вызывают хаб унарным `WorkerData.AgentCall` и действуют только на свою сессию (у Codex и OpenCode тот же набор без `approve`: лимиты, `share_file`, пресеты и межсессионные инструменты). «Прервать» отправляет CLI управляющий запрос `interrupt`: ход закрывается как прерванный, процесс и контекст остаются, следующий ввод идёт в тот же процесс, а очередь стоит на паузе `user_stop` до продолжения. SIGINT остаётся запасным путём, если квитанции нет в срок: тогда процесс выходит, исполнение получает `stopped(user_stop)`, а продолжение запускает новое исполнение с `--resume` и тем же нативным ID. Отсутствие авторизации даёт `auth_required`, несовпадение ID или несовместимая версия дают `cli_incompatible`, недоступность canterlot MCP даёт `start_failed`.
 

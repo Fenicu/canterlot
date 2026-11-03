@@ -207,6 +207,7 @@ impl PresetHarness {
                 ..Default::default()
             }),
             opencode: None,
+            antigravity: None,
         };
         let mut adapter = canterlot_worker::adapter::registry_with("codex", &context).unwrap();
         let group = TreeContainment::new().unwrap();
@@ -423,6 +424,7 @@ async fn resume_of_a_missing_rollout_fails_once_without_a_path() {
             ..Default::default()
         }),
         opencode: None,
+        antigravity: None,
     };
     let mut adapter = canterlot_worker::adapter::registry_with("codex", &context).unwrap();
     let group = TreeContainment::new().unwrap();

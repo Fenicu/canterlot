@@ -55,6 +55,8 @@ pub struct SupervisorSpec {
     pub codex: Option<crate::config::CodexConfig>,
     #[serde(default)]
     pub opencode: Option<crate::config::OpenCodeConfig>,
+    #[serde(default)]
+    pub antigravity: Option<crate::config::AntigravityConfig>,
 }
 
 /// Спека на диске глазами управляющей службы: она может быть записана другим релизом,

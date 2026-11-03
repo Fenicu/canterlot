@@ -638,6 +638,13 @@ pub(super) async fn validate(
                 .expect("adapter config lock")
                 .opencode
                 .is_none())
+        || (start.harness == "antigravity"
+            && shared
+                .adapters
+                .lock()
+                .expect("adapter config lock")
+                .antigravity
+                .is_none())
     {
         return Ok(Err("harness_unavailable"));
     }
@@ -1276,6 +1283,12 @@ impl Actor {
             if let Some(cfg) = adapters.opencode {
                 let cfg = toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("opencode"))?;
                 table.insert("opencode".into(), cfg);
+            }
+            if let Some(mut cfg) = adapters.antigravity {
+                cfg.data_dir = Some(data_dir.clone());
+                let cfg =
+                    toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("antigravity"))?;
+                table.insert("antigravity".into(), cfg);
             }
             fs::write(
                 &spec_path,

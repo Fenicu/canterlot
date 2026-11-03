@@ -4,6 +4,7 @@ use canterlot_proto::worker::v1::LimitWindow as ProtoLimitWindow;
 use std::{fmt, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
+pub mod antigravity;
 pub mod canterlot_mcp;
 pub mod claude_code;
 pub mod cli_version;
@@ -784,7 +785,7 @@ const CLAUDE_MODELS: &[(&str, &str, u64)] = &[
 ];
 
 pub fn catalog() -> Vec<HarnessCatalog> {
-    catalog_with(None, None, None, None)
+    catalog_with(None, None, None, None, None)
 }
 
 pub fn catalog_with(
@@ -792,6 +793,7 @@ pub fn catalog_with(
     cli: Option<&claude_code::version::CliVersion>,
     codex: Option<&codex::CodexCatalog>,
     opencode: Option<&opencode::OpenCodeCatalog>,
+    antigravity: Option<&antigravity::AntigravityCatalog>,
 ) -> Vec<HarnessCatalog> {
     let mut entries = Vec::new();
     if cfg.is_some() && cli.is_some() {
@@ -831,6 +833,9 @@ pub fn catalog_with(
         });
     }
     if let Some(catalog) = opencode {
+        entries.push(catalog.harness());
+    }
+    if let Some(catalog) = antigravity {
         entries.push(catalog.harness());
     }
     #[cfg(feature = "synthetic-adapter")]
@@ -972,6 +977,7 @@ pub fn registry_with_deadline(
             claude_code: None,
             codex: None,
             opencode: None,
+            antigravity: None,
         },
     )
 }
@@ -984,10 +990,14 @@ pub struct AdapterContext {
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
     pub codex: Option<crate::config::CodexConfig>,
     pub opencode: Option<crate::config::OpenCodeConfig>,
+    pub antigravity: Option<crate::config::AntigravityConfig>,
 }
 
 pub fn known_harness(profile: &str) -> bool {
-    if matches!(profile, "claude_code" | "codex" | "opencode") {
+    if matches!(
+        profile,
+        "claude_code" | "codex" | "opencode" | "antigravity"
+    ) {
         return true;
     }
     #[cfg(feature = "synthetic-adapter")]
@@ -1029,6 +1039,18 @@ pub fn registry_with(profile: &str, ctx: &AdapterContext) -> Option<Box<dyn Adap
                 ctx.exec_dir.clone(),
                 ctx.transmit_deadline,
             )) as Box<dyn Adapter>
+        });
+    }
+    if profile == "antigravity" {
+        return ctx.antigravity.clone().map(|cfg| {
+            Box::new(
+                antigravity::AntigravityAdapter::new(
+                    cfg,
+                    ctx.exec_dir.clone(),
+                    ctx.transmit_deadline,
+                )
+                .with_ready_deadline(ctx.ready_deadline),
+            ) as Box<dyn Adapter>
         });
     }
     #[cfg(feature = "synthetic-adapter")]

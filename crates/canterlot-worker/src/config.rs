@@ -32,6 +32,8 @@ pub struct WorkerConfig {
     pub codex: Option<CodexConfig>,
     #[serde(default)]
     pub opencode: Option<OpenCodeConfig>,
+    #[serde(default)]
+    pub antigravity: Option<AntigravityConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -421,6 +423,29 @@ impl Default for OpenCodeConfig {
             providers: Vec::new(),
             default_model: None,
             owner_config: None,
+        }
+    }
+}
+
+/// Таблица `[antigravity]`: включает адаптер `agy acp`.
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AntigravityConfig {
+    /// Выключает харнесс, не убирая таблицу из конфигурации.
+    pub enabled: bool,
+    /// Исходный `agy`; по умолчанию `$HOME/.local/bin/agy`. Воркер копирует его
+    /// в `<data_dir>/antigravity/bin/agy-<версия>` и запускает копию.
+    pub binary: Option<PathBuf>,
+    /// Каталог данных canterlot; заполняет воркер, из TOML не читается как решение.
+    pub data_dir: Option<PathBuf>,
+}
+
+impl Default for AntigravityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            binary: None,
+            data_dir: None,
         }
     }
 }

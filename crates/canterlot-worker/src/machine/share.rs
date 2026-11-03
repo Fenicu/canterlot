@@ -76,7 +76,7 @@ pub struct Prepared {
 fn denied_dir(part: &str) -> bool {
     matches!(
         part,
-        ".ssh" | ".gnupg" | ".claude" | ".codex" | ".docker" | ".kube" | ".aws"
+        ".ssh" | ".gnupg" | ".claude" | ".codex" | ".gemini" | ".docker" | ".kube" | ".aws"
     )
 }
 
@@ -101,7 +101,7 @@ fn denied_share_name(name: &str) -> bool {
 }
 
 /// Разрешённый путь после раскрытия ссылок в родителях: секретные каталоги
-/// (`~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.codex`, `~/.docker`, `~/.kube`, `~/.aws`,
+/// (`~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.codex`, `~/.gemini`, `~/.docker`, `~/.kube`, `~/.aws`,
 /// `~/.config/{opencode,canterlot,gh,rclone}`), секретные имена и любой `.env` не отдаются.
 fn denied_parts(parts: &[&str]) -> bool {
     if parts.iter().any(|part| denied_dir(part)) {
@@ -455,6 +455,7 @@ mod tests {
         let home = dir();
         for relative in [
             ".claude.json",
+            ".gemini/oauth_creds.json",
             ".config/canterlot/token",
             ".config/gh/hosts.yml",
             ".git-credentials",
