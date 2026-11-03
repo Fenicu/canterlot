@@ -6,6 +6,8 @@ export function notifyIncompatible(): void {
 }
 interface UpdateEnvironment {
   isSafe(): boolean;
+  /** Открыта правка, текст которой живёт только на экране: даже скрытую страницу не перезагружаем. */
+  editing?(): boolean;
   flushDrafts(): Promise<void>;
   hidden(): boolean;
   reload?(): void;
@@ -58,7 +60,7 @@ export class UpdateController extends EventTarget {
   }
   async apply(force = false): Promise<void> {
     if (this.#destroyed || this.#applying) return;
-    if (!force && !this.env.hidden() && !this.env.isSafe()) return;
+    if (!force && (this.env.editing?.() || (!this.env.hidden() && !this.env.isSafe()))) return;
     this.#applying = true;
     try {
       this.#failure = '';

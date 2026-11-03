@@ -115,6 +115,8 @@
     window.addEventListener('online', checkUpdate);
     void register({
       isSafe: () => !runtime?.drafts.pending && !(document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest('[data-composer]') && document.activeElement.value.length > 0),
+      // Правка пузыря живёт только на экране: черновик её не сохраняет.
+      editing: () => document.querySelector('[data-unsaved-edit]') !== null,
       flushDrafts: async () => {
         await runtime?.drafts.flush();
       },

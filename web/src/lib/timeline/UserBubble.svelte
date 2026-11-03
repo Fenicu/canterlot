@@ -163,7 +163,7 @@
   {#if from}<p class="origin">{from}</p>{/if}
   {#if editing}
     <label class="edit-label" for="edit-{input.key}">Текст сообщения</label>
-    <textarea id="edit-{input.key}" class="edit-text" bind:value={editText} rows="4"></textarea>
+    <textarea id="edit-{input.key}" class="edit-text" data-unsaved-edit bind:value={editText} rows="4"></textarea>
     {#if editKept.length > 0}
       <ul class="files">
         {#each input.attachments.filter((file) => editKept.includes(file.attachment_id)) as file (file.attachment_id)}

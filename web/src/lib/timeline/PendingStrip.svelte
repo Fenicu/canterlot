@@ -216,7 +216,7 @@
       {#if editClosed[input.key] && !editing[input.key] && input.state === 'queued'}<p class="note">{editClosed[input.key]}</p>{/if}
       {#if editing[input.key]}
         <label class="edit-label" for="strip-edit-{input.key}">Текст сообщения</label>
-        <textarea id="strip-edit-{input.key}" class="edit-text" bind:value={editTexts[input.key]} rows="3"></textarea>
+        <textarea id="strip-edit-{input.key}" class="edit-text" data-unsaved-edit bind:value={editTexts[input.key]} rows="3"></textarea>
         {#if (editKept[input.key] ?? []).length > 0}
           <ul class="files">
             {#each input.attachments.filter((file) => (editKept[input.key] ?? []).includes(file.attachment_id)) as file (file.attachment_id)}
