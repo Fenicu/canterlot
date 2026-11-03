@@ -624,7 +624,7 @@ npm run build
 npm run preview
 ```
 
-`gen:api` читает только `docs/api/openapi.json` и `docs/api/events.schema.json`; типы HTTP, событий, ClientOp и ServerOp не пишутся вручную. Dev proxy `/api` направляет запросы на `HUB_URL` (по умолчанию `http://127.0.0.1:8080`), добавляет `Remote-User` из `HUB_OWNER` (по умолчанию `owner`) и заменяет Origin на `HUB_ALLOWED_ORIGIN` (по умолчанию `http://localhost:5173`). Это локальный режим разработки; наружу Vite не публикуют. В статической production-сборке такого прокси нет.
+`gen:api` читает только `docs/api/openapi.json` и `docs/api/events.schema.json`; типы HTTP, событий, ClientOp и ServerOp не пишутся вручную. `node scripts/gen-api.mjs --check` только сверяет закоммиченные типы с контрактом; `check-web.sh` запускает сверку всегда, а в режиме `--fast` — когда менялись `docs/api`, `src/lib/api/generated` или сам генератор. Dev proxy `/api` направляет запросы на `HUB_URL` (по умолчанию `http://127.0.0.1:8080`), добавляет `Remote-User` из `HUB_OWNER` (по умолчанию `owner`) и заменяет Origin на `HUB_ALLOWED_ORIGIN` (по умолчанию `http://localhost:5173`). Это локальный режим разработки; наружу Vite не публикуют. В статической production-сборке такого прокси нет.
 
 ```bash
 cd web
