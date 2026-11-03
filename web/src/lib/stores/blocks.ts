@@ -349,7 +349,8 @@ function applyFinal(
   block.rev = payload.rev;
   block.state = "final";
   replaceBody(block, payload.text);
-  return [{ type: "verify", blockId: block.id }];
+  // Хаб прислал тело сам: сверять его с контрольной суммой в этом же кадре незачем.
+  return [];
 }
 
 function applyIncomplete(
@@ -358,6 +359,8 @@ function applyIncomplete(
 ): BlockEffect[] {
   if (ev.kind !== "block_incomplete") return [];
   const block = ensure(blocks, ev.payload.block_id);
+  // Финальное тело уже пришло: запоздавшая отметка о неполноте его не отменяет.
+  if (block.state === "final") return [];
   ++block.ticket;
   block.rev = ev.payload.rev;
   block.state = "incomplete";

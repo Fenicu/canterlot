@@ -331,15 +331,15 @@ describe("stores task 4", () => {
       blocks,
       [
         started(),
-        delta(0, 1, "черновик"),
+        delta(0, 1, "не то"),
         ev(
           "block_final",
           {
             block_id: BLOCK,
             rev: 2,
-            text: "не то",
+            text: "",
             checksum: "00",
-            text_omitted: false,
+            text_omitted: true,
             summary: null,
           },
           "8",
