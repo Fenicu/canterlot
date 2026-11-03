@@ -259,13 +259,27 @@ impl Process {
         }
     }
 
-    pub async fn write_message(&mut self, message: &serde_json::Value) -> std::io::Result<()> {
+    /// Запись в stdin в срок операции: CLI, переставший читать, не держит вызывающего
+    /// и не оставляет половину строки в канале — таймаут виден как `TimedOut`.
+    pub async fn write_message_until(
+        &mut self,
+        message: &serde_json::Value,
+        deadline: tokio::time::Instant,
+    ) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
         let Some(stdin) = &mut self.stdin else {
             return Err(std::io::Error::other("no stdin"));
         };
-        stdin.write_all(format!("{message}\n").as_bytes()).await?;
-        stdin.flush().await
+        let line = format!("{message}\n");
+        match tokio::time::timeout_at(deadline, async {
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.flush().await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+        }
     }
 
     /// Следующая строка stdout без `\n`; длиннее 64 МиБ пропускается до перевода строки.

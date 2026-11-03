@@ -1324,6 +1324,40 @@ async fn a_late_echo_after_the_deadline_is_input_accepted() {
 }
 
 #[tokio::test]
+async fn a_cli_that_stops_reading_stdin_is_retired_inside_the_write_deadline() {
+    let steps = vec![init_step(), new_step(), Step::Hang];
+    let mut bench = Bench::with_timing(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+        Duration::from_millis(200),
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+    bench.start().await;
+    let input = send(&"x".repeat(262_144));
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(3),
+        bench.adapter.transmit(&input, &bench.group),
+    )
+    .await
+    .expect("a stalled stdin write must not block transmit");
+    assert!(matches!(outcome, TransmitOutcome::Undetermined));
+    let events = drain(&mut bench.adapter).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::ProcessExited { .. })),
+        "a timed-out partial write retires the connection: {events:?}"
+    );
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
 async fn a_steer_answered_without_an_echo_does_not_keep_its_echo_for_the_next_input() {
     let steps = vec![
         init_step(),

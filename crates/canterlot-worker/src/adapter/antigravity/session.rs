@@ -75,7 +75,7 @@ pub async fn call(
     deadline: Instant,
 ) -> Result<Value, SessionError> {
     let (id, message) = rpc.request_v2(method, params);
-    proc.write_message(&message).await?;
+    proc.write_message_until(&message, deadline).await?;
     loop {
         let line = match timeout_at(deadline, proc.next_line()).await {
             Ok(super::process::StdoutLine::Line(line)) => line,
@@ -105,7 +105,7 @@ pub async fn call(
             Incoming::ServerRequest { id, .. } => {
                 // До задач 3 запросов сервера в рукопожатии нет; отвечаем, чтобы не зависнуть.
                 let message = RpcClient::error(&id, -32601, "Method not found");
-                proc.write_message(&message).await?;
+                proc.write_message_until(&message, deadline).await?;
             }
             Incoming::Invalid => {
                 rpc.forget(id);

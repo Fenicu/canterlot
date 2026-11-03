@@ -262,10 +262,55 @@ impl AntigravityAdapter {
     // --- чтение потока ------------------------------------------------------
 
     async fn write_message(&mut self, message: Value) -> bool {
-        match self.proc.as_mut() {
-            Some(proc) => proc.write_message(&message).await.is_ok(),
-            None => false,
+        let deadline = Instant::now() + self.deadline;
+        self.write_message_until(message, deadline).await
+    }
+
+    /// Запись в срок операции. Таймаут означает, что CLI перестал читать stdin:
+    /// половина строки уже в канале, поэтому соединение закрывается, а supervisor
+    /// получает `ProcessExited`, как при любом выходе процесса.
+    async fn write_message_until(&mut self, message: Value, deadline: Instant) -> bool {
+        let written = match self.proc.as_mut() {
+            Some(proc) => proc.write_message_until(&message, deadline).await,
+            None => return false,
+        };
+        match written {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                self.retire_unwritable().await;
+                false
+            }
+            Err(_) => false,
         }
+    }
+
+    async fn retire_unwritable(&mut self) {
+        let status = match self.proc.take() {
+            Some(mut proc) => {
+                proc.kill_now();
+                timeout(KILL_WAIT, proc.wait())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            }
+            None => None,
+        };
+        self.finish_process(status);
+    }
+
+    /// Терминальный исход процесса: общие события для EOF, стража хода и записи.
+    fn finish_process(&mut self, status: Option<std::process::ExitStatus>) {
+        use std::os::unix::process::ExitStatusExt;
+        self.exited = true;
+        self.exit_reported = true;
+        self.stall_at = None;
+        self.requests.drop_open();
+        if let Some(Effect::CompactDone { ok }) = self.tracker.on_eof() {
+            self.events.push_back(AdapterEvent::Compacted { ok });
+        }
+        let (code, signal) = status.map_or((None, None), |status| (status.code(), status.signal()));
+        self.events
+            .push_back(AdapterEvent::ProcessExited { code, signal });
     }
 
     async fn pump_once(&mut self) -> bool {
@@ -511,29 +556,18 @@ impl AntigravityAdapter {
     }
 
     async fn handle_eof(&mut self) {
-        use std::os::unix::process::ExitStatusExt;
         self.eof = true;
         let status = match self.proc.as_mut() {
             Some(proc) => proc.wait().await.ok(),
             None => None,
         };
-        self.exited = true;
-        self.exit_reported = true;
-        self.stall_at = None;
-        self.requests.drop_open();
-        if let Some(Effect::CompactDone { ok }) = self.tracker.on_eof() {
-            self.events.push_back(AdapterEvent::Compacted { ok });
-        }
-        let (code, signal) = status.map_or((None, None), |status| (status.code(), status.signal()));
-        self.events
-            .push_back(AdapterEvent::ProcessExited { code, signal });
+        self.finish_process(status);
     }
 
     async fn check_stall(&mut self) {
         if !self.stall_at.is_some_and(|at| Instant::now() >= at) {
             return;
         }
-        use std::os::unix::process::ExitStatusExt;
         self.stall_at = None;
         let status = match self.proc.take() {
             Some(mut proc) => {
@@ -545,15 +579,7 @@ impl AntigravityAdapter {
             }
             None => None,
         };
-        self.exited = true;
-        self.exit_reported = true;
-        self.requests.drop_open();
-        if let Some(Effect::CompactDone { ok }) = self.tracker.on_eof() {
-            self.events.push_back(AdapterEvent::Compacted { ok });
-        }
-        let (code, signal) = status.map_or((None, None), |status| (status.code(), status.signal()));
-        self.events
-            .push_back(AdapterEvent::ProcessExited { code, signal });
+        self.finish_process(status);
     }
 
     // --- настройки хода -----------------------------------------------------
@@ -564,7 +590,8 @@ impl AntigravityAdapter {
         params: Value,
     ) -> Result<Value, RpcError> {
         let (id, message) = self.rpc.request_v2(method, params);
-        if !self.write_message(message).await {
+        let limit = Instant::now() + self.deadline;
+        if !self.write_message_until(message, limit).await {
             self.rpc.forget(id);
             return Err(RpcError {
                 code: -32000,
@@ -572,7 +599,6 @@ impl AntigravityAdapter {
                 data: None,
             });
         }
-        let limit = Instant::now() + self.deadline;
         loop {
             if let Some(result) = self.responses.remove(&id) {
                 return result;
@@ -1012,12 +1038,12 @@ impl Adapter for AntigravityAdapter {
         if let Some(translator) = self.translator.as_mut() {
             translator.begin_turn(Some(input.command_id));
         }
-        if !self.write_message(message).await {
+        let limit = Instant::now() + self.deadline;
+        if !self.write_message_until(message, limit).await {
             self.tracker.forget_command(input.command_id);
             self.rpc.forget(id);
             return TransmitOutcome::Undetermined;
         }
-        let limit = Instant::now() + self.deadline;
         match self.wait_echo(input.command_id, limit).await {
             EchoEnd::Accepted => TransmitOutcome::Accepted(Proof {
                 command_id: input.command_id,
@@ -1102,12 +1128,12 @@ impl Adapter for AntigravityAdapter {
                 self.tracker.register(id, command_id, PromptKind::Turn);
                 self.tracker.expect_echo(id, command_id, &text);
                 self.tracker.await_echo(command_id);
-                if !self.write_message(message).await {
+                let limit = Instant::now() + self.deadline;
+                if !self.write_message_until(message, limit).await {
                     self.tracker.forget_command(command_id);
                     self.rpc.forget(id);
                     return DecisionOutcome::Undetermined;
                 }
-                let limit = Instant::now() + self.deadline;
                 match self.wait_echo(command_id, limit).await {
                     EchoEnd::Accepted => DecisionOutcome::Applied(DecisionProof {
                         proof_kind: "agy_acp_question_continuation".into(),
@@ -1219,12 +1245,12 @@ impl Adapter for AntigravityAdapter {
             .register(id, input.command_id, PromptKind::Turn);
         self.tracker.expect_echo(id, input.command_id, &text);
         self.tracker.await_echo(input.command_id);
-        if !self.write_message(message).await {
+        let limit = Instant::now() + self.deadline;
+        if !self.write_message_until(message, limit).await {
             self.tracker.forget_command(input.command_id);
             self.rpc.forget(id);
             return SteerOutcome::Undetermined;
         }
-        let limit = Instant::now() + self.deadline;
         match self.wait_echo(input.command_id, limit).await {
             EchoEnd::Accepted => SteerOutcome::Accepted(Proof {
                 command_id: input.command_id,
@@ -1250,12 +1276,12 @@ impl Adapter for AntigravityAdapter {
         if let Some(translator) = self.translator.as_mut() {
             translator.begin_turn(None);
         }
-        if !self.write_message(message).await {
+        let limit = Instant::now() + self.deadline;
+        if !self.write_message_until(message, limit).await {
             self.tracker.forget_command(command);
             self.rpc.forget(id);
             return CompactOutcome::Failed;
         }
-        let limit = Instant::now() + self.deadline;
         match self.wait_echo(command, limit).await {
             EchoEnd::Accepted => CompactOutcome::Accepted,
             EchoEnd::Rejected(_) | EchoEnd::Undetermined => {

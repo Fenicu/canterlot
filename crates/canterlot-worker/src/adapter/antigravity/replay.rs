@@ -82,6 +82,8 @@ pub enum Step {
         #[serde(default)]
         result: Option<Value>,
     },
+    /// Процесс перестаёт читать stdin и висит до убийства: проверка срока записи.
+    Hang,
     Die {
         code: i32,
         #[serde(default)]
@@ -413,6 +415,9 @@ pub fn main(args: Vec<String>) -> ExitCode {
                 let _ = output.flush();
             }
             Step::Delay { ms } => std::thread::sleep(Duration::from_millis(*ms)),
+            Step::Hang => loop {
+                std::thread::sleep(Duration::from_secs(1));
+            },
             Step::Die { code, kill } => {
                 let _ = output.flush();
                 if *kill {
