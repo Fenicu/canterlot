@@ -54,6 +54,10 @@ const ERROR_TEXT_BYTES: usize = 512;
 /// prompt (§11). Смена этого значения — единственное, что нужно для включения.
 const QUESTIONS_CAPABILITY: Support = Support::Unavailable("stage0");
 
+fn questions_enabled_by_default() -> bool {
+    !matches!(QUESTIONS_CAPABILITY, Support::Unavailable(_))
+}
+
 pub struct AntigravityAdapter {
     cfg: AntigravityConfig,
     exec_dir: PathBuf,
@@ -78,6 +82,7 @@ pub struct AntigravityAdapter {
     permission_mode: String,
     spec: Option<StartSpec>,
     generation: u64,
+    questions_enabled: bool,
     limit_reported: bool,
     stall_at: Option<Instant>,
     eof: bool,
@@ -118,6 +123,7 @@ impl AntigravityAdapter {
             permission_mode: String::new(),
             spec: None,
             generation: 0,
+            questions_enabled: questions_enabled_by_default(),
             limit_reported: false,
             stall_at: None,
             eof: false,
@@ -141,6 +147,13 @@ impl AntigravityAdapter {
     /// Сколько ждать ответа после `Undetermined`, прежде чем закрыть процесс силой.
     pub fn with_turn_stall_deadline(mut self, deadline: Duration) -> Self {
         self.turn_stall_deadline = deadline;
+        self
+    }
+
+    /// Тестовый тумблер: включает путь вопросов, пока константа
+    /// `QUESTIONS_CAPABILITY` остаётся `Unavailable("stage0")`.
+    pub fn with_questions_enabled(mut self, enabled: bool) -> Self {
+        self.questions_enabled = enabled;
         self
     }
 
@@ -375,6 +388,12 @@ impl AntigravityAdapter {
     }
 
     async fn open_question(&mut self, call: QuestionCall) {
+        if !self.questions_enabled {
+            // До живой проверки cancel + служебный prompt вопрос не показывается.
+            self.diagnostic("antigravity_questions_unavailable", false);
+            self.send_cancel().await;
+            return;
+        }
         match self
             .requests
             .open_question(&call.tool_call_id, &call.raw_input, "orchestrator")

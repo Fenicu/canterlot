@@ -100,6 +100,35 @@ impl Bench {
         interrupt: Duration,
         stall: Duration,
     ) -> Self {
+        Self::with_questions(
+            script, model, effort, mode, deadline, interrupt, stall, true,
+        )
+    }
+
+    fn new_without_questions(script: Script) -> Self {
+        Self::with_questions(
+            script,
+            "",
+            "",
+            "bypass",
+            WAIT,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_questions(
+        script: Script,
+        model: &str,
+        effort: &str,
+        mode: &str,
+        deadline: Duration,
+        interrupt: Duration,
+        stall: Duration,
+        questions: bool,
+    ) -> Self {
         let fake = Fake::new(script);
         let exec_dir = fake.exec_dir();
         let cfg = AntigravityConfig {
@@ -110,7 +139,8 @@ impl Bench {
         let adapter = AntigravityAdapter::new(cfg, exec_dir.clone(), deadline)
             .with_ready_deadline(WAIT)
             .with_interrupt_deadline(interrupt)
-            .with_turn_stall_deadline(stall);
+            .with_turn_stall_deadline(stall)
+            .with_questions_enabled(questions);
         let mut start = spec(model, effort, mode);
         start.workdir = fake.workdir();
         Self {
@@ -2145,6 +2175,45 @@ async fn a_malformed_question_is_a_diagnostic_and_a_cancel() {
             .iter()
             .any(|entry| entry["dir"] == "in" && entry["frame"]["method"] == "session/cancel")
     );
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn ask_question_is_refused_while_the_capability_is_unavailable() {
+    let mut steps = question_scenario();
+    steps.push(Script::notification("session/cancel"));
+    steps.push(respond(4, cancelled(Some(usage(1, 1, 0)))));
+    let mut bench = Bench::new_without_questions(Script {
+        steps,
+        ..Default::default()
+    });
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let events = drain(&mut bench.adapter).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic {
+            kind: "antigravity_questions_unavailable",
+            required: false,
+            ..
+        }
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::RequestOpened { kind, .. } if kind == "question"
+    )));
+    assert!(
+        bench
+            .fake
+            .requests()
+            .iter()
+            .any(|entry| entry["dir"] == "in" && entry["frame"]["method"] == "session/cancel")
+    );
+    assert_eq!(finished(&events), vec![input.command_id]);
     bench.close().await;
 }
 
