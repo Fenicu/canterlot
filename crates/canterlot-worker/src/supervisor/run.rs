@@ -233,6 +233,8 @@ struct Supervisor {
     agent_calls: HashMap<Uuid, Instant>,
     conns: HashMap<u64, Conn>,
     attached: Option<u64>,
+    /// Неизвестное сообщение IPC уже названо в журнале: дальше молча.
+    unknown_ipc_logged: bool,
     next_conn: u64,
     attach_deadline: Option<Instant>,
     workdir: Option<PathBuf>,
@@ -430,6 +432,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         agent_calls: HashMap::new(),
         conns: HashMap::new(),
         attached: None,
+        unknown_ipc_logged: false,
         next_conn: 0,
         workdir: None,
         media: MediaQueue::default(),
@@ -798,6 +801,17 @@ impl Supervisor {
             return Ok(());
         };
         let Some(message) = message.msg else {
+            // Новая управляющая служба может прислать то, чего эта сборка не знает:
+            // связь остаётся, иначе она рвалась бы на каждом таком сообщении.
+            if conn.attached {
+                if !std::mem::replace(&mut self.unknown_ipc_logged, true) {
+                    tracing::warn!(
+                        kind = "ipc_unknown_message",
+                        "unknown control message ignored"
+                    );
+                }
+                return Ok(());
+            }
             self.drop_connection(id);
             return Ok(());
         };
@@ -838,6 +852,10 @@ impl Supervisor {
                 last_sj_seq: self.sj.last_seq(),
                 acked_sj_seq: self.sj.acked_seq(),
                 received,
+                ipc_capabilities: canterlot_proto::limits::IPC_CAPABILITIES
+                    .iter()
+                    .map(|capability| (*capability).to_owned())
+                    .collect(),
             }));
             tracing::info!(kind = "attached", "control attached");
             // Новая управляющая служба получает незавершённую загрузку заново.
@@ -3436,6 +3454,7 @@ mod tests {
             agent_calls: HashMap::new(),
             conns: HashMap::new(),
             attached: None,
+            unknown_ipc_logged: false,
             next_conn: 0,
             workdir: None,
             media: MediaQueue::default(),

@@ -54,6 +54,9 @@ message Attached {
   uint64 last_sj_seq = 5;
   uint64 acked_sj_seq = 6;
   repeated ReceivedInput received = 7;
+  // Возможности IPC этой сборки сопровождения (`IPC_CAP_*`). Пусто у 1.0.0 и старше:
+  // управляющая служба не шлёт им видов сообщений и команд, появившихся позже.
+  repeated string ipc_capabilities = 8;
 }
 
 message ReceivedInput {
