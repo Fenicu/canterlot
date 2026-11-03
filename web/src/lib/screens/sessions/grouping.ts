@@ -93,14 +93,40 @@ export function buildSections(
   if (tab.kind === "group") {
     const group = ordered.find((item) => item.id === tab.id);
     const members = active.filter((item) => item.groups.includes(tab.id));
-    return [
-      section(
-        tab.id,
-        group?.name ?? "Группа",
-        nest(active, new Set(members.map((item) => item.id)), kids),
-        collapsed,
-      ),
-    ];
+    const pinned = members
+      .filter((item) => groupPinAt(item, tab.id) !== null)
+      .sort(
+        (a, b) =>
+          (groupPinAt(b, tab.id) ?? "").localeCompare(
+            groupPinAt(a, tab.id) ?? "",
+          ) || a.id.localeCompare(b.id),
+      );
+    const pinnedIds = new Set(pinned.map((item) => item.id));
+    const rest = members.filter((item) => !pinnedIds.has(item.id));
+    const sections: Section[] = [];
+    if (pinned.length > 0)
+      sections.push(
+        section(
+          `pinned:${tab.id}`,
+          "Закреплённые",
+          nest(
+            [...pinned, ...active.filter((item) => !pinnedIds.has(item.id))],
+            pinnedIds,
+            kids,
+          ),
+          collapsed,
+        ),
+      );
+    if (rest.length > 0 || pinned.length === 0)
+      sections.push(
+        section(
+          tab.id,
+          group?.name ?? "Группа",
+          nest(active, new Set(rest.map((item) => item.id)), kids),
+          collapsed,
+        ),
+      );
+    return sections;
   }
   const roots = nest(active, null, kids);
   const used = new Set<string>();
@@ -272,6 +298,13 @@ function firstGroup(item: ListRow, groups: Group[]): string | null {
     if (item.groups.includes(group.id)) return group.id;
   }
   return null;
+}
+
+/** Время закрепления сессии в группе; `null` — в этой группе она не закреплена. */
+export function groupPinAt(item: ListRow, groupId: string): string | null {
+  return (
+    item.group_pins?.find((pin) => pin.group_id === groupId)?.pinned_at ?? null
+  );
 }
 
 function section(

@@ -13,6 +13,7 @@ function row(patch: Partial<ListRow> & { id: string; title: string }): ListRow {
     pinned: false,
     archived: false,
     groups: [],
+    group_pins: [],
     parent_id: null,
     spawn_depth: 0,
     machine: { id: "m", name: "workstation" },
@@ -83,6 +84,88 @@ describe("sessions/grouping", () => {
       new Set(),
     );
     expect(section?.items.map((node) => node.item.id)).toEqual(["p1", "c1"]);
+  });
+
+  it("group_tab_puts_group_pins_first_newest_and_keeps_global_pins_in_the_rest", () => {
+    const items = [
+      row({
+        id: "global",
+        title: "Глобальный закреп",
+        pinned: true,
+        groups: ["canterlot"],
+      }),
+      row({ id: "plain", title: "Обычная", groups: ["canterlot"] }),
+      row({
+        id: "older",
+        title: "Раньше закреплена",
+        groups: ["canterlot", "books"],
+        group_pins: [
+          { group_id: "canterlot", pinned_at: "2026-10-28T10:00:00.000Z" },
+          { group_id: "books", pinned_at: "2026-10-28T11:30:00.000Z" },
+        ],
+      }),
+      row({
+        id: "newer",
+        title: "Позже закреплена",
+        groups: ["canterlot"],
+        group_pins: [
+          { group_id: "canterlot", pinned_at: "2026-10-28T12:00:00.000Z" },
+        ],
+      }),
+    ];
+    const sections = buildSections(
+      items,
+      groups,
+      { kind: "group", id: "canterlot" },
+      new Set(),
+    );
+    expect(sections.map((section) => section.title)).toEqual([
+      "Закреплённые",
+      "canterlot",
+    ]);
+    expect(sections[0]?.items.map((node) => node.item.id)).toEqual([
+      "newer",
+      "older",
+    ]);
+    expect(sections[0]?.count).toBe(2);
+    expect(sections[1]?.items.map((node) => node.item.id)).toEqual([
+      "global",
+      "plain",
+    ]);
+
+    // «Все» и чужая группа знают только свои закрепления.
+    const all = buildSections(items, groups, { kind: "all" }, new Set());
+    expect(all[0]?.title).toBe("Закреплённые");
+    expect(all[0]?.items.map((node) => node.item.id)).toEqual(["global"]);
+    const books = buildSections(
+      items,
+      groups,
+      { kind: "group", id: "books" },
+      new Set(),
+    );
+    expect(books[0]?.title).toBe("Закреплённые");
+    expect(books[0]?.items.map((node) => node.item.id)).toEqual(["older"]);
+  });
+
+  it("group_with_every_member_pinned_still_shows_the_pin_heading", () => {
+    const items = [
+      row({
+        id: "only",
+        title: "Одна",
+        groups: ["books"],
+        group_pins: [
+          { group_id: "books", pinned_at: "2026-10-28T12:00:00.000Z" },
+        ],
+      }),
+    ];
+    const sections = buildSections(
+      items,
+      groups,
+      { kind: "group", id: "books" },
+      new Set(),
+    );
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.title).toBe("Закреплённые");
   });
 
   it("counts_come_from_the_snapshot_and_events_not_the_visible_slice", () => {

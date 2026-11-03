@@ -9,6 +9,7 @@ function row(patch: Partial<ListRow> & { id: string; title: string }): ListRow {
     pinned: false,
     archived: false,
     groups: [],
+    group_pins: [],
     parent_id: null,
     spawn_depth: 0,
     machine: { id: "m", name: "workstation" },

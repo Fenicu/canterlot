@@ -18,6 +18,7 @@ export function seedConversation(api: FakeHubApi, patch: Partial<ListRow> = {}):
 		pinned: false,
 		archived: false,
 		groups: [],
+		group_pins: [],
 		parent_id: null,
 		spawn_depth: 0,
 		machine: { id: api.id(), name: 'dev' },
