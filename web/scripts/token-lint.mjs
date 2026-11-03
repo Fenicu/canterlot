@@ -139,19 +139,35 @@ export function lintFile(path, text) {
   for (const m of markup.matchAll(/&#(?:x([0-9a-f]+)|(\d+));|&(check|checkmark|cross);/gi)) { const glyph = m[3] ? '\u2713' : String.fromCodePoint(parseInt(m[1] ?? m[2], m[1] ? 16 : 10)); if (emoji.test(glyph)) add('ui_strings_have_no_emoji_or_checkmark_glyphs', m.index, m[0]); }
   return found.sort((a, b) => a.line - b.line || a.rule.localeCompare(b.rule));
 }
+// Свойство считается заданным, если его объявляют в CSS, через style:--x или передают строкой в styleProperty и setProperty.
+const definitions = /(?:^|[^\w-])(--[\w-]+)\s*:|style:(--[\w-]+)|['"`](--[\w-]+)['"`]/g;
+const usages = /var\(\s*(--[\w-]+)\s*[,)]/g;
+export function definedTokens(texts) {
+  const defined = new Set();
+  for (const text of texts) for (const m of text.matchAll(definitions)) defined.add(m[1] ?? m[2] ?? m[3]);
+  return defined;
+}
+export function undefinedTokens(text, defined) {
+  const found = [];
+  for (const m of text.matchAll(usages)) if (!defined.has(m[1])) found.push({ rule: 'undefined-token', line: text.slice(0, m.index).split('\n').length, value: m[1] });
+  return found;
+}
 export function lintTree(root, allow) {
   for (const entry of allow) if (!entry.reason?.trim() || !entry.value?.trim()) throw new Error('Allow entry needs a reason and a value');
-  const result = [];
+  const files = [];
   function walk(directory) {
     for (const item of readdirSync(directory, { withFileTypes: true })) {
       const file = resolve(directory, item.name);
       if (item.isDirectory()) walk(file);
-      else if (/\.(css|svelte|ts|js|html)$/.test(item.name)) {
-        const path = relative(resolve(root), file).replaceAll('\\', '/');
-        for (const violation of lintFile(file, readFileSync(file, 'utf8'))) if (!allow.some(entry => entry.path === path && entry.rule === violation.rule && entry.value === violation.value)) result.push({ path, ...violation });
-      }
+      else if (/\.(css|svelte|ts|js|html)$/.test(item.name)) files.push({ file, path: relative(resolve(root), file).replaceAll('\\', '/'), text: readFileSync(file, 'utf8') });
     }
   }
   walk(root);
+  const defined = definedTokens(files.map(f => f.text));
+  const result = [];
+  for (const { file, path, text } of files) {
+    const violations = [...lintFile(file, text), ...undefinedTokens(text, defined)];
+    for (const violation of violations) if (!allow.some(entry => entry.path === path && entry.rule === violation.rule && entry.value === violation.value)) result.push({ path, ...violation });
+  }
   return result;
 }
