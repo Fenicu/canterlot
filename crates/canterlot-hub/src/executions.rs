@@ -649,6 +649,7 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
                         | "worktree_base_unknown"
                         | "worktree_failed"
                         | "start_failed"
+                        | "codex_state_backfill_stuck"
                         | "cli_incompatible"
                         | "auth_required"
                         | "crashed"
@@ -690,5 +691,19 @@ fn state_event(
         execution_id: Some(execution_id),
         payload: json!({"state": state, "generation": generation, "outcome": outcome}),
         correlation_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stuck_codex_state_backfill_is_a_legal_start_failure() {
+        assert!(legal_transition(
+            ExecutionState::Stopping,
+            ExecutionState::Failed,
+            Some("codex_state_backfill_stuck"),
+        ));
     }
 }

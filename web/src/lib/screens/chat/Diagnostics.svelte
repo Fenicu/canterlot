@@ -2,6 +2,7 @@
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import { buildDiagnosticsReport, type DiagnosticsData } from './diagnostics';
 	import {
+		diagnosticEventLabel,
 		diagnosticKindLabel,
 		executionOutcomeLabel,
 		executionStateLabel,
@@ -130,7 +131,7 @@
 					{#each diagnosticEvents as ev, idx (idx)}
 						<div class="key-value">
 							<span class="event-kind">{diagnosticKindLabel(ev.kind)}</span>
-							{#if ev.detail}<code>{ev.detail}</code>{/if}
+							{#if ev.detail}<code>{diagnosticEventLabel(ev.detail) ?? ev.detail}</code>{/if}
 							{#if ev.correlation_id}<code>{ev.correlation_id}</code>{/if}
 							{#if ev.fields?.length}
 								<span class="fields">Поля кадра: <code>{ev.fields.join(', ')}</code></span>
