@@ -4505,10 +4505,21 @@ struct Relay {
 
 impl Relay {
     async fn connect(bench: &Bench) -> Self {
+        use tokio::io::AsyncWriteExt as _;
         let stream = tokio::net::UnixStream::connect(bench.exec_dir.join("mcp.sock"))
             .await
             .unwrap();
-        let (read, writer) = stream.into_split();
+        let (read, mut writer) = stream.into_split();
+        let content: Value =
+            serde_json::from_str(&bench.env("OPENCODE_CONFIG_CONTENT").unwrap()).unwrap();
+        let secret = content["mcp"]["servers"]["canterlot"]["environment"]["CANTERLOT_MCP_SECRET"]
+            .as_str()
+            .expect("the relay gets the socket secret")
+            .to_owned();
+        writer
+            .write_all(canterlot_worker::adapter::canterlot_mcp::relay_hello(&secret).as_bytes())
+            .await
+            .unwrap();
         Self {
             reader: tokio::io::BufReader::new(read),
             writer,

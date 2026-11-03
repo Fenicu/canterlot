@@ -1,3 +1,4 @@
+use crate::adapter::canterlot_mcp::RELAY_SECRET_ENV;
 use crate::adapter::{InstructionMode, InstructionSpec, SettingsChange, spawn_with_retry_io};
 use crate::config::ClaudeCodeConfig;
 use crate::containment::Containment;
@@ -338,18 +339,25 @@ pub fn apply_mcp_isolation(envs: &mut Vec<(OsString, OsString)>) {
     envs.push(("ENABLE_CLAUDEAI_MCP_SERVERS".into(), "false".into()));
 }
 
+/// `relay_secret` — секрет сокета MCP этой сессии: relay получает его в окружении.
 pub fn write_exec_files(
     spec: &LaunchSpec,
     _cfg: &ClaudeCodeConfig,
     relay_exe: &Path,
+    relay_secret: Option<&str>,
 ) -> Result<(), LaunchError> {
     std::fs::create_dir_all(spec.exec_dir).map_err(LaunchError::Io)?;
+    let env: serde_json::Map<String, serde_json::Value> = relay_secret
+        .map(|secret| (RELAY_SECRET_ENV.to_owned(), secret.into()))
+        .into_iter()
+        .collect();
     let mcp = serde_json::json!({
         "mcpServers": {
             "canterlot": {
                 "type": "stdio",
                 "command": relay_exe.display().to_string(),
-                "args": ["mcp-relay", "--socket", spec.exec_dir.join("mcp.sock").display().to_string()]
+                "args": ["mcp-relay", "--socket", spec.exec_dir.join("mcp.sock").display().to_string()],
+                "env": env
             }
         }
     });

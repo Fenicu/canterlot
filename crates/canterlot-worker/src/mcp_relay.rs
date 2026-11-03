@@ -4,9 +4,12 @@
 //! read from stdin is forwarded to the supervisor socket, every line read
 //! from the socket is written to stdout. No JSON-RPC handling here: the
 //! supervisor side parses and answers. Only JSON-RPC goes to stdout;
-//! diagnostics go to stderr.
+//! diagnostics go to stderr. The first line to the socket is the session
+//! secret from `CANTERLOT_MCP_SECRET`, when the CLI passed one.
 
 use std::path::Path;
+
+use crate::adapter::canterlot_mcp::{RELAY_SECRET_ENV, relay_hello};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -15,6 +18,13 @@ use tokio::{
 pub async fn run(socket: &Path) -> std::io::Result<()> {
     let stream = UnixStream::connect(socket).await?;
     let (mut from_socket, mut to_socket) = stream.into_split();
+    // Сокет принимает только relay своей сессии: секрет приходит в окружении от CLI.
+    if let Some(secret) = std::env::var(RELAY_SECRET_ENV)
+        .ok()
+        .filter(|secret| !secret.is_empty())
+    {
+        to_socket.write_all(relay_hello(&secret).as_bytes()).await?;
+    }
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let pump_out = async move {

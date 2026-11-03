@@ -156,6 +156,54 @@ fn rpc_error(id: &Value, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": message}})
 }
 
+/// Переменная окружения relay с секретом сокета этой сессии.
+pub const RELAY_SECRET_ENV: &str = "CANTERLOT_MCP_SECRET";
+
+/// Первая строка relay: секрет сессии. Без неё сокет не принимает ни одного вызова.
+pub fn relay_hello(secret: &str) -> String {
+    format!("{RELAY_HELLO_PREFIX}{secret}\n")
+}
+
+const RELAY_HELLO_PREFIX: &str = "canterlot-relay ";
+const HELLO_DEADLINE: Duration = Duration::from_secs(5);
+const MAX_HELLO_BYTES: u64 = 256;
+
+fn new_secret() -> String {
+    let bytes: [u8; 32] = rand::random();
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Сравнение без раннего выхода: время не выдаёт совпавшее начало.
+fn same_secret(given: &[u8], expected: &[u8]) -> bool {
+    given.len() == expected.len()
+        && given
+            .iter()
+            .zip(expected)
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+/// Первая строка соединения должна нести секрет этой сессии; иначе соединение закрывается
+/// до допуска, и взведённый допуск Claude Code чужому процессу не достаётся.
+async fn authenticated(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    secret: &str,
+) -> bool {
+    let mut line = Vec::new();
+    let read = tokio::time::timeout(
+        HELLO_DEADLINE,
+        (&mut *reader)
+            .take(MAX_HELLO_BYTES)
+            .read_until(b'\n', &mut line),
+    )
+    .await;
+    if !matches!(read, Ok(Ok(n)) if n > 0) || line.pop() != Some(b'\n') {
+        return false;
+    }
+    line.strip_prefix(RELAY_HELLO_PREFIX.as_bytes())
+        .is_some_and(|given| same_secret(given, secret.as_bytes()))
+}
+
 /// Соединение от процесса того же пользователя.
 fn same_user(stream: &UnixStream) -> bool {
     stream
@@ -171,6 +219,7 @@ pub struct Broker {
     gate: Arc<SyncMutex<Gate>>,
     task: JoinHandle<()>,
     limits_provider: String,
+    secret: String,
 }
 
 impl Drop for Broker {
@@ -206,11 +255,13 @@ impl Broker {
             ..Gate::default()
         }));
         let provider = limits_provider.to_owned();
+        let secret = new_secret();
         let task = {
             let pending = pending.clone();
             let agent_pending = agent_pending.clone();
             let gate = gate.clone();
             let provider = provider.clone();
+            let secret = secret.clone();
             tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
@@ -219,21 +270,41 @@ impl Broker {
                     if !same_user(&stream) {
                         continue;
                     }
-                    let Some(conn) = gate.lock().expect("mcp gate").admit() else {
-                        continue;
-                    };
-                    let (read, write) = stream.into_split();
-                    tokio::spawn(serve_conn(
-                        conn,
-                        read,
-                        Arc::new(Mutex::new(Some(write))),
+                    let (pending, agent_pending, gate, tx, provider, secret) = (
                         pending.clone(),
                         agent_pending.clone(),
                         gate.clone(),
                         tx.clone(),
-                        tool_set,
                         provider.clone(),
-                    ));
+                        secret.clone(),
+                    );
+                    // Приветствие ждётся в своей задаче: молчащий процесс не держит приём.
+                    tokio::spawn(async move {
+                        let (read, write) = stream.into_split();
+                        let mut reader = BufReader::new(read);
+                        if !authenticated(&mut reader, &secret).await {
+                            tracing::warn!(
+                                kind = "mcp_relay_rejected",
+                                "mcp socket connection without the session secret"
+                            );
+                            return;
+                        }
+                        let Some(conn) = gate.lock().expect("mcp gate").admit() else {
+                            return;
+                        };
+                        serve_conn(
+                            conn,
+                            reader,
+                            Arc::new(Mutex::new(Some(write))),
+                            pending,
+                            agent_pending,
+                            gate,
+                            tx,
+                            tool_set,
+                            provider,
+                        )
+                        .await;
+                    });
                 }
             })
         };
@@ -244,7 +315,13 @@ impl Broker {
             gate,
             task,
             limits_provider: provider,
+            secret,
         })
+    }
+
+    /// Секрет сокета этой сессии: relay получает его в `CANTERLOT_MCP_SECRET`.
+    pub fn relay_secret(&self) -> &str {
+        &self.secret
     }
 
     /// Разрешить следующее соединение relay: адаптер зовёт перед запуском
@@ -435,7 +512,7 @@ async fn next_line(
 #[allow(clippy::too_many_arguments)]
 async fn serve_conn(
     conn: u64,
-    read: tokio::net::unix::OwnedReadHalf,
+    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: ConnWriter,
     pending: Pending,
     agent_pending: AgentPending,
@@ -444,7 +521,6 @@ async fn serve_conn(
     tool_set: ToolSet,
     provider: String,
 ) {
-    let mut reader = BufReader::new(read);
     let mut buf = Vec::new();
     let mut rpc_to_request: HashMap<String, String> = HashMap::new();
     while let Some(line) = next_line(&mut reader, &mut buf).await {

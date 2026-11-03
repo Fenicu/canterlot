@@ -7,8 +7,12 @@ use std::path::Path;
 pub const SERVER_NAME: &str = canterlot_mcp::SERVER_NAME;
 
 /// Значение `OPENCODE_CONFIG_CONTENT`. `codemode: false` обязателен: иначе инструмент
-/// доступен только изнутри `execute`.
-pub fn config_content(relay_exe: &Path, exec_dir: &Path) -> String {
+/// доступен только изнутри `execute`. `relay_secret` уходит relay в окружении.
+pub fn config_content(relay_exe: &Path, exec_dir: &Path, relay_secret: Option<&str>) -> String {
+    let environment: serde_json::Map<String, Value> = relay_secret
+        .map(|secret| (canterlot_mcp::RELAY_SECRET_ENV.to_owned(), secret.into()))
+        .into_iter()
+        .collect();
     json!({
         "update": "disable",
         "share": "disabled",
@@ -22,7 +26,7 @@ pub fn config_content(relay_exe: &Path, exec_dir: &Path) -> String {
                 "--socket",
                 exec_dir.join("mcp.sock").to_string_lossy(),
             ],
-            "environment": {},
+            "environment": environment,
             "codemode": false,
         }}},
     })

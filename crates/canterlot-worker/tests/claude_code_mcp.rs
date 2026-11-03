@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
+use canterlot_worker::adapter::canterlot_mcp::relay_hello;
 use canterlot_worker::adapter::claude_code::{
     broker::{Broker, BrokerEvent},
     mcp,
@@ -55,7 +56,10 @@ impl RelayHarness {
         let stream = UnixStream::connect(dir.path().join("mcp.sock"))
             .await
             .expect("connect");
-        let (read, sink) = stream.into_split();
+        let (read, mut sink) = stream.into_split();
+        sink.write_all(relay_hello(broker.relay_secret()).as_bytes())
+            .await
+            .expect("hello");
         Self {
             broker,
             socket: BufReader::new(read),
@@ -92,11 +96,14 @@ type Peer = (
     tokio::net::unix::OwnedWriteHalf,
 );
 
-async fn peer(path: &std::path::Path) -> Peer {
-    let (read, sink) = UnixStream::connect(path)
+async fn peer(path: &std::path::Path, secret: &str) -> Peer {
+    let (read, mut sink) = UnixStream::connect(path)
         .await
         .expect("connect")
         .into_split();
+    sink.write_all(relay_hello(secret).as_bytes())
+        .await
+        .expect("hello");
     (BufReader::new(read), sink)
 }
 
@@ -643,7 +650,7 @@ async fn second_connection_while_the_relay_is_live_is_refused() {
         )
         .await;
     let live = opened(&mut relay.broker).await;
-    let (mut reader, mut sink) = peer(&relay.socket_path()).await;
+    let (mut reader, mut sink) = peer(&relay.socket_path(), relay.broker.relay_secret()).await;
     approve_on(&mut sink, 2, "toolu_intruder").await;
     assert!(
         closed_by_server(&mut reader).await,
@@ -687,7 +694,7 @@ async fn armed_relay_supersedes_and_each_connection_keeps_its_own_calls() {
     let old = opened(&mut relay.broker).await;
     // Перезапуск CLI: адаптер взводит допуск, новый relay вытесняет прежний.
     relay.broker.arm();
-    let (mut reader, mut sink) = peer(&relay.socket_path()).await;
+    let (mut reader, mut sink) = peer(&relay.socket_path(), relay.broker.relay_secret()).await;
     approve_on(&mut sink, 7, "toolu_new").await;
     let new = opened(&mut relay.broker).await;
     assert_eq!(new, "toolu_new");
@@ -961,4 +968,99 @@ fn tool_without_prompt_in_manual_mode_is_marked_cli_policy_and_not_in_bypass() {
         cli_policy_mark("plan", &approved, "toolu_fresh"),
         Some("cli_policy")
     );
+}
+
+/// Чужой процесс того же пользователя: подключается к сокету и сразу шлёт вызов.
+async fn foreign(path: &std::path::Path, hello: &str) -> Peer {
+    let (read, mut sink) = UnixStream::connect(path)
+        .await
+        .expect("connect")
+        .into_split();
+    sink.write_all(hello.as_bytes()).await.expect("hello");
+    (BufReader::new(read), sink)
+}
+
+#[tokio::test]
+async fn a_foreign_process_without_the_session_secret_is_dropped() {
+    let mut relay = RelayHarness::bind().await;
+    let path = relay.socket_path();
+    relay
+        .call(
+            json!(1),
+            "approve",
+            json!({"tool_name": "Bash", "input": {}, "tool_use_id": "toolu_live"}),
+        )
+        .await;
+    opened(&mut relay.broker).await;
+    // Допуск взведён, как перед перезапуском CLI: чужой процесс не должен его занять.
+    relay.broker.arm();
+    for hello in [
+        String::new(),
+        relay_hello("not-the-secret"),
+        "\n".to_owned(),
+    ] {
+        let (mut reader, mut sink) = foreign(&path, &hello).await;
+        approve_on(&mut sink, 9, "toolu_foreign").await;
+        assert!(
+            closed_by_server(&mut reader).await,
+            "dropped without the secret: {hello:?}"
+        );
+    }
+    assert!(quiet(&mut relay.broker).await, "nothing was opened");
+    let (_reader, mut sink) = peer(&path, relay.broker.relay_secret()).await;
+    approve_on(&mut sink, 10, "toolu_own").await;
+    assert_eq!(
+        opened(&mut relay.broker).await,
+        "toolu_own",
+        "the armed slot is still free for the session's own relay"
+    );
+}
+
+#[tokio::test]
+async fn a_codex_socket_also_drops_a_foreign_process() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut broker = canterlot_worker::adapter::canterlot_mcp::Broker::bind_with(
+        dir.path(),
+        canterlot_worker::adapter::canterlot_mcp::ToolSet::LimitsOnly,
+        "codex",
+    )
+    .await
+    .expect("bind");
+    let (mut reader, mut sink) = foreign(&dir.path().join("mcp.sock"), "").await;
+    write_line(
+        &mut sink,
+        &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_send",
+            "arguments":{"session_id":"root","text":"do it"}}}),
+    )
+    .await;
+    assert!(closed_by_server(&mut reader).await);
+    assert!(quiet(&mut broker).await, "no agent call reaches the hub");
+}
+
+#[tokio::test]
+async fn relay_sends_the_session_secret_first_when_given_one() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let path = dir.path().join("mcp.sock");
+    let listener = UnixListener::bind(&path).expect("listen");
+    let _child = tokio::process::Command::new(worker_binary())
+        .args(["mcp-relay", "--socket"])
+        .arg(&path)
+        .env("CANTERLOT_MCP_SECRET", "abc123")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn relay");
+    let (stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .expect("accept")
+        .expect("accept ok");
+    let mut lines = BufReader::new(stream);
+    let mut first = String::new();
+    tokio::time::timeout(Duration::from_secs(10), lines.read_line(&mut first))
+        .await
+        .expect("hello in time")
+        .expect("read");
+    assert_eq!(first, relay_hello("abc123"));
 }

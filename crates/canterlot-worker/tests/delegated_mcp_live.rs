@@ -154,6 +154,7 @@ async fn claude_delegated_session_starts_no_owner_user_project_or_plugin_server(
             &spec,
             &cfg,
             Path::new("/bin/true"),
+            None,
         )
         .unwrap();
         // Те же аргументы и окружение, что у воркера; входа в аккаунт нет.
@@ -310,6 +311,7 @@ async fn codex_delegated_session_lists_only_canterlot() {
             exec_dir: &exec_dir,
             workdir: &workdir,
             relay_exe: Path::new("/bin/true"),
+            relay_secret: None,
         };
         let group = TreeContainment::new().unwrap();
         let mut process =

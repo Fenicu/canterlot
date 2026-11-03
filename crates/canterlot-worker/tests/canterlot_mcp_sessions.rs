@@ -4,7 +4,7 @@
 
 use canterlot_worker::adapter::{
     AgentCallResult,
-    canterlot_mcp::{Broker, BrokerEvent, ToolSet, mcp},
+    canterlot_mcp::{Broker, BrokerEvent, ToolSet, mcp, relay_hello},
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -354,6 +354,9 @@ async fn session_call_reaches_the_hub_and_returns_text_with_hint() {
         .await
         .expect("connect");
     let (read, mut sink) = stream.into_split();
+    sink.write_all(relay_hello(broker.relay_secret()).as_bytes())
+        .await
+        .expect("hello");
     let mut socket = BufReader::new(read);
     let mut line = json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
         "name":"session_send","arguments":{"session_id":"s","text":"привет"}}})

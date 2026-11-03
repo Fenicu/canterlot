@@ -97,6 +97,7 @@ impl Fake {
             exec_dir: dir.path(),
             workdir: dir.path(),
             relay_exe: &relay,
+            relay_secret: None,
         };
         let proc = AppServerProcess::spawn(
             &spec,

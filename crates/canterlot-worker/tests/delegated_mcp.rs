@@ -106,6 +106,7 @@ fn claude_mcp_config_names_only_canterlot() {
         &spec,
         &ClaudeCodeConfig::default(),
         Path::new("/usr/bin/relay"),
+        None,
     )
     .unwrap();
     let config: serde_json::Value =

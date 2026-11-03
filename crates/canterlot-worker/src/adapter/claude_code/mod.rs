@@ -1267,6 +1267,7 @@ impl Adapter for ClaudeCodeAdapter {
                 .relay_executable
                 .clone()
                 .unwrap_or(std::env::current_exe()?),
+            Some(broker.relay_secret()),
         )
         .map_err(|error| AdapterError::StartFailed(error.reason()))?;
         broker.arm();

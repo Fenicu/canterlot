@@ -26,6 +26,7 @@ async fn close_kills_detached_grandchild() {
         exec_dir: td.path(),
         workdir: td.path(),
         relay_exe: &relay,
+        relay_secret: None,
     };
     let proc = AppServerProcess::spawn(
         &spec,

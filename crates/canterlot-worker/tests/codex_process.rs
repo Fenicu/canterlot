@@ -60,6 +60,7 @@ fn spec<'a>(exec_dir: &'a Path, workdir: &'a Path, relay: &'a Path) -> LaunchSpe
         exec_dir,
         workdir,
         relay_exe: relay,
+        relay_secret: None,
     }
 }
 
@@ -667,6 +668,7 @@ async fn oversized_stdout_line_is_skipped_and_reading_continues() {
         exec_dir: td.path(),
         workdir: td.path(),
         relay_exe: &relay,
+        relay_secret: None,
     };
     let mut proc = AppServerProcess::spawn(
         &spec,

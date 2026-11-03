@@ -1081,6 +1081,7 @@ impl CodexAdapter {
             exec_dir: &exec_dir,
             workdir: &workdir,
             relay_exe: &relay,
+            relay_secret: self.broker.as_ref().map(Broker::relay_secret),
         };
         let mut proc = AppServerProcess::spawn(&launch, group, mode, home).ok()?;
         if exited_early(&mut proc).await {
@@ -1798,6 +1799,7 @@ impl Adapter for CodexAdapter {
             exec_dir: &self.exec_dir,
             workdir: &spec.workdir,
             relay_exe: &relay,
+            relay_secret: self.broker.as_ref().map(Broker::relay_secret),
         };
         self.proc = Some(
             AppServerProcess::spawn(
