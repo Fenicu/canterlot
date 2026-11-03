@@ -48,6 +48,8 @@ test('history_page_lists_entries_and_the_installed_version', async ({ page }) =>
   await expect(page.getByText(/Установленная версия/)).toContainText(APP_VERSION);
   await expect(page.getByText('установлена', { exact: true })).toBeVisible();
   await expect(page.getByText('Первая пронумерованная версия.')).toBeVisible();
+  // Страница без ссылок листается с клавиатуры: её тело — фокусируемая область.
+  await expect(page.getByRole('region', { name: 'История изменений' })).toHaveAttribute('tabindex', '0');
 });
 
 test('settings_show_both_versions_and_flag_a_mismatch_quietly', async ({ page }) => {

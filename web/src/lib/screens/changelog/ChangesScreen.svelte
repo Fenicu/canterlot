@@ -11,7 +11,9 @@
 
 <main id="main" tabindex="-1">
   <SecondaryHeader title="История изменений" />
-  <div class="secondary-body"><div class="secondary-content">
+  <!-- В истории нет ссылок и кнопок: без tabindex её нельзя было бы листать с клавиатуры. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="secondary-body" tabindex="0" role="region" aria-label="История изменений"><div class="secondary-content">
     <p class="note">Установленная версия — <strong>{APP_VERSION}</strong></p>
     {#each entries as entry (entry.version)}
       <section data-changelog-entry>

@@ -308,6 +308,12 @@ test('long_code_scrolls_inside_the_block_at_360px', async ({ page }) => {
   const codeScrolls = await page.locator('pre').first().evaluate((node) => node.scrollWidth > node.clientWidth);
   expect(pageFits).toBe(true);
   expect(codeScrolls).toBe(true);
+  // Широкий код листается и с клавиатуры: блок — именованная область в порядке Tab.
+  const pre = page.getByRole('region', { name: 'Код' }).first();
+  await expect(pre).toHaveAttribute('tabindex', '0');
+  await pre.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect.poll(() => pre.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
 });
 
 test('subagent_row_links_to_the_lane_and_shows_live_status', async ({ page }) => {
