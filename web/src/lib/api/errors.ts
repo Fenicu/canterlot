@@ -1,4 +1,9 @@
-import { ApiError, AuthRequired, NetworkError } from "#lib/api/http.js";
+import {
+  ApiError,
+  AuthRequired,
+  HUB_UNAVAILABLE,
+  NetworkError,
+} from "#lib/api/http.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
 export type ErrorCode = components["schemas"]["ErrorCode"];
@@ -39,8 +44,9 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     message: "Доступ для этого пользователя запрещён",
   },
   origin_rejected: {
-    action: "sign_in_again",
-    message: "Запрос отклонён: недопустимый источник",
+    action: "none",
+    message:
+      "Адрес приложения не разрешён в настройках хаба (allowed_origins)",
   },
   invalid_request: {
     action: "none",
@@ -60,7 +66,7 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
   },
   idempotency_conflict: {
     action: "new_operation",
-    message: "Ключ идемпотентности уже использован с другим запросом",
+    message: "Повтор не совпал с исходной отправкой, отправьте заново",
   },
   decision_conflict: {
     action: "none",
@@ -131,7 +137,7 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     message: "Машина недоступна",
   },
   capability_missing: {
-    action: "restore_connection",
+    action: "none",
     message: "Требуется обновление воркера",
   },
   limits_mismatch: {
@@ -267,11 +273,58 @@ export interface DescribedError {
   correlationId?: string;
 }
 
-/** Текст для экрана: сообщения хаба и клиента уже по-русски, а коды латиницей владельцу не показываем. */
+export type ErrorReason = components["schemas"]["ErrorReason"];
+
+/** Причина отказа из `details.reason`: каждую хаб публикует в схеме, тип ловит пропуск. */
+export const REASON_TEXT: Record<ErrorReason, string> = {
+  closed_without_decision: "Запрос закрыт без ответа",
+  generation_advanced: "Исполнение перезапущено, запрос устарел",
+  invalid_idempotency_key: "Повтор не совпал с исходной отправкой, отправьте заново",
+  input_not_queued: "Сообщение уже ушло из очереди",
+  no_running_turn: "Ход уже кончился: сообщение уйдёт следующим",
+  request_open: "Дождитесь ответа на запрос",
+  compacting: "Дождитесь конца сжатия",
+  unsupported_harness: "Харнесс этой сессии так не умеет",
+  capability_missing: "Требуется обновление воркера",
+  revision_conflict: "Сообщение уже изменено в другом месте",
+  steer_in_flight: "Сообщение вливается в ход, дождитесь конца хода",
+  empty_content: "Сообщение не должно быть пустым",
+  content_too_long: "Сообщение длиннее 256 КиБ",
+  attachment_unavailable: "Вложение недоступно",
+  attachment_not_ready: "Вложение ещё загружается",
+  attachment_not_found: "Вложение недоступно",
+  run_in_progress: "Идёт ход: сжать можно между ходами",
+  no_live_execution: "Сессия не запущена",
+};
+
+/** Причина отказа, если хаб её прислал и она известна вкладке. */
+export function errorReason(err: unknown): ErrorReason | undefined {
+  if (!(err instanceof ApiError)) return undefined;
+  const reason = err.details?.reason;
+  return typeof reason === "string" && reason in REASON_TEXT
+    ? (reason as ErrorReason)
+    : undefined;
+}
+
+const NETWORK_TEXT = "Нет связи с хабом";
+const UNAVAILABLE_TEXT = "Хаб недоступен, повторяю";
+
+/** Текст для экрана: причина, затем код по таблице, затем сообщение хаба; латиницу владельцу не показываем. */
 export function errorText(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
+  if (err instanceof ApiError) {
+    const reason = errorReason(err);
+    if (reason) return REASON_TEXT[reason];
+    const known = (ERROR_TABLE as Partial<Record<string, ErrorDescriptor>>)[
+      err.code
+    ];
+    if (known) return known.message;
+    if (/[А-Яа-яЁё]/.test(err.message)) return err.message;
+    return `Непредвиденная ошибка хаба, код запроса ${err.correlationId}`;
+  }
+  if (err instanceof NetworkError)
+    return err.message === HUB_UNAVAILABLE ? UNAVAILABLE_TEXT : NETWORK_TEXT;
   if (err instanceof Error && /[А-Яа-яЁё]/.test(err.message)) return err.message;
-  return err instanceof NetworkError ? "Нет связи с хабом" : fallback;
+  return fallback;
 }
 
 export function describeError(err: ApiError | unknown): DescribedError {
@@ -287,12 +340,24 @@ export function describeError(err: ApiError | unknown): DescribedError {
     return {
       action: "restore_connection",
       actionLabel: ACTION_LABEL.restore_connection,
-      message: "Нет связи с хабом",
+      message:
+        err.message === HUB_UNAVAILABLE ? UNAVAILABLE_TEXT : NETWORK_TEXT,
     };
   }
 
   if (err instanceof ApiError) {
-    const descriptor = ERROR_TABLE[err.code];
+    const reason = errorReason(err);
+    const descriptor = (
+      ERROR_TABLE as Partial<Record<string, ErrorDescriptor>>
+    )[err.code];
+    if (reason) {
+      return {
+        action: descriptor?.action ?? "none",
+        actionLabel: ACTION_LABEL[descriptor?.action ?? "none"],
+        message: REASON_TEXT[reason],
+        correlationId: err.correlationId,
+      };
+    }
     const fromRetry: ErrorAction | undefined =
       err.retry === "safe_same_key"
         ? "retry_same_key"

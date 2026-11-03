@@ -184,5 +184,23 @@ describe("uploads/patch", () => {
         0,
       ),
     ).rejects.toBeInstanceOf(NetworkError);
+
+    // Ошибка прокси при перезапуске хаба не просит войти заново.
+    session.reset?.();
+    install({
+      status: 502,
+      getResponseHeader: vi.fn((name: string) =>
+        name.toLowerCase() === "content-type" ? "text/html" : null,
+      ),
+      responseText: "<html><h1>502 Bad Gateway</h1></html>",
+    });
+    const outage = await patchChunk(
+      "/api/v1/attachments/att-1/content",
+      new Uint8Array([1, 2, 3, 4]),
+      0,
+    ).catch((e: unknown) => e);
+    expect(outage).toBeInstanceOf(NetworkError);
+    expect((outage as NetworkError).message).toBe("hub_unavailable");
+    expect(session.state).toBe("ok");
   });
 });

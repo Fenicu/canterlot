@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { httpHealth } from "#lib/api/gate.js";
-import { ApiError, NetworkError } from "#lib/api/http.js";
+import {
+  ApiError,
+  AuthRequired,
+  HUB_UNAVAILABLE,
+  NetworkError,
+  session,
+} from "#lib/api/http.js";
 import { opRequest, sendOp } from "#lib/ops/request.js";
 
 describe("opRequest", () => {
@@ -112,6 +118,78 @@ describe("sendOp", () => {
     const failure = await sendOp(reply(409, envelope), op).catch((e) => e);
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).code).toBe("queue_full");
+    expect(httpHealth.lastOkAt).toBeNull();
+  });
+
+  it("does_not_follow_redirects", async () => {
+    let init: RequestInit | undefined;
+    const capture = (async (_url: string, given: RequestInit) => {
+      init = given;
+      return new Response(JSON.stringify({ input_id: "i" }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    await sendOp(capture, op);
+    expect(init?.redirect).toBe("manual");
+  });
+
+  it("sso_redirect_is_auth_required_and_never_committed", async () => {
+    session.reset();
+    const opaque = new Response(null, { status: 200 });
+    Object.defineProperty(opaque, "type", { value: "opaqueredirect" });
+    Object.defineProperty(opaque, "status", { value: 0 });
+    const failure = await sendOp((async () => opaque) as unknown as typeof fetch, op).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(AuthRequired);
+    expect(session.state).toBe("expired");
+    expect(httpHealth.lastOkAt).toBeNull();
+  });
+
+  it("login_page_with_200_is_auth_required_not_success", async () => {
+    session.reset();
+    const page = (async () =>
+      new Response("<html><title>Authelia</title></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      })) as unknown as typeof fetch;
+    await expect(sendOp(page, op)).rejects.toBeInstanceOf(AuthRequired);
+    expect(session.state).toBe("expired");
+  });
+
+  it("hub_401_waits_for_sign_in_instead_of_a_refusal", async () => {
+    session.reset();
+    const envelope = {
+      error: {
+        code: "unauthenticated",
+        message: "Требуется вход",
+        scope: "auth",
+        retry: "after_condition",
+        correlation_id: "c",
+      },
+    };
+    await expect(sendOp(reply(401, envelope), op)).rejects.toBeInstanceOf(AuthRequired);
+    expect(session.state).toBe("expired");
+  });
+
+  it("proxy_502_page_is_hub_unavailable_and_retryable", async () => {
+    session.reset();
+    const gateway = (async () =>
+      new Response("<html><h1>502 Bad Gateway</h1></html>", {
+        status: 502,
+        headers: { "content-type": "text/html" },
+      })) as unknown as typeof fetch;
+    const failure = await sendOp(gateway, op).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(NetworkError);
+    expect((failure as NetworkError).message).toBe(HUB_UNAVAILABLE);
+    expect(session.state).toBe("ok");
+  });
+
+  it("success_without_a_json_body_is_not_committed", async () => {
+    const empty = (async () => new Response(null, { status: 204 })) as unknown as typeof fetch;
+    await expect(sendOp(empty, op)).rejects.toBeInstanceOf(NetworkError);
+    const text = (async () =>
+      new Response("ok", { status: 200, headers: { "content-type": "text/plain" } })) as unknown as typeof fetch;
+    await expect(sendOp(text, op)).rejects.toBeInstanceOf(NetworkError);
     expect(httpHealth.lastOkAt).toBeNull();
   });
 

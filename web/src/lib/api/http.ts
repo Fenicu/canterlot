@@ -53,10 +53,93 @@ export class AuthRequired extends Error {
   readonly reason: "redirect" | "unauthenticated" | "forbidden_user";
 
   constructor(reason: "redirect" | "unauthenticated" | "forbidden_user") {
-    super(`Требуется авторизация: ${reason}`);
+    super(
+      reason === "forbidden_user"
+        ? "Доступ для этого пользователя запрещён"
+        : "Сессия истекла, войдите снова",
+    );
     this.name = "AuthRequired";
     this.reason = reason;
   }
+}
+
+/** Прокси ответил своей страницей ошибки или хаб не поднялся: повтор, а не вход. */
+export const HUB_UNAVAILABLE = "hub_unavailable";
+
+const AUTH_PAGE = /authelia|sign[\s-]?in|log[\s-]?in|вход|password|пароль/i;
+
+/**
+ * HTML на адрес API: страница входа или ошибка прокси. 5xx никогда не вход,
+ * 2xx и 3xx всегда вход, прочие 4xx решают заголовки и разметка страницы.
+ */
+export function htmlVerdict(
+  status: number,
+  headers: Headers | null | undefined,
+  body = "",
+): "auth" | "unavailable" {
+  if (status >= 500) return "unavailable";
+  if (status < 400 || status === 401 || status === 403 || status === 407)
+    return "auth";
+  if (headers?.has("www-authenticate")) return "auth";
+  for (const [name] of headers?.entries() ?? [])
+    if (name.toLowerCase().startsWith("x-authelia")) return "auth";
+  return AUTH_PAGE.test(body) ? "auth" : "unavailable";
+}
+
+/**
+ * Ответ не от хаба: переадресация на вход, страница входа, ошибка прокси или отказ личности.
+ * Бросает AuthRequired (и помечает сессию истёкшей) либо NetworkError(hub_unavailable).
+ */
+export async function screenForeign(
+  response: Response,
+  path: string,
+): Promise<void> {
+  const status = response.status;
+  if (
+    (response as Response & { type?: string }).type === "opaqueredirect" ||
+    (status >= 300 && status < 400 && status !== 304)
+  ) {
+    session.state = "expired";
+    throw new AuthRequired("redirect");
+  }
+  const contentType = response.headers?.get("Content-Type") ?? "";
+  if (path.includes("/api/") && contentType.includes("text/html")) {
+    const needsBody = status >= 400 && status < 500 && status !== 401 && status !== 403;
+    const body = needsBody
+      ? await response
+          .clone()
+          .text()
+          .catch(() => "")
+      : "";
+    if (htmlVerdict(status, response.headers, body) === "unavailable")
+      throw new NetworkError(HUB_UNAVAILABLE);
+    session.state = "expired";
+    throw new AuthRequired(status === 401 ? "unauthenticated" : "redirect");
+  }
+  if (status === 401) {
+    session.state = "expired";
+    throw new AuthRequired("unauthenticated");
+  }
+  if (status === 403) {
+    let errorCode: string | undefined;
+    try {
+      errorCode = (await response.clone().json())?.error?.code;
+    } catch {
+      errorCode = undefined;
+    }
+    // origin_rejected повторный вход не исправит: он уходит обычной ошибкой с конвертом.
+    if (errorCode === "forbidden_user") {
+      session.state = "expired";
+      throw new AuthRequired("forbidden_user");
+    }
+  }
+}
+
+/** Ошибка без конверта хаба: 5xx значит прокси без хаба за ним. */
+export function envelopeMissing(status: number): NetworkError {
+  return new NetworkError(
+    status >= 500 ? HUB_UNAVAILABLE : "response_without_envelope",
+  );
 }
 
 /**
@@ -115,65 +198,6 @@ const SCOPES = new Set<ErrorScope>([
   "adapter_protocol",
   "agent_service",
 ]);
-const CODES = new Set<ErrorCode>([
-  "unauthenticated",
-  "forbidden_user",
-  "origin_rejected",
-  "invalid_request",
-  "invalid_offset",
-  "not_found",
-  "method_not_allowed",
-  "idempotency_conflict",
-  "decision_conflict",
-  "request_not_open",
-  "decision_invalid",
-  "resource_limit",
-  "not_implemented",
-  "too_many_requests",
-  "db_unavailable",
-  "internal",
-  "queue_full",
-  "conversation_closed",
-  "execution_already_live",
-  "invalid_state",
-  "not_pending",
-  "schedule_time_out_of_range",
-  "too_many_scheduled",
-  "machine_not_found",
-  "machine_unavailable",
-  "capability_missing",
-  "limits_mismatch",
-  "harness_unknown",
-  "model_unknown",
-  "effort_not_allowed",
-  "permission_mode_unknown",
-  "settings_midsession_unsupported",
-  "profile_unknown",
-  "workdir_not_allowed",
-  "group_not_found",
-  "group_name_taken",
-  "archive_active",
-  "conversation_deleted",
-  "conversation_live",
-  "attachment_not_ready",
-  "attachment_not_uploadable",
-  "attachment_unsupported",
-  "attachment_unavailable",
-  "offset_mismatch",
-  "upload_in_progress",
-  "checksum_mismatch",
-  "attachment_conflict",
-  "preset_not_found",
-  "preset_builtin",
-  "preset_revision_conflict",
-  "preset_title_taken",
-  "preset_limit_reached",
-  "preset_invalid",
-  "spawn_whitelist_invalid",
-  "not_delegated",
-  "worktree_removed",
-  "worktree_not_removed",
-]);
 
 const CONTENT_PATCH = /^\/api\/v1\/attachments\/[^/]+\/content$/;
 const MARK_READ = /^\/api\/v1\/conversations\/[^/]+\/read$/;
@@ -202,19 +226,23 @@ export function envelopeOf(value: unknown): ErrorEnvelope["error"] | undefined {
   const error = (value as { error?: unknown }).error;
   if (!error || typeof error !== "object") return undefined;
   const body = error as Record<string, unknown>;
-  if (typeof body.code !== "string" || !CODES.has(body.code as ErrorCode))
-    return undefined;
+  // Новый код или область от хаба новее вкладки всё равно ошибка хаба, а не обрыв связи.
+  if (typeof body.code !== "string" || body.code.length === 0) return undefined;
   if (typeof body.message !== "string") return undefined;
-  if (typeof body.scope !== "string" || !SCOPES.has(body.scope as ErrorScope))
-    return undefined;
-  if (typeof body.retry !== "string" || !RETRIES.has(body.retry as Retry))
-    return undefined;
+  if (typeof body.scope !== "string") return undefined;
+  if (typeof body.retry !== "string") return undefined;
   if (
     typeof body.correlation_id !== "string" ||
     body.correlation_id.length === 0
   )
     return undefined;
-  return error as ErrorEnvelope["error"];
+  return {
+    ...(error as ErrorEnvelope["error"]),
+    scope: SCOPES.has(body.scope as ErrorScope)
+      ? (body.scope as ErrorScope)
+      : "browser",
+    retry: RETRIES.has(body.retry as Retry) ? (body.retry as Retry) : "never",
+  };
 }
 
 export async function http<T = unknown>(
@@ -369,38 +397,9 @@ export async function http<T = unknown>(
       }
     }
 
-    if ((response as Response & { type?: string }).type === "opaqueredirect") {
-      session.state = "expired";
-      throw new AuthRequired("redirect");
-    }
+    await consume(() => screenForeign(response, path));
 
     const contentType = response.headers.get("Content-Type") ?? "";
-
-    if (path.includes("/api/") && contentType.includes("text/html")) {
-      session.state = "expired";
-      throw new AuthRequired("redirect");
-    }
-
-    if (response.status === 401) {
-      session.state = "expired";
-      throw new AuthRequired("unauthenticated");
-    }
-
-    if (response.status === 403) {
-      let errorCode: string | undefined;
-      try {
-        const errJson = await response.clone().json();
-        errorCode = errJson?.error?.code;
-      } catch {
-        // ignore JSON parse failure
-      }
-      if (errorCode === "forbidden_user" || errorCode === "origin_rejected") {
-        session.state = "expired";
-        throw new AuthRequired(
-          errorCode === "forbidden_user" ? "forbidden_user" : "redirect",
-        );
-      }
-    }
 
     if (!response.ok) {
       let errorBody: ErrorEnvelope["error"] | undefined;
@@ -411,9 +410,7 @@ export async function http<T = unknown>(
         errorBody = undefined;
       }
 
-      if (!errorBody) {
-        throw new NetworkError("response_without_envelope");
-      }
+      if (!errorBody) throw envelopeMissing(response.status);
 
       throw new ApiError(
         response.status,

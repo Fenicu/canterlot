@@ -1,8 +1,14 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
-import { describeError, errorText, type ErrorAction } from "#lib/api/errors.js";
-import { ApiError, AuthRequired, NetworkError } from "#lib/api/http.js";
+import {
+  describeError,
+  errorText,
+  REASON_TEXT,
+  type ErrorAction,
+  type ErrorReason,
+} from "#lib/api/errors.js";
+import { ApiError, AuthRequired, HUB_UNAVAILABLE, NetworkError } from "#lib/api/http.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
 type ErrorCode = components["schemas"]["ErrorCode"];
@@ -177,5 +183,32 @@ describe("api/errors", () => {
     expect(errorText(new Error("empty_conversation"), "Не вышло")).toBe("Не вышло");
     expect(errorText(new Error("Загрузка отменена"), "Не вышло")).toBe("Загрузка отменена");
     expect(errorText("строка", "Не вышло")).toBe("Не вышло");
+  });
+
+  it("proxy_outage_reads_as_hub_unavailable_and_auth_without_latin_reason", () => {
+    expect(errorText(new NetworkError(HUB_UNAVAILABLE), "Не вышло")).toBe("Хаб недоступен, повторяю");
+    expect(describeError(new NetworkError(HUB_UNAVAILABLE)).message).toBe("Хаб недоступен, повторяю");
+    expect(errorText(new AuthRequired("redirect"), "Не вышло")).toBe("Сессия истекла, войдите снова");
+  });
+
+  it("every_published_reason_has_a_russian_message_and_wins_over_the_code", () => {
+    const reasons = JSON.parse(
+      readFileSync(resolve(process.cwd(), "../docs/api/openapi.json"), "utf8"),
+    ).components.schemas.ErrorReason.enum as string[];
+    expect(Object.keys(REASON_TEXT).sort()).toEqual([...reasons].sort());
+    for (const reason of reasons) {
+      const err = new ApiError(409, "invalid_state", "Действие недопустимо", "delivery", "never", "c", {
+        reason: reason as ErrorReason,
+      });
+      expect(errorText(err, "Не вышло")).toMatch(/[А-Яа-яЁё]/);
+      expect(errorText(err, "Не вышло")).toBe(REASON_TEXT[reason as ErrorReason]);
+    }
+  });
+
+  it("unknown_code_falls_back_to_the_hub_message_not_no_connection", () => {
+    const err = new ApiError(409, "brand_new" as ErrorCode, "Новая ошибка хаба", "browser", "never", "c-1");
+    expect(errorText(err, "Не вышло")).toBe("Новая ошибка хаба");
+    const latin = new ApiError(409, "brand_new" as ErrorCode, "new error", "browser", "never", "c-2");
+    expect(errorText(latin, "Не вышло")).toBe("Непредвиденная ошибка хаба, код запроса c-2");
   });
 });

@@ -159,7 +159,12 @@ export class OpJournal {
           return;
         } catch (err) {
           if (this.#stopped.has(op.key)) return;
-          if (err instanceof AuthRequired) {
+          if (
+            err instanceof AuthRequired ||
+            (err instanceof ApiError && err.code === "unauthenticated")
+          ) {
+            // Операция ждёт повторного входа в журнале, а не теряется отказом.
+            if (err instanceof ApiError) session.state = "expired";
             op.state = "unknown";
             await this.#persist(op);
             if (this.#stopped.has(op.key)) return;

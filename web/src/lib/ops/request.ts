@@ -2,10 +2,9 @@ import { httpHealth } from "#lib/api/gate.js";
 import {
   ApiError,
   NetworkError,
-  type ErrorCode,
-  type ErrorDetails,
-  type ErrorScope,
-  type Retry,
+  envelopeMissing,
+  envelopeOf,
+  screenForeign,
 } from "#lib/api/http.js";
 import type { Op } from "#lib/ops/journal.js";
 
@@ -62,47 +61,45 @@ export async function sendOp(
   const request = opRequest(op);
   const signal = AbortSignal.timeout(timeoutMs);
   // Обрыв соединения, потерянный ответ или зависший запрос: операция остаётся «неизвестной» и повторяется с тем же ключом.
-  const response = await fetchImpl(request.url, { ...request.init, signal }).catch(
-    (cause: unknown) => {
-      throw new NetworkError("send_failed", { cause });
-    },
-  );
-  const body = await response.json().catch(() => null);
+  // Переадресацию на вход не проходим: страница входа с кодом 200 иначе выглядела бы принятым сообщением.
+  const response = await fetchImpl(request.url, {
+    ...request.init,
+    credentials: "same-origin",
+    redirect: "manual",
+    signal,
+  }).catch((cause: unknown) => {
+    throw new NetworkError("send_failed", { cause });
+  });
+  try {
+    await screenForeign(response, request.url);
+  } catch (err) {
+    if (signal.aborted) throw new NetworkError("send_failed");
+    throw err;
+  }
+  const contentType = response.headers?.get("Content-Type") ?? "";
+  const body: unknown =
+    contentType === "" || contentType.includes("application/json")
+      ? await response.json().catch(() => undefined)
+      : undefined;
   if (signal.aborted) throw new NetworkError("send_failed");
   if (!response.ok) throw httpFailure(response, body);
+  // Отправленной операция считается только по JSON-ответу хаба.
+  if (body === null || typeof body !== "object")
+    throw new NetworkError("invalid_response");
   httpHealth.recordSuccess();
   return body;
 }
 
 function httpFailure(response: Response, body: unknown): Error {
-  const error = (
-    body as {
-      error?: {
-        code?: string;
-        message?: string;
-        scope?: string;
-        retry?: string;
-        correlation_id?: string;
-        details?: ErrorDetails;
-      };
-    } | null
-  )?.error;
-  if (
-    error?.code &&
-    error.message &&
-    error.scope &&
-    error.retry &&
-    error.correlation_id
-  ) {
-    return new ApiError(
-      response.status,
-      error.code as ErrorCode,
-      error.message,
-      error.scope as ErrorScope,
-      error.retry as Retry,
-      error.correlation_id,
-      error.details,
-    );
-  }
-  return new NetworkError("send_failed");
+  const error = envelopeOf(body);
+  if (!error) return envelopeMissing(response.status);
+  return new ApiError(
+    response.status,
+    error.code,
+    error.message,
+    error.scope,
+    error.retry,
+    error.correlation_id,
+    error.details,
+  );
 }
