@@ -21,3 +21,11 @@ export const test = base.extend({
 });
 
 export { expect };
+
+/** Сменить тему из чата: на телефоне переключатель живёт в меню сессии, на рабочем столе в шапке. */
+export async function toggleChatTheme(page: import('@playwright/test').Page) {
+  const button = page.locator('.chat-header [data-theme-toggle]');
+  if (await button.count()) return button.click();
+  await page.getByRole('button', { name: 'Меню сессии' }).click();
+  await page.getByRole('menuitem', { name: /Светлая тема|Тёмная тема/ }).click();
+}

@@ -3,7 +3,7 @@ import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { FIRST_DIALOG, FIRST_QUESTION, dialogConversation, playFirstDialog, seedFirstDialog, seedLongTurn } from '../../testing/fixtures/first-dialog';
 import { sha256Hex } from '../../src/lib/stores/blocks';
-import { expect, test } from './fixtures';
+import { expect, test, toggleChatTheme } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 
@@ -248,7 +248,7 @@ test('list_marker_is_aligned_in_both_themes', async ({ page }) => {
   const left = await item.evaluate((node) => node.getBoundingClientRect().left);
   const text = await page.locator('.prose p').first().evaluate((node) => node.getBoundingClientRect().left);
   expect(left).toBeGreaterThan(text);
-  await page.locator('[data-theme-toggle]').first().click();
+  await toggleChatTheme(page);
   await expect(item).toHaveJSProperty('value', 0);
   expect(await item.evaluate((node) => node.getBoundingClientRect().left)).toBe(left);
   expect(await page.locator('.prose ol[start="3"]').evaluate((node) => (node as HTMLOListElement).start)).toBe(3);
@@ -356,12 +356,14 @@ test('header_is_flat_and_its_controls_line_up_with_the_content', async ({ page, 
   await expect(bar).toHaveCSS('border-top-left-radius', '0px');
   const card = (await page.locator('article.card').first().boundingBox())!;
   const backLink = page.getByRole('link', { name: 'Все сессии' });
-  const theme = (await page.locator('[data-theme-toggle]').first().locator('svg').boundingBox())!;
+  // На телефоне тема живёт в меню сессии, и правый край шапки — кнопка меню.
+  const last = isMobile ? page.getByRole('button', { name: 'Меню сессии' }) : page.locator('.chat-header [data-theme-toggle]');
+  const theme = (await last.locator('svg').boundingBox())!;
   // На рабочем столе список виден всегда, и кнопка назад вела бы в никуда.
   if (isMobile) expect(Math.abs((await backLink.locator('svg').boundingBox())!.x - card.x)).toBeLessThanOrEqual(1);
   else await expect(backLink).toHaveCount(0);
   expect(Math.abs(theme.x + theme.width - (card.x + card.width))).toBeLessThanOrEqual(1);
-  for (const control of [...(isMobile ? [backLink] : []), page.getByRole('button', { name: 'Меню сессии' }), page.locator('[data-theme-toggle]').first()]) {
+  for (const control of [...(isMobile ? [backLink] : []), page.getByRole('button', { name: 'Меню сессии' }), last]) {
     const box = (await control.boundingBox())!;
     expect(box.width).toBeGreaterThanOrEqual(44);
     expect(box.height).toBeGreaterThanOrEqual(44);

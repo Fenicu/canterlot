@@ -1,8 +1,8 @@
 import type { Page } from '@playwright/test';
-import { FakeHub, FakeHubApi, seedMachine, seedPresets } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, seedConversation, seedMachine, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupChat, seedMockup08 } from '../../testing/fixtures/mockup-chat';
-import { expect, test } from './fixtures';
+import { expect, test, toggleChatTheme } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 
@@ -531,7 +531,7 @@ test('pause_cards_render_mockup_08_in_both_themes', async ({ page }) => {
 	await expect(page.getByRole('button', { name: 'Изменить текст продолжения' })).toBeVisible();
 
 	// Toggle theme
-	await page.locator('.chat-header [data-theme-toggle]').click();
+	await toggleChatTheme(page);
 	await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 
 	// Cards remain rendered
@@ -656,9 +656,10 @@ test('chat_chrome_has_no_horizontal_scroll_at_360px_and_keyboard_reaches_every_a
 
 	await page.keyboard.press('Tab');
 	await expect(page.getByRole('button', { name: 'Меню сессии' })).toBeFocused();
-
-	await page.keyboard.press('Tab');
-	await expect(page.locator('.chat-header [data-theme-toggle]')).toBeFocused();
+	// На узком экране тема переехала в меню сессии и названию остаётся место.
+	await expect(page.locator('.chat-header [data-theme-toggle]')).toHaveCount(0);
+	await page.keyboard.press('Enter');
+	await expect(page.getByRole('menuitem', { name: /Светлая тема|Тёмная тема/ })).toBeVisible();
 });
 
 test('session_dropdown_closes_outside_keeps_inside_and_toggles', async ({ page, isMobile }) => {
@@ -679,4 +680,30 @@ test('session_dropdown_closes_outside_keeps_inside_and_toggles', async ({ page, 
 	await page.keyboard.press('Escape');
 	await expect(menu).toHaveCount(0);
 	await expect(toggle).toBeFocused();
+});
+
+test('header_keeps_the_subtitle_readable_and_names_a_long_title', async ({ page }) => {
+	await page.setViewportSize({ width: 384, height: 800 });
+	const title = 'Восстановление потока после обрыва связи у воркера';
+	const longAgo = new Date(Date.now() - 131 * 3_600_000).toISOString();
+	await bootChat(page, {
+		seeder: (api) => {
+			const id = seedConversation(api, {
+				title,
+				model: 'gpt-6.1-sol',
+				harness: { id: 'codex', title: 'Codex', provider: 'codex' },
+				activity: { state: 'stalled', evidence: { last_event_at: longAgo }, since: longAgo }
+			} as never);
+			api.bindConversation(id);
+			return id;
+		}
+	});
+	const heading = page.locator('.chat-header .header-title');
+	await expect(heading).toHaveAttribute('title', title);
+	await expect(page.locator('.state-chip .state-text')).toContainText('Подвисла? Нет событий');
+	// Подзаголовок не сжимается до одной буквы: либо ему хватает места в строке, либо он уходит на свою.
+	const subtitle = (await page.locator('.chat-header .subtitle').boundingBox())!;
+	expect(subtitle.width).toBeGreaterThanOrEqual(64);
+	// Тема ушла в меню, и названию остаётся две трети ширины телефона.
+	expect((await heading.boundingBox())!.width).toBeGreaterThanOrEqual(256);
 });

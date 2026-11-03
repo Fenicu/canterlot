@@ -159,7 +159,7 @@
 
 
 <div class="chat-header" role="region" aria-label="Шапка чата">
-	<div class="topbar">
+	<div class="topbar" class:tall={!!parentId}>
 		{#if !pane.desktop}
 			<a
 				class="icon-button back"
@@ -172,7 +172,7 @@
 			<div class="title-row">
 				{#if detail}
 					<span class="mark" style:background="var({markColor})"></span>
-					<h1 class="header-title">{title}</h1>
+					<h1 class="header-title" {title}>{title}</h1>
 				{:else}
 					<span class="skeleton" style:width="var(--bar-56)"></span>
 				{/if}
@@ -225,15 +225,18 @@
 				<Icon name="more" />
 			</button>
 
-			<button
-				type="button"
-				class="icon-button theme-toggle-btn"
-				data-theme-toggle
-				aria-label="Сменить тему"
-				onclick={() => theme.toggle()}
-			>
-				<Icon name={theme.effective === 'dark' ? 'sun' : 'moon'} />
-			</button>
+			<!-- На телефоне тема уходит в меню сессии: так названию остаётся место. -->
+			{#if pane.desktop}
+				<button
+					type="button"
+					class="icon-button theme-toggle-btn"
+					data-theme-toggle
+					aria-label="Сменить тему"
+					onclick={() => theme.toggle()}
+				>
+					<Icon name={theme.effective === 'dark' ? 'sun' : 'moon'} />
+				</button>
+			{/if}
 		</div>
 	</div>
 
@@ -266,6 +269,10 @@
 
 				{#if onOpenDiagnostics}
 					<MenuItem icon="info" onclick={() => { menuOpen = false; onOpenDiagnostics(); }}>Диагностика</MenuItem>
+				{/if}
+
+				{#if !pane.desktop}
+					<MenuItem icon={theme.effective === 'dark' ? 'sun' : 'moon'} onclick={() => { menuOpen = false; theme.toggle(); }}>{theme.effective === 'dark' ? 'Светлая тема' : 'Тёмная тема'}</MenuItem>
 				{/if}
 
 				<div class="menu-divider" role="separator"></div>
@@ -336,6 +343,10 @@
 		margin: var(--s5) var(--gutter) var(--s3);
 		min-height: var(--target);
 	}
+	/* Под ссылкой на родителя кнопки остаются у названия и состояния, а не посередине трёх строк. */
+	.topbar.tall {
+		align-items: flex-start;
+	}
 	.header-info {
 		flex: 1;
 		display: flex;
@@ -365,15 +376,17 @@
 		border-radius: var(--radius-round);
 		flex-shrink: 0;
 	}
+	/* Длинное состояние уводит подзаголовок на свою строку, а не сжимает его до буквы. */
 	.sub-row {
 		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
-		gap: var(--s3);
+		gap: var(--s1) var(--s3);
 		min-width: 0;
 		padding-left: calc(var(--mark-large) + var(--s3));
 	}
 	.subtitle {
-		flex: 1 1 0;
+		flex: 1 0 calc(var(--s4) * 8);
 		min-width: 0;
 		font-size: var(--fs-sm);
 		color: var(--muted);
@@ -385,10 +398,13 @@
 		min-width: 0;
 		padding-left: calc(var(--mark-large) + var(--s3));
 	}
+	/* Зона нажатия 44px держится отступами, а не высотой строки, чтобы ссылка не раздвигала шапку. */
 	.parent-link {
+		--pad: calc((var(--target) - var(--fs-sm) * var(--lh-tight)) / 2);
 		display: block;
-		min-height: var(--target);
-		line-height: var(--target);
+		padding-block: var(--pad);
+		margin-block: calc(-1 * var(--pad));
+		line-height: var(--lh-tight);
 		font-size: var(--fs-sm);
 		color: var(--accent-link);
 		white-space: nowrap;

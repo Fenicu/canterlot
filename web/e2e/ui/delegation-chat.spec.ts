@@ -85,6 +85,12 @@ test('parent_link_opens_parent', async ({ page }) => {
 
   const link = page.getByRole('link', { name: 'Запущена сессией Оркестратор' });
   await expect(link).toBeVisible();
+  // Ссылка держит зону нажатия 44px, а кнопки шапки стоят у названия, не посередине трёх строк.
+  expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  const title = (await page.locator('.chat-header .header-title').boundingBox())!;
+  const menu = (await page.getByRole('button', { name: 'Меню сессии' }).boundingBox())!;
+  expect(menu.y).toBeLessThanOrEqual(title.y + title.height);
+  expect(menu.y + menu.height).toBeLessThan((await link.boundingBox())!.y + (await link.boundingBox())!.height / 2);
   await link.focus();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(new RegExp(`/c/${parent}$`));
