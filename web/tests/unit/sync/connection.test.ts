@@ -125,8 +125,20 @@ test('resume_that_replaces_a_stuck_attempt_does_not_count_as_an_auth_failure', a
     close: vi.fn(() => { handlers?.close({ code: 1006, reason: '', opened: false }); })
   };
   const manager = new ConnectionManager({ transport, lifecycle, now: clock.now, schedule: clock.schedule, rng: clock.rng, probeAuth, announce: vi.fn() });
-  for (let n = 0; n < 4; n++) { manager.probe('online'); await clock.advanceAsync(0); }
+  for (let n = 0; n < 4; n++) { await clock.advanceAsync(3000); manager.probe('online'); await clock.advanceAsync(0); }
   expect(probeAuth).not.toHaveBeenCalled(); expect(transport.open.mock.calls.length).toBeGreaterThan(4);
+  manager.dispose();
+});
+test('burst_of_resume_events_does_not_restart_a_fresh_handshake', async () => {
+  const clock = new FakeClock(), lifecycle = new TestLifecycle(); let handlers: TransportHandlers | undefined;
+  const transport = {
+    on: (h: TransportHandlers) => { handlers = h; return () => { handlers = undefined; }; },
+    open: vi.fn(), send: () => false,
+    close: vi.fn(() => { handlers?.close({ code: 1006, reason: '', opened: false }); })
+  };
+  const manager = new ConnectionManager({ transport, lifecycle, now: clock.now, schedule: clock.schedule, rng: clock.rng, probeAuth: async () => 'ok', announce: vi.fn() });
+  for (const reason of ['visible', 'focus', 'online', 'pageshow'] as const) { manager.probe(reason); await clock.advanceAsync(100); }
+  expect(transport.open).toHaveBeenCalledTimes(2); expect(transport.close).toHaveBeenCalledTimes(1);
   manager.dispose();
 });
 test('auth_required_rechecks_auth_on_resume_and_recovers_without_reload', async () => {
