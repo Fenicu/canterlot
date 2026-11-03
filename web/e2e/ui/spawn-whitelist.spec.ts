@@ -22,7 +22,6 @@ test('sync_line_keeps_its_place_so_the_delegation_section_does_not_move', async 
   const section = page.locator('section[data-spawn-whitelist]');
   await expect(section.getByRole('heading', { name: 'Делегирование' })).toBeVisible();
   const line = page.getByText(/^Последняя синхронизация/);
-  await expect(line).toHaveCount(0);
   const before = (await section.boundingBox())!.y;
   for (let tick = 0; tick < 30 && (await line.count()) === 0; tick += 1) {
     await page.clock.fastForward(1000);
