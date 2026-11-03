@@ -1273,16 +1273,19 @@ pub async fn request_edit_input(
                 }
                 let (catalog, machine) =
                     crate::attachments::gate_for(&mut *conn, conversation_id).await?;
-                sqlx::query("delete from input_attachments where input_id = $1")
-                    .bind(input_id)
-                    .execute(&mut *conn)
-                    .await?;
-                let refs = crate::attachments::link_in_tx(
+                let kept: Vec<Uuid> = sqlx::query_scalar(
+                    "select attachment_id from input_attachments where input_id = $1",
+                )
+                .bind(input_id)
+                .fetch_all(&mut *conn)
+                .await?;
+                let refs = crate::attachments::relink_edited_in_tx(
                     &mut *conn,
                     owner_id,
                     conversation_id,
                     input_id,
                     &attachment_ids,
+                    &kept,
                     &catalog,
                     &machine,
                 )
