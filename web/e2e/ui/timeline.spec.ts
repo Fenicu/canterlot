@@ -404,6 +404,37 @@ test('long_code_scrolls_inside_the_block_at_360px', async ({ page }) => {
   await expect.poll(() => pre.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
 });
 
+test('quote_with_a_long_code_line_stays_inside_the_card', async ({ page }) => {
+  const command = `Write-Host "${'x'.repeat(400)}"`;
+  const quote = [
+    '> ## Обновление сборки mc',
+    '>',
+    '> Друзья, **обновляем** сборку `mc`:',
+    '>',
+    '> 1. Скачайте архив',
+    '> 2. Выполните в PowerShell:',
+    '>    ```powershell',
+    `>    ${command}`,
+    '>    ```',
+    '> 3. Готово',
+    '>',
+    '> > Вложенная цитата'
+  ].join('\n');
+  const { api, id } = await boot(page, 0);
+  api.histories.set(id, [textBlock(api, quote, '1')]);
+  api.bindConversation(id);
+  await page.reload();
+  const card = page.locator('article.card').last();
+  const pre = card.locator('pre').first();
+  await expect(pre).toBeVisible();
+
+  const cardBox = await card.boundingBox();
+  const preBox = await pre.boundingBox();
+  expect(preBox!.x + preBox!.width).toBeLessThanOrEqual(cardBox!.x + cardBox!.width + 1);
+  expect(await card.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(0);
+  expect(await pre.evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(true);
+});
+
 test('subagent_row_links_to_the_lane_and_shows_live_status', async ({ page }) => {
   const { api, id } = await boot(page, 0);
   const call = textBlock(api, 'делегирую', '1');

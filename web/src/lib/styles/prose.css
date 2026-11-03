@@ -32,4 +32,6 @@
 /* На большом экране код и таблицы могут выйти за колонку чтения, но не за панель чата. */
 @container (min-width: 72rem) {
   .prose :is(pre, table) { width: fit-content; min-width: 100%; max-width: min(var(--prose-wide), calc(50cqw + 50% - var(--gutter))); }
+  /* Внутри цитаты или пункта списка ширина считается от их полей: выходить за карточку некуда. */
+  .prose :is(blockquote, li) :is(pre, table) { width: auto; min-width: 0; max-width: 100%; }
 }
