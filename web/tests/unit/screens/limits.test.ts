@@ -15,6 +15,13 @@ describe("screens/limits", () => {
         { provider: "opencode" },
       ]),
     ).toBe("Claude, Codex и OpenCode");
+    expect(
+      limitsSubtitle([
+        { provider: "claude" },
+        { provider: "codex" },
+        { provider: "antigravity" },
+      ]),
+    ).toBe("Claude, Codex и Antigravity");
   });
 
   it("subtitle_does_not_repeat_a_provider_twice", () => {

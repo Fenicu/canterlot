@@ -7,7 +7,7 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { browserRuntime } from '#lib/screens/chat/open.js';
-  import { DEFAULT_PERMISSION_MODE, NO_MODELS_HINT, effortLabel, modelImagesNote, permissionHint, permissionLabel } from '#lib/format/labels.js';
+  import { ANTIGRAVITY_CATALOG_NOTE, DEFAULT_PERMISSION_MODE, NO_MODELS_HINT, effortLabel, modelImagesNote, permissionHint, permissionLabel } from '#lib/format/labels.js';
   import Button from '#lib/ui/Button.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import Select from '#lib/ui/Select.svelte';
@@ -80,6 +80,7 @@
   const permissionOptions = $derived(permissions.map((value) => ({ value, label: permissionLabel(value) })));
   const provider = $derived(harnesses.find((item) => item.id === harness)?.provider ?? 'claude');
   const imagesNote = $derived(modelImagesNote(models.find((item) => item.id === modelId)?.images));
+  const catalogNote = $derived(provider === 'antigravity' ? ANTIGRAVITY_CATALOG_NOTE : '');
   const gate = $derived.by(() => {
     if (!model) return { ok: false as const, reason: 'Открываю форму' };
     model.machineId = machineId;
@@ -197,11 +198,16 @@
     {/if}
     <WorkdirField {machineId} bind:value={path} />
     <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
-    <div class="pair">
+    {#if provider === 'antigravity'}
       <Select label="Модель" options={modelOptions} bind:value={modelId} />
-      <Select label="Усилие" options={effortOptions} bind:value={effort} />
-    </div>
+    {:else}
+      <div class="pair">
+        <Select label="Модель" options={modelOptions} bind:value={modelId} />
+        <Select label="Усилие" options={effortOptions} bind:value={effort} />
+      </div>
+    {/if}
     {#if harness && models.length === 0}<p class="hint">{NO_MODELS_HINT}</p>{/if}
+    {#if catalogNote}<p class="hint">{catalogNote}</p>{/if}
     {#if imagesNote}<p class="hint">{imagesNote}</p>{/if}
     {#if permissionOptions.length > 0}
       <Select label="Режим разрешений" options={permissionOptions} bind:value={permission} hint={permissionHint(permission, provider)} />

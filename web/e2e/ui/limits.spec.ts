@@ -40,9 +40,27 @@ test('limits_history_follows_mockup_10_with_an_accessible_data_table', async ({ 
   await expect(usage.locator('.count').first()).toHaveText(/^вх\. [\d ]+$/);
   for (const link of await usage.getByRole('link').all()) expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   await expect(main.getByText(/Кэш включён во входные токены/)).toBeVisible();
-  // Третий запрос, OpenCode, нужен только сводке скорости.
-  expect(historyRequests.map(query => query.get('provider')).sort()).toEqual(['claude', 'codex', 'opencode']);
+  // OpenCode и Antigravity нужны сводке скорости; график и расход остаются у Claude и Codex.
+  expect(historyRequests.map(query => query.get('provider')).sort()).toEqual(['antigravity', 'claude', 'codex', 'opencode']);
   for (const query of historyRequests) { expect(query.get('tz')).toBeTruthy(); expect(query.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}T/); expect(query.get('to')).toMatch(/^\d{4}-\d{2}-\d{2}T/); }
+});
+
+test('antigravity_is_one_named_provider_on_the_limits_page', async ({ page }) => {
+  await bootSecondary(page, '/limits', null, (api) => {
+    const observed = new Date(Date.now() - 60_000).toISOString();
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    api.limits.push({
+      provider: 'antigravity',
+      weekly_reserve_active: false,
+      five_hour: { used_permille: 260, resets_at: reset, observed_at: observed },
+      weekly: { used_permille: 410, resets_at: reset, observed_at: observed }
+    });
+  });
+  await expect(page.locator('header.topbar p')).toHaveText('Claude, Codex и Antigravity');
+  const card = page.locator('main .current section').filter({ hasText: 'Antigravity сейчас' });
+  await expect(card).toHaveCount(1);
+  await expect(card.locator('.value')).toContainText('74%');
+  await expect(card.locator('.value')).toContainText('5ч');
 });
 
 test('estimated_reading_is_called_out_on_the_limits_page', async ({ page }) => {

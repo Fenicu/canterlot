@@ -365,7 +365,9 @@
         <div class="fields">
           <div class="pair">
             <Select id="sheet-model" label="Модель" options={modelOptions} bind:value={model} onchange={() => void saveModel(model)} />
-            <Select id="sheet-effort" label="Усилие" options={effortOptions} bind:value={effort} onchange={() => void saveEffort(effort)} />
+            {#if (harness?.provider ?? item.harness?.provider) !== 'antigravity'}
+              <Select id="sheet-effort" label="Усилие" options={effortOptions} bind:value={effort} onchange={() => void saveEffort(effort)} />
+            {/if}
           </div>
           <Select id="sheet-permission" label="Режим разрешений" hint={permissionHint(permission, harness?.provider ?? item.harness?.provider)} options={permissionOptions} bind:value={permission} onchange={() => void savePermission(permission)} />
           <Toggle block label="Автопродолжение после лимитов" bind:checked={crunch} />
