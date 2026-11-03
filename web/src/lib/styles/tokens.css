@@ -452,6 +452,9 @@
   --duration-enter: calc(var(--motion-base-enter) * var(--motion-scale));
   --motion-base-press: 120ms;
   --duration-press: calc(var(--motion-base-press) * var(--motion-scale));
+  --motion-base-text-reveal: 180ms;
+  --duration-text-reveal: calc(var(--motion-base-text-reveal) * var(--motion-scale));
+  --blur-text-reveal: 2px;
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -469,6 +472,7 @@
     --duration-stage-resize: 0ms;
     --duration-enter: 0ms;
     --duration-press: 0ms;
+    --duration-text-reveal: 0ms;
   }
 }
 
