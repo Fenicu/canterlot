@@ -30,6 +30,7 @@ use crate::{
         CompactOutcome, DecisionOutcome, DecisionProof, InstructionSpec, InterruptOutcome,
         ModelUsage, Phase, Proof, SettingsChange, StartSpec, Started, SteerOutcome, Support,
         Transmission, TransmitOutcome,
+        canterlot_mcp::{Broker, BrokerEvent, ToolSet},
     },
     config::AntigravityConfig,
     containment::Containment,
@@ -82,6 +83,11 @@ pub struct AntigravityAdapter {
     tracker: Tracker,
     requests: Requests,
     responses: HashMap<i64, Result<Value, RpcError>>,
+    /// MCP canterlot: сокет сессии и stdio-relay, который запускает сам CLI.
+    broker: Option<Broker>,
+    relay_executable: Option<PathBuf>,
+    mcp_servers: Value,
+    limits_calls: HashMap<Uuid, String>,
     current_model: String,
     current_effort: String,
     permission_mode: String,
@@ -123,6 +129,10 @@ impl AntigravityAdapter {
             tracker: Tracker::new(),
             requests: Requests::new(0),
             responses: HashMap::new(),
+            broker: None,
+            relay_executable: None,
+            mcp_servers: json!([]),
+            limits_calls: HashMap::new(),
             current_model: String::new(),
             current_effort: String::new(),
             permission_mode: String::new(),
@@ -146,6 +156,12 @@ impl AntigravityAdapter {
     /// Срок ожидания `cancelled` после `session/cancel` (спека: 5 с).
     pub fn with_interrupt_deadline(mut self, deadline: Duration) -> Self {
         self.interrupt_deadline = deadline;
+        self
+    }
+
+    /// Бинарник relay `canterlot-worker mcp-relay`; по умолчанию текущий процесс.
+    pub fn with_relay_executable(mut self, executable: PathBuf) -> Self {
+        self.relay_executable = Some(executable);
         self
     }
 
@@ -185,6 +201,9 @@ impl AntigravityAdapter {
     }
 
     async fn abandon(&mut self, group: &dyn Containment) {
+        if let Some(mut broker) = self.broker.take() {
+            broker.shutdown().await;
+        }
         let Some(mut proc) = self.proc.take() else {
             return;
         };
@@ -192,6 +211,22 @@ impl AntigravityAdapter {
         let _ = group.signal_member(&proc.member(), rustix::process::Signal::KILL);
         let _ = timeout(KILL_WAIT, proc.wait()).await;
         self.exited = true;
+    }
+
+    /// Сокет MCP сессии и параметры relay для `session/new`/`session/resume`.
+    async fn bind_broker(&mut self) -> Result<(), AdapterError> {
+        let broker = Broker::bind_with(&self.exec_dir, ToolSet::LimitsOnly, "antigravity")
+            .await
+            .map_err(|_| AdapterError::StartFailed("mcp_bind_failed"))?;
+        let relay = self
+            .relay_executable
+            .clone()
+            .or_else(|| std::env::current_exe().ok())
+            .ok_or(AdapterError::StartFailed("relay_unavailable"))?;
+        self.mcp_servers = session::mcp_servers(&relay, &self.exec_dir, broker.relay_secret());
+        broker.arm();
+        self.broker = Some(broker);
+        Ok(())
     }
 
     fn session_error(error: SessionError) -> AdapterError {
@@ -228,15 +263,23 @@ impl AntigravityAdapter {
                 if !found {
                     return Err(AdapterError::StartFailed("conversation not found"));
                 }
-                session::resume(proc, &mut self.rpc, native_id, &self.instructions, timeout)
-                    .await
-                    .map_err(Self::session_error)?
+                session::resume(
+                    proc,
+                    &mut self.rpc,
+                    native_id,
+                    &self.instructions,
+                    &self.mcp_servers,
+                    timeout,
+                )
+                .await
+                .map_err(Self::session_error)?
             }
             None => session::new_session(
                 proc,
                 &mut self.rpc,
                 &self.workdir,
                 &self.instructions,
+                &self.mcp_servers,
                 timeout,
             )
             .await
@@ -317,12 +360,57 @@ impl AntigravityAdapter {
         if self.exit_reported || self.eof {
             return false;
         }
-        let Some(proc) = self.proc.as_mut() else {
+        if self.proc.is_none() {
             self.exit_reported = true;
             return false;
+        }
+        enum Pumped {
+            Line(StdoutLine),
+            Broker(BrokerEvent),
+        }
+        // Вызов MCP не ждёт кадра stdout: иначе ответ владельца застрял бы до конца хода.
+        let pumped = {
+            let proc = self.proc.as_mut().expect("process checked above");
+            match self.broker.as_mut() {
+                Some(broker) => tokio::select! {
+                    line = proc.next_line() => Pumped::Line(line),
+                    event = broker.next() => Pumped::Broker(event),
+                },
+                None => Pumped::Line(proc.next_line().await),
+            }
         };
-        let line = proc.next_line().await;
-        self.dispatch_line(line).await
+        match pumped {
+            Pumped::Line(line) => self.dispatch_line(line).await,
+            Pumped::Broker(event) => {
+                self.on_broker(event);
+                true
+            }
+        }
+    }
+
+    fn on_broker(&mut self, event: BrokerEvent) {
+        match event {
+            BrokerEvent::AgentTool {
+                call_id,
+                tool,
+                arguments,
+                ..
+            } => self.events.push_back(AdapterEvent::AgentCall {
+                call_id,
+                tool: tool.to_owned(),
+                arguments,
+            }),
+            BrokerEvent::ShareFile { call_id, arguments } => {
+                self.events
+                    .push_back(AdapterEvent::ShareFile { call_id, arguments });
+            }
+            BrokerEvent::LimitsQuery { call_id } => {
+                self.limits_calls
+                    .insert(call_id, "no limit data yet in this session".to_owned());
+                self.events.push_back(AdapterEvent::Limits { call_id });
+            }
+            _ => {}
+        }
     }
 
     async fn dispatch_line(&mut self, line: StdoutLine) -> bool {
@@ -693,6 +781,14 @@ impl AntigravityAdapter {
         let next_effort = change.effort.clone().unwrap_or_else(|| previous.3.clone());
         self.stop_for_restart().await;
         self.reset_connection();
+        // Новый процесс получает новый relay со своим секретом.
+        if let Some(mut broker) = self.broker.take() {
+            broker.shutdown().await;
+        }
+        if self.bind_broker().await.is_err() {
+            self.diagnostic("restart_failed", true);
+            return Err("settings_restart_failed");
+        }
         self.instructions = next_instructions.clone();
         self.permission_mode = next_mode.clone();
         match self
@@ -795,9 +891,16 @@ impl AntigravityAdapter {
             return Err(AdapterError::StartFailed("conversation not found"));
         }
         let proc = self.proc.as_mut().expect("process checked above");
-        let info = session::resume(proc, &mut self.rpc, native, instructions, timeout)
-            .await
-            .map_err(Self::session_error)?;
+        let info = session::resume(
+            proc,
+            &mut self.rpc,
+            native,
+            instructions,
+            &self.mcp_servers,
+            timeout,
+        )
+        .await
+        .map_err(Self::session_error)?;
         if !matches!(model, "" | "default") {
             let proc = self.proc.as_mut().expect("process checked above");
             session::set_model(proc, &mut self.rpc, &info.session_id, model, timeout)
@@ -981,6 +1084,8 @@ impl Adapter for AntigravityAdapter {
         if process::launch_args(&self.exec_dir, &spec.permission_mode).is_err() {
             return Err(AdapterError::StartFailed("unknown_permission_mode"));
         }
+        // Сокет и relay — до CLI: `session/new` уже перечисляет canterlot.
+        self.bind_broker().await?;
         self.proc = Some(
             Process::spawn(
                 &pinned.executable,
@@ -1334,7 +1439,13 @@ impl Adapter for AntigravityAdapter {
         }
     }
 
-    async fn agent_call_result(&mut self, _call_id: Uuid, _result: AgentCallResult) {}
+    async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
+        // Итог вызова возвращается запросившему relay; чужой итог брокер отбросит.
+        let result = crate::adapter::limits_fallback(&mut self.limits_calls, call_id, result);
+        if let Some(broker) = self.broker.as_mut() {
+            broker.answer_agent_tool(call_id, &result).await;
+        }
+    }
 
     async fn next_event(&mut self) -> AdapterEvent {
         loop {
@@ -1367,6 +1478,9 @@ impl Adapter for AntigravityAdapter {
     ) -> Result<(), AdapterError> {
         self.stall_at = None;
         self.requests.drop_open();
+        if let Some(mut broker) = self.broker.take() {
+            broker.shutdown().await;
+        }
         let Some(mut proc) = self.proc.take() else {
             return Ok(());
         };

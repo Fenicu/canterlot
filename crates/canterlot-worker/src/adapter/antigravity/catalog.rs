@@ -119,6 +119,7 @@ async fn probe(executable: &Path, root: &Path) -> Result<SessionInfo, ProbeError
             &mut rpc,
             &workdir,
             &empty_instructions(),
+            &serde_json::json!([]),
             PROBE_STEP,
         )
         .await

@@ -6,14 +6,15 @@
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterError, AdapterEvent, BlockKind, CloseMode, CompactOutcome, DecisionOutcome,
-        InstructionMode, InstructionSpec, InterruptOutcome, LocalFile, Phase, SettingsChange,
-        StartSpec, SteerOutcome, Transmission, TransmitOutcome,
+        Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, CloseMode, CompactOutcome,
+        DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, LocalFile, Phase,
+        SettingsChange, StartSpec, SteerOutcome, Transmission, TransmitOutcome,
         antigravity::{
             AntigravityAdapter, catalog, input,
             process::ENV_ALLOWLIST,
             replay::{Script, Step, evidence_result, session_list},
         },
+        canterlot_mcp::relay_hello,
     },
     config::AntigravityConfig,
     containment::TreeContainment,
@@ -140,6 +141,7 @@ impl Bench {
             .with_ready_deadline(WAIT)
             .with_interrupt_deadline(interrupt)
             .with_turn_stall_deadline(stall)
+            .with_relay_executable(PathBuf::from(env!("CARGO_BIN_EXE_canterlot-worker")))
             .with_questions_enabled(questions);
         let mut start = spec(model, effort, mode);
         start.workdir = fake.workdir();
@@ -440,10 +442,7 @@ async fn start_new_uses_the_recorded_session_and_pinned_copy() {
         new[0]["frame"]["params"]["cwd"],
         bench.spec.workdir.to_string_lossy().as_ref()
     );
-    assert_eq!(
-        new[0]["frame"]["params"]["mcpServers"],
-        Value::Array(vec![])
-    );
+    assert_relay(&relay_of(&new[0]["frame"]), &bench.exec_dir);
     assert_eq!(
         new[0]["frame"]["params"]["_meta"]["antigravity"]["systemPrompt"]["append"],
         "canterlot test append"
@@ -555,6 +554,153 @@ async fn env_is_an_allowlist_with_forced_file_storage() {
         .await
         .unwrap();
     bench.fake.wait_gone().await;
+}
+
+fn relay_of(frame: &Value) -> Value {
+    let servers = frame["params"]["mcpServers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("mcpServers array: {frame}"));
+    assert_eq!(servers.len(), 1, "{frame}");
+    servers[0].clone()
+}
+
+fn assert_relay(server: &Value, exec_dir: &std::path::Path) {
+    assert_eq!(server["name"], "canterlot");
+    assert_eq!(
+        server["command"].as_str(),
+        Some(env!("CARGO_BIN_EXE_canterlot-worker"))
+    );
+    let args: Vec<&str> = server["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(args[0], "mcp-relay");
+    assert_eq!(args[1], "--socket");
+    assert_eq!(
+        args[2],
+        exec_dir.join("mcp.sock").to_string_lossy(),
+        "the relay talks to this session's socket"
+    );
+    assert_eq!(server["env"][0]["name"], "CANTERLOT_MCP_SECRET");
+    assert_eq!(
+        server["env"][0]["value"].as_str().map(str::len),
+        Some(64),
+        "the relay carries this session's secret"
+    );
+}
+
+#[tokio::test]
+async fn new_and_resume_pass_the_canterlot_mcp_relay() {
+    let mut bench = Bench::new(
+        Script {
+            steps: vec![init_step(), new_step()],
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let requests = bench.fake.requests();
+    assert_relay(
+        &relay_of(&calls(&requests, "session/new")[0]["frame"]),
+        &bench.exec_dir,
+    );
+    bench.close().await;
+
+    let session_id = "7497af9f-8ce0-4bb6-9b42-f14ac3fd1890";
+    let mut bench = Bench::new(
+        Script {
+            steps: vec![
+                init_step(),
+                Script::expect("session/list", session_list(&[session_id])),
+                Script::expect("session/resume", evidence_result("t13b-resume.jsonl", 2)),
+            ],
+            ..Default::default()
+        },
+        "",
+        "",
+        "owner",
+    );
+    bench.spec.native_conversation_id = Some(session_id.into());
+    bench.start().await;
+    let requests = bench.fake.requests();
+    assert_relay(
+        &relay_of(&calls(&requests, "session/resume")[0]["frame"]),
+        &bench.exec_dir,
+    );
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn an_agent_call_over_the_canterlot_relay_round_trips() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let mut bench = Bench::new(
+        Script {
+            steps: vec![init_step(), new_step()],
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let server = relay_of(&calls(&bench.fake.requests(), "session/new")[0]["frame"]);
+    let secret = server["env"][0]["value"].as_str().unwrap().to_owned();
+    let stream = UnixStream::connect(bench.exec_dir.join("mcp.sock"))
+        .await
+        .expect("broker socket");
+    let (read, mut write) = stream.into_split();
+    write
+        .write_all(relay_hello(&secret).as_bytes())
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(read);
+    let mut line = String::new();
+    write
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n")
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, reader.read_line(&mut line))
+        .await
+        .expect("initialize reply")
+        .unwrap();
+    assert!(line.contains("canterlot"), "{line}");
+
+    write
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"canterlot_presets_list\",\"arguments\":{}}}\n")
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(WAIT, bench.adapter.next_event())
+        .await
+        .expect("agent call event");
+    let (call_id, tool) = match event {
+        AdapterEvent::AgentCall { call_id, tool, .. } => (call_id, tool),
+        other => panic!("not an agent call: {other:?}"),
+    };
+    assert_eq!(tool, "presets.list");
+    bench
+        .adapter
+        .agent_call_result(call_id, AgentCallResult::Ok(json!({"presets": []})))
+        .await;
+    line.clear();
+    tokio::time::timeout(WAIT, reader.read_line(&mut line))
+        .await
+        .expect("tool reply")
+        .unwrap();
+    let reply: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["id"], 2, "{reply}");
+    assert!(
+        reply["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("presets")),
+        "the result goes back into the connection: {reply}"
+    );
+    bench.close().await;
 }
 
 #[tokio::test]

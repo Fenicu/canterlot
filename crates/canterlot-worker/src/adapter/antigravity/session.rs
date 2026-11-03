@@ -51,17 +51,41 @@ fn append(instructions: &InstructionSpec) -> &str {
     &instructions.text
 }
 
-pub fn new_params(cwd: &Path, instructions: &InstructionSpec) -> Value {
+/// MCP-сервер canterlot для ACP: stdio-relay, секрет сессии в `env`.
+/// `tools/list` общего сервера не отдаёт `_meta` на инструмент, поэтому подсказку
+/// `antigravity/alwaysLoad` (P16) передать нечем — доводка после живой проверки.
+pub fn mcp_servers(relay: &Path, exec_dir: &Path, secret: &str) -> Value {
+    json!([{
+        "name": crate::adapter::canterlot_mcp::SERVER_NAME,
+        "command": relay.to_string_lossy(),
+        "args": [
+            "mcp-relay",
+            "--socket",
+            exec_dir.join("mcp.sock").to_string_lossy(),
+        ],
+        "env": [{
+            "name": crate::adapter::canterlot_mcp::RELAY_SECRET_ENV,
+            "value": secret,
+        }],
+    }])
+}
+
+pub fn new_params(cwd: &Path, instructions: &InstructionSpec, mcp_servers: &Value) -> Value {
     json!({
         "cwd": cwd.to_string_lossy(),
-        "mcpServers": [],
+        "mcpServers": mcp_servers,
         "_meta": {"antigravity": {"systemPrompt": {"append": append(instructions)}}},
     })
 }
 
-pub fn resume_params(session_id: &str, instructions: &InstructionSpec) -> Value {
+pub fn resume_params(
+    session_id: &str,
+    instructions: &InstructionSpec,
+    mcp_servers: &Value,
+) -> Value {
     json!({
         "sessionId": session_id,
+        "mcpServers": mcp_servers,
         "_meta": {"antigravity": {"systemPrompt": {"append": append(instructions)}}},
     })
 }
@@ -135,13 +159,14 @@ pub async fn new_session(
     rpc: &mut RpcClient,
     cwd: &Path,
     instructions: &InstructionSpec,
+    mcp_servers: &Value,
     timeout: Duration,
 ) -> Result<SessionInfo, SessionError> {
     let result = call(
         proc,
         rpc,
         "session/new",
-        new_params(cwd, instructions),
+        new_params(cwd, instructions, mcp_servers),
         Instant::now() + timeout,
     )
     .await?;
@@ -175,13 +200,14 @@ pub async fn resume(
     rpc: &mut RpcClient,
     session_id: &str,
     instructions: &InstructionSpec,
+    mcp_servers: &Value,
     timeout: Duration,
 ) -> Result<SessionInfo, SessionError> {
     let result = call(
         proc,
         rpc,
         "session/resume",
-        resume_params(session_id, instructions),
+        resume_params(session_id, instructions, mcp_servers),
         Instant::now() + timeout,
     )
     .await?;
