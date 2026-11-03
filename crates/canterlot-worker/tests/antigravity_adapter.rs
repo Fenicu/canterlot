@@ -2626,8 +2626,46 @@ async fn settings_never_restart_the_process_in_the_middle_of_a_turn() {
 }
 
 #[tokio::test]
-async fn a_quota_error_after_the_echo_is_a_reached_limit_and_a_failed_turn() {
-    use canterlot_worker::adapter::{LimitFact, LimitWindow};
+async fn model_text_about_quota_is_not_a_reached_limit() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 2),
+        Script::send(user_chunk("go")),
+        Script::send(agent_chunk(
+            "Individual quota reached for gemini-3.8-flash-high. Resets in 2h 15m — \
+             I will describe what remains.",
+        )),
+        respond(2, end_turn(Some(usage(10, 2, 0)))),
+    ];
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let input = send("go");
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let events = drain(&mut bench.adapter).await;
+    assert_eq!(finished(&events), vec![input.command_id]);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Limit(_))),
+        "model text is never a quota signal: {events:?}"
+    );
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn a_quota_error_after_the_echo_fails_the_turn_without_a_limit_until_the_live_check() {
     let steps = vec![
         init_step(),
         new_step(),
@@ -2656,15 +2694,12 @@ async fn a_quota_error_after_the_echo_is_a_reached_limit_and_a_failed_turn() {
     let events = drain(&mut bench.adapter).await;
     assert_eq!(finished(&events), vec![input.command_id]);
     assert!(kinds(&events).contains(&BlockKind::Error));
+    // Форма ошибки квоты не подтверждена живым кадром (§11): до неё Limit не выдаётся.
     assert!(
-        events.iter().any(|event| matches!(
-            event,
-            AdapterEvent::Limit(LimitFact::Reached {
-                window: LimitWindow::FiveHour,
-                resets_at_ms: Some(_),
-            })
-        )),
-        "quota text becomes Limit(Reached): {events:?}"
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Limit(_))),
+        "structured quota detection stays behind its constant: {events:?}"
     );
     let run = events
         .iter()

@@ -54,6 +54,11 @@ const ERROR_TEXT_BYTES: usize = 512;
 /// prompt (§11). Смена этого значения — единственное, что нужно для включения.
 const QUESTIONS_CAPABILITY: Support = Support::Unavailable("stage0");
 
+/// Квота из JSON-RPC ошибки prompt: форма §11 не подтверждена живым кадром, до неё
+/// `Limit(Reached)` приходит только из `/usage` (§8). Смена значения — единственное,
+/// что нужно после живой проверки.
+const QUOTA_FROM_PROMPT_ERROR: bool = false;
+
 fn questions_enabled_by_default() -> bool {
     !matches!(QUESTIONS_CAPABILITY, Support::Unavailable(_))
 }
@@ -330,17 +335,8 @@ impl AntigravityAdapter {
             None => return,
         };
         let events::Fed { events, question } = fed;
-        if !self.limit_reported {
-            for event in &events {
-                if let AdapterEvent::BlockDelta { append, .. } = event
-                    && let Some(fact) = limits::reached_from_text(append, crate::machine::now_ms())
-                {
-                    self.limit_reported = true;
-                    self.events.push_back(AdapterEvent::Limit(fact));
-                    break;
-                }
-            }
-        }
+        // Текст модели не признак квоты: обычный ответ может обсуждать лимиты.
+        // `Limit(Reached)` приходит из `/usage` и, после живой проверки, из ошибки prompt.
         self.events.extend(events);
         if let Some(question) = question {
             self.open_question(question).await;
@@ -457,7 +453,11 @@ impl AntigravityAdapter {
         self.close_blocks();
         self.close_open_requests("turn_ended");
         if let Some(message) = &failed {
-            if let Some(fact) = limits::reached_from_text(message, crate::machine::now_ms()) {
+            if QUOTA_FROM_PROMPT_ERROR
+                && !self.limit_reported
+                && let Some(fact) = limits::reached_from_text(message, crate::machine::now_ms())
+            {
+                self.limit_reported = true;
                 self.events.push_back(AdapterEvent::Limit(fact));
             }
             self.error_block(message.clone(), Some(command_id));
