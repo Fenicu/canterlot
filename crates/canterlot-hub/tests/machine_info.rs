@@ -14,6 +14,19 @@ use sqlx::PgPool;
 use support::*;
 use uuid::Uuid;
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+async fn stopped_execution(pool: &PgPool, conversation_id: Uuid, generation: i64) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state) values($1,$2,$3,'stopped')",
+    )
+    .bind(id)
+    .bind(conversation_id)
+    .bind(generation)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn machine_view_has_no_profiles(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
@@ -119,6 +132,94 @@ async fn metrics_upsert_keeps_latest_and_appends_a_machines_event(pool: PgPool) 
         .await,
         2
     );
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn execution_cpu_above_one_core_is_accepted(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    let first = stopped_execution(&pool, s.conversation_id, 1).await;
+    let second = stopped_execution(&pool, s.conversation_id, 2).await;
+    let mut m = metrics(1000);
+    m.cpu_cores = 36;
+    m.executions = vec![
+        ExecutionProcess {
+            execution_id: first.to_string(),
+            alive: true,
+            cpu_permille: 2400,
+            rss_bytes: 4096,
+            descendants: Some(3),
+        },
+        ExecutionProcess {
+            execution_id: second.to_string(),
+            alive: true,
+            cpu_permille: 1000,
+            rss_bytes: 4096,
+            descendants: Some(0),
+        },
+    ];
+    assert_eq!(
+        machine_info::apply_metrics(&pool, s.owner_id, s.machine_id, &m, Uuid::now_v7()).await?,
+        MetricsOutcome::Stored
+    );
+    let (machine_cpu, executions): (i32, Value) =
+        sqlx::query_as("select cpu_permille,executions from machine_metrics where machine_id=$1")
+            .bind(s.machine_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(machine_cpu, 200);
+    let rows = executions.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["execution_id"], first.to_string());
+    assert_eq!(rows[0]["cpu_permille"], 2400);
+    assert_eq!(rows[0]["descendants"], 3);
+    assert_eq!(rows[1]["cpu_permille"], 1000);
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn broken_execution_counter_drops_only_that_entry(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    let good = stopped_execution(&pool, s.conversation_id, 1).await;
+    let hot = stopped_execution(&pool, s.conversation_id, 2).await;
+    let huge = stopped_execution(&pool, s.conversation_id, 3).await;
+    let mut m = metrics(1000);
+    m.cpu_cores = 4;
+    m.executions = vec![
+        ExecutionProcess {
+            execution_id: good.to_string(),
+            alive: true,
+            cpu_permille: 2400,
+            rss_bytes: 4096,
+            descendants: Some(1),
+        },
+        ExecutionProcess {
+            execution_id: hot.to_string(),
+            alive: true,
+            cpu_permille: 4201,
+            rss_bytes: 4096,
+            descendants: Some(0),
+        },
+        ExecutionProcess {
+            execution_id: huge.to_string(),
+            alive: true,
+            cpu_permille: 10,
+            rss_bytes: i64::MAX as u64 + 1,
+            descendants: Some(0),
+        },
+    ];
+    assert_eq!(
+        machine_info::apply_metrics(&pool, s.owner_id, s.machine_id, &m, Uuid::now_v7()).await?,
+        MetricsOutcome::Stored
+    );
+    let (machine_cpu, executions): (i32, Value) =
+        sqlx::query_as("select cpu_permille,executions from machine_metrics where machine_id=$1")
+            .bind(s.machine_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(machine_cpu, 200);
+    let rows = executions.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["execution_id"], good.to_string());
+    assert_eq!(rows[0]["cpu_permille"], 2400);
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

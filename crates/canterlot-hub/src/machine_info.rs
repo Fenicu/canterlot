@@ -8,6 +8,10 @@ use canterlot_proto::{
 };
 use serde_json::json;
 use sqlx::{PgConnection, PgPool};
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -121,6 +125,8 @@ pub async fn apply_report(
     })
     .await
 }
+/// Машинный `cpu_permille` нормирован на всю машину, поэтому 1000 — его потолок.
+/// Битые счётчики исполнений отбрасываются по одному в `sanitize_executions`.
 fn validate(metrics: &MachineMetrics) -> Option<&'static str> {
     if metrics.cpu_permille > 1000 {
         return Some("cpu_permille");
@@ -161,14 +167,42 @@ fn validate(metrics: &MachineMetrics) -> Option<&'static str> {
     {
         return Some("counter_overflow");
     }
-    if metrics
-        .executions
-        .iter()
-        .any(|e| e.cpu_permille > 1000 || e.rss_bytes > i64::MAX as u64)
-    {
-        return Some("execution_counter");
-    }
     None
+}
+/// `cpu_permille` исполнения — тысячные доли одного ядра, сумма по его дереву
+/// процессов, поэтому многопоточный CLI или сборка даёт больше 1000
+/// (2400 = 2,4 ядра). Принимаем все ядра машины и 5% на дрожание замера.
+fn execution_cpu_limit(cpu_cores: u32) -> u64 {
+    u64::from(cpu_cores.max(1)) * 1000 * 105 / 100
+}
+/// Сломанный счётчик повторяется в каждой выборке; предупреждаем редко.
+const DROPPED_EXECUTIONS_WARN: Duration = Duration::from_secs(300);
+fn warn_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= DROPPED_EXECUTIONS_WARN)
+}
+fn warn_dropped_executions(dropped: usize) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let now = Instant::now();
+    let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if warn_due(*last, now) {
+        *last = Some(now);
+        tracing::warn!(
+            kind = "machine_metrics_execution_dropped",
+            reason = "execution_counter",
+            dropped,
+            "metrics execution dropped"
+        );
+    }
+}
+/// Одна битая запись исполнения не повод выбрасывать машину, память, диски и
+/// остальные исполнения: отбрасываем только её.
+fn sanitize_executions(metrics: &mut MachineMetrics) -> usize {
+    let limit = execution_cpu_limit(metrics.cpu_cores);
+    let before = metrics.executions.len();
+    metrics
+        .executions
+        .retain(|e| u64::from(e.cpu_permille) <= limit && e.rss_bytes <= i64::MAX as u64);
+    before - metrics.executions.len()
 }
 fn ignored(reason: &'static str) -> MetricsOutcome {
     tracing::warn!(kind = "machine_metrics_ignored", reason, "metrics ignored");
@@ -184,6 +218,14 @@ pub async fn apply_metrics(
     if let Some(reason) = validate(m) {
         return Ok(ignored(reason));
     }
+    let m = {
+        let mut metrics = m.clone();
+        let dropped = sanitize_executions(&mut metrics);
+        if dropped > 0 {
+            warn_dropped_executions(dropped);
+        }
+        metrics
+    };
     let mut ids = Vec::new();
     for e in &m.executions {
         let Ok(id) = Uuid::parse_str(&e.execution_id) else {
@@ -196,7 +238,6 @@ pub async fn apply_metrics(
     if ids.len() != m.executions.len() {
         return Ok(ignored("duplicate_execution"));
     }
-    let m = m.clone();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
     machine(&mut *conn, owner_id, machine_id).await?;
@@ -343,4 +384,27 @@ pub async fn run_status_projection(
         }
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn dropped_execution_warning_is_rate_limited() {
+        let now = Instant::now();
+        assert!(warn_due(None, now), "первое предупреждение проходит");
+        assert!(
+            !warn_due(Some(now), now + Duration::from_secs(1)),
+            "следующая выборка не повторяет предупреждение"
+        );
+        assert!(warn_due(Some(now), now + DROPPED_EXECUTIONS_WARN));
+    }
+
+    #[test]
+    fn execution_cpu_limit_allows_all_cores_with_jitter() {
+        assert_eq!(execution_cpu_limit(0), 1050);
+        assert_eq!(execution_cpu_limit(36), 37800);
+    }
 }
