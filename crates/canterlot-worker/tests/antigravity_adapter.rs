@@ -3,11 +3,12 @@
 
 //! Контракт адаптера Antigravity на `fake-agy`: кадры этапа 0, запуск, resume и каталог.
 
+use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterError, AdapterEvent, BlockKind, CloseMode, CompactOutcome, InstructionMode,
-        InstructionSpec, InterruptOutcome, LocalFile, Phase, SettingsChange, StartSpec,
-        SteerOutcome, Transmission, TransmitOutcome,
+        Adapter, AdapterError, AdapterEvent, BlockKind, CloseMode, CompactOutcome, DecisionOutcome,
+        InstructionMode, InstructionSpec, InterruptOutcome, LocalFile, Phase, SettingsChange,
+        StartSpec, SteerOutcome, Transmission, TransmitOutcome,
         antigravity::{
             AntigravityAdapter, catalog, input,
             process::ENV_ALLOWLIST,
@@ -18,6 +19,7 @@ use canterlot_worker::{
     containment::TreeContainment,
 };
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::{path::PathBuf, time::Duration};
 use uuid::Uuid;
 
@@ -300,6 +302,62 @@ fn kinds(events: &[AdapterEvent]) -> Vec<BlockKind> {
             _ => None,
         })
         .collect()
+}
+
+fn allow() -> DecisionPayload {
+    DecisionPayload::Permission {
+        behavior: PermissionBehavior::Allow,
+        message: None,
+    }
+}
+
+fn deny() -> DecisionPayload {
+    DecisionPayload::Permission {
+        behavior: PermissionBehavior::Deny,
+        message: Some("no".into()),
+    }
+}
+
+fn answer(question: &str, value: &str) -> DecisionPayload {
+    let mut answers = BTreeMap::new();
+    answers.insert(question.to_owned(), AnswerValue::Single(value.into()));
+    DecisionPayload::Question { answers }
+}
+
+/// Первый открытый запрос нужного вида; ходы до него остаются в списке.
+async fn wait_request(
+    adapter: &mut AntigravityAdapter,
+    wanted: &str,
+) -> (String, Value, Vec<AdapterEvent>) {
+    let mut seen = Vec::new();
+    let timeout = tokio::time::Instant::now() + WAIT;
+    loop {
+        let event = tokio::time::timeout_at(timeout, adapter.next_event())
+            .await
+            .expect("request did not open");
+        if let AdapterEvent::RequestOpened {
+            request_id,
+            kind,
+            payload,
+        } = &event
+            && kind == wanted
+        {
+            let (request_id, payload) = (request_id.clone(), payload.clone());
+            seen.push(event);
+            // Фаза открытия идёт сразу за карточкой; берём и её.
+            if let Ok(next) =
+                tokio::time::timeout(Duration::from_millis(200), adapter.next_event()).await
+            {
+                seen.push(next);
+            }
+            return (request_id, payload, seen);
+        }
+        seen.push(event);
+    }
+}
+
+fn session_prompts(requests: &[Value]) -> Vec<&Value> {
+    calls(requests, "session/prompt")
 }
 
 #[tokio::test]
@@ -624,6 +682,13 @@ fn catalog_parses_the_recorded_p1_frame() {
     assert_eq!(entry.permission_modes, vec!["owner", "ask", "bypass"]);
     assert!(!entry.images);
     assert!(entry.models.iter().all(|model| model.efforts.is_empty()));
+    assert!(
+        entry
+            .models
+            .iter()
+            .all(|model| model.context_window == Some(1_048_576)),
+        "the family context window is visible to the catalog"
+    );
 }
 
 #[tokio::test]
@@ -698,6 +763,19 @@ async fn text_turn_streams_one_block_and_finishes_with_usage() {
     assert_eq!(usage[0].input_tokens, 7183);
     assert_eq!(usage[0].output_tokens, 1);
     assert_eq!(usage[0].model, "gemini-3.8-flash-high");
+    let (context, window) = events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::RunFinished {
+                context_tokens,
+                context_window_tokens,
+                ..
+            } => Some((*context_tokens, *context_window_tokens)),
+            _ => None,
+        })
+        .expect("run finished");
+    assert_eq!(context, 7183);
+    assert_eq!(window, 1_048_576);
     bench.close().await;
 }
 
@@ -746,7 +824,7 @@ async fn thought_chunks_merge_and_a_kind_change_closes_the_block() {
 }
 
 #[tokio::test]
-async fn tool_turn_holds_the_call_and_reports_the_result() {
+async fn tool_turn_holds_the_call_until_the_owner_allows_it() {
     let mut steps = handshake();
     steps.extend(from_prompt("t5-allow"));
     let mut bench = Bench::new(
@@ -766,7 +844,23 @@ async fn tool_turn_holds_the_call_and_reports_the_result() {
         bench.adapter.transmit(&input, &bench.group).await,
         TransmitOutcome::Accepted(_)
     ));
-    let events = drain(&mut bench.adapter).await;
+    let (request_id, payload, mut events) = wait_request(&mut bench.adapter, "permission").await;
+    assert_eq!(request_id, "1:call_730220");
+    assert_eq!(payload["tool_name"], "run_command");
+    assert_eq!(payload["tool_use_id"], "call_730220");
+    assert_eq!(payload["input"]["CommandLine"], "echo perm-allow-probe");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingPermission,
+            ..
+        }
+    )));
+    assert!(matches!(
+        bench.adapter.deliver_decision(&request_id, &allow()).await,
+        DecisionOutcome::Applied(_)
+    ));
+    events.extend(drain(&mut bench.adapter).await);
     let kinds = kinds(&events);
     assert!(kinds.contains(&BlockKind::ToolCall));
     assert!(kinds.contains(&BlockKind::ToolResult));
@@ -782,24 +876,205 @@ async fn tool_turn_holds_the_call_and_reports_the_result() {
         AdapterEvent::BlockFinal { text, .. } if text.contains("perm-allow-probe")
     )));
     assert_eq!(finished(&events), vec![input.command_id]);
-    let denied = bench
+    let reply = bench
         .fake
         .requests()
         .into_iter()
         .find(|entry| entry["dir"] == "in" && entry["frame"]["id"] == json!("1"))
         .expect("permission reply");
     assert_eq!(
-        denied["frame"]["result"]["outcome"]["optionId"],
+        reply["frame"]["result"]["outcome"]["optionId"],
+        json!("allow")
+    );
+    assert!(
+        !reply["frame"]["result"]["outcome"]
+            .to_string()
+            .contains("allow_always"),
+        "the adapter never asks for a standing grant"
+    );
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn permission_deny_answers_deny_and_the_turn_ends() {
+    let mut steps = handshake();
+    steps.extend(from_prompt("t5-deny"));
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "ask",
+    );
+    bench.start().await;
+    let input = send(
+        "Run the shell command `echo perm-deny-probe` then reply with exactly: done. Do not ask questions, just run it.",
+    );
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, mut events) = wait_request(&mut bench.adapter, "permission").await;
+    assert_eq!(request_id, "1:call_168341");
+    assert!(matches!(
+        bench.adapter.deliver_decision(&request_id, &deny()).await,
+        DecisionOutcome::Applied(_)
+    ));
+    events.extend(drain(&mut bench.adapter).await);
+    assert_eq!(finished(&events), vec![input.command_id]);
+    let reply = bench
+        .fake
+        .requests()
+        .into_iter()
+        .find(|entry| entry["dir"] == "in" && entry["frame"]["id"] == json!("1"))
+        .expect("permission reply");
+    assert_eq!(
+        reply["frame"]["result"]["outcome"]["optionId"],
         json!("deny")
     );
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn permission_decision_after_the_turn_ended_is_not_applied() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 4),
+        Script::send(user_chunk(
+            "Run the shell command `echo perm-late-probe` then reply with exactly: done.",
+        )),
+        Script::send(tool_call(
+            "call_late",
+            "run_command",
+            json!({"CommandLine": "echo perm-late-probe"}),
+        )),
+        Script::send(tool_update("call_late", "pending", None)),
+        Script::send(json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "s",
+                "toolCall": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_late",
+                    "name": "run_command",
+                    "status": "pending",
+                    "rawInput": {"CommandLine": "echo perm-late-probe"},
+                },
+                "options": [
+                    {"optionId": "allow", "kind": "allow_once"},
+                    {"optionId": "deny", "kind": "reject_once"},
+                ],
+            },
+        })),
+        respond(4, end_turn(Some(usage(10, 1, 0)))),
+    ];
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "ask",
+    );
+    bench.start().await;
+    let input = send("Run the shell command `echo perm-late-probe` then reply with exactly: done.");
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, mut events) = wait_request(&mut bench.adapter, "permission").await;
+    events.extend(drain(&mut bench.adapter).await);
     assert!(events.iter().any(|event| matches!(
         event,
-        AdapterEvent::Diagnostic {
-            kind: "antigravity_permission_denied",
-            required: false,
-            ..
-        }
+        AdapterEvent::RequestClosed { request_id: closed, .. } if closed == &request_id
     )));
+    assert_eq!(finished(&events), vec![input.command_id]);
+    match bench.adapter.deliver_decision(&request_id, &allow()).await {
+        DecisionOutcome::NotApplied(reason) => assert_eq!(reason, "request_not_pending"),
+        other => panic!("expected NotApplied, got {other:?}"),
+    }
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn permission_decision_racing_cancel_is_not_applied_and_the_request_closes() {
+    let mut steps = handshake();
+    steps.extend(from_prompt("t7c-cancel-perm"));
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "ask",
+    );
+    bench.start().await;
+    let input = send(
+        "Run the shell command `echo cancel-perm-probe` then reply with exactly: done. Do not ask questions, just run it.",
+    );
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, mut events) = wait_request(&mut bench.adapter, "permission").await;
+    assert!(matches!(
+        bench.adapter.interrupt().await,
+        InterruptOutcome::Acknowledged
+    ));
+    events.extend(drain(&mut bench.adapter).await);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::RequestClosed { request_id: closed, reason } if closed == &request_id && reason == "interrupted"
+    )));
+    assert!(matches!(
+        bench.adapter.deliver_decision(&request_id, &allow()).await,
+        DecisionOutcome::NotApplied(_)
+    ));
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn permission_refusal_answers_deny_without_waiting_for_a_frame() {
+    let mut steps = handshake();
+    steps.extend(from_prompt("t5-allow"));
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "ask",
+    );
+    bench.start().await;
+    let input = send(
+        "Run the shell command `echo perm-allow-probe` then reply with exactly: done. Do not ask questions, just run it.",
+    );
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, _) = wait_request(&mut bench.adapter, "permission").await;
+    bench.adapter.refuse_request(&request_id, "no").await;
+    let events = drain(&mut bench.adapter).await;
+    assert_eq!(finished(&events), vec![input.command_id]);
+    let reply = bench
+        .fake
+        .requests()
+        .into_iter()
+        .find(|entry| entry["dir"] == "in" && entry["frame"]["id"] == json!("1"))
+        .expect("permission reply");
+    assert_eq!(
+        reply["frame"]["result"]["outcome"]["optionId"],
+        json!("deny")
+    );
     bench.close().await;
 }
 
@@ -1572,10 +1847,181 @@ async fn a_subagent_without_payload_is_a_collapsed_tool() {
     bench.close().await;
 }
 
-#[tokio::test]
-async fn ask_question_cancels_with_a_diagnostic_instead_of_hanging() {
+const QUESTION_PROMPT: &str = "Before doing anything, ask me a clarifying question with options: which banner color should I use — red, green or blue? Use the question tool. Do not run any commands.";
+
+fn question_scenario() -> Vec<Step> {
     let mut steps = handshake();
     steps.extend(from_prompt("t6-question"));
+    steps
+}
+
+/// Ответ на вопрос: cancel исходного хода, затем служебный prompt и его эхо.
+fn question_answer_steps(cancel_usage: bool, continuation: &str) -> Vec<Step> {
+    let cancel_usage = cancel_usage.then(|| usage(1, 1, 0));
+    vec![
+        Script::notification("session/cancel"),
+        respond(4, cancelled(cancel_usage)),
+        deferred("session/prompt", 9),
+        Script::send(user_chunk(continuation)),
+        respond(9, end_turn(Some(usage(2, 1, 0)))),
+    ]
+}
+
+#[tokio::test]
+async fn ask_question_opens_a_normalised_question_and_the_answer_continues_the_turn() {
+    let mut steps = question_scenario();
+    steps.extend(question_answer_steps(
+        true,
+        "Ответ владельца на вопрос \"Which banner color should I use?\": Red",
+    ));
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, payload, mut events) = wait_request(&mut bench.adapter, "question").await;
+    assert_eq!(request_id, "1:call_913335");
+    assert_eq!(payload["questions"][0]["id"], "q0");
+    assert_eq!(
+        payload["questions"][0]["text"],
+        "Which banner color should I use?"
+    );
+    assert_eq!(
+        payload["questions"][0]["options"],
+        json!([
+            {"label": "(Recommended) Blue", "description": null},
+            {"label": "Red", "description": null},
+            {"label": "Green", "description": null},
+        ])
+    );
+    assert_eq!(payload["questions"][0]["multi_select"], false);
+    assert_eq!(payload["questions"][0]["allow_custom"], true);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingAnswer,
+            ..
+        }
+    )));
+    assert!(matches!(
+        bench
+            .adapter
+            .deliver_decision(&request_id, &answer("q0", "Red"))
+            .await,
+        DecisionOutcome::Applied(_)
+    ));
+    events.extend(drain(&mut bench.adapter).await);
+    assert_eq!(finished(&events), vec![input.command_id]);
+    let requests = bench.fake.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|entry| entry["dir"] == "in" && entry["frame"]["method"] == "session/cancel")
+    );
+    let prompts = session_prompts(&requests);
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(
+        prompts[1]["frame"]["params"]["prompt"][0]["text"],
+        "Ответ владельца на вопрос \"Which banner color should I use?\": Red"
+    );
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn a_question_answered_after_the_turn_ended_is_expired() {
+    let mut steps = question_scenario();
+    steps.push(respond(4, end_turn(Some(usage(1, 1, 0)))));
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, mut events) = wait_request(&mut bench.adapter, "question").await;
+    events.extend(drain(&mut bench.adapter).await);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::RequestClosed { request_id: closed, .. } if closed == &request_id
+    )));
+    assert_eq!(finished(&events), vec![input.command_id]);
+    match bench
+        .adapter
+        .deliver_decision(&request_id, &answer("q0", "Red"))
+        .await
+    {
+        DecisionOutcome::NotApplied(reason) => assert_eq!(reason, "question expired"),
+        other => panic!("expected NotApplied, got {other:?}"),
+    }
+    assert_eq!(session_prompts(&bench.fake.requests()).len(), 1);
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn a_second_answer_to_the_same_question_is_not_applied() {
+    let mut steps = question_scenario();
+    steps.extend(question_answer_steps(
+        true,
+        "Ответ владельца на вопрос \"Which banner color should I use?\": Red",
+    ));
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, _) = wait_request(&mut bench.adapter, "question").await;
+    assert!(matches!(
+        bench
+            .adapter
+            .deliver_decision(&request_id, &answer("q0", "Red"))
+            .await,
+        DecisionOutcome::Applied(_)
+    ));
+    assert!(matches!(
+        bench
+            .adapter
+            .deliver_decision(&request_id, &answer("q0", "Green"))
+            .await,
+        DecisionOutcome::NotApplied(_)
+    ));
+    let requests = bench.fake.requests();
+    let prompts = session_prompts(&requests);
+    assert_eq!(prompts.len(), 2, "the second answer sends nothing");
+    drain(&mut bench.adapter).await;
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn refusing_a_question_cancels_and_never_sends_the_continuation_prompt() {
+    let mut steps = question_scenario();
     steps.push(Script::notification("session/cancel"));
     steps.push(respond(4, cancelled(Some(usage(1, 1, 0)))));
     let mut bench = Bench::new(
@@ -1588,9 +2034,93 @@ async fn ask_question_cancels_with_a_diagnostic_instead_of_hanging() {
         "bypass",
     );
     bench.start().await;
-    let input = send(
-        "Before doing anything, ask me a clarifying question with options: which banner color should I use — red, green or blue? Use the question tool. Do not run any commands.",
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, _) = wait_request(&mut bench.adapter, "question").await;
+    bench.adapter.refuse_request(&request_id, "no").await;
+    let events = drain(&mut bench.adapter).await;
+    assert_eq!(finished(&events), vec![input.command_id]);
+    let requests = bench.fake.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|entry| entry["dir"] == "in" && entry["frame"]["method"] == "session/cancel")
     );
+    assert_eq!(
+        session_prompts(&requests).len(),
+        1,
+        "refusal never starts a prompt"
+    );
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn process_death_between_cancel_and_the_continuation_echo_is_undetermined() {
+    let mut steps = question_scenario();
+    steps.push(Script::notification("session/cancel"));
+    steps.push(respond(4, cancelled(Some(usage(1, 1, 0)))));
+    steps.push(Step::Die {
+        code: 1,
+        kill: false,
+    });
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, _) = wait_request(&mut bench.adapter, "question").await;
+    assert!(matches!(
+        bench
+            .adapter
+            .deliver_decision(&request_id, &answer("q0", "Red"))
+            .await,
+        DecisionOutcome::Undetermined
+    ));
+    let events = drain(&mut bench.adapter).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::ProcessExited { .. }))
+    );
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
+async fn a_malformed_question_is_a_diagnostic_and_a_cancel() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 4),
+        Script::send(user_chunk(QUESTION_PROMPT)),
+        Script::send(tool_call("call_bad", "ask_question", json!({}))),
+        Script::send(tool_update("call_bad", "pending", None)),
+        Script::notification("session/cancel"),
+        respond(4, cancelled(Some(usage(1, 1, 0)))),
+    ];
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
     assert!(matches!(
         bench.adapter.transmit(&input, &bench.group).await,
         TransmitOutcome::Accepted(_)
@@ -1599,10 +2129,14 @@ async fn ask_question_cancels_with_a_diagnostic_instead_of_hanging() {
     assert!(events.iter().any(|event| matches!(
         event,
         AdapterEvent::Diagnostic {
-            kind: "antigravity_questions_unavailable",
+            kind: "antigravity_question_invalid",
             required: false,
             ..
         }
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::RequestOpened { kind, .. } if kind == "question"
     )));
     assert!(
         bench
@@ -1611,7 +2145,6 @@ async fn ask_question_cancels_with_a_diagnostic_instead_of_hanging() {
             .iter()
             .any(|entry| entry["dir"] == "in" && entry["frame"]["method"] == "session/cancel")
     );
-    assert_eq!(finished(&events), vec![input.command_id]);
     bench.close().await;
 }
 
@@ -1805,5 +2338,191 @@ async fn a_late_cancelled_response_clears_the_forced_close_timer() {
             .any(|event| matches!(event, AdapterEvent::ProcessExited { .. }))
     );
     assert!(!bench.fake.pids().is_empty(), "live turn keeps the process");
+    bench.close().await;
+}
+
+// --- задача 3: перезапуск между ходами для режима и инструкций ---
+
+fn boots(fake: &antigravity::Fake) -> Vec<Value> {
+    fake.entries()
+        .into_iter()
+        .filter(|entry| entry["boot"] == true)
+        .collect()
+}
+
+fn restart_script(session_id: &str) -> Script {
+    let mut resumed = evidence_result("p1-diagnostics.jsonl", 3);
+    resumed["sessionId"] = json!(session_id);
+    Script {
+        steps: vec![
+            init_step(),
+            Script::expect("session/list", session_list(&[session_id])),
+            Script::expect("session/resume", resumed),
+            set_model_step(),
+            set_effort_step(),
+            deferred("session/prompt", 4),
+            Script::send(user_chunk("after restart")),
+            respond(4, end_turn(Some(usage(1, 1, 0)))),
+        ],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn mode_and_instructions_restart_the_process_between_turns() {
+    let mut bench = Bench::new(
+        Script {
+            steps: handshake(),
+            ..Default::default()
+        },
+        "",
+        "",
+        "owner",
+    );
+    bench.spec.native_conversation_id = None;
+    let started = bench.start().await;
+    let first_pid = started.cli_pid;
+    let session_id = started.native_conversation_id.clone();
+    bench.fake.rewrite(restart_script(&session_id));
+
+    let mut input = send("after restart");
+    let mut next_instructions = instructions();
+    next_instructions.text = "new canterlot append".into();
+    input.settings = Some(SettingsChange {
+        permission_mode: Some("bypass".into()),
+        instructions: Some(next_instructions),
+        ..Default::default()
+    });
+    let outcome = bench.adapter.transmit(&input, &bench.group).await;
+    assert!(
+        matches!(outcome, TransmitOutcome::Accepted(_)),
+        "transmit failed; boots={:?} requests={:?}",
+        boots(&bench.fake),
+        bench.fake.requests()
+    );
+    let events = drain(&mut bench.adapter).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::CliRestarted { cli_pid, .. } if *cli_pid != first_pid
+    )));
+    assert_eq!(finished(&events), vec![input.command_id]);
+    assert_eq!(bench.adapter.session().unwrap().session_id, session_id);
+
+    let booted = boots(&bench.fake);
+    assert_eq!(booted.len(), 2, "the process was replaced once");
+    let args: Vec<&str> = booted[1]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(args.contains(&"--dangerously-skip-permissions"));
+    let requests = bench.fake.requests();
+    let resume = calls(&requests, "session/resume");
+    assert_eq!(resume.len(), 1);
+    assert_eq!(resume[0]["frame"]["params"]["sessionId"], session_id);
+    assert_eq!(
+        resume[0]["frame"]["params"]["_meta"]["antigravity"]["systemPrompt"]["append"],
+        "new canterlot append"
+    );
+    assert!(
+        calls(&requests, "session/new").len() == 1,
+        "resume, not a new session"
+    );
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn settings_never_restart_the_process_in_the_middle_of_a_turn() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 4),
+        Script::send(user_chunk("long")),
+    ];
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "owner",
+    );
+    bench.start().await;
+    let first = send("long");
+    assert!(matches!(
+        bench.adapter.transmit(&first, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    bench.fake.rewrite(Script {
+        steps: handshake(),
+        ..Default::default()
+    });
+    let mut second = send("later");
+    second.settings = Some(SettingsChange {
+        permission_mode: Some("bypass".into()),
+        ..Default::default()
+    });
+    assert!(matches!(
+        bench.adapter.transmit(&second, &bench.group).await,
+        TransmitOutcome::Rejected(reason) if reason == "turn_active"
+    ));
+    assert_eq!(boots(&bench.fake).len(), 1);
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn a_quota_error_after_the_echo_is_a_reached_limit_and_a_failed_turn() {
+    use canterlot_worker::adapter::{LimitFact, LimitWindow};
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 4),
+        Script::send(user_chunk("quota")),
+        respond_error(
+            4,
+            json!({"code": -32603, "message": "Individual quota reached for gemini-3.8-flash-high. Resets in 2h 15m"}),
+        ),
+    ];
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let input = send("quota");
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let events = drain(&mut bench.adapter).await;
+    assert_eq!(finished(&events), vec![input.command_id]);
+    assert!(kinds(&events).contains(&BlockKind::Error));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Limit(LimitFact::Reached {
+                window: LimitWindow::FiveHour,
+                resets_at_ms: Some(_),
+            })
+        )),
+        "quota text becomes Limit(Reached): {events:?}"
+    );
+    let run = events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::RunFinished {
+                context_window_tokens,
+                ..
+            } => Some(*context_window_tokens),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(run, 1_048_576);
     bench.close().await;
 }

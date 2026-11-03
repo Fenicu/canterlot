@@ -211,6 +211,18 @@ impl Tracker {
         self.turn.as_ref().map(|turn| turn.command_id)
     }
 
+    /// Сколько prompt-ответов хода ещё не пришло.
+    pub fn outstanding(&self) -> usize {
+        self.turn.as_ref().map_or(0, |turn| turn.outstanding)
+    }
+
+    /// Вопрос отвечён: ход ждёт служебный prompt и не закрывается ответом cancel.
+    pub fn expect_continuation(&mut self, expected: bool) {
+        if let Some(turn) = self.turn.as_mut() {
+            turn.continuation = expected;
+        }
+    }
+
     pub fn target(&self) -> Option<Target> {
         if self.turn.is_some() {
             Some(Target::Turn)
@@ -761,6 +773,31 @@ mod tests {
         tracker.begin(first);
         tracker.register(4, first, PromptKind::Turn);
         tracker.forget_command(first);
+        assert!(!tracker.has_turn());
+    }
+
+    // §6: ответ на вопрос ждёт cancel, затем служебный prompt того же хода.
+    #[test]
+    fn a_question_continuation_keeps_the_turn_open_until_the_service_prompt() {
+        let command = Uuid::now_v7();
+        let mut tracker = Tracker::new();
+        tracker.begin(command);
+        tracker.register(4, command, PromptKind::Turn);
+        tracker.expect_echo(command, "ask");
+        tracker.on_echo("ask");
+        tracker.expect_continuation(true);
+        assert!(
+            tracker
+                .on_response(4, &Ok(json!({"stopReason": "cancelled"})))
+                .is_none()
+        );
+        assert!(tracker.has_turn());
+        assert_eq!(tracker.outstanding(), 0);
+        tracker.expect_continuation(false);
+        tracker.register(5, command, PromptKind::Turn);
+        assert_eq!(tracker.outstanding(), 1);
+        let (closed, ..) = closed(tracker.on_response(5, &Ok(usage(2, 1, 0))));
+        assert_eq!(closed, command);
         assert!(!tracker.has_turn());
     }
 

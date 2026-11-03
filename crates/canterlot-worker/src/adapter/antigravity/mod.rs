@@ -5,9 +5,11 @@
 pub mod catalog;
 pub mod events;
 pub mod input;
+pub mod limits;
 pub mod process;
 #[cfg(feature = "synthetic-adapter")]
 pub mod replay;
+pub mod requests;
 pub mod rpc;
 pub mod session;
 pub mod version;
@@ -15,22 +17,24 @@ pub mod version;
 pub use self::catalog::AntigravityCatalog;
 
 use self::{
-    events::Translator,
+    events::{QuestionCall, Translator},
     input::{Effect, PromptKind, Target, Tracker},
     process::{PrepareError, Process, StdoutLine},
+    requests::{Answer, PendingKind, Requests},
     rpc::{Incoming, RpcClient, RpcError, RpcId},
     session::{SessionError, SessionInfo},
 };
 use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
-        CompactOutcome, DecisionOutcome, InstructionSpec, InterruptOutcome, ModelUsage, Phase,
-        Proof, StartSpec, Started, SteerOutcome, Support, Transmission, TransmitOutcome,
+        CompactOutcome, DecisionOutcome, DecisionProof, InstructionSpec, InterruptOutcome,
+        ModelUsage, Phase, Proof, SettingsChange, StartSpec, Started, SteerOutcome, Support,
+        Transmission, TransmitOutcome,
     },
     config::AntigravityConfig,
     containment::Containment,
 };
-use canterlot_proto::requests::DecisionPayload;
+use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -45,6 +49,10 @@ const KILL_WAIT: Duration = Duration::from_secs(2);
 const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 const TURN_STALL: Duration = Duration::from_secs(60);
 const ERROR_TEXT_BYTES: usize = 512;
+
+/// Вопросы реализованы, но включаются после живой проверки cancel + служебный
+/// prompt (§11). Смена этого значения — единственное, что нужно для включения.
+const QUESTIONS_CAPABILITY: Support = Support::Unavailable("stage0");
 
 pub struct AntigravityAdapter {
     cfg: AntigravityConfig,
@@ -63,9 +71,14 @@ pub struct AntigravityAdapter {
     native_conversation_id: String,
     translator: Option<Translator>,
     tracker: Tracker,
+    requests: Requests,
     responses: HashMap<i64, Result<Value, RpcError>>,
     current_model: String,
     current_effort: String,
+    permission_mode: String,
+    spec: Option<StartSpec>,
+    generation: u64,
+    limit_reported: bool,
     stall_at: Option<Instant>,
     eof: bool,
     exited: bool,
@@ -98,9 +111,14 @@ impl AntigravityAdapter {
             native_conversation_id: String::new(),
             translator: None,
             tracker: Tracker::new(),
+            requests: Requests::new(0),
             responses: HashMap::new(),
             current_model: String::new(),
             current_effort: String::new(),
+            permission_mode: String::new(),
+            spec: None,
+            generation: 0,
+            limit_reported: false,
             stall_at: None,
             eof: false,
             exited: false,
@@ -253,8 +271,8 @@ impl AntigravityAdapter {
                     }
                     true
                 }
-                Incoming::ServerRequest { id, method, .. } => {
-                    self.handle_server_request(&id, &method).await;
+                Incoming::ServerRequest { id, method, params } => {
+                    self.handle_server_request(&id, &method, &params).await;
                     true
                 }
                 Incoming::Response { id, result } => {
@@ -291,14 +309,28 @@ impl AntigravityAdapter {
             self.events
                 .push_back(AdapterEvent::InputAccepted { command_id });
         }
+        if let Some(tool_call_id) = update.get("toolCallId").and_then(Value::as_str) {
+            self.requests.note_tool_frame(tool_call_id);
+        }
         let fed = match self.translator.as_mut() {
             Some(translator) => translator.feed(update),
             None => return,
         };
-        let cancel = fed.cancel;
-        self.events.extend(fed.events);
-        if cancel {
-            self.send_cancel().await;
+        let events::Fed { events, question } = fed;
+        if !self.limit_reported {
+            for event in &events {
+                if let AdapterEvent::BlockDelta { append, .. } = event
+                    && let Some(fact) = limits::reached_from_text(append, crate::machine::now_ms())
+                {
+                    self.limit_reported = true;
+                    self.events.push_back(AdapterEvent::Limit(fact));
+                    break;
+                }
+            }
+        }
+        self.events.extend(events);
+        if let Some(question) = question {
+            self.open_question(question).await;
         }
     }
 
@@ -307,21 +339,64 @@ impl AntigravityAdapter {
         let _ = self.write_message(notification).await;
     }
 
-    async fn handle_server_request(&mut self, id: &RpcId, method: &str) {
+    async fn handle_server_request(&mut self, id: &RpcId, method: &str, params: &Value) {
         if method == "session/request_permission" {
-            // Задача 3 откроет настоящий запрос владельцу; сейчас отказ, чтобы ход не завис.
-            self.diagnostic("antigravity_permission_denied", false);
-            let reply = json!({
-                "jsonrpc": "2.0",
-                "id": id.to_value(),
-                "result": {"outcome": {"outcome": "selected", "optionId": "deny"}},
-            });
-            let _ = self.write_message(reply).await;
+            match self
+                .requests
+                .open_permission(id.clone(), params, "orchestrator")
+            {
+                Ok((request_id, payload)) => {
+                    if let Some(translator) = self.translator.as_mut() {
+                        translator.permission_open = true;
+                    }
+                    self.events.push_back(AdapterEvent::RequestOpened {
+                        request_id,
+                        kind: "permission".into(),
+                        payload,
+                    });
+                    self.events.push_back(AdapterEvent::Phase {
+                        phase: Phase::AwaitingPermission,
+                        tool_name: None,
+                        summary: None,
+                    });
+                }
+                Err(_) => {
+                    // Без toolCallId карточки нет: отказ, чтобы ход не завис.
+                    self.diagnostic("antigravity_permission_invalid", false);
+                    let _ = self.write_message(permission_reply(id, "deny")).await;
+                }
+            }
         } else {
             self.diagnostic("unsupported_server_request", false);
             let mut reply = RpcClient::error(id, -32601, "Method not found");
             reply["jsonrpc"] = json!("2.0");
             let _ = self.write_message(reply).await;
+        }
+    }
+
+    async fn open_question(&mut self, call: QuestionCall) {
+        match self
+            .requests
+            .open_question(&call.tool_call_id, &call.raw_input, "orchestrator")
+        {
+            Ok((request_id, payload)) => {
+                self.events.push_back(AdapterEvent::RequestOpened {
+                    request_id,
+                    kind: "question".into(),
+                    payload,
+                });
+                self.events.push_back(AdapterEvent::Phase {
+                    phase: Phase::AwaitingAnswer,
+                    tool_name: None,
+                    summary: None,
+                });
+            }
+            Err(_) => {
+                // Пустой или неразбираемый questions[]: карточка не открывается,
+                // ход прерывается, чтобы не висеть без stopReason.
+                self.diagnostic("antigravity_question_invalid", false);
+                self.send_cancel().await;
+            }
         }
     }
 
@@ -361,8 +436,12 @@ impl AntigravityAdapter {
 
     fn close_turn(&mut self, command_id: Uuid, usage: input::Usage, failed: Option<String>) {
         self.close_blocks();
-        if let Some(message) = failed {
-            self.error_block(message, Some(command_id));
+        self.close_open_requests("turn_ended");
+        if let Some(message) = &failed {
+            if let Some(fact) = limits::reached_from_text(message, crate::machine::now_ms()) {
+                self.events.push_back(AdapterEvent::Limit(fact));
+            }
+            self.error_block(message.clone(), Some(command_id));
         }
         let context_tokens = usage.last_input;
         let usage: Vec<ModelUsage> = usage.model_usage(&self.current_model).into_iter().collect();
@@ -370,13 +449,25 @@ impl AntigravityAdapter {
             input_command_id: command_id,
             usage,
             context_tokens,
-            context_window_tokens: 0,
+            context_window_tokens: limits::context_window(&self.current_model),
         });
         self.events.push_back(AdapterEvent::Phase {
             phase: Phase::AwaitingInput,
             tool_name: None,
             summary: None,
         });
+    }
+
+    fn close_open_requests(&mut self, reason: &str) {
+        for request_id in self.requests.expire() {
+            self.events.push_back(AdapterEvent::RequestClosed {
+                request_id,
+                reason: reason.into(),
+            });
+        }
+        if let Some(translator) = self.translator.as_mut() {
+            translator.permission_open = false;
+        }
     }
 
     fn error_block(&mut self, text: String, command_id: Option<Uuid>) {
@@ -410,6 +501,7 @@ impl AntigravityAdapter {
         self.exited = true;
         self.exit_reported = true;
         self.stall_at = None;
+        self.requests.drop_open();
         if let Some(Effect::CompactDone { ok }) = self.tracker.on_eof() {
             self.events.push_back(AdapterEvent::Compacted { ok });
         }
@@ -436,6 +528,7 @@ impl AntigravityAdapter {
         };
         self.exited = true;
         self.exit_reported = true;
+        self.requests.drop_open();
         if let Some(Effect::CompactDone { ok }) = self.tracker.on_eof() {
             self.events.push_back(AdapterEvent::Compacted { ok });
         }
@@ -517,15 +610,192 @@ impl AntigravityAdapter {
                 .map_err(|_| "effort_rejected".to_string())?;
             self.current_effort = effort.to_owned();
         }
-        if change.permission_mode.is_some()
-            || change
-                .instructions
-                .as_ref()
-                .is_some_and(|next| !next.same_effect(&self.instructions))
-        {
-            // Смена режима и пресета — перезапуск между ходами (задача 4).
-            self.diagnostic("settings_restart_required", false);
+        Ok(())
+    }
+
+    async fn restart_for_settings(
+        &mut self,
+        change: &SettingsChange,
+        group: &dyn Containment,
+    ) -> Result<(), &'static str> {
+        let Some(mut spec) = self.spec.clone() else {
+            return Err("settings_unavailable");
+        };
+        let native = self.session_id();
+        let previous = (
+            self.permission_mode.clone(),
+            self.instructions.clone(),
+            self.current_model.clone(),
+            self.current_effort.clone(),
+        );
+        let next_mode = change
+            .permission_mode
+            .clone()
+            .unwrap_or_else(|| previous.0.clone());
+        if process::launch_args(&self.exec_dir, &next_mode).is_err() {
+            return Err("settings_unavailable");
         }
+        let next_instructions = change
+            .instructions
+            .clone()
+            .unwrap_or_else(|| previous.1.clone());
+        let next_model = change.model.clone().unwrap_or_else(|| previous.2.clone());
+        let next_effort = change.effort.clone().unwrap_or_else(|| previous.3.clone());
+        self.stop_for_restart().await;
+        self.reset_connection();
+        self.instructions = next_instructions.clone();
+        self.permission_mode = next_mode.clone();
+        match self
+            .launch_resumed(
+                &native,
+                &next_mode,
+                &next_instructions,
+                &next_model,
+                &next_effort,
+                group,
+            )
+            .await
+        {
+            Ok(()) => {
+                spec.native_conversation_id = Some(native);
+                spec.permission_mode = next_mode;
+                spec.instructions = next_instructions;
+                spec.model = next_model;
+                spec.effort = next_effort;
+                self.spec = Some(spec);
+                let proc = self.proc.as_ref().expect("restart spawned a process");
+                self.events.push_back(AdapterEvent::CliRestarted {
+                    cli_pid: proc.pid,
+                    cli_start_ticks: proc.start_ticks,
+                });
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    kind = "antigravity_restart_failed",
+                    reason = ?error,
+                    "antigravity restart failed; trying the previous settings"
+                );
+                self.stop_for_restart().await;
+                self.reset_connection();
+                self.instructions = previous.1.clone();
+                self.permission_mode = previous.0.clone();
+                if self
+                    .launch_resumed(
+                        &native,
+                        &previous.0,
+                        &previous.1,
+                        &previous.2,
+                        &previous.3,
+                        group,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    let proc = self.proc.as_ref().expect("fallback spawned a process");
+                    self.events.push_back(AdapterEvent::CliRestarted {
+                        cli_pid: proc.pid,
+                        cli_start_ticks: proc.start_ticks,
+                    });
+                } else {
+                    self.exited = true;
+                    self.exit_reported = true;
+                    self.events.push_back(AdapterEvent::ProcessExited {
+                        code: None,
+                        signal: None,
+                    });
+                }
+                Err("settings_restart_failed")
+            }
+        }
+    }
+
+    async fn stop_for_restart(&mut self) {
+        let Some(mut proc) = self.proc.take() else {
+            return;
+        };
+        proc.close_stdin();
+        if timeout(self.stop_grace, proc.wait()).await.is_err() {
+            proc.kill_now();
+            let _ = timeout(KILL_WAIT, proc.wait()).await;
+        }
+    }
+
+    fn reset_connection(&mut self) {
+        self.rpc = RpcClient::new();
+        self.responses.clear();
+        self.requests = Requests::new(self.generation);
+        self.translator = None;
+        self.eof = false;
+        self.exited = false;
+        self.exit_reported = false;
+        self.stall_at = None;
+        self.limit_reported = false;
+    }
+
+    async fn launch_resumed(
+        &mut self,
+        native: &str,
+        mode: &str,
+        instructions: &InstructionSpec,
+        model: &str,
+        effort: &str,
+        group: &dyn Containment,
+    ) -> Result<(), AdapterError> {
+        let pinned = process::prepare_pinned(&self.cfg)
+            .await
+            .map_err(|_| AdapterError::StartFailed("cli_not_found"))?;
+        self.proc = Some(
+            Process::spawn(
+                &pinned.executable,
+                &self.exec_dir,
+                &self.workdir,
+                mode,
+                group,
+            )
+            .map_err(|_| AdapterError::StartFailed("cli_launch_failed"))?,
+        );
+        let timeout = self.ready_deadline.max(STEP);
+        let proc = self.proc.as_mut().expect("spawned above");
+        session::initialize(proc, &mut self.rpc, timeout)
+            .await
+            .map_err(Self::session_error)?;
+        let proc = self.proc.as_mut().expect("process checked above");
+        let found = session::contains_session(proc, &mut self.rpc, native, timeout)
+            .await
+            .map_err(Self::session_error)?;
+        if !found {
+            return Err(AdapterError::StartFailed("conversation not found"));
+        }
+        let proc = self.proc.as_mut().expect("process checked above");
+        let info = session::resume(proc, &mut self.rpc, native, instructions, timeout)
+            .await
+            .map_err(Self::session_error)?;
+        if !matches!(model, "" | "default") {
+            let proc = self.proc.as_mut().expect("process checked above");
+            session::set_model(proc, &mut self.rpc, &info.session_id, model, timeout)
+                .await
+                .map_err(|_| AdapterError::StartFailed("model_rejected"))?;
+        }
+        if !effort.is_empty() {
+            let proc = self.proc.as_mut().expect("process checked above");
+            session::set_effort(proc, &mut self.rpc, &info.session_id, effort, timeout)
+                .await
+                .map_err(|_| AdapterError::StartFailed("effort_rejected"))?;
+        }
+        self.native_conversation_id = native.to_owned();
+        self.current_model = info
+            .current_model
+            .clone()
+            .filter(|_| matches!(model, "" | "default"))
+            .unwrap_or_else(|| model.to_owned());
+        self.current_effort = if effort.is_empty() {
+            info.current_effort.clone().unwrap_or_default()
+        } else {
+            effort.to_owned()
+        };
+        self.translator = Some(Translator::new(&self.current_model));
+        self.session = Some(info);
         Ok(())
     }
 
@@ -558,6 +828,28 @@ impl AntigravityAdapter {
     }
 }
 
+fn permission_reply(id: &RpcId, option: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id.to_value(),
+        "result": {"outcome": {"outcome": "selected", "optionId": option}},
+    })
+}
+
+fn permission_applied(option: &str) -> DecisionOutcome {
+    DecisionOutcome::Applied(DecisionProof {
+        proof_kind: "agy_acp_permission_frame".into(),
+        payload: json!({"option": option}),
+    })
+}
+
+fn deny_decision(message: &str) -> DecisionPayload {
+    DecisionPayload::Permission {
+        behavior: PermissionBehavior::Deny,
+        message: Some(message.to_owned()),
+    }
+}
+
 enum EchoEnd {
     Accepted,
     Rejected(String),
@@ -571,8 +863,8 @@ impl Adapter for AntigravityAdapter {
             streaming: Support::Supported,
             resume: Support::Supported,
             interrupt: Support::Supported,
-            approvals: Support::Unavailable("antigravity: task 3"),
-            questions: Support::Unavailable("antigravity: task 3"),
+            approvals: Support::Supported,
+            questions: QUESTIONS_CAPABILITY.clone(),
             background_work: Support::Unavailable("antigravity: P8"),
             interrupt_keeps_process: true,
         }
@@ -621,6 +913,11 @@ impl Adapter for AntigravityAdapter {
         }
         self.instructions = spec.instructions.clone();
         self.workdir = spec.workdir.clone();
+        self.permission_mode = spec.permission_mode.clone();
+        self.generation = spec.generation;
+        self.requests = Requests::new(spec.generation);
+        self.spec = Some(spec.clone());
+        self.limit_reported = false;
         // Аргументы проверяются до spawn: неверный режим не оставляет процесс.
         if process::launch_args(&self.exec_dir, &spec.permission_mode).is_err() {
             return Err(AdapterError::StartFailed("unknown_permission_mode"));
@@ -679,16 +976,25 @@ impl Adapter for AntigravityAdapter {
         input::prompt_text(input).map(|_| ())
     }
 
-    async fn transmit(
-        &mut self,
-        input: &Transmission,
-        _group: &dyn Containment,
-    ) -> TransmitOutcome {
+    async fn transmit(&mut self, input: &Transmission, group: &dyn Containment) -> TransmitOutcome {
         if self.proc.is_none() || self.exited || self.eof {
             return TransmitOutcome::Undetermined;
         }
         if self.tracker.has_turn() {
             return TransmitOutcome::Rejected("turn_active".into());
+        }
+        if let Some(change) = input.settings.as_ref()
+            && (change
+                .permission_mode
+                .as_deref()
+                .is_some_and(|mode| mode != self.permission_mode)
+                || change
+                    .instructions
+                    .as_ref()
+                    .is_some_and(|next| !next.same_effect(&self.instructions)))
+            && let Err(reason) = self.restart_for_settings(change, group).await
+        {
+            return TransmitOutcome::Rejected(reason.into());
         }
         if let Err(reason) = self.apply_settings(input.settings.as_ref()).await {
             return TransmitOutcome::Rejected(reason);
@@ -728,16 +1034,140 @@ impl Adapter for AntigravityAdapter {
 
     async fn deliver_decision(
         &mut self,
-        _request_id: &str,
-        _decision: &DecisionPayload,
+        request_id: &str,
+        decision: &DecisionPayload,
     ) -> DecisionOutcome {
-        DecisionOutcome::NotApplied("antigravity: task 3".into())
+        let Some(pending) = self.requests.pending(request_id) else {
+            return if self.requests.was_expired(request_id) {
+                DecisionOutcome::NotApplied("question expired".into())
+            } else {
+                DecisionOutcome::NotApplied("request_not_pending".into())
+            };
+        };
+        if pending.answered {
+            return DecisionOutcome::NotApplied("request_not_pending".into());
+        }
+        let answer = match self.requests.answer(request_id, decision) {
+            Ok(answer) => answer,
+            Err(reason) => return DecisionOutcome::NotApplied(reason.into()),
+        };
+        if self.eof || self.exited || self.proc.is_none() {
+            return DecisionOutcome::Undetermined;
+        }
+        match answer {
+            Answer::Permission { rpc_id, option } => {
+                if !self.write_message(permission_reply(&rpc_id, option)).await {
+                    return DecisionOutcome::Undetermined;
+                }
+                if let Some(translator) = self.translator.as_mut() {
+                    translator.permission_open = false;
+                }
+                let limit = Instant::now() + self.deadline;
+                loop {
+                    if self.requests.take_resolved(request_id) {
+                        return permission_applied(option);
+                    }
+                    if self.eof || self.exited {
+                        return DecisionOutcome::Undetermined;
+                    }
+                    // Ответ prompt закрыл ход: он тоже доказывает, что ответ дошёл.
+                    if !self.tracker.has_turn() {
+                        return permission_applied(option);
+                    }
+                    if timeout_at(limit, self.pump_once()).await.is_err() {
+                        return DecisionOutcome::Undetermined;
+                    }
+                }
+            }
+            Answer::Question { text } => {
+                let Some(command_id) = self.tracker.turn_command() else {
+                    return DecisionOutcome::NotApplied("question expired".into());
+                };
+                self.tracker.expect_continuation(true);
+                self.send_cancel().await;
+                let limit = Instant::now() + self.deadline;
+                loop {
+                    if self.eof || self.exited {
+                        return DecisionOutcome::Undetermined;
+                    }
+                    if !self.tracker.has_turn() {
+                        return DecisionOutcome::NotApplied("question expired".into());
+                    }
+                    if self.tracker.outstanding() == 0 {
+                        break;
+                    }
+                    if timeout_at(limit, self.pump_once()).await.is_err() {
+                        return DecisionOutcome::Undetermined;
+                    }
+                }
+                self.tracker.expect_continuation(false);
+                let params = input::prompt_params(&self.session_id(), &text);
+                let (id, message) = self.rpc.request_v2("session/prompt", params);
+                self.tracker.register(id, command_id, PromptKind::Turn);
+                self.tracker.expect_echo(command_id, &text);
+                self.tracker.await_echo(command_id);
+                if !self.write_message(message).await {
+                    self.tracker.forget_command(command_id);
+                    self.rpc.forget(id);
+                    return DecisionOutcome::Undetermined;
+                }
+                let limit = Instant::now() + self.deadline;
+                match self.wait_echo(command_id, limit).await {
+                    EchoEnd::Accepted => DecisionOutcome::Applied(DecisionProof {
+                        proof_kind: "agy_acp_question_continuation".into(),
+                        payload: json!({"tool_call_id": request_id, "text_bytes": text.len()}),
+                    }),
+                    EchoEnd::Rejected(_) => {
+                        DecisionOutcome::NotApplied("continuation_rejected".into())
+                    }
+                    EchoEnd::Undetermined => DecisionOutcome::Undetermined,
+                }
+            }
+        }
+    }
+
+    async fn refuse_request(&mut self, request_id: &str, message: &str) {
+        let Some(pending) = self.requests.pending(request_id) else {
+            return;
+        };
+        if pending.answered {
+            return;
+        }
+        let kind = pending.kind.clone();
+        match kind {
+            PendingKind::Permission { .. } => {
+                let Ok(Answer::Permission { rpc_id, option }) =
+                    self.requests.answer(request_id, &deny_decision(message))
+                else {
+                    return;
+                };
+                let _ = self.write_message(permission_reply(&rpc_id, option)).await;
+                self.requests.remove(request_id);
+            }
+            PendingKind::Question { .. } => {
+                self.requests.remove(request_id);
+                // Отказ вопроса только отменяет живой ход; prompt не отправляется.
+                if self.tracker.has_turn() && !self.eof && !self.exited {
+                    self.send_cancel().await;
+                }
+            }
+        }
     }
 
     async fn interrupt(&mut self) -> InterruptOutcome {
         let Some(target) = self.tracker.target() else {
             return InterruptOutcome::NotApplicable;
         };
+        for request_id in self.requests.open_ids() {
+            self.events.push_back(AdapterEvent::RequestClosed {
+                request_id,
+                reason: "interrupted".into(),
+            });
+        }
+        self.requests.drop_open();
+        if let Some(translator) = self.translator.as_mut() {
+            translator.permission_open = false;
+        }
         self.send_cancel().await;
         let limit = Instant::now() + self.interrupt_deadline;
         loop {
@@ -871,6 +1301,7 @@ impl Adapter for AntigravityAdapter {
         group: &dyn Containment,
     ) -> Result<(), AdapterError> {
         self.stall_at = None;
+        self.requests.drop_open();
         let Some(mut proc) = self.proc.take() else {
             return Ok(());
         };
@@ -919,13 +1350,11 @@ mod tests {
         assert_eq!(capabilities.streaming, Support::Supported);
         assert_eq!(capabilities.resume, Support::Supported);
         assert_eq!(capabilities.interrupt, Support::Supported);
-        assert_eq!(
-            capabilities.approvals,
-            Support::Unavailable("antigravity: task 3")
-        );
+        assert_eq!(capabilities.approvals, Support::Supported);
         assert_eq!(
             capabilities.questions,
-            Support::Unavailable("antigravity: task 3")
+            Support::Unavailable("stage0"),
+            "questions stay behind the live-check capability switch"
         );
         assert_eq!(
             capabilities.background_work,

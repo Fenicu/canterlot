@@ -27,13 +27,18 @@ struct ToolState {
     raw_input: Value,
 }
 
+/// Вызов `ask_question`: адаптер нормализует вопросы и открывает карточку.
+#[derive(Clone, Debug)]
+pub struct QuestionCall {
+    pub tool_call_id: String,
+    pub raw_input: Value,
+}
+
 /// Что просит сделать кадр помимо событий.
 #[derive(Default)]
 pub struct Fed {
     pub events: Vec<AdapterEvent>,
-    /// `ask_question` без поверхности: адаптер шлёт `session/cancel` (задача 3
-    /// заменит это настоящим вопросом).
-    pub cancel: bool,
+    pub question: Option<QuestionCall>,
 }
 
 pub struct Translator {
@@ -197,6 +202,7 @@ impl Translator {
             summary: Some(summary.clone()),
             approved_by: None,
         };
+        let question_input = raw_input.clone();
         self.tools.insert(
             id.to_owned(),
             ToolState {
@@ -209,12 +215,9 @@ impl Translator {
         );
         self.held.hold(id.to_owned(), block_id, started);
         if name == "ask_question" {
-            fed.cancel = true;
-            fed.events.push(AdapterEvent::Diagnostic {
-                kind: "antigravity_questions_unavailable",
-                event_type: "antigravity_questions_unavailable".into(),
-                required: false,
-                field_names: Vec::new(),
+            fed.question = Some(QuestionCall {
+                tool_call_id: id.to_owned(),
+                raw_input: question_input,
             });
         }
     }
@@ -664,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn ask_question_asks_for_a_cancel_and_a_diagnostic() {
+    fn ask_question_is_exposed_to_the_adapter_as_a_question_call() {
         let mut translator = Translator::new("m");
         translator.begin_turn(None);
         let fed = translator.feed(&tool(
@@ -672,12 +675,13 @@ mod tests {
             "ask_question",
             json!({"questions": [{"question": "q", "options": ["a"]}]}),
         ));
-        assert!(fed.cancel);
-        assert!(fed.events.iter().any(|event| matches!(
+        let question = fed.question.expect("question call");
+        assert_eq!(question.tool_call_id, "call_1");
+        assert_eq!(question.raw_input["questions"][0]["question"], "q");
+        assert!(!fed.events.iter().any(|event| matches!(
             event,
             AdapterEvent::Diagnostic {
                 kind: "antigravity_questions_unavailable",
-                required: false,
                 ..
             }
         )));

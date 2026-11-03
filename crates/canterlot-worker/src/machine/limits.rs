@@ -190,7 +190,7 @@ struct PollState {
     rate_limited: u32,
 }
 
-pub(super) fn rfc3339_ms(text: &str) -> Option<u64> {
+pub(crate) fn rfc3339_ms(text: &str) -> Option<u64> {
     use toml::value::{Datetime, Offset};
     let datetime: Datetime = text.parse().ok()?;
     let date = datetime.date?;

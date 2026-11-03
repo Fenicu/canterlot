@@ -40,13 +40,16 @@ impl AntigravityCatalog {
             models: self
                 .models
                 .iter()
-                .map(|entry| ModelCatalog {
-                    id: entry.id.clone(),
-                    title: entry.title.clone(),
-                    // Переключатель effort не показывается до контрактного теста P14.
-                    efforts: Vec::new(),
-                    images: Some(false),
-                    context_window: None,
+                .map(|entry| {
+                    let window = super::limits::context_window(&entry.id);
+                    ModelCatalog {
+                        id: entry.id.clone(),
+                        title: entry.title.clone(),
+                        // Переключатель effort не показывается до контрактного теста P14.
+                        efforts: Vec::new(),
+                        images: Some(false),
+                        context_window: (window > 0).then_some(window),
+                    }
                 })
                 .collect(),
         }

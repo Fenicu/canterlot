@@ -523,6 +523,22 @@ impl Worker {
             idle_ticker.register("opencode", limits_interval);
             routes.insert("opencode".into(), codexbar(None));
         }
+        if let Some(cfg) = &config.antigravity {
+            // `/usage` идёт закреплённой копией из каталога данных воркера.
+            let mut cfg = cfg.clone();
+            cfg.data_dir = Some(config.data_dir.clone());
+            idle_ticker.register("antigravity", limits_interval);
+            routes.insert(
+                "antigravity".into(),
+                Arc::new(
+                    crate::adapter::antigravity::limits::AntigravityLimitsSource::new(
+                        cfg,
+                        limits_interval,
+                        live_limits.clone(),
+                    ),
+                ),
+            );
+        }
         let limits_source: Arc<dyn crate::machine::limits::LimitsSource> = if routes.is_empty() {
             default_source
         } else {

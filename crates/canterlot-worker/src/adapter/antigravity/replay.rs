@@ -27,6 +27,8 @@ pub struct Script {
     pub log: Option<PathBuf>,
     /// EOF stdin не завершает: проверка `Force`.
     pub ignore_eof: bool,
+    /// Ответ `agy -p /usage --output-format json`.
+    pub usage: Option<Value>,
 }
 
 impl Default for Script {
@@ -36,6 +38,7 @@ impl Default for Script {
             steps: Vec::new(),
             log: None,
             ignore_eof: false,
+            usage: None,
         }
     }
 }
@@ -280,6 +283,15 @@ pub fn main(args: Vec<String>) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     log.boot(&args);
+    // Бесквотный `/usage`: тот же бинарник, но без ACP-сессии и хода.
+    if args.iter().any(|arg| arg == "-p") && args.iter().any(|arg| arg == "/usage") {
+        let usage = script.usage.clone().unwrap_or_else(|| json!({}));
+        match serde_json::to_string(&usage) {
+            Ok(text) => println!("{text}"),
+            Err(_) => return ExitCode::from(70),
+        }
+        return ExitCode::SUCCESS;
+    }
     let stdin = std::io::stdin();
     let mut input = BufReader::new(stdin.lock());
     let mut output = std::io::stdout();
