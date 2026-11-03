@@ -191,7 +191,8 @@ export function patchChunk(
     xhr.addEventListener("abort", () => {
       cleanup();
       if (isProgressTimedOut) {
-        reject(new Error("Превышен таймаут прогресса загрузки"));
+        // Застой связи (смена Wi-Fi на сотовую): загрузчик продолжит с принятого хабом смещения.
+        reject(new NetworkError("Превышен таймаут прогресса загрузки"));
       } else {
         reject(new Error("Загрузка отменена"));
       }
