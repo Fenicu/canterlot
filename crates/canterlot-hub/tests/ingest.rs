@@ -2594,3 +2594,82 @@ async fn steered_input_gets_agent_confirmation_time(pool: PgPool) -> TestResult 
     assert_eq!((state.as_str(), confirmed), ("accepted", Some(505)));
     Ok(())
 }
+
+/// Исполнение кончилось смертью сопровождения: вливание, дошедшее до машины,
+/// становится неподтверждённым приёмом, не ушедшее — возвращает ввод в
+/// очередь. Ни одно не висит и не уходит второй раз.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn ended_execution_settles_its_open_steers(pool: PgPool) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let mut steers = Vec::new();
+    for (text, stored) in [("stored", true), ("unsent", false)] {
+        let queued = submit_input(
+            &pool,
+            SubmitInput {
+                owner_id: seed.owner_id,
+                conversation_id: seed.conversation_id,
+                idempotency_key: Uuid::now_v7().to_string(),
+                content: vec![ContentBlock::Text { text: text.into() }],
+                received_at: Utc::now(),
+                correlation_id: Uuid::now_v7(),
+                origin: None,
+            },
+        )
+        .await?;
+        let steer = Uuid::now_v7();
+        sqlx::query(
+            "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
+                                   kind, payload, target_command_id, delivery_state, dispatch_attempt,
+                                   dispatch_claimed_at)
+             values ($1, $2, $3, $4, 1, 'steer_input', '{}'::jsonb, $5,
+                     case when $6 then 'stored_on_machine' else 'pending' end, 0,
+                     case when $6 then now() end)",
+        )
+        .bind(steer)
+        .bind(seed.machine_id)
+        .bind(seed.conversation_id)
+        .bind(execution.execution_id)
+        .bind(queued.command_id)
+        .bind(stored)
+        .execute(&pool)
+        .await?;
+        steers.push((steer, queued.input_id));
+    }
+    let mut failed = execution_fact(execution.execution_id, execution.generation, "failed");
+    if let record_body::Body::ExecutionState(fact) = &mut failed {
+        fact.outcome = "supervisor_died".into();
+    }
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    execution_fact(execution.execution_id, execution.generation, "stopping"),
+                    failed,
+                ],
+            ),
+        )
+        .await?;
+    let mut states = Vec::new();
+    for (steer, input) in steers {
+        let (delivery, state): (String, String) = sqlx::query_as(
+            "select c.delivery_state, i.state from commands c, inputs i where c.id = $1 and i.id = $2",
+        )
+        .bind(steer)
+        .bind(input)
+        .fetch_one(&pool)
+        .await?;
+        states.push((delivery, state));
+    }
+    assert_eq!(
+        states,
+        vec![
+            ("completed".to_owned(), "acceptance_unconfirmed".to_owned()),
+            ("completed".to_owned(), "queued".to_owned()),
+        ]
+    );
+    Ok(())
+}
