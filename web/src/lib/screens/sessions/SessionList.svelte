@@ -307,7 +307,7 @@
       <EmptyState kind="machines" />
     {/if}
     {#if results && results.length === 0}
-      <EmptyState kind="search" onreset={resetSearch} />
+      <EmptyState kind="search" />
     {:else if ready && rows.length === 0 && !results}
       <EmptyState kind="sessions" />
     {:else if !ready}

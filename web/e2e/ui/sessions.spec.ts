@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions, type MockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect, fillContrast, test } from './fixtures';
@@ -110,7 +110,9 @@ test('search_without_results_offers_reset', async ({ page }) => {
   await page.getByRole('button', { name: 'Поиск', exact: true }).click();
   await page.getByRole('textbox', { name: 'Поиск сессий' }).fill('неттакого');
   await expect(page.getByText('Ничего не найдено')).toBeVisible();
-  await page.getByRole('button', { name: 'Сбросить' }).first().click();
+  // Сброс один: в строке поиска, без повтора под «Ничего не найдено».
+  await expect(page.getByRole('button', { name: 'Сбросить' })).toHaveCount(1);
+  await page.getByRole('button', { name: 'Сбросить' }).click();
   await expect(page.getByRole('link', { name: /Восстановление потока/ })).toBeVisible();
 });
 
@@ -667,8 +669,11 @@ test('limits_strip_warns_below_20_remaining_and_shows_the_reserve_variant', asyn
 
 test('empty_states_offer_actions', async ({ page }) => {
   await boot(page, true);
-  await expect(page.getByText(/machine add/)).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Создать первую сессию' })).toBeVisible();
+  await expect(page.locator('code', { hasText: 'canterlot machine add' })).toBeVisible();
+  await expect(page.getByRole('link', { name: /machine add/ })).toHaveCount(0);
+  const create = page.getByRole('link', { name: 'Создать первую сессию' });
+  await expect(create).toBeVisible();
+  expect((await create.boundingBox())!.height).toBeGreaterThanOrEqual(44);
 });
 
 test('keyboard_reaches_every_list_action', async ({ page }) => {
@@ -702,4 +707,30 @@ test('more_menu_reloads_the_page', async ({ page }) => {
   ]);
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   expect(await page.evaluate(() => (window as unknown as { marker?: number }).marker)).toBeUndefined();
+});
+
+test('row_dot_shows_the_state_while_the_owner_colour_waits_for_a_quiet_session', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const busy = seedConversation(api, { title: 'Синяя, но работает', color: 'blue', activity: { state: 'working', evidence: { phase: 'generating' }, since: new Date().toISOString() } } as never);
+  const stalled = seedConversation(api, { title: 'Серая, но подвисла', color: 'neutral', activity: { state: 'stalled', evidence: { last_event_at: new Date(Date.now() - 3_600_000).toISOString() }, since: new Date().toISOString() } } as never);
+  const quiet = seedConversation(api, { title: 'Синяя и спокойная', color: 'blue', activity: { state: 'stopped', evidence: { outcome: 'stopped' }, since: new Date().toISOString() } } as never);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto('/sessions');
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(`[data-session="${busy}"] .mark`)).toHaveAttribute('data-token', '--accent');
+  await expect(page.locator(`[data-session="${stalled}"] .mark`)).toHaveAttribute('data-token', '--warning');
+  await expect(page.locator(`[data-session="${quiet}"] .mark`)).toHaveAttribute('data-token', '--blue');
+  // Длинное название, обрезанное в строке, читается целиком в подсказке.
+  await expect(page.locator(`[data-session="${busy}"] .title`)).toHaveAttribute('title', 'Синяя, но работает');
+});
+
+test('search_focus_ring_wraps_the_whole_bar', async ({ page }) => {
+  await boot(page);
+  await page.getByRole('button', { name: 'Поиск', exact: true }).click();
+  const field = page.getByRole('textbox', { name: 'Поиск сессий' });
+  await field.fill('поток');
+  await field.focus();
+  await expect(field).toHaveCSS('outline-style', 'none');
+  await expect(page.locator('.search')).not.toHaveCSS('outline-style', 'none');
 });
