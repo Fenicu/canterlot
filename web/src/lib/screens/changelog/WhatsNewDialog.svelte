@@ -1,6 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import type { ChangelogEntry } from '#lib/changelog.js';
+  import { changelogDate, type ChangelogEntry } from '#lib/changelog.js';
   import Button from '#lib/ui/Button.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
   import ChangelogText from './ChangelogText.svelte';
@@ -14,7 +14,7 @@
       <section>
         <div class="meta">
           <span class="version">{entry.version}</span>
-          {#if entry.date}<span class="date">{entry.date}</span>{/if}
+          {#if entry.date}<span class="date">{changelogDate(entry.date)}</span>{/if}
         </div>
         {#each entry.sections as section (section.title)}
           {#if section.items.length}

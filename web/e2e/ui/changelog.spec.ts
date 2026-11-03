@@ -24,6 +24,8 @@ test('update_shows_new_entries_once_and_not_after_reload', async ({ page }) => {
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText(APP_VERSION, { exact: true })).toBeVisible();
   await expect(dialog.getByText('Первая пронумерованная версия.')).toBeVisible();
+  // Дата как в остальном приложении: «2 ноября», а не «02.11.2026».
+  await expect(dialog.locator('.date').first()).toHaveText(/^\d{1,2} [а-яё]+( \d{4})?$/);
   // Лист открылся сам: фокус на заголовке, а не кольцом на «Закрыть».
   await expect(dialog.getByRole('heading', { name: 'Что нового' })).toBeFocused();
   await expect(dialog.getByRole('button', { name: 'Закрыть' })).not.toBeFocused();

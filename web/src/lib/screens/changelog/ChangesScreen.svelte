@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { parseChangelog } from '#lib/changelog.js';
+  import { changelogDate, parseChangelog } from '#lib/changelog.js';
   import { APP_VERSION } from '#lib/stores/appVersion.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import ChangelogText from './ChangelogText.svelte';
@@ -18,7 +18,7 @@
         <div class="heading">
           <h2>{entry.version}</h2>
           {#if entry.version === APP_VERSION}<span class="current">установлена</span>{/if}
-          {#if entry.date}<span class="date">{entry.date}</span>{/if}
+          {#if entry.date}<span class="date">{changelogDate(entry.date)}</span>{/if}
         </div>
         {#each entry.sections as section (section.title)}
           {#if section.items.length}
