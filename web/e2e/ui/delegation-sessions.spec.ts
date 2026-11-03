@@ -326,8 +326,7 @@ test('phone_sheet_lists_child_sessions_and_opens_them', async ({ page, isMobile 
   await expect(sheet.getByText('Сессии')).toBeVisible();
   const link = sessionLink(sheet, child);
   await expect(link).toContainText('Миграция схемы');
-  await expect(link).toContainText('sonnet');
-  await expect(link).toContainText('работала 1 ч 5 мин');
+  await expect(link.locator('.node-task')).toHaveText('sonnet · работала 1 ч 5 мин');
   await expect(link).toContainText('Генерирует');
   await page.screenshot({ path: `test-results/delegation-session-worked-${test.info().project.name}.png` });
   await link.click();
@@ -369,7 +368,7 @@ test('desktop_panel_lists_child_sessions', async ({ page, isMobile }) => {
   await expect(panel.getByText('Сессии')).toBeVisible();
   const link = sessionLink(panel, child);
   await expect(link).toContainText('Миграция схемы');
-  await expect(link).toContainText('работала 1 ч 5 мин');
+  await expect(link.locator('.node-task')).toHaveText('sonnet · работала 1 ч 5 мин');
   await link.click();
   await expect(page).toHaveURL(new RegExp(`/c/${child}$`));
 });

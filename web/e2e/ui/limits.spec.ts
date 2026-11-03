@@ -53,7 +53,7 @@ test('subtitle_names_the_shown_providers_and_cards_keep_their_shape', async ({ p
   const cards = page.locator('main .current section');
   await expect(cards).toHaveCount(3);
   await expect(cards.nth(0).locator('.value')).toHaveText('21% / нед');
-  await expect(cards.nth(2)).toContainText('мес · 91%');
+  await expect(cards.nth(2).locator('.other').last()).toHaveText(/^мес · 91% · \S/);
   // Одинаковая структура: крупное значение с окном в одну строку, сброс — отдельной.
   for (let index = 0; index < 3; index += 1) {
     const card = cards.nth(index);

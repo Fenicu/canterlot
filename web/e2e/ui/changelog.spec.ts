@@ -48,9 +48,6 @@ test('settings_show_both_versions_and_flag_a_mismatch_quietly', async ({ page })
 
   const main = page.locator('main');
   const versions = main.locator('.versions');
-  await expect(versions).toContainText('Приложение');
-  await expect(versions).toContainText(APP_VERSION);
-  await expect(versions).toContainText('хаб');
-  await expect(versions).toContainText('9.9.9');
+  await expect(versions).toHaveText(`Приложение ${APP_VERSION} · хаб 9.9.9`);
   await expect(main.getByText(/Версии приложения и хаба различаются/)).toBeVisible();
 });

@@ -142,7 +142,7 @@
 		<span class="branch">└</span>
 		<span class="grow node-info session-info">
 			<span class="session-name">{row.title}</span>
-			<small class="node-task">{modelLabel(row.model)}{#if workedSession(row)} · {workedSession(row)}{/if}</small>
+			<small class="node-task">{[modelLabel(row.model), workedSession(row)].filter(Boolean).join(' · ')}</small>
 		</span>
 		<span class={sessionLine(row).tone}>{sessionLine(row).text}</span>
 	</a>

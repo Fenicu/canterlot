@@ -53,7 +53,7 @@
           <p class="note">{providerName(provider.provider)} сейчас · осталось</p>
           <strong class="value">{primary.text}&#32;/ <span class="window">{windowLabel}</span></strong>
           {#if !view.five.absent}<p class="other">{view.week.known ? `${view.week.text} недели` : 'Нет данных недели'}</p>{/if}
-          {#if view.month}<p class="other">мес · {view.month.text}{#if view.month.reset} · {view.month.reset}{/if}</p>{/if}
+          {#if view.month}<p class="other">{['мес', view.month.text, view.month.reset].filter(Boolean).join(' · ')}</p>{/if}
           {#if view.week.reset}<small>{view.week.reset}</small>{/if}
           {#if view.stale}<p class="note">данные устарели</p>{/if}
         </section>
