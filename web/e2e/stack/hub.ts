@@ -232,6 +232,8 @@ export async function createSessionUI(page: Page, stack: Stack, opts: { agent?: 
   await expect(page.locator('[data-new-session]')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: stack.machineName });
   await page.getByRole('textbox', { name: 'Рабочая папка' }).fill(stack.workRoot);
+  // Список подсказок лежит поверх формы: владелец закрывает его, прежде чем выбрать агента.
+  await page.getByRole('textbox', { name: 'Рабочая папка' }).press('Escape');
   await page.getByRole('radio', { name: opts.agent ?? 'Синтетический', exact: true }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('synthetic-large');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');

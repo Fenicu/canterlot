@@ -62,8 +62,8 @@ fn hub_durations_are_strings_and_unknown_fields_are_rejected() {
 }
 
 #[test]
-fn readme_documents_running_both_services() {
-    let readme = include_str!("../../../README.md");
+fn configuration_doc_documents_running_both_services() {
+    let readme = include_str!("../../../docs/configuration.md");
     for required in [
         "canterlot-worker run --config",
         "hub_url =",
@@ -79,8 +79,8 @@ fn readme_documents_running_both_services() {
 }
 
 #[test]
-fn readme_hub_toml_examples_load_without_worker_tables() {
-    let readme = include_str!("../../../README.md");
+fn configuration_doc_hub_toml_examples_load_without_worker_tables() {
+    let readme = include_str!("../../../docs/configuration.md");
     let hub_part = readme
         .split("На машине воркера сохраните `worker.toml`")
         .next()
