@@ -44,6 +44,17 @@ for (const theme of ['dark', 'light'] as const) {
 		await expect(feed.getByText('Контекст сжат автоматически, было 980 тыс. токенов')).toBeVisible();
 		await expect(feed.getByText('Контекст сжат вручную')).toBeVisible();
 		await expect(feed.getByText('Сжатие контекста не удалось')).toBeVisible();
+		// Строки сжатия начинаются с того же отступа, что текст карточек и строки хаба.
+		const inset = await feed.locator('.compact').first().evaluate((node) => {
+			const range = document.createRange();
+			range.selectNodeContents(node);
+			const feedBox = node.closest('.feed')!.querySelector('article, .card');
+			const card = feedBox?.getBoundingClientRect();
+			const style = feedBox ? getComputedStyle(feedBox) : null;
+			return { text: range.getBoundingClientRect().left, card: card && style ? card.left + parseFloat(style.paddingLeft) : null, own: node.getBoundingClientRect().left };
+		});
+		expect(inset.text - inset.own).toBeGreaterThanOrEqual(12);
+		if (inset.card !== null) expect(Math.abs(inset.text - inset.card)).toBeLessThanOrEqual(1);
 
 		hub.append(`conversation:${id}`, {
 			kind: 'phase_changed',
