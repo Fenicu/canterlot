@@ -3,7 +3,7 @@
 //! метаданные копии и одна ветка, наружу ничего не отправляется.
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     path::{Component, Path, PathBuf},
     process::{Output, Stdio},
@@ -59,6 +59,11 @@ pub fn resolve_target(root: &Path, path: &Path) -> Option<PathBuf> {
 }
 
 async fn git(dir: &Path, args: &[&OsStr]) -> Option<Output> {
+    git_with(dir, &[], args).await
+}
+
+/// `overrides` идут перед командой как `-c`; дочерние git получают их через окружение.
+async fn git_with(dir: &Path, overrides: &[OsString], args: &[&OsStr]) -> Option<Output> {
     Command::new("git")
         .args([
             "-c",
@@ -66,6 +71,7 @@ async fn git(dir: &Path, args: &[&OsStr]) -> Option<Output> {
             "-c",
             "core.fsmonitor=false",
         ])
+        .args(overrides)
         .arg("--no-optional-locks")
         .args(args)
         .current_dir(dir)
@@ -104,6 +110,43 @@ async fn git_text(dir: &Path, args: &[&OsStr]) -> Option<String> {
         .await
         .filter(|output| output.status.success())?;
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Пустые команды для всех фильтров из конфигурации, которую видит `dir` (система, владелец,
+/// репозиторий, копия): `git status` и `git worktree remove` в копии делегата не запускают
+/// `filter.<имя>.clean`, `smudge` и `process` с правами воркера. Чтение конфига ничего не
+/// запускает. Имя, которое нельзя передать через `-c`, даёт `None`: удаление откажет.
+async fn filter_overrides(dir: &Path) -> Option<Vec<OsString>> {
+    let output = git(dir, args!["config", "--null", "--get-regexp", r"^filter\."]).await?;
+    // Код 1: ни одного фильтра.
+    match output.status.code() {
+        Some(0) => {}
+        Some(1) if output.stdout.is_empty() => return Some(Vec::new()),
+        _ => return None,
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for entry in output.stdout.split(|byte| *byte == 0) {
+        let Some(key) = entry.split(|byte| *byte == b'\n').next() else {
+            continue;
+        };
+        if key.is_empty() {
+            continue;
+        }
+        let key = std::str::from_utf8(key).ok()?;
+        let name = key.strip_prefix("filter.")?.rsplit_once('.')?.0;
+        if name.is_empty() || name.contains('=') {
+            return None;
+        }
+        names.insert(name.to_owned());
+    }
+    let mut overrides = Vec::new();
+    for name in names {
+        for setting in ["clean=", "smudge=", "process=", "required=false"] {
+            overrides.push(OsString::from("-c"));
+            overrides.push(format!("filter.{name}.{setting}").into());
+        }
+    }
+    Some(overrides)
 }
 
 /// Общий каталог git рабочего дерева; `None`, если каталог не рабочее дерево git.
@@ -275,8 +318,11 @@ async fn remove_inner(root: &Path, source: &Path, request: &RemoveWorktree) -> R
         if !is_worktree_of(&target, &common).await {
             return Removed::failed("not_a_worktree");
         }
+        let Some(overrides) = filter_overrides(&target).await else {
+            return Removed::failed("git_failed");
+        };
         if !request.force {
-            match holds_unsaved_work(&target).await {
+            match holds_unsaved_work(&target, &overrides).await {
                 None => return Removed::failed("git_failed"),
                 Some(true) => {
                     return Removed {
@@ -289,10 +335,21 @@ async fn remove_inner(root: &Path, source: &Path, request: &RemoveWorktree) -> R
             }
         }
         let removed = if request.force {
-            git_ok(source, args!["worktree", "remove", "--force", "--", target]).await
+            git_with(
+                source,
+                &overrides,
+                args!["worktree", "remove", "--force", "--", target],
+            )
+            .await
         } else {
-            git_ok(source, args!["worktree", "remove", "--", target]).await
-        };
+            git_with(
+                source,
+                &overrides,
+                args!["worktree", "remove", "--", target],
+            )
+            .await
+        }
+        .is_some_and(|output| output.status.success());
         if !removed {
             return Removed::failed("git_failed");
         }
@@ -307,12 +364,22 @@ async fn remove_inner(root: &Path, source: &Path, request: &RemoveWorktree) -> R
 /// С каталогом копии пропало бы то, что есть только в нём: незакоммиченные правки и коммиты, до
 /// которых не дойти ни от одной ссылки, например на отсоединённом HEAD. `--all` здесь не годится:
 /// он включает HEAD самой копии и потому всегда даёт ноль.
-async fn holds_unsaved_work(target: &Path) -> Option<bool> {
-    let status = git_text(
+/// Изменения внутри подмодулей не смотрятся: их `git status` читал бы конфиг подмодуля
+/// с фильтрами, которых `overrides` не знает. Сдвиг коммита подмодуля виден по-прежнему.
+async fn holds_unsaved_work(target: &Path, overrides: &[OsString]) -> Option<bool> {
+    let status = git_with(
         target,
-        args!["status", "--porcelain", "--untracked-files=all"],
+        overrides,
+        args![
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=dirty"
+        ],
     )
-    .await?;
+    .await
+    .filter(|output| output.status.success())?;
+    let status = String::from_utf8_lossy(&status.stdout).trim().to_owned();
     if !status.is_empty() {
         return Some(true);
     }

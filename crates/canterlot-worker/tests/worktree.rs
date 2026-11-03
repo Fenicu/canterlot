@@ -646,3 +646,57 @@ async fn removing_a_lost_copy_leaves_foreign_stale_entries_alone() {
     assert!(listed.contains("owner-own"), "{listed}");
     assert!(!listed.contains("r10"), "{listed}");
 }
+
+#[tokio::test]
+async fn remove_runs_no_filter_configured_by_the_repository() {
+    let fixture = Fixture::new();
+    let target = fixture.target("r-filter");
+    let spec = fixture.spec("canterlot/0190abf0");
+    prepare(&target, &fixture.source, &spec).await.unwrap();
+    fs::write(
+        target.join(".gitattributes"),
+        "b.txt filter=evil\nsrc/a.txt filter=dot.ted\n*.md filter=long\n",
+    )
+    .unwrap();
+    git(&target, &["add", ".gitattributes"]);
+    git(&target, &["commit", "-q", "--no-verify", "-m", "attrs"]);
+    let marker = fixture.root.join("filter-ran");
+    let run = format!("touch {}; cat", marker.display());
+    // Фильтры в общем конфиге и атрибуты в копии: так их может оставить делегат.
+    git(&fixture.source, &["config", "filter.evil.clean", &run]);
+    git(&fixture.source, &["config", "filter.evil.smudge", &run]);
+    git(&fixture.source, &["config", "filter.dot.ted.clean", &run]);
+    git(
+        &fixture.source,
+        &[
+            "config",
+            "filter.long.process",
+            &format!("touch {}", marker.display()),
+        ],
+    );
+    // Тот же размер и другое время: git status обязан пересчитать содержимое.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(target.join("b.txt"), "BETA\n").unwrap();
+    fs::write(target.join("src/a.txt"), "ALPHA\n").unwrap();
+    fs::write(target.join("c.md"), "new\n").unwrap();
+    assert!(!marker.exists(), "the test itself ran no filter");
+    let done = remove(
+        &fixture.root,
+        &fixture.source,
+        &fixture.removal(&target, &spec.branch, false),
+    )
+    .await;
+    assert_eq!(done.outcome, "dirty");
+    assert!(!marker.exists(), "git status ran a repository filter");
+    let done = remove(
+        &fixture.root,
+        &fixture.source,
+        &fixture.removal(&target, &spec.branch, true),
+    )
+    .await;
+    assert_eq!(done.outcome, "removed");
+    assert!(
+        !marker.exists(),
+        "git worktree remove ran a repository filter"
+    );
+}
