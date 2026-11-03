@@ -93,6 +93,22 @@ test('sections_collapse_and_remember_state', async ({ page }) => {
   await expect(page.getByRole('button', { name: /bookshelf 4/ })).toHaveAttribute('aria-expanded', 'false');
 });
 
+test('the_last_selected_tab_survives_a_reload_and_a_deleted_group_falls_back_to_all', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
+  await tablist.getByRole('tab', { name: /bookshelf/ }).click();
+  await expect(tablist.getByRole('tab', { name: /bookshelf/ })).toHaveAttribute('aria-selected', 'true');
+  await page.reload();
+  await expect(page.locator('[data-list-ready]')).toBeVisible();
+  await expect(tablist.getByRole('tab', { name: /bookshelf/ })).toHaveAttribute('aria-selected', 'true');
+
+  api.groups = api.groups.filter((group) => group.id !== ids.books);
+  await page.reload();
+  await expect(page.locator('[data-list-ready]')).toBeVisible();
+  await expect(tablist.getByRole('tab', { name: /bookshelf/ })).toHaveCount(0);
+  await expect(tablist.getByRole('tab', { name: /Все/ })).toHaveAttribute('aria-selected', 'true');
+});
+
 test('search_debounces_and_queries_the_server_with_the_typed_text', async ({ page }) => {
   await boot(page);
   const seen: string[] = [];

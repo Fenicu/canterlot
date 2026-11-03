@@ -38,6 +38,7 @@
   import GroupManager from './GroupManager.svelte';
   import GroupTabs from './GroupTabs.svelte';
   import { buildSections, tabCounts, type Tab, type TreeNode } from './grouping';
+  import { readTab, resolveTab, writeTab } from './listTab';
   import LimitsStrip from './LimitsStrip.svelte';
   import SearchBar from './SearchBar.svelte';
   import Section from './Section.svelte';
@@ -50,7 +51,7 @@
   let collapsed = $state<string[]>([]);
   let kidsCollapsed = $state<string[]>([]);
   let kidsExpanded = $state<string[]>([]);
-  let tab = $state<Tab>({ kind: 'all' });
+  let tab = $state<Tab>(readTab());
   let query = $state('');
   let searchOpen = $state(false);
   let results = $state<ListRow[] | null>(null);
@@ -160,6 +161,16 @@
   const ready = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' || rows.length > 0 : false);
   // Строки могут прийти из памяти устройства раньше снимка, а лимиты и счёт вкладок — только со снимком.
   const synced = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' : false);
+
+  // Выбор вкладки живёт на устройстве; удалённую группу после снимка заменяет «Все».
+  $effect(() => {
+    if (!synced) return;
+    const next = resolveTab(tab, groups);
+    if (next !== tab) tab = next;
+  });
+  $effect(() => {
+    writeTab(tab);
+  });
 
   // Меню принадлежит строке: смена вкладки, поиска или экрана закрывает его, как и уход строки из списка.
   // Закрытие листа подтверждения меняет запись истории, а не экран.
