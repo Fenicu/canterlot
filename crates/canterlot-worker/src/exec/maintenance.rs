@@ -121,6 +121,83 @@ fn is_live_socket(path: &Path) -> bool {
     }
 }
 
+/// Убирает `target` и кэш `node_modules/.cache` в рабочих копиях, где нет живого
+/// исполнения и сборка не менялась дольше `idle`.
+pub(crate) fn gc_worktrees(
+    data_dir: &Path,
+    records: &[Ownership],
+    now: SystemTime,
+    idle: Duration,
+) -> io::Result<()> {
+    let live: HashSet<&str> = records
+        .iter()
+        .filter(|record| record.phase != OwnershipPhase::Released as i32)
+        .map(|record| record.conversation_id.as_str())
+        .collect();
+    let worktrees = data_dir.join("worktrees");
+    let Ok(entries) = fs::read_dir(&worktrees) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if Uuid::parse_str(name).is_err() || live.contains(name) {
+            continue;
+        }
+        let worktree = entry.path();
+        let Some(target) = direct_dir(&worktree, "target") else {
+            continue;
+        };
+        let Some(newest) = newest_mtime(&target)? else {
+            continue;
+        };
+        if !now.duration_since(newest).is_ok_and(|age| age > idle) {
+            continue;
+        }
+        fs::remove_dir_all(&target)?;
+        if let Some(modules) = direct_dir(&worktree, "node_modules")
+            && let Some(cache) = direct_dir(&modules, ".cache")
+        {
+            fs::remove_dir_all(cache)?;
+        }
+    }
+    Ok(())
+}
+
+fn direct_dir(parent: &Path, name: &str) -> Option<PathBuf> {
+    let path = parent.join(name);
+    let meta = fs::symlink_metadata(&path).ok()?;
+    (meta.is_dir() && !meta.file_type().is_symlink()).then_some(path)
+}
+
+fn newest_mtime(path: &Path) -> io::Result<Option<SystemTime>> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let mut newest = meta.modified().ok();
+    if meta.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if let Ok(Some(time)) = newest_mtime(&entry.path()) {
+                newest = Some(newest.map_or(time, |current| current.max(time)));
+            }
+        }
+    }
+    Ok(newest)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -133,11 +210,20 @@ mod tests {
     use canterlot_proto::worker::ipc::{Ownership, OwnershipPhase};
     use uuid::Uuid;
 
-    use super::sweep_runtime;
+    use super::{gc_worktrees, sweep_runtime};
 
     fn old(path: &Path) {
-        let old = SystemTime::now() - Duration::from_secs(60);
+        let old = SystemTime::now() - Duration::from_secs(8 * 3600);
         fs::File::open(path).unwrap().set_modified(old).unwrap();
+    }
+
+    fn old_tree(path: &Path) {
+        old(path);
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                old_tree(&entry.path());
+            }
+        }
     }
 
     fn socket(dir: &Path, id: Uuid) -> PathBuf {
@@ -155,6 +241,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gc_worktrees_removes_only_idle_build_output() {
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let data = root.path().join("data");
+        let worktrees = data.join("worktrees");
+        fs::create_dir_all(&worktrees).unwrap();
+
+        let idle = Uuid::now_v7();
+        let idle_tree = worktrees.join(idle.to_string());
+        fs::create_dir_all(idle_tree.join("target/debug")).unwrap();
+        fs::create_dir_all(idle_tree.join("node_modules/.cache")).unwrap();
+        fs::write(idle_tree.join("target/debug/old"), "old").unwrap();
+        fs::write(idle_tree.join("node_modules/.cache/old"), "old").unwrap();
+        fs::write(idle_tree.join("keep.txt"), "keep").unwrap();
+        old_tree(&idle_tree.join("target"));
+        old_tree(&idle_tree.join("node_modules/.cache"));
+        old(&idle_tree);
+
+        let live = Uuid::now_v7();
+        let live_tree = worktrees.join(live.to_string());
+        fs::create_dir_all(live_tree.join("target")).unwrap();
+        fs::write(live_tree.join("target/old"), "old").unwrap();
+        old_tree(&live_tree.join("target"));
+        let live_record = Ownership {
+            execution_id: Uuid::now_v7().to_string(),
+            conversation_id: live.to_string(),
+            phase: OwnershipPhase::Attached as i32,
+            ..Default::default()
+        };
+
+        let fresh = Uuid::now_v7();
+        let fresh_tree = worktrees.join(fresh.to_string());
+        fs::create_dir_all(fresh_tree.join("target")).unwrap();
+        fs::write(fresh_tree.join("target/new"), "new").unwrap();
+
+        let foreign = worktrees.join("not-a-conversation");
+        fs::create_dir_all(foreign.join("target")).unwrap();
+        fs::write(foreign.join("target/old"), "old").unwrap();
+        old_tree(&foreign.join("target"));
+
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep"), "keep").unwrap();
+        let linked = Uuid::now_v7();
+        let linked_tree = worktrees.join(linked.to_string());
+        fs::create_dir(&linked_tree).unwrap();
+        std::os::unix::fs::symlink(&outside, linked_tree.join("target")).unwrap();
+
+        let cache_link = Uuid::now_v7();
+        let cache_tree = worktrees.join(cache_link.to_string());
+        fs::create_dir_all(cache_tree.join("target")).unwrap();
+        fs::write(cache_tree.join("target/old"), "old").unwrap();
+        old_tree(&cache_tree.join("target"));
+        let cache_outside = root.path().join("cache-outside");
+        fs::create_dir_all(&cache_outside).unwrap();
+        std::os::unix::fs::symlink(&cache_outside, cache_tree.join("node_modules")).unwrap();
+
+        gc_worktrees(
+            &data,
+            &[live_record],
+            SystemTime::now(),
+            Duration::from_secs(6 * 3600),
+        )
+        .unwrap();
+
+        assert!(!idle_tree.join("target").exists());
+        assert!(!idle_tree.join("node_modules/.cache").exists());
+        assert!(idle_tree.join("keep.txt").exists());
+        assert!(live_tree.join("target/old").exists());
+        assert!(fresh_tree.join("target/new").exists());
+        assert!(foreign.join("target/old").exists());
+        assert!(outside.join("keep").exists());
+        assert!(linked_tree.join("target").is_symlink());
+        assert!(!cache_tree.join("target").exists());
+        assert!(cache_tree.join("node_modules").is_symlink());
+        assert!(cache_outside.exists());
+    }
     #[test]
     fn sweep_removes_only_stale_runtime_state() {
         let root = tempfile::Builder::new()

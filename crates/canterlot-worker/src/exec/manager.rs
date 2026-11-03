@@ -324,6 +324,26 @@ pub(super) async fn sweep_runtime(shared: &Shared) -> Result<(), ExecError> {
     Ok(())
 }
 
+/// Сборка в рабочей копии без живого исполнения: `target` и кэш узлов старше шести часов.
+pub(super) async fn gc_worktrees(shared: &Shared) -> Result<(), ExecError> {
+    let records = shared
+        .store
+        .call(|store| Ok(open(store)?.ownership().all()))
+        .await?;
+    let data_dir = shared.data_dir().await?.clone();
+    tokio::task::spawn_blocking(move || {
+        maintenance::gc_worktrees(
+            &data_dir,
+            &records,
+            SystemTime::now(),
+            Duration::from_secs(6 * 3600),
+        )
+    })
+    .await
+    .map_err(|_| ExecError::Shutdown)??;
+    Ok(())
+}
+
 pub(super) async fn cleanup_released(shared: &Shared) -> Result<(), ExecError> {
     let records = shared
         .store

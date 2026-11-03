@@ -6,7 +6,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use canterlot_proto::worker::{
@@ -605,8 +605,24 @@ async fn startup_sweeps_stale_runtime_state() {
     let id = Uuid::now_v7();
     let path = sockets.join(format!("{id}.sock"));
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    let worktree = env
+        .root
+        .path()
+        .join("store/worktrees")
+        .join(Uuid::now_v7().to_string());
+    fs::create_dir_all(worktree.join("target")).unwrap();
+    fs::write(worktree.join("target/old"), "old").unwrap();
+    let old = SystemTime::now() - Duration::from_secs(8 * 3600);
+    for path in [
+        worktree.join("target/old"),
+        worktree.join("target"),
+        worktree.clone(),
+    ] {
+        fs::File::open(path).unwrap().set_modified(old).unwrap();
+    }
     env.manager().startup_verify().await.unwrap();
     assert!(!path.exists());
+    assert!(!worktree.join("target").exists());
     env.close_manager().await;
 }
 

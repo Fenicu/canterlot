@@ -739,6 +739,9 @@ impl ExecutionManager {
                         if let Err(error) = manager::sweep_runtime(&shared).await {
                             tracing::warn!(reason = %error, "runtime sweep failed");
                         }
+                        if let Err(error) = manager::gc_worktrees(&shared).await {
+                            tracing::warn!(reason = %error, "worktree build gc failed");
+                        }
                     }
                     changed = shutdown.changed() => {
                         if changed.is_err() || *shutdown.borrow() {
@@ -755,6 +758,7 @@ impl ExecutionManager {
         let _route = self.shared.route_lock.lock().await;
         manager::cleanup_released(&self.shared).await?;
         manager::sweep_runtime(&self.shared).await?;
+        manager::gc_worktrees(&self.shared).await?;
         self.start_maintenance();
         let records = self
             .shared
