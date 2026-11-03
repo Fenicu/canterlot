@@ -46,6 +46,8 @@ test('owner_sheet_cards_stand_out_and_keep_meta_under_the_title', async ({ page 
     expect(paint.summary, theme).not.toBe('rgba(0, 0, 0, 0)');
     expect(paint.card, theme).not.toBe(paint.sheet);
   }
+  // Лист въезжает снизу: координаты сравниваются после конца анимации.
+  await page.getByRole('dialog').evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
   for (const kind of ['claude_user', 'codex_global', 'opencode_global']) {
     const card = page.locator(`[data-owner-file="${kind}"]`);
     const title = (await card.locator('.row strong').boundingBox())!;

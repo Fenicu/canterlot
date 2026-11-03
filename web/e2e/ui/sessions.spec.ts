@@ -753,7 +753,9 @@ test('list_reserves_the_limits_strip_and_hides_zero_counts_until_the_snapshot', 
   await expect(page.locator('.strip-slot')).toHaveCount(0);
   await expect(page.locator('.tabs .count').first()).toBeVisible();
   // Пришедшая полоса не выше оставленного места: строки под ней не уезжают вниз.
-  const strip = (await page.locator('.limits').first().boundingBox())!;
+  const stripNode = page.locator('.limits').first();
+  await expect(stripNode).toBeVisible();
+  const strip = (await stripNode.boundingBox())!;
   expect(strip.height).toBeLessThanOrEqual(slot.height + 1);
   expect(Math.abs(strip.y - slot.y)).toBeLessThanOrEqual(1);
 });
