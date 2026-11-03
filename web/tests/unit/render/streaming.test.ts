@@ -272,6 +272,26 @@ describe('streaming markdown', () => {
     expect(resSpecial.tail.html).not.toContain('<b>dangerous</b>');
   });
 
+  test('prose_tail_takes_the_plain_fast_path_on_request', () => {
+    const sm = new StreamingMarkdown(createMarkdown());
+    const prose = 'Обычная строка без разметки, с запятыми и тире — и всё.';
+    expect(sm.update(prose, false).tail.plain).toBe(false);
+    const res = sm.update(prose, false, undefined, { prosePlain: true });
+    expect(res.tail.plain).toBe(true);
+    expect(res.tail.text).toBe(prose);
+
+    for (const markup of [
+      '**жирный** текст',
+      '- пункт\n- ещё',
+      '```\nconst x = 1',
+      'ссылка https://example.com',
+      'заголовок\n==='
+    ]) {
+      const tail = sm.update(markup, false, undefined, { prosePlain: true }).tail;
+      expect(tail.plain, markup).toBe(false);
+    }
+  });
+
   test('plain_tail_carries_the_raw_text_for_a_text_node', () => {
     const sm = new StreamingMarkdown(createMarkdown());
     const raw = '<i>сырой</i> ' + 'Я'.repeat(5000);

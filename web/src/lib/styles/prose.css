@@ -1,4 +1,9 @@
 .prose { line-height: var(--lh-body); overflow-wrap: anywhere; }
+.prose .reveal-word { animation: text-reveal var(--duration-text-reveal) var(--ease) both; }
+@keyframes text-reveal {
+  from { opacity: 0; filter: blur(var(--blur-text-reveal)); }
+  to { opacity: 1; filter: blur(0); }
+}
 .prose :is(p, ul, ol, pre, blockquote, table) { margin-block: var(--s6); }
 .prose :is(h1, h2, h3, h4, h5, h6) { margin-block: var(--s8) var(--s4); font-weight: var(--weight-semibold); line-height: var(--lh-tight); letter-spacing: var(--tracking-normal); }
 .prose h1 { font-size: var(--fs-title); }

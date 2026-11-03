@@ -1,5 +1,6 @@
 import { FakeHub, FakeHubApi, seedConversation, seedHistory } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
+import { sha256Hex } from '../../src/lib/stores/blocks';
 import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelte';
 import { expect, test } from './fixtures';
 
@@ -276,7 +277,8 @@ test('delta_batching_updates_dom_at_most_once_per_frame', async ({ page }) => {
     for (const frame of hits) counts.set(frame, (counts.get(frame) ?? 0) + 1);
     return Math.max(0, ...counts.values());
   });
-  expect(perFrame).toBeLessThanOrEqual(1);
+  // Пачка дельт даёт не больше одной перерисовки; второй вызов в кадре — шаг проявления текста.
+  expect(perFrame).toBeLessThanOrEqual(2);
 });
 
 test('render_budget_during_long_stream_has_no_long_tasks', async ({ page, browserName }) => {
@@ -719,6 +721,76 @@ test('reduced_motion_stops_caret_and_expand_transitions', async ({ page }) => {
   const expand = await page.locator('.head').evaluate((node) => getComputedStyle(node).transitionDuration);
   expect(parseFloat(caret)).toBe(0);
   expect(parseFloat(expand)).toBe(0);
+});
+
+async function setMotion(page: import('@playwright/test').Page, motion: 'normal' | 'off'): Promise<void> {
+  await page.addInitScript((value) => {
+    try { localStorage.setItem('canterlot.motion', value); } catch { /* Настройка действует и без хранилища. */ }
+  }, motion);
+}
+
+function liveText(count: number): string {
+  return Array.from({ length: count }, (_, index) => `слово${index}`).join(' ');
+}
+
+test('streamed_answer_text_appears_progressively_and_finishes_exactly_as_received', async ({ page }) => {
+  await setMotion(page, 'normal');
+  const { hub, api, id } = await boot(page, 0);
+  const blockId = api.id();
+  const scope = `conversation:${id}`;
+  const text = liveText(28);
+  hub.append(scope, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
+  hub.append(scope, { kind: 'block_delta', conversation_id: id, payload: { block_id: blockId, base_rev: 0, rev: 1, append: text } });
+  hub.flush();
+
+  const block = page.locator(`[data-block="${blockId}"]`);
+  await expect(block).toBeVisible();
+  const samples: string[] = [];
+  for (let step = 0; step < 8; step++) {
+    samples.push(((await block.textContent()) ?? '').trim());
+    await page.waitForTimeout(40);
+  }
+  // Текст не вываливается целиком: в выборке есть непустой префикс, но не весь ответ.
+  expect(samples.some((sample) => sample.length > 0 && sample !== text)).toBe(true);
+  expect(samples.every((sample) => text.startsWith(sample))).toBe(true);
+
+  hub.append(scope, {
+    kind: 'block_final', conversation_id: id,
+    payload: { block_id: blockId, rev: 2, text, checksum: await sha256Hex(text), text_omitted: false, summary: null }
+  });
+  hub.flush();
+  await expect(block).toHaveText(text);
+  expect(((await block.textContent()) ?? '').trim()).toBe(text);
+  await expect(block.locator('.reveal-word')).toHaveCount(0);
+});
+
+test('motion_off_shows_streamed_text_at_once', async ({ page }) => {
+  await setMotion(page, 'off');
+  const { hub, api, id } = await boot(page, 0);
+  const blockId = api.id();
+  const text = liveText(28);
+  hub.append(`conversation:${id}`, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
+  hub.append(`conversation:${id}`, { kind: 'block_delta', conversation_id: id, payload: { block_id: blockId, base_rev: 0, rev: 1, append: text } });
+  hub.flush();
+  const block = page.locator(`[data-block="${blockId}"]`);
+  // Обычная скорость проявила бы 28 слов почти за секунду; «Выкл» — сразу.
+  await expect(block).toHaveText(text, { timeout: 700 });
+  await expect(block.locator('.reveal-word')).toHaveCount(0);
+});
+
+test('history_after_reload_shows_answer_text_at_once', async ({ page }) => {
+  await setMotion(page, 'normal');
+  const { api, id } = await boot(page, 0);
+  const text = liveText(40);
+  const block = textBlock(api, text, '1');
+  api.histories.set(id, [block]);
+  api.bindConversation(id);
+  await page.reload();
+  await expect(page.locator('[data-ready]')).toBeVisible();
+  const live = page.locator(`[data-block="${block.id}"]`);
+  await expect(live).toBeVisible();
+  expect(((await live.textContent()) ?? '').trim()).toBe(text);
+  await expect(live.locator('.reveal-word')).toHaveCount(0);
 });
 
 test('feed_after_resync_shows_exact_text_without_a_jump_when_pinned', async ({ page }) => {

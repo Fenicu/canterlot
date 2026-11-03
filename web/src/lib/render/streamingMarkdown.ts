@@ -24,6 +24,11 @@ export interface StreamingResult {
   stats: RenderStats;
 }
 
+export interface StreamingOptions {
+  /** Обычная проза рисуется текстовым узлом без разбора markdown: хвост растёт дописыванием. */
+  prosePlain?: boolean;
+}
+
 /** Готовый HTML финальных блоков: возврат к ответу не разбирает markdown заново. */
 export class RenderCache {
   readonly #html = new Map<string, string>();
@@ -76,6 +81,25 @@ export class RenderCache {
     this.#html.clear();
     this.#bytes = 0;
   }
+}
+
+const MARKDOWN_CHARS = /[\\`*_\[\]<>|~#&{}^=]/;
+const BLANK_LINE = /\n[ \t]*\r?\n/;
+const INDENTED = /(^|\n)(?: {4,}\S|\t)/;
+const LINE_MARKER = /(^|\n)[ \t]*(?:[-+]|\d{1,9}[.)])(?:[ \t]|$)/;
+const HARD_BREAK = / {2,}\r?\n/;
+
+/** Проза без разметки: markdown всё равно дал бы один абзац, а его пересборка на каждое слово дорога. */
+export function isPlainProse(text: string): boolean {
+  if (text.length === 0) return false;
+  if (MARKDOWN_CHARS.test(text)) return false;
+  if (text.includes('://')) return false;
+  if (BLANK_LINE.test(text)) return false;
+  if (INDENTED.test(text)) return false;
+  if (LINE_MARKER.test(text)) return false;
+  if (/(^|\n)[ \t]*(?:-{3,}|={3,})[ \t]*(?:\r?\n|$)/.test(text)) return false;
+  if (HARD_BREAK.test(text)) return false;
+  return true;
 }
 
 const encoder = new TextEncoder();
@@ -315,7 +339,12 @@ export class StreamingMarkdown {
     this.renderer = r;
   }
 
-  update(text: string, final: boolean, key?: string): StreamingResult {
+  update(
+    text: string,
+    final: boolean,
+    key?: string,
+    opts?: StreamingOptions,
+  ): StreamingResult {
     if (final) {
       const cached = key ? this.cache?.get(key) : undefined;
       if (cached !== undefined) {
@@ -364,7 +393,10 @@ export class StreamingMarkdown {
     let tail: Tail;
     if (tailText.length === 0) {
       tail = { html: '', plain: false };
-    } else if (tailBytes > 8192) {
+    } else if (
+      tailBytes > 8192 ||
+      (opts?.prosePlain === true && isPlainProse(tailText))
+    ) {
       tail = {
         plain: true,
         text: tailText,
