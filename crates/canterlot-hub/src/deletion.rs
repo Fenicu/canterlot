@@ -253,6 +253,7 @@ async fn purge_rows(
         "delete from block_files where conversation_id=$1",
         "delete from commands where conversation_id=$1",
         "delete from attachments where conversation_id=$1",
+        "delete from conversation_group_pins where conversation_id=$1",
         "delete from queue_state where conversation_id=$1",
         "delete from idempotency_keys where conversation_id=$1",
         "delete from session_subscriptions where subscriber_id=$1 or target_id=$1",

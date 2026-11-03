@@ -156,6 +156,12 @@ pub struct HarnessRef {
     pub title: String,
     pub provider: String,
 }
+/// Закрепление сессии внутри одной группы; глобальное `pinned` живёт отдельно.
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
+pub struct GroupPinView {
+    pub group_id: Uuid,
+    pub pinned_at: String,
+}
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
 pub struct AttributeView {
     pub id: Uuid,
@@ -165,6 +171,7 @@ pub struct AttributeView {
     pub pinned: bool,
     pub archived: bool,
     pub groups: Vec<Uuid>,
+    pub group_pins: Vec<GroupPinView>,
     pub machine: MachineRef,
     pub harness: HarnessRef,
     pub workdir: String,
@@ -328,7 +335,8 @@ const SELECT:&str="select c.*,m.name machine_name,m.capabilities,m.availability,
  coalesce(d.queue_queued,0) queue_queued,coalesce(d.pause_reasons,'[]') derived_pauses,coalesce(d.hold_reasons,'[]') derived_holds,
  d.last_activity_at derived_last_activity,
  coalesce((select sum(w.working_ms)::bigint from run_working w where w.conversation_id=c.id),0) working_ms,
- array(select gm.group_id from conversation_group_members gm where gm.conversation_id=c.id order by gm.group_id) groups
+ array(select gm.group_id from conversation_group_members gm where gm.conversation_id=c.id order by gm.group_id) groups,
+ coalesce((select jsonb_agg(jsonb_build_object('group_id',gp.group_id,'pinned_at',to_char(gp.pinned_at at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')) order by gp.group_id) from conversation_group_pins gp where gp.conversation_id=c.id),'[]'::jsonb) group_pins
  from conversations c join machines m on m.id=c.machine_id
  left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness
  left join conversation_derived d on d.conversation_id=c.id";
@@ -344,6 +352,8 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
                 .try_get::<Option<DateTime<Utc>>, _>("archived_at")?
                 .is_some(),
             groups: row.try_get("groups")?,
+            group_pins: serde_json::from_value(row.try_get("group_pins")?)
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
             machine: MachineRef {
                 id: row.try_get("machine_id")?,
                 name: row.try_get("machine_name")?,
@@ -408,6 +418,10 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
     }
     let mut sql = sqlx::QueryBuilder::new(SELECT);
     sql.push(" where c.owner_id=").push_bind(q.owner_id);
+    let group_filter = match q.filter {
+        ListFilter::Group(id) => Some(id),
+        _ => None,
+    };
     match q.filter {
         ListFilter::All => {
             sql.push(" and c.archived_at is null");
@@ -433,12 +447,41 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
             .push_bind(pattern)
             .push(" collate \"und-x-icu\") escape E'\\\\'");
     }
-    if let Some(c) = &q.cursor {
+    // В группе закрепление своё: сортировка и граница страницы идут по времени
+    // закрепления в этой группе, а не по глобальному.
+    if let Some(c) = &q.cursor
+        && let Some(group) = group_filter
+    {
+        sql.push(" and not(c.id=any(")
+            .push_bind(c.seen.clone())
+            .push(")) and (coalesce((select gp.pinned_at from conversation_group_pins gp where gp.conversation_id=c.id and gp.group_id=")
+            .push_bind(group)
+            .push("),'-infinity') < coalesce(")
+            .push_bind(c.pinned_at)
+            .push("::timestamptz,'-infinity') or (coalesce((select gp.pinned_at from conversation_group_pins gp where gp.conversation_id=c.id and gp.group_id=")
+            .push_bind(group)
+            .push("),'-infinity')=coalesce(")
+            .push_bind(c.pinned_at)
+            .push("::timestamptz,'-infinity') and (coalesce(c.last_activity_at,'-infinity') < coalesce(")
+            .push_bind(c.last_activity_at)
+            .push("::timestamptz,'-infinity') or (coalesce(c.last_activity_at,'-infinity')=coalesce(")
+            .push_bind(c.last_activity_at)
+            .push("::timestamptz,'-infinity') and c.id > ")
+            .push_bind(c.id)
+            .push("))))");
+    } else if let Some(c) = &q.cursor {
         sql.push(" and not(c.id=any(").push_bind(c.seen.clone()).push(")) and (c.pinned < ").push_bind(c.pinned)
             .push(" or (c.pinned = ").push_bind(c.pinned).push(" and (coalesce(c.pinned_at,'-infinity') < coalesce(").push_bind(c.pinned_at).push("::timestamptz,'-infinity') or (coalesce(c.pinned_at,'-infinity')=coalesce(").push_bind(c.pinned_at)
             .push("::timestamptz,'-infinity') and (coalesce(c.last_activity_at,'-infinity') < coalesce(").push_bind(c.last_activity_at).push("::timestamptz,'-infinity') or (coalesce(c.last_activity_at,'-infinity')=coalesce(").push_bind(c.last_activity_at).push("::timestamptz,'-infinity') and c.id > ").push_bind(c.id).push("))))))");
     }
-    sql.push(" order by c.pinned desc,c.pinned_at desc nulls last,c.last_activity_at desc nulls last,c.id limit ").push_bind(q.limit+1);
+    if let Some(group) = group_filter {
+        sql.push(" order by (select gp.pinned_at from conversation_group_pins gp where gp.conversation_id=c.id and gp.group_id=")
+            .push_bind(group)
+            .push(") desc nulls last,c.last_activity_at desc nulls last,c.id limit ")
+            .push_bind(q.limit + 1);
+    } else {
+        sql.push(" order by c.pinned desc,c.pinned_at desc nulls last,c.last_activity_at desc nulls last,c.id limit ").push_bind(q.limit+1);
+    }
     let mut rows = sql.build().fetch_all(&mut *conn).await?;
     let more = rows.len() > q.limit as usize;
     rows.truncate(q.limit as usize);
@@ -452,12 +495,28 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
         for row in &rows {
             seen.push(row.try_get("id")?);
         }
+        let last_id: Uuid = row.try_get("id")?;
+        let pinned_at = if let Some(group) = group_filter {
+            sqlx::query_scalar(
+                "select pinned_at from conversation_group_pins where conversation_id=$1 and group_id=$2",
+            )
+            .bind(last_id)
+            .bind(group)
+            .fetch_optional(&mut *conn)
+            .await?
+        } else {
+            row.try_get("pinned_at")?
+        };
         Some(
             ListCursor {
-                pinned: row.try_get("pinned")?,
-                pinned_at: row.try_get("pinned_at")?,
+                pinned: if group_filter.is_some() {
+                    false
+                } else {
+                    row.try_get("pinned")?
+                },
+                pinned_at,
                 last_activity_at: row.try_get("last_activity_at")?,
-                id: row.try_get("id")?,
+                id: last_id,
                 seen,
                 filter: q.filter.clone(),
                 q: q.q.clone(),
@@ -788,6 +847,14 @@ async fn replace_groups(
         .bind(id)
         .execute(&mut *conn)
         .await?;
+    // Сессия вышла из группы - закрепление в ней больше не к чему относить.
+    sqlx::query(
+        "delete from conversation_group_pins where conversation_id=$1 and not(group_id=any($2))",
+    )
+    .bind(id)
+    .bind(groups)
+    .execute(&mut *conn)
+    .await?;
     for group in groups {
         sqlx::query("insert into conversation_group_members(group_id,conversation_id) values($1,$2) on conflict do nothing").bind(group).bind(id).execute(&mut *conn).await?;
     }
@@ -953,6 +1020,75 @@ pub async fn set_groups(
                     return Err(UpdateError::GroupNotFound);
                 }
                 replace_groups(conn, id, &groups).await?;
+                emit_attributes(conn, owner_id, id, correlation_id).await?;
+                detail(conn, owner_id, id)
+                    .await?
+                    .ok_or(UpdateError::NotFound)
+            })
+        },
+    )
+    .await?
+    .value)
+}
+/// Закрепление в группе идемпотентно: повтор оставляет одно время закрепления,
+/// а снятие уже снятого ничего не меняет. Членство обязательно.
+pub async fn set_group_pin(
+    pool: &PgPool,
+    owner_id: Uuid,
+    id: Uuid,
+    group_id: Uuid,
+    pinned: bool,
+    key: &str,
+    correlation_id: Uuid,
+) -> Result<ConversationDetail, UpdateError> {
+    let request = json!({"id":id,"group_id":group_id,"pinned":pinned});
+    let kind = if pinned {
+        "pin_in_group"
+    } else {
+        "unpin_in_group"
+    };
+    Ok(idempotency::run_in_tx(
+        pool,
+        owner_id,
+        key,
+        kind,
+        &request,
+        Some(id),
+        move |conn| {
+            Box::pin(async move {
+                lock_owner(conn, owner_id).await?;
+                lock_conversation(conn, owner_id, id).await?;
+                let member: bool = sqlx::query_scalar(
+                    "select exists(select 1 from conversation_group_members gm
+                       join conversation_groups g on g.id=gm.group_id
+                       where gm.conversation_id=$1 and gm.group_id=$2 and g.owner_id=$3)",
+                )
+                .bind(id)
+                .bind(group_id)
+                .bind(owner_id)
+                .fetch_one(&mut *conn)
+                .await?;
+                if !member {
+                    return Err(UpdateError::GroupNotFound);
+                }
+                if pinned {
+                    sqlx::query(
+                        "insert into conversation_group_pins(conversation_id,group_id) values($1,$2)
+                         on conflict do nothing",
+                    )
+                    .bind(id)
+                    .bind(group_id)
+                    .execute(&mut *conn)
+                    .await?;
+                } else {
+                    sqlx::query(
+                        "delete from conversation_group_pins where conversation_id=$1 and group_id=$2",
+                    )
+                    .bind(id)
+                    .bind(group_id)
+                    .execute(&mut *conn)
+                    .await?;
+                }
                 emit_attributes(conn, owner_id, id, correlation_id).await?;
                 detail(conn, owner_id, id)
                     .await?

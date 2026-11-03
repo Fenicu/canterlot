@@ -582,6 +582,20 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         ),
         case(
             Method::PUT,
+            "/api/v1/conversations/{id}/groups/{group_id}/pin",
+            format!("/api/v1/conversations/{id}/groups/{group}/pin"),
+            None,
+            None,
+        ),
+        case(
+            Method::DELETE,
+            "/api/v1/conversations/{id}/groups/{group_id}/pin",
+            format!("/api/v1/conversations/{id}/groups/{group}/pin"),
+            None,
+            None,
+        ),
+        case(
+            Method::PUT,
             "/api/v1/conversations/{id}/crunch",
             format!("/api/v1/conversations/{id}/crunch"),
             Some(json!({"enabled":true})),
