@@ -150,3 +150,8 @@ test('a_transient_snapshot_failure_is_still_retried', async () => {
   expect(vi.mocked(h.applier.loadSnapshot).mock.calls.length).toBeGreaterThan(1);
   h.dispose();
 });
+test('refresh_from_the_store_loads_a_fresh_snapshot_and_resubscribes', async () => {
+  const h = await harness();
+  h.sync.refresh(); await h.clock.advanceAsync(0);
+  expect(h.applier.loadSnapshot).toHaveBeenCalledTimes(2); expect(h.sync.status).toBe('live'); h.dispose();
+});

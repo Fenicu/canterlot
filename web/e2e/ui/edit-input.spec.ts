@@ -369,3 +369,24 @@ test('edit_conflict_keeps_the_editor_open_with_the_other_revision', async ({ pag
   await expect(page.locator('.bubble').filter({ has: page.locator('textarea') })).toHaveCount(0);
   await expect(page.locator('.bubble', { hasText: 'Моё после конфликта' })).toBeVisible();
 });
+
+test('background_update_keeps_an_open_bubble_edit', async ({ page, context, baseURL }) => {
+  const { hub, api, id } = await boot(page, []);
+  const { ownKey } = await sendOwn(page, 'Правка до обновления');
+  const { bubble } = await confirmQueued(page, hub, api, id, ownKey, 'Правка до обновления');
+  await bubble.getByRole('button', { name: 'Изменить' }).click();
+  const editor = page.locator('.bubble').filter({ has: page.locator('textarea') }).locator('textarea');
+  await editor.fill('несохранённый текст');
+  await context.addCookies([{ name: 'pwa-build', value: 'next', url: baseURL! }]);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(page.locator('[data-update]')).toBeAttached({ timeout: 10_000 });
+  await page.evaluate(() => {
+    (window as unknown as { __marker: boolean }).__marker = true;
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.waitForTimeout(1000);
+  expect(await page.evaluate(() => (window as unknown as { __marker?: boolean }).__marker)).toBe(true);
+  await expect(editor).toHaveValue('несохранённый текст');
+});

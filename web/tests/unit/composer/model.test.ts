@@ -846,4 +846,62 @@ describe("composer/model", () => {
     model.applyInterruptStatus("rejected_stale");
     expect(model.interruptLabel).toBe("Прерывание устарело");
   });
+  it("interrupt_without_a_live_execution_finishes_at_once", async () => {
+    const { deps } = createMockDeps();
+    deps.interruptApi = async () => ({ requested: { interrupt_command_id: null, withdraw_command_id: null } });
+    const model = new ComposerModel(deps);
+    await model.interrupt();
+    expect(model.interruptLabel).toBe("Прерывание не требуется");
+    expect(model.interruptRunning).toBe(false);
+  });
+
+  it("interrupt_without_an_answer_from_the_machine_times_out_to_a_clear_state", async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps } = createMockDeps();
+      deps.interruptApi = async () => ({ requested: { interrupt_command_id: "c1", withdraw_command_id: null } });
+      const model = new ComposerModel(deps);
+      await model.interrupt();
+      expect(model.interruptLabel).toBe("Прерываю…");
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(model.interruptLabel).toBe("Прерывание не подтверждено");
+      expect(model.interruptRunning).toBe(false);
+      let calls = 0;
+      deps.interruptApi = async () => { calls += 1; };
+      await model.interrupt();
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("terminal_status_before_the_deadline_keeps_its_label", async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps } = createMockDeps();
+      deps.interruptApi = async () => ({ requested: { interrupt_command_id: "c1", withdraw_command_id: null } });
+      const model = new ComposerModel(deps);
+      await model.interrupt();
+      model.applyInterruptStatus("completed");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(model.interruptLabel).toBe("Прервано");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("a_failed_attachment_blocks_the_send_and_says_why", async () => {
+    const { deps, uploadsList } = createMockDeps();
+    uploadsList.push(
+      { id: "u1", conversationId: "conv-1", name: "shot.png", mime: "image/png", size: 100, phase: "ready", sent: 100, attachmentId: "att-1" },
+      { id: "u2", conversationId: "conv-1", name: "log.txt", mime: "text/plain", size: 100, phase: "failed", sent: 10 },
+    );
+    const model = new ComposerModel(deps);
+    model.text = "смотри файлы";
+    expect(model.gate).toEqual({ ok: false, reason: "Файл не загрузился: повторите или уберите его" });
+    await model.send();
+    expect(deps.ops.begin).not.toHaveBeenCalled();
+    expect(model.text).toBe("смотри файлы");
+    model.text = "";
+    expect(model.gate).toEqual({ ok: false, reason: "Файл не загрузился: повторите или уберите его" });
+  });
 });

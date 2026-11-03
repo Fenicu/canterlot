@@ -5,6 +5,7 @@ export function reactiveOp<B>(init: Op<B>): Op<B> {
   let attempts = $state(init.attempts);
   let refusal = $state(init.refusal);
   let result = $state(init.result);
+  let trying = $state(init.trying);
 
   return {
     key: init.key,
@@ -35,6 +36,12 @@ export function reactiveOp<B>(init: Op<B>): Op<B> {
     },
     set result(value) {
       result = value;
+    },
+    get trying() {
+      return trying;
+    },
+    set trying(value) {
+      trying = value;
     },
   };
 }

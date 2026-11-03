@@ -2,6 +2,7 @@
   import { ApiError } from '#lib/api/http.js';
   import { deleteScheduled, interrupt, patchScheduled } from '#lib/api/client.js';
   import { getRuntime } from '#lib/app/runtime.js';
+  import { unconfirmed } from '#lib/ops/journal.js';
   import { returnToComposer } from '#lib/composer/returned.js';
   import { cancelInput } from '#lib/timeline/QueueActions.js';
   import { STEER_RETURNED_LABEL, editInput, editInputCaption, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
@@ -215,7 +216,7 @@
       {#if editClosed[input.key] && !editing[input.key] && input.state === 'queued'}<p class="note">{editClosed[input.key]}</p>{/if}
       {#if editing[input.key]}
         <label class="edit-label" for="strip-edit-{input.key}">Текст сообщения</label>
-        <textarea id="strip-edit-{input.key}" class="edit-text" bind:value={editTexts[input.key]} rows="3"></textarea>
+        <textarea id="strip-edit-{input.key}" class="edit-text" data-unsaved-edit bind:value={editTexts[input.key]} rows="3"></textarea>
         {#if (editKept[input.key] ?? []).length > 0}
           <ul class="files">
             {#each input.attachments.filter((file) => (editKept[input.key] ?? []).includes(file.attachment_id)) as file (file.attachment_id)}
@@ -246,7 +247,7 @@
         <p class="note">Передача уже началась, обычная отмена невозможна</p>
         <span class="actions"><Button onclick={() => interrupt(chat.id, crypto.randomUUID())}>Прервать исполнение</Button></span>
       {/if}
-      {#if op?.state === 'unknown'}
+      {#if unconfirmed(op)}
         <p class="note">Отправка не подтверждена, повторяю</p>
         <span class="actions"><Button onclick={() => retryUnknown(input.key)}>Повторить сейчас</Button></span>
       {/if}

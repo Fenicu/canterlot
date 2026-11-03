@@ -229,6 +229,25 @@ function textOf(content: HistoryInput["content"]): string {
 
 const MAX_DELTA_MARKS = 512;
 const MAX_DIAGNOSTICS = 200;
+/** Сколько событий ленты ждут страницу истории; больше — состояние берётся из нового снимка. */
+const MAX_HELD = 2000;
+/** События, которые меняют строки ленты: их порядок со страницей истории важен. */
+const SHAPING: ReadonlySet<string> = new Set([
+  "input_queued",
+  "input_state_changed",
+  "block_started",
+  "block_delta",
+  "block_final",
+  "block_incomplete",
+  "block_file_attached",
+  "block_media_attached",
+  "compaction_started",
+  "compaction_finished",
+  "request_opened",
+  "request_closed",
+  "request_decided",
+  "request_transmitting",
+]);
 
 function scopeOf(id: string): ScopeName {
   return `conversation:${id}`;
@@ -310,15 +329,23 @@ export class ChatStore {
   readonly #sync: BlockSync;
   #sub: {
     release(): void;
+    resync(): void;
     readonly status: ScopeStatus;
     readonly cursor: string;
   } | null = null;
-  #hold = false;
+  /** Сколько страниц хвоста сейчас в пути: пока их больше нуля, события ленты ждут. */
+  #holds = 0;
   #held: HubEvent[] = [];
+  /** Ожидание переполнилось: события потеряны, нужен новый снимок. */
+  #lost = false;
+  /** Номер снимка: страница, запрошенная до него, уже устарела. */
+  #epoch = 0;
   #lanes = new SvelteMap<string, number>();
   #laneLive = rawCell<TimelineEntry[]>([]);
   #readSeq = 0n;
   #readAt = -10_000;
+  #readWanted: string | null = null;
+  #readTimer: (() => void) | null = null;
   #noteTimers = new SvelteMap<string, () => void>();
   #applier: ScopeApplier | null = null;
   #stopRefused: (() => void) | null = null;
@@ -396,6 +423,9 @@ export class ChatStore {
   close(): void {
     this.#sub?.release();
     this.#sub = null;
+    this.#readTimer?.();
+    this.#readTimer = null;
+    this.#readWanted = null;
     for (const cancel of this.#noteTimers.values()) cancel();
     this.#noteTimers.clear();
   }
@@ -447,7 +477,7 @@ export class ChatStore {
       const known = this.blocks.get(item.id);
       // Живое событие могло обогнать ответ: более новую ревизию не затирает снимок.
       const block =
-        known && known.rev >= item.rev && known.state !== "stale"
+        known && known.rev >= item.rev && known.state !== "stale" && !known.provisional
           ? known
           : this.#blockFromHistory({ ...item, kind: "block" }, false);
       return {
@@ -461,31 +491,52 @@ export class ChatStore {
   }
 
   async loadNewer(): Promise<void> {
-    this.#hold = true;
+    const epoch = this.#epoch;
+    this.#holds += 1;
     try {
       const page = await this.deps.api.history(this.id, {
         after: this.timeline.newestSeq() ?? undefined,
       });
+      if (epoch !== this.#epoch) return;
       this.#ingest(page.items, "newer");
+      if (page.next_after) return;
       this.timeline.tailDetached = false;
       this.timeline.newerCount = 0;
     } finally {
-      this.#hold = false;
-      this.#flushHeld();
+      this.#release();
     }
   }
 
   async reloadTail(): Promise<void> {
-    this.#hold = true;
+    const epoch = this.#epoch;
+    this.#holds += 1;
     try {
       const page = await this.deps.api.history(this.id, {});
+      if (epoch !== this.#epoch) return;
+      if (this.timeline.tailDetached) {
+        // Окно далеко от хвоста: склеенные, они дали бы ленту с дырой посередине.
+        this.timeline.applyHistoryPage([], "tail");
+        this.timeline.hasOlder = Boolean(page.next_before);
+      }
       this.#ingest(page.items, "tail");
     } finally {
-      this.#hold = false;
-      this.#flushHeld();
+      this.#release();
     }
   }
 
+  #release(): void {
+    this.#holds = Math.max(0, this.#holds - 1);
+    if (this.#holds > 0) return;
+    if (this.#lost) {
+      this.#lost = false;
+      this.#held = [];
+      this.#sub?.resync();
+      return;
+    }
+    this.#flushHeld();
+  }
+
+  /** Владелец видит последние записи: хаб снимает непрочитанное до этого номера. Чаще раза в две секунды не шлёт, последнюю отметку досылает. */
   markRead(createdSeq: string): void {
     if (!this.following || !visible()) return;
     let seq: bigint;
@@ -495,11 +546,26 @@ export class ChatStore {
       return;
     }
     if (seq <= this.#readSeq) return;
-    const now = this.deps.clock.now();
-    if (now - this.#readAt < 2000) return;
+    const wait = this.#readAt + 2000 - this.deps.clock.now();
+    if (wait > 0) {
+      this.#readWanted = createdSeq;
+      this.#readTimer ??= this.#later(() => {
+        this.#readTimer = null;
+        const wanted = this.#readWanted;
+        this.#readWanted = null;
+        if (wanted) this.markRead(wanted);
+      }, wait);
+      return;
+    }
     this.#readSeq = seq;
-    this.#readAt = now;
-    void this.deps.api.markRead(this.id, createdSeq);
+    this.#readAt = this.deps.clock.now();
+    this.deps.api.markRead(this.id, createdSeq).catch(() => undefined);
+  }
+
+  #later(fn: () => void, ms: number): () => void {
+    if (this.deps.clock.schedule) return this.deps.clock.schedule(fn, ms);
+    const timer = setTimeout(fn, ms);
+    return () => clearTimeout(timer);
   }
 
   async blockContent(blockId: string): Promise<AsyncIterable<BlockPage>> {
@@ -612,18 +678,14 @@ export class ChatStore {
       this.background.apply(event.payload.tasks);
       return;
     }
-    if (this.#hold || this.timeline.tailDetached) {
-      // Открытая лента субагента живёт независимо от прокрутки ленты разговора.
-      if (!this.#hold && this.#inOpenLane(event)) {
-        this.#dispatch(event);
-        return;
-      }
+    // Пока страница хвоста в пути, события ленты ждут её; остальное состояние живёт сразу.
+    // Оторванное окно ничего не держит: новые строки только считаются и придут страницами.
+    if (this.#holds > 0 && SHAPING.has(event.kind)) {
+      if (this.#lost) return;
       this.#held.push(event);
-      if (
-        this.timeline.tailDetached &&
-        (event.kind === "block_started" || event.kind === "input_queued")
-      ) {
-        this.timeline.newerCount += 1;
+      if (this.#held.length > MAX_HELD) {
+        this.#held = [];
+        this.#lost = true;
       }
       return;
     }
@@ -647,19 +709,6 @@ export class ChatStore {
   /** Записи блоков открытых лент, пришедших живыми, пока лента разговора оторвана от хвоста. */
   get laneLive(): TimelineEntry[] {
     return this.#laneLive.get();
-  }
-
-  #inOpenLane(event: HubEvent): boolean {
-    if (this.#lanes.size === 0) return false;
-    if (event.kind === "block_started")
-      return this.#underOpenLane(event.payload.parent_block_id);
-    if (
-      event.kind === "block_delta" ||
-      event.kind === "block_final" ||
-      event.kind === "block_incomplete"
-    )
-      return this.#underOpenLane(event.payload.block_id);
-    return false;
   }
 
   #underOpenLane(start: string | null): boolean {
@@ -729,7 +778,8 @@ export class ChatStore {
         return;
       case "compaction_finished":
         // Тихая строка уже в истории: подтягиваем хвост, переживает перезагрузку.
-        void this.reloadTail();
+        // Оторванное окно получит её со страницей: перечитанный хвост увёл бы владельца из чтения.
+        if (!this.timeline.tailDetached) this.reloadTail().catch(() => undefined);
         return;
       case "compaction_started":
         if (event.kind === "compaction_started") {
@@ -1157,13 +1207,19 @@ export class ChatStore {
 
 
   #applySnapshot(data: SnapshotData): void {
+    // Снимок новее всего, что ждало страницу: повтор этих событий вернул бы старое.
+    this.#epoch += 1;
+    this.#held = [];
+    this.#lost = false;
     if (data.detail) {
       this.detail = data.detail;
       this.turnRecorded = data.detail.turn_recorded === true;
-      if (data.detail.execution)
-        this.execution = data.detail.execution as ChatExecution;
+      // Нет живого исполнения — хаб присылает null, а не пропускает поле.
+      this.execution = (data.detail.execution as ChatExecution | null | undefined) ?? null;
       if (data.detail.activity)
         this.activity = data.detail.activity as Record<string, unknown>;
+      this.phase = phaseOf(this.activity);
+      this.interrupt = null;
       if (data.detail.settings) {
         const s = data.detail.settings as {
           effective?: unknown;
@@ -1198,7 +1254,7 @@ export class ChatStore {
       if (data.queue.run_slot) this.queue.run_slot = data.queue.run_slot;
     }
     if (data.scheduled) this.scheduled = data.scheduled;
-    if (data.open_requests) this.requests.ingestSnapshot(data.open_requests);
+    if (data.open_requests) this.requests.reconcileSnapshot(data.open_requests);
     if (data.todos) this.todos.ingestSnapshot(data.todos);
     if (data.background) this.background.ingestSnapshot(data.background);
     if (data.context !== undefined)
@@ -1215,7 +1271,9 @@ export class ChatStore {
           (entry) => BigInt(entry.seq) < BigInt(floor),
         )
       : [];
-    const keepOlder = older.every((entry) => terminalEntry(entry));
+    // Оторванное окно с хвостом снимка не стыкуется: между ними дыра.
+    const keepOlder =
+      !this.timeline.tailDetached && older.every((entry) => terminalEntry(entry));
     if (!keepOlder) this.timeline.applyHistoryPage([], "tail");
     this.#ingest(items, "tail");
     if (!keepOlder) {
@@ -1297,6 +1355,11 @@ export class ChatStore {
 
   #blockFromHistory(item: HistoryBlock, wholesale: boolean): BlockModel {
     let block = this.blocks.get(item.id);
+    // Финал без начала создал модель наугад, текстом: вид, родителя и тело даёт только история.
+    if (block?.provisional) {
+      block = undefined;
+      wholesale = true;
+    }
     if (!block) {
       block = new BlockModel(item.id, item.block_kind);
       this.blocks.set(item.id, block);
@@ -1410,6 +1473,20 @@ export class ChatStore {
       );
     }
   }
+}
+
+/** Фаза хода в снимке есть только в показаниях активности. */
+function phaseOf(activity: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (activity?.state !== "working") return null;
+  const evidence = activity.evidence as
+    | { phase?: unknown; tool_name?: unknown; summary?: unknown }
+    | undefined;
+  if (typeof evidence?.phase !== "string") return null;
+  return {
+    phase: evidence.phase,
+    tool_name: evidence.tool_name ?? null,
+    summary: evidence.summary ?? null,
+  };
 }
 
 function visible(): boolean {

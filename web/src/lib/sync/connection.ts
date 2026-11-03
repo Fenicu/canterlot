@@ -27,6 +27,8 @@ const labels: Record<ConnectionPhase, string> = {
 };
 type Slot = { sync: ScopeSync; applier: ScopeApplier; refs: number; cancelRelease?: () => void };
 const OPEN_TIMEOUT = 10_000;
+/** События возврата (видимость, фокус, сеть) приходят пачкой: начатое ими рукопожатие следующие не перезапускают. */
+const FRESH_CONNECT = 3_000;
 export class ConnectionManager {
   readonly status: ConnectionStatus;
   private scopes = new Map<ScopeName, Slot>();
@@ -35,6 +37,7 @@ export class ConnectionManager {
   private disposed = false;
   private opened = false;
   private connecting = false;
+  private resumedAt = -Infinity;
   private connectStartedAt = 0;
   private selfClosing = false;
   private authRechecking = false;
@@ -162,7 +165,7 @@ export class ConnectionManager {
     }
     this.schedule(() => this.tick(), 1000);
   }
-  subscribe(scope: ScopeName, applier: ScopeApplier): { release(): void; readonly status: ScopeStatus; readonly cursor: string } {
+  subscribe(scope: ScopeName, applier: ScopeApplier): { release(): void; resync(): void; readonly status: ScopeStatus; readonly cursor: string } {
     if (this.disposed) throw new Error('connection_disposed');
     let slot = this.scopes.get(scope);
     // Отпущенный слот с чужим получателем доставлял бы события уже закрытому хранилищу.
@@ -190,6 +193,7 @@ export class ConnectionManager {
     const current = slot; let released = false;
     return {
       get status() { return current.sync.status; }, get cursor() { return current.sync.cursor; },
+      resync: () => { if (!released && !this.disposed) current.sync.refresh(); },
       release: () => {
         if (released || this.disposed) return;
         released = true; current.refs--;
@@ -213,8 +217,11 @@ export class ConnectionManager {
     if (this.opened) {
       this.cancelPing?.(); this.cancelPing = undefined; this.ping = undefined;
       this.sendPing(2000);
-    } else if (this.connecting) this.restart();
-    else { this.generation++; this.connect(); }
+    } else if (this.connecting) {
+      // Застрявшую попытку возврат заменяет, а начатую этой же пачкой событий не трогает.
+      if (this.deps.now() - this.resumedAt < FRESH_CONNECT) return;
+      this.resumedAt = this.deps.now(); this.restart();
+    } else { this.resumedAt = this.deps.now(); this.generation++; this.connect(); }
   }
   dispose(): void {
     if (this.disposed) return;

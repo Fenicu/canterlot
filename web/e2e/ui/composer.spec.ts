@@ -253,6 +253,22 @@ test('send_is_disabled_while_attachments_upload_with_the_count_reason', async ({
   await expect(page.getByText('Станет доступно, когда загрузятся файлы')).toBeVisible();
 });
 
+test('a_failed_attachment_blocks_the_send_until_it_is_retried_or_removed', async ({ page }) => {
+  await boot(page);
+  await page.route('**/api/v1/attachments', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    await route.fulfill({ status: 422, json: { error: { code: 'attachment_unsupported', message: 'Отказ', scope: 'hub_db', retry: 'never', correlation_id: '00000000-0000-4000-8000-0000000000e5' } } });
+  });
+  await page.setInputFiles('input[type=file]', { name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('abc') });
+  await page.getByRole('textbox', { name: 'Сообщение' }).fill('с файлом');
+  const send = page.getByRole('button', { name: 'Отправить', exact: true });
+  // Хеш считается в воркере: под нагрузкой до запроса хабу проходит не одна секунда.
+  await expect(page.getByText('Файл не загрузился: повторите или уберите его')).toBeVisible({ timeout: 30_000 });
+  await expect(send).toHaveAttribute('aria-disabled', 'true');
+  await page.locator('[data-composer] .tray').getByRole('button', { name: 'Убрать' }).click();
+  await expect(send).toHaveAttribute('aria-disabled', 'false');
+});
+
 test('p01_probe_marks_press_and_local_item_paint', async ({ page }) => {
   await boot(page, { probe: true });
   const area = page.getByRole('textbox', { name: 'Сообщение' });
@@ -320,6 +336,31 @@ test('interrupt_pill_shows_only_while_a_turn_runs_and_reports_progress', async (
   await expect(busy).toBeVisible();
   await busy.click();
   await expect.poll(() => hits.length).toBe(1);
+});
+
+test('interrupt_without_a_live_execution_does_not_hang_on_progress', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  await page.route('**/api/v1/conversations/*/interrupt', async (route) => {
+    await route.fulfill({ json: { requested: { interrupt_command_id: null, withdraw_command_id: null } } });
+  });
+  const scope = `conversation:${id}`;
+  hub.append(scope, {
+    kind: 'derived_changed',
+    conversation_id: id,
+    payload: {
+      conversation_id: id,
+      activity: { state: 'stalled', evidence: {}, since: AT },
+      unread_count: 0,
+      queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
+      last_activity_at: AT,
+      settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
+      crunch: { enabled: false }
+    }
+  });
+  hub.append(scope, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [], hold_reasons: [], run_slot: { running: { input_id: api.id() } } } });
+  hub.flush();
+  await page.getByRole('button', { name: 'Прервать' }).click();
+  await expect(page.getByRole('button', { name: 'Прерывание не требуется' })).toBeVisible();
 });
 
 test('interrupt_pill_shows_during_a_wake_turn_that_holds_no_slot', async ({ page }) => {

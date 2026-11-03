@@ -84,3 +84,18 @@ describe("TimelineModel: признак старых страниц", () => {
     watch.stop();
   });
 });
+
+describe("TimelineModel: оторванный хвост", () => {
+  it("tail_detached_and_newer_count_are_reactive", () => {
+    const model = new TimelineModel();
+    let seen: [boolean, number] = [false, 0];
+    const watch = countEffectRuns(() => { seen = [model.tailDetached, model.newerCount]; });
+    flushSync();
+    expect(seen).toEqual([false, 0]);
+    model.tailDetached = true;
+    model.upsert(block("b", "2"));
+    flushSync();
+    expect(seen).toEqual([true, 1]);
+    watch.stop();
+  });
+});

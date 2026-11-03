@@ -55,6 +55,8 @@ export class ScopeSync {
     this.buffer = []; this.buffered.clear(); this.bytes = 0; this.batcher.dispose(); this.state.status = 'idle';
   }
   flushNow(): void { this.batcher.flushNow(); }
+  /** Хранилище потеряло часть событий: состояние берётся заново из снимка. */
+  refresh(): void { this.resync(); }
   incompatible(): void {
     this.unsubscribe(); this.epoch++; this.cancelRetry?.(); this.cancelRetry = undefined;
     this.batcher.flushNow(); this.state.status = 'incompatible';

@@ -115,6 +115,8 @@ describe("uploads/patch", () => {
     expect(aborted).toBe(true);
 
     await expect(failingPromise).rejects.toThrow(/timeout|таймаут/i);
+    // Застой сети, а не отказ: загрузчик дочитает смещение и продолжит.
+    await expect(failingPromise).rejects.toBeInstanceOf(NetworkError);
 
     vi.useRealTimers();
   });

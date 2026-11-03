@@ -78,3 +78,17 @@ test('incompatible_protocol_offers_the_same_update_and_a_retry_clears_it', async
   expect(ctl.state).toBe('available');
   ctl.destroy();
 });
+
+test('background_update_waits_while_an_edit_is_open_even_when_hidden', async () => {
+  let editing = true;
+  const { reload, make } = setup({ hidden: () => true, isSafe: () => false, editing: () => editing });
+  const ctl = make();
+  ctl.notify();
+  await ctl.apply(false);
+  expect(reload).not.toHaveBeenCalled();
+  expect(ctl.state).toBe('available');
+  editing = false;
+  await ctl.apply(false);
+  expect(reload).toHaveBeenCalledTimes(1);
+  ctl.destroy();
+});
