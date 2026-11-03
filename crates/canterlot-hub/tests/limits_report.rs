@@ -36,6 +36,7 @@ async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgP
         ("claude", 120, fresh, None),
         ("codex", 340, stale, None),
         ("opencode", 93, fresh, Some(7)),
+        ("antigravity", 41, fresh, None),
     ] {
         sqlx::query(
             "insert into provider_limits(provider,five_hour_used_permille,five_hour_resets_at,
@@ -69,28 +70,37 @@ async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgP
     .await
     .unwrap();
     let providers = report["providers"].as_array().unwrap();
-    assert_eq!(providers.len(), 3);
+    assert_eq!(providers.len(), 4);
     assert_eq!(providers[0]["provider"], "claude");
+    assert_eq!(providers[1]["provider"], "antigravity");
+    let find = |name: &str| {
+        providers
+            .iter()
+            .find(|row| row["provider"] == name)
+            .unwrap()
+    };
     let text = report["text"].as_str().unwrap();
     assert!(
         text.starts_with("Claude API budget: five-hour window 12% used, resets "),
         "{text}"
     );
+    assert!(text.contains("Antigravity (Gemini): five-hour window 4.1% used"));
     assert!(text.contains("weekly window 22% used"));
     assert!(text.contains("Codex API budget"));
     assert!(text.contains("OpenCode API budget"));
+    assert!(text.contains("Antigravity (Gemini)"));
     assert!(text.contains("monthly window 0.7% used"));
     assert!(text.contains("Observed:"));
     assert!(
         text.contains("codex 29 min ago") || text.contains("codex 30 min ago"),
         "{text}"
     );
-    let claude = &providers[0]["windows"];
+    let claude = &find("claude")["windows"];
     assert_eq!(claude[0]["fresh"], true);
     assert_eq!(claude[1]["window"], "weekly");
     assert_eq!(claude[2]["window"], "monthly");
     assert_eq!(claude[2]["absent"], true);
-    let codex = &providers[1]["windows"];
+    let codex = &find("codex")["windows"];
     assert_eq!(codex[0]["fresh"], false);
 }
 

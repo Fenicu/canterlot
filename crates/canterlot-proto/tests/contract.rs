@@ -1170,6 +1170,8 @@ fn provider_table_maps_harnesses() {
     assert_eq!(harnesses_of("codex"), ["codex", "synthetic-codex"]);
     assert_eq!(provider_of("opencode"), Some("opencode"));
     assert_eq!(harnesses_of("opencode"), ["opencode", "synthetic-opencode"]);
+    assert_eq!(provider_of("antigravity"), Some("antigravity"));
+    assert_eq!(harnesses_of("antigravity"), ["antigravity"]);
     assert!(harnesses_of("unknown").is_empty());
     for &(harness, provider) in HARNESS_PROVIDERS {
         assert_eq!(provider_of(harness), Some(provider));

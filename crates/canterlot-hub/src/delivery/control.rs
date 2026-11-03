@@ -1055,7 +1055,10 @@ pub async fn request_send_now(
                     .bind(conversation_id)
                     .fetch_one(&mut *conn)
                     .await?;
-            if !matches!(harness.as_str(), "claude_code" | "codex" | "opencode") {
+            if !matches!(
+                harness.as_str(),
+                "claude_code" | "codex" | "opencode" | "antigravity"
+            ) {
                 return Err(ControlError::InvalidRequest {
                     reason: "unsupported_harness",
                 });
