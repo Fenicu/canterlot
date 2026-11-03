@@ -162,7 +162,7 @@ export class ConnectionManager {
     }
     this.schedule(() => this.tick(), 1000);
   }
-  subscribe(scope: ScopeName, applier: ScopeApplier): { release(): void; readonly status: ScopeStatus; readonly cursor: string } {
+  subscribe(scope: ScopeName, applier: ScopeApplier): { release(): void; resync(): void; readonly status: ScopeStatus; readonly cursor: string } {
     if (this.disposed) throw new Error('connection_disposed');
     let slot = this.scopes.get(scope);
     // Отпущенный слот с чужим получателем доставлял бы события уже закрытому хранилищу.
@@ -190,6 +190,7 @@ export class ConnectionManager {
     const current = slot; let released = false;
     return {
       get status() { return current.sync.status; }, get cursor() { return current.sync.cursor; },
+      resync: () => { if (!released && !this.disposed) current.sync.refresh(); },
       release: () => {
         if (released || this.disposed) return;
         released = true; current.refs--;
