@@ -212,6 +212,28 @@ test('new_session_choices_by_pointer_are_not_lost_while_the_folder_list_is_open'
   await expect(page).toHaveURL(/\/c\//);
 });
 
+test('new_session_suggestion_dropdown_paints_above_later_controls_on_phone', async ({ page, hasTouch }) => {
+  test.skip(!hasTouch, 'phone only');
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  await pathField(page).fill('/srv/c');
+  const list = page.getByRole('listbox', { name: 'Подсказки папок' });
+  await expect(list).toBeVisible();
+  const row = page.getByRole('option', { name: '/srv/canterlot', exact: true });
+  await expect(row).toBeVisible();
+  const box = await row.boundingBox();
+  if (!box) throw new Error('no box');
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  const hit = await page.evaluate(({ x, y }) => {
+    const el = document.elementFromPoint(x, y);
+    return el ? el.getAttribute('aria-label') ?? el.textContent ?? '' : '';
+  }, { x: cx, y: cy });
+  expect(hit).toContain('/srv/canterlot');
+  await row.tap();
+  await expect(pathField(page)).toHaveValue('/srv/canterlot/');
+});
+
 test('new_session_agent_radio_keeps_its_place_when_suggestions_appear', async ({ page }) => {
   await boot(page, { solo: true });
   await openWithMachine(page);

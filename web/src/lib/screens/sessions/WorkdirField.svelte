@@ -119,6 +119,7 @@
 <style>
   .list {
     position: fixed;
+    z-index: 1000;
     display: flex;
     flex-direction: column;
     gap: var(--s1);
