@@ -248,4 +248,44 @@ describe("timeline/QueueActions editInput", () => {
     const idless: InputView = freshInput("k2", "Черновик", Date.now());
     expect(await editInput(idless, "conv-1", "x", [], 1)).toBe("noop");
   });
+
+  it("revision_conflict_is_saved_only_when_text_and_ordered_attachments_match", async () => {
+    const { editInput } = await import("#lib/timeline/QueueActions.js");
+    const { ApiError } = await import("#lib/api/http.js");
+    const conflict = async () => {
+      throw new ApiError(409, "invalid_state", "Действие недопустимо", "delivery", "never", "c", {
+        reason: "revision_conflict",
+      });
+    };
+    const attachment = (id: string) => ({
+      attachment_id: id,
+      name: id,
+      mime: "text/plain",
+      size: 1,
+      sha256: "",
+      image: false,
+    });
+    const input: InputView = freshInput("k1", "Тот же текст", Date.now(), [
+      attachment("a1"),
+      attachment("b2"),
+    ]);
+    input.id = "inp-uuid-1";
+    input.state = "queued";
+    input.revision = 3;
+
+    const same = await editInput(input, "conv-1", "Тот же текст", ["a1", "b2"], 2, {
+      clientEditInput: conflict,
+    });
+    expect(same).toBe("saved");
+
+    const reordered = await editInput(input, "conv-1", "Тот же текст", ["b2", "a1"], 2, {
+      clientEditInput: conflict,
+    });
+    expect(reordered).toEqual({ reason: "revision_conflict" });
+
+    const changed = await editInput(input, "conv-1", "Тот же текст", ["a1"], 2, {
+      clientEditInput: conflict,
+    });
+    expect(changed).toEqual({ reason: "revision_conflict" });
+  });
 });
