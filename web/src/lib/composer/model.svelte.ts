@@ -38,8 +38,12 @@ export interface ComposerDeps {
   connection(): ConnectionStatus;
   probe?: { mark(name: string): void };
   serverNow?(): number;
+  /** Возвращает ответ хаба `StopOutcome`. */
   interruptApi?(conversationId: string, key: string): Promise<unknown>;
 }
+
+/** Сколько ждать итога прерывания от машины, прежде чем вернуть кнопку владельцу. */
+export const INTERRUPT_DEADLINE_MS = 20_000;
 
 interface Accepted {
   op: Op;
@@ -56,6 +60,7 @@ export class ComposerModel {
   interruptRunning = $state(false);
   /** Нажатие в работе: повторное во время проверки сети не создаёт второе сообщение. */
   sending = $state(false);
+  #interruptTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(deps: ComposerDeps) {
     this.deps = deps;
@@ -307,23 +312,41 @@ export class ComposerModel {
     this.interruptRunning = true;
     this.interruptLabel = "Прерываю…";
 
+    let outcome: unknown;
     try {
       const key = crypto.randomUUID();
       if (this.deps.interruptApi) {
-        await this.deps.interruptApi(this.deps.conversationId, key);
+        outcome = await this.deps.interruptApi(this.deps.conversationId, key);
       } else {
         const { interrupt } = await import("#lib/api/client.js");
-        await interrupt(this.deps.conversationId, key);
+        outcome = (await interrupt(this.deps.conversationId, key)).data;
       }
     } catch {
       this.interruptLabel = "Прервать";
       this.interruptRunning = false;
+      return;
     }
+    if (!this.interruptRunning) return;
+    // Живого исполнения нет: хаб поставил очередь на паузу, а прерывать на машине нечего.
+    const requested = (outcome as { requested?: { interrupt_command_id?: unknown } } | null)?.requested;
+    if (requested && requested.interrupt_command_id == null) {
+      this.applyInterruptStatus("not_applicable");
+      return;
+    }
+    // Итог приходит событием от машины; машина могла пропасть, и кнопка не ждёт вечно.
+    this.#interruptTimer = setTimeout(() => {
+      this.#interruptTimer = null;
+      if (!this.interruptRunning) return;
+      this.interruptLabel = "Прерывание не подтверждено";
+      this.interruptRunning = false;
+    }, INTERRUPT_DEADLINE_MS);
   }
 
   applyInterruptStatus(status: string): void {
     const label = terminalInterruptLabel(status);
     if (!label) return;
+    if (this.#interruptTimer) clearTimeout(this.#interruptTimer);
+    this.#interruptTimer = null;
     this.interruptLabel = label;
     this.interruptRunning = false;
   }

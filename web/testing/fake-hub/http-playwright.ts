@@ -150,7 +150,8 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
 
   await page.route('**/api/v1/conversations/*/interrupt', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
-    await route.fulfill({ headers: headers(), json: { status: 'sent_to_agent' } });
+    // Как у хаба: команда прерывания создана для живого исполнения.
+    await route.fulfill({ headers: headers(), json: { requested: { interrupt_command_id: crypto.randomUUID(), withdraw_command_id: null } } });
   });
 
   await page.route('**/api/v1/inputs/*/cancel', async (route) => {

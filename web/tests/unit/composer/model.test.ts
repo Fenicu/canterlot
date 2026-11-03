@@ -846,4 +846,47 @@ describe("composer/model", () => {
     model.applyInterruptStatus("rejected_stale");
     expect(model.interruptLabel).toBe("Прерывание устарело");
   });
+  it("interrupt_without_a_live_execution_finishes_at_once", async () => {
+    const { deps } = createMockDeps();
+    deps.interruptApi = async () => ({ requested: { interrupt_command_id: null, withdraw_command_id: null } });
+    const model = new ComposerModel(deps);
+    await model.interrupt();
+    expect(model.interruptLabel).toBe("Прерывание не требуется");
+    expect(model.interruptRunning).toBe(false);
+  });
+
+  it("interrupt_without_an_answer_from_the_machine_times_out_to_a_clear_state", async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps } = createMockDeps();
+      deps.interruptApi = async () => ({ requested: { interrupt_command_id: "c1", withdraw_command_id: null } });
+      const model = new ComposerModel(deps);
+      await model.interrupt();
+      expect(model.interruptLabel).toBe("Прерываю…");
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(model.interruptLabel).toBe("Прерывание не подтверждено");
+      expect(model.interruptRunning).toBe(false);
+      let calls = 0;
+      deps.interruptApi = async () => { calls += 1; };
+      await model.interrupt();
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("terminal_status_before_the_deadline_keeps_its_label", async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps } = createMockDeps();
+      deps.interruptApi = async () => ({ requested: { interrupt_command_id: "c1", withdraw_command_id: null } });
+      const model = new ComposerModel(deps);
+      await model.interrupt();
+      model.applyInterruptStatus("completed");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(model.interruptLabel).toBe("Прервано");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
