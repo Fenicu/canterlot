@@ -89,6 +89,8 @@ pub struct ProviderSeries {
 pub struct History {
     pub usage: Vec<limits::UsageDay>,
     pub series: Vec<ProviderSeries>,
+    /// Медианы скорости ответа по моделям; Codex не передаёт времени генерации и сюда не попадает.
+    pub speed: Vec<crate::speed::ModelSpeedSummary>,
 }
 #[utoipa::path(get,path="/api/v1/limits",tag="limits",responses((status=200,description="Текущие лимиты",body=Vec<ProviderView>)))]
 async fn current(
@@ -131,6 +133,15 @@ async fn history(
     )
     .await
     .map_err(super::conversations::query_error)?;
+    let speed = crate::speed::summary(
+        &mut *s.pool.acquire().await?,
+        o.owner_id,
+        p.provider.as_deref(),
+        from,
+        to,
+        p.tz.as_deref().unwrap_or("UTC"),
+    )
+    .await?;
     let providers = if let Some(provider) = p.provider {
         vec![provider]
     } else {
@@ -158,7 +169,11 @@ async fn history(
             weekly,
         });
     }
-    Ok(Json(History { usage, series }))
+    Ok(Json(History {
+        usage,
+        series,
+        speed,
+    }))
 }
 #[utoipa::path(post,path="/api/v1/limits/refresh",tag="limits",responses((status=202,description="Просьба об опросе отправлена воркерам; новые показания придут событием limits_changed",body=RefreshView),(status=429,description="Опрос просили слишком недавно"),(status=409,description="Нет доступного воркера с лимитами")))]
 async fn refresh(

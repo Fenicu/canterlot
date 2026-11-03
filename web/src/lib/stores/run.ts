@@ -16,6 +16,13 @@ export interface RunInfo {
 		cache_write_tokens?: number;
 		kind?: string;
 	}[];
+	speed?: {
+		model: string;
+		output_tokens: number;
+		generation_ms?: number | null;
+		tokens_per_second?: number | null;
+		first_token_ms?: number | null;
+	}[];
 }
 
 export class RunStore {

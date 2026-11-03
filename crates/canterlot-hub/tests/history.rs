@@ -768,3 +768,52 @@ async fn history_page_reads_items_in_batches(pool: PgPool) {
     );
     assert_eq!(items[0]["content"], "ответ");
 }
+
+#[allow(clippy::too_many_arguments)]
+async fn timed_block(
+    f: &Fixture,
+    execution: Uuid,
+    run: Uuid,
+    seq: i64,
+    kind: &str,
+    start_ms: i64,
+    end_ms: i64,
+    parent: Option<Uuid>,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,created_seq,content,agent,model,input_command_id,parent_block_id,created_at,finished_at) values($1,$2,$3,$4,'final',1,$5,'x','orchestrator','opus',$6,$7,timestamptz '2026-10-27T10:00:00Z'+$8*interval '1 millisecond',timestamptz '2026-10-27T10:00:00Z'+$9*interval '1 millisecond')")
+        .bind(id).bind(execution).bind(f.seed.conversation_id).bind(kind).bind(seq).bind(run).bind(parent).bind(start_ms as f64).bind(end_ms as f64).execute(&f.pool).await.unwrap();
+    id
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_speed_excludes_tool_time_in_the_middle_of_the_turn(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let e = f.execution().await;
+    let i = f.input("speed").await;
+    let cmd = i.command_id;
+    sqlx::query("insert into runs(input_command_id,execution_id,conversation_id,provider,started_at,finished_at,duration_ms,exact) values($1,$2,$3,'claude','2026-10-27T10:00:00Z','2026-10-27T10:01:06Z',66000,true)").bind(cmd).bind(e).bind(f.seed.conversation_id).execute(&f.pool).await.unwrap();
+    sqlx::query("insert into run_model_usage values($1,'opus','orchestrator',10,400,0,0)")
+        .bind(cmd)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    // Генерация 1–3 с, инструмент до 63 с, ответ 63,5–65,5 с.
+    timed_block(&f, e, cmd, 10, "reasoning", 1_000, 2_000, None).await;
+    let call = timed_block(&f, e, cmd, 11, "tool_call", 2_000, 3_000, None).await;
+    timed_block(&f, e, cmd, 12, "tool_result", 63_000, 63_000, Some(call)).await;
+    timed_block(&f, e, cmd, 13, "text", 63_500, 65_500, None).await;
+    let p = f.path(&format!("/runs/{cmd}"));
+    let r = f.get(&p).await;
+    assert_eq!(r["speed"][0]["model"], "opus");
+    assert_eq!(r["speed"][0]["output_tokens"], 400);
+    assert_eq!(r["speed"][0]["generation_ms"], 4000);
+    assert_eq!(r["speed"][0]["tokens_per_second"], 100.0);
+    assert_eq!(r["speed"][0]["first_token_ms"], 750);
+    // Codex прячет рассуждения: числа нет вовсе.
+    sqlx::query("update runs set provider='codex' where input_command_id=$1")
+        .bind(cmd)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(f.get(&p).await["speed"], json!([]));
+}

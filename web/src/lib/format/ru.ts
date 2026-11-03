@@ -91,6 +91,25 @@ export const fmt = {
 	tokens(n: number): string {
 		return grouped(n);
 	},
+	/** Скорость генерации: «142 ток/с», медленнее десяти — с десятыми. */
+	tokensPerSecond(value: number): string {
+		const text = value < 10 ? value.toFixed(1).replace('.', ',') : grouped(Math.round(value));
+		return `${text} ток/с`;
+	},
+	/** Время до первого токена: «1,8 с»; от минуты — как длительность. */
+	firstToken(ms: number): string {
+		if (ms >= 60_000) return fmt.duration(ms);
+		if (ms < 50) return '< 0,1 с';
+		const seconds = ms / 1000;
+		return `${seconds < 10 ? seconds.toFixed(1).replace('.', ',') : Math.round(seconds)} с`;
+	},
+	/** «генерация 142 ток/с · первый токен 1,8 с»; неизвестная часть опускается. */
+	speed(tokensPerSecond: number | null | undefined, firstTokenMs: number | null | undefined): string {
+		const parts: string[] = [];
+		if (tokensPerSecond != null) parts.push(`генерация ${fmt.tokensPerSecond(tokensPerSecond)}`);
+		if (firstTokenMs != null) parts.push(`первый токен ${fmt.firstToken(firstTokenMs)}`);
+		return parts.join(' · ');
+	},
 	/** Коротко для строк ленты: «980 тыс.», «1 млн», «640». */
 	tokensShort(n: number): string {
 		const short = (value: number, unit: string): string => {

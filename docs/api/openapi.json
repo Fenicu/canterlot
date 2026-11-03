@@ -7114,7 +7114,8 @@
         "type": "object",
         "required": [
           "usage",
-          "series"
+          "series",
+          "speed"
         ],
         "properties": {
           "series": {
@@ -7122,6 +7123,13 @@
             "items": {
               "$ref": "#/components/schemas/ProviderSeries"
             }
+          },
+          "speed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelSpeedSummary"
+            },
+            "description": "Медианы скорости ответа по моделям; Codex не передаёт времени генерации и сюда не попадает."
           },
           "usage": {
             "type": "array",
@@ -8346,6 +8354,70 @@
           }
         }
       },
+      "ModelSpeed": {
+        "type": "object",
+        "required": [
+          "model",
+          "output_tokens"
+        ],
+        "properties": {
+          "first_token_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Медиана по запросам хода: от начала запроса до первого кадра ответа."
+          },
+          "generation_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Сумма времени генерации по запросам хода; нет, если его нельзя выделить честно."
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tokens_per_second": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "ModelSpeedSummary": {
+        "type": "object",
+        "required": [
+          "provider",
+          "model",
+          "today",
+          "period"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "period": {
+            "$ref": "#/components/schemas/SpeedStats",
+            "description": "Весь запрошенный диапазон."
+          },
+          "provider": {
+            "type": "string"
+          },
+          "today": {
+            "$ref": "#/components/schemas/SpeedStats",
+            "description": "Последний день диапазона в часовом поясе запроса."
+          }
+        }
+      },
       "ModelUsageView": {
         "type": "object",
         "required": [
@@ -9425,7 +9497,8 @@
           "input_id",
           "started_at",
           "usage",
-          "parts"
+          "parts",
+          "speed"
         ],
         "properties": {
           "compactions": {
@@ -9483,6 +9556,13 @@
           "run_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "speed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelSpeed"
+            },
+            "description": "Скорость ответа по моделям основного агента; пусто, если её нельзя выделить честно."
           },
           "started_at": {
             "type": "string",
@@ -9957,6 +10037,35 @@
           },
           "scope": {
             "type": "string"
+          }
+        }
+      },
+      "SpeedStats": {
+        "type": "object",
+        "required": [
+          "runs"
+        ],
+        "properties": {
+          "first_token_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Медиана по ходам."
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ходы, по которым посчитана скорость генерации."
+          },
+          "tokens_per_second": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Медиана по ходам."
           }
         }
       },

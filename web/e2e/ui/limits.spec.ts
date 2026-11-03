@@ -27,7 +27,8 @@ test('limits_history_follows_mockup_10_with_an_accessible_data_table', async ({ 
   await expect(main.getByText('Субагент · haiku').first()).toBeVisible();
   await expect(main.getByText('приблизительно', { exact: true }).first()).toBeVisible();
   await expect(main.getByText(/Кэш включён во входные токены/)).toBeVisible();
-  expect(historyRequests).toHaveLength(2);
+  // Третий запрос, OpenCode, нужен только сводке скорости.
+  expect(historyRequests.map(query => query.get('provider')).sort()).toEqual(['claude', 'codex', 'opencode']);
   for (const query of historyRequests) { expect(query.get('tz')).toBeTruthy(); expect(query.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}T/); expect(query.get('to')).toMatch(/^\d{4}-\d{2}-\d{2}T/); }
 });
 

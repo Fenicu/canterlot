@@ -487,6 +487,8 @@ pub struct RunInfo {
     pub limit: Option<RunLimit>,
     pub parts: Vec<PartView>,
     pub compactions: Option<u32>,
+    /// Скорость ответа по моделям основного агента; пусто, если её нельзя выделить честно.
+    pub speed: Vec<crate::speed::ModelSpeed>,
 }
 pub async fn run_info(
     conn: &mut PgConnection,
@@ -511,7 +513,11 @@ pub async fn run_info(
                 && (a % 10 != 0 || b % 10 != 0),
         });
     let usage=sqlx::query_as("select model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens from run_model_usage where input_command_id=$1 order by model,agent").bind(run_id).fetch_all(&mut *conn).await?;
-    let parts=sqlx::query_as("select block_id,agent,model,kind from blocks where conversation_id=$1 and input_command_id=$2 order by created_seq,block_id").bind(conversation_id).bind(run_id).fetch_all(conn).await?;
+    let parts=sqlx::query_as("select block_id,agent,model,kind from blocks where conversation_id=$1 and input_command_id=$2 order by created_seq,block_id").bind(conversation_id).bind(run_id).fetch_all(&mut *conn).await?;
+    let speed = crate::speed::for_runs(conn, &[run_id])
+        .await?
+        .remove(&run_id)
+        .unwrap_or_default();
     Ok(Some(RunInfo {
         run_id,
         input_id: r.try_get("input_id")?,
@@ -528,6 +534,7 @@ pub async fn run_info(
         limit,
         parts,
         compactions: None,
+        speed,
     }))
 }
 /// Страница ленты одного субагента: корень (вызов) и его потомки по любой глубине.
