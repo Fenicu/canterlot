@@ -1254,6 +1254,7 @@ async fn apply_body(
                 } else {
                     let machine_time = i64::try_from(fact.machine_time_ms)
                         .map_err(|_| IngestError::InvalidRecord)?;
+                    lock_command_queue(conn, command_id).await?;
                     sqlx::query("update commands set delivery_state = 'stored_on_machine', stored_at = coalesce(stored_at, now()), machine_stored_at_ms = coalesce(machine_stored_at_ms, $3) where id = $1 and dispatch_attempt = $2 and delivery_state = 'pending'")
                         .bind(command_id).bind(dispatch_attempt).bind(machine_time).execute(&mut *conn).await?;
                     store_machine_time_in_tx(
@@ -1314,6 +1315,7 @@ async fn apply_body(
                     )
                     .await?;
                 } else {
+                    lock_command_queue(conn, command_id).await?;
                     complete_rejected(conn, command_id, dispatch_attempt, &fact.reason).await?;
                 }
             }
@@ -1631,13 +1633,7 @@ async fn reject_start(
     reason: &str,
     correlation_id: Uuid,
 ) -> Result<(), IngestError> {
-    // Очередь блокируется раньше чтения команды: тот же порядок, что у квитанций и диспетчера.
-    sqlx::query(
-        "select q.conversation_id from queue_state q join commands c on c.conversation_id = q.conversation_id where c.id = $1 for update of q",
-    )
-    .bind(command_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    lock_command_queue(conn, command_id).await?;
     let Some(target) = command(conn, machine_id, command_id).await? else {
         return Ok(());
     };
@@ -1655,6 +1651,18 @@ async fn reject_start(
         .await?;
     }
     complete_rejected(conn, command_id, dispatch_attempt, reason).await
+}
+
+/// Очередь блокируется раньше строки команды: тот же порядок, что у квитанций,
+/// диспетчера, захвата outbox и правки.
+async fn lock_command_queue(conn: &mut PgConnection, command_id: Uuid) -> Result<(), IngestError> {
+    sqlx::query(
+        "select q.conversation_id from queue_state q join commands c on c.conversation_id = q.conversation_id where c.id = $1 for update of q",
+    )
+    .bind(command_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 async fn complete_rejected(

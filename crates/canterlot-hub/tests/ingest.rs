@@ -2449,3 +2449,90 @@ async fn bound_sj_rejects_foreign_phase_and_close_without_effect(pool: PgPool) -
     }
     Ok(())
 }
+
+/// Запись о вливании берёт замок очереди раньше строки команды, как захват
+/// outbox и правка: иначе они взаимно блокируются, и Postgres рвёт одну сторону.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn steer_records_lock_the_queue_before_the_command(pool: PgPool) -> TestResult {
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
+
+    let (seed, execution, input) = setup(&pool).await;
+    for rejected in [false, true] {
+        let steer = Uuid::now_v7();
+        sqlx::query(
+            "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
+                                   kind, payload, target_command_id, delivery_state, dispatch_attempt,
+                                   dispatch_claimed_at)
+             values ($1, $2, $3, $4, 1, 'steer_input', '{}'::jsonb, $5, 'pending', 1, now())",
+        )
+        .bind(steer)
+        .bind(seed.machine_id)
+        .bind(seed.conversation_id)
+        .bind(execution.execution_id)
+        .bind(input.command_id)
+        .execute(&pool)
+        .await?;
+        let body = if rejected {
+            record_body::Body::CommandRejected(CommandRejected {
+                command_id: steer.to_string(),
+                dispatch_attempt: 1,
+                reason: "invalid".into(),
+            })
+        } else {
+            stored(steer)
+        };
+        let mut queue_lock = pool.begin().await?;
+        sqlx::query(
+            "select conversation_id from queue_state where conversation_id = $1 for update",
+        )
+        .bind(seed.conversation_id)
+        .execute(&mut *queue_lock)
+        .await?;
+        let ingest = Ingest::new(pool.clone());
+        let digest = seed.credential_digest();
+        let task = tokio::spawn(async move {
+            ingest
+                .apply_batch(
+                    seed.machine_id,
+                    &digest,
+                    JournalKind::Cj,
+                    &batch(Uuid::now_v7(), vec![body]),
+                )
+                .await
+        });
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like 'select q.%queue_state%')")
+                    .fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        // Строка вливания свободна: захват под замком очереди её получит.
+        sqlx::query("select id from commands where id = $1 for update nowait")
+            .bind(steer)
+            .execute(&mut *queue_lock)
+            .await?;
+        queue_lock.commit().await?;
+        assert!(matches!(
+            timeout(Duration::from_secs(2), task).await???,
+            IngestOutcome::Committed { .. }
+        ));
+        let delivery: String =
+            sqlx::query_scalar("select delivery_state from commands where id = $1")
+                .bind(steer)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            delivery,
+            if rejected {
+                "completed"
+            } else {
+                "stored_on_machine"
+            }
+        );
+    }
+    Ok(())
+}
