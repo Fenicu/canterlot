@@ -39,6 +39,9 @@
   const shownFailed = $derived(collapsed ? failed.slice(0, Math.max(0, VISIBLE - shownItems.length - shownScheduled.length)) : failed);
   const hidden = $derived(total - shownItems.length - shownScheduled.length - shownFailed.length);
 
+  // Подпись кнопки называет сообщение: одинаковые «Изменить» в соседних строках не различить на слух.
+  const short = (text: string): string => (text.length > 32 ? `${text.slice(0, 32).trimEnd()}…` : text);
+
   function textOf(item: ScheduledMessage): string {
     return item.content.map((block) => (block.type === 'text' ? block.text : '')).join('');
   }
@@ -196,19 +199,19 @@
     <div class="item" data-state={input.state}>
       <span class="pill">
         <span class="label accent">{deliveryLabel(input.state)}</span>
-        <span class="text">{input.text}</span>
+        <span class="text" title={input.text}>{input.text}</span>
         {#if input.state === 'queued' && input.id && !editing[input.key]}
-          <IconButton icon="edit" label="Изменить" onclick={() => startEdit(input)} />
+          <IconButton icon="edit" label="Изменить: {short(input.text)}" onclick={() => startEdit(input)} />
         {/if}
         {#if input.state === 'queued' && input.id && turnLive && steerSupported}
           {#if sending[input.key]}
-            <IconButton icon="send" label="Отправляется…" inert={true} />
+            <IconButton icon="play" label="Отправляется: {short(input.text)}" inert={true} />
           {:else}
-            <IconButton icon="send" label="Отправить сейчас" onclick={() => void doSendNow(input)} />
+            <IconButton icon="play" label="Отправить сейчас: {short(input.text)}" onclick={() => void doSendNow(input)} />
           {/if}
         {/if}
         {#if input.state === 'queued' || input.state === 'on_machine'}
-          <IconButton icon="close" label="Отменить" onclick={() => cancel(input.key)} />
+          <IconButton icon="close" label="Отменить: {short(input.text)}" onclick={() => cancel(input.key)} />
         {/if}
       </span>
       {#if input.cancelRequested}<p class="note">{CANCEL_REQUESTED_LABEL}</p>{/if}
@@ -255,10 +258,10 @@
     <div class="item">
       <span class="pill">
         <span class="label">{atOf(item)}</span>
-        <span class="text">{textOf(item)}</span>
+        <span class="text" title={textOf(item)}>{textOf(item)}</span>
         {#if !notes[item.id]}
-          <IconButton icon="edit" label="Изменить" onclick={() => openEdit(item.id, textOf(item), item.run_at)} />
-          <IconButton icon="close" label="Отменить" onclick={() => cancelScheduled(item.id)} />
+          <IconButton icon="edit" label="Изменить: {short(textOf(item))}" onclick={() => openEdit(item.id, textOf(item), item.run_at)} />
+          <IconButton icon="close" label="Отменить: {short(textOf(item))}" onclick={() => cancelScheduled(item.id)} />
         {/if}
       </span>
       {#if notes[item.id]}<p class="note">{notes[item.id]}</p>{/if}
@@ -268,7 +271,7 @@
     <div class="item">
       <span class="pill failed">
         <span class="label danger">Не отправлено</span>
-        <span class="text">{textOf(item)}</span>
+        <span class="text" title={textOf(item)}>{textOf(item)}</span>
       </span>
       <span class="actions"><Button onclick={() => takeBackFailed(item)}>Вернуть в черновик</Button></span>
     </div>

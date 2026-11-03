@@ -79,6 +79,9 @@ test('send_now_buttons_appear_while_a_turn_runs_and_post_to_the_hub', async ({ p
   // Полоса очереди показывает ожидающий ввод хаба.
   const buttons = page.getByRole('button', { name: 'Отправить сейчас' });
   await expect(buttons).toHaveCount(1);
+  // «Отправить сейчас» не повторяет стрелку отправки из поля ввода.
+  const glyph = (locator: import('@playwright/test').Locator) => locator.locator('svg path').first().getAttribute('d');
+  expect(await glyph(buttons.first())).not.toBe(await glyph(page.getByRole('button', { name: 'Отправить', exact: true })));
   const hits: string[] = [];
   await page.route('**/send-now', async (route) => {
     hits.push(route.request().url());
