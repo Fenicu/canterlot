@@ -4,7 +4,7 @@
 
 [![Forgejo](https://shields.fenicu.com/badge/Forgejo-Fenicu%2Fcanterlot-brightgreen?logo=forgejo)](https://git.fenicu.com/Fenicu/canterlot)
 ![версия](https://shields.fenicu.com/badge/%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F-1.0.0-00f4ee)
-![агенты](https://shields.fenicu.com/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode-1f5457)
+![агенты](https://shields.fenicu.com/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode%20%C2%B7%20Antigravity-1f5457)
 ![Rust](https://shields.fenicu.com/badge/rust-1.99-orange?logo=rust)
 ![SvelteKit](https://shields.fenicu.com/badge/SvelteKit-3-FF3E00?logo=svelte&logoColor=white)
 ![PostgreSQL](https://shields.fenicu.com/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)
@@ -12,7 +12,7 @@
 
 </p>
 
-Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на рабочих машинах, PWA на SvelteKit, PostgreSQL, gRPC между хабом и воркерами. Поддерживаются Claude Code, Codex и OpenCode (последний включается таблицей `[opencode]` воркера).
+Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на рабочих машинах, PWA на SvelteKit, PostgreSQL, gRPC между хабом и воркерами. Поддерживаются Claude Code, Codex, OpenCode и Antigravity (последние два включаются таблицами `[opencode]` и `[antigravity]` воркера). Antigravity работает на Google-аккаунте владельца и использует его каталог `~/.gemini`: настройки, MCP-серверы и история разговоров общие с Antigravity владельца.
 
 Версия и история изменений — [CHANGES.rst](CHANGES.rst), правила бампа — [docs/versioning.md](docs/versioning.md).
 
@@ -442,7 +442,7 @@ scripts/opencode-schema-check.sh
 
 OpenCode включается таблицей `[opencode]`: без неё харнесс не показывается и не запускается.
 
-Адаптер Antigravity (`src/adapter/antigravity`) говорит с `agy acp` по stdio JSON-RPC. Таблица `[antigravity]` включает харнесс; ключи: `enabled` (по умолчанию `true`; `false` прячет харнесс) и `binary` — исходный `agy` (по умолчанию `~/.local/bin/agy`). Воркер проверяет `agy --version` (минимум и проверенная версия 1.4.12, более новая допускается с диагностикой `untested_cli_version`), копирует бинарник в `<data_dir>/antigravity/bin/agy-<версия>` и запускает только копию: `<bin> acp --log-file <exec_dir>/agy.log --disable-telemetry [--dangerously-skip-permissions]`, cwd — рабочий каталог, `--gemini-dir` не передаётся. Окружение собирается заново из `PATH`, `HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`, `SSH_AUTH_SOCK`, `CARGO_BUILD_JOBS` и `GEMINI_FORCE_FILE_STORAGE=true`. Каталог моделей берётся из `session/new` (`models.availableModels`) без хода; `configOptions.model` — семейство, а не id модели. Возобновление — через `session/list` и `session/resume`, `session/load` не используется. Режимы: `owner`, `ask`, `bypass`; `read_only` не поддерживается.
+Адаптер Antigravity (`src/adapter/antigravity`) говорит с `agy acp` по stdio JSON-RPC и запускается на Google-аккаунте владельца: воркер не читает вход и настройки из `~/.gemini`, а сессии, MCP владельца и история разговоров живут в его каталоге. Таблица `[antigravity]` включает харнесс; ключи: `enabled` (по умолчанию `true`; `false` прячет харнесс) и `binary` — исходный `agy` (по умолчанию `~/.local/bin/agy`). Воркер проверяет `agy --version` (минимум и проверенная версия 1.4.12, более новая допускается с диагностикой `untested_cli_version`), копирует бинарник в `<data_dir>/antigravity/bin/agy-<версия>` и запускает только копию: `<bin> acp --log-file <exec_dir>/agy.log --disable-telemetry [--dangerously-skip-permissions]`, cwd — рабочий каталог, `--gemini-dir` не передаётся. Окружение собирается заново из `PATH`, `HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`, `SSH_AUTH_SOCK`, `CARGO_BUILD_JOBS` и `GEMINI_FORCE_FILE_STORAGE=true`. Каталог моделей берётся из `session/new` (`models.availableModels`) без хода; `configOptions.model` — семейство, а не id модели. Возобновление — через `session/list` и `session/resume`, `session/load` не используется. Режимы: `owner`, `ask`, `bypass`; `read_only` не поддерживается.
 
 Сопровождение добавляет свой MCP-сервер для разрешений, вопросов, чтения лимитов и работы с пресетами: `canterlot_presets_list`, `canterlot_preset_save` и `canterlot_preset_apply` вызывают хаб унарным `WorkerData.AgentCall` и действуют только на свою сессию (у Codex и OpenCode тот же набор без `approve`: лимиты, `share_file`, пресеты и межсессионные инструменты). «Прервать» отправляет CLI управляющий запрос `interrupt`: ход закрывается как прерванный, процесс и контекст остаются, следующий ввод идёт в тот же процесс, а очередь стоит на паузе `user_stop` до продолжения. SIGINT остаётся запасным путём, если квитанции нет в срок: тогда процесс выходит, исполнение получает `stopped(user_stop)`, а продолжение запускает новое исполнение с `--resume` и тем же нативным ID. Отсутствие авторизации даёт `auth_required`, несовпадение ID или несовместимая версия дают `cli_incompatible`, недоступность canterlot MCP даёт `start_failed`.
 
