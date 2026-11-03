@@ -1324,6 +1324,57 @@ async fn a_late_echo_after_the_deadline_is_input_accepted() {
 }
 
 #[tokio::test]
+async fn a_rejection_after_the_deadline_fails_the_turn_instead_of_dropping_it() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 2),
+        Step::Delay { ms: 300 },
+        respond_error(
+            2,
+            json!({"code": -32603, "message": "trajectory not found"}),
+        ),
+    ];
+    let mut bench = Bench::with_timing(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+        Duration::from_millis(100),
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+    bench.start().await;
+    let input = send("late refusal");
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Undetermined
+    ));
+    let events = drain(&mut bench.adapter).await;
+    assert_eq!(
+        finished(&events),
+        vec![input.command_id],
+        "a late rejection must close the turn: {events:?}"
+    );
+    assert!(kinds(&events).contains(&BlockKind::Error));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockFinal { text, .. } if text.contains("trajectory")
+        )),
+        "the rejection reason reaches the feed: {events:?}"
+    );
+    assert!(matches!(
+        bench.adapter.interrupt().await,
+        InterruptOutcome::NotApplicable
+    ));
+    bench.close().await;
+}
+
+#[tokio::test]
 async fn an_error_before_the_echo_is_rejected_without_a_run_finished() {
     let steps = vec![
         init_step(),

@@ -355,7 +355,8 @@ impl Tracker {
     /// Ответ prompt: вклад в ход, закрытие хода или итог сжатия.
     pub fn on_response(&mut self, id: i64, result: &Result<Value, RpcError>) -> Option<Effect> {
         let meta = self.prompts.remove(&id)?;
-        if !meta.proved && self.waiting == Some(meta.command_id) {
+        let awaiting_echo = !meta.proved && self.waiting == Some(meta.command_id);
+        if awaiting_echo {
             self.waiting = None;
             self.answered_unproven.insert(meta.command_id);
         }
@@ -397,7 +398,10 @@ impl Tracker {
                         self.echoes
                             .retain(|wait| wait.command_id != meta.command_id);
                         self.unconfirmed.remove(&meta.command_id);
-                        if meta.proved {
+                        // Отказ после срока (`Undetermined`) больше некому вручить:
+                        // без терминального исхода ход молча пропал бы, а supervisor
+                        // остался бы занят. Ранний отказ ждёт `transmit` в `early_rejects`.
+                        if meta.proved || !awaiting_echo {
                             turn.accepted = true;
                             turn.failed = Some(error.message.clone());
                         } else {
