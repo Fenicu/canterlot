@@ -884,6 +884,26 @@ fn openapi_documents_global_server_time() {
 }
 
 #[test]
+fn openapi_path_parameters_appear_in_their_path() {
+    let document = serde_json::to_value(openapi::document()).unwrap();
+    let mut stray = Vec::new();
+    for (path, item) in document["paths"].as_object().unwrap() {
+        for (method, operation) in item.as_object().unwrap() {
+            for parameter in operation["parameters"].as_array().into_iter().flatten() {
+                let name = parameter["name"].as_str().unwrap();
+                if parameter["in"] == "path" && !path.contains(&format!("{{{name}}}")) {
+                    stray.push(format!("{method} {path}: {name}"));
+                }
+            }
+        }
+    }
+    assert!(
+        stray.is_empty(),
+        "path parameters missing from the path: {stray:#?}"
+    );
+}
+
+#[test]
 fn openapi_documents_optional_history_query() {
     let document = serde_json::to_value(openapi::document()).unwrap();
     let parameters = document["paths"]["/api/v1/conversations/{id}/history"]["get"]["parameters"]

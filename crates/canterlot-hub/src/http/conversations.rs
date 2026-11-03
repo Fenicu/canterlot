@@ -1,7 +1,7 @@
 use super::{
     AppState,
     auth::{Correlation, IdempotencyKey, Owner},
-    error::{ApiError, ErrorCode, ErrorDetails},
+    error::{ApiError, ErrorCode},
     extract::{ApiJson, ApiPath, ApiQuery},
 };
 use crate::conversations::{
@@ -306,16 +306,7 @@ async fn send_now(
         c,
         &capabilities.unwrap_or_default(),
     )
-    .await
-    .map_err(|error| match error {
-        crate::delivery::control::ControlError::InvalidRequest { reason } => {
-            ApiError::new(ErrorCode::InvalidRequest).with_details(ErrorDetails {
-                reason: Some(reason.into()),
-                ..Default::default()
-            })
-        }
-        error => error.into(),
-    })?;
+    .await?;
     Ok(Json(result))
 }
 
@@ -350,16 +341,7 @@ async fn edit_input(
             correlation_id: c,
         },
     )
-    .await
-    .map_err(|error| match error {
-        crate::delivery::control::ControlError::InvalidRequest { reason } => {
-            ApiError::new(ErrorCode::InvalidRequest).with_details(ErrorDetails {
-                reason: Some(reason.into()),
-                ..Default::default()
-            })
-        }
-        error => error.into(),
-    })?;
+    .await?;
     Ok(Json(result))
 }
 #[derive(Clone, PartialEq, Eq, Deserialize, serde::Serialize, ToSchema)]
@@ -721,6 +703,7 @@ pub struct CreateBody {
     pub start: bool,
 }
 #[derive(Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListParams {
     pub filter: Option<String>,
     pub q: Option<String>,

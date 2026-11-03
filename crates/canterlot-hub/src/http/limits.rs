@@ -67,6 +67,7 @@ pub struct RefreshView {
     pub retry_after_secs: u64,
 }
 #[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct HistoryParams {
     pub provider: Option<String>,
     pub from: Option<DateTime<Utc>>,

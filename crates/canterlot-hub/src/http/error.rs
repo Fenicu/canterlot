@@ -140,6 +140,87 @@ error_codes! {
     WorktreeNotRemoved => "worktree_not_removed", 409, Browser, AfterCondition, "Сначала примите результат: рабочая копия ещё на машине";
 }
 
+/// Причины отказа в `details.reason` и код, с которым каждая уходит владельцу:
+/// конфликт состояния идёт 409, ошибка самого запроса 400.
+macro_rules! error_reasons {
+    ($($variant:ident => $wire:literal, $code:ident;)+) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, ToSchema)]
+        #[serde(rename_all = "snake_case")]
+        pub enum ErrorReason {
+            $($variant),+
+        }
+
+        impl ErrorReason {
+            pub const ALL: &'static [ErrorReason] = &[$(ErrorReason::$variant),+];
+
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $wire),+
+                }
+            }
+
+            pub fn code(self) -> ErrorCode {
+                match self {
+                    $(Self::$variant => ErrorCode::$code),+
+                }
+            }
+
+            pub fn parse(value: &str) -> Option<Self> {
+                match value {
+                    $($wire => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+error_reasons! {
+    ClosedWithoutDecision => "closed_without_decision", RequestNotOpen;
+    GenerationAdvanced => "generation_advanced", RequestNotOpen;
+    InvalidIdempotencyKey => "invalid_idempotency_key", InvalidRequest;
+    InputNotQueued => "input_not_queued", InvalidState;
+    NoRunningTurn => "no_running_turn", InvalidState;
+    RequestOpen => "request_open", InvalidState;
+    Compacting => "compacting", InvalidState;
+    UnsupportedHarness => "unsupported_harness", InvalidState;
+    CapabilityMissing => "capability_missing", CapabilityMissing;
+    RevisionConflict => "revision_conflict", InvalidState;
+    SteerInFlight => "steer_in_flight", InvalidState;
+    EmptyContent => "empty_content", InvalidRequest;
+    ContentTooLong => "content_too_long", InvalidRequest;
+    AttachmentUnavailable => "attachment_unavailable", AttachmentUnavailable;
+    AttachmentNotReady => "attachment_not_ready", AttachmentNotReady;
+    AttachmentNotFound => "attachment_not_found", AttachmentUnavailable;
+    RunInProgress => "run_in_progress", InvalidState;
+    NoLiveExecution => "no_live_execution", InvalidState;
+}
+
+/// Отказ команды управления: код по причине, сама причина в `details.reason`.
+pub fn refusal(reason: &'static str) -> ApiError {
+    match ErrorReason::parse(reason) {
+        Some(known) => ApiError::new(known.code()).with_details(ErrorDetails {
+            reason: Some(known.as_str().into()),
+            ..Default::default()
+        }),
+        None => {
+            tracing::warn!(
+                kind = "unlisted_error_reason",
+                reason,
+                "refusal reason is not in ErrorReason"
+            );
+            ApiError::new(ErrorCode::InvalidRequest)
+        }
+    }
+}
+
+fn invalid_field(field: &'static str) -> ApiError {
+    ApiError::new(ErrorCode::InvalidRequest).with_details(ErrorDetails {
+        field: Some(field.into()),
+        ..Default::default()
+    })
+}
+
 impl From<crate::conversations::SettingsError> for ApiError {
     fn from(error: crate::conversations::SettingsError) -> Self {
         use crate::conversations::SettingsError as E;
@@ -176,7 +257,10 @@ impl From<crate::scheduler::ScheduleError> for ApiError {
             E::NotPending => Self::new(ErrorCode::NotPending),
             E::TimeOutOfRange => Self::new(ErrorCode::ScheduleTimeOutOfRange),
             E::TooManyPending => Self::new(ErrorCode::TooManyScheduled),
-            E::InvalidContent(_) => Self::new(ErrorCode::InvalidRequest),
+            E::InvalidContent(reason) => match ErrorReason::parse(reason) {
+                Some(_) => refusal(reason),
+                None => invalid_field("content"),
+            },
             E::Attachment(error) => error.into(),
             E::IdempotencyConflict => Self::new(ErrorCode::IdempotencyConflict),
             E::Db(error) => error.into(),
@@ -208,10 +292,7 @@ pub struct ErrorDetails {
     )]
     pub current_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(
-        nullable = false,
-        pattern = "^(closed_without_decision|generation_advanced)$"
-    )]
+    #[schema(value_type = ErrorReason, nullable = false)]
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -372,9 +453,8 @@ impl From<SubmitError> for ApiError {
                 error.status = StatusCode::UNPROCESSABLE_ENTITY;
                 error
             }
-            SubmitError::InvalidRequest { .. } | SubmitError::InvalidContent { .. } => {
-                ApiError::new(ErrorCode::InvalidRequest)
-            }
+            SubmitError::InvalidRequest { reason } => refusal(reason),
+            SubmitError::InvalidContent { .. } => invalid_field("content"),
             SubmitError::QueueFull { .. } => ApiError::new(ErrorCode::QueueFull),
             SubmitError::ResourceLimit { .. } => ApiError::new(ErrorCode::ResourceLimit),
             SubmitError::ConversationNotFound => ApiError::new(ErrorCode::NotFound),
@@ -389,7 +469,7 @@ impl From<ControlError> for ApiError {
         match error {
             ControlError::NotFound => ApiError::new(ErrorCode::NotFound),
             ControlError::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
-            ControlError::InvalidRequest { .. } => ApiError::new(ErrorCode::InvalidRequest),
+            ControlError::InvalidRequest { reason } => refusal(reason),
             ControlError::Db(error) => error.into(),
         }
     }
@@ -450,7 +530,7 @@ impl From<crate::conversations::CreateError> for ApiError {
             E::ProfileUnknown => ErrorCode::ProfileUnknown,
             E::WorkdirNotAllowed => ErrorCode::WorkdirNotAllowed,
             E::GroupNotFound => ErrorCode::GroupNotFound,
-            E::Invalid(_) => ErrorCode::InvalidRequest,
+            E::Invalid(field) => return invalid_field(field),
             E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             E::Db(e) => return e.into(),
         })
@@ -462,7 +542,7 @@ impl From<crate::conversations::UpdateError> for ApiError {
         Self::new(match e {
             E::NotFound => ErrorCode::NotFound,
             E::GroupNotFound => ErrorCode::GroupNotFound,
-            E::Invalid(_) => ErrorCode::InvalidRequest,
+            E::Invalid(field) => return invalid_field(field),
             E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             E::ArchiveActive(reasons) => {
                 return Self::new(ErrorCode::ArchiveActive).with_details(
@@ -557,5 +637,77 @@ impl From<crate::attachments::AttachmentError> for ApiError {
         let mut api = ApiError::new(code);
         api.upload_offset = offset;
         api
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quoted_after<'a>(source: &'a str, marker: &str) -> Vec<&'a str> {
+        source
+            .match_indices(marker)
+            .filter_map(|(at, _)| {
+                let rest = &source[at + marker.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_control_refusal_reason_is_published() {
+        let control = include_str!("../delivery/control.rs");
+        let idempotency = include_str!("../idempotency.rs");
+        let mut found = quoted_after(control, "reason: \"");
+        found.extend(quoted_after(idempotency, "Err(\""));
+        assert!(!found.is_empty());
+        let unlisted: Vec<_> = found
+            .into_iter()
+            .filter(|reason| ErrorReason::parse(reason).is_none())
+            .collect();
+        assert!(unlisted.is_empty(), "add to error_reasons!: {unlisted:?}");
+    }
+
+    #[test]
+    fn state_conflicts_answer_409_and_request_errors_400() {
+        for reason in ErrorReason::ALL {
+            let error = refusal(reason.as_str());
+            assert_eq!(error.code, reason.code(), "{reason:?}");
+            assert_eq!(
+                error.details.as_ref().and_then(|d| d.reason.as_deref()),
+                Some(reason.as_str())
+            );
+        }
+        for reason in [
+            "input_not_queued",
+            "revision_conflict",
+            "steer_in_flight",
+            "no_running_turn",
+            "request_open",
+            "compacting",
+            "unsupported_harness",
+            "run_in_progress",
+            "no_live_execution",
+            "attachment_not_ready",
+            "attachment_unavailable",
+            "attachment_not_found",
+            "capability_missing",
+        ] {
+            assert_eq!(refusal(reason).status, StatusCode::CONFLICT, "{reason}");
+        }
+        for reason in [
+            "invalid_idempotency_key",
+            "empty_content",
+            "content_too_long",
+        ] {
+            assert_eq!(refusal(reason).status, StatusCode::BAD_REQUEST, "{reason}");
+        }
+    }
+
+    #[test]
+    fn unknown_reason_stays_a_bare_invalid_request() {
+        let error = refusal("something_new");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert!(error.details.is_none());
     }
 }

@@ -35,6 +35,7 @@ pub struct HistoryParams {
 }
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
 pub struct BlockParams {
     pub offset: Option<i64>,
     pub limit: Option<i64>,
@@ -48,6 +49,7 @@ pub struct LaneParams {
 }
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
 pub struct RangeParams {
     pub scope: String,
     pub after: String,

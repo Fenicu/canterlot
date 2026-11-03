@@ -570,46 +570,34 @@
         "parameters": [
           {
             "name": "filter",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "q",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "cursor",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int64"
             }
           }
@@ -1056,25 +1044,19 @@
           },
           {
             "name": "offset",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int64"
             }
           },
           {
             "name": "limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int64"
             }
           }
@@ -2750,13 +2732,10 @@
           },
           {
             "name": "history_limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int64"
             }
           }
@@ -2957,7 +2936,7 @@
         "parameters": [
           {
             "name": "scope",
-            "in": "path",
+            "in": "query",
             "required": true,
             "schema": {
               "type": "string"
@@ -2965,7 +2944,7 @@
           },
           {
             "name": "after",
-            "in": "path",
+            "in": "query",
             "required": true,
             "schema": {
               "type": "string"
@@ -2973,13 +2952,10 @@
           },
           {
             "name": "limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int64"
             }
           }
@@ -3405,48 +3381,36 @@
         "parameters": [
           {
             "name": "provider",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "from",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": "string",
               "format": "date-time"
             }
           },
           {
             "name": "to",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": "string",
               "format": "date-time"
             }
           },
           {
             "name": "tz",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           }
         ],
@@ -3763,7 +3727,7 @@
           },
           {
             "name": "kind",
-            "in": "path",
+            "in": "query",
             "required": true,
             "schema": {
               "type": "string"
@@ -3771,16 +3735,16 @@
           },
           {
             "name": "project",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
               "type": "string"
             }
           },
           {
             "name": "name",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3917,7 +3881,7 @@
           },
           {
             "name": "path",
-            "in": "path",
+            "in": "query",
             "required": true,
             "schema": {
               "type": "string"
@@ -6665,8 +6629,7 @@
             "type": "string"
           },
           "reason": {
-            "type": "string",
-            "pattern": "^(closed_without_decision|generation_advanced)$"
+            "$ref": "#/components/schemas/ErrorReason"
           },
           "reasons": {
             "type": "array",
@@ -6689,6 +6652,29 @@
             "$ref": "#/components/schemas/ErrorBody"
           }
         }
+      },
+      "ErrorReason": {
+        "type": "string",
+        "enum": [
+          "closed_without_decision",
+          "generation_advanced",
+          "invalid_idempotency_key",
+          "input_not_queued",
+          "no_running_turn",
+          "request_open",
+          "compacting",
+          "unsupported_harness",
+          "capability_missing",
+          "revision_conflict",
+          "steer_in_flight",
+          "empty_content",
+          "content_too_long",
+          "attachment_unavailable",
+          "attachment_not_ready",
+          "attachment_not_found",
+          "run_in_progress",
+          "no_live_execution"
+        ]
       },
       "ErrorScope": {
         "type": "string",

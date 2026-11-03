@@ -18,6 +18,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
 }
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
 pub struct SnapshotParams {
     pub history_limit: Option<i64>,
 }

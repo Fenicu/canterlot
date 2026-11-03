@@ -1326,13 +1326,15 @@ export interface components {
             /** @description Поле запроса, которое не прошло проверку (`preset_invalid`). */
             field?: string;
             question_id?: string;
-            reason?: string;
+            reason?: components["schemas"]["ErrorReason"];
             reasons?: components["schemas"]["ArchiveReason"][];
             winner_decision?: components["schemas"]["DecisionBody"];
         };
         ErrorEnvelope: {
             error: components["schemas"]["ErrorBody"];
         };
+        /** @enum {string} */
+        ErrorReason: "closed_without_decision" | "generation_advanced" | "invalid_idempotency_key" | "input_not_queued" | "no_running_turn" | "request_open" | "compacting" | "unsupported_harness" | "capability_missing" | "revision_conflict" | "steer_in_flight" | "empty_content" | "content_too_long" | "attachment_unavailable" | "attachment_not_ready" | "attachment_not_found" | "run_in_progress" | "no_live_execution";
         /** @enum {string} */
         ErrorScope: "browser" | "auth" | "hub_db" | "delivery" | "worker_disk" | "cli_start" | "adapter_protocol" | "agent_service";
         Evidence: {
@@ -2666,14 +2668,14 @@ export interface operations {
     };
     get__api_v1_conversations: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                filter: string | null;
-                q: string | null;
-                cursor: string | null;
-                limit: number | null;
+            query?: {
+                filter?: string;
+                q?: string;
+                cursor?: string;
+                limit?: number;
             };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -2917,13 +2919,14 @@ export interface operations {
     };
     get__api_v1_conversations__id__blocks__block_id_: {
         parameters: {
-            query?: never;
+            query?: {
+                offset?: number;
+                limit?: number;
+            };
             header?: never;
             path: {
                 id: string;
                 block_id: string;
-                offset: number | null;
-                limit: number | null;
             };
             cookie?: never;
         };
@@ -3811,11 +3814,12 @@ export interface operations {
     };
     get__api_v1_conversations__id__snapshot: {
         parameters: {
-            query?: never;
+            query?: {
+                history_limit?: number;
+            };
             header?: never;
             path: {
                 id: string;
-                history_limit: number | null;
             };
             cookie?: never;
         };
@@ -3925,13 +3929,13 @@ export interface operations {
     };
     get__api_v1_events: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
+            query: {
                 scope: string;
                 after: string;
-                limit: number | null;
+                limit?: number;
             };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -4180,14 +4184,14 @@ export interface operations {
     };
     get__api_v1_limits_history: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                provider: string | null;
-                from: string | null;
-                to: string | null;
-                tz: string | null;
+            query?: {
+                provider?: string;
+                from?: string;
+                to?: string;
+                tz?: string;
             };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -4381,13 +4385,14 @@ export interface operations {
     };
     get__api_v1_machines__id__owner_instructions_file: {
         parameters: {
-            query?: never;
+            query: {
+                kind: string;
+                project?: string;
+                name?: string;
+            };
             header?: never;
             path: {
                 id: string;
-                kind: string;
-                project: string;
-                name: string;
             };
             cookie?: never;
         };
@@ -4463,11 +4468,12 @@ export interface operations {
     };
     get__api_v1_machines__id__workdirs_suggest: {
         parameters: {
-            query?: never;
+            query: {
+                path: string;
+            };
             header?: never;
             path: {
                 id: string;
-                path: string;
             };
             cookie?: never;
         };

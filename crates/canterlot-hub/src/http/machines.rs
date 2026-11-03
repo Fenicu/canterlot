@@ -81,6 +81,7 @@ pub struct Workdirs {
     pub workdirs: Vec<String>,
 }
 #[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct SuggestParams {
     pub path: String,
 }
@@ -373,6 +374,7 @@ pub struct OwnerFileContent {
 }
 
 #[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct OwnerFileParams {
     pub kind: String,
     #[serde(default)]
