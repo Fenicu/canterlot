@@ -4,6 +4,7 @@
   import { ApiError } from '#lib/api/http.js';
   import type { components } from '#lib/api/generated/openapi.js';
   import Button from '#lib/ui/Button.svelte';
+  import Field from '#lib/ui/Field.svelte';
   import Disclosure from '#lib/ui/Disclosure.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
   import { byteCounter, PRESET_TEXT_LIMIT, textBytes } from './presetsModel.js';
@@ -154,17 +155,17 @@
         void save();
       }}
     >
-      <label>Название
-        <input aria-label="Название" bind:value={title} maxlength={80} />
-      </label>
+      <Field label="Название">
+        {#snippet children({ id })}<input {id} bind:value={title} maxlength={80} />{/snippet}
+      </Field>
       {#if titleError}<p role="alert">{titleError}</p>{/if}
-      <label>Описание
-        <textarea aria-label="Описание" bind:value={description} rows={2}></textarea>
-      </label>
+      <Field label="Описание">
+        {#snippet children({ id })}<textarea {id} bind:value={description} rows={2}></textarea>{/snippet}
+      </Field>
       {#if descriptionError}<p role="alert">{descriptionError}</p>{/if}
-      <label>Текст
-        <textarea aria-label="Текст" bind:value={text} rows={8} class="mono"></textarea>
-      </label>
+      <Field label="Текст">
+        {#snippet children({ id })}<textarea {id} bind:value={text} rows={8} class="mono"></textarea>{/snippet}
+      </Field>
       <p>{counter.text}</p>
       {#if textError}<p role="alert">{textError}</p>{/if}
       {#if conflict}
@@ -189,27 +190,15 @@
     flex-direction: column;
     gap: var(--s4);
   }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s2);
-  }
-  input,
-  textarea {
-    min-height: var(--target);
-    border: var(--s0);
-    border-radius: var(--radius-pill);
-    background: var(--raised);
-    color: var(--text);
-    padding: var(--s4) var(--s6);
-  }
   textarea {
     field-sizing: content;
     max-height: calc(var(--fs-input) * var(--lh-body) * 16);
-    border-radius: var(--radius);
   }
+  /* field-sizing перекрывает rows: многоабзацный текст инструкции открывается полем в шесть строк, а не капсулой. */
   .mono {
+    min-height: calc(var(--fs-input) * var(--lh-code) * 6 + var(--s10));
     font-family: var(--font-mono);
+    line-height: var(--lh-code);
   }
   p {
     margin: 0;
