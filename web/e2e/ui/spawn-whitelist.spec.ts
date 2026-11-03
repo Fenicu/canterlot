@@ -2,12 +2,10 @@ import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { bootSecondary } from './secondary-fixture';
 
-// Строка «Последняя синхронизация» появляется над разделом на первом секундном такте после связи и
-// сдвигает его на строку вниз. Клик, нацеленный до сдвига, приходится мимо кнопки, поэтому
-// нажимать можно, только когда она уже на месте. Строка приходит со снимком списка сессий, это часть
-// загрузки страницы, поэтому срок как у остальных ожиданий загрузки.
+// Место строки «Последняя синхронизация» занято с первого кадра, поэтому ждать её появления
+// перед нажатиями не нужно: раздел делегирования уже стоит на месте.
 async function settled(page: Page) {
-  await expect(page.getByText(/^Последняя синхронизация/)).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('section[data-spawn-whitelist]').getByRole('heading', { name: 'Делегирование' })).toBeVisible({ timeout: 15_000 });
 }
 
 async function openSettings(page: Page) {
@@ -15,6 +13,25 @@ async function openSettings(page: Page) {
   await settled(page);
   return booted;
 }
+
+test('sync_line_keeps_its_place_so_the_delegation_section_does_not_move', async ({ page }) => {
+  // Часы стоят до первого тика: строка синхронизации ещё пуста, но её место уже занято.
+  await page.clock.install();
+  await bootSecondary(page, '/settings');
+  await expect(page.locator('main[data-secondary-ready]')).toBeVisible();
+  const section = page.locator('section[data-spawn-whitelist]');
+  await expect(section.getByRole('heading', { name: 'Делегирование' })).toBeVisible();
+  const line = page.getByText(/^Последняя синхронизация/);
+  await expect(line).toHaveCount(0);
+  const before = (await section.boundingBox())!.y;
+  for (let tick = 0; tick < 30 && (await line.count()) === 0; tick += 1) {
+    await page.clock.fastForward(1000);
+    await page.waitForTimeout(25);
+  }
+  await expect(line).toBeVisible();
+  const after = (await section.boundingBox())!.y;
+  expect(Math.abs(after - before)).toBeLessThanOrEqual(0.5);
+});
 
 test('edit_save_reload', async ({ page }) => {
   const { api } = await openSettings(page);
