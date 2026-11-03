@@ -157,6 +157,14 @@ pub async fn apply_input_receipt_in_tx(
         .execute(&mut *conn)
         .await?;
     }
+    // Команда уже передавалась агенту: молча повторять её нельзя, а удержание
+    // «нет исполнения» на живом исполнении не снялось бы. Решает владелец.
+    let receipt = match receipt {
+        InputReceipt::DispatchDeferred { reason } if !steer && reason == "already_transmitted" => {
+            InputReceipt::AcceptanceUndetermined
+        }
+        receipt => receipt,
+    };
     let late_acceptance =
         state == InputState::AcceptanceUnconfirmed && receipt == InputReceipt::Accepted;
     let ignored = if attempt != target.dispatch_attempt {

@@ -872,3 +872,47 @@ async fn event_failure_rolls_back_receipt_and_run_finished(pool: PgPool) -> Test
     );
     Ok(())
 }
+
+/// Воркер отложил выдачу живому исполнению, потому что эта команда уже
+/// передавалась агенту. Повторять её молча нельзя, а удержание «нет
+/// исполнения» на живом исполнении не снялось бы до его перезапуска:
+/// приём считается неподтверждённым, решает владелец.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn already_transmitted_deferral_is_unconfirmed_not_held(pool: PgPool) -> TestResult {
+    let (seed, _, head) = setup(&pool).await;
+    apply(&pool, head.command_id, 1, InputReceipt::Stored).await;
+    assert_eq!(
+        apply(
+            &pool,
+            head.command_id,
+            1,
+            InputReceipt::DispatchDeferred {
+                reason: "already_transmitted".into(),
+            },
+        )
+        .await,
+        ApplyOutcome::Applied {
+            input_state: InputState::AcceptanceUnconfirmed
+        }
+    );
+    let after = snapshot(&pool, &head).await;
+    assert!(
+        !after["queue"]["hold_reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(HoldReason::NoLiveExecution))
+    );
+    assert_eq!(
+        after["queue"]["pause_reasons"],
+        json!([PauseReason::UnconfirmedDelivery {
+            input_id: head.input_id
+        }])
+    );
+    assert_eq!(after["command"]["delivery_state"], json!("completed"));
+    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
+    assert!(matches!(
+        dispatch(&pool, seed.conversation_id).await,
+        DispatchOutcome::Blocked(_)
+    ));
+    Ok(())
+}
