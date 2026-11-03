@@ -30,6 +30,7 @@ use crate::{
 };
 
 mod group;
+mod ipc_caps;
 mod lost;
 mod manager;
 mod procfs;

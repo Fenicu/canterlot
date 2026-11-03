@@ -184,12 +184,16 @@ fn open_store(root: &Path) -> StoreThread {
 
 impl Env {
     async fn new() -> Env {
+        Self::with_supervisor_exe(PathBuf::from(env!("CARGO_BIN_EXE_canterlot-worker"))).await
+    }
+
+    async fn with_supervisor_exe(supervisor_exe: PathBuf) -> Env {
         let root = TempDir::new().unwrap();
         let work = root.path().join("work");
         fs::create_dir(&work).unwrap();
         let config = ExecutionConfig {
             allowed_workdir_roots: vec![work.clone()],
-            supervisor_exe: Some(PathBuf::from(env!("CARGO_BIN_EXE_canterlot-worker"))),
+            supervisor_exe: Some(supervisor_exe.clone()),
             spawn_timeout: Duration::from_secs(10),
             supervisor: SupervisorTimers {
                 stop_grace: Duration::from_secs(1),
@@ -201,7 +205,7 @@ impl Env {
         let (sender, relay) = mpsc::channel(64);
         let manager = ExecutionManager::new(config.clone(), thread.client(), sender);
         Env {
-            guard: ProcessGuard::new(root.path()),
+            guard: ProcessGuard::for_executable(root.path(), &supervisor_exe),
             root,
             work,
             config,
@@ -2960,4 +2964,83 @@ async fn supervisor_with_capabilities_gets_compact() {
     let cj = env.wait_cj("nothing refused", |_| true).await;
     assert!(!capability_rejected(&cj, compact));
     env.stop().await;
+}
+
+/// Сборка под видом выпуска: жёсткая ссылка в `releases/<sha>/bin`, чтобы `/proc/<pid>/exe`
+/// сопровождения указывал в каталог выпуска. Ссылка требует той же файловой системы, что target.
+fn release_exe(sha: &str) -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let bin = dir.path().join("releases").join(sha).join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("canterlot-worker");
+    fs::hard_link(env!("CARGO_BIN_EXE_canterlot-worker"), &exe).unwrap();
+    (dir, exe)
+}
+
+/// Сопровождение выпуска `sha` отвечает без списка возможностей; ответ — отказаны ли
+/// сжатие и вливание.
+#[cfg(feature = "fault-injection")]
+async fn legacy_release(sha: &str) -> (bool, bool) {
+    let (_release, exe) = release_exe(sha);
+    let mut env = Env::with_supervisor_exe(exe).await;
+    env.manager().strip_ipc_capabilities();
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let compact = Uuid::now_v7();
+    env.send(command(
+        compact,
+        1,
+        env.execution,
+        1,
+        Kind::CompactSession(canterlot_proto::worker::v1::CompactSession {}),
+    ))
+    .await;
+    let steer = Uuid::now_v7();
+    env.send(steer_command(steer, &env)).await;
+    // Каждая команда получает ответ: отказ управляющей службы в CJ или итог сопровождения в SJ.
+    let answered = |id: Uuid, cj: &[Body], sj: &[Body]| {
+        capability_rejected(cj, id)
+            || sj.iter().any(|b| match b {
+                Body::CompactionStatus(f) => f.command_id == id.to_string(),
+                Body::DispatchDeferred(f) => f.command_id == id.to_string(),
+                Body::InputRejected(f) => f.command_id == id.to_string(),
+                _ => false,
+            })
+    };
+    let cj = timeout(WAIT, async {
+        loop {
+            env.pump(Duration::from_millis(100)).await;
+            let cj = env.cj().await;
+            if answered(compact, &cj, &env.bodies) && answered(steer, &cj, &env.bodies) {
+                return cj;
+            }
+        }
+    })
+    .await
+    .expect("both commands answered");
+    let outcome = (
+        capability_rejected(&cj, compact),
+        capability_rejected(&cj, steer),
+    );
+    env.stop().await;
+    outcome
+}
+
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn legacy_supervisor_of_v1_0_0_gets_compact_and_steer() {
+    assert_eq!(legacy_release("8be10fce886b").await, (false, false));
+}
+
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn legacy_supervisor_of_an_older_release_gets_compact_only() {
+    assert_eq!(legacy_release("d3efc1e").await, (false, true));
+}
+
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn legacy_supervisor_of_an_unknown_release_gets_neither() {
+    assert_eq!(legacy_release("deadbeefcafe").await, (true, true));
 }

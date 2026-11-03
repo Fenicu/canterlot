@@ -866,7 +866,7 @@ pub(super) struct Actor {
     pending: VecDeque<Msg>,
     waiting: VecDeque<Command>,
     link: Option<Link>,
-    /// Возможности IPC сопровождения из последнего `Attached`; пусто — сборка 1.0.0 или старше.
+    /// Возможности IPC сопровождения: из последнего `Attached`, у 1.0.0 и старше — по выпуску.
     ipc_caps: HashSet<String>,
     exec_dir: Option<PathBuf>,
     ipc_socket: Option<PathBuf>,
@@ -1032,7 +1032,21 @@ impl Actor {
         if *self.shared.strip_caps.lock().expect("caps fault lock") {
             attached.ipc_capabilities.clear();
         }
-        self.ipc_caps = attached.ipc_capabilities.iter().cloned().collect();
+        self.ipc_caps = if attached.ipc_capabilities.is_empty() {
+            // Сборка без списка: возможности по выпуску, из которого запущено сопровождение.
+            let caps = super::ipc_caps::supervisor_exe(attached.pid, attached.start_ticks)
+                .map(|exe| super::ipc_caps::of_release_exe(&exe))
+                .unwrap_or_default();
+            tracing::info!(
+                execution_id = %self.id,
+                kind = "supervisor_ipc_legacy",
+                capabilities = caps.len(),
+                "supervisor does not advertise ipc capabilities"
+            );
+            caps
+        } else {
+            attached.ipc_capabilities.iter().cloned().collect()
+        };
         self.journal_id = Uuid::parse_str(&attached.sj_journal_id).ok();
         self.last_seq = attached.last_sj_seq;
         self.acked_seq = attached.acked_sj_seq;
