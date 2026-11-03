@@ -1075,7 +1075,11 @@ export class ChatStore {
     if (state === "accepted") this.turnRecorded = true;
     input.attempt = payload.attempt ?? input.attempt;
     if (payload.retry_of) input.retryOf = payload.retry_of;
-    if (payload.reason) input.rejection = payload.reason;
+    // Итог вливания не отклоняет ввод: причина не становится причиной отказа.
+    if (payload.cause === "steer_requested") input.steer = "pending";
+    else if (payload.cause === "steer_rejected" || payload.cause === "steer_deferred") input.steer = "returned";
+    else if (state !== "queued") input.steer = undefined;
+    if (payload.reason && input.steer === undefined) input.rejection = payload.reason;
     if (payload.cause === "cancel_requested") input.cancelRequested = true;
     if (typeof payload.revision === "number" && Number.isFinite(payload.revision)) {
       input.revision = Math.max(1, Math.floor(payload.revision));

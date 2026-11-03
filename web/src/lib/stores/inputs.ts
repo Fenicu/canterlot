@@ -46,6 +46,8 @@ export interface InputView {
 	/** Пузырь стоит в ленте до ответа хаба: сообщение отправлено с этого устройства и ничто не мешает ему уйти. */
 	optimistic: boolean;
 	rejection?: string;
+	/** «Отправить сейчас»: вливание идёт или не удалось и ввод ждёт следующего хода. */
+	steer?: 'pending' | 'returned';
 	stripUntil: number | null;
 }
 
