@@ -1438,7 +1438,7 @@ async fn steer_input_needs_the_capability() {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn steer_sent_before_reconnect_keeps_its_claim(pool: PgPool) {
     use canterlot_hub::delivery::{
-        control::{ControlError, SendNowOutcome, cancel_input, request_send_now},
+        control::{CancelOutcome, SendNowOutcome, cancel_input, request_send_now},
         receipts::{InputReceipt, apply_input_receipt},
     };
     let hub = spawn_test_hub(pool.clone(), timers()).await;
@@ -1493,14 +1493,20 @@ async fn steer_sent_before_reconnect_keeps_its_claim(pool: PgPool) {
         &["instructions_v1", "pilot_v1"],
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let claimed: bool =
-        sqlx::query_scalar("select dispatch_claimed_at is not null from commands where id = $1")
-            .bind(steer_command_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    // Вливание могло дойти до агента: решает владелец, в очередь ввод не
+    // возвращается и отменой не гасится.
+    wait_completed(&pool, steer_command_id).await;
+    let (claimed, input_state): (bool, String) = sqlx::query_as(
+        "select c.dispatch_claimed_at is not null, i.state from commands c, inputs i
+         where c.id = $1 and i.id = $2",
+    )
+    .bind(steer_command_id)
+    .bind(second.input_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert!(claimed, "claim from the first connection must survive");
+    assert_eq!(input_state, "acceptance_unconfirmed");
     assert!(matches!(
         cancel_input(
             &pool,
@@ -1510,9 +1516,143 @@ async fn steer_sent_before_reconnect_keeps_its_claim(pool: PgPool) {
             Uuid::now_v7(),
         )
         .await,
-        Err(ControlError::InvalidRequest {
-            reason: "steer_in_flight"
-        })
+        Ok(CancelOutcome::TooLate { .. })
     ));
+    stop(hub).await;
+}
+
+async fn wait_completed(pool: &PgPool, command_id: Uuid) {
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let delivery: String =
+                sqlx::query_scalar("select delivery_state from commands where id = $1")
+                    .bind(command_id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            if delivery == "completed" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("command must be completed");
+}
+
+/// Сеанс машины не умеет «Отправить сейчас»: вливание не висит вечно, а
+/// завершается отказом `capability_missing`, ввод остаётся в очереди, и
+/// владелец видит причину.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn steer_without_capability_is_refused_and_input_stays_queued(pool: PgPool) {
+    use canterlot_hub::delivery::{
+        control::{SendNowOutcome, request_send_now},
+        receipts::{InputReceipt, apply_input_receipt},
+    };
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    sqlx::query("update conversations set harness = 'codex' where id = $1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut worker = Worker::connect_with_capabilities(
+        &hub,
+        &machine,
+        Uuid::now_v7(),
+        &["instructions_v1", "pilot_v1"],
+    )
+    .await;
+    let first = input(&pool, &hub, conversation).await;
+    worker.command().await;
+    for receipt in [
+        InputReceipt::Stored,
+        InputReceipt::TransmissionStarted,
+        InputReceipt::Accepted,
+    ] {
+        apply_input_receipt(&pool, first.command_id, 1, receipt, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let second = input(&pool, &hub, conversation).await;
+    // Возможности сеанса успели смениться между запросом и отправкой.
+    let SendNowOutcome::Requested { steer_command_id } = request_send_now(
+        &pool,
+        hub.installation.owner_id,
+        conversation,
+        second.input_id,
+        "send-now",
+        Uuid::now_v7(),
+        &["send_now_v1".to_owned()],
+    )
+    .await
+    .unwrap() else {
+        panic!("send now must create a steer");
+    };
+    wait_completed(&pool, steer_command_id).await;
+    let input_state: String = sqlx::query_scalar("select state from inputs where id = $1")
+        .bind(second.input_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(input_state, "queued");
+    let payload: Value = sqlx::query_scalar(
+        "select payload from events where kind = 'input_state_changed'
+         and payload->>'input_id' = $1 order by scope_seq desc limit 1",
+    )
+    .bind(second.input_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["cause"], json!("steer_rejected"));
+    assert_eq!(payload["reason"], json!("capability_missing"));
+    assert!(
+        timeout(Duration::from_millis(200), worker.down.message())
+            .await
+            .is_err(),
+        "the steer never reaches the session"
+    );
+    stop(hub).await;
+}
+
+/// Служебная команда, которую сеанс не поймёт, тоже не висит: она
+/// завершается отказом `capability_missing`.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn command_without_capability_completes_as_capability_missing(pool: PgPool) {
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let (execution_id, generation): (Uuid, i64) =
+        sqlx::query_as("select id, generation from executions where conversation_id = $1")
+            .bind(conversation)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let _worker = Worker::connect(&hub, &machine).await;
+    let compact = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
+                               kind, payload, delivery_state, dispatch_attempt)
+         values ($1, $2, $3, $4, $5, 'compact_session', '{}'::jsonb, 'pending', 1)",
+    )
+    .bind(compact)
+    .bind(machine.machine_id)
+    .bind(conversation)
+    .bind(execution_id)
+    .bind(generation)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("select pg_notify('canterlot_outbox', $1)")
+        .bind(machine.machine_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    wait_completed(&pool, compact).await;
+    let result: Value = sqlx::query_scalar("select result from commands where id = $1")
+        .bind(compact)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(result, json!({"rejected": "capability_missing"}));
     stop(hub).await;
 }

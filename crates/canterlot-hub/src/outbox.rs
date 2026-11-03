@@ -782,10 +782,19 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             };
             let command = match to_proto_for_connection(&row, &registry, connection) {
                 Ok(command) => command,
-                Err(OutboxError::CapabilityMissing | OutboxError::SessionChanged) => {
+                Err(OutboxError::SessionChanged) => {
                     // Команда не попала в транспорт: захват не должен держать отмену.
                     if fresh {
                         release_claim(&pool, &row).await;
+                    }
+                    continue;
+                }
+                Err(OutboxError::CapabilityMissing) => {
+                    // Сеанс команду не поймёт: она не должна висеть вечно.
+                    tokio::select! {
+                        biased;
+                        _ = wait_for_shutdown(&mut shutdown) => return,
+                        result = refuse_missing_capability(&pool, &row, fresh) => if result.is_err() { eprintln!("outbox_rejection_error"); },
                     }
                     continue;
                 }
@@ -830,6 +839,53 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             }
         }
     }
+}
+
+/// Команда, которую сеанс не поймёт. Не уходившая с хаба (`fresh`) завершается
+/// отказом `capability_missing`, как если бы его прислала машина. Ввод или
+/// вливание, которые уже уходили прошлому сеансу, могли дойти до агента:
+/// приём считается неподтверждённым, решает владелец, повтора нет. Прочие
+/// команды прошлого сеанса ждут его итога.
+async fn refuse_missing_capability(
+    pool: &PgPool,
+    row: &CommandRow,
+    fresh: bool,
+) -> Result<(), crate::ingest::IngestError> {
+    let (kind, id, attempt, machine_id) = (
+        row.kind.clone(),
+        row.id,
+        row.dispatch_attempt,
+        row.machine_id,
+    );
+    if !fresh && !matches!(kind.as_str(), "deliver_input" | "steer_input") {
+        return Ok(());
+    }
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            if fresh {
+                crate::ingest::apply_command_rejected_in_tx(
+                    &mut *conn,
+                    machine_id,
+                    id,
+                    attempt,
+                    "capability_missing",
+                    Uuid::now_v7(),
+                )
+                .await
+            } else {
+                apply_input_receipt_in_tx(
+                    &mut *conn,
+                    id,
+                    attempt,
+                    InputReceipt::AcceptanceUndetermined,
+                    Uuid::now_v7(),
+                )
+                .await?;
+                Ok(())
+            }
+        })
+    })
+    .await
 }
 
 async fn reject(pool: &PgPool, row: &CommandRow, reason: &str) -> Result<(), sqlx::Error> {
