@@ -9,7 +9,7 @@
   --text: #e5f3f4;
   --secondary: #bed2d3;
   --muted: #adc7c8;
-  --time: #97b6b8;
+  --time: #adc7c8;
   --line: #2e5053;
   --control-line: #415d5f;
   --chip: #415d5f;
@@ -20,6 +20,7 @@
   --accent-ink: #183135;
   --accent-soft: #235451;
   --success: #91d8bf;
+  --success-soft: #233e35;
   --warning: #e7bf84;
   --warning-soft: #3c3c31;
   --danger: #eda99d;
@@ -29,6 +30,17 @@
   --scrim: #132b2e;
   --chart-secondary: #9bbac8;
   --transparent: transparent;
+  --popover: #235451;
+  --popover-hover: #1d4044;
+  --syn-keyword: #00f4ee;
+  --syn-control: #00f4ee;
+  --syn-string: #91d8bf;
+  --syn-function: #a8cbd8;
+  --syn-type: #91d8bf;
+  --syn-comment: #adc7c8;
+  --syn-number: #e7bf84;
+  --syn-variable: #e5f3f4;
+  --syn-symbol: #56fffc;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Arial, sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --fs-xs: .6875rem;
@@ -116,7 +128,7 @@
   --bar-68: 68%; --bar-74: 74%; --bar-81: 81%; --bar-88: 88%;
   --bar-90: 90%; --bar-95: 95%; --bar-96: 96%;
 }
-[data-theme=light] {
+[data-palette=aquamarine][data-theme=light] {
   color-scheme: light;
   --bg: #e7f2ee;
   --chat-bg: #e1eeea;
@@ -127,7 +139,7 @@
   --text: #183a3d;
   --secondary: #365d5f;
   --muted: #3c6261;
-  --time: #456d6b;
+  --time: #3c6261;
   --line: #c2d9d2;
   --control-line: #adcac2;
   --chip: #c6dfd7;
@@ -138,6 +150,7 @@
   --accent-ink: #f2fffc;
   --accent-soft: #c3e6de;
   --success: #256a53;
+  --success-soft: #d7ede2;
   --warning: #7d531d;
   --warning-soft: #f0e7d4;
   --danger: #9d493e;
@@ -146,6 +159,198 @@
   --code: #dfede7;
   --scrim: #ccdfd7;
   --chart-secondary: #50778a;
+  --transparent: transparent;
+  --popover: #cce6de;
+  --popover-hover: #bdddd5;
+  --syn-keyword: #006966;
+  --syn-control: #006966;
+  --syn-string: #256a53;
+  --syn-function: #3d6579;
+  --syn-type: #256a53;
+  --syn-comment: #3c6261;
+  --syn-number: #7d531d;
+  --syn-variable: #183a3d;
+  --syn-symbol: #006360;
+}
+
+[data-palette=standard][data-theme=dark] {
+  color-scheme: dark;
+  --bg: #1c1c1e;
+  --chat-bg: #18181a;
+  --surface: #242426;
+  --raised: #2c2c2e;
+  --hover: #333336;
+  --selected: #37373b;
+  --text: #e4e4e7;
+  --secondary: #c3c3c8;
+  --muted: #ababb1;
+  --time: #a3a3a9;
+  --line: #3a3a3d;
+  --control-line: #5a5a60;
+  --chip: #3f3f45;
+  --chip-text: #ebebee;
+  --badge: #8a8a92;
+  --accent: #4c8dff;
+  --accent-link: #79b8ff;
+  --accent-ink: #101418;
+  --accent-soft: #1e2b3f;
+  --success: #82c99b;
+  --success-soft: #203a2c;
+  --warning: #d6b06a;
+  --warning-soft: #3a3020;
+  --danger: #e08d88;
+  --danger-soft: #3d2527;
+  --blue: #8fb7e8;
+  --code: #141416;
+  --scrim: #0f0f11;
+  --chart-secondary: #8aa3c0;
+  --transparent: transparent;
+  --popover: #2c2c2e;
+  --popover-hover: #353538;
+  --syn-keyword: #82aaff;
+  --syn-control: #c792ea;
+  --syn-string: #a5d6a7;
+  --syn-function: #e6c07b;
+  --syn-type: #7fd1c0;
+  --syn-comment: #8f9299;
+  --syn-number: #d6b06a;
+  --syn-variable: #9cc8ff;
+  --syn-symbol: #79b8ff;
+}
+
+[data-palette=standard][data-theme=light] {
+  color-scheme: light;
+  --bg: #f6f7f8;
+  --chat-bg: #eef1f3;
+  --surface: #ffffff;
+  --raised: #e9ecef;
+  --hover: #e3e6e9;
+  --selected: #dbe7f7;
+  --text: #1f2328;
+  --secondary: #4b5563;
+  --muted: #5b6573;
+  --time: #59636f;
+  --line: #d8dde2;
+  --control-line: #7d8792;
+  --chip: #e4e8ec;
+  --chip-text: #26313d;
+  --badge: #6b7684;
+  --accent: #0969da;
+  --accent-link: #0550ae;
+  --accent-ink: #ffffff;
+  --accent-soft: #dbeafe;
+  --success: #157235;
+  --success-soft: #e6f4ea;
+  --warning: #8a5a00;
+  --warning-soft: #fff1cc;
+  --danger: #b42318;
+  --danger-soft: #fde8e6;
+  --blue: #2f6fb2;
+  --code: #f0f2f4;
+  --scrim: #e8ebee;
+  --chart-secondary: #4f6f8f;
+  --transparent: transparent;
+  --popover: #ffffff;
+  --popover-hover: #eef1f4;
+  --syn-keyword: #0550ae;
+  --syn-control: #7b2d8e;
+  --syn-string: #1a6b32;
+  --syn-function: #6f5317;
+  --syn-type: #0f6c7d;
+  --syn-comment: #53616f;
+  --syn-number: #8a5a00;
+  --syn-variable: #1f2328;
+  --syn-symbol: #094f91;
+}
+
+[data-palette=vscode][data-theme=dark] {
+  color-scheme: dark;
+  --bg: #1f1f1f;
+  --chat-bg: #181818;
+  --surface: #252526;
+  --raised: #2b2b2b;
+  --hover: #2a2d2e;
+  --selected: #1f3a52;
+  --text: #cccccc;
+  --secondary: #c0c0c0;
+  --muted: #b0b0b0;
+  --time: #a8a8a8;
+  --line: #3a3a3a;
+  --control-line: #3c3c3c;
+  --chip: #3a3a3a;
+  --chip-text: #dddddd;
+  --badge: #8a8a8a;
+  --accent: #0078d4;
+  --accent-link: #4daafc;
+  --accent-ink: #ffffff;
+  --accent-soft: #0d2b45;
+  --success: #89d185;
+  --success-soft: #1d2f24;
+  --warning: #d7ba7d;
+  --warning-soft: #352d1c;
+  --danger: #f48771;
+  --danger-soft: #3a211e;
+  --blue: #75beff;
+  --code: #181818;
+  --scrim: #111111;
+  --chart-secondary: #75beff;
+  --transparent: transparent;
+  --popover: #252526;
+  --popover-hover: #2f2f2f;
+  --syn-keyword: #569cd6;
+  --syn-control: #c586c0;
+  --syn-string: #ce9178;
+  --syn-function: #dcdcaa;
+  --syn-type: #4ec9b0;
+  --syn-comment: #6a9955;
+  --syn-number: #b5cea8;
+  --syn-variable: #9cdcfe;
+  --syn-symbol: #4daafc;
+}
+
+[data-palette=vscode][data-theme=light] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --chat-bg: #f8f8f8;
+  --surface: #f8f8f8;
+  --raised: #efefef;
+  --hover: #e8e8e8;
+  --selected: #d6e8f7;
+  --text: #3b3b3b;
+  --secondary: #4a4a4a;
+  --muted: #5f5f5f;
+  --time: #5c5c5c;
+  --line: #d0d0d0;
+  --control-line: #8a8a8a;
+  --chip: #e8e8e8;
+  --chip-text: #333333;
+  --badge: #6b6b6b;
+  --accent: #005fb8;
+  --accent-link: #005fb8;
+  --accent-ink: #ffffff;
+  --accent-soft: #d9ecff;
+  --success: #1f7a33;
+  --success-soft: #e6f4e9;
+  --warning: #8a6200;
+  --warning-soft: #fff1cc;
+  --danger: #b3261e;
+  --danger-soft: #fde8e6;
+  --blue: #2f6fb2;
+  --code: #f3f3f3;
+  --scrim: #e8e8e8;
+  --chart-secondary: #4b7fb5;
+  --transparent: transparent;
+  --popover: #ffffff;
+  --popover-hover: #e8e8e8;
+  --syn-keyword: #0000ff;
+  --syn-control: #af00db;
+  --syn-string: #a31515;
+  --syn-function: #795e26;
+  --syn-type: #1f6d84;
+  --syn-comment: #008000;
+  --syn-number: #067a4e;
+  --syn-variable: #001080;
+  --syn-symbol: #005fb8;
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --duration-fast: 0ms; --duration-expand: 0ms; --duration-caret: 0ms; }
@@ -267,23 +472,12 @@
   }
 }
 
-[data-theme=light] { --transparent: transparent; }
-
 :root {
   --gutter: var(--s6);
-  --popover: #235451;
-  --popover-hover: #1d4044;
   --scrim-soft: color-mix(in srgb, var(--scrim) 72%, transparent);
   --bubble-max: 86%;
   --prose-wide: 150ch;
 }
-[data-theme=light] {
-  --popover: #cce6de;
-  --popover-hover: #bdddd5;
-}
-
-:root { --time: #adc7c8; }
-[data-theme=light] { --time: #3c6261; }
 
 /* Масштаб рабочего стола: один множитель на шрифт, геометрию и ширины колонок. Пороги ниже номинальных: окно при системном масштабе бывает на доли пикселя уже. */
 @property --icon-small { syntax: '<length>'; inherits: true; initial-value: 16px; }

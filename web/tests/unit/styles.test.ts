@@ -1,44 +1,135 @@
 import { test, expect } from 'vitest';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { themes, contrast } from './contrast';
+import { variants, contrast, COLOR_TOKENS } from './contrast';
 const text = readFileSync('src/lib/styles/tokens.css', 'utf8');
-const { dark, light } = themes(text);
+const palettes = variants(text);
+const byName = (palette: string, theme: 'dark' | 'light') => palettes.find(v => v.palette === palette && v.theme === theme)!;
+
+const AQUAMARINE = {
+  dark: {
+    'bg': '#183135', 'chat-bg': '#152d31', 'surface': '#1d383b', 'raised': '#1d4044',
+    'hover': '#235451', 'selected': '#1f5457', 'text': '#e5f3f4', 'secondary': '#bed2d3',
+    'muted': '#adc7c8', 'time': '#adc7c8', 'line': '#2e5053', 'control-line': '#415d5f',
+    'chip': '#415d5f', 'chip-text': '#e5f3f4', 'badge': '#5c8282', 'accent': '#00f4ee',
+    'accent-link': '#56fffc', 'accent-ink': '#183135', 'accent-soft': '#235451',
+    'success': '#91d8bf', 'warning': '#e7bf84', 'warning-soft': '#3c3c31',
+    'danger': '#eda99d', 'danger-soft': '#483b39', 'blue': '#a8cbd8', 'code': '#142d31',
+    'scrim': '#132b2e', 'chart-secondary': '#9bbac8', 'transparent': 'transparent',
+    'popover': '#235451', 'popover-hover': '#1d4044'
+  },
+  light: {
+    'bg': '#e7f2ee', 'chat-bg': '#e1eeea', 'surface': '#f4faf7', 'raised': '#d3e8e2',
+    'hover': '#bdddd5', 'selected': '#c2e1d9', 'text': '#183a3d', 'secondary': '#365d5f',
+    'muted': '#3c6261', 'time': '#3c6261', 'line': '#c2d9d2', 'control-line': '#adcac2',
+    'chip': '#c6dfd7', 'chip-text': '#254f50', 'badge': '#729e96', 'accent': '#006966',
+    'accent-link': '#006360', 'accent-ink': '#f2fffc', 'accent-soft': '#c3e6de',
+    'success': '#256a53', 'warning': '#7d531d', 'warning-soft': '#f0e7d4',
+    'danger': '#9d493e', 'danger-soft': '#f4e1db', 'blue': '#3d6579', 'code': '#dfede7',
+    'scrim': '#ccdfd7', 'chart-secondary': '#50778a', 'transparent': 'transparent',
+    'popover': '#cce6de', 'popover-hover': '#bdddd5'
+  }
+} as const;
+
 test('tokens_match_the_approved_mockup_when_available', () => {
   const path = '../.superpowers/design/mockups/tokens.css';
   if (!existsSync(path)) return;
   expect(text.split('\n/* pwa additions */')[0]).toBe(readFileSync(path, 'utf8'));
 });
-test('light_theme_overrides_every_color_token', () => {
-  for (const [name, value] of Object.entries(dark)) {
-    if (/^#|^transparent$/.test(value)) expect(light[name], name).toBeDefined();
-    else expect(light[name], name).toBeUndefined();
+
+test('aquamarine_resolves_to_the_unchanged_main_palette', () => {
+  for (const theme of ['dark', 'light'] as const) {
+    const actual = byName('aquamarine', theme).tokens;
+    for (const [name, value] of Object.entries(AQUAMARINE[theme])) {
+      expect(actual[`--${name}`], `${theme} --${name}`).toBe(value);
+    }
   }
 });
-test('text_pairs_meet_wcag_aa_in_both_themes', () => {
-  const pairs: [string, string[]][] = [
-    ['text', ['bg', 'chat-bg', 'surface', 'raised', 'selected', 'accent-soft', 'code']],
-    ...['secondary', 'muted', 'time'].map(n => [n, ['bg', 'surface', 'raised', 'selected']] as [string, string[]]),
-    ['chip-text', ['chip']], ['accent-ink', ['accent']], ['accent-link', ['bg', 'surface', 'raised']],
-    ['warning', ['surface', 'warning-soft']], ['danger', ['surface', 'danger-soft']], ['success', ['surface']]
-  ];
-  for (const palette of [dark, { ...dark, ...light }]) for (const [fg, backgrounds] of pairs) for (const bg of backgrounds) expect(contrast(palette[`--${fg}`]!, palette[`--${bg}`]!), `${fg}/${bg}`).toBeGreaterThanOrEqual(4.5);
+
+test('aquamarine_syntax_tokens_keep_the_old_highlight_colors', () => {
+  const dark = byName('aquamarine', 'dark').tokens;
+  expect(dark['--syn-keyword']).toBe(dark['--accent']);
+  expect(dark['--syn-control']).toBe(dark['--accent']);
+  expect(dark['--syn-string']).toBe(dark['--success']);
+  expect(dark['--syn-function']).toBe(dark['--blue']);
+  expect(dark['--syn-type']).toBe(dark['--success']);
+  expect(dark['--syn-comment']).toBe(dark['--muted']);
+  expect(dark['--syn-number']).toBe(dark['--warning']);
+  expect(dark['--syn-variable']).toBe(dark['--text']);
+  expect(dark['--syn-symbol']).toBe(dark['--accent-link']);
+  const light = byName('aquamarine', 'light').tokens;
+  expect(light['--syn-keyword']).toBe(light['--accent']);
+  expect(light['--syn-control']).toBe(light['--accent']);
+  expect(light['--syn-string']).toBe(light['--success']);
+  expect(light['--syn-function']).toBe(light['--blue']);
+  expect(light['--syn-type']).toBe(light['--success']);
+  expect(light['--syn-comment']).toBe(light['--muted']);
+  expect(light['--syn-number']).toBe(light['--warning']);
+  expect(light['--syn-variable']).toBe(light['--text']);
+  expect(light['--syn-symbol']).toBe(light['--accent-link']);
 });
+
+test('all_theme_variants_define_the_same_color_tokens', () => {
+  expect(palettes.map(v => `${v.palette}/${v.theme}`)).toEqual([
+    'aquamarine/dark', 'aquamarine/light',
+    'standard/dark', 'standard/light',
+    'vscode/dark', 'vscode/light'
+  ]);
+  const expected = new Set(COLOR_TOKENS.map(name => `--${name}`));
+  for (const variant of palettes) {
+    const actual = new Set(Object.entries(variant.tokens)
+      .filter(([, value]) => /^#[\da-f]{3,8}$/i.test(value) || value === 'transparent')
+      .map(([name]) => name));
+    expect(actual, `${variant.palette}/${variant.theme}`).toEqual(expected);
+  }
+});
+
+const textPairs: [string, string[]][] = [
+  ['text', ['bg', 'chat-bg', 'surface', 'raised', 'selected', 'accent-soft', 'code']],
+  ...['secondary', 'muted', 'time'].flatMap(fg => [
+    [fg, ['bg', 'chat-bg', 'surface', 'raised', 'selected']] as [string, string[]]
+  ]),
+  ['chip-text', ['chip']],
+  ['accent-ink', ['accent']],
+  ['accent-link', ['bg', 'surface', 'raised']],
+  ...['success', 'warning', 'danger'].flatMap(fg => [
+    [fg, ['bg', 'surface', `${fg}-soft`]] as [string, string[]]
+  ])
+];
+
+test('text_pairs_meet_wcag_aa_in_all_six_variants', () => {
+  for (const variant of palettes) {
+    const label = `${variant.palette}/${variant.theme}`;
+    for (const [fg, backgrounds] of textPairs) for (const bg of backgrounds) {
+      expect(contrast(variant.tokens[`--${fg}`]!, variant.tokens[`--${bg}`]!), `${label} ${fg}/${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+    for (const name of COLOR_TOKENS.filter(name => name.startsWith('syn-'))) {
+      expect(contrast(variant.tokens[`--${name}`]!, variant.tokens['--code']!), `${label} ${name}/code`).toBeGreaterThanOrEqual(4.5);
+    }
+    for (const line of ['line', 'control-line']) {
+      expect(contrast(variant.tokens[`--${line}`]!, variant.tokens['--surface']!), `${label} ${line}/surface`).toBeGreaterThanOrEqual(1.3);
+    }
+  }
+});
+
 test('reduced_motion_zeroes_all_duration_tokens', () => {
   const reduced = text.slice(text.lastIndexOf('@media (prefers-reduced-motion: reduce)'));
-  for (const name of Object.keys(dark).filter(n => n.startsWith('--duration-'))) {
-    expect(dark[name]).toContain('var(--motion-scale)');
+  for (const name of Object.keys(palettes[0]!.tokens).filter(n => n.startsWith('--duration-'))) {
+    expect(palettes[0]!.tokens[name]).toContain('var(--motion-scale)');
     expect(reduced).toContain(`${name}: 0ms`);
   }
 });
+
 test('disabled_button_requires_a_reason', () => {
   const walk = (path: string): string[] => readdirSync(path, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(`${path}/${e.name}`) : [`${path}/${e.name}`]);
   for (const path of walk('src').filter(p => p.endsWith('.svelte') && !p.endsWith('/Button.svelte'))) expect(readFileSync(path, 'utf8'), path).not.toMatch(/<button\b[^>]*\bdisabled\b/);
 });
+
 test('pwa_design_doc_records_removal_of_check_icon_and_unscaled_countdown', () => {
   const doc = readFileSync('../docs/design/pwa.md', 'utf8');
   expect(doc).not.toMatch(/Регистрация `check` остаётся/);
   expect(doc).toMatch(/нет иконки `check`/i);
 });
+
 test('separator_spacing_survives_svelte_block_trimming', () => {
   // Svelte срезает пробелы, в том числе &#32;, в начале и в конце блока: «1.0.0{#if x} · хаб» выводится как «1.0.0· хаб».
   // Пробел ставится перед блоком, снаружи, или разделитель собирается в скрипте.
@@ -53,8 +144,14 @@ test('separator_spacing_survives_svelte_block_trimming', () => {
     expect(markup.match(closing)?.[0], path).toBeUndefined();
   }
 });
-test('selected_fill_meets_non_text_contrast_in_both_themes', () => {
+
+test('selected_fill_meets_non_text_contrast_in_all_variants', () => {
   // Вкладки групп лежат на --bg, сегменты на --raised: заливка выбора отличима от них на 3:1.
-  for (const palette of [dark, { ...dark, ...light }]) for (const bg of ['bg', 'surface', 'raised']) expect(contrast(palette['--accent']!, palette[`--${bg}`]!), `accent/${bg}`).toBeGreaterThanOrEqual(3);
+  for (const variant of palettes) {
+    const label = `${variant.palette}/${variant.theme}`;
+    for (const bg of ['bg', 'surface', 'raised']) {
+      expect(contrast(variant.tokens['--accent']!, variant.tokens[`--${bg}`]!), `${label} accent/${bg}`).toBeGreaterThanOrEqual(3);
+    }
+  }
   for (const path of ['src/lib/screens/sessions/GroupTabs.svelte', 'src/lib/ui/Segmented.svelte']) expect(readFileSync(path, 'utf8'), path).toMatch(/(?:aria-selected='true'\]|:checked \+ span) \{ background: var\(--accent\);/);
 });
