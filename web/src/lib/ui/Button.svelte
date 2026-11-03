@@ -1,11 +1,11 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import type { MouseEventHandler } from 'svelte/elements';
-  type Props = { variant?: 'default' | 'primary' | 'text'; full?: boolean; type?: 'button' | 'submit'; onclick?: MouseEventHandler<HTMLButtonElement>; children: Snippet } & ({ disabled?: false; reason?: never } | { disabled: true; reason: string });
-  let { variant = 'default', full = false, type = 'button', onclick, children, disabled = false, reason }: Props = $props();
+  type Props = { variant?: 'default' | 'primary' | 'text'; full?: boolean; busy?: boolean; type?: 'button' | 'submit'; onclick?: MouseEventHandler<HTMLButtonElement>; children: Snippet } & ({ disabled?: false; reason?: never } | { disabled: true; reason: string });
+  let { variant = 'default', full = false, busy, type = 'button', onclick, children, disabled = false, reason }: Props = $props();
   const id = $props.id();
 </script>
-<button {type} {onclick} {disabled} class:primary={variant === 'primary'} class:text-button={variant === 'text'} class:full aria-describedby={disabled ? id : undefined}>{@render children()}</button>
+<button {type} {onclick} {disabled} aria-busy={busy} class:primary={variant === 'primary'} class:text-button={variant === 'text'} class:full aria-describedby={disabled ? id : undefined}>{@render children()}</button>
 {#if disabled}<p id={id} class="reason">{reason}</p>{/if}
 <style>
   button { display: inline-flex; align-items: center; justify-content: center; gap: var(--s4); min-height: var(--target); min-width: var(--target); padding: var(--s5) var(--s8); border: var(--s0); border-radius: var(--radius-pill); background: var(--button-bg, var(--raised)); font-size: var(--fs-meta); font-weight: var(--weight-medium); text-align: center; }

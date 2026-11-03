@@ -99,7 +99,14 @@ test('info_sheet_matches_mockup_04_with_per_model_parts_and_the_limit_estimate',
 	await expect(dialog.getByText('Оценка по изменению квоты')).toBeVisible();
 
 	// Actions
-	await expect(dialog.getByRole('button', { name: 'Копировать Markdown' })).toBeVisible();
+	const copy = dialog.getByRole('button', { name: 'Копировать Markdown' });
+	await expect(copy).toBeVisible();
+	// Подпись не прилипает к краям капсулы: те же поля, что у остальных кнопок приложения.
+	for (const button of [copy, dialog.getByRole('button', { name: /(Копировать|Поделиться) картинкой/ })]) {
+		const pad = await button.evaluate((node) => { const style = getComputedStyle(node); return Math.min(parseFloat(style.paddingLeft), parseFloat(style.paddingRight)); });
+		expect(pad).toBeGreaterThanOrEqual(16);
+		await expect(button).toHaveCSS('border-top-left-radius', /^(?:[3-9]\d|\d{3,})/);
+	}
 });
 
 test('info_sheet_reloads_on_run_finished', async ({ page }) => {
