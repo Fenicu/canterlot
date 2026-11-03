@@ -1324,6 +1324,84 @@ async fn a_late_echo_after_the_deadline_is_input_accepted() {
 }
 
 #[tokio::test]
+async fn a_compact_without_an_echo_cancels_and_waits_for_the_late_response() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 2),
+        Script::notification("session/cancel"),
+        Step::Delay { ms: 100 },
+        respond(2, cancelled(None)),
+    ];
+    let mut bench = Bench::with_timing(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+        Duration::from_millis(200),
+        Duration::from_millis(300),
+        Duration::from_secs(60),
+    );
+    bench.start().await;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        bench.adapter.compact(Uuid::now_v7()).await,
+        CompactOutcome::Failed
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "compact must wait for the outstanding RPC: {:?}",
+        started.elapsed()
+    );
+    let events = drain(&mut bench.adapter).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Compacted { ok: false })),
+        "the late compact response is not ignored: {events:?}"
+    );
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn a_compact_that_ignores_cancel_is_closed_before_input_is_released() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 2),
+        Script::notification("session/cancel"),
+    ];
+    let mut bench = Bench::with_timing(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+        Duration::from_millis(200),
+        Duration::from_millis(150),
+        Duration::from_secs(60),
+    );
+    bench.start().await;
+    assert_eq!(
+        bench.adapter.compact(Uuid::now_v7()).await,
+        CompactOutcome::Failed
+    );
+    let events = drain(&mut bench.adapter).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::ProcessExited { .. })),
+        "an unsettled compact retires the process: {events:?}"
+    );
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
 async fn a_late_response_for_one_rpc_keeps_the_forced_close_timer_for_the_other() {
     let steps = vec![
         init_step(),

@@ -826,6 +826,38 @@ impl AntigravityAdapter {
         Ok(())
     }
 
+    /// Довести неизвестное сжатие до терминального исхода: отмена и ожидание ответа
+    /// в срок `interrupt`, иначе процесс закрывается (`ProcessExited`).
+    async fn settle_compaction(&mut self) {
+        if !self.tracker.has_compaction() {
+            return;
+        }
+        self.send_cancel().await;
+        let limit = Instant::now() + self.interrupt_deadline;
+        loop {
+            if self.eof || self.exited {
+                return;
+            }
+            if !self.tracker.has_compaction() {
+                return;
+            }
+            if timeout_at(limit, self.pump_once()).await.is_err() {
+                let status = match self.proc.take() {
+                    Some(mut proc) => {
+                        proc.kill_now();
+                        timeout(KILL_WAIT, proc.wait())
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                    }
+                    None => None,
+                };
+                self.finish_process(status);
+                return;
+            }
+        }
+    }
+
     // --- доказательство приёма ---------------------------------------------
 
     async fn wait_echo(&mut self, command_id: Uuid, limit: Instant) -> EchoEnd {
@@ -1289,8 +1321,14 @@ impl Adapter for AntigravityAdapter {
         }
         match self.wait_echo(command, limit).await {
             EchoEnd::Accepted => CompactOutcome::Accepted,
-            EchoEnd::Rejected(_) | EchoEnd::Undetermined => {
+            EchoEnd::Rejected(_) => {
                 self.tracker.forget_command(command);
+                CompactOutcome::Failed
+            }
+            EchoEnd::Undetermined => {
+                // Исход неизвестен: ввод нельзя отпускать, пока prompt сжатия в полёте,
+                // иначе следующий ход перемешается со сжатием, а поздний ответ потеряется.
+                self.settle_compaction().await;
                 CompactOutcome::Failed
             }
         }
