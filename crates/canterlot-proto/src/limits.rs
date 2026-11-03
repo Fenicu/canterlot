@@ -30,6 +30,14 @@ pub const MAX_EVENT_BATCH_BYTES: usize = 524_288;
 pub const MAX_FILE_CHUNK_BYTES: usize = 131_072;
 pub const IPC_MAX_MESSAGE_BYTES: usize = 1_048_576;
 pub const IPC_PROTOCOL_VERSION: u32 = 1;
+/// Сопровождение пропускает неизвестное сообщение IPC и держит связь.
+pub const IPC_CAP_IGNORE_UNKNOWN: &str = "ignore_unknown_v1";
+/// Сопровождение принимает `CompactRequest`.
+pub const IPC_CAP_COMPACT: &str = "compact_v1";
+/// Сопровождение принимает `Deliver` с командой `SteerInput`.
+pub const IPC_CAP_STEER: &str = "steer_v1";
+/// Всё, что объявляет эта сборка в `Attached.ipc_capabilities`.
+pub const IPC_CAPABILITIES: &[&str] = &[IPC_CAP_IGNORE_UNKNOWN, IPC_CAP_COMPACT, IPC_CAP_STEER];
 pub const MAX_SJ_BATCH_RECORDS: usize = 256;
 pub const MAX_BLOCK_DELTA_BYTES: usize = 16_384;
 pub const BLOCK_FINAL_INLINE_MAX_BYTES: usize = 65_536;

@@ -156,6 +156,10 @@ pub struct CodexAdapter {
     compact_manual: bool,
     /// Команда сжатия ждёт итога парой `contextCompaction`: им она и закрывается.
     compact_pending: Option<(Uuid, Instant)>,
+    /// Сжатие идёт своим ходом: команда закрывается его концом, а не элементом.
+    compact_turn: bool,
+    /// Итог элемента `contextCompaction`, ждущий конца хода сжатия.
+    compact_done: Option<bool>,
     eof: bool,
     exited: bool,
     start_attempted: bool,
@@ -241,6 +245,8 @@ impl CodexAdapter {
             pending_turn: None,
             compact_manual: false,
             compact_pending: None,
+            compact_turn: false,
+            compact_done: None,
             eof: false,
             exited: false,
             start_attempted: false,
@@ -510,6 +516,13 @@ impl CodexAdapter {
                         summary: None,
                     });
                 }
+                // Ход сжатия кончился: без завершения элемента сжатие не удалось.
+                if self.compact_pending.take().is_some() {
+                    let ok = self.compact_done.take().unwrap_or(false);
+                    self.compact_turn = false;
+                    self.compact_manual = false;
+                    self.events.push_back(AdapterEvent::Compacted { ok });
+                }
             }
             Translated::RateLimits(snapshot) => {
                 for fact in self.limits.on_snapshot(&snapshot) {
@@ -567,6 +580,9 @@ impl CodexAdapter {
                 }
             }
             Translated::TurnStarted { turn_id } => {
+                if self.compact_pending.is_some() && !self.turn_running() {
+                    self.compact_turn = true;
+                }
                 self.outbox.on_turn_started(&turn_id);
                 // Ответ turn/start ещё не разобран, а элементы хода уже идут.
                 if self.outbox.active().is_none()
@@ -599,9 +615,7 @@ impl CodexAdapter {
                 post_tokens,
             } if self.compact_manual => {
                 self.compact_manual = false;
-                if self.compact_pending.take().is_some() {
-                    complete_compact = Some(ok);
-                }
+                complete_compact = self.compact_item_done(ok);
                 AdapterEvent::CompactionFinished {
                     manual: true,
                     ok,
@@ -611,9 +625,7 @@ impl CodexAdapter {
             }
             AdapterEvent::CompactionFinished { ok, .. } => {
                 self.compact_manual = false;
-                if self.compact_pending.take().is_some() {
-                    complete_compact = Some(ok);
-                }
+                complete_compact = self.compact_item_done(ok);
                 event
             }
             _ => event,
@@ -1332,8 +1344,21 @@ impl CodexAdapter {
         self.outbox.active().is_some() || self.pending_turn.is_some()
     }
 
+    /// Элемент сжатия завершён. Если сжатие идёт своим ходом, команда ждёт его конца:
+    /// иначе ввод владельца ушёл бы в ещё идущий ход сжатия.
+    fn compact_item_done(&mut self, ok: bool) -> Option<bool> {
+        self.compact_pending?;
+        if self.compact_turn {
+            self.compact_done = Some(ok);
+            return None;
+        }
+        self.compact_pending = None;
+        Some(ok)
+    }
+
     /// Просроченное сжатие — отказ: пара `contextCompaction` так и не пришла,
     /// висеть вечно нельзя, иначе команда хаба останется открытой навсегда.
+    /// Эпизод, уже закрытый элементом, второй раз не закрывается.
     fn compact_timed_out(&mut self) {
         if self
             .compact_pending
@@ -1341,13 +1366,19 @@ impl CodexAdapter {
         {
             self.compact_pending = None;
             self.compact_manual = false;
-            self.events.push_back(AdapterEvent::Compacted { ok: false });
-            self.events.push_back(AdapterEvent::CompactionFinished {
-                manual: true,
-                ok: false,
-                pre_tokens: 0,
-                post_tokens: 0,
+            self.compact_turn = false;
+            let done = self.compact_done.take();
+            self.events.push_back(AdapterEvent::Compacted {
+                ok: done.unwrap_or(false),
             });
+            if done.is_none() {
+                self.events.push_back(AdapterEvent::CompactionFinished {
+                    manual: true,
+                    ok: false,
+                    pre_tokens: 0,
+                    post_tokens: 0,
+                });
+            }
         }
     }
 
@@ -1703,8 +1734,14 @@ async fn drain_until_exit(
         if start.elapsed() >= limit {
             return false;
         }
-        if let Ok(line) = timeout(Duration::from_millis(50), proc.next_line()).await {
-            adapter.dispatch_line(line);
+        match timeout(Duration::from_millis(50), proc.next_line()).await {
+            // Конец stdout отвечает мгновенно, а процесс ещё жив: без паузы цикл крутился бы.
+            Ok(StdoutLine::Eof) => {
+                adapter.dispatch_line(StdoutLine::Eof);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(line) => adapter.dispatch_line(line),
+            Err(_) => {}
         }
     }
 }
@@ -1943,17 +1980,23 @@ impl Adapter for CodexAdapter {
             "thread/compact/start",
             serde_json::json!({ "threadId": thread_id }),
         );
-        if !self.write_request(message).await {
-            return CompactOutcome::Failed;
-        }
-        if !matches!(
-            self.wait_response(id, Instant::now() + self.deadline).await,
-            Some(Ok(_))
-        ) {
-            return CompactOutcome::Failed;
-        }
+        // Кадры хода сжатия могут прийти раньше ответа: команда открыта уже к ним.
         self.compact_manual = true;
         self.compact_pending = Some((command, Instant::now() + COMPACT_TIMEOUT));
+        self.compact_turn = false;
+        self.compact_done = None;
+        let accepted = self.write_request(message).await
+            && matches!(
+                self.wait_response(id, Instant::now() + self.deadline).await,
+                Some(Ok(_))
+            );
+        if !accepted {
+            self.compact_manual = false;
+            self.compact_pending = None;
+            self.compact_turn = false;
+            self.compact_done = None;
+            return CompactOutcome::Failed;
+        }
         CompactOutcome::Accepted
     }
 

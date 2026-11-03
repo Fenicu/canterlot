@@ -233,6 +233,8 @@ struct Supervisor {
     agent_calls: HashMap<Uuid, Instant>,
     conns: HashMap<u64, Conn>,
     attached: Option<u64>,
+    /// Неизвестное сообщение IPC уже названо в журнале: дальше молча.
+    unknown_ipc_logged: bool,
     next_conn: u64,
     attach_deadline: Option<Instant>,
     workdir: Option<PathBuf>,
@@ -430,6 +432,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         agent_calls: HashMap::new(),
         conns: HashMap::new(),
         attached: None,
+        unknown_ipc_logged: false,
         next_conn: 0,
         workdir: None,
         media: MediaQueue::default(),
@@ -798,6 +801,17 @@ impl Supervisor {
             return Ok(());
         };
         let Some(message) = message.msg else {
+            // Новая управляющая служба может прислать то, чего эта сборка не знает:
+            // связь остаётся, иначе она рвалась бы на каждом таком сообщении.
+            if conn.attached {
+                if !std::mem::replace(&mut self.unknown_ipc_logged, true) {
+                    tracing::warn!(
+                        kind = "ipc_unknown_message",
+                        "unknown control message ignored"
+                    );
+                }
+                return Ok(());
+            }
             self.drop_connection(id);
             return Ok(());
         };
@@ -838,6 +852,10 @@ impl Supervisor {
                 last_sj_seq: self.sj.last_seq(),
                 acked_sj_seq: self.sj.acked_seq(),
                 received,
+                ipc_capabilities: canterlot_proto::limits::IPC_CAPABILITIES
+                    .iter()
+                    .map(|capability| (*capability).to_owned())
+                    .collect(),
             }));
             tracing::info!(kind = "attached", "control attached");
             // Новая управляющая служба получает незавершённую загрузку заново.
@@ -2201,6 +2219,8 @@ impl Supervisor {
             self.faults.abort_at("before_first_byte");
             self.ready = false;
             self.aborting_turn = false;
+            // Новый ход: выход процесса после него — уже не остановка пользователем.
+            self.interrupted = false;
             self.active_turn = Some(key.0);
             let Some(adapter) = self.adapter.as_mut() else {
                 break;
@@ -2275,14 +2295,20 @@ impl Supervisor {
                         .await;
                 };
                 self.record(Body::RequestOpened(RequestOpened {
-                    request_id,
+                    request_id: request_id.clone(),
                     execution_id: self.spec.execution_id.to_string(),
                     generation: self.spec.generation,
                     kind,
                     payload_json,
                 }))?;
                 if self.aborting_turn {
+                    // Карточка закрыта сразу: ответить на неё нельзя, CLI нужен отказ.
                     self.close_requests("interrupted")?;
+                    if let Some(adapter) = self.adapter.as_mut() {
+                        adapter
+                            .refuse_request(&request_id, "The turn is being interrupted")
+                            .await;
+                    }
                 }
             }
             AdapterEvent::RequestClosed { request_id, reason } => {
@@ -2735,7 +2761,6 @@ impl Supervisor {
         }
         self.interrupt_record(&id, attempt, InterruptState::SentToAgent)?;
         self.aborting_turn = true;
-        self.close_requests("interrupted")?;
         self.sj.flush()?;
         let Some(adapter) = self.adapter.as_mut() else {
             return Ok(());
@@ -2743,14 +2768,18 @@ impl Supervisor {
         match adapter.interrupt().await {
             InterruptOutcome::Acknowledged => {
                 self.interrupted = true;
+                self.close_requests("interrupted")?;
                 self.interrupt_record(&id, attempt, InterruptState::Acknowledged)?;
                 self.pending_interrupts.push((id, attempt));
             }
             InterruptOutcome::Undetermined => {
                 self.interrupted = true;
+                self.close_requests("interrupted")?;
                 self.pending_interrupts.push((id, attempt));
             }
             InterruptOutcome::NotApplicable => {
+                // Прерывать было нечего: ход и его запросы остаются как были.
+                self.aborting_turn = false;
                 self.interrupt_record(&id, attempt, InterruptState::NotApplicable)?;
             }
         }
@@ -2893,6 +2922,11 @@ impl Supervisor {
             Lifecycle::Stopping(_) | Lifecycle::Draining { .. }
         ) {
             return self.compaction_record(&id, attempt, CompactionState::Superseded);
+        }
+        // Без compact_v1 хаб не примет ни эпизод, ни сброс контекста: сжатие прошло бы
+        // без строки в ленте.
+        if !self.compact_v1 {
+            return self.compaction_record(&id, attempt, CompactionState::NotApplicable);
         }
         let (Some(command), None, Some(adapter)) = (
             Uuid::parse_str(&id).ok(),
@@ -3227,6 +3261,8 @@ mod tests {
         ack_interrupt: bool,
         steer_accept: bool,
         steer_undetermined: bool,
+        refused: Vec<String>,
+        compact_calls: usize,
     }
 
     struct StubAdapter {
@@ -3294,6 +3330,19 @@ mod tests {
             } else {
                 InterruptOutcome::NotApplicable
             }
+        }
+
+        async fn compact(&mut self, _command: Uuid) -> crate::adapter::CompactOutcome {
+            self.state.lock().unwrap().compact_calls += 1;
+            crate::adapter::CompactOutcome::Accepted
+        }
+
+        async fn refuse_request(&mut self, request_id: &str, _message: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .refused
+                .push(request_id.to_owned());
         }
 
         async fn steer(&mut self, input: &Transmission) -> SteerOutcome {
@@ -3416,6 +3465,7 @@ mod tests {
             agent_calls: HashMap::new(),
             conns: HashMap::new(),
             attached: None,
+            unknown_ipc_logged: false,
             next_conn: 0,
             workdir: None,
             media: MediaQueue::default(),
@@ -4035,6 +4085,108 @@ mod tests {
         assert_eq!(
             state.lock().unwrap().transmit_calls,
             vec![first.0, second.0]
+        );
+    }
+
+    fn permission_opened(request_id: &str) -> AdapterEvent {
+        AdapterEvent::RequestOpened {
+            request_id: request_id.into(),
+            kind: "permission".into(),
+            payload: serde_json::json!({"tool_name": "Bash", "input": {"command": "ls"}}),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_opened_during_an_interrupt_is_refused_to_the_cli() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        supervisor.on_interrupt("int-1".into(), 1).await.unwrap();
+        supervisor
+            .on_adapter_event(permission_opened("req-late"))
+            .await
+            .unwrap();
+        assert!(!supervisor.sj.has_open_requests());
+        assert_eq!(state.lock().unwrap().refused, vec!["req-late".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn interrupt_not_applicable_leaves_the_turn_answerable() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        supervisor
+            .on_adapter_event(permission_opened("req-1"))
+            .await
+            .unwrap();
+        supervisor.on_interrupt("int-1".into(), 1).await.unwrap();
+        assert!(!supervisor.aborting_turn, "nothing is being aborted");
+        assert!(
+            supervisor.sj.request("req-1").is_some() && supervisor.sj.has_open_requests(),
+            "the request stays open for the owner"
+        );
+        assert!(state.lock().unwrap().refused.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupt_mark_does_not_outlive_the_next_turn() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        supervisor.on_interrupt("int-1".into(), 1).await.unwrap();
+        assert!(supervisor.interrupted);
+        supervisor
+            .on_adapter_event(AdapterEvent::RunFinished {
+                input_command_id: first.0,
+                usage: Vec::new(),
+                context_tokens: 0,
+                context_window_tokens: 0,
+            })
+            .await
+            .unwrap();
+        assert!(
+            supervisor.interrupted,
+            "an exit right after it is still a user stop"
+        );
+        supervisor
+            .on_adapter_event(AdapterEvent::Phase {
+                phase: crate::adapter::Phase::AwaitingInput,
+                tool_name: None,
+                summary: None,
+            })
+            .await
+            .unwrap();
+        queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        assert!(
+            !supervisor.interrupted,
+            "a later clean exit is a normal exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_without_compact_v1_is_not_applicable() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        supervisor.compact_v1 = false;
+        let id = Uuid::now_v7().to_string();
+        supervisor.on_compact(id.clone(), 1).await.unwrap();
+        assert_eq!(
+            state.lock().unwrap().compact_calls,
+            0,
+            "never sent to the agent"
+        );
+        assert!(supervisor.pending_compaction.is_none());
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(
+            bodies.iter().any(|body| matches!(
+                body,
+                Body::CompactionStatus(status)
+                    if status.command_id == id
+                        && status.state == i32::from(CompactionState::NotApplicable)
+            )),
+            "{bodies:?}"
         );
     }
 }

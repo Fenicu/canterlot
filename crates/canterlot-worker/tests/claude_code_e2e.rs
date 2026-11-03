@@ -2472,3 +2472,227 @@ async fn compacted_waits_for_service_result_after_boundary() {
     );
     f.close().await;
 }
+
+/// Ход ждёт в `@wait` и не читает stdin; SIGINT даёт записанный итог `aborted_tools`.
+fn stalled_turn(transmit: Duration) -> (Fake, Uuid) {
+    let id = Uuid::now_v7();
+    let f = Fake::with_timers(
+        vec![vec![
+            json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!("@wait"),
+        ]],
+        transmit,
+        WAIT,
+    );
+    let mut interrupted = outgoing("interrupt")
+        .into_iter()
+        .filter(|v| v["type"] == "result" && v["terminal_reason"] == "aborted_tools")
+        .take(1)
+        .collect::<Vec<_>>();
+    interrupted[0]["user_message_uuid"] = json!(id);
+    interrupted[0]["user_message_uuids"] = json!([id]);
+    std::fs::write(
+        f.dir.path().join("interrupt.json"),
+        serde_json::to_vec(&interrupted).unwrap(),
+    )
+    .unwrap();
+    (f, id)
+}
+
+#[tokio::test]
+async fn interrupt_after_a_torn_steer_falls_back_to_sigint() {
+    let _sigint =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let (mut f, id) = stalled_turn(Duration::from_secs(1));
+    f.start().await;
+    f.send(&tx(id)).await;
+    f.wait_point().await;
+    // Строка больше буфера pipe: CLI не читает, запись обрывается по сроку на середине.
+    let big = Transmission {
+        text: "x".repeat(1024 * 1024),
+        ..tx(Uuid::now_v7())
+    };
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.steer(&big))
+            .await
+            .unwrap(),
+        adapter::SteerOutcome::Undetermined
+    ));
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.interrupt())
+            .await
+            .expect("interrupt must not hang on a full pipe"),
+        adapter::InterruptOutcome::Acknowledged
+    ));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn sigint_fallback_fires_with_a_transmit_deadline_below_the_receipt_wait() {
+    let _sigint =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let (mut f, id) = stalled_turn(Duration::from_secs(1));
+    f.start().await;
+    f.send(&tx(id)).await;
+    f.wait_point().await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(30), f.adapter.interrupt())
+            .await
+            .unwrap(),
+        adapter::InterruptOutcome::Acknowledged
+    ));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn input_after_a_torn_steer_goes_to_a_new_process() {
+    let turn = vec![
+        json!({"type":"stream_event","parent_tool_use_id":null,"user_message_uuids":["@input"],"event":{"type":"message_start","message":{"id":"m1","model":"claude-haiku-test","usage":{}}}}),
+        json!("@sleep:2500"),
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"],"modelUsage":{}}),
+    ];
+    let mut f = Fake::with_timers(vec![turn], Duration::from_secs(1), WAIT);
+    f.start().await;
+    let first = Uuid::now_v7();
+    f.send(&tx(first)).await;
+    let big = Transmission {
+        text: "x".repeat(1024 * 1024),
+        ..tx(Uuid::now_v7())
+    };
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.steer(&big))
+            .await
+            .unwrap(),
+        adapter::SteerOutcome::Undetermined
+    ));
+    f.finish().await;
+    let second = Uuid::now_v7();
+    f.send(&tx(second)).await;
+    let mut restarted = false;
+    for event in f.finish().await {
+        restarted |= matches!(event, AdapterEvent::CliRestarted { .. });
+    }
+    assert!(restarted, "the torn stdin is not written to again");
+    // Старый процесс оставил в логе оборванную строку без перевода строки, ввод идёт следом.
+    let log = std::fs::read_to_string(f.dir.path().join("stdin.log")).unwrap();
+    assert!(log.lines().last().unwrap().contains(&second.to_string()));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn steer_without_a_cli_after_a_failed_restart_is_deferred() {
+    let mut f = Fake::new(vec![answer_turn()]);
+    f.start().await;
+    f.send(&tx(Uuid::now_v7())).await;
+    f.finish().await;
+    // Ни новый, ни запасной запуск не проходят проверку версии: процесса больше нет.
+    std::fs::write(f.dir.path().join("version"), "failed").unwrap();
+    let mut change = tx(Uuid::now_v7());
+    change.settings = Some(SettingsChange {
+        instructions: Some(InstructionSpec {
+            mode: InstructionMode::Clean,
+            text: String::new(),
+            preset_id: None,
+            revision: 1,
+            title: String::new(),
+        }),
+        ..Default::default()
+    });
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.transmit(&change, &f.group))
+            .await
+            .unwrap(),
+        TransmitOutcome::Rejected(_)
+    ));
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.steer(&tx(Uuid::now_v7())))
+            .await
+            .unwrap(),
+        adapter::SteerOutcome::NotApplicable(_)
+    ));
+    f.close().await;
+}
+
+/// События сжатия до тишины в `quiet`: срок команды здесь короче кадров CLI.
+async fn compaction_with_timeout(compact_turn: Vec<Value>) -> Vec<AdapterEvent> {
+    use canterlot_worker::adapter::{CompactOutcome, claude_code::ClaudeCodeAdapter};
+    let mut f = Fake::new(vec![answer_turn(), compact_turn]);
+    f.adapter = Box::new(
+        ClaudeCodeAdapter::new(
+            ClaudeCodeConfig {
+                executable: f.dir.path().join("fake-cli"),
+                ..Default::default()
+            },
+            f.dir.path().join("exec"),
+            WAIT,
+        )
+        .with_compact_timeout(Duration::from_millis(500)),
+    );
+    f.start().await;
+    f.send(&tx(Uuid::now_v7())).await;
+    f.finish().await;
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.compact(Uuid::now_v7()))
+            .await
+            .unwrap(),
+        CompactOutcome::Accepted
+    ));
+    let mut events = Vec::new();
+    while let Ok(event) = tokio::time::timeout(Duration::from_secs(3), f.adapter.next_event()).await
+    {
+        events.push(event);
+    }
+    f.close().await;
+    events
+}
+
+fn compaction_outcomes(events: &[AdapterEvent]) -> (Vec<bool>, Vec<bool>) {
+    let finished = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::CompactionFinished { ok, .. } => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    let compacted = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Compacted { ok } => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    (finished, compacted)
+}
+
+#[tokio::test]
+async fn compaction_timeout_after_the_boundary_is_a_success() {
+    let events = compaction_with_timeout(vec![
+        json!({"type":"system","subtype":"status","status":"compacting"}),
+        json!({"type":"system","subtype":"compact_boundary",
+            "compact_metadata":{"pre_tokens":41000,"trigger":"manual"}}),
+        json!("@wait"),
+    ])
+    .await;
+    assert_eq!(
+        compaction_outcomes(&events),
+        (vec![true], vec![true]),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn late_boundary_after_the_timeout_closes_the_one_episode() {
+    let events = compaction_with_timeout(vec![
+        json!({"type":"system","subtype":"status","status":"compacting"}),
+        json!("@sleep:1500"),
+        json!({"type":"system","subtype":"compact_boundary",
+            "compact_metadata":{"pre_tokens":41000,"trigger":"manual"}}),
+        json!("@wait"),
+    ])
+    .await;
+    assert_eq!(
+        compaction_outcomes(&events),
+        (vec![true], vec![false]),
+        "{events:?}"
+    );
+}

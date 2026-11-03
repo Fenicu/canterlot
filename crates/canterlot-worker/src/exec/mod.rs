@@ -30,6 +30,7 @@ use crate::{
 };
 
 mod group;
+mod ipc_caps;
 mod lost;
 mod manager;
 mod procfs;
@@ -264,6 +265,8 @@ pub(crate) struct Shared {
     pub spawn_delay: Mutex<std::time::Duration>,
     #[cfg(feature = "fault-injection")]
     pub fail_sends: Mutex<usize>,
+    #[cfg(feature = "fault-injection")]
+    pub strip_caps: Mutex<bool>,
 }
 
 pub(crate) fn open(store: &mut Option<WorkerStore>) -> Result<&mut WorkerStore, WorkerError> {
@@ -450,6 +453,8 @@ impl ExecutionManager {
                 spawn_delay: Mutex::new(std::time::Duration::ZERO),
                 #[cfg(feature = "fault-injection")]
                 fail_sends: Mutex::new(0),
+                #[cfg(feature = "fault-injection")]
+                strip_caps: Mutex::new(false),
             }),
             shutdown,
         }
@@ -458,6 +463,12 @@ impl ExecutionManager {
     #[cfg(feature = "fault-injection")]
     pub fn set_spawn_delay(&self, delay: std::time::Duration) {
         *self.shared.spawn_delay.lock().expect("delay lock") = delay;
+    }
+
+    /// Сопровождение отвечает на подключение как 1.0.0: без списка возможностей IPC.
+    #[cfg(feature = "fault-injection")]
+    pub fn strip_ipc_capabilities(&self) {
+        *self.shared.strip_caps.lock().expect("caps fault lock") = true;
     }
 
     #[cfg(feature = "fault-injection")]

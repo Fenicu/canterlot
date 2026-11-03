@@ -29,6 +29,15 @@ impl ProcessGuard {
         }
     }
 
+    /// Сопровождение, запущенное из другого пути (каталог выпуска с жёсткой ссылкой на сборку).
+    #[allow(dead_code)]
+    pub fn for_executable(root: &Path, executable: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            executable: fs::canonicalize(executable).unwrap(),
+        }
+    }
+
     pub fn members(&self) -> Vec<(u32, u64)> {
         fs::read_dir("/proc")
             .unwrap()

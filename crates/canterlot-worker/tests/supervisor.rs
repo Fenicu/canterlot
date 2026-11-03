@@ -2683,3 +2683,43 @@ async fn todo_is_dropped_once_with_a_diagnostic_without_todo_v1() {
     assert_eq!(drops, 1);
     harness.shutdown().await;
 }
+
+// Сообщение новой управляющей службы, которого эта сборка не знает: связь остаётся.
+#[tokio::test]
+async fn unknown_control_message_keeps_the_link_and_capabilities_are_advertised() {
+    use canterlot_proto::worker::ipc::InterruptRequest;
+    use tokio::io::AsyncWriteExt;
+    let mut harness = Harness::start(&[]).await;
+    let attached = harness.attach_and_ship(0).await;
+    for capability in [
+        canterlot_proto::limits::IPC_CAP_IGNORE_UNKNOWN,
+        canterlot_proto::limits::IPC_CAP_COMPACT,
+        canterlot_proto::limits::IPC_CAP_STEER,
+    ] {
+        assert!(
+            attached.ipc_capabilities.iter().any(|c| c == capability),
+            "{:?}",
+            attached.ipc_capabilities
+        );
+    }
+    harness.start_cli("synthetic").await;
+    // Поле 99 с пустым значением: для этой сборки `msg` пуст.
+    let conn = harness.conn.as_mut().unwrap();
+    conn.write
+        .write_all(&[0, 0, 0, 3, 0x9a, 0x06, 0x00])
+        .await
+        .unwrap();
+    let id = Uuid::now_v7();
+    harness
+        .send(down::Msg::Interrupt(InterruptRequest {
+            command_id: id.to_string(),
+            dispatch_attempt: 1,
+        }))
+        .await;
+    harness
+        .wait_records("the link still carries commands", |b| {
+            !interrupt_states(b, id).is_empty()
+        })
+        .await;
+    harness.shutdown().await;
+}

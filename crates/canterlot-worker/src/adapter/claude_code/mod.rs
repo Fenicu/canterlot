@@ -82,6 +82,7 @@ pub struct ClaudeCodeAdapter {
     compact_pending: Option<(Uuid, Instant)>,
     /// Граница сжатия прошла, служебный итог ещё нет: команда закрывается им, а не границей.
     compact_result_due: bool,
+    compact_timeout: Duration,
 }
 
 impl ClaudeCodeAdapter {
@@ -129,7 +130,13 @@ impl ClaudeCodeAdapter {
             background_changed: None,
             compact_pending: None,
             compact_result_due: false,
+            compact_timeout: COMPACT_TIMEOUT,
         }
+    }
+
+    pub fn with_compact_timeout(mut self, compact_timeout: Duration) -> Self {
+        self.compact_timeout = compact_timeout;
+        self
     }
 
     pub fn with_ready_deadline(mut self, ready_deadline: Duration) -> Self {
@@ -330,10 +337,10 @@ impl ClaudeCodeAdapter {
                 }
                 self.events.push_back(event);
             }
-            Parsed::CompactResultConsumed => {
+            Parsed::CompactResultConsumed { ok } => {
                 if self.compact_pending.take().is_some() {
                     self.compact_result_due = false;
-                    self.events.push_back(AdapterEvent::Compacted { ok: true });
+                    self.events.push_back(AdapterEvent::Compacted { ok });
                 }
             }
             Parsed::ToolCallComplete {
@@ -684,6 +691,19 @@ impl ClaudeCodeAdapter {
         Ok(())
     }
 
+    /// В stdin осталась оборванная строка: следующий кадр склеился бы с ней, ввод уходит
+    /// только в новый процесс с той же беседой и действующими настройками.
+    async fn restart_torn(&mut self, group: &dyn Containment) -> bool {
+        tracing::warn!(
+            kind = "cli_stdin_torn",
+            "cli stdin torn, restarting the cli"
+        );
+        self.stop_old_cli(group).await;
+        self.parser.reset_process();
+        let _ = self.respawn_previous(group).await;
+        self.cli.is_some()
+    }
+
     /// Запасной запуск со старыми инструкциями и настройками после неудачного
     /// перезапуска, аргумент беседы тот же, что у перезапуска. Успех — отказ
     /// входа; провал, в том числе невозвращённый файл прежних инструкций, —
@@ -790,6 +810,10 @@ impl ClaudeCodeAdapter {
         }
         if let Err(reason) = self.validate_transmission(input) {
             return TransmitOutcome::Rejected(reason.into());
+        }
+        if self.cli.as_ref().is_some_and(CliProcess::stdin_torn) && !self.restart_torn(group).await
+        {
+            return TransmitOutcome::Undetermined;
         }
         // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода. Пока идёт
         // фоновая работа, ждёт только перезапуск. Модель и режим уходят управляющими запросами
@@ -1116,17 +1140,27 @@ async fn drain_to_eof(cli: &mut CliProcess, parser: &mut Parser, queue: &mut Opt
 }
 
 impl ClaudeCodeAdapter {
-    /// Просроченное сжатие — отказ: граница так и не пришла, висеть вечно нельзя.
-    /// Граница без итога тоже отпускает очередь: эпизод уже закрыт, дублировать нечего.
+    fn send_sigint(&self) -> std::io::Result<()> {
+        match self.cli.as_ref() {
+            Some(cli) => cli.signal(process::Signal::Int),
+            None => Err(std::io::Error::other("no cli")),
+        }
+    }
+
+    /// Просроченное сжатие отпускает очередь, висеть вечно нельзя. Без границы это отказ;
+    /// с границей сжатие удалось, ждался только служебный итог. Открытый эпизод закроет
+    /// своя граница, если придёт: второй строки сжатия не будет.
     fn compact_timed_out(&mut self) -> bool {
         if self
             .compact_pending
             .is_some_and(|(_, until)| Instant::now() >= until)
         {
             self.compact_pending = None;
+            self.parser.forget_compact();
             let boundary_seen = std::mem::take(&mut self.compact_result_due);
-            self.events.push_back(AdapterEvent::Compacted { ok: false });
-            if !boundary_seen {
+            self.events
+                .push_back(AdapterEvent::Compacted { ok: boundary_seen });
+            if !boundary_seen && !self.parser.compaction_open() {
                 self.events.push_back(AdapterEvent::CompactionFinished {
                     manual: true,
                     ok: false,
@@ -1345,8 +1379,8 @@ impl Adapter for ClaudeCodeAdapter {
         ) {
             return CompactOutcome::Failed;
         }
-        self.parser.mark_compact_manual();
-        self.compact_pending = Some((command, Instant::now() + COMPACT_TIMEOUT));
+        self.parser.mark_compact_manual(command);
+        self.compact_pending = Some((command, Instant::now() + self.compact_timeout));
         self.compact_result_due = false;
         CompactOutcome::Accepted
     }
@@ -1372,6 +1406,10 @@ impl Adapter for ClaudeCodeAdapter {
                     kind,
                 });
             }
+        }
+        // Процесса нет или его stdin сломан: вливать некуда, сообщение уйдёт обычным вводом.
+        if self.exited || self.eof || self.cli.as_ref().is_none_or(CliProcess::stdin_torn) {
+            return SteerOutcome::NotApplicable("cli_unavailable".into());
         }
         if let Err(reason) = self.validate_steer(input) {
             return SteerOutcome::Rejected(reason.into());
@@ -1417,7 +1455,7 @@ impl Adapter for ClaudeCodeAdapter {
     }
 
     async fn interrupt(&mut self) -> InterruptOutcome {
-        if self.exited || self.eof {
+        if self.exited || self.eof || self.cli.is_none() {
             return InterruptOutcome::NotApplicable;
         }
         let Some(line) = self
@@ -1436,11 +1474,20 @@ impl Adapter for ClaudeCodeAdapter {
         self.requests.clear();
         // Управляющий запрос останавливает ход, процесс жив: следующий ввод
         // уйдёт в тот же CLI без перезапуска. SIGINT — только запасной.
-        if self.cli.as_mut().unwrap().write_line(&line).await.is_err() {
-            return InterruptOutcome::Undetermined;
-        }
+        let written = matches!(
+            timeout(self.deadline, self.cli.as_mut().unwrap().write_line(&line)).await,
+            Ok(Ok(()))
+        );
         let mut sigint_sent = false;
-        let until = Instant::now() + self.deadline;
+        let mut until = Instant::now() + self.deadline;
+        if !written {
+            // stdin не принял запрос целиком: дальше только сигнал.
+            if self.send_sigint().is_err() {
+                return InterruptOutcome::Undetermined;
+            }
+            sigint_sent = true;
+            until = Instant::now() + self.deadline;
+        }
         loop {
             if self.queue.as_ref().unwrap().interrupt_acknowledged() {
                 return InterruptOutcome::Acknowledged;
@@ -1454,29 +1501,30 @@ impl Adapter for ClaudeCodeAdapter {
             }
             if !sigint_sent && self.queue.as_ref().unwrap().interrupt_receipt_expired() {
                 // Запасной путь: квитанции нет в срок, останавливаем ход сигналом.
-                if self
-                    .cli
-                    .as_ref()
-                    .unwrap()
-                    .signal(process::Signal::Int)
-                    .is_err()
-                {
+                if self.send_sigint().is_err() {
                     return InterruptOutcome::Undetermined;
                 }
                 sigint_sent = true;
+                // У сигнала своё окно: иначе его итог никто бы не дождался.
+                until = Instant::now() + self.deadline;
             }
-            // Без кадров stdout ожидание упирается в срок квитанции,
-            // иначе запасной SIGINT никогда бы не наступил.
-            let bound = self
+            // Пока квитанции нет, ожидание идёт до её срока, даже если срок
+            // передачи короче: иначе запасной SIGINT никогда бы не наступил.
+            let receipt = self
                 .queue
                 .as_ref()
                 .unwrap()
                 .interrupt_receipt_bound()
-                .filter(|_| !sigint_sent)
-                .map(|bound| bound.min(until))
-                .unwrap_or(until);
-            if timeout_at(bound, self.pump()).await.is_err() && Instant::now() >= until {
-                return InterruptOutcome::Undetermined;
+                .filter(|_| !sigint_sent);
+            match receipt {
+                Some(bound) => {
+                    let _ = timeout_at(bound, self.pump()).await;
+                }
+                None => {
+                    if timeout_at(until, self.pump()).await.is_err() {
+                        return InterruptOutcome::Undetermined;
+                    }
+                }
             }
         }
     }
@@ -1488,6 +1536,7 @@ impl Adapter for ClaudeCodeAdapter {
             }
             if self.deferred.is_some()
                 && !self.deferred_due
+                && self.compact_pending.is_none()
                 && !self.background_busy()
                 && self.queue.as_ref().is_some_and(|q| q.active().is_none())
             {
@@ -1498,7 +1547,9 @@ impl Adapter for ClaudeCodeAdapter {
         }
     }
     async fn apply_deferred(&mut self, group: &dyn Containment) {
+        // Перезапуск посреди `/compact` потерял бы сжатие.
         if self.background_busy()
+            || self.compact_pending.is_some()
             || self.exited
             || self.eof
             || self.cli.is_none()

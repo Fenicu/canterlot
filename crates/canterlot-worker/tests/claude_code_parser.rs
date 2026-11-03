@@ -1574,7 +1574,14 @@ fn real_tool_result_of_a_synchronous_agent_is_not_marked() {
 fn compaction_boundary_opens_and_closes_one_episode() {
     let lines = fixtures::replay_fixture("compaction");
     let mut parser = Parser::new();
-    let parsed = feed_all(&mut parser, &lines);
+    // Ручная граница приходит только после `/compact` кнопки.
+    let manual = lines
+        .iter()
+        .position(|line| line.contains("\"trigger\":\"manual\""))
+        .unwrap();
+    let mut parsed = feed_all(&mut parser, &lines[..manual]);
+    parser.mark_compact_manual(Uuid::now_v7());
+    parsed.extend(feed_all(&mut parser, &lines[manual..]));
     let events: Vec<&AdapterEvent> = parsed
         .iter()
         .filter_map(|p| match p {
@@ -1621,7 +1628,7 @@ fn compaction_boundary_opens_and_closes_one_episode() {
 #[test]
 fn compaction_manual_flag_comes_from_the_button() {
     let mut parser = Parser::new();
-    parser.mark_compact_manual();
+    parser.mark_compact_manual(Uuid::now_v7());
     let parsed =
         parser.feed(&json!({"type":"system","subtype":"status","status":"compacting"}).to_string());
     assert!(parsed.iter().any(|p| matches!(
@@ -1667,7 +1674,7 @@ fn live_context_progress_is_rate_limited() {
 #[test]
 fn duplicate_compact_boundary_is_dropped_by_frame_identity() {
     let mut parser = Parser::new();
-    parser.mark_compact_manual();
+    parser.mark_compact_manual(Uuid::now_v7());
     let boundary = json!({"type":"system","subtype":"compact_boundary",
         "uuid":"031c33e9-8858-4ae4-b128-ae032b295aca",
         "compact_metadata":{"trigger":"manual","pre_tokens":30111,"post_tokens":15694}})
@@ -1686,4 +1693,115 @@ fn duplicate_compact_boundary_is_dropped_by_frame_identity() {
             .any(|p| matches!(p, Parsed::Event(AdapterEvent::CompactionFinished { .. }))),
         "repeated boundary frame must not close a second episode: {second:?}"
     );
+}
+
+/// Автоматическая граница из записанной фикстуры сжатия.
+fn auto_boundary() -> String {
+    fixtures::replay_fixture("compaction")
+        .into_iter()
+        .find(|line| line.contains("\"trigger\":\"auto\""))
+        .unwrap()
+}
+
+fn compact_consumed(parsed: &[Parsed]) -> Vec<bool> {
+    parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::CompactResultConsumed { ok } => Some(*ok),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn auto_compaction_inside_a_wake_turn_keeps_its_result() {
+    let rows = fixtures::replay_fixture_rows("background");
+    let wake = rows.iter().position(|(_, f)| is_wake_result(f)).unwrap();
+    let mut parser = Parser::new();
+    let before = replay_rows(&mut parser, &rows[..wake]);
+    let last = *adopted(&before).last().expect("the wake turn is adopted");
+    let boundary = parser.feed(&auto_boundary());
+    assert!(boundary.iter().any(|p| matches!(
+        p,
+        Parsed::Event(AdapterEvent::CompactionFinished { manual: false, .. })
+    )));
+    let result = replay_rows(&mut parser, &rows[wake..=wake]);
+    assert_eq!(finished(&result), vec![last], "the wake turn still ends");
+    assert!(compact_consumed(&result).is_empty());
+    assert!(!parser.wake_turn_open());
+}
+
+#[test]
+fn auto_compaction_error_inside_a_wake_turn_keeps_its_result() {
+    let rows = fixtures::replay_fixture_rows("background");
+    let wake = rows.iter().position(|(_, f)| is_wake_result(f)).unwrap();
+    let mut parser = Parser::new();
+    let before = replay_rows(&mut parser, &rows[..wake]);
+    let last = *adopted(&before).last().unwrap();
+    parser.feed(&json!({"type":"system","subtype":"status","status":"compacting"}).to_string());
+    let mut frame: Value = serde_json::from_str(&rows[wake].1).unwrap();
+    frame["is_error"] = json!(true);
+    let result = parser.feed(&frame.to_string());
+    assert_eq!(finished(&result), vec![last]);
+    assert!(result.iter().any(|p| matches!(
+        p,
+        Parsed::Event(AdapterEvent::CompactionFinished { ok: false, .. })
+    )));
+}
+
+#[test]
+fn result_of_the_compact_command_without_a_boundary_is_a_failure() {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    parser.feed(
+        &json!({"type":"result","subtype":"success","is_error":false,
+            "user_message_uuids":[command_id()],"modelUsage":{}})
+        .to_string(),
+    );
+    let compact = Uuid::now_v7();
+    parser.mark_compact_manual(compact);
+    // Форма итога локальной команды из записанной фикстуры local_command.
+    let parsed = parser.feed(
+        &json!({"type":"result","subtype":"success","is_error":false,
+            "result":"Not enough messages to compact.","local_command":"compact",
+            "user_message_uuid":compact,"user_message_uuids":[compact],"modelUsage":{}})
+        .to_string(),
+    );
+    assert_eq!(compact_consumed(&parsed), vec![false]);
+    assert!(finished(&parsed).is_empty(), "no turn of the last command");
+    assert!(adopted(&parsed).is_empty(), "not adopted as a wake turn");
+}
+
+#[test]
+fn result_of_the_compact_command_after_its_boundary_is_a_success() {
+    let mut parser = Parser::new();
+    let compact = Uuid::now_v7();
+    parser.mark_compact_manual(compact);
+    parser.feed(
+        &json!({"type":"system","subtype":"compact_boundary","uuid":"b1",
+            "compact_metadata":{"trigger":"manual","pre_tokens":3,"post_tokens":1}})
+        .to_string(),
+    );
+    let parsed = parser.feed(
+        &json!({"type":"result","subtype":"success","is_error":false,"modelUsage":{}}).to_string(),
+    );
+    assert_eq!(compact_consumed(&parsed), vec![true]);
+    assert!(finished(&parsed).is_empty());
+}
+
+#[test]
+fn model_stream_of_the_compact_command_is_not_a_wake_turn() {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    parser.feed(
+        &json!({"type":"result","subtype":"success","is_error":false,
+            "user_message_uuids":[command_id()],"modelUsage":{}})
+        .to_string(),
+    );
+    parser.mark_compact_manual(Uuid::now_v7());
+    let parsed = parser.feed(&stream(
+        json!({"type":"message_start","message":{"model":"m","id":"x"}}),
+    ));
+    assert!(adopted(&parsed).is_empty());
+    assert!(!parser.wake_turn_open());
 }

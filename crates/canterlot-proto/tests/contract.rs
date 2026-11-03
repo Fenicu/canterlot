@@ -577,6 +577,7 @@ fn ipc_messages_roundtrip_and_limit() {
                 dispatch_attempt: 3,
                 state: "received".into(),
             }],
+            ipc_capabilities: vec!["compact_v1".into()],
         }),
         ipc::supervisor_to_control::Msg::CliStarted(ipc::CliStarted {
             pid: 124,

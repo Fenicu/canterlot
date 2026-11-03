@@ -159,7 +159,7 @@ fn read_batch(
 }
 
 /// Итоги неотвеченных команд: сопровождения нет, и за него отвечает управляющая служба.
-/// Ввод с начатой передачей получает только неопределённость: повторять его нельзя.
+/// Ввод с начатой передачей и вливание получают только неопределённость: повторять их нельзя.
 fn close_commands(
     commands: &[Command],
     transmitted: &HashSet<String>,
@@ -188,10 +188,23 @@ fn close_commands(
     }
     commands
         .iter()
-        .filter(|command| matches!(command.kind, Some(Kind::DeliverInput(_))))
+        .filter(|command| {
+            matches!(
+                command.kind,
+                Some(Kind::DeliverInput(_) | Kind::SteerInput(_))
+            )
+        })
         .map(|command| {
             let key = terminal(command);
             let (command_id, dispatch_attempt) = key.clone();
+            // Вливание не пишет намерения до записи в CLI: без факта оно могло дойти.
+            if matches!(command.kind, Some(Kind::SteerInput(_))) {
+                return Body::AcceptanceUnconfirmed(InputAcceptanceUnconfirmed {
+                    command_id,
+                    dispatch_attempt,
+                    reason: outcome.into(),
+                });
+            }
             if started(&command_id) {
                 if cancelled.contains(&key) {
                     return Body::CancelLost(InputCancelLost {
@@ -555,7 +568,7 @@ impl Watch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canterlot_proto::worker::v1::DeliverInput;
+    use canterlot_proto::worker::v1::{DeliverInput, SteerInput};
 
     fn command(id: &str, kind: Kind) -> Command {
         Command {
@@ -624,5 +637,17 @@ mod tests {
         assert!(matches!(&facts[0], Body::CancelWon(_)));
         assert!(matches!(&facts[1], Body::InputWithdrawn(_)));
         assert!(matches!(&facts[2], Body::CancelLost(_)));
+    }
+
+    #[test]
+    fn steer_without_a_fact_is_undetermined() {
+        let commands = [command("steer", Kind::SteerInput(SteerInput::default()))];
+        for incomplete in [false, true] {
+            let facts = close_commands(&commands, &HashSet::new(), incomplete, "supervisor_died");
+            assert!(
+                matches!(&facts[..], [Body::AcceptanceUnconfirmed(f)] if f.command_id == "steer" && f.reason == "supervisor_died"),
+                "{facts:?}"
+            );
+        }
     }
 }
