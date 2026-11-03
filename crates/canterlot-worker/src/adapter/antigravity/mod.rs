@@ -469,7 +469,7 @@ impl AntigravityAdapter {
             self.responses.insert(id, result);
             return;
         }
-        self.stall_at = None;
+        let stalled = self.stall_at.is_some();
         match self.tracker.on_response(id, &result) {
             Some(Effect::TurnClosed {
                 command_id,
@@ -482,6 +482,11 @@ impl AntigravityAdapter {
                 self.events.push_back(AdapterEvent::Compacted { ok });
             }
             _ => {}
+        }
+        // Страж снимается только когда ответили все RPC отменённого хода: ответ
+        // одного prompt не отвечает за молчащий второй.
+        if stalled && self.tracker.target().is_none() {
+            self.stall_at = None;
         }
     }
 

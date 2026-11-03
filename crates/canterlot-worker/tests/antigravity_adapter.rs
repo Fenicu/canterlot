@@ -1324,6 +1324,55 @@ async fn a_late_echo_after_the_deadline_is_input_accepted() {
 }
 
 #[tokio::test]
+async fn a_late_response_for_one_rpc_keeps_the_forced_close_timer_for_the_other() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 2),
+        Script::send(user_chunk("one")),
+        deferred("session/prompt", 3),
+        Script::notification("session/cancel"),
+        Step::Delay { ms: 250 },
+        // Отвечает только steer после срока `interrupt`; исходный prompt молчит.
+        respond(3, cancelled(Some(usage(1, 1, 0)))),
+    ];
+    let mut bench = Bench::with_timing(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+        Duration::from_millis(300),
+        Duration::from_millis(150),
+        Duration::from_millis(200),
+    );
+    bench.start().await;
+    let first = send("one");
+    assert!(matches!(
+        bench.adapter.transmit(&first, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    assert!(matches!(
+        bench.adapter.steer(&send("two")).await,
+        SteerOutcome::Undetermined
+    ));
+    assert!(matches!(
+        bench.adapter.interrupt().await,
+        InterruptOutcome::Undetermined
+    ));
+    let events = drain(&mut bench.adapter).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::ProcessExited { .. })),
+        "the unanswered prompt keeps the watchdog armed: {events:?}"
+    );
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
 async fn a_cli_that_stops_reading_stdin_is_retired_inside_the_write_deadline() {
     let steps = vec![init_step(), new_step(), Step::Hang];
     let mut bench = Bench::with_timing(
