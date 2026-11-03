@@ -224,12 +224,13 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--s3);
-		padding: var(--s3) var(--s4);
+		padding: var(--s3) var(--gutter);
 		box-sizing: border-box;
 		width: 100%;
 	}
+	/* Поля как у карточек ленты: край и текст карточки совпадают с лентой над ней. */
 	.pause-card {
-		padding: var(--s4);
+		padding: var(--s5) var(--s6);
 		border-radius: var(--radius-card);
 		background: var(--surface);
 		display: flex;

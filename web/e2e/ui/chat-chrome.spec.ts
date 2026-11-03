@@ -274,6 +274,13 @@ test('stuck_session_card_asks_for_compaction_and_shows_its_progress', async ({ p
 
 	const card = page.locator('.pause-card[data-tone="danger"]');
 	await expect(card).toContainText('один и тот же отказ провайдера подряд');
+	// Карточка паузы стоит по краям ленты и поля ввода, с теми же полями, что карточки ленты.
+	const pause = (await card.boundingBox())!;
+	const composer = (await page.locator('[data-composer] .capsule').boundingBox())!;
+	expect(Math.abs(pause.x - composer.x)).toBeLessThanOrEqual(1);
+	expect(Math.abs(pause.x + pause.width - (composer.x + composer.width))).toBeLessThanOrEqual(1);
+	const s6 = await page.evaluate(() => { const probe = document.createElement('div'); probe.style.paddingLeft = 'var(--s6)'; document.body.append(probe); const value = getComputedStyle(probe).paddingLeft; probe.remove(); return value; });
+	await expect(card).toHaveCSS('padding-left', s6);
 	await expect(card).toContainText('Причина отказа неизвестна');
 	await card.getByRole('button', { name: 'Сжать контекст' }).click();
 	await expect.poll(() => posted.filter((url) => url.endsWith('/compact')).length).toBe(1);
