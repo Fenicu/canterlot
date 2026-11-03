@@ -13,7 +13,7 @@
   import EventEntry from '#lib/timeline/EventEntry.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
   import { FeedFolds } from '#lib/timeline/folds.js';
-  import { blockLinks, buildRows, dayStart, shownInCard, tailKey, type Row } from '#lib/timeline/rows.js';
+  import { dayStart, shownInCard, tailKey, RowsCache, type Row } from '#lib/timeline/rows.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
@@ -65,8 +65,12 @@
   const today = $derived(dayStart(now));
   const entries = $derived(feed ? feed.entries : chat.timeline.entries);
   const hasOlder = $derived(feed ? feed.hasOlder : chat.timeline.hasOlder);
-  const links = $derived(blockLinks(entries, chat.backgroundFacts));
-  const rows = $derived(buildRows(entries, { now: today, laneRoot, links }));
+  const rowsCache = new RowsCache();
+  const view = $derived(
+    rowsCache.build(entries, { now: today, laneRoot, background: chat.backgroundFacts })
+  );
+  const links = $derived(view.links);
+  const rows = $derived(view.rows);
   const windowRows = $derived(rows.slice(range.start, range.end));
   const lastInput = $derived(rows.findLast((row) => row.kind === 'input')?.key);
   // Своё сообщение возвращает ленту к хвосту: плашка «К новым сообщениям» нужна только для чужих.
