@@ -253,6 +253,22 @@ test('send_is_disabled_while_attachments_upload_with_the_count_reason', async ({
   await expect(page.getByText('Станет доступно, когда загрузятся файлы')).toBeVisible();
 });
 
+test('a_failed_attachment_blocks_the_send_until_it_is_retried_or_removed', async ({ page }) => {
+  await boot(page);
+  await page.route('**/api/v1/attachments', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    await route.fulfill({ status: 422, json: { error: { code: 'attachment_unsupported', message: 'Отказ', scope: 'hub_db', retry: 'never', correlation_id: '00000000-0000-4000-8000-0000000000e5' } } });
+  });
+  await page.setInputFiles('input[type=file]', { name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('abc') });
+  await page.getByRole('textbox', { name: 'Сообщение' }).fill('с файлом');
+  const send = page.getByRole('button', { name: 'Отправить', exact: true });
+  // Хеш считается в воркере: под нагрузкой до запроса хабу проходит не одна секунда.
+  await expect(page.getByText('Файл не загрузился: повторите или уберите его')).toBeVisible({ timeout: 30_000 });
+  await expect(send).toHaveAttribute('aria-disabled', 'true');
+  await page.locator('[data-composer] .tray').getByRole('button', { name: 'Убрать' }).click();
+  await expect(send).toHaveAttribute('aria-disabled', 'false');
+});
+
 test('p01_probe_marks_press_and_local_item_paint', async ({ page }) => {
   await boot(page, { probe: true });
   const area = page.getByRole('textbox', { name: 'Сообщение' });

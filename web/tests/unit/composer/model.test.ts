@@ -889,4 +889,19 @@ describe("composer/model", () => {
       vi.useRealTimers();
     }
   });
+  it("a_failed_attachment_blocks_the_send_and_says_why", async () => {
+    const { deps, uploadsList } = createMockDeps();
+    uploadsList.push(
+      { id: "u1", conversationId: "conv-1", name: "shot.png", mime: "image/png", size: 100, phase: "ready", sent: 100, attachmentId: "att-1" },
+      { id: "u2", conversationId: "conv-1", name: "log.txt", mime: "text/plain", size: 100, phase: "failed", sent: 10 },
+    );
+    const model = new ComposerModel(deps);
+    model.text = "смотри файлы";
+    expect(model.gate).toEqual({ ok: false, reason: "Файл не загрузился: повторите или уберите его" });
+    await model.send();
+    expect(deps.ops.begin).not.toHaveBeenCalled();
+    expect(model.text).toBe("смотри файлы");
+    model.text = "";
+    expect(model.gate).toEqual({ ok: false, reason: "Файл не загрузился: повторите или уберите его" });
+  });
 });

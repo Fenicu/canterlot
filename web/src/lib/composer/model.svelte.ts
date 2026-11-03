@@ -77,6 +77,11 @@ export class ComposerModel {
       (u) => u.phase !== "cancelled" && u.phase !== "failed",
     );
 
+    // 0. Файл не загрузился: без него сообщение ушло бы молча неполным.
+    if (uploadsList.some((u) => u.phase === "failed")) {
+      return { ok: false, reason: "Файл не загрузился: повторите или уберите его" };
+    }
+
     // 1. Пустой ввод без вложений
     if (trimmed.length === 0 && activeUploads.length === 0) {
       return { ok: false, reason: EMPTY_DRAFT_REASON };
