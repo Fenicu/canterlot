@@ -18,6 +18,7 @@
   import Field from '#lib/ui/Field.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
+  import Textarea from '#lib/ui/Textarea.svelte';
 
   let { chat }: { chat: ChatStore } = $props();
   const items = $derived(chat.strip());
@@ -40,6 +41,9 @@
   const shownScheduled = $derived(collapsed ? scheduled.slice(0, Math.max(0, VISIBLE - shownItems.length)) : scheduled);
   const shownFailed = $derived(collapsed ? failed.slice(0, Math.max(0, VISIBLE - shownItems.length - shownScheduled.length)) : failed);
   const hidden = $derived(total - shownItems.length - shownScheduled.length - shownFailed.length);
+
+  // Подпись кнопки называет сообщение: одинаковые «Изменить» в соседних строках не различить на слух.
+  const short = (text: string): string => (text.length > 32 ? `${text.slice(0, 32).trimEnd()}…` : text);
 
   function textOf(item: ScheduledMessage): string {
     return item.content.map((block) => (block.type === 'text' ? block.text : '')).join('');
@@ -223,22 +227,22 @@
     <div class="item" data-state={input.state}>
       <span class="pill">
         <span class="label accent">{deliveryLabel(input.state)}</span>
-        <span class="text">{input.text}</span>
+        <span class="text" title={input.text}>{input.text}</span>
         {#if input.state === 'queued' && input.id && !editing[input.key]}
-          <IconButton icon="edit" label="Изменить" onclick={() => startEdit(input)} />
+          <IconButton icon="edit" label="Изменить: {short(input.text)}" onclick={() => startEdit(input)} />
         {/if}
         {#if input.state === 'queued' && input.id && turnLive && steerSupported}
           {#if sending[input.key]}
-            <IconButton icon="send" label="Отправляется…" inert={true} />
+            <IconButton icon="play" label="Отправляется: {short(input.text)}" inert={true} />
           {:else}
-            <IconButton icon="send" label="Отправить сейчас" onclick={() => void doSendNow(input)} />
+            <IconButton icon="play" label="Отправить сейчас: {short(input.text)}" onclick={() => void doSendNow(input)} />
           {/if}
         {/if}
         {#if input.state === 'queued' || input.state === 'on_machine'}
           {#if input.id && intents.busy(`cancel:${input.id}`)}
             <IconButton icon="close" label="Отменяется…" inert={true} />
           {:else}
-            <IconButton icon="close" label="Отменить" onclick={() => cancel(input.key)} />
+            <IconButton icon="close" label="Отменить: {short(input.text)}" onclick={() => cancel(input.key)} />
           {/if}
         {/if}
       </span>
@@ -247,8 +251,7 @@
       {#if input.revision > 1}<p class="note">Изменено</p>{/if}
       {#if editClosed[input.key] && !editing[input.key] && input.state === 'queued'}<p class="note">{editClosed[input.key]}</p>{/if}
       {#if editing[input.key]}
-        <label class="edit-label" for="strip-edit-{input.key}">Текст сообщения</label>
-        <textarea id="strip-edit-{input.key}" class="edit-text" data-unsaved-edit bind:value={editTexts[input.key]} rows="3"></textarea>
+        <div data-unsaved-edit><Textarea label="Текст сообщения" id="strip-edit-{input.key}" bind:value={editTexts[input.key]} /></div>
         {#if (editKept[input.key] ?? []).length > 0}
           <ul class="files">
             {#each input.attachments.filter((file) => (editKept[input.key] ?? []).includes(file.attachment_id)) as file (file.attachment_id)}
@@ -262,9 +265,9 @@
         {#if editErrors[input.key]}<p class="note">{editErrors[input.key]}</p>{/if}
         <span class="actions">
           {#if editBusy[input.key]}
-            <Button disabled={true} reason="Сохраняется…">Сохранить</Button>
+            <Button variant="primary" disabled={true} reason="Сохраняется…">Сохранить</Button>
           {:else}
-            <Button onclick={() => void saveQueuedEdit(input)}>Сохранить</Button>
+            <Button variant="primary" onclick={() => void saveQueuedEdit(input)}>Сохранить</Button>
           {/if}
           <Button onclick={() => { editing = { ...editing, [input.key]: false }; }}>Отмена</Button>
         </span>
@@ -296,13 +299,13 @@
     <div class="item">
       <span class="pill">
         <span class="label">{atOf(item)}</span>
-        <span class="text">{textOf(item)}</span>
+        <span class="text" title={textOf(item)}>{textOf(item)}</span>
         {#if notes[item.id] !== 'Уже отправлено'}
-          <IconButton icon="edit" label="Изменить" onclick={() => openEdit(item.id, textOf(item), item.run_at)} />
+          <IconButton icon="edit" label="Изменить: {short(textOf(item))}" onclick={() => openEdit(item.id, textOf(item), item.run_at)} />
           {#if intents.busy(`scheduled-cancel:${item.id}`)}
             <IconButton icon="close" label="Отменяется…" inert={true} />
           {:else}
-            <IconButton icon="close" label="Отменить" onclick={() => cancelScheduled(item.id)} />
+            <IconButton icon="close" label="Отменить: {short(textOf(item))}" onclick={() => cancelScheduled(item.id)} />
           {/if}
         {/if}
       </span>
@@ -313,7 +316,7 @@
     <div class="item">
       <span class="pill failed">
         <span class="label danger">Не отправлено</span>
-        <span class="text">{textOf(item)}</span>
+        <span class="text" title={textOf(item)}>{textOf(item)}</span>
       </span>
       <span class="actions"><Button onclick={() => takeBackFailed(item)}>Вернуть в черновик</Button></span>
     </div>
@@ -356,8 +359,6 @@
   .pill :global(button) { color: var(--secondary); }
   .note { margin: 0; padding-inline: var(--s6); color: var(--muted); font-size: var(--fs-sm); }
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); padding-inline: var(--s2); }
-  .edit-label { color: var(--secondary); font-size: var(--fs-sm); padding-inline: var(--s6); }
-  .edit-text { width: 100%; min-height: calc(var(--target) * 2); resize: vertical; border-radius: var(--radius-sm); padding: var(--s3) var(--s4); font: inherit; }
   .files { display: flex; flex-wrap: wrap; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
   .edit-file { display: flex; align-items: center; gap: var(--s2); }
   .more { align-self: flex-start; min-height: var(--target); padding-inline: var(--s6); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-sm); }

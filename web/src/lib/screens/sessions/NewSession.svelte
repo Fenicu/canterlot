@@ -74,8 +74,8 @@
       return { value: item.id, label: `${item.name}${problem ? ` · ${problem}` : ''}`, disabled: Boolean(problem) };
     })
   ]);
-  const modelOptions = $derived([{ value: '', label: 'Выберите модель' }, ...models.map((item) => ({ value: item.id, label: item.title }))]);
-  const effortOptions = $derived([{ value: '', label: 'Выберите усилие' }, ...efforts.map((item) => ({ value: item, label: effortLabel(item) }))]);
+  const modelOptions = $derived([{ value: '', label: 'Выбрать' }, ...models.map((item) => ({ value: item.id, label: item.title }))]);
+  const effortOptions = $derived([{ value: '', label: 'Выбрать' }, ...efforts.map((item) => ({ value: item, label: effortLabel(item) }))]);
   const presetOptions = $derived(presets.map((item) => ({ value: item.id, label: item.title })));
   const permissionOptions = $derived(permissions.map((value) => ({ value, label: permissionLabel(value) })));
   const provider = $derived(harnesses.find((item) => item.id === harness)?.provider ?? 'claude');

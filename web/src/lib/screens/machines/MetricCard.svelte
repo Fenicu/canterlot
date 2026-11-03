@@ -8,7 +8,8 @@
 </section>
 <style>
   section { display: flex; align-items: center; justify-content: space-between; gap: var(--s8); background: var(--surface); border-radius: var(--radius-card); padding: var(--s5) var(--s6); margin-block: var(--s2); }
-  section > div { min-width: 0; }
+  /* Подпись забирает остаток строки, а шкала держит свою ширину: шкалы всех карточек начинаются с одного края. */
+  section > div { flex: 1; min-width: 0; }
   .metric-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s4); }
   h3 { font-size: var(--fs-body); font-weight: var(--weight-medium); }
   strong { font-size: var(--fs-title); font-variant-numeric: tabular-nums; }

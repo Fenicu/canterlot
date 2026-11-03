@@ -4,6 +4,7 @@
   import { browserRuntime } from '#lib/screens/chat/open.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { limitsHistory } from '#lib/api/client.js';
+  import { ApiError } from '#lib/api/http.js';
   import { loadConfig } from '#lib/api/config.js';
   import type { components } from '#lib/api/generated/openapi.js';
   import { limitView } from '#lib/stores/limits.js';
@@ -12,6 +13,7 @@
   import UsageChart from './UsageChart.svelte';
   import UsageTable from './UsageTable.svelte';
   import SpeedTable from './SpeedTable.svelte';
+  import Button from '#lib/ui/Button.svelte';
   import { limitsSubtitle, providerName, sevenDays, usageRows, historyRange, speedRows } from './model.js';
   import '../secondary.css';
   let runtime = $state<Runtime | null>(null);
@@ -35,7 +37,7 @@
       const replies = [claude!, codex!];
       series = replies.flatMap(r => r.data.series); usage = replies.flatMap(r => r.data.usage);
       speed = [...replies, opencode!].flatMap(r => r.data.speed ?? []);
-    } catch { error = 'Не удалось загрузить историю лимитов. Повторите при восстановлении связи'; }
+    } catch (err) { error = err instanceof ApiError ? `История недоступна: ${err.message}` : 'История недоступна: нет связи с хабом'; }
     finally { loading = false; }
   }
   onMount(() => { void load(); const timer = setInterval(() => now = clock.serverNow(), 1000); return () => clearInterval(timer); });
@@ -44,32 +46,36 @@
   <SecondaryHeader title="Лимиты" subtitle={subtitle} />
   <div class="secondary-body"><div class="secondary-content">
     <h2>История лимитов</h2>
-    {#if loading}<p>Загружаю историю лимитов…</p>{:else if error}<p class="error">{error}</p><button type="button" onclick={load}>Повторить</button>
+    {#if loading}<p>Загружаю историю лимитов…</p>{:else if error}<p class="error" role="alert">{error}</p><Button onclick={load}>Повторить</Button>
     {:else}
       <p class="note">{fmt.dayRange(days[0], days.at(-1))} · остаток квоты</p>
-      <UsageChart {series} {days} {zone} noFiveHour={(runtime?.list.limits ?? []).filter(p => p.five_hour_absent).map(p => p.provider)} />
-      <p class="note">Снимок в конце дня · сегодня по последним данным хаба</p>
-      {#if !series.some(p => p.five_hour.length || p.weekly.length)}<p>Снимков лимитов за эти дни ещё нет</p>{/if}
-      <div class="current">{#each runtime?.list.limits ?? [] as provider (provider.provider)}
-        {@const view = limitView(provider, now, thresholds)}
-        {@const primary = view.five.absent ? view.week : view.five}
-        {@const windowLabel = view.five.absent ? 'нед' : '5ч'}
-        <section data-tone={view.tone}>
-          <p class="note">{providerName(provider.provider)} сейчас · осталось</p>
-          <strong class="value">{primary.text}&#32;/ <span class="window">{windowLabel}</span></strong>
-          {#if !view.five.absent}<p class="other">{view.week.known ? `${view.week.text} недели` : 'Нет данных недели'}</p>{/if}
-          {#if view.month}<p class="other">мес · {view.month.text}{#if view.month.reset} · {view.month.reset}{/if}</p>{/if}
-          {#if view.week.reset}<small>{view.week.reset}</small>{/if}
-          {#if view.stale}<p class="note">данные устарели</p>{/if}
-        </section>
-      {/each}</div>
-      <UsageTable {rows} />
-      <SpeedTable rows={speedRows(speed)} />
+      {#if series.some(p => p.five_hour.length || p.weekly.length)}
+        <UsageChart {series} {days} {zone} noFiveHour={(runtime?.list.limits ?? []).filter(p => p.five_hour_absent).map(p => p.provider)} />
+        <p class="note">Снимок в конце дня · сегодня по последним данным хаба</p>
+      {:else}
+        <p class="empty" data-history-empty>Снимков лимитов за эти дни ещё нет</p>
+      {/if}
     {/if}
+    <!-- Текущие лимиты приходят со снимком списка и видны, даже когда история не загрузилась. -->
+    <div class="current">{#each runtime?.list.limits ?? [] as provider (provider.provider)}
+      {@const view = limitView(provider, now, thresholds)}
+      {@const primary = view.five.absent ? view.week : view.five}
+      {@const windowLabel = view.five.absent ? 'нед' : '5ч'}
+      <section data-tone={view.tone}>
+        <p class="note">{providerName(provider.provider)} сейчас · осталось</p>
+        <strong class="value">{primary.text}&#32;/ <span class="window">{windowLabel}</span></strong>
+        {#if !view.five.absent}<p class="other">{view.week.known ? `${view.week.text} недели` : 'Нет данных недели'}</p>{/if}
+        {#if view.month}<p class="other">{['мес', view.month.text, view.month.reset].filter(Boolean).join(' · ')}</p>{/if}
+        {#if view.week.reset}<small>{view.week.reset}</small>{/if}
+        {#if view.stale}<p class="note">данные устарели</p>{/if}
+      </section>
+    {/each}</div>
+    {#if !loading && !error}<UsageTable {rows} /><SpeedTable rows={speedRows(speed)} />{/if}
   </div></div>
 </main>
 <style>
   .current { display: flex; flex-wrap: wrap; gap: var(--s8); margin-block: var(--s8); }
+  .empty { margin: var(--s0); padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); color: var(--muted); }
   .current section { flex: 1 1 calc(var(--gauge-width) * 2); min-width: 0; padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
   .value { display: block; white-space: nowrap; font-size: var(--fs-heading); }
   .window { font-size: var(--fs-body); font-weight: var(--weight-normal); }

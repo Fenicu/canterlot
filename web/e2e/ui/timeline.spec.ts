@@ -396,6 +396,12 @@ test('long_code_scrolls_inside_the_block_at_360px', async ({ page }) => {
   const codeScrolls = await page.locator('pre').first().evaluate((node) => node.scrollWidth > node.clientWidth);
   expect(pageFits).toBe(true);
   expect(codeScrolls).toBe(true);
+  // Широкий код листается и с клавиатуры: блок — именованная область в порядке Tab.
+  const pre = page.getByRole('region', { name: 'Код' }).first();
+  await expect(pre).toHaveAttribute('tabindex', '0');
+  await pre.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect.poll(() => pre.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
 });
 
 test('subagent_row_links_to_the_lane_and_shows_live_status', async ({ page }) => {
@@ -569,6 +575,29 @@ test('incomplete_block_is_marked_and_partial_text_stays', async ({ page }) => {
   await expect(page.getByText('частичный текст')).toBeVisible();
   await expect(page.getByText('Неполный ответ')).toBeVisible();
   await expect(page.getByText('Процесс агента завершился')).toBeVisible();
+});
+
+test('interrupted_tool_reads_stopped_like_the_text_next_to_it', async ({ page }) => {
+  const { api, id } = await boot(page, 0);
+  const call = toolBlock(api, '');
+  call.tool_name = 'Bash';
+  call.summary = 'Bash: sleep 90';
+  call.state = 'incomplete';
+  call.incomplete_reason = 'process_exited';
+  call.created_seq = '1';
+  const text = textBlock(api, 'частичный текст ответа', '2', 'incomplete');
+  text.incomplete_reason = 'interrupted';
+  api.histories.set(id, [call, text]);
+  api.bindConversation(id);
+  await page.reload();
+  const row = page.locator('.tool').filter({ hasText: 'sleep 90' });
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  // Одна остановка — одно слово и один цвет, а не «Ошибка» рядом с «Прервано».
+  await expect(row.locator('.pill')).toHaveText('Прервано');
+  await expect(row.locator('.pill')).toHaveAttribute('data-state', 'stopped');
+  await expect(page.locator('[role="log"] .pill[data-state="error"]')).toHaveCount(0);
+  const warning = await page.evaluate(() => { const probe = document.createElement('span'); probe.style.color = 'var(--warning)'; document.body.append(probe); const value = getComputedStyle(probe).color; probe.remove(); return value; });
+  await expect(row.locator('.pill')).toHaveCSS('color', warning);
 });
 
 test('error_and_warning_blocks_carry_text_not_colour_alone', async ({ page }) => {
@@ -753,3 +782,28 @@ for (const theme of ['dark', 'light'] as const) {
     await page.screenshot({ path: `/tmp/shots-t10/attachments-viewer-${theme}-${info.project.name}.png` });
   });
 }
+
+test('empty_chat_says_so_and_a_loading_chat_shows_placeholders', async ({ page }) => {
+  // Пока снимок в пути, вместо пустоты три полосы заготовки, как в шапке.
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const id = seedConversation(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/snapshot', async (route) => { await held; await route.fallback(); });
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-feed-loading] .skeleton')).toHaveCount(3);
+  release();
+  await expect(page.locator('[data-feed-loading]')).toHaveCount(0);
+  await expect(page.locator('[data-feed-empty]')).toHaveText('Сообщений пока нет. Напишите агенту задачу');
+});
+
+test('a_chat_with_history_never_flashes_the_empty_line', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { __empty: number }).__empty = 0;
+    new MutationObserver(() => { if (document.querySelector('[data-feed-empty]')) (window as unknown as { __empty: number }).__empty += 1; }).observe(document, { childList: true, subtree: true });
+  });
+  await boot(page, 5);
+  expect(await page.evaluate(() => (window as unknown as { __empty: number }).__empty)).toBe(0);
+});

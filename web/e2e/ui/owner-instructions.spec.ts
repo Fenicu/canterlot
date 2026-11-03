@@ -20,9 +20,8 @@ async function bootOwner(page: Page) {
 
 test('owner_sheet_shows_summary_and_renders_files_as_markdown', async ({ page }) => {
   await bootOwner(page);
-  await expect(page.locator('[data-owner-summary]')).toContainText('claude:');
-  await expect(page.locator('[data-owner-summary]')).toContainText('codex:');
-  await expect(page.locator('[data-owner-summary]')).toContainText('opencode:');
+  const summary = page.locator('[data-owner-summary]');
+  await expect(summary.locator('li')).toHaveText([/^Claude Code: /, /^Codex: /, /^OpenCode: /, 'Память Claude Code: 1 проект']);
   await expect(page.locator('[data-owner-file="claude_user"]')).toContainText('/home/owner/.claude/CLAUDE.md');
   await expect(page.locator('[data-owner-file="claude_home"]')).toContainText('файл — ссылка, не показан');
   await page.locator('[data-owner-file="claude_user"] button').click();
@@ -31,6 +30,37 @@ test('owner_sheet_shows_summary_and_renders_files_as_markdown', async ({ page })
   await expect(content.locator('h1, h2, p').first()).toBeVisible();
   await expect(content).toContainText('Стиль');
   await expect(page.locator('[data-owner-memory]')).toContainText('proj1');
+});
+
+test('owner_sheet_cards_stand_out_and_keep_meta_under_the_title', async ({ page }) => {
+  await bootOwner(page);
+  for (const theme of ['dark', 'light']) {
+    if ((await page.locator('html').getAttribute('data-theme')) !== theme) await page.evaluate((value) => document.documentElement.setAttribute('data-theme', value), theme);
+    const paint = await page.locator('[data-owner-summary]').evaluate((summary) => {
+      const sheet = getComputedStyle(summary.closest('dialog')!).backgroundColor;
+      const card = summary.parentElement!.querySelector('section')!;
+      return { sheet, summary: getComputedStyle(summary).backgroundColor, card: getComputedStyle(card).backgroundColor };
+    });
+    // Итог и карточки файлов отличимы от листа, а не сливаются с ним или прозрачны.
+    expect(paint.summary, theme).not.toBe(paint.sheet);
+    expect(paint.summary, theme).not.toBe('rgba(0, 0, 0, 0)');
+    expect(paint.card, theme).not.toBe(paint.sheet);
+  }
+  // Лист въезжает снизу: координаты сравниваются после конца анимации.
+  await page.getByRole('dialog').evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
+  for (const kind of ['claude_user', 'codex_global', 'opencode_global']) {
+    const card = page.locator(`[data-owner-file="${kind}"]`);
+    const title = (await card.locator('.row strong').boundingBox())!;
+    const meta = (await card.locator('.row .meta').boundingBox())!;
+    // Подпись всегда под названием и с того же края, а не в строку и не справа.
+    expect(meta.y, kind).toBeGreaterThanOrEqual(title.y + title.height - 1);
+    expect(Math.abs(meta.x - title.x), kind).toBeLessThanOrEqual(1);
+    await expect(card.locator('.meta')).not.toContainText(/\d\d\.\d\d\.\d{4}/);
+  }
+  const memory = page.locator('[data-owner-memory]');
+  const select = (await memory.locator('select').boundingBox())!;
+  const show = (await memory.getByRole('button', { name: 'Показать MEMORY.md' }).boundingBox())!;
+  expect(show.y - (select.y + select.height)).toBeGreaterThanOrEqual(8);
 });
 
 test('owner_sheet_reads_memory_index_and_topic_file', async ({ page }) => {

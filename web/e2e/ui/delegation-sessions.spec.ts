@@ -81,11 +81,17 @@ async function bootList(page: Page) {
 }
 
 test('child_nests_under_parent_and_keeps_counts', async ({ page }) => {
-  const { ids } = await bootList(page);
+  const { hub, api, ids } = await bootList(page);
   // Разделители в строке-сгибе не слипаются с числом работающих.
   const fold = page.getByRole('button', { name: /делегированные: 2/ });
   await expect(fold).toBeVisible();
   await expect(fold).toContainText('Делегированные · 2 · работает 1');
+  // Ребёнок, который ждёт владельца, считается отдельно, а не как работающий.
+  const asking = { state: 'waiting_for_user', evidence: { question: 'Какой лог?' }, since: '2026-10-28T12:00:00.000Z' };
+  (api.list.get(ids.done) as ListRow).activity = asking as never;
+  hub.append('conversations', { kind: 'derived_changed', conversation_id: ids.done, payload: derivedPayload(api, ids.done, asking) });
+  hub.flush();
+  await expect(fold).toHaveText(/Делегированные · 2 · работает 1 · ждёт 1/);
   const child = page.locator(`[data-session="${ids.child}"]`);
   await expect(child).toBeVisible();
   await expect(child).toHaveClass(/depth-1/);
@@ -326,8 +332,7 @@ test('phone_sheet_lists_child_sessions_and_opens_them', async ({ page, isMobile 
   await expect(sheet.getByText('Сессии')).toBeVisible();
   const link = sessionLink(sheet, child);
   await expect(link).toContainText('Миграция схемы');
-  await expect(link).toContainText('sonnet');
-  await expect(link).toContainText('работала 1 ч 5 мин');
+  await expect(link.locator('.node-task')).toHaveText('sonnet · работала 1 ч 5 мин');
   await expect(link).toContainText('Генерирует');
   await page.screenshot({ path: `test-results/delegation-session-worked-${test.info().project.name}.png` });
   await link.click();
@@ -363,13 +368,15 @@ test('desktop_panel_lists_child_sessions', async ({ page, isMobile }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`/c/${parent}`);
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  // Как и значок на телефоне, кнопка на рабочем столе показывает число работающих.
+  await expect(page.getByRole('button', { name: 'Делегирование' })).toHaveText('Делегирование · 1');
   await page.getByRole('button', { name: 'Делегирование' }).click();
   const panel = page.locator('[data-pane="lane"]');
   await expect(panel).toBeVisible();
   await expect(panel.getByText('Сессии')).toBeVisible();
   const link = sessionLink(panel, child);
   await expect(link).toContainText('Миграция схемы');
-  await expect(link).toContainText('работала 1 ч 5 мин');
+  await expect(link.locator('.node-task')).toHaveText('sonnet · работала 1 ч 5 мин');
   await link.click();
   await expect(page).toHaveURL(new RegExp(`/c/${child}$`));
 });

@@ -24,6 +24,13 @@ test('update_shows_new_entries_once_and_not_after_reload', async ({ page }) => {
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText(APP_VERSION, { exact: true })).toBeVisible();
   await expect(dialog.getByText('Первая пронумерованная версия.')).toBeVisible();
+  // Дата как в остальном приложении: «2 ноября», а не «02.11.2026».
+  await expect(dialog.locator('.date').first()).toHaveText(/^\d{1,2} [а-яё]+( \d{4})?$/);
+  // Лист открылся сам: фокус на заголовке, а не кольцом на «Закрыть».
+  await expect(dialog.getByRole('heading', { name: 'Что нового' })).toBeFocused();
+  await expect(dialog.getByRole('button', { name: 'Закрыть' })).not.toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', { name: 'Закрыть' })).toBeFocused();
   await dialog.getByRole('button', { name: 'Понятно', exact: true }).click();
   await expect(dialog).toHaveCount(0);
 
@@ -41,6 +48,8 @@ test('history_page_lists_entries_and_the_installed_version', async ({ page }) =>
   await expect(page.getByText(/Установленная версия/)).toContainText(APP_VERSION);
   await expect(page.getByText('установлена', { exact: true })).toBeVisible();
   await expect(page.getByText('Первая пронумерованная версия.')).toBeVisible();
+  // Страница без ссылок листается с клавиатуры: её тело — фокусируемая область.
+  await expect(page.getByRole('region', { name: 'История изменений' })).toHaveAttribute('tabindex', '0');
 });
 
 test('settings_show_both_versions_and_flag_a_mismatch_quietly', async ({ page }) => {
@@ -48,9 +57,6 @@ test('settings_show_both_versions_and_flag_a_mismatch_quietly', async ({ page })
 
   const main = page.locator('main');
   const versions = main.locator('.versions');
-  await expect(versions).toContainText('Приложение');
-  await expect(versions).toContainText(APP_VERSION);
-  await expect(versions).toContainText('хаб');
-  await expect(versions).toContainText('9.9.9');
+  await expect(versions).toHaveText(`Приложение ${APP_VERSION} · хаб 9.9.9`);
   await expect(main.getByText(/Версии приложения и хаба различаются/)).toBeVisible();
 });

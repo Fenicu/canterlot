@@ -1,3 +1,4 @@
+import type { Locator } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { expect, test } from './fixtures';
@@ -110,6 +111,23 @@ async function confirmQueued(
   return { bubble, inputId };
 }
 
+// Поле правки — то же поле приложения, что и в формах, а не серый прямоугольник браузера.
+async function expectThemedField(field: Locator) {
+  const style = await field.evaluate((element) => {
+    const probe = document.createElement('div');
+    probe.style.background = 'var(--raised)';
+    document.body.append(probe);
+    const raised = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    const own = getComputedStyle(element);
+    return { background: own.backgroundColor, raised, border: own.borderTopWidth, resize: own.resize, radius: parseFloat(own.borderTopLeftRadius) };
+  });
+  expect(style.background).toBe(style.raised);
+  expect(style.border).toBe('0px');
+  expect(style.resize).toBe('none');
+  expect(style.radius).toBeGreaterThan(0);
+}
+
 test('edit_queued_bubble_in_place_and_save', async ({ page }) => {
   const { hub, api, id } = await boot(page, []);
   const { ownKey } = await sendOwn(page, 'Черновик в очереди');
@@ -117,7 +135,8 @@ test('edit_queued_bubble_in_place_and_save', async ({ page }) => {
   const { bubble } = await confirmQueued(page, hub, api, id, ownKey, 'Черновик в очереди');
   await bubble.getByRole('button', { name: 'Изменить' }).click();
   const editor = page.locator('.bubble').filter({ has: page.locator('textarea') });
-  await expect(editor.locator('textarea')).toBeVisible();
+  await expect(editor.getByLabel('Текст сообщения')).toBeVisible();
+  await expectThemedField(editor.getByLabel('Текст сообщения'));
   await editor.locator('textarea').fill('Отредактировано');
   const hits: string[] = [];
   await page.route('**/api/v1/conversations/*/inputs/*', async (route) => {
@@ -200,6 +219,7 @@ test('edit_strip_item_while_turn_runs_and_remove_attachment', async ({ page }) =
   const item = page.locator('.strip .item', { hasText: 'С файлом' });
   await expect(item.getByRole('button', { name: 'Изменить' })).toBeVisible();
   await item.getByRole('button', { name: 'Изменить' }).click();
+  await expectThemedField(item.getByLabel('Текст сообщения'));
   await item.getByRole('button', { name: /Убрать вложение/ }).click();
   const hits: { body: unknown }[] = [];
   await page.route('**/api/v1/conversations/*/inputs/*', async (route) => {

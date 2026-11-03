@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { errorText } from '#lib/api/errors.js';
 	import { onMount } from 'svelte';
+	import Button from '#lib/ui/Button.svelte';
 	import type { BlockModel } from '#lib/stores/blocks.js';
 	import { answerToMarkdown } from '#lib/export/markdown.js';
 	import { renderAnswerPages } from '#lib/export/image.js';
@@ -161,32 +162,11 @@
 </script>
 
 <div class="copy-actions">
-	<button
-		type="button"
-		class="button"
-		onclick={handleCopyMarkdown}
-		aria-busy={copyingMarkdown}
-	>
-		Копировать Markdown
-	</button>
-
+	<Button onclick={handleCopyMarkdown} busy={copyingMarkdown}>Копировать Markdown</Button>
 	{#if readyPages}
-		<button
-			type="button"
-			class="button primary gesture-retry"
-			onclick={handleRetryGestureShare}
-		>
-			Поделиться
-		</button>
+		<Button variant="primary" onclick={handleRetryGestureShare}>Поделиться</Button>
 	{:else}
-		<button
-			type="button"
-			class="button"
-			onclick={handleExportImage}
-			aria-busy={exportingImage}
-		>
-			{canShareFiles ? 'Поделиться картинкой' : 'Копировать картинкой'}
-		</button>
+		<Button onclick={handleExportImage} busy={exportingImage}>{canShareFiles ? 'Поделиться картинкой' : 'Копировать картинкой'}</Button>
 	{/if}
 </div>
 
@@ -214,26 +194,9 @@
 <style>
 	.copy-actions {
 		display: flex;
-		gap: var(--s2);
+		gap: var(--s4);
 		margin-top: var(--s4);
 		flex-wrap: wrap;
-	}
-	.button {
-		padding: var(--s2) var(--s4);
-		border-radius: var(--radius-card);
-		border: var(--s0);
-		background: var(--raised);
-		color: var(--text);
-		font-size: var(--fs-body);
-		cursor: pointer;
-		min-height: var(--target);
-	}
-	.button:hover:not(:disabled) {
-		background: var(--raised);
-	}
-	.button.primary {
-		background: var(--accent);
-		color: var(--accent-ink);
 	}
 	.status-msg {
 		margin: var(--s2) 0 0;

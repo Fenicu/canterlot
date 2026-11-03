@@ -9,13 +9,21 @@ test('machine_screen_follows_mockup_09_and_updates_metrics_live', async ({ page 
   await expect(main.getByText('Linux · x86_64')).toBeVisible();
   await expect(main.getByRole('meter', { name: 'CPU' })).toHaveAttribute('aria-valuenow', '24');
   await expect(main.getByRole('meter', { name: 'RAM' })).toHaveAttribute('aria-valuenow', '40');
+  await expect(main.getByRole('meter')).not.toHaveCount(0);
+  expect(await main.getByRole('meter').count()).toBeGreaterThan(2);
+  // Шкалы всех карточек начинаются с одного края и одной ширины, даже когда подпись диска переносится.
+  const gauges = await main.getByRole('meter').evaluateAll((nodes) => nodes.map((node) => { const box = node.getBoundingClientRect(); return [Math.round(box.left), Math.round(box.width)]; }));
+  expect(new Set(gauges.map(([left]) => left)).size).toBe(1);
+  expect(new Set(gauges.map(([, width]) => width)).size).toBe(1);
   await expect(main.getByText(/Последний сигнал/)).toBeVisible();
   await expect(main.getByText(/Подключение с/)).toBeVisible();
   await expect(main.getByRole('link', { name: /^Восстановление потока/ })).toHaveAttribute('href', `/c/${ids.pinned}`);
   hub.append('machines', { kind: 'machine_metrics', payload: { machine_id: ids.machine, ...metrics, cpu_permille: 730, mem_available_bytes: metrics.mem_total_bytes / 2 } }); hub.flush();
   await expect(main.getByRole('meter', { name: 'CPU' })).toHaveAttribute('aria-valuenow', '73');
   await expect(main.getByRole('meter', { name: 'RAM' })).toHaveAttribute('aria-valuenow', '50');
-  await main.getByRole('radio', { name: 'mini', exact: true }).check();
+  // Состояние машины — текст, а не капсула-кнопка; нестабильная машина отмечена уже в переключателе.
+  await expect(main.locator('.availability')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await main.getByRole('radio', { name: 'mini · нестабильно', exact: true }).check();
   await expect(main.getByText('Связь нестабильна', { exact: true })).toBeVisible();
 });
 

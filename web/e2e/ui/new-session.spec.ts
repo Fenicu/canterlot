@@ -155,7 +155,7 @@ test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   const field = page.getByRole('combobox', { name: 'Модель' });
   await expect(field).toHaveValue('opus[1m]');
-  await expect(field.locator('option')).toContainText(['Выберите модель', 'Opus 1M', 'Fable 1M', 'Opus', 'Haiku']);
+  await expect(field.locator('option')).toContainText(['Выбрать', 'Opus 1M', 'Fable 1M', 'Opus', 'Haiku']);
   await field.selectOption('haiku');
   await expect(field).toHaveValue('haiku');
   await field.selectOption('opus[1m]');
@@ -340,5 +340,35 @@ test('list_and_new_session_have_no_horizontal_scroll_at_360px_and_320px_and_200_
     const again = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(again).toBeLessThanOrEqual(1);
     await page.goto('/sessions');
+  }
+});
+
+test('focus_ring_of_a_full_width_field_fits_inside_the_sheet', async ({ page }) => {
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  const field = pathField(page);
+  await field.focus();
+  const fit = await field.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const ring = parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset);
+    const box = element.getBoundingClientRect();
+    let clipper = element.parentElement!;
+    while (clipper.parentElement && getComputedStyle(clipper).overflowY === 'visible' && getComputedStyle(clipper).overflowX === 'visible') clipper = clipper.parentElement;
+    const clip = clipper.getBoundingClientRect();
+    return { ring, start: box.left - ring - clip.left, end: clip.right - (box.right + ring) };
+  });
+  // Кольцо фокуса видно целиком: ближайший обрезающий контейнер, тело листа или панель, его не срезает.
+  expect(fit.ring).toBeGreaterThan(0);
+  expect(fit.start).toBeGreaterThanOrEqual(0);
+  expect(fit.end).toBeGreaterThanOrEqual(0);
+});
+
+test('model_and_effort_placeholders_fit_their_half_width_fields', async ({ page }) => {
+  await page.setViewportSize({ width: 384, height: 800 });
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  for (const name of ['Модель', 'Усилие']) {
+    const select = page.getByRole('combobox', { name });
+    await expect(select.locator('option').first()).toHaveText('Выбрать');
   }
 });

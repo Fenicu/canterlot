@@ -60,7 +60,7 @@
 			<div class="header-info">
 				<div class="title-row">
 					<span class="mark" class:running={model.running}></span>
-					<h1 class="header-title">{model.title}</h1>
+					<h1 class="header-title" title={model.title}>{model.title}</h1>
 				</div>
 				<div class="subtitle">{model.subtitle}</div>
 			</div>

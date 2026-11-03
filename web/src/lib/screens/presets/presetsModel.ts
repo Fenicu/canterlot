@@ -1,6 +1,7 @@
 // Логика экрана пресетов: сортировка, подписи происхождения, счётчик байтов.
 // Текст пресетов здесь не хранится и не печатается: только длины и метаданные.
 import type { components } from "#lib/api/generated/openapi.js";
+import { fmt } from "#lib/format/ru.js";
 
 export type PresetSummaryLike = components["schemas"]["PresetSummary"];
 export type PresetOriginLike = components["schemas"]["PresetOrigin"];
@@ -99,10 +100,21 @@ export const OWNER_KIND_META: Record<string, { harness: string; title: string; n
   },
 };
 
+// Названия харнессов те же, что в заголовках карточек файлов.
+export const OWNER_HARNESS_TITLES: Record<string, string> = { claude: "Claude Code", codex: "Codex", opencode: "OpenCode" };
+
+// «1 проект», «2 проекта», «5 проектов», «нет проектов».
+export function memoryProjects(count: number): string {
+  if (count === 0) return "нет проектов";
+  const tail = count % 100 >= 11 && count % 100 <= 14 ? 10 : count % 10;
+  const word = tail === 1 ? "проект" : tail >= 2 && tail <= 4 ? "проекта" : "проектов";
+  return `${count} ${word}`;
+}
+
 // Краткий итог по харнессу: сколько файлов найдено и общий объём.
 export function ownerHarnessSummary(
   files: OwnerFileLike[],
-): { harness: string; found: number; total: number; text: string }[] {
+): { harness: string; title: string; found: number; total: number; text: string }[] {
   const groups = new Map<string, { found: number; total: number }>();
   for (const file of files) {
     const slot = groups.get(file.harness) ?? { found: 0, total: 0 };
@@ -118,6 +130,7 @@ export function ownerHarnessSummary(
       slot.found === 1 ? "файл" : slot.found >= 2 && slot.found <= 4 ? "файла" : "файлов";
     return {
       harness,
+      title: OWNER_HARNESS_TITLES[harness] ?? harness,
       found: slot.found,
       total: slot.total,
       text: `${slot.found} ${filesWord}, ${formatSize(slot.total)}`,
@@ -132,10 +145,10 @@ export function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1).replace(".", ",")} МиБ`;
 }
 
-// Время изменения для подписи файла: дата и время, пусто при отсутствии.
-export function formatOwnerMtime(mtime: string | null | undefined): string {
+// Время изменения для подписи файла, как в остальном приложении: «28 октября, 15:00», год только не текущий.
+export function formatOwnerMtime(mtime: string | null | undefined, now = Date.now()): string {
   if (!mtime) return "";
   const date = new Date(mtime);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  return fmt.stamp(date.getTime(), now);
 }

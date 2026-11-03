@@ -30,7 +30,7 @@ export function permissionLabel(value: Value): string {
 const PERMISSION_HINTS: Record<string, Record<string, string>> = {
   claude: {
     owner:
-      "Режим не передаётся: Claude Code берёт defaultMode из ~/.claude/settings.json. При dontAsk работает только список allow, остальное отклоняется молча, без карточки.",
+      "Режим не передаётся: Claude Code берёт режим по умолчанию из своих настроек, ~/.claude/settings.json. В режиме «не спрашивать» (dontAsk) работает только список разрешённых действий, остальное отклоняется молча, без карточки.",
     ask: "Claude Code спрашивает о действиях вне списка разрешённых: решение приходит карточкой.",
     bypass: "Claude Code выполняет всё без подтверждений, карточек разрешений не будет.",
     read_only: "Режим plan: Claude Code читает и планирует, файлы не меняет.",

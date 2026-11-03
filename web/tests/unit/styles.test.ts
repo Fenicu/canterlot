@@ -39,3 +39,22 @@ test('pwa_design_doc_records_removal_of_check_icon_and_unscaled_countdown', () =
   expect(doc).not.toMatch(/Регистрация `check` остаётся/);
   expect(doc).toMatch(/нет иконки `check`/i);
 });
+test('separator_spacing_survives_svelte_block_trimming', () => {
+  // Svelte срезает пробелы, в том числе &#32;, в начале и в конце блока: «1.0.0{#if x} · хаб» выводится как «1.0.0· хаб».
+  // Пробел ставится перед блоком, снаружи, или разделитель собирается в скрипте.
+  const opening = /\{[#:](?:if|else|each|key|await|then|catch)\b[^}]*\}(?:[ \t]|&#32;)+[^\s<{]/;
+  const closing = /[^\s>}](?:[ \t]|&#32;)+\{[/:](?:if|else|each|key|await|then|catch)\b/;
+  for (const bad of ['<b>1</b>{#if x} · хаб{/if}', '{#if x}&#32;· хаб{/if}', '{:else} · b', 'a · {/if}']) expect(opening.test(bad) || closing.test(bad), bad).toBe(true);
+  expect(opening.test("<b>1</b> {#if x}· хаб <b>2</b>{/if}")).toBe(false);
+  const walk = (path: string): string[] => readdirSync(path, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(`${path}/${e.name}`) : [`${path}/${e.name}`]);
+  for (const path of walk('src').filter(p => p.endsWith('.svelte'))) {
+    const markup = readFileSync(path, 'utf8').replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/g, '');
+    expect(markup.match(opening)?.[0], path).toBeUndefined();
+    expect(markup.match(closing)?.[0], path).toBeUndefined();
+  }
+});
+test('selected_fill_meets_non_text_contrast_in_both_themes', () => {
+  // Вкладки групп лежат на --bg, сегменты на --raised: заливка выбора отличима от них на 3:1.
+  for (const palette of [dark, { ...dark, ...light }]) for (const bg of ['bg', 'surface', 'raised']) expect(contrast(palette['--accent']!, palette[`--${bg}`]!), `accent/${bg}`).toBeGreaterThanOrEqual(3);
+  for (const path of ['src/lib/screens/sessions/GroupTabs.svelte', 'src/lib/ui/Segmented.svelte']) expect(readFileSync(path, 'utf8'), path).toMatch(/(?:aria-selected='true'\]|:checked \+ span) \{ background: var\(--accent\);/);
+});

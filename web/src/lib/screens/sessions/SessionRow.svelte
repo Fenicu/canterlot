@@ -22,7 +22,8 @@
   } = $props();
 
   const line = $derived(activityLine(item.activity as Activity, { now }));
-  const mark = $derived(item.color ? colorVar(item.color) : toneVar(line.tone));
+  // Как в шапке чата: точка показывает состояние, а цвет владельца — только у спокойной сессии.
+  const mark = $derived(line.tone === 'default' && item.color ? colorVar(item.color) : toneVar(line.tone));
   const stamp = $derived(item.last_activity_at ? fmt.clock(Date.parse(item.last_activity_at)) : '');
   const tail = $derived(item.unread_count > 0 && stamp ? ` · ${stamp}` : '');
   let timer = 0;
@@ -48,7 +49,7 @@
 <article class="row" class:current class:depth-1={depth === 1} class:depth-2={depth >= 2} data-session={item.id} oncontextmenu={(event) => { event.preventDefault(); onopen(item.id); }}>
   <a href={resolve(`/c/${item.id}` as '/')} aria-current={current ? 'page' : undefined} onpointerdown={down} onpointerup={up} onpointercancel={up} onclick={click}>
     <span class="mark" data-token={mark}></span>
-    <span class="title">{item.title}</span>
+    <span class="title" title={item.title}>{item.title}</span>
     <span class="side">
       {#if item.unread_count > 1}
         <span class="sr-only">Непрочитанных: {item.unread_count}</span><span class="count" aria-hidden="true">{item.unread_count}</span>

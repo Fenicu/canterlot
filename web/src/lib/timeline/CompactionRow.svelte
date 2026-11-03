@@ -23,6 +23,7 @@
 		align-items: center;
 		gap: var(--s3);
 		margin: 0;
+		padding-inline: var(--s6);
 		color: var(--muted);
 		font-size: var(--fs-sm);
 	}

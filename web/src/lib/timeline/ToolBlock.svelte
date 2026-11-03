@@ -50,7 +50,9 @@
   const running = $derived(timing.running || block.state === 'stale');
   const error = $derived(toolError(block, result) || background?.state === 'failed');
   const launched = $derived(!background && !error && toolBackground(result));
-  const status = $derived(launched ? 'В фоне' : background?.state === 'stopped' ? 'Прервано' : toolPillText({ ...timing, error, now }));
+  // Оборванный ход называется так же, как оборванный текст рядом: «Прервано», а не «Ошибка».
+  const stopped = $derived(!error && !running && (block.state === 'incomplete' || background?.state === 'stopped'));
+  const status = $derived(launched ? 'В фоне' : stopped ? 'Прервано' : toolPillText({ ...timing, error, now }));
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));
   const files = $derived(block.files);
@@ -75,7 +77,7 @@
 </script>
 
 <div class="tool">
-  <StepHead name={title.name || 'Шаг'} {detail} dir={label.dir} {status} state={error ? 'error' : running ? 'running' : launched ? 'background' : 'done'} {open} ontoggle={onToggle}>
+  <StepHead name={title.name || 'Шаг'} {detail} dir={label.dir} {status} state={error ? 'error' : running ? 'running' : stopped ? 'stopped' : launched ? 'background' : 'done'} {open} ontoggle={onToggle}>
     {#snippet badge()}
       {#if background}<span class="policy-badge">Фоном</span>{/if}
       {#if isCliPolicy}<span class="policy-badge">Разрешено правилами CLI</span>{/if}

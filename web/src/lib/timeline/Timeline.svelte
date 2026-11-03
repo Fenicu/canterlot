@@ -446,7 +446,13 @@
         <p class="aborted">Ход прерван</p>
       </div>
     {/if}
-    {#if rows.length === 0 && !navigator.onLine}<p class="day">История недоступна без связи</p>{/if}
+    {#if rows.length === 0 && !navigator.onLine}<p class="day">История недоступна без связи</p>
+    {:else if rows.length === 0 && !feed && !chat.detail}
+      <!-- Пока снимок не пришёл, лента показывает заготовку, как шапка, а не пустоту. -->
+      <div class="loading" data-feed-loading aria-hidden="true"><span class="skeleton" style:width="var(--bar-74)"></span><span class="skeleton" style:width="var(--bar-56)"></span><span class="skeleton" style:width="var(--bar-81)"></span></div>
+    {:else if rows.length === 0 && !feed && !compacting && chat.requests.items.size === 0}
+      <p class="empty" data-feed-empty>Сообщений пока нет. Напишите агенту задачу</p>
+    {/if}
   </div>
   {#if !feed && chat.timeline.tailDetached}
     <button type="button" class="jump" onclick={() => void jumpToLatest()}>К последним сообщениям</button>
@@ -456,6 +462,8 @@
 </div>
 
 <style>
+  .loading { display: flex; flex-direction: column; gap: var(--s6); padding: var(--s8) var(--s6); }
+  .empty { margin: auto var(--s0); padding: var(--s8) var(--s6); color: var(--muted); font-size: var(--fs-meta); text-align: center; }
   .feed-wrap { position: relative; flex: 1; min-height: 0; display: flex; container-type: inline-size; }
   .feed { overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; flex: 1; min-width: 0; padding-inline: max(var(--gutter), calc((100% - var(--reading-max)) / 2 + var(--gutter))); padding-block: var(--s6); mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s6), var(--text) calc(100% - var(--s6)), var(--transparent)); }
   .feed :global(*) { overflow-anchor: none; }

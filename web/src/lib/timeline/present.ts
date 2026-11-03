@@ -167,10 +167,9 @@ export function toolFailed(result: BlockModel | null): boolean {
   return result.summary === TOOL_FAILED_MARK || result.text.startsWith(CLI_ERROR_OPEN);
 }
 
-/** Вызов считается неудачным и без своего результата: обрыв хода и старые строки без вызова. */
+/** Вызов неудачен по результату или по старой строке без вызова; оборванный ход — это «Прервано», не ошибка. */
 export function toolError(block: BlockModel, result: BlockModel | null): boolean {
   return (
-    block.state === "incomplete" ||
     block.kind === "error" ||
     toolFailed(result ?? (block.kind === "tool_result" ? block : null))
   );
@@ -290,6 +289,25 @@ export function revealedText(
 const SUBAGENT_END = { done: "Готово", error: "Ошибка", stopped: "Прервано" };
 
 export type SubagentState = "running" | "done" | "error" | "stopped";
+
+/** Одни слова и цвета итога для ленты, панели делегирования и линии субагента. */
+export const STATUS_WORD: Record<SubagentState | "waiting", string> = { running: "Работает", waiting: "Ждёт", ...SUBAGENT_END };
+export const STATUS_TONE: Record<SubagentState | "waiting", "accent" | "warning" | "danger" | "muted"> = {
+  running: "accent",
+  waiting: "warning",
+  stopped: "warning",
+  error: "danger",
+  done: "muted",
+};
+
+/** Состояние узла делегирования из хаба или живой ленты в том же словаре. */
+export function nodeStatus(state: string): SubagentState | "waiting" {
+  if (state === "waiting") return "waiting";
+  if (state === "done" || state === "final" || state === "completed") return "done";
+  if (state === "failed" || state === "error") return "error";
+  if (state === "aborted" || state === "stopped" || state === "incomplete" || state === "stale") return "stopped";
+  return "running";
+}
 
 const BACKGROUND_STATE: Record<string, SubagentState> = {
   running: "running",

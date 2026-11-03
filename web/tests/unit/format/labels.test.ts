@@ -55,6 +55,7 @@ describe("format/labels", () => {
     }
     expect(permissionHint("owner", "claude")).toContain("~/.claude/settings.json");
     expect(permissionHint("owner", "claude")).toContain("dontAsk");
+    expect(permissionHint("owner", "claude")).not.toMatch(/defaultMode|список allow/);
     expect(permissionHint("owner", "codex")).toContain("approval_policy");
     expect(permissionHint("owner", "opencode")).toContain("opencode.json");
     expect(permissionHint("read_only", "opencode")).toContain("OpenCode");

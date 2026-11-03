@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
-import { lintFile, lintTree } from '../../scripts/token-lint.mjs';
+import { definedTokens, lintFile, lintTree, undefinedTokens } from '../../scripts/token-lint.mjs';
 import { icons } from '../../src/lib/ui/icons';
 const directory = 'tests/unit/fixtures/token-lint';
 describe('tokens', () => {
@@ -50,5 +50,10 @@ describe('tokens', () => {
     for (const name of Object.keys(icons)) {
       expect(name.toLowerCase(), `icon name ${name} contains check`).not.toContain('check');
     }
+  });
+  test('lint_rejects_undefined_tokens', () => {
+    const defined = definedTokens([':root { --raised: #000; }', '<div style:--gap={x}></div>', "use:styleProperty={{ name: '--fill', value: '1%' }}"]);
+    expect(undefinedTokens('.a {\n  background: var(--surface-raised);\n}', defined)).toEqual([{ rule: 'undefined-token', line: 2, value: '--surface-raised' }]);
+    expect(undefinedTokens('.a { background: var(--raised); gap: var(--gap); width: var(--fill, 0); }', defined)).toEqual([]);
   });
 });

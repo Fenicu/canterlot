@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import {
+  changelogDate,
   compareVersions,
   entriesSince,
   parseChangelog,
@@ -145,5 +146,14 @@ describe('версия и история не разъезжаются', () => {
 
     expect(APP_VERSION).toBe(cargoVersion());
     expect(pkg.version).toBe(cargoVersion());
+  });
+});
+
+describe("changelog_date", () => {
+  it("reads_like_the_rest_of_the_app", () => {
+    const now = new Date(2026, 10, 3, 12).getTime();
+    expect(changelogDate("02.11.2026", now)).toBe("2 ноября");
+    expect(changelogDate("10.09.2025", now)).toBe("10 сентября 2025");
+    expect(changelogDate("скоро", now)).toBe("скоро");
   });
 });

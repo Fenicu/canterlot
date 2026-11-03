@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedConversation } from '../../testing/fake-hub/seed';
-import { expect, test } from './fixtures';
+import { expect, test, toggleChatTheme } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const AT = '2026-10-28T12:00:00.000Z';
@@ -272,6 +272,11 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
     await expect(card.getByText(label, { exact: true })).toBeVisible();
     await expect(card.getByText(value, { exact: true })).toBeVisible();
   }
+  // Значения начинаются с одного края, отдельной колонкой от подписей.
+  const values = await card.locator('.facts dd').evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().left)));
+  expect(new Set(values).size).toBe(1);
+  const labels = await card.locator('.facts dt').evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().right)));
+  expect(Math.max(...labels)).toBeLessThan(values[0]!);
   await expect(card.getByText('Итог')).toHaveCount(0);
   const footer = card.locator('[data-role="event-footer"]');
   await expect(footer).toBeVisible();
@@ -285,12 +290,11 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
   await expect(card.getByRole('button', { name: 'Скрыть ответ' })).toBeVisible();
   await noOverflow(page);
 
-  const toggle = page.locator('.chat-header [data-theme-toggle]');
-  if ((await page.locator('html').getAttribute('data-theme')) !== 'light') await toggle.click();
+  if ((await page.locator('html').getAttribute('data-theme')) !== 'light') await toggleChatTheme(page);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await noOverflow(page);
   await expect(card).toBeVisible();
-  if ((await page.locator('html').getAttribute('data-theme')) === 'light') await toggle.click();
+  if ((await page.locator('html').getAttribute('data-theme')) === 'light') await toggleChatTheme(page);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await noOverflow(page);
 

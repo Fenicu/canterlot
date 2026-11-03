@@ -54,6 +54,26 @@ test('segmented_is_a_keyboard_operable_radio_group', async ({ page }) => {
 test('toggle_has_switch_semantics', async ({ page }) => {
   const toggle = page.getByRole('switch', { name: 'Автоматическое продолжение' }); await toggle.focus(); await page.keyboard.press('Space'); await expect(toggle).toBeChecked(); await page.keyboard.press('Space'); await expect(toggle).not.toBeChecked();
 });
+test('toggle_off_and_on_differ_by_fill_not_only_by_knob_position', async ({ page }) => {
+  const toggle = page.getByRole('switch', { name: 'Автоматическое продолжение' });
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((value) => document.documentElement.setAttribute('data-theme', value), theme);
+    const paint = () => toggle.evaluate((input) => { const track = input.nextElementSibling!; return { track: getComputedStyle(track).backgroundColor, knob: getComputedStyle(track, '::after').backgroundColor }; });
+    if (await toggle.isChecked()) await toggle.click();
+    const off = await paint();
+    await toggle.click();
+    const on = await paint();
+    await toggle.click();
+    // Ручка выключенного не того же тона, что дорожка включённого: иначе «выкл» читается как «вкл».
+    const ratio = await page.evaluate(([a, b]) => {
+      const lum = (value: string) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number).map((c) => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }).reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i]!, 0);
+      const [x, y] = [lum(a!), lum(b!)].sort((p, q) => q - p);
+      return (x! + 0.05) / (y! + 0.05);
+    }, [off.knob, on.track]);
+    expect(ratio, theme).toBeGreaterThanOrEqual(3);
+    expect(off.track, theme).not.toBe(on.track);
+  }
+});
 test('theme_toggle_persists_and_theme_script_runs_before_first_paint', async ({ page }) => {
   const shell = readFileSync('build/200.html', 'utf8'); expect(shell.slice(shell.indexOf('<head>')).match(/<script\b[^>]*>/)?.[0]).toBe('<script src="/theme-init.js">');
   await page.getByRole('button', { name: 'Сменить тему' }).click(); await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');

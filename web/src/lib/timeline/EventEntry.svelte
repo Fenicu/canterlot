@@ -104,17 +104,19 @@
   .status[data-state='waiting_for_user'] { color: var(--accent-link); }
   .status[data-state='stalled'], .status[data-state='quota_paused'] { color: var(--warning); }
   .status[data-state='failed'] { color: var(--danger); }
+  /* Подписи в своей колонке, значения с одного края: пары не сливаются в одно предложение. */
   .facts {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    align-items: baseline;
     gap: var(--s2) var(--s6);
     margin: 0;
   }
-  .facts div { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; }
+  .facts div { display: contents; }
   dt { color: var(--muted); font-size: var(--fs-sm); }
   dd {
     margin: 0;
-    color: var(--secondary);
+    color: var(--text);
     font-size: var(--fs-sm);
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;

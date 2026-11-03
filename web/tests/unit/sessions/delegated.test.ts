@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSections, type Group } from "#lib/screens/sessions/grouping.js";
+import { buildSections, kidsTitle, type Group } from "#lib/screens/sessions/grouping.js";
 import type { ListRow } from "#lib/stores/list.svelte.js";
 
 function row(patch: Partial<ListRow> & { id: string; title: string }): ListRow {
@@ -221,5 +221,12 @@ describe("sessions/delegated-tree", () => {
     expect(archive.flatMap((section) => section.items).map((node) => node.item.id)).toEqual([
       "child",
     ]);
+  });
+
+  it("kids_title_counts_working_and_waiting_apart", () => {
+    const children = [{}, {}] as never[];
+    expect(kidsTitle({ children, running: 2, waiting: 1 })).toBe("Делегированные · 2 · работает 1 · ждёт 1");
+    expect(kidsTitle({ children, running: 1, waiting: 1 })).toBe("Делегированные · 2 · ждёт 1");
+    expect(kidsTitle({ children, running: 0, waiting: 0 })).toBe("Делегированные · 2");
   });
 });

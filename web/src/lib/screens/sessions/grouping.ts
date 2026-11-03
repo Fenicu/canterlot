@@ -21,6 +21,8 @@ export interface TreeNode {
   open: boolean;
   /** Живых сессий в поддереве без самой строки. */
   running: number;
+  /** Из живых: ждут ответа владельца, а не работают. */
+  waiting: number;
   children: TreeNode[];
 }
 
@@ -140,6 +142,7 @@ function nest(
       depth: 0,
       open: false,
       running: 0,
+      waiting: 0,
       children: [],
     });
   }
@@ -210,8 +213,16 @@ function nest(
     return count;
   };
   for (const node of nodes.values()) live.set(node.item.id, subtree(node, new Set()));
+  const asking = (node: TreeNode, seen: Set<string>): number => {
+    if (seen.has(node.item.id)) return 0;
+    seen.add(node.item.id);
+    let count = 0;
+    for (const child of node.children) count += (child.item.activity.state === "waiting_for_user" ? 1 : 0) + asking(child, seen);
+    return count;
+  };
   for (const node of nodes.values()) {
     node.running = live.get(node.item.id) ?? 0;
+    node.waiting = asking(node, new Set());
     node.open = kids.expanded.has(node.item.id)
       ? true
       : kids.collapsed.has(node.item.id)
@@ -276,4 +287,10 @@ function section(
     items,
     collapsed: collapsed.has(id),
   };
+}
+
+/** Заголовок детей: сколько работает и сколько ждёт владельца, раздельно. */
+export function kidsTitle(node: Pick<TreeNode, "children" | "running" | "waiting">): string {
+  const working = node.running - node.waiting;
+  return [`Делегированные · ${node.children.length}`, working > 0 ? `работает ${working}` : "", node.waiting > 0 ? `ждёт ${node.waiting}` : ""].filter(Boolean).join(" · ");
 }

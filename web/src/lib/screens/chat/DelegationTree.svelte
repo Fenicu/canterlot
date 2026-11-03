@@ -11,7 +11,7 @@
 	import { activityLine, type Activity } from '#lib/screens/sessions/activityText.js';
 	import type { ListRow } from '#lib/stores/list.svelte.js';
 	import { groupDelegation, latestTurnStart, mergeNodes, subagentVerb, type DelegationNode } from '#lib/stores/delegation.js';
-	import { isMainAgent, toolTitle } from '#lib/timeline/present.js';
+	import { isMainAgent, nodeStatus, STATUS_TONE, STATUS_WORD, toolTitle } from '#lib/timeline/present.js';
 	import Icon from '#lib/ui/Icon.svelte';
 	import { liveNodes } from './delegationNodes';
 
@@ -77,21 +77,12 @@
 	});
 
 	function verb(node: DelegationNode): string {
-		if (node.state === 'waiting') return 'Ждёт';
-		if (node.state === 'done' || node.state === 'final' || node.state === 'completed') return 'Готово';
-		if (node.state === 'failed' || node.state === 'error') return 'Ошибка';
-		if (node.state === 'aborted' || node.state === 'stopped' || node.state === 'incomplete') return 'Прервано';
-		if (node.tool_name && node.tool_name !== 'Agent' && node.tool_name !== 'Task') return subagentVerb(node.tool_name);
-		return 'Работает';
+		const status = nodeStatus(node.state);
+		if (status === 'running' && node.tool_name && node.tool_name !== 'Agent' && node.tool_name !== 'Task') return subagentVerb(node.tool_name);
+		return STATUS_WORD[status];
 	}
 
-	function tone(node: DelegationNode): string {
-		const text = verb(node);
-		if (text === 'Ждёт') return 'warning';
-		if (text === 'Готово') return 'muted';
-		if (text === 'Прервано' || text === 'Ошибка') return 'danger';
-		return 'accent';
-	}
+	const tone = (node: DelegationNode): string => STATUS_TONE[nodeStatus(node.state)];
 
 	function sessionLine(row: ListRow): { text: string; tone: string } {
 		const line = activityLine(row.activity as Activity, { now: Date.now() });
@@ -142,7 +133,7 @@
 		<span class="branch">└</span>
 		<span class="grow node-info session-info">
 			<span class="session-name">{row.title}</span>
-			<small class="node-task">{modelLabel(row.model)}{#if workedSession(row)} · {workedSession(row)}{/if}</small>
+			<small class="node-task">{[modelLabel(row.model), workedSession(row)].filter(Boolean).join(' · ')}</small>
 		</span>
 		<span class={sessionLine(row).tone}>{sessionLine(row).text}</span>
 	</a>
@@ -157,7 +148,7 @@
 
 	{#if groups.older.length > 0}
 		<button type="button" class="tree-node older-toggle" aria-expanded={expanded} aria-controls={listId} onclick={() => (expanded = !expanded)}>
-			<span class="grow" class:danger={groups.interrupted > 0}>{olderLabel}</span>
+			<span class="grow" class:warning={groups.interrupted > 0}>{olderLabel}</span>
 			<span class="chevron"><Icon name="chevron" /></span>
 		</button>
 		{#if expanded}
@@ -227,7 +218,7 @@
 		color: var(--muted);
 		font-size: var(--fs-sm);
 	}
-	.older-toggle .danger {
+	.older-toggle .warning {
 		font-size: var(--fs-sm);
 	}
 	.chevron {

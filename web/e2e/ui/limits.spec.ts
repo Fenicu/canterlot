@@ -24,8 +24,21 @@ test('limits_history_follows_mockup_10_with_an_accessible_data_table', async ({ 
   await expect(table.getByRole('row')).toHaveCount(15);
   await expect(main.getByText('Claude сейчас')).toBeVisible();
   await expect(main.getByText('Codex сейчас')).toBeVisible();
+  // Легенда держит окна рядом с провайдером: каждая группа в одну строку.
+  for (const group of await main.locator('.legend .group').all()) {
+    const box = (await group.boundingBox())!;
+    expect(box.height).toBeLessThanOrEqual(30);
+  }
+  await expect(main.locator('.legend .group').first()).toHaveText(/^Claude:.*неделя$/);
+  await expect(main.locator('.axis span').last()).toHaveText('0%');
   await expect(main.getByText('Субагент · haiku').first()).toBeVisible();
-  await expect(main.getByText('приблизительно', { exact: true }).first()).toBeVisible();
+  // Приблизительность сказана один раз заголовком «≈» и примечанием, а не в каждой строке.
+  await expect(main.getByText('приблизительно', { exact: true })).toHaveCount(0);
+  const usage = main.getByRole('table', { name: 'Сегодня по сессиям' });
+  // Числа токенов не рвутся посреди разрядов, а ссылка на сессию — полноценная цель нажатия.
+  for (const count of await usage.locator('.count').all()) expect(await count.evaluate((node) => node.getClientRects().length)).toBe(1);
+  await expect(usage.locator('.count').first()).toHaveText(/^вх\. [\d ]+$/);
+  for (const link of await usage.getByRole('link').all()) expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   await expect(main.getByText(/Кэш включён во входные токены/)).toBeVisible();
   // Третий запрос, OpenCode, нужен только сводке скорости.
   expect(historyRequests.map(query => query.get('provider')).sort()).toEqual(['claude', 'codex', 'opencode']);
@@ -54,7 +67,7 @@ test('subtitle_names_the_shown_providers_and_cards_keep_their_shape', async ({ p
   const cards = page.locator('main .current section');
   await expect(cards).toHaveCount(3);
   await expect(cards.nth(0).locator('.value')).toHaveText('21% / нед');
-  await expect(cards.nth(2)).toContainText('мес · 91%');
+  await expect(cards.nth(2).locator('.other').last()).toHaveText(/^мес · 91% · \S/);
   // Одинаковая структура: крупное значение с окном в одну строку, сброс — отдельной.
   for (let index = 0; index < 3; index += 1) {
     const card = cards.nth(index);
@@ -83,4 +96,28 @@ test('subtitle_names_the_shown_providers_and_cards_keep_their_shape', async ({ p
   await page.locator('main').getByRole('button', { name: 'Сменить тему' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await shot(page, 'limits-cards');
+});
+
+test('history_error_keeps_the_current_limits_and_names_the_cause', async ({ page }) => {
+  await bootSecondary(page, '/limits');
+  // Свой ответ истории перекрывает маршрут стенда, поэтому ставится после него и страница перечитывается.
+  await page.route('**/api/v1/limits/history?*', (route) => route.fulfill({ status: 503, json: { error: { code: 'db_unavailable', message: 'База данных временно недоступна', scope: 'hub_db', retry: 'safe_same_key', correlation_id: '00000000-0000-4000-8000-0000000000f1' } } }));
+  await page.reload();
+  const main = page.locator('main');
+  await expect(main.getByRole('alert')).toHaveText('История недоступна: База данных временно недоступна');
+  await expect(main.getByRole('button', { name: 'Повторить' })).toBeVisible();
+  await expect(main.getByText('Claude сейчас')).toBeVisible();
+  await expect(main.getByText('Codex сейчас')).toBeVisible();
+});
+
+test('without_snapshots_the_page_says_so_instead_of_empty_axes', async ({ page }) => {
+  await bootSecondary(page, '/limits');
+  // Свой ответ истории перекрывает маршрут стенда, поэтому ставится после него и страница перечитывается.
+  await page.route('**/api/v1/limits/history?*', (route) => route.fulfill({ json: { series: [], usage: [] } }));
+  await page.reload();
+  const main = page.locator('main');
+  await expect(main.locator('[data-history-empty]')).toHaveText('Снимков лимитов за эти дни ещё нет');
+  await expect(main.getByRole('img', { name: /Дневные снимки лимитов/ })).toHaveCount(0);
+  await expect(main.getByRole('table', { name: 'Сегодня по сессиям' })).toHaveCount(0);
+  await expect(main.getByText('Сегодня завершённых запусков ещё нет')).toBeVisible();
 });

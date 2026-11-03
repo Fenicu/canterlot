@@ -1,8 +1,8 @@
 import type { Page } from '@playwright/test';
-import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions, type MockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, test } from './fixtures';
+import { expect, fillContrast, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 
@@ -46,6 +46,32 @@ test('group_tabs_are_a_tablist_with_arrow_navigation_and_stay_inside_the_pill', 
   expect(metrics.page).toBeLessThanOrEqual((page.viewportSize()?.width ?? metrics.page) + 1);
 });
 
+test('selected_group_tab_stands_out_in_both_themes', async ({ page }) => {
+  await boot(page);
+  const selected = page.getByRole('tablist', { name: 'Группы сессий' }).getByRole('tab', { selected: true });
+  // Признак выбора — не текст, поэтому ему нужно 3:1 с фоном под ним (WCAG 1.4.11).
+  expect(await fillContrast(selected)).toBeGreaterThanOrEqual(3);
+  await page.getByRole('button', { name: 'Сменить тему' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  expect(await fillContrast(selected)).toBeGreaterThanOrEqual(3);
+});
+
+test('phone_tabs_fade_only_the_edge_with_more_tabs_and_keep_the_selected_tab_clear', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'на рабочем столе вкладки переносятся, а не листаются');
+  await boot(page);
+  const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
+  await expect(tablist).toHaveAttribute('data-fade-end', '');
+  await expect(tablist).not.toHaveAttribute('data-fade-start', '');
+  await tablist.getByRole('tab', { name: /Архив/ }).click();
+  await expect(tablist).toHaveAttribute('data-fade-start', '');
+  await expect(tablist).not.toHaveAttribute('data-fade-end', '');
+  // Выбранная вкладка целиком вне гаснущей полосы.
+  const strip = (await tablist.boundingBox())!;
+  const tab = (await tablist.getByRole('tab', { selected: true }).boundingBox())!;
+  expect(tab.x + tab.width).toBeLessThanOrEqual(strip.x + strip.width + 1);
+  expect(tab.x).toBeGreaterThanOrEqual(strip.x + 18);
+});
+
 test('tabs_of_the_desktop_list_stay_compact_and_left_aligned', async ({ page, isMobile }) => {
   test.skip(isMobile, 'телефон листает вкладки');
   await page.setViewportSize({ width: 1707, height: 960 });
@@ -84,7 +110,9 @@ test('search_without_results_offers_reset', async ({ page }) => {
   await page.getByRole('button', { name: 'Поиск', exact: true }).click();
   await page.getByRole('textbox', { name: 'Поиск сессий' }).fill('неттакого');
   await expect(page.getByText('Ничего не найдено')).toBeVisible();
-  await page.getByRole('button', { name: 'Сбросить' }).first().click();
+  // Сброс один: в строке поиска, без повтора под «Ничего не найдено».
+  await expect(page.getByRole('button', { name: 'Сбросить' })).toHaveCount(1);
+  await page.getByRole('button', { name: 'Сбросить' }).click();
   await expect(page.getByRole('link', { name: /Восстановление потока/ })).toBeVisible();
 });
 
@@ -641,8 +669,11 @@ test('limits_strip_warns_below_20_remaining_and_shows_the_reserve_variant', asyn
 
 test('empty_states_offer_actions', async ({ page }) => {
   await boot(page, true);
-  await expect(page.getByText(/machine add/)).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Создать первую сессию' })).toBeVisible();
+  await expect(page.locator('code', { hasText: 'canterlot machine add' })).toBeVisible();
+  await expect(page.getByRole('link', { name: /machine add/ })).toHaveCount(0);
+  const create = page.getByRole('link', { name: 'Создать первую сессию' });
+  await expect(create).toBeVisible();
+  expect((await create.boundingBox())!.height).toBeGreaterThanOrEqual(44);
 });
 
 test('keyboard_reaches_every_list_action', async ({ page }) => {
@@ -676,4 +707,62 @@ test('more_menu_reloads_the_page', async ({ page }) => {
   ]);
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   expect(await page.evaluate(() => (window as unknown as { marker?: number }).marker)).toBeUndefined();
+});
+
+test('row_dot_shows_the_state_while_the_owner_colour_waits_for_a_quiet_session', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const busy = seedConversation(api, { title: 'Синяя, но работает', color: 'blue', activity: { state: 'working', evidence: { phase: 'generating' }, since: new Date().toISOString() } } as never);
+  const stalled = seedConversation(api, { title: 'Серая, но подвисла', color: 'neutral', activity: { state: 'stalled', evidence: { last_event_at: new Date(Date.now() - 3_600_000).toISOString() }, since: new Date().toISOString() } } as never);
+  const quiet = seedConversation(api, { title: 'Синяя и спокойная', color: 'blue', activity: { state: 'stopped', evidence: { outcome: 'stopped' }, since: new Date().toISOString() } } as never);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto('/sessions');
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(`[data-session="${busy}"] .mark`)).toHaveAttribute('data-token', '--accent');
+  await expect(page.locator(`[data-session="${stalled}"] .mark`)).toHaveAttribute('data-token', '--warning');
+  await expect(page.locator(`[data-session="${quiet}"] .mark`)).toHaveAttribute('data-token', '--blue');
+  // Длинное название, обрезанное в строке, читается целиком в подсказке.
+  await expect(page.locator(`[data-session="${busy}"] .title`)).toHaveAttribute('title', 'Синяя, но работает');
+});
+
+test('search_focus_ring_wraps_the_whole_bar', async ({ page }) => {
+  await boot(page);
+  await page.getByRole('button', { name: 'Поиск', exact: true }).click();
+  const field = page.getByRole('textbox', { name: 'Поиск сессий' });
+  await field.fill('поток');
+  await field.focus();
+  await expect(field).toHaveCSS('outline-style', 'none');
+  await expect(page.locator('.search')).not.toHaveCSS('outline-style', 'none');
+});
+
+test('list_reserves_the_limits_strip_and_hides_zero_counts_until_the_snapshot', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  seedMockupSessions(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/v1/snapshot**', async (route) => { await held; await route.fallback(); });
+  await page.goto('/sessions');
+  // До снимка нули в счёте вкладок не выдают себя за пустой список, а место полосы лимитов занято.
+  await expect(page.locator('.strip-slot')).toHaveCount(1);
+  await expect(page.locator('.tabs .count')).toHaveCount(0);
+  const slot = (await page.locator('.strip-slot').boundingBox())!;
+  release();
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.strip-slot')).toHaveCount(0);
+  await expect(page.locator('.tabs .count').first()).toBeVisible();
+  // Пришедшая полоса не выше оставленного места: строки под ней не уезжают вниз.
+  const stripNode = page.locator('.limits').first();
+  await expect(stripNode).toBeVisible();
+  const strip = (await stripNode.boundingBox())!;
+  expect(strip.height).toBeLessThanOrEqual(slot.height + 1);
+  expect(Math.abs(strip.y - slot.y)).toBeLessThanOrEqual(1);
+});
+
+test('list_bottom_edge_fades_instead_of_slicing_the_next_row', async ({ page }) => {
+  await boot(page);
+  const scroll = page.locator('[data-list-scroll]');
+  // Строка под краем гаснет к навигации, а не стоит полоской верхушек букв.
+  expect(await scroll.evaluate((node) => getComputedStyle(node).maskImage || getComputedStyle(node).webkitMaskImage)).toContain('linear-gradient');
 });

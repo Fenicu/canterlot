@@ -401,6 +401,9 @@ test.describe('очередь и вложения', () => {
     expect(first!.x).toBeGreaterThan(8);
     // Действия правки живут внутри строки, не добавляя второй строки к каждой заявке.
     await expect(strip.locator('.pill').first().getByRole('button', { name: 'Изменить' })).toBeVisible();
+    // Обрезанный текст читается в подсказке, а кнопки называют своё сообщение.
+    await expect(strip.locator('.pill .text').first()).toHaveAttribute('title', 'После тестов обнови README и добавь строку про порядок подписки и снимка журнала');
+    await expect(strip.locator('.pill').nth(1).getByRole('button', { name: 'Отменить: Потом собери релиз' })).toBeVisible();
     expect((await strip.boundingBox())!.height).toBeLessThan(110);
     await queue(hub, api, id, ['Третье', 'Четвёртое']);
     await expect(strip.getByRole('button', { name: 'Ещё 2 в очереди' })).toBeVisible();

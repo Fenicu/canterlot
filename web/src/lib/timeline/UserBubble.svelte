@@ -6,6 +6,7 @@
   import { fmt } from '#lib/format/ru.js';
   import Button from '#lib/ui/Button.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
+  import Textarea from '#lib/ui/Textarea.svelte';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
   import type { Component } from 'svelte';
@@ -162,8 +163,7 @@
 <article class="bubble" data-state={input.state} data-origin={input.origin?.kind} data-optimistic={input.optimistic ? '' : undefined} use:enter>
   {#if from}<p class="origin">{from}</p>{/if}
   {#if editing}
-    <label class="edit-label" for="edit-{input.key}">Текст сообщения</label>
-    <textarea id="edit-{input.key}" class="edit-text" data-unsaved-edit bind:value={editText} rows="4"></textarea>
+    <div data-unsaved-edit><Textarea label="Текст сообщения" id="edit-{input.key}" bind:value={editText} /></div>
     {#if editKept.length > 0}
       <ul class="files">
         {#each input.attachments.filter((file) => editKept.includes(file.attachment_id)) as file (file.attachment_id)}
@@ -177,9 +177,9 @@
     {#if editError}<p class="reason">{editError}</p>{/if}
     <div class="actions">
       {#if editBusy}
-        <Button disabled={true} reason="Сохраняется…">Сохранить</Button>
+        <Button variant="primary" disabled={true} reason="Сохраняется…">Сохранить</Button>
       {:else}
-        <Button onclick={() => void saveEdit()}>Сохранить</Button>
+        <Button variant="primary" onclick={() => void saveEdit()}>Сохранить</Button>
       {/if}
       <Button onclick={() => { editing = false; }}>Отмена</Button>
     </div>
@@ -281,8 +281,6 @@
   .files { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
   li { display: flex; min-width: 0; max-width: 100%; }
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
-  .edit-label { color: var(--secondary); font-size: var(--fs-sm); }
-  .edit-text { width: 100%; min-height: calc(var(--target) * 2); resize: vertical; border-radius: var(--radius-sm); padding: var(--s3) var(--s4); font: inherit; }
   .edit-file { align-items: center; gap: var(--s2); }
   .edited { color: var(--secondary); font-size: var(--fs-sm); }
 </style>

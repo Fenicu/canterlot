@@ -210,7 +210,13 @@
 
 <style>
   .card-root {
-    padding: var(--s4);
+    --card-pad-block: var(--s5);
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scroll-padding-block: var(--s4) calc(var(--target) + var(--s8));
+    padding: var(--card-pad-block) var(--s6);
     border-radius: var(--radius-card);
     background: var(--surface);
     display: flex;

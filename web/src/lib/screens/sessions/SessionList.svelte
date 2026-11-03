@@ -140,7 +140,7 @@
     const deleted = store.list.deleted;
     return results
       .filter((item) => !deleted.has(item.id))
-      .map((item) => ({ item, depth: 0, open: true, running: 0, children: [] }));
+      .map((item) => ({ item, depth: 0, open: true, running: 0, waiting: 0, children: [] }));
   });
   const kids = $derived({ collapsed: collapsedSet(kidsCollapsed), expanded: collapsedSet(kidsExpanded) });
   const sections = $derived(
@@ -170,6 +170,8 @@
     return counts;
   });
   const ready = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' || rows.length > 0 : false);
+  // Строки могут прийти из памяти устройства раньше снимка, а лимиты и счёт вкладок — только со снимком.
+  const synced = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' : false);
 
   // Меню принадлежит строке: смена вкладки, поиска или экрана закрывает его, как и уход строки из списка.
   // Закрытие листа подтверждения меняет запись истории, а не экран.
@@ -301,12 +303,19 @@
       thresholds={thresholds}
       prefer={openRow?.harness.provider ?? ''}
     />
+    {#if !synced && runtime.list.limits.length === 0}
+      <!-- Место полосы лимитов держится до снимка, чтобы строки не съезжали вниз, когда она придёт. -->
+      <div class="strip-slot" aria-hidden="true"></div>
+    {/if}
 
     <GroupTabs
       tabs={tabs}
       current={tab}
+      counted={synced}
       onselect={(next) => tab = next}
     />
+  {:else}
+    <div class="strip-slot" aria-hidden="true"></div>
   {/if}
   <div class="scroll" data-list-scroll bind:this={scroller} onscroll={remember}>
     {#if runtime && runtime.machines.items.size === 0 && ready}
@@ -314,7 +323,7 @@
     {/if}
     {#if searchError}<p class="search-error" role="alert">{searchError}</p>{/if}
     {#if results && results.length === 0}
-      <EmptyState kind="search" onreset={resetSearch} />
+      <EmptyState kind="search" />
     {:else if ready && rows.length === 0 && !results}
       <EmptyState kind="sessions" />
     {:else if !ready}
@@ -363,7 +372,9 @@
   .brand { flex: 1 0 auto; margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }
   .create { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: var(--target); min-height: var(--target); border-radius: var(--radius-round); color: var(--accent-link); }
   .menu-slot { position: absolute; z-index: 4; top: calc(100% + var(--s2)); right: var(--s3); }
-  .scroll { overflow: auto; min-height: 0; flex: 1; }
+  /* Нижний край списка гаснет, а не режет следующую строку полосой верхушек букв над навигацией. */
+  .scroll { overflow: auto; min-height: 0; flex: 1; mask-image: linear-gradient(to bottom, var(--text) calc(100% - var(--s8)), var(--transparent)); }
+  .strip-slot { min-height: calc(var(--target) + var(--s2) * 2); margin: var(--s0) var(--gutter) var(--s3); }
   .placeholder { display: flex; flex-direction: column; gap: var(--s8); padding: var(--s4) var(--gutter); }
   .ghost { display: flex; flex-direction: column; gap: var(--s3); padding-inline: var(--s6); }
 </style>

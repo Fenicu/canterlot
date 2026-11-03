@@ -6,6 +6,7 @@
   let { open, title, subtitle, routeKey, onclose, children }: { open: boolean; title: string; subtitle?: string; routeKey?: string; onclose: () => void; children: Snippet } = $props();
   const id = $props.id();
   let dialog: HTMLDialogElement;
+  let heading: HTMLHeadingElement | undefined;
   let mounted = $state(false);
   let opener: HTMLElement | null = null;
   let shell: HTMLElement | null = null;
@@ -34,7 +35,7 @@
     const first = items[0];
     const last = items.at(-1);
 
-    if (event.shiftKey && document.activeElement === first) {
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === heading)) {
       event.preventDefault();
       last?.focus();
     } else if (!event.shiftKey && document.activeElement === last) {
@@ -70,6 +71,9 @@
       }
 
       dialog.showModal();
+      // Сам showModal ставит фокус на «Закрыть», и без указателя на нём загорается кольцо.
+      // Заголовок принимает фокус тихо, а Tab ведёт дальше по листу.
+      heading?.focus({ preventScroll: true });
       if (shell) shell.inert = true;
     } else if (!open && dialog.open) close();
   });
@@ -77,7 +81,7 @@
 </script>
 <dialog bind:this={dialog} aria-labelledby={id} aria-modal="true" onkeydown={keydown} onpointerdown={(event) => { pressedBackdrop = overBackdrop(event); }} onclick={backdropClick} oncancel={(event) => { event.preventDefault(); close(); }}>
   <div class="handle" aria-hidden="true"></div>
-  <header><div class="titles"><h2 id={id}>{title}</h2>{#if subtitle}<p>{subtitle}</p>{/if}</div><IconButton icon="close" label="Закрыть" onclick={close} /></header>
+  <header><div class="titles"><h2 id={id} bind:this={heading} tabindex="-1">{title}</h2>{#if subtitle}<p>{subtitle}</p>{/if}</div><IconButton icon="close" label="Закрыть" onclick={close} /></header>
   <div class="body">{@render children()}</div>
 </dialog>
 <style>
@@ -88,8 +92,10 @@
   .handle { width: var(--handle-width); height: var(--handle-height); border-radius: var(--radius-pill); background: var(--control-line); margin: var(--s4) auto; }
   header { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s4); }
   .titles { min-width: 0; }
+  h2:focus { outline: none; }
   p { margin: var(--s1) var(--s0) var(--s0); color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
-  .body { flex: 1 1 auto; min-height: 0; padding-block: var(--s6) calc(var(--s8) + env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s6)); }
+  /* Запас по бокам вмещает кольцо фокуса полей во всю ширину: прокрутка обрезала бы его. */
+  .body { --ring-room: calc(var(--focus-width) + var(--s1)); flex: 1 1 auto; min-height: 0; padding-block: var(--s6) calc(var(--s8) + env(safe-area-inset-bottom)); padding-inline: var(--ring-room); margin-inline: calc(-1 * var(--ring-room)); overflow-y: auto; overscroll-behavior: contain; mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s6)); }
   :global([data-layout='desktop']) dialog { inset: 0; height: fit-content; margin: auto; padding: var(--s6) var(--s10) var(--s0); border-radius: var(--radius-sheet); }
   :global([data-layout='desktop']) .handle { display: none; }
   .body:has(> :global([data-sheet-flush])) { padding-bottom: var(--s0); }

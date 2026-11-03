@@ -35,6 +35,8 @@ test('presets_screen_lists_builtins_first_and_marks_agent_presets', async ({ pag
 test('create_edit_and_delete_preset_with_confirmation', async ({ page }) => {
   await bootPresets(page);
   await page.getByRole('button', { name: 'Новая инструкция' }).click();
+  // Поле текста открывается на несколько строк, а не капсулой в одну.
+  expect((await page.getByLabel('Текст').boundingBox())!.height).toBeGreaterThanOrEqual(120);
   await page.getByLabel('Название').fill('Проверочный пресет');
   await page.getByLabel('Текст').fill('Отвечай кратко.');
   await page.getByRole('button', { name: 'Сохранить' }).click();

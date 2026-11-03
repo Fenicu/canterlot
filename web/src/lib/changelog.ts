@@ -5,6 +5,7 @@
  * Источник один — тот же файл, что читают в репозитории. Отдельная копия для
  * интерфейса разъехалась бы с ним на второй же неделе.
  */
+import { fmt } from "#lib/format/ru.js";
 import raw from "../../../CHANGES.rst?raw";
 
 export interface ChangelogSection {
@@ -123,4 +124,12 @@ export function entriesSince(
   return entries
     .filter((entry) => compareVersions(entry.version, seen) > 0 && compareVersions(entry.version, current) <= 0)
     .sort((a, b) => compareVersions(b.version, a.version));
+}
+
+/** Дата записи «02.11.2026» в виде, как в остальном приложении: «2 ноября», с годом, если он не текущий. */
+export function changelogDate(text: string, now = Date.now()): string {
+  const match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(text.trim());
+  if (!match) return text;
+  const ts = new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]), 12).getTime();
+  return fmt.date(ts, now);
 }

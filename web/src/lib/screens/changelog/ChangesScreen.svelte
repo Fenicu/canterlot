@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { parseChangelog } from '#lib/changelog.js';
+  import { changelogDate, parseChangelog } from '#lib/changelog.js';
   import { APP_VERSION } from '#lib/stores/appVersion.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import ChangelogText from './ChangelogText.svelte';
@@ -11,14 +11,16 @@
 
 <main id="main" tabindex="-1">
   <SecondaryHeader title="История изменений" />
-  <div class="secondary-body"><div class="secondary-content">
+  <!-- В истории нет ссылок и кнопок: без tabindex её нельзя было бы листать с клавиатуры. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="secondary-body" tabindex="0" role="region" aria-label="История изменений"><div class="secondary-content">
     <p class="note">Установленная версия — <strong>{APP_VERSION}</strong></p>
     {#each entries as entry (entry.version)}
       <section data-changelog-entry>
         <div class="heading">
           <h2>{entry.version}</h2>
           {#if entry.version === APP_VERSION}<span class="current">установлена</span>{/if}
-          {#if entry.date}<span class="date">{entry.date}</span>{/if}
+          {#if entry.date}<span class="date">{changelogDate(entry.date)}</span>{/if}
         </div>
         {#each entry.sections as section (section.title)}
           {#if section.items.length}
