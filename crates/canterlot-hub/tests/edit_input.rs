@@ -592,6 +592,22 @@ async fn edit_replaces_attachment_list(pool: PgPool) -> TestResult {
     Ok(())
 }
 
+/// Правка проверяет текст так же, как отправка: NUL — отказ с причиной, а не
+/// ошибка базы.
+#[sqlx::test(migrations = "./migrations")]
+async fn edit_refuses_nul_character(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let (input_id, _) = input(&pool, &seed, "исходный").await;
+    assert!(matches!(
+        edit(&pool, &seed, input_id, "до\0после", 1, "nul").await,
+        Err(ControlError::InvalidRequest {
+            reason: "nul_character"
+        })
+    ));
+    assert_eq!(revision(&pool, input_id).await, 1);
+    Ok(())
+}
+
 async fn ready_attachment(pool: &PgPool, owner: Uuid, conversation: Uuid, name: &str) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(

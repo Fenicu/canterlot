@@ -1265,6 +1265,19 @@ pub async fn request_edit_input(
                 });
             }
             let mut blocks = vec![crate::delivery::submit::ContentBlock::Text { text }];
+            // Те же правила текста, что у отправки: NUL иначе дошёл бы до jsonb.
+            crate::delivery::submit::validate_message_content(&blocks, !attachment_ids.is_empty())
+                .map_err(|error| ControlError::InvalidRequest {
+                    reason: match error {
+                        crate::delivery::SubmitError::InvalidContent {
+                            reason: "nul_character",
+                        } => "nul_character",
+                        crate::delivery::SubmitError::InvalidContent { reason: "empty" } => {
+                            "empty_content"
+                        }
+                        _ => "content_too_long",
+                    },
+                })?;
             if !attachment_ids.is_empty() {
                 if crate::attachments::check_ids(&attachment_ids).is_err() {
                     return Err(ControlError::InvalidRequest {
