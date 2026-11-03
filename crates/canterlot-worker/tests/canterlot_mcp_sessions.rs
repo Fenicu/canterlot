@@ -114,6 +114,37 @@ fn session_tools_listed_for_all_three_providers() {
 }
 
 #[test]
+fn send_and_spawn_declare_attachment_ids() {
+    for (tool_set, provider) in PROVIDERS {
+        let tools = tools_of(tool_set, provider);
+        for name in ["session_send", "session_spawn"] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+            let field = &tool["inputSchema"]["properties"]["attachment_ids"];
+            assert_eq!(field["type"], "array", "{provider}: {name}");
+            assert_eq!(field["items"]["type"], "string", "{provider}: {name}");
+            assert_eq!(
+                field["maxItems"],
+                canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT,
+                "{provider}: {name}"
+            );
+            assert!(
+                field["description"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("share_file")),
+                "{provider}: {name}"
+            );
+            assert!(
+                tool["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("attachment_ids"),
+                "{provider}: {name}"
+            );
+        }
+    }
+}
+
+#[test]
 fn session_tool_calls_map_to_hub_names() {
     for (tool_set, provider) in PROVIDERS {
         for (mcp_name, hub_name) in SESSION_TOOLS {

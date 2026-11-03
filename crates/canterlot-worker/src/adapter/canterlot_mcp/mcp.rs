@@ -158,10 +158,10 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Show one session in detail: activity with evidence, its last messages, running processes, the last run summary, worktree and open requests. Messages are cut at 4 KiB. To read a long result in full, pass `block_id` (a message `id`) and `offset`: the answer holds one page of that block, and `next_offset` is the offset of the next page until it is null. Also use it to find out why a session is quiet. Do not call it to poll for progress: you are subscribed and get a [canterlot] message when the session finishes, asks or stalls."
         }
         "session_send" => {
-            "Queue a text message for another session; it reads it as a message from an agent, not from the owner. By default you are subscribed to its completion. Do not use it to ask the owner anything (use your own question flow) and do not send the same text twice. After sending, end your turn instead of polling."
+            "Queue a text message for another session; it reads it as a message from an agent, not from the owner. `attachment_ids` passes on files of this session's own conversation. By default you are subscribed to its completion. Do not use it to ask the owner anything (use your own question flow) and do not send the same text twice. After sending, end your turn instead of polling."
         }
         "session_spawn" => {
-            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir. The child never gets wider permissions than yours without the owner: a mode that is stronger in the child's CLI than yours (Codex `ask` runs commands without asking) answers pending_approval, and an omitted mode falls back to the widest one that is not stronger. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
+            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir; `attachment_ids` passes on files of this session's own conversation. The child never gets wider permissions than yours without the owner: a mode that is stronger in the child's CLI than yours (Codex `ask` runs commands without asking) answers pending_approval, and an omitted mode falls back to the widest one that is not stronger. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
         }
         "session_subscribe" => {
             "Ask for a [canterlot] message when another session finishes, asks or stalls. Sending to or spawning a session already subscribes you. Do not call it for a session you just sent to or spawned."
@@ -186,6 +186,12 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
 }
 
 fn session_input_schema(mcp_name: &str) -> Value {
+    let attachments = json!({
+        "type": "array",
+        "items": {"type": "string"},
+        "maxItems": canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT,
+        "description": "Ids of ready attachments in this session's own conversation (files the owner sent you, files from share_file) to pass on without uploading again.",
+    });
     let id = json!({"type": "string", "description": "Session id (UUID)."});
     match mcp_name {
         "sessions_list" => json!({
@@ -214,6 +220,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "session_id": id,
                 "text": {"type": "string", "description": "Up to 32 KiB."},
                 "subscribe": {"type": "boolean", "default": true},
+                "attachment_ids": attachments,
             },
             "required": ["session_id", "text"],
             "additionalProperties": false,
@@ -232,6 +239,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "preset": {"type": "string", "description": "Instruction preset id, default clean."},
                 "permission_mode": {"type": "string", "description": "Not wider than this session's mode."},
                 "subscribe": {"type": "boolean", "default": true},
+                "attachment_ids": attachments,
             },
             "required": ["harness", "brief"],
             "additionalProperties": false,
