@@ -2502,6 +2502,79 @@ async fn mode_and_instructions_restart_the_process_between_turns() {
 }
 
 #[tokio::test]
+async fn failed_restart_stops_the_execution_without_the_old_settings() {
+    let mut bench = Bench::new(
+        Script {
+            steps: handshake(),
+            ..Default::default()
+        },
+        "",
+        "",
+        "owner",
+    );
+    let started = bench.start().await;
+    assert!(!started.native_conversation_id.is_empty());
+    // Новая настройка не запускается: сессии нет в `session/list`.
+    bench.fake.rewrite(Script {
+        steps: vec![init_step(), Script::expect("session/list", session_list(&[]))],
+        ..Default::default()
+    });
+
+    let mut input = send("after restart");
+    input.settings = Some(SettingsChange {
+        permission_mode: Some("bypass".into()),
+        ..Default::default()
+    });
+    let outcome = bench.adapter.transmit(&input, &bench.group).await;
+    assert!(
+        matches!(&outcome, TransmitOutcome::Rejected(reason) if reason == "settings_restart_failed"),
+        "{outcome:?}"
+    );
+    let events = drain(&mut bench.adapter).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "restart_failed",
+                required: true,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::CliRestarted { .. })),
+        "a failed restart is not a restart: {events:?}"
+    );
+    let booted = boots(&bench.fake);
+    assert_eq!(
+        booted.len(),
+        2,
+        "no fallback boot with the previous settings: {booted:?}"
+    );
+    let args: Vec<&str> = booted[1]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        args.contains(&"--dangerously-skip-permissions"),
+        "the new mode was attempted: {args:?}"
+    );
+    assert!(
+        !calls(&bench.fake.requests(), "session/prompt")
+            .iter()
+            .any(|call| call["frame"]["params"]["prompt"][0]["text"] == "after restart"),
+        "input is not sent after a failed restart"
+    );
+    assert!(bench.fake.pids().is_empty(), "the process is stopped");
+    bench.close().await;
+}
+
+#[tokio::test]
 async fn settings_never_restart_the_process_in_the_middle_of_a_turn() {
     let steps = vec![
         init_step(),

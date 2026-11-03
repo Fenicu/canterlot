@@ -690,40 +690,17 @@ impl AntigravityAdapter {
                 Ok(())
             }
             Err(error) => {
+                // Прежние настройки не подставляются: после переключения в `ask`
+                // молчаливый откат к `bypass` оставил бы владельца без запросов
+                // разрешений. Исполнение останавливается с причиной запуска.
                 tracing::warn!(
                     kind = "antigravity_restart_failed",
                     reason = ?error,
-                    "antigravity restart failed; trying the previous settings"
+                    "antigravity restart failed; the execution stops"
                 );
                 self.stop_for_restart().await;
                 self.reset_connection();
-                self.instructions = previous.1.clone();
-                self.permission_mode = previous.0.clone();
-                if self
-                    .launch_resumed(
-                        &native,
-                        &previous.0,
-                        &previous.1,
-                        &previous.2,
-                        &previous.3,
-                        group,
-                    )
-                    .await
-                    .is_ok()
-                {
-                    let proc = self.proc.as_ref().expect("fallback spawned a process");
-                    self.events.push_back(AdapterEvent::CliRestarted {
-                        cli_pid: proc.pid,
-                        cli_start_ticks: proc.start_ticks,
-                    });
-                } else {
-                    self.exited = true;
-                    self.exit_reported = true;
-                    self.events.push_back(AdapterEvent::ProcessExited {
-                        code: None,
-                        signal: None,
-                    });
-                }
+                self.diagnostic("restart_failed", true);
                 Err("settings_restart_failed")
             }
         }
