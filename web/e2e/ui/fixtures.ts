@@ -29,3 +29,18 @@ export async function toggleChatTheme(page: import('@playwright/test').Page) {
   await page.getByRole('button', { name: 'Меню сессии' }).click();
   await page.getByRole('menuitem', { name: /Светлая тема|Тёмная тема/ }).click();
 }
+
+/** Контраст заливки элемента с ближайшим непрозрачным фоном под ним, по формуле WCAG. */
+export async function fillContrast(locator: import('@playwright/test').Locator): Promise<number> {
+  return locator.evaluate((element) => {
+    const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
+    const opaque = (value: string) => { const parts = rgb(value); return parts.length >= 3 && (parts[3] ?? 1) > 0; };
+    const luminance = ([r, g, b]: number[]) => [r!, g!, b!].map((c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }).reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i]!, 0);
+    const own = getComputedStyle(element).backgroundColor;
+    let parent = element.parentElement;
+    let under = getComputedStyle(document.documentElement).backgroundColor;
+    while (parent) { const value = getComputedStyle(parent).backgroundColor; if (opaque(value)) { under = value; break; } parent = parent.parentElement; }
+    const [a, b] = [luminance(rgb(own)), luminance(rgb(under))].sort((x, y) => y - x);
+    return (a! + 0.05) / (b! + 0.05);
+  });
+}

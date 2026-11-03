@@ -52,3 +52,8 @@ test('separator_spacing_survives_svelte_block_trimming', () => {
     expect(markup.match(closing)?.[0], path).toBeUndefined();
   }
 });
+test('selected_fill_meets_non_text_contrast_in_both_themes', () => {
+  // Вкладки групп лежат на --bg, сегменты на --raised: заливка выбора отличима от них на 3:1.
+  for (const palette of [dark, { ...dark, ...light }]) for (const bg of ['bg', 'surface', 'raised']) expect(contrast(palette['--accent']!, palette[`--${bg}`]!), `accent/${bg}`).toBeGreaterThanOrEqual(3);
+  for (const path of ['src/lib/screens/sessions/GroupTabs.svelte', 'src/lib/ui/Segmented.svelte']) expect(readFileSync(path, 'utf8'), path).toMatch(/(?:aria-selected='true'\]|:checked \+ span) \{ background: var\(--accent\);/);
+});

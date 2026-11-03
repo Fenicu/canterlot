@@ -65,7 +65,9 @@
     white-space: nowrap;
   }
   .count { display: inline-block; min-width: var(--s9); margin-left: var(--s1); padding-inline: var(--s3); border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-sm); }
-  button[aria-selected='true'] { background: var(--tab-selected); color: var(--accent-link); font-weight: var(--weight-medium); }
+  /* Выбор заметен в обеих темах: заливка акцентом, как у нижней навигации. */
+  button[aria-selected='true'] { background: var(--accent); color: var(--accent-ink); font-weight: var(--weight-medium); }
+  button[aria-selected='true'] .count { background: var(--accent-ink); color: var(--accent); }
   :global([data-pane='list']) .tabs { flex-wrap: wrap; overflow-x: visible; }
   :global([data-pane='list']) button { flex: 0 1 auto; min-width: 0; max-width: 100%; padding-inline: var(--s4); overflow-wrap: anywhere; white-space: normal; }
 </style>

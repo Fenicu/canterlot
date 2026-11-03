@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions, type MockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, test } from './fixtures';
+import { expect, fillContrast, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 
@@ -44,6 +44,16 @@ test('group_tabs_are_a_tablist_with_arrow_navigation_and_stay_inside_the_pill', 
   if (isMobile) expect(metrics.scroll).toBeGreaterThan(metrics.client);
   else expect(metrics.scroll).toBeLessThanOrEqual(metrics.client);
   expect(metrics.page).toBeLessThanOrEqual((page.viewportSize()?.width ?? metrics.page) + 1);
+});
+
+test('selected_group_tab_stands_out_in_both_themes', async ({ page }) => {
+  await boot(page);
+  const selected = page.getByRole('tablist', { name: 'Группы сессий' }).getByRole('tab', { selected: true });
+  // Признак выбора — не текст, поэтому ему нужно 3:1 с фоном под ним (WCAG 1.4.11).
+  expect(await fillContrast(selected)).toBeGreaterThanOrEqual(3);
+  await page.getByRole('button', { name: 'Сменить тему' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  expect(await fillContrast(selected)).toBeGreaterThanOrEqual(3);
 });
 
 test('tabs_of_the_desktop_list_stay_compact_and_left_aligned', async ({ page, isMobile }) => {

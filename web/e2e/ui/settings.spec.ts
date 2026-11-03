@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, fillContrast } from './fixtures';
 import { bootSecondary } from './secondary-fixture';
 import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/http-playwright';
 
@@ -23,6 +23,16 @@ test('settings_screen_shows_login_connection_theme_enter_install_and_signout', a
   }
   await expect(main.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible();
   await expect(main.getByText(/Authelia.*собственной странице/)).toBeVisible();
+});
+
+test('segmented_choice_stands_out_in_both_themes', async ({ page }) => {
+  await bootSecondary(page, '/settings');
+  const main = page.locator('main');
+  for (const theme of ['Тёмная', 'Светлая']) {
+    await main.getByRole('radio', { name: theme, exact: true }).check();
+    const chosen = main.getByRole('radiogroup').first().locator('input:checked + span');
+    expect(await fillContrast(chosen), theme).toBeGreaterThanOrEqual(3);
+  }
 });
 
 test('enter_preference_changes_composer_behaviour', async ({ page }) => {

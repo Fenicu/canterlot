@@ -273,7 +273,6 @@
   --gutter: var(--s6);
   --popover: #235451;
   --popover-hover: #1d4044;
-  --tab-selected: #1f5457;
   --scrim-soft: color-mix(in srgb, var(--scrim) 72%, transparent);
   --bubble-max: 86%;
   --prose-wide: 150ch;
@@ -281,7 +280,6 @@
 [data-theme=light] {
   --popover: #cce6de;
   --popover-hover: #bdddd5;
-  --tab-selected: #f4faf7;
 }
 
 :root { --time: #adc7c8; }
