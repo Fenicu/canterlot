@@ -201,6 +201,77 @@ function countLines(value: string): number {
   return countNewlines(value) + (value.endsWith("\n") ? 0 : 1);
 }
 
+/** Хвост вывода инструмента на телефоне: остальное догружается по «Показать полностью». */
+export const TOOL_TAIL_BYTES = 64 * 1024;
+
+/** Последние байты строки без разрыва символа UTF-8. */
+function utf8Tail(value: string, limit: number): string {
+  if (limit <= 0 || value.length === 0) return "";
+  let bytes = 0;
+  let index = value.length;
+  while (index > 0) {
+    const code = value.charCodeAt(index - 1);
+    const size =
+      code < 0x80 ? 1 : code < 0x800 ? 2 : code >= 0xd800 && code <= 0xdfff ? 2 : 3;
+    if (bytes + size > limit) break;
+    bytes += size;
+    index--;
+  }
+  // Младший суррогат без старшего — половина символа: его не оставляем.
+  const first = value.charCodeAt(index);
+  if (first >= 0xdc00 && first <= 0xdfff) index++;
+  return value.slice(index);
+}
+
+/** Финальный вывод инструмента держим хвостом: полный текст уже есть в истории. */
+export function trimFinalBody(block: BlockModel): void {
+  if (block.kind !== "tool_call" && block.kind !== "tool_result") return;
+  if (block.state !== "final" && block.state !== "incomplete") return;
+  if (block.bytes <= TOOL_TAIL_BYTES) return;
+  const lines = block.lineCount;
+  const tail = utf8Tail(block.body, TOOL_TAIL_BYTES);
+  if (tail.length === block.body.length) return;
+  block.body = tail;
+  block.text = tail;
+  block.lineCount = lines;
+  block.truncated = true;
+  // bytes остаётся полным: по нему считается объём вывода и смещения догрузки.
+}
+
+/**
+ * Оставляет блоки, на которые ссылается окно, их детей и явно нужные корни.
+ * Дети не лежат в ленте, но карточка показывает их по связям.
+ */
+export function pruneBlocks(
+  blocks: Map<string, BlockModel>,
+  referenced: Iterable<string>,
+): number {
+  const keep = new Set(referenced);
+  const children = new Map<string, string[]>();
+  for (const block of blocks.values()) {
+    if (block.parentId === null) continue;
+    const list = children.get(block.parentId);
+    if (list) list.push(block.id);
+    else children.set(block.parentId, [block.id]);
+  }
+  const stack = [...keep];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    for (const child of children.get(id) ?? []) {
+      if (keep.has(child)) continue;
+      keep.add(child);
+      stack.push(child);
+    }
+  }
+  let removed = 0;
+  for (const id of [...blocks.keys()]) {
+    if (keep.has(id)) continue;
+    blocks.delete(id);
+    removed++;
+  }
+  return removed;
+}
+
 function display(block: BlockModel): string {
   if (block.kind === "tool_call" && block.state !== "final")
     return block.summary ?? "";
@@ -349,6 +420,7 @@ function applyFinal(
   block.rev = payload.rev;
   block.state = "final";
   replaceBody(block, payload.text);
+  trimFinalBody(block);
   // Хаб прислал тело сам: сверять его с контрольной суммой в этом же кадре незачем.
   return [];
 }
@@ -367,6 +439,7 @@ function applyIncomplete(
   block.incompleteReason = ev.payload.reason;
   block.finishedAt = at(ev);
   publish(block);
+  trimFinalBody(block);
   return [];
 }
 
@@ -481,6 +554,7 @@ export class BlockSync {
     if (hex === block.checksum) {
       block.state = "final";
       publish(block);
+      trimFinalBody(block);
       return;
     }
     this.#diag({
@@ -510,6 +584,7 @@ export class BlockSync {
     }
     if (block.ticket !== mine) return;
     await this.#replay(block);
+    if (block.ticket === mine) trimFinalBody(block);
   }
 
   async #replay(block: BlockModel): Promise<void> {

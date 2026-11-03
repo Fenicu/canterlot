@@ -47,6 +47,12 @@ export class TimelineModel {
 	#hasOlder = rawCell(false);
 	#tailDetached = rawCell(false);
 	#newerCount = rawCell(0);
+	/** Окно выбросило записи: блоки, на которые они ссылались, можно освободить. */
+	readonly #onTrim: () => void;
+
+	constructor(onTrim: () => void = () => undefined) {
+		this.#onTrim = onTrim;
+	}
 
 	/** Окно ушло от хвоста: новые записи считаются, но в ленту не встают, пока его не вернут. */
 	get tailDetached(): boolean {
@@ -92,18 +98,21 @@ export class TimelineModel {
 			const oldest = incoming[0]?.seq;
 			const kept = oldest ? this.entries.filter((entry) => cmpSeq(entry.seq, oldest) < 0) : [];
 			const combined = dedupe([...kept, ...incoming]);
-			if (combined.length > this.maxLoaded) {
+			const trimmed = combined.length > this.maxLoaded;
+			if (trimmed) {
 				combined.splice(0, combined.length - this.maxLoaded);
 				this.hasOlder = true;
 			}
 			this.#entries.set(combined);
 			this.tailDetached = false;
 			this.newerCount = 0;
+			if (trimmed) this.#onTrim();
 			return;
 		}
 		const merged =
 			dir === 'older' ? dedupe([...incoming, ...this.entries]) : dedupe([...this.entries, ...incoming]);
-		if (merged.length > this.maxLoaded) {
+		const trimmed = merged.length > this.maxLoaded;
+		if (trimmed) {
 			if (dir === 'newer') {
 				merged.splice(0, merged.length - this.maxLoaded);
 				this.hasOlder = true;
@@ -113,12 +122,14 @@ export class TimelineModel {
 			}
 		}
 		this.#entries.set(merged);
+		if (trimmed) this.#onTrim();
 	}
 
 	trimNewestEnd(): void {
 		if (this.entries.length <= this.maxLoaded) return;
 		this.#entries.set(this.entries.slice(0, this.maxLoaded));
 		this.tailDetached = true;
+		this.#onTrim();
 	}
 
 	upsert(entry: TimelineEntry): void {
@@ -133,11 +144,13 @@ export class TimelineModel {
 		const last = without[without.length - 1];
 		without.push(entry);
 		if (last && cmpSeq(last.seq, entry.seq) > 0) without.sort((a, b) => cmpSeq(a.seq, b.seq));
-		if (without.length > this.maxLoaded) {
+		const trimmed = without.length > this.maxLoaded;
+		if (trimmed) {
 			without.splice(0, without.length - this.maxLoaded);
 			this.hasOlder = true;
 		}
 		this.#entries.set(without);
+		if (trimmed) this.#onTrim();
 	}
 
 	remove(key: string): void {

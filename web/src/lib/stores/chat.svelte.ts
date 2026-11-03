@@ -14,11 +14,13 @@ import {
   BlockModel,
   BlockSync,
   applyBlockEvent,
+  pruneBlocks,
   type BlockIO,
   type BlockKind,
   type BlockPage,
 } from "./blocks";
 import { utf8Length } from "./blocks";
+import { isSubagentCall } from "#lib/timeline/rows.js";
 import {
   assignFeedSeq,
   blankAttachment,
@@ -268,7 +270,7 @@ class InputMap extends SvelteMap<string, InputView> {
 export class ChatStore {
   readonly blocks = new SvelteMap<string, BlockModel>();
   readonly inputs = new InputMap();
-  readonly timeline = new TimelineModel();
+  readonly timeline = new TimelineModel(() => this.#pruneBlocks());
   readonly requests: RequestsModel;
   readonly todos = new TodosModel();
   readonly background = new BackgroundModel();
@@ -452,6 +454,20 @@ export class ChatStore {
     this.scheduled = [];
     this.settings = { effective: null, pending: null, rev: 0 };
     this.crunch = { enabled: false, resume_pending: false };
+  }
+
+  /** Окно обрезало начало: блоки, на которые больше никто не ссылается, освобождаются. */
+  #pruneBlocks(): void {
+    // Открытая лента субагента держит свои страницы вне окна разговора.
+    if (this.#lanes.size > 0) return;
+    const keep = new Set<string>();
+    for (const entry of this.timeline.entries)
+      if (entry.kind === "block") keep.add(entry.block.id);
+    for (const entry of this.#laneLive.get())
+      if (entry.kind === "block") keep.add(entry.block.id);
+    for (const block of this.blocks.values())
+      if (isSubagentCall(block)) keep.add(block.id);
+    pruneBlocks(this.blocks, keep);
   }
 
   async loadOlder(): Promise<void> {
