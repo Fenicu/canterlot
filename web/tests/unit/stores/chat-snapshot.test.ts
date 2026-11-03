@@ -78,4 +78,20 @@ describe("снимок тёплого чата", () => {
     expect(chat.interrupt).toBeNull();
   });
 
+  it("запрос, закрытый вдали от чата, уходит из открытых", () => {
+    const chat = chatOf();
+    snapshot(chat, { open_requests: [permission("r1"), permission("r2")] });
+    expect(chat.requests.items.get("r1")!.state).toBe("open");
+    snapshot(chat, { open_requests: [permission("r2")] });
+    expect(chat.requests.items.get("r1")!.state).toBe("closed");
+    expect(chat.requests.items.get("r2")!.state).toBe("open");
+  });
+
+  it("ответ, который владелец ещё отправляет, снимок не трогает", () => {
+    const chat = chatOf();
+    snapshot(chat, { open_requests: [permission("r1")] });
+    chat.requests.items.get("r1")!.state = "sending";
+    snapshot(chat, { open_requests: [] });
+    expect(chat.requests.items.get("r1")!.state).toBe("sending");
+  });
 });

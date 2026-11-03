@@ -1196,7 +1196,7 @@ export class ChatStore {
       if (data.queue.run_slot) this.queue.run_slot = data.queue.run_slot;
     }
     if (data.scheduled) this.scheduled = data.scheduled;
-    if (data.open_requests) this.requests.ingestSnapshot(data.open_requests);
+    if (data.open_requests) this.requests.reconcileSnapshot(data.open_requests);
     if (data.todos) this.todos.ingestSnapshot(data.todos);
     if (data.background) this.background.ingestSnapshot(data.background);
     if (data.context !== undefined)

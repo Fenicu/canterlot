@@ -1,4 +1,4 @@
-import { SvelteMap } from 'svelte/reactivity';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import type { HubEvent } from '#lib/sync/wire.js';
 import type { Op, OpJournal } from '#lib/ops/journal.js';
 import type { DecisionBody } from '#lib/api/client.js';
@@ -134,6 +134,24 @@ export class RequestsModel {
           closedReason
         }));
       }
+    }
+  }
+
+  /**
+   * В снимке только открытые и ещё не доставленные запросы: открытый здесь, но пропавший оттуда,
+   * закрыли, пока чат не слушал. Ответ, который владелец сейчас отправляет, решит его запрос сам.
+   */
+  reconcileSnapshot(requests: unknown[]): void {
+    if (!Array.isArray(requests)) return;
+    this.ingestSnapshot(requests);
+    const present = new SvelteSet(
+      requests.map((raw) => {
+        const r = asRecord(raw);
+        return String(r.id ?? r.request_id ?? '');
+      })
+    );
+    for (const item of this.items.values()) {
+      if (item.state === 'open' && !present.has(item.id)) item.state = 'closed';
     }
   }
 
