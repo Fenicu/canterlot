@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { clock } from '#lib/clock.js';
+	import { ticker } from '#lib/ticker.svelte.js';
 	import ChatGone from '#lib/screens/chat/ChatGone.svelte';
 	import Lane from '#lib/screens/chat/Lane.svelte';
 	import { leaseChatSession } from '#lib/screens/chat/open.js';
@@ -9,14 +10,14 @@
 
 	let chat = $state<ChatStore | null>(null);
 	let error = $state('');
-	let now = $state(clock.serverNow());
+	const now = $derived.by(() => {
+		void ticker.second;
+		return clock.serverNow();
+	});
 	const id = $derived(page.params.id ?? '');
 	const blockId = $derived(page.params.blockId ?? '');
 
-	onMount(() => {
-		const timer = setInterval(() => (now = clock.serverNow()), 1000);
-		return () => clearInterval(timer);
-	});
+	onMount(() => ticker.retain());
 
 	$effect(() => {
 		const current = id;

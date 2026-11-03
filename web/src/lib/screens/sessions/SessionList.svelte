@@ -19,6 +19,7 @@
   import { loadConfig } from '#lib/api/config.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { clock } from '#lib/clock.js';
+  import { ticker } from '#lib/ticker.svelte.js';
   import { browserRuntime } from '#lib/screens/chat/open.js';
   import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
@@ -60,12 +61,11 @@
   let groupsOpen = $state(false);
   let menu = $state(false);
   let canInstall = $state(false);
-  let tick = $state(0);
   let scroller = $state<HTMLElement | null>(null);
   let thresholds = $state<LimitThresholds>({ stale_after_secs: 35 * 60, warn_pcts: [80], weekly_reserve_pct: 95 });
   let restore = true;
   const now = $derived.by(() => {
-    void tick;
+    void ticker.second;
     return clock.serverNow();
   });
 
@@ -90,23 +90,11 @@
       const config = await loadConfig().catch(() => null);
       if (config?.limit_thresholds) thresholds = config.limit_thresholds;
     }).catch(() => undefined);
-    let timer = 0;
-    const arm = () => {
-      timer = window.setInterval(() => tick++, 1000);
-    };
-    const visible = () => {
-      if (document.hidden) {
-        window.clearInterval(timer);
-        timer = 0;
-      } else if (!timer) arm();
-    };
-    arm();
-    document.addEventListener('visibilitychange', visible);
+    const releaseTicker = ticker.retain();
     return () => {
       install.removeEventListener('change', changed);
       alive = false;
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', visible);
+      releaseTicker();
     };
   });
 

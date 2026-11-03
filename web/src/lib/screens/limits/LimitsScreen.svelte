@@ -9,6 +9,7 @@
   import type { components } from '#lib/api/generated/openapi.js';
   import { limitView } from '#lib/stores/limits.js';
   import { clock } from '#lib/clock.js';
+  import { ticker } from '#lib/ticker.svelte.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import UsageChart from './UsageChart.svelte';
   import UsageTable from './UsageTable.svelte';
@@ -21,7 +22,7 @@
   let usage = $state<components['schemas']['UsageDay'][]>([]);
   let speed = $state<components['schemas']['ModelSpeedSummary'][]>([]);
   let days = $state<string[]>([]); let zone = $state(''); let error = $state(''); let loading = $state(true);
-  let now = $state(clock.serverNow());
+  const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
   let thresholds = $state({ stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 });
   const rows = $derived(usageRows(usage, days.at(-1) ?? '', runtime?.list.items ?? new Map()));
   const subtitle = $derived(limitsSubtitle(runtime?.list.limits ?? []));
@@ -40,7 +41,7 @@
     } catch (err) { error = err instanceof ApiError ? `История недоступна: ${err.message}` : 'История недоступна: нет связи с хабом'; }
     finally { loading = false; }
   }
-  onMount(() => { void load(); const timer = setInterval(() => now = clock.serverNow(), 1000); return () => clearInterval(timer); });
+  onMount(() => { void load(); return ticker.retain(); });
 </script>
 <main id="main" tabindex="-1" data-secondary-ready={!loading ? '' : undefined}>
   <SecondaryHeader title="Лимиты" subtitle={subtitle} />

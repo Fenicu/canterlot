@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fmt } from '#lib/format/ru.js';
+  import { ticker } from '#lib/ticker.svelte.js';
   import type { Upload, UploadManager } from '#lib/uploads/manager.js';
   import Button from '#lib/ui/Button.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
@@ -7,14 +8,11 @@
   let { uploads, conversationId }: { uploads: UploadManager; conversationId: string } = $props();
   let items = $state<Upload[]>([]);
 
+  $effect(() => ticker.retain());
+
   $effect(() => {
-    const id = conversationId;
-    const pull = () => {
-      items = uploads.list(id).filter((item) => item.phase !== 'cancelled');
-    };
-    pull();
-    const timer = setInterval(pull, 250);
-    return () => clearInterval(timer);
+    void ticker.now;
+    items = uploads.list(conversationId).filter((item) => item.phase !== 'cancelled');
   });
 
   const ready = $derived(items.filter((item) => item.phase === 'ready').length);

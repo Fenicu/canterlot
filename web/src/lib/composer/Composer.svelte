@@ -3,6 +3,7 @@
   import { canSendNow } from '#lib/api/gate.js';
   import { loadConfig } from '#lib/api/config.js';
   import { clock } from '#lib/clock.js';
+  import { ticker } from '#lib/ticker.svelte.js';
   import AttachmentTray from '#lib/composer/AttachmentTray.svelte';
   import ContextIndicator from '#lib/composer/ContextIndicator.svelte';
   import InterruptButton from '#lib/composer/InterruptButton.svelte';
@@ -57,7 +58,6 @@
   let dropDepth = 0;
   let held = false;
   let timer = 0;
-  let tick = $state(0);
   let originX = 0;
   let originY = 0;
   const touch = isTouchPrimary();
@@ -68,13 +68,13 @@
   let armReset = false;
   const showInterrupt = $derived(turn || model.interruptLabel !== 'Прервать');
   const uploadsPending = $derived.by(() => {
-    void tick;
+    void ticker.now;
     return uploads
       .list(chat.id)
       .some((item) => item.phase !== 'cancelled' && item.phase !== 'failed' && item.phase !== 'ready');
   });
   const notice = $derived.by(() => {
-    void tick;
+    void ticker.now;
     if (model.errorMessage) return model.errorMessage;
     const gate = model.gate;
     return gate.ok || gate.reason === EMPTY_DRAFT_REASON ? '' : gate.reason;
@@ -123,16 +123,14 @@
         limits = cfg.limits;
       })
       .catch(() => undefined);
-    const pulse = setInterval(() => {
-      tick += 1;
-    }, 250);
+    const releaseTicker = ticker.retain();
     return () => {
       stop();
       stopReturned();
       window.removeEventListener('dragover', blockDrop);
       window.removeEventListener('drop', blockDrop);
       window.removeEventListener('dragend', endDrop);
-      clearInterval(pulse);
+      releaseTicker();
       window.clearTimeout(timer);
     };
   });
@@ -214,7 +212,7 @@
 
   function markSend(node: HTMLButtonElement) {
     $effect(() => {
-      void tick;
+      void ticker.now;
       node.setAttribute('aria-disabled', model.gate.ok && !model.sending ? 'false' : 'true');
     });
   }

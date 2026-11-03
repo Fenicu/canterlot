@@ -2,6 +2,7 @@
   import { page, updated } from '$app/state';
   import { version as appVersion } from '$app/env';
   import { clock } from '#lib/clock.js';
+  import { ticker } from '#lib/ticker.svelte.js';
   import { browserRuntime, leaseChatSession } from '#lib/screens/chat/open.js';
   import SessionList from '#lib/screens/sessions/SessionList.svelte';
   import type { Runtime } from '#lib/app/runtime.js';
@@ -24,7 +25,6 @@
   let runtime = $state<Runtime | null>(null);
   let width = $state(0);
   let laidOut = $state(false);
-  let tick = $state(0);
   let update = $state<UpdateController | null>(null);
   let updateState = $state('idle');
   let updateMessage = $state('');
@@ -84,7 +84,7 @@
   const harness = $derived(path.startsWith('/__test'));
   const nav = $derived(path.startsWith('/machines') ? 'machines' : path.startsWith('/limits') ? 'limits' : path.startsWith('/presets') ? 'presets' : 'sessions');
   const now = $derived.by(() => {
-    void tick;
+    void ticker.second;
     return clock.serverNow();
   });
 
@@ -144,7 +144,7 @@
     read();
     laidOut = true;
     window.addEventListener('resize', read);
-    const timer = window.setInterval(() => tick++, 1000);
+    const releaseTicker = ticker.retain();
     loadRuntime();
     return () => {
       alive = false;
@@ -160,7 +160,7 @@
       window.removeEventListener('online', checkUpdate);
       document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('resize', read);
-      window.clearInterval(timer);
+      releaseTicker();
     };
   });
 

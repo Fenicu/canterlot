@@ -5,6 +5,7 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { loadConfig } from '#lib/api/config.js';
   import { clock } from '#lib/clock.js';
+  import { ticker } from '#lib/ticker.svelte.js';
   import { fmt } from '#lib/format/ru.js';
   import { modelLabel } from '#lib/format/labels.js';
   import Segmented from '#lib/ui/Segmented.svelte';
@@ -14,7 +15,8 @@
   import '../secondary.css';
 
   let runtime = $state<Runtime | null>(null);
-  let selected = $state(''); let now = $state(clock.serverNow()); let error = $state('');
+  let selected = $state(''); let error = $state('');
+  const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
   let config = $state({ disk_warn_pct: 85, metrics_stale_after_secs: 90 });
   const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
   $effect(() => { if (!machines.some(m => m.id === selected)) selected = machines[0]?.id ?? ''; });
@@ -33,7 +35,7 @@
     try { const [value, cfg] = await Promise.all([browserRuntime(), loadConfig()]); runtime = value; config = cfg.machines; }
     catch { error = 'Не удалось загрузить машины. Повторите при восстановлении связи'; }
   }
-  onMount(() => { void load(); const timer = setInterval(() => now = clock.serverNow(), 1000); return () => clearInterval(timer); });
+  onMount(() => { void load(); return ticker.retain(); });
   function loadText(value: number | undefined) { return value === undefined ? 'Нет данных' : (value / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2 }); }
 </script>
 <main id="main" tabindex="-1" data-secondary-ready={runtime ? '' : undefined}>

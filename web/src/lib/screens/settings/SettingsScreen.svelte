@@ -9,6 +9,7 @@
   import { compareVersions } from '#lib/changelog.js';
   import { APP_VERSION } from '#lib/stores/appVersion.js';
   import { fmt } from '#lib/format/ru.js';
+  import { ticker } from '#lib/ticker.svelte.js';
   import { theme, type ThemePref } from '#lib/theme.js';
   import { getEnterPref, setEnterPref, type EnterPref } from '#lib/composer/prefs.js';
   import { currentUpdate, installation } from '#lib/pwa/register.js';
@@ -25,12 +26,12 @@
   let runtime = $state<Runtime | null>(null); let config = $state<components['schemas']['ConfigView'] | null>(null);
   let login = $state(''); let error = $state(''); let busy = $state(false); let purged = $state(false);
   let enter = $state('auto'); let motion = $state('normal');
-  let canInstall = $state(false); let tick = $state(0);
-  const update = $derived.by(() => { void tick; return currentUpdate(); });
-  const updateState = $derived.by(() => { void tick; return update?.state ?? 'idle'; });
+  let canInstall = $state(false);
+  const update = $derived.by(() => { void ticker.second; return currentUpdate(); });
+  const updateState = $derived.by(() => { void ticker.second; return update?.state ?? 'idle'; });
   const hubVersion = $derived(config?.version ?? null);
   const versionMismatch = $derived(hubVersion !== null && compareVersions(APP_VERSION, hubVersion) !== 0);
-  const sync = $derived.by(() => { void tick; return staleness.lastSyncAt; });
+  const sync = $derived.by(() => { void ticker.second; return staleness.lastSyncAt; });
   const phase = $derived(runtime?.connection.status.phase);
   const connectionText = $derived(phase === 'live' ? 'Подключено' : phase === 'auth_required' ? 'Требуется вход' : phase === 'incompatible' ? 'Требуется обновление' : phase === 'connecting' ? 'Подключаюсь' : 'Нет связи');
   $effect(() => { if (ready && !purged) saveMotion(motion as MotionPref); });
@@ -44,8 +45,8 @@
     enter = getEnterPref(); motion = motionPref(); ready = true;
     const install = installation(); const changed = () => canInstall = install.canInstall;
     changed(); install.addEventListener('change', changed); void load();
-    const timer = setInterval(() => tick++, 1000);
-    return () => { clearInterval(timer); install.removeEventListener('change', changed); };
+    const releaseTicker = ticker.retain();
+    return () => { releaseTicker(); install.removeEventListener('change', changed); };
   });
   async function clear(exit: boolean) {
     if (busy || !runtime || !config) return;
