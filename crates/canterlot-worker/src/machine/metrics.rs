@@ -208,6 +208,11 @@ impl MetricsCollector {
                     }
                 }
             }
+            let members_alive = included
+                .iter()
+                .filter(|pid| execution.members.iter().any(|(member, _)| member == *pid))
+                .count();
+            let descendants = included.len().saturating_sub(members_alive);
             let mut delta = 0u64;
             let mut rss = 0u64;
             for pid in &included {
@@ -230,6 +235,7 @@ impl MetricsCollector {
                 alive: !included.is_empty(),
                 cpu_permille: cpu,
                 rss_bytes: rss,
+                descendants: Some(descendants.min(u32::MAX as usize) as u32),
             });
         }
         self.cpu = Some(current);

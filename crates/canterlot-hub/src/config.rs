@@ -404,6 +404,7 @@ impl Default for LimitsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ActivityConfig {
+    /// Молчание генерации: удалённая модель не тратит CPU, поэтому порог щедрый.
     #[serde(with = "humantime_serde")]
     pub stalled_generating: Duration,
     #[serde(with = "humantime_serde")]
@@ -420,7 +421,7 @@ pub struct ActivityConfig {
 impl Default for ActivityConfig {
     fn default() -> Self {
         Self {
-            stalled_generating: Duration::from_secs(300),
+            stalled_generating: Duration::from_secs(1800),
             stalled_tool: Duration::from_secs(1800),
             tick: Duration::from_secs(15),
             debounce: Duration::from_millis(250),

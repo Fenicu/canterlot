@@ -152,6 +152,8 @@ pub struct QueueFacts {
 pub struct ProcessFacts {
     pub alive: bool,
     pub cpu_permille: u32,
+    /// Живые потомки CLI без зомби; у старого воркера поля нет.
+    pub descendants: Option<u32>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkState {
@@ -337,7 +339,22 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
             return working("delivering_attachments");
         }
         let last = i.last_event_at.max(e.phase_at).max(i.turn_started_at);
-        let threshold = if matches!(e.phase.as_str(), "running_tool" | "context_maintenance") {
+        // Без свежих метрик машинного процесса судить о зависании нельзя: не шлём ложный
+        // `stalled` ни в одной фазе (старый воркер или пропавшая телеметрия).
+        let Some(process) = i.process else {
+            return working(&e.phase);
+        };
+        let cpu_busy = process.cpu_permille >= 50;
+        let tool_phase = matches!(e.phase.as_str(), "running_tool" | "context_maintenance");
+        // Дерево инструмента живёт, даже если сам CLI ждёт его без CPU. У старого
+        // воркера числа потомков нет — осторожно считаем живой CLI доказательством работы.
+        let live_descendants = process
+            .descendants
+            .map_or(process.alive, |descendants| descendants > 0);
+        if process.alive && ((tool_phase && live_descendants) || cpu_busy) {
+            return working(&e.phase);
+        }
+        let threshold = if tool_phase {
             t.stalled_tool
         } else {
             t.stalled_generating
@@ -352,8 +369,8 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
                 evidence: Evidence::Stalled {
                     last_event_at: last,
                     phase: e.phase.clone(),
-                    process_alive: i.process.map(|p| p.alive),
-                    cpu_busy: i.process.map(|p| p.cpu_permille >= 50),
+                    process_alive: Some(process.alive),
+                    cpu_busy: Some(cpu_busy),
                     link: "available".into(),
                 },
             };
@@ -458,6 +475,14 @@ pub async fn load_inputs(
         last_event_at = e
             .try_get::<Option<DateTime<Utc>>, _>("last_event_at")?
             .or(Some(e.try_get("updated_at")?));
+        // Потоковые блоки — тоже свидетельство прогресса, даже если запись журнала
+        // не дошла до `last_event_at`.
+        let block_progress: Option<DateTime<Utc>> =
+            sqlx::query_scalar("select max(updated_at) from blocks where execution_id=$1")
+                .bind(id)
+                .fetch_one(&mut *conn)
+                .await?;
+        last_event_at = last_event_at.max(block_progress);
         let detail: Option<Value> = e.try_get("phase_detail")?;
         let metrics:Option<Value>=sqlx::query_scalar("select mm.executions from machine_metrics mm join conversations c on c.machine_id=mm.machine_id where c.id=$1 and mm.observed_at <= $2 and mm.observed_at > $2 - $3 * interval '1 second'")
             .bind(conversation_id).bind(now).bind(stale_after.as_secs_f64()).fetch_optional(&mut *conn).await?;
@@ -473,6 +498,9 @@ pub async fn load_inputs(
             process = Some(ProcessFacts {
                 alive,
                 cpu_permille: cpu.min(1000) as u32,
+                descendants: found["descendants"]
+                    .as_u64()
+                    .map(|value| value.min(u32::MAX as u64) as u32),
             });
         }
         let state: String = e.try_get("state")?;
@@ -717,6 +745,10 @@ async fn evaluate_subscriptions(
         since,
         last_turn_at: inputs.last_turn_at,
         last_event_at: inputs.last_event_at,
+        phase_since: inputs
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.phase_at),
     };
     subs::evaluate_in_tx(
         conn,

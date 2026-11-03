@@ -228,12 +228,16 @@ pub async fn current_in_tx(
         since,
         last_turn_at: inputs.last_turn_at,
         last_event_at: inputs.last_event_at,
+        phase_since: inputs
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.phase_at),
     };
     let activity = Activity { state, evidence };
     Ok(
         settle::settled(&activity, &inputs.queue, &facts, config).map(|state| Current {
             state,
-            fingerprint: settle::fingerprint(state, since, inputs.last_turn_at),
+            fingerprint: settle::fingerprint(state, since, inputs.last_turn_at, facts.phase_since),
             closes: state.closes_subscription(inputs.queue.queued),
         }),
     )
@@ -293,7 +297,8 @@ pub async fn evaluate_in_tx(
     let Some(state) = settle::settled(activity, queue, facts, config) else {
         return Ok(false);
     };
-    let fingerprint = settle::fingerprint(state, facts.since, facts.last_turn_at);
+    let fingerprint =
+        settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
     // Удаление подписчика держит его строку и потом удаляет подписку: без блокировки строки
     // разговора здесь вставка задания ждала бы его, а оно ждало бы подписку.
     let open: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(

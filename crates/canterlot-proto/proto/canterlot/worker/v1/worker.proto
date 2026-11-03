@@ -572,6 +572,8 @@ message ExecutionProcess {
   bool alive = 2;
   uint32 cpu_permille = 3;
   uint64 rss_bytes = 4;
+  // Живые потомки CLI без зомби. Нет поля — старый воркер, неизвестно.
+  optional uint32 descendants = 5;
 }
 
 enum LimitWindow {
