@@ -5,7 +5,7 @@
 
 use canterlot_worker::adapter::{
     AgentCallResult,
-    canterlot_mcp::{Broker, BrokerEvent, mcp},
+    canterlot_mcp::{Broker, BrokerEvent, mcp, relay_hello},
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -150,7 +150,10 @@ impl RelayHarness {
         let stream = UnixStream::connect(dir.path().join("mcp.sock"))
             .await
             .expect("connect");
-        let (read, sink) = stream.into_split();
+        let (read, mut sink) = stream.into_split();
+        sink.write_all(relay_hello(broker.relay_secret()).as_bytes())
+            .await
+            .expect("hello");
         Self {
             broker,
             socket: BufReader::new(read),
@@ -178,10 +181,13 @@ impl RelayHarness {
 
     /// Второе соединение с тем же сокетом.
     async fn peer(&self) -> Peer {
-        let (read, sink) = UnixStream::connect(self._dir.path().join("mcp.sock"))
+        let (read, mut sink) = UnixStream::connect(self._dir.path().join("mcp.sock"))
             .await
             .expect("connect")
             .into_split();
+        sink.write_all(relay_hello(self.broker.relay_secret()).as_bytes())
+            .await
+            .expect("hello");
         (BufReader::new(read), sink)
     }
 }

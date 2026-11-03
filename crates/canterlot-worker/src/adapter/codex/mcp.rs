@@ -34,6 +34,20 @@ pub fn launch_overrides(relay_exe: &Path, exec_dir: &Path) -> [OsString; 6] {
     ]
 }
 
+/// Секрет сокета для relay: `env` сервера canterlot. Значение видно в командной строке,
+/// но читать её может только тот, кто и так читает окружение relay.
+pub fn secret_override(secret: &str) -> [OsString; 2] {
+    let mut env = toml::map::Map::new();
+    env.insert(
+        canterlot_mcp::RELAY_SECRET_ENV.to_owned(),
+        toml::Value::String(secret.to_owned()),
+    );
+    [
+        "-c".into(),
+        format!("mcp_servers.canterlot.env={}", toml::Value::Table(env)).into(),
+    ]
+}
+
 /// Действующий конфиг делегированной сессии (`config/read`): серверов нет, кроме canterlot, а
 /// приложения аккаунта и плагины выключены. Сверка до `thread/start`, ничего не запуская.
 pub fn isolated_config(response: &Value) -> bool {

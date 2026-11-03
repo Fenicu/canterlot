@@ -12,6 +12,7 @@ use std::{
 pub mod codexbar;
 pub mod limits;
 pub mod metrics;
+mod nofollow;
 pub mod owner_instructions;
 pub mod share;
 pub mod workdirs;

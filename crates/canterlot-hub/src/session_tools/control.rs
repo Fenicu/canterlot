@@ -44,6 +44,12 @@ async fn owned_in_tx(
     Ok(target)
 }
 
+/// Ключ идемпотентности остановки по `session_interrupt`: по нему `session_send` узнаёт,
+/// что пауза очереди цели поставлена родителем, а не владельцем.
+pub(super) const INTERRUPT_KEY_PREFIX: &str = "agenti:";
+
+const HINT_INTERRUPTED: &str = "The turn is being stopped; the process and worktree stay. The session's queue waits for your next session_send, which resumes it. Messages already queued run after that.";
+
 fn idle() -> Value {
     json!({"status": "nothing_running", "hint": "The session has no live process."})
 }
@@ -69,7 +75,7 @@ pub async fn interrupt(
         &context.pool,
         caller.owner_id,
         target.id,
-        &format!("agenti:{}", caller.call_id),
+        &format!("{INTERRUPT_KEY_PREFIX}{}", caller.call_id),
         caller.call_id,
     )
     .await
@@ -82,6 +88,7 @@ pub async fn interrupt(
         "status": "interrupted",
         "session_id": target.id,
         "command_id": interrupt_command_id,
+        "hint": HINT_INTERRUPTED,
     }))
 }
 

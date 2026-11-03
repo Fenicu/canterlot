@@ -283,7 +283,14 @@ async fn save_refuses_builtins_stale_revision_and_missing_base_revision(pool: Pg
             .await;
         assert_eq!(response.error_code, "preset_builtin", "{builtin}");
     }
-    let created = fx.create_preset("Агентский конфликт", "текст v1").await;
+    let created = fx
+        .agent(
+            "presets.save",
+            json!({"title": "Агентский конфликт", "text": "текст v1"}),
+            &Uuid::now_v7(),
+        )
+        .await;
+    let created: Value = serde_json::from_str(&created.result_json).unwrap();
     let preset_id = created["id"].as_str().unwrap().to_owned();
     let revision = created["revision"].as_i64().unwrap();
     // Без base_revision правка запрещена.
@@ -615,4 +622,130 @@ fn session_tool_error_codes_are_unique_snake_case_with_messages() {
     ] {
         assert!(seen.contains(expected), "{expected} missing");
     }
+}
+
+impl Fx {
+    async fn set_session(&self, mode: &str, pending: Value, depth: i32) {
+        sqlx::query(
+            "update conversations set permission_mode=$2,pending_settings=$3,spawn_depth=$4
+             where id=$1",
+        )
+        .bind(self.conversation)
+        .bind(mode)
+        .bind(pending)
+        .bind(depth)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn save(&self, args: Value) -> canterlot_proto::worker::v1::AgentCallResponse {
+        self.agent("presets.save", args, &Uuid::now_v7()).await
+    }
+
+    async fn text(&self, id: &str) -> String {
+        let mut conn = self.pool.acquire().await.unwrap();
+        presets::get(
+            &mut conn,
+            self.owner,
+            &presets::PresetRef::Custom(id.parse().unwrap()),
+        )
+        .await
+        .unwrap()
+        .text
+        .unwrap()
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn agent_cannot_rewrite_an_owner_preset(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let created = fx.create_preset("Повседневный", "текст владельца").await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    let response = fx
+        .save(json!({"id": id, "title": "Повседневный", "text": "внедрение", "base_revision": 1}))
+        .await;
+    assert_eq!(response.error_code, "preset_read_only");
+    assert_eq!(fx.text(&id).await, "текст владельца");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn agent_updates_only_presets_its_session_created(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let other = testkit::seed_conversation(&fx.pool, fx.owner, fx.machine).await;
+    let foreign = presets::create(
+        &fx.pool,
+        fx.owner,
+        "foreign-agent",
+        presets::NewPreset {
+            title: "Чужой агентский".to_owned(),
+            description: None,
+            text: "текст другого агента".to_owned(),
+        },
+        presets::Actor::Agent {
+            conversation_id: other,
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let response = fx
+        .save(json!({"id": foreign.summary.id, "title": "Чужой агентский", "text": "моё", "base_revision": 1}))
+        .await;
+    assert_eq!(response.error_code, "preset_read_only");
+    assert_eq!(fx.text(&foreign.summary.id).await, "текст другого агента");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn read_only_agent_cannot_write_presets(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let own = fx.save(json!({"title": "Свой", "text": "текст"})).await;
+    assert_eq!(own.error_code, "", "{}", own.error_message);
+    let own: Value = serde_json::from_str(&own.result_json).unwrap();
+    for (mode, pending) in [
+        ("read_only", json!({})),
+        ("ask", json!({"permission_mode": "read_only"})),
+    ] {
+        fx.set_session(mode, pending, 0).await;
+        let created = fx
+            .save(json!({"title": format!("Новый {mode}"), "text": "текст"}))
+            .await;
+        assert_eq!(created.error_code, "read_only_session", "{mode}");
+        let updated = fx
+            .save(json!({"id": own["id"], "title": "Свой", "text": "правка", "base_revision": 1}))
+            .await;
+        assert_eq!(updated.error_code, "read_only_session", "{mode}");
+    }
+    assert_eq!(fx.text(own["id"].as_str().unwrap()).await, "текст");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delegated_session_cannot_apply_the_owner_preset(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.set_session("bypass", json!({}), 1).await;
+    let response = fx
+        .agent("presets.apply", json!({"id": "owner"}), &Uuid::now_v7())
+        .await;
+    assert_eq!(response.error_code, "preset_not_allowed");
+    let pending: Value =
+        sqlx::query_scalar("select pending_settings from conversations where id=$1")
+            .bind(fx.conversation)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert!(pending.get("instruction_profile").is_none(), "{pending}");
+    let response = fx
+        .agent("presets.apply", json!({"id": "clean"}), &Uuid::now_v7())
+        .await;
+    assert_eq!(response.error_code, "", "{}", response.error_message);
+
+    fx.set_session("bypass", json!({}), 0).await;
+    let response = fx
+        .agent("presets.apply", json!({"id": "owner"}), &Uuid::now_v7())
+        .await;
+    assert_eq!(
+        response.error_code, "",
+        "a root session may: {}",
+        response.error_message
+    );
 }

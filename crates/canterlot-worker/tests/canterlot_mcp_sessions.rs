@@ -4,7 +4,7 @@
 
 use canterlot_worker::adapter::{
     AgentCallResult,
-    canterlot_mcp::{Broker, BrokerEvent, ToolSet, mcp},
+    canterlot_mcp::{Broker, BrokerEvent, ToolSet, mcp, relay_hello},
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -108,6 +108,37 @@ fn session_tools_listed_for_all_three_providers() {
             assert!(
                 inspect["inputSchema"]["properties"].get(field).is_some(),
                 "{provider}: {field}"
+            );
+        }
+    }
+}
+
+#[test]
+fn send_and_spawn_declare_attachment_ids() {
+    for (tool_set, provider) in PROVIDERS {
+        let tools = tools_of(tool_set, provider);
+        for name in ["session_send", "session_spawn"] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+            let field = &tool["inputSchema"]["properties"]["attachment_ids"];
+            assert_eq!(field["type"], "array", "{provider}: {name}");
+            assert_eq!(field["items"]["type"], "string", "{provider}: {name}");
+            assert_eq!(
+                field["maxItems"],
+                canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT,
+                "{provider}: {name}"
+            );
+            assert!(
+                field["description"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("share_file")),
+                "{provider}: {name}"
+            );
+            assert!(
+                tool["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("attachment_ids"),
+                "{provider}: {name}"
             );
         }
     }
@@ -354,6 +385,9 @@ async fn session_call_reaches_the_hub_and_returns_text_with_hint() {
         .await
         .expect("connect");
     let (read, mut sink) = stream.into_split();
+    sink.write_all(relay_hello(broker.relay_secret()).as_bytes())
+        .await
+        .expect("hello");
     let mut socket = BufReader::new(read);
     let mut line = json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
         "name":"session_send","arguments":{"session_id":"s","text":"привет"}}})

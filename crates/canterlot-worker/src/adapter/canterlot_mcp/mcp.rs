@@ -133,7 +133,7 @@ fn is_session_tool(mcp_name: &str) -> bool {
 }
 
 fn share_tool_description() -> &'static str {
-    "Hand a file to the owner: pass a path this session can read (relative paths start at the workdir), an optional title and note. The worker uploads it once and the owner sees it in this turn: images and videos as thumbnails, other files with name, size, type and download. Refuses symlinks, hard links, devices and files on the secret deny list; at most 50 MiB. Use it for a document, image or archive meant for the owner."
+    "Hand a file to the owner: pass a path under the session workdir or the temp directory (relative paths start at the workdir; copy other files there first), an optional title and note. The worker uploads it once and the owner sees it in this turn: images and videos as thumbnails, other files with name, size, type and download. Refuses symlinks, hard links, devices and files on the secret deny list; at most 50 MiB. Use it for a document, image or archive meant for the owner."
 }
 
 fn share_input_schema() -> Value {
@@ -158,10 +158,10 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Show one session in detail: activity with evidence, its last messages, running processes, the last run summary, worktree and open requests. Messages are cut at 4 KiB. To read a long result in full, pass `block_id` (a message `id`) and `offset`: the answer holds one page of that block, and `next_offset` is the offset of the next page until it is null. Also use it to find out why a session is quiet. Do not call it to poll for progress: you are subscribed and get a [canterlot] message when the session finishes, asks or stalls."
         }
         "session_send" => {
-            "Queue a text message for another session; it reads it as a message from an agent, not from the owner. By default you are subscribed to its completion. Do not use it to ask the owner anything (use your own question flow) and do not send the same text twice. After sending, end your turn instead of polling."
+            "Queue a text message for another session; it reads it as a message from an agent, not from the owner. `attachment_ids` passes on files of this session's own conversation. By default you are subscribed to its completion. Do not use it to ask the owner anything (use your own question flow) and do not send the same text twice. After sending, end your turn instead of polling."
         }
         "session_spawn" => {
-            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir. The child never gets wider permissions than yours. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
+            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir; `attachment_ids` passes on files of this session's own conversation. The child never gets wider permissions than yours without the owner: a mode that is stronger in the child's CLI than yours (Codex `ask` runs commands without asking) answers pending_approval, and an omitted mode falls back to the widest one that is not stronger. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
         }
         "session_subscribe" => {
             "Ask for a [canterlot] message when another session finishes, asks or stalls. Sending to or spawning a session already subscribes you. Do not call it for a session you just sent to or spawned."
@@ -176,7 +176,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Accept the result of a session you started: it stops that session and removes its worktree; commits stay on the branch. Call it after you have read the result. Do not call it while you still need to continue that session, and not for sessions you did not start."
         }
         "session_interrupt" => {
-            "Stop the current turn of a session you started, leaving its process and worktree in place. Only the direct parent may do this; the owner's root sessions are untouchable. Do not call it on a session you did not start. Idempotent: a second call answers the same command id, and a session with nothing running says so."
+            "Stop the current turn of a session you started, leaving its process and worktree in place. Its queue then waits for you: your next session_send to it resumes it and is delivered. Only the direct parent may do this; the owner's root sessions are untouchable. Do not call it on a session you did not start. Idempotent: a second call answers the same command id, and a session with nothing running says so."
         }
         "session_stop" => {
             "Stop the process of a session you started but keep its worktree and branch, unlike session_accept. Only the direct parent may do this; the owner's root sessions are untouchable. Do not call it on a session you did not start. Idempotent: a second call says already_stopping or nothing_running."
@@ -186,6 +186,12 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
 }
 
 fn session_input_schema(mcp_name: &str) -> Value {
+    let attachments = json!({
+        "type": "array",
+        "items": {"type": "string"},
+        "maxItems": canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT,
+        "description": "Ids of ready attachments in this session's own conversation (files the owner sent you, files from share_file) to pass on without uploading again.",
+    });
     let id = json!({"type": "string", "description": "Session id (UUID)."});
     match mcp_name {
         "sessions_list" => json!({
@@ -214,6 +220,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "session_id": id,
                 "text": {"type": "string", "description": "Up to 32 KiB."},
                 "subscribe": {"type": "boolean", "default": true},
+                "attachment_ids": attachments,
             },
             "required": ["session_id", "text"],
             "additionalProperties": false,
@@ -232,6 +239,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "preset": {"type": "string", "description": "Instruction preset id, default clean."},
                 "permission_mode": {"type": "string", "description": "Not wider than this session's mode."},
                 "subscribe": {"type": "boolean", "default": true},
+                "attachment_ids": attachments,
             },
             "required": ["harness", "brief"],
             "additionalProperties": false,
@@ -272,10 +280,10 @@ fn preset_tool_description(mcp_name: &str) -> &'static str {
             "List the instruction presets the owner keeps in canterlot (built-in «Без инструкций» = none of the owner's own instruction files, repository instructions still apply, «Как у владельца» = the owner's own configuration, saved presets with origin and revision) and which one this session uses and has pending; pass `id` to get that preset's text."
         }
         "canterlot_preset_save" => {
-            "Create a preset (no `id`) or replace a saved preset's title, description and text (`id` + `base_revision` from the list); built-ins cannot be changed; saving never changes running sessions; the preset is marked as made by an agent."
+            "Create a preset (no `id`) or replace the title, description and text of a preset this session created (`id` + `base_revision` from the list); built-ins and presets of the owner or other sessions cannot be changed, and a read_only session cannot save; saving never changes running sessions; the preset is marked as made by an agent."
         }
         "canterlot_preset_apply" => {
-            "Apply a preset to this session only, from the next turn; canterlot restarts the agent between turns with the conversation history kept; in Claude Code the restart waits until the background tasks of this session finish, they are not stopped; call it once, not in a loop."
+            "Apply a preset to this session only, from the next turn; a session started by another agent cannot apply `owner`; canterlot restarts the agent between turns with the conversation history kept; in Claude Code the restart waits until the background tasks of this session finish, they are not stopped; call it once, not in a loop."
         }
         _ => "Preset tool.",
     }

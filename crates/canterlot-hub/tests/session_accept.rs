@@ -1295,3 +1295,78 @@ async fn only_the_direct_parent_may_stop_and_owner_sessions_are_untouchable(pool
         .unwrap_err();
     assert_eq!(error.code, Code::NotDelegated);
 }
+
+async fn pauses(fx: &Fx, id: Uuid) -> Value {
+    sqlx::query_scalar("select pause_reasons from queue_state where conversation_id=$1")
+        .bind(id)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap()
+}
+
+async fn send_to_child(fx: &Fx, text: &str) -> Value {
+    session_tools::call(
+        &fx.context,
+        &fx.parent_caller(),
+        "sessions.send",
+        json!({"session_id": fx.child, "text": text}),
+    )
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn after_an_interrupt_the_parents_next_message_is_delivered(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.run_child().await;
+    let answer = control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "interrupted");
+    assert!(
+        answer["hint"].as_str().unwrap().contains("session_send"),
+        "{answer}"
+    );
+    let sent = send_to_child(&fx, "Продолжай с другим планом").await;
+    assert_eq!(sent["target_paused"], false, "{sent}");
+    assert_eq!(
+        pauses(&fx, fx.child).await,
+        json!([]),
+        "the interrupt pause is lifted"
+    );
+    let state: String = sqlx::query_scalar("select state from inputs where id=$1")
+        .bind(Uuid::parse_str(sent["input_id"].as_str().unwrap()).unwrap())
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "queued");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_parent_never_lifts_the_owners_stop(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.run_child().await;
+    control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)
+        .await
+        .unwrap();
+    // Владелец остановил ход после родителя: его стоп остаётся.
+    canterlot_hub::delivery::control::request_stop(
+        &fx.pool,
+        fx.owner,
+        fx.child,
+        "owner-stop-1",
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let sent = send_to_child(&fx, "Продолжай").await;
+    assert_eq!(sent["target_paused"], true, "{sent}");
+    assert!(
+        sent["hint"].as_str().unwrap().contains("owner"),
+        "the parent is told the message waits: {sent}"
+    );
+    assert_eq!(
+        pauses(&fx, fx.child).await,
+        json!([{"reason": "user_stop"}])
+    );
+}

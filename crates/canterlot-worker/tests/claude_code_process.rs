@@ -201,7 +201,7 @@ fn custom_preset_writes_instructions_file_0600_and_appends_it() {
         s[append + 1],
         exec_dir.join("instructions.md").to_string_lossy()
     );
-    write_exec_files(&spec, &cfg(), Path::new("/usr/bin/canterlot-worker")).unwrap();
+    write_exec_files(&spec, &cfg(), Path::new("/usr/bin/canterlot-worker"), None).unwrap();
     let dst = exec_dir.join("instructions.md");
     assert_eq!(std::fs::read_to_string(&dst).unwrap(), "секретный текст");
     use std::os::unix::fs::PermissionsExt;
@@ -345,9 +345,19 @@ fn mcp_json_points_relay_at_exec_socket() {
         isolate_mcp: false,
     };
     fs::create_dir_all(&exec_dir).unwrap();
-    write_exec_files(&spec, &cfg(), Path::new("/usr/bin/canterlot-worker")).unwrap();
+    write_exec_files(
+        &spec,
+        &cfg(),
+        Path::new("/usr/bin/canterlot-worker"),
+        Some("s3cret"),
+    )
+    .unwrap();
     let raw = fs::read_to_string(exec_dir.join("mcp.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        v["mcpServers"]["canterlot"]["env"]["CANTERLOT_MCP_SECRET"], "s3cret",
+        "the relay gets the socket secret in its environment"
+    );
     let cmd = v["mcpServers"]["canterlot"]["command"].as_str().unwrap();
     assert_eq!(cmd, "/usr/bin/canterlot-worker");
     let args = v["mcpServers"]["canterlot"]["args"].as_array().unwrap();

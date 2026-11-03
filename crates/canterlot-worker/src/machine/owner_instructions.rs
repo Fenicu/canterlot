@@ -23,12 +23,12 @@
 //! - OpenCode: `~/.config/opencode/AGENTS.md` (документация OpenCode V2
 //!   «Instructions»: блок Scope с примером глобального файла).
 
+use super::nofollow;
 use canterlot_proto::worker::v1::{
     OwnerFileMeta, OwnerInstructionsFile, OwnerInstructionsOverview, OwnerMemoryFile,
     OwnerMemoryProject,
 };
 use std::ffi::OsString;
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -182,20 +182,6 @@ enum ReadOutcome {
     Symlink,
 }
 
-fn is_loop(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())
-}
-
-/// Открыть файл ровно один раз без перехода по ссылке и без блокировки
-/// на FIFO: подмена между проверкой и чтением упрётся в ошибку,
-/// а не в чужое содержимое.
-fn open_verified(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(path)
-}
-
 /// Все проверки файла — только по дескриптору: обычный файл, единственная
 /// жёсткая ссылка и владелец-процесс. Жёсткая ссылка на чужой файл
 /// неотличима по пути, поэтому счётчик ссылок проверяется здесь.
@@ -227,9 +213,14 @@ fn open_checked(
     if !inside(&parent_canon, base) {
         return Err(ReadOutcome::Absent);
     }
-    let file = match open_verified(expected) {
+    // Открывается проверенный раскрытый родитель, финал от его дескриптора:
+    // родитель, подменённый ссылкой после проверки, за базу не выведет.
+    let Ok(parent_fd) = nofollow::open_dir(&parent_canon) else {
+        return Err(ReadOutcome::Absent);
+    };
+    let file = match nofollow::open_file(&parent_fd, name) {
         Ok(file) => file,
-        Err(error) if is_loop(&error) => return Err(ReadOutcome::Symlink),
+        Err(error) if nofollow::is_link_error(error) => return Err(ReadOutcome::Symlink),
         Err(_) => return Err(ReadOutcome::Absent),
     };
     match verified_meta(&file) {

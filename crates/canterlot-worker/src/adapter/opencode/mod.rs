@@ -828,7 +828,12 @@ impl OpenCodeAdapter {
         env.push(("OPENCODE_PASSWORD".into(), password.clone().into()));
         env.push((
             "OPENCODE_CONFIG_CONTENT".into(),
-            mcp::config_content(&relay, &self.exec_dir).into(),
+            mcp::config_content(
+                &relay,
+                &self.exec_dir,
+                self.broker.as_ref().map(Broker::relay_secret),
+            )
+            .into(),
         ));
         Ok((env, password))
     }

@@ -57,6 +57,8 @@ pub struct LaunchSpec<'a> {
     pub exec_dir: &'a Path,
     pub workdir: &'a Path,
     pub relay_exe: &'a Path,
+    /// Секрет сокета MCP этой сессии для relay.
+    pub relay_secret: Option<&'a str>,
 }
 
 // Значение `-c key=value` разбирается CLI как TOML, поэтому строки и массивы
@@ -98,6 +100,9 @@ pub fn build_args(spec: &LaunchSpec, mode: InstructionMode) -> Result<Vec<OsStri
         "incremental_tools".into(),
     ];
     args.extend(super::mcp::launch_overrides(spec.relay_exe, spec.exec_dir));
+    if let Some(secret) = spec.relay_secret {
+        args.extend(super::mcp::secret_override(secret));
+    }
     if mode != InstructionMode::Owner {
         args.push("--disable".into());
         args.push("memories".into());
