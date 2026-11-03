@@ -68,6 +68,24 @@ struct ReceiptEntry {
     transmitted: bool,
     #[serde(default)]
     pilot_v1: bool,
+    #[serde(default)]
+    at_ms: u64,
+}
+
+const RECEIPT_HORIZON_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct HorizonEntry {
+    attempt: u32,
+    class: ReceiptClass,
+    #[serde(default)]
+    transmitted: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Previous {
+    attempt: u32,
+    transmitted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,10 +122,13 @@ pub struct WorkerStore {
     receipts: Journal,
     ownership: OwnershipStore,
     index: HashMap<String, ReceiptEntry>,
+    horizon: HashMap<String, HorizonEntry>,
     hub: HubState,
     cancelled_starts: HashSet<Uuid>,
     #[cfg(test)]
     crash_after: Option<tests::AppendPoint>,
+    #[cfg(test)]
+    receipt_time: Option<u64>,
 }
 
 impl WorkerStore {
@@ -200,6 +221,11 @@ impl WorkerStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => HashSet::new(),
             Err(error) => return Err(error.into()),
         };
+        let horizon = match fs::read_to_string(data_dir.join("receipts-horizon.toml")) {
+            Ok(text) => toml::from_str(&text)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(error.into()),
+        };
         let hub = match fs::read_to_string(data_dir.join("hub.toml")) {
             Ok(text) => toml::from_str(&text)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => HubState::default(),
@@ -217,13 +243,18 @@ impl WorkerStore {
             receipts,
             ownership,
             index: HashMap::new(),
+            horizon,
             hub,
             cancelled_starts,
             #[cfg(test)]
             crash_after: tests::take_open_crash_point(),
+            #[cfg(test)]
+            receipt_time: None,
         };
         #[cfg(feature = "fault-injection")]
         store.ownership.set_probe(store.probe.clone());
+        let terminal = store.terminal_ids_up_to(store.cj.acked_seq())?;
+        store.ownership.acknowledge_terminal(terminal)?;
         store.reconcile()?;
         Ok(store)
     }
@@ -302,11 +333,15 @@ impl WorkerStore {
             }
         }
         for (command_id, attempt, class) in facts {
-            if self
+            let index_old = self
                 .index
                 .get(&command_id)
-                .is_none_or(|entry| entry.attempt < attempt)
-            {
+                .is_none_or(|entry| entry.attempt < attempt);
+            let horizon_old = self
+                .horizon
+                .get(&command_id)
+                .is_none_or(|entry| entry.attempt < attempt);
+            if index_old && horizon_old {
                 let inbox_seq = if class == ReceiptClass::Stored {
                     inbox_seqs.get(&(command_id.clone(), attempt)).copied()
                 } else {
@@ -317,6 +352,10 @@ impl WorkerStore {
                 let was_transmitted = transmitted.contains(&command_id)
                     || self
                         .index
+                        .get(&command_id)
+                        .is_some_and(|entry| entry.transmitted)
+                    || self
+                        .horizon
                         .get(&command_id)
                         .is_some_and(|entry| entry.transmitted);
                 let terminal = class == ReceiptClass::Rejected;
@@ -329,16 +368,21 @@ impl WorkerStore {
                     terminal,
                     transmitted: was_transmitted,
                     pilot_v1,
+                    at_ms: 0,
                 })?;
             }
         }
         for (inbox_seq, cmd) in pending {
             let command_id = receipt_id(&cmd.command_id);
-            if self
+            let index_old = self
                 .index
                 .get(&command_id)
-                .is_none_or(|entry| entry.attempt < cmd.dispatch_attempt)
-            {
+                .is_none_or(|entry| entry.attempt < cmd.dispatch_attempt);
+            let horizon_old = self
+                .horizon
+                .get(&command_id)
+                .is_none_or(|entry| entry.attempt < cmd.dispatch_attempt);
+            if index_old && horizon_old {
                 self.append_stored_fact(&cmd)?;
                 let pilot_v1 = self
                     .pilot_marker(&command_id, cmd.dispatch_attempt)
@@ -351,6 +395,7 @@ impl WorkerStore {
                     class: ReceiptClass::Stored,
                     inbox_seq: Some(inbox_seq),
                     terminal: false,
+                    at_ms: 0,
                 })?;
             } else if let Some(entry) = self.index.get(&command_id)
                 && entry.attempt == cmd.dispatch_attempt
@@ -389,7 +434,14 @@ impl WorkerStore {
         Ok(())
     }
 
-    fn append_receipt(&mut self, entry: ReceiptEntry) -> Result<(), StoreError> {
+    fn append_receipt(&mut self, mut entry: ReceiptEntry) -> Result<(), StoreError> {
+        #[cfg(test)]
+        if let Some(at) = self.receipt_time {
+            entry.at_ms = at;
+        }
+        if entry.at_ms == 0 {
+            entry.at_ms = machine_time_ms();
+        }
         self.receipts.append(toml::to_string(&entry)?.as_bytes())?;
         self.append_boundary(AppendBoundary::Receipt)?;
         self.index.insert(entry.command_id.clone(), entry);
@@ -424,7 +476,7 @@ impl WorkerStore {
             return Ok(Accept::DroppedInvalidId);
         };
         let command_id = id.to_string();
-        let previous = self.index.get(&command_id);
+        let previous = self.previous(&command_id);
         if let Some(entry) = previous
             && cmd.dispatch_attempt <= entry.attempt
         {
@@ -483,10 +535,7 @@ impl WorkerStore {
             .encode_to_vec(),
         )?;
         self.append_boundary(AppendBoundary::Cj)?;
-        let transmitted = self
-            .index
-            .get(&command_id)
-            .is_some_and(|entry| entry.transmitted);
+        let transmitted = self.transmitted(&command_id);
         let inbox_seq = self
             .index
             .get(&command_id)
@@ -499,6 +548,7 @@ impl WorkerStore {
             terminal: true,
             transmitted,
             pilot_v1: false,
+            at_ms: 0,
         })?;
         Ok(Accept::Rejected { cj_seq, reason })
     }
@@ -540,6 +590,7 @@ impl WorkerStore {
             terminal: false,
             transmitted: false,
             pilot_v1,
+            at_ms: 0,
         })?;
         if pilot_v1 {
             fs::remove_file(marker)?;
@@ -556,19 +607,62 @@ impl WorkerStore {
             .join(format!(".pilot-{command_id}-{attempt}.mark"))
     }
 
+    #[cfg(test)]
+    pub(crate) fn receipt_in_horizon(&self, command_id: &str) -> bool {
+        self.horizon.contains_key(&receipt_id(command_id))
+    }
+
     pub fn command_state(&self, command_id: &str) -> Result<Option<CommandState>, StoreError> {
         self.ensure_open()?;
-        Ok(self
-            .index
-            .get(&receipt_id(command_id))
-            .map(|entry| CommandState {
+        let command_id = receipt_id(command_id);
+        Ok(self.index.get(&command_id).map_or_else(
+            || {
+                self.horizon.get(&command_id).map(|entry| CommandState {
+                    attempt: entry.attempt,
+                    class: entry.class.clone(),
+                    inbox_seq: None,
+                    terminal: true,
+                    transmitted: entry.transmitted,
+                    pilot_v1: false,
+                })
+            },
+            |entry| {
+                Some(CommandState {
+                    attempt: entry.attempt,
+                    class: entry.class.clone(),
+                    inbox_seq: entry.inbox_seq,
+                    terminal: entry.terminal,
+                    transmitted: entry.transmitted,
+                    pilot_v1: entry.pilot_v1,
+                })
+            },
+        ))
+    }
+
+    fn previous(&self, command_id: &str) -> Option<Previous> {
+        self.index
+            .get(command_id)
+            .map(|entry| Previous {
                 attempt: entry.attempt,
-                class: entry.class.clone(),
-                inbox_seq: entry.inbox_seq,
-                terminal: entry.terminal,
                 transmitted: entry.transmitted,
-                pilot_v1: entry.pilot_v1,
-            }))
+            })
+            .or_else(|| {
+                self.horizon.get(command_id).map(|entry| Previous {
+                    attempt: entry.attempt,
+                    transmitted: entry.transmitted,
+                })
+            })
+    }
+
+    fn transmitted(&self, command_id: &str) -> bool {
+        self.index.get(command_id).map_or_else(
+            || {
+                self.horizon
+                    .get(command_id)
+                    .is_some_and(|entry| entry.transmitted)
+            },
+            |entry| entry.transmitted,
+        )
     }
 
     pub(crate) fn delivery_is_closed(
@@ -716,9 +810,82 @@ impl WorkerStore {
                     terminal: true,
                     transmitted: false,
                     pilot_v1: false,
+                    at_ms: 0,
                 })?;
             }
             self.release_inbox()
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Убирает из журнала подтверждённые терминальные квитанции старше семи дней.
+    /// Их идентификаторы остаются в компактной карте, чтобы повтор команды не выполнился снова.
+    pub(crate) fn prune_receipts(&mut self, now_ms: u64) -> Result<usize, StoreError> {
+        self.ensure_open()?;
+        let result = (|| {
+            let cutoff = now_ms.saturating_sub(RECEIPT_HORIZON_MS);
+            let mut records = Vec::new();
+            let mut from = self.receipts.first_seq();
+            while from <= self.receipts.last_seq() {
+                for record in self.receipts.read_from(from, MAX_MESSAGE_BYTES)? {
+                    from = record.seq + 1;
+                    let entry: ReceiptEntry =
+                        toml::from_str(std::str::from_utf8(&record.payload)?)?;
+                    records.push((record.seq, entry));
+                }
+            }
+
+            let mut latest = HashMap::new();
+            for (seq, entry) in &records {
+                latest.insert(entry.command_id.clone(), *seq);
+            }
+            let mut prefix_end = 0;
+            let mut expected = self.receipts.first_seq();
+            let mut pruned = 0;
+            for (seq, entry) in records {
+                if seq != expected || entry.at_ms == 0 || entry.at_ms >= cutoff {
+                    break;
+                }
+                let superseded = latest
+                    .get(&entry.command_id)
+                    .is_some_and(|last| *last > seq);
+                if !entry.terminal && !superseded {
+                    break;
+                }
+                if entry.terminal {
+                    if self.index.get(&entry.command_id).is_some_and(|current| {
+                        current.attempt == entry.attempt
+                            && current.at_ms == entry.at_ms
+                            && current.terminal
+                    }) {
+                        self.index.remove(&entry.command_id);
+                    }
+                    self.horizon.insert(
+                        entry.command_id.clone(),
+                        HorizonEntry {
+                            attempt: entry.attempt,
+                            class: entry.class,
+                            transmitted: entry.transmitted,
+                        },
+                    );
+                }
+                prefix_end = seq;
+                expected = seq + 1;
+                pruned += 1;
+            }
+            if pruned == 0 {
+                return Ok(0);
+            }
+            write_private_atomic(
+                &self.data_dir.join("receipts-horizon.toml"),
+                toml::to_string(&self.horizon)?.as_bytes(),
+            )?;
+            self.receipts.ack(prefix_end)?;
+            self.receipts.compact()?;
+            Ok(pruned)
         })();
         if result.is_err() {
             self.poisoned = true;
@@ -873,10 +1040,36 @@ impl WorkerStore {
             .collect()
     }
 
+    fn terminal_ids_up_to(&self, up_to: u64) -> Result<HashSet<Uuid>, StoreError> {
+        let mut terminal = HashSet::new();
+        let mut next = self.cj.first_seq();
+        while next <= up_to {
+            let records = self.cj_records_from(next, MAX_MESSAGE_BYTES)?;
+            if records.is_empty() {
+                break;
+            }
+            for record in records {
+                next = record.seq + 1;
+                if record.seq > up_to {
+                    break;
+                }
+                if let Some(record_body::Body::ExecutionState(fact)) =
+                    record.body.and_then(|body| body.body)
+                    && is_terminal_state(&fact.state)
+                    && let Ok(id) = Uuid::parse_str(&fact.execution_id)
+                {
+                    terminal.insert(id);
+                }
+            }
+        }
+        Ok(terminal)
+    }
+
     pub fn on_cj_ack(&mut self, up_to: u64) -> Result<(), StoreError> {
         self.ensure_open()?;
         let result = (|| {
             self.cj.ack(up_to)?;
+            let mut terminal = HashSet::new();
             let mut next = self.cj.first_seq();
             while next <= up_to {
                 let records = self.cj_records_from(next, MAX_MESSAGE_BYTES)?;
@@ -890,12 +1083,19 @@ impl WorkerStore {
                     }
                     if let Some(record_body::Body::ExecutionState(fact)) =
                         record.body.and_then(|body| body.body)
-                        && fact.state == "owner_lost"
                     {
-                        self.retire_owner_lost(&fact.execution_id, record.seq)?;
+                        if fact.state == "owner_lost" {
+                            self.retire_owner_lost(&fact.execution_id, record.seq)?;
+                        }
+                        if is_terminal_state(&fact.state)
+                            && let Ok(id) = Uuid::parse_str(&fact.execution_id)
+                        {
+                            terminal.insert(id);
+                        }
                     }
                 }
             }
+            self.ownership.acknowledge_terminal(terminal)?;
             self.cj.compact()?;
             Ok(())
         })();
@@ -985,6 +1185,10 @@ fn machine_time_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn is_terminal_state(state: &str) -> bool {
+    matches!(state, "stopped" | "failed" | "owner_lost")
 }
 
 fn receipt_id(raw: &str) -> String {

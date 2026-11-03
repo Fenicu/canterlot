@@ -324,6 +324,28 @@ pub(super) async fn sweep_runtime(shared: &Shared) -> Result<(), ExecError> {
     Ok(())
 }
 
+/// Квитанции старше семи дней: журнал сжимается, идентификаторы остаются в карте.
+pub(super) async fn prune_receipts(shared: &Shared) -> Result<(), ExecError> {
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    prune_receipts_at(shared, now).await
+}
+
+pub(super) async fn prune_receipts_at(shared: &Shared, now_ms: u64) -> Result<(), ExecError> {
+    shared
+        .store
+        .call(move |store| {
+            open(store)?.prune_receipts(now_ms)?;
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
 /// Сборка в рабочей копии без живого исполнения: `target` и кэш узлов старше шести часов.
 pub(super) async fn gc_worktrees(shared: &Shared) -> Result<(), ExecError> {
     let records = shared
@@ -2960,6 +2982,45 @@ mod tests {
                 .unwrap()
         );
         drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn maintenance_prunes_receipts_past_the_horizon() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let id = Uuid::now_v7().to_string();
+        let command = Command {
+            command_id: id.clone(),
+            dispatch_attempt: 1,
+            kind: Some(Kind::CancelInput(CancelInput::default())),
+            ..Default::default()
+        };
+        store.accept_command(&command).unwrap();
+        store.mark_terminal(&id, 1).unwrap();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 8 * 24 * 3600 * 1000;
+        super::prune_receipts_at(&manager.shared, now)
+            .await
+            .unwrap();
+        let in_horizon = thread
+            .client()
+            .call(move |slot| Ok(open(slot)?.receipt_in_horizon(&id)))
+            .await
+            .unwrap();
+        assert!(in_horizon);
         manager.shutdown().await;
         thread.close().await.unwrap();
     }
