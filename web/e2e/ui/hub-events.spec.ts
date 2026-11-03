@@ -272,6 +272,11 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
     await expect(card.getByText(label, { exact: true })).toBeVisible();
     await expect(card.getByText(value, { exact: true })).toBeVisible();
   }
+  // Значения начинаются с одного края, отдельной колонкой от подписей.
+  const values = await card.locator('.facts dd').evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().left)));
+  expect(new Set(values).size).toBe(1);
+  const labels = await card.locator('.facts dt').evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().right)));
+  expect(Math.max(...labels)).toBeLessThan(values[0]!);
   await expect(card.getByText('Итог')).toHaveCount(0);
   const footer = card.locator('[data-role="event-footer"]');
   await expect(footer).toBeVisible();
