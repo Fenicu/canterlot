@@ -2,6 +2,8 @@
 //! Задача 1: запуск, resume и каталог; ходы, запросы и лимиты приходят позже.
 
 pub mod catalog;
+pub mod events;
+pub mod input;
 pub mod process;
 #[cfg(feature = "synthetic-adapter")]
 pub mod replay;
