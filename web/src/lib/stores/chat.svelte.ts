@@ -344,6 +344,8 @@ export class ChatStore {
   #laneLive = rawCell<TimelineEntry[]>([]);
   #readSeq = 0n;
   #readAt = -10_000;
+  #readWanted: string | null = null;
+  #readTimer: (() => void) | null = null;
   #noteTimers = new SvelteMap<string, () => void>();
   #applier: ScopeApplier | null = null;
   #stopRefused: (() => void) | null = null;
@@ -421,6 +423,9 @@ export class ChatStore {
   close(): void {
     this.#sub?.release();
     this.#sub = null;
+    this.#readTimer?.();
+    this.#readTimer = null;
+    this.#readWanted = null;
     for (const cancel of this.#noteTimers.values()) cancel();
     this.#noteTimers.clear();
   }
@@ -531,6 +536,7 @@ export class ChatStore {
     this.#flushHeld();
   }
 
+  /** Владелец видит последние записи: хаб снимает непрочитанное до этого номера. Чаще раза в две секунды не шлёт, последнюю отметку досылает. */
   markRead(createdSeq: string): void {
     if (!this.following || !visible()) return;
     let seq: bigint;
@@ -540,11 +546,26 @@ export class ChatStore {
       return;
     }
     if (seq <= this.#readSeq) return;
-    const now = this.deps.clock.now();
-    if (now - this.#readAt < 2000) return;
+    const wait = this.#readAt + 2000 - this.deps.clock.now();
+    if (wait > 0) {
+      this.#readWanted = createdSeq;
+      this.#readTimer ??= this.#later(() => {
+        this.#readTimer = null;
+        const wanted = this.#readWanted;
+        this.#readWanted = null;
+        if (wanted) this.markRead(wanted);
+      }, wait);
+      return;
+    }
     this.#readSeq = seq;
-    this.#readAt = now;
-    void this.deps.api.markRead(this.id, createdSeq);
+    this.#readAt = this.deps.clock.now();
+    this.deps.api.markRead(this.id, createdSeq).catch(() => undefined);
+  }
+
+  #later(fn: () => void, ms: number): () => void {
+    if (this.deps.clock.schedule) return this.deps.clock.schedule(fn, ms);
+    const timer = setTimeout(fn, ms);
+    return () => clearTimeout(timer);
   }
 
   async blockContent(blockId: string): Promise<AsyncIterable<BlockPage>> {

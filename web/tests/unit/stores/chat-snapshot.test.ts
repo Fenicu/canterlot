@@ -3,6 +3,7 @@ import type { OpJournal } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import { sha256Hex } from "#lib/stores/blocks.js";
+import { FakeClock } from "../../../testing/fake-hub";
 import { ChatStore, type ChatApi, type HistoryItem, type SnapshotData } from "#lib/stores/chat.svelte.js";
 import type { HubEvent } from "#lib/sync/wire.js";
 
@@ -25,7 +26,11 @@ export function ev(kind: string, payload: unknown, seq = "1", execution: string 
   } as HubEvent;
 }
 
-export function chatOf(api: Partial<ChatApi> = {}, resync: () => void = () => undefined): ChatStore {
+export function chatOf(
+  api: Partial<ChatApi> = {},
+  resync: () => void = () => undefined,
+  clock: { now(): number; schedule?: (fn: () => void, ms: number) => () => void } = { now: () => 0 },
+): ChatStore {
   const full: ChatApi = {
     conversationSnapshot: async () => ({ cursor: "0", data: {} }),
     history: async () => ({ items: [] }),
@@ -42,7 +47,7 @@ export function chatOf(api: Partial<ChatApi> = {}, resync: () => void = () => un
       fetchContent: async () => ({ content: "", offset: 0, rev: 0, state: "streaming", total_bytes: 0 }),
       sha256Hex,
     },
-    clock: { now: () => 0 },
+    clock,
     probe: {},
   });
 }
@@ -277,5 +282,22 @@ describe("финал блока за окном снимка", () => {
     apply(chat, final);
     const page = await chat.loadLane(CALL);
     expect(page.entries[0]!.kind === "block" && page.entries[0]!.block.kind).toBe("tool_call");
+  });
+});
+
+describe("отметка прочтения", () => {
+  it("последняя отметка внутри паузы уходит, когда пауза кончится", () => {
+    const reads: string[] = [];
+    const clock = new FakeClock(1);
+    const chat = chatOf({ markRead: async (_id, seq) => { reads.push(seq); } }, undefined, clock);
+    chat.markRead("5");
+    clock.advance(500);
+    chat.markRead("6");
+    chat.markRead("7");
+    expect(reads).toEqual(["5"]);
+    clock.advance(1500);
+    expect(reads).toEqual(["5", "7"]);
+    clock.advance(5000);
+    expect(reads).toEqual(["5", "7"]);
   });
 });

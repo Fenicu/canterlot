@@ -109,6 +109,32 @@ test('scrolling_down_a_detached_window_loads_newer_pages_back_to_the_tail', asyn
   await expect(page.locator('[data-row]').last()).toContainText('3200');
 });
 
+test('reading_the_tail_marks_the_chat_read_and_reading_old_history_does_not', async ({ page }) => {
+  const { hub, api, id } = await boot(page, 0);
+  const reads: string[] = [];
+  await page.route('**/api/v1/conversations/*/read', async (route) => {
+    reads.push(String((route.request().postDataJSON() as { seq?: unknown }).seq));
+    await route.fallback();
+  });
+  api.histories.set(id, Array.from({ length: 30 }, (_, index) => textBlock(api, `строка ${index}`, String(index + 1))));
+  // Журнал хаба идёт вровень с историей: живое событие получит номер после неё.
+  for (let n = 0; n < 30; n++) hub.append(`conversation:${id}`, { kind: 'phase_changed', conversation_id: id, payload: { phase: 'generating', tool_name: null, summary: null } });
+  api.bindConversation(id);
+  await page.reload();
+  await expect(page.locator('[data-ready]')).toBeVisible();
+  await expect.poll(() => reads.at(-1)).toBe('30');
+  const feed = page.locator('.feed');
+  await feed.evaluate((el) => { el.scrollTop = 0; });
+  await expect(feed).not.toHaveAttribute('data-pinned', '');
+  const blockId = api.id();
+  const opened = hub.append(`conversation:${id}`, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
+  hub.flush();
+  await page.waitForTimeout(2500);
+  expect(reads.at(-1)).toBe('30');
+  await page.getByRole('button', { name: 'К новым сообщениям' }).click();
+  await expect.poll(() => reads.at(-1), { timeout: 5000 }).toBe(opened.scope_seq);
+});
+
 // QUARANTINE: подгрузка не укладывается в 5 с под нагрузкой (1 раз при нагрузке 40; 8 из 8 отдельно)
 test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the_viewport', () => {
   test.describe.configure({ retries: 2 });

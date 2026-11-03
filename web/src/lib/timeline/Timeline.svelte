@@ -79,6 +79,14 @@
     if (!feed && untrack(() => chat.timeline.tailDetached)) void jumpToLatest();
     else void tick().then(() => controller?.jumpToBottom());
   });
+  // Владелец у самого низа настоящего хвоста видит последние записи: хаб снимает непрочитанное.
+  let shown = $state(0);
+  $effect(() => {
+    void shown;
+    if (feed || laneRoot || !controller?.pinned || chat.timeline.tailDetached) return;
+    const seq = chat.timeline.newestSeq();
+    if (seq) untrack(() => chat.markRead(seq));
+  });
   let seenRows: string | null = null;
   $effect(() => {
     const next = rows.map((row) => row.key).join('\n');
@@ -385,7 +393,10 @@
       else if (overflow - host.scrollTop < host.clientHeight) void pullNewer();
     };
     scroller.addEventListener('scroll', onScroll, { passive: true });
+    const onVisible = () => { if (document.visibilityState === 'visible') shown += 1; };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
+      document.removeEventListener('visibilitychange', onVisible);
       scroller.removeEventListener('scroll', onScroll);
       controller?.destroy();
       observer?.disconnect();
