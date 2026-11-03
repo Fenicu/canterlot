@@ -305,6 +305,8 @@ test('answered_question_reads_as_a_row_with_its_question_and_opens_as_history', 
   const row = page.locator('.applied');
   await expect(row.locator('.name')).toHaveText('Вопрос');
   await expect(row.locator('.summary')).toHaveText('Продолжать проверку интерфейса?');
+  // Сводка шага обрезается многоточием, поэтому целиком она в подсказке.
+  await expect(row.locator('.summary')).toHaveAttribute('title', 'Продолжать проверку интерфейса?');
   await expect(row.locator('.pill')).toHaveText('Продолжить');
   await row.locator('.head').click();
   await expect(row.locator('.answered-option[data-chosen]')).toContainText('Выполнить sleep 90');

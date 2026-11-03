@@ -27,7 +27,7 @@
 <button type="button" class="head" aria-expanded={open} onclick={ontoggle}>
   <span class="chevron" data-open={open ? '' : undefined}><Icon name="chevron" /></span>
   <span class="name">{name}</span>
-  {#if detail}<span class="summary">{detail}{#if dir}<span class="dir">{dir}</span>{/if}</span>{/if}
+  {#if detail}<span class="summary" title={detail}>{detail}{#if dir}<span class="dir">{dir}</span>{/if}</span>{/if}
   {@render badge?.()}
   {#if status}<StatusPill {state} text={status} />{/if}
 </button>
