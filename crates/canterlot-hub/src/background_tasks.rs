@@ -202,7 +202,11 @@ pub async fn apply(
     Ok(false)
 }
 
-/// Задачи разговора, свежие в конце. Со смертью процесса работающая задача прервана.
+/// Законченных задач в снимке: долгая сессия копит их без конца.
+const RECENT_TASKS: i64 = 50;
+
+/// Работающие и последние законченные задачи разговора, свежие в конце.
+/// Со смертью процесса работающая задача прервана.
 pub async fn list(
     conn: &mut PgConnection,
     conversation_id: Uuid,
@@ -213,9 +217,14 @@ pub async fn list(
                      else t.state end as state,
                 t.started_at, t.ended_at
          from background_tasks t join executions e on e.id = t.execution_id
-         where t.conversation_id = $1 order by t.started_at, t.task_id",
+         where t.conversation_id = $1
+           and ((t.state = 'running' and e.state in ('created','starting','running','stopping'))
+                or t.task_id in (select r.task_id from background_tasks r where r.conversation_id = $1
+                                 order by r.started_at desc, r.task_id desc limit $2))
+         order by t.started_at, t.task_id",
     )
     .bind(conversation_id)
+    .bind(RECENT_TASKS)
     .fetch_all(conn)
     .await?;
     Ok(rows.into_iter().map(Into::into).collect())

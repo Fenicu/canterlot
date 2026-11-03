@@ -687,3 +687,30 @@ async fn delegation_of_other_harnesses_keeps_the_call_state(pool: PgPool) {
     apply(&pool, &seed, &records(Uuid::now_v7(), 1, bodies)).await;
     assert_eq!(node(&pool, &seed, call).await.0, "done");
 }
+
+// Снимок несёт работающие задачи и последние законченные, а не всю историю сессии.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn snapshot_carries_running_and_recent_tasks_only(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    let execution = running(&pool, &seed).await;
+    for (n, state) in (0..70).map(|n| (n, if n == 3 { "running" } else { "completed" })) {
+        sqlx::query(
+            "insert into background_tasks(conversation_id,task_id,execution_id,generation,source_revision,kind,description,state,started_at,ended_at)
+             values($1,$2,$3,1,1,'bash','задача',$4,clock_timestamp()-make_interval(mins=>100-$5),
+                    case when $4='running' then null else clock_timestamp() end)",
+        )
+        .bind(seed.conversation_id)
+        .bind(format!("t{n:02}"))
+        .bind(execution.execution_id)
+        .bind(state)
+        .bind(n)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let tasks = background(&pool, &seed).await;
+    assert_eq!(tasks.len(), 51);
+    assert_eq!(tasks[0].task_id, "t03");
+    assert_eq!(tasks[1].task_id, "t20");
+    assert_eq!(tasks.last().unwrap().task_id, "t69");
+}

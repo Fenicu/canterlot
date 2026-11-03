@@ -588,3 +588,27 @@ async fn list_update_counts_as_a_sign_of_life_for_the_stalled_check(pool: PgPool
     .await;
     assert!(last_event_at().await.is_some());
 }
+
+// Снимок несёт основную дорожку и недавно обновлённые дорожки субагентов.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn snapshot_carries_main_and_recent_lanes_only(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    for n in 0..=60 {
+        let lane = (n > 0).then(Uuid::now_v7);
+        sqlx::query(
+            "insert into agent_todos(conversation_id,lane_block_id,generation,source_revision,revision,items,omitted,updated_at)
+             values($1,$2,1,1,$3,'[]',0,clock_timestamp()-make_interval(mins=>$4))",
+        )
+        .bind(seed.conversation_id)
+        .bind(lane)
+        .bind(n as i64)
+        .bind(n)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let lists = lists(&pool, &seed).await;
+    assert_eq!(lists.len(), 51);
+    assert_eq!(lists[0].lane_block_id, None);
+    assert!(lists.iter().all(|list| list.revision <= 50));
+}
