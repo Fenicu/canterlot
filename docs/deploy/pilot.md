@@ -83,7 +83,7 @@
 |  |                                                                             |  |
 |  |  - KillMode=process (сохранение сопровождающих процессов при рестарте)      |  |
 |  |  - data_dir: ~/.local/state/canterlot-worker (права 0700)                   |  |
-|  |  - Локальный журнал управления (CJ) и hub.toml с restore_generation (0600)  |  |
+|  |  - Журнал управления (CJ) (0600); токен в token_file (0600)                 |  |
 |  +-----------------------------------------------------------------------------+  |
 |           |                                       |                               |
 |           v Управление процессом                  v Управление процессом          |
@@ -195,86 +195,97 @@ curl --connect-timeout 2 http://10.0.0.10:8080/readyz
 
 Конфигурационный файл хаба располагается по пути `/etc/canterlot/hub.toml` (права `0600`, владелец `canterlot`). Все относительные пути внутри файла вычисляются относительно каталога, в котором лежит `hub.toml`.
 
-Ниже приведён эталонный файл конфигурации со всеми полями, валидируемыми структурой `HubConfig` ([crates/canterlot-hub/src/config.rs:14](../../crates/canterlot-hub/src/config.rs#L14)):
+Ниже приведён эталонный файл конфигурации со всеми таблицами, которые принимает структура `HubConfig` ([crates/canterlot-hub/src/config.rs](../../crates/canterlot-hub/src/config.rs)). Ссылок на строки кода здесь нет: они устаревают с каждой правкой, значения по умолчанию сверяйте с файлом:
 
 ```toml
 # Корневые параметры хаба
-database_url_file = "/etc/canterlot/db.url"         # crates/canterlot-hub/src/config.rs:15
-grpc_listen = "10.0.0.10:7443"                      # crates/canterlot-hub/src/config.rs:16 (обязательное поле, без значения по умолчанию)
-tls_cert = "/etc/canterlot/tls/hub.crt"             # crates/canterlot-hub/src/config.rs:17
-tls_key = "/etc/canterlot/tls/hub.key"              # crates/canterlot-hub/src/config.rs:18
-manifest = "/etc/canterlot/manifest/installation.toml" # crates/canterlot-hub/src/config.rs:19
+database_url_file = "/etc/canterlot/db.url"
+grpc_listen = "10.0.0.10:7443"                      # обязательное поле, без значения по умолчанию
+tls_cert = "/etc/canterlot/tls/hub.crt"
+tls_key = "/etc/canterlot/tls/hub.key"
+manifest = "/etc/canterlot/manifest/installation.toml"
 
-[timers]                                            # crates/canterlot-hub/src/config.rs:38
-handshake = "10s"                                   # crates/canterlot-hub/src/config.rs:40
-# degraded_after (15s, config.rs:59), unavailable_after (30s, config.rs:60)
-# и command_stored_receipt (5s, config.rs:63) опущены — действуют значения по умолчанию из кода
-http2_keepalive_interval = "30s"                    # crates/canterlot-hub/src/config.rs:46
-http2_keepalive_timeout = "10s"                     # crates/canterlot-hub/src/config.rs:48
-dispatch_sweep = "5s"                               # crates/canterlot-hub/src/config.rs:52
+[timers]
+handshake = "10s"
+# degraded_after (15s), unavailable_after (30s)
+# и command_stored_receipt (5s) опущены — действуют значения по умолчанию из кода
+http2_keepalive_interval = "30s"
+http2_keepalive_timeout = "10s"
+dispatch_sweep = "5s"
 
-[http]                                              # crates/canterlot-hub/src/config.rs:141
-listen = "10.0.0.10:8080"                           # crates/canterlot-hub/src/config.rs:142 (привязка к IP хаба в LXC; default в коде: 127.0.0.1:8080, config.rs:162)
-trusted_proxies = ["10.0.0.2/32"]                   # crates/canterlot-hub/src/config.rs:143 (IP отдельного хоста Caddy /32)
-owner_login = "owner"                               # crates/canterlot-hub/src/config.rs:144 (логин в Authelia)
-user_header = "Remote-User"                         # crates/canterlot-hub/src/config.rs:145 (default Remote-User, config.rs:165)
-allowed_origins = ["https://chat.example.com"]      # crates/canterlot-hub/src/config.rs:146
-# max_json_body_bytes опущен — действует значение по умолчанию 524288 (512 KiB), crates/canterlot-hub/src/config.rs:167
-header_read_timeout = "10s"                         # crates/canterlot-hub/src/config.rs:149
-body_read_timeout = "30s"                           # crates/canterlot-hub/src/config.rs:151
-max_connections = 256                               # crates/canterlot-hub/src/config.rs:152
-proxy_secret_file = "/etc/canterlot/proxy.secret"   # crates/canterlot-hub/src/config.rs:154
-logout_url = "https://auth.example.com/logout"      # crates/canterlot-hub/src/config.rs:155
-multi_process = false                               # crates/canterlot-hub/src/config.rs:156 (true включает LISTEN/NOTIFY)
+[http]
+listen = "10.0.0.10:8080"                           # привязка к IP хаба в LXC; default в коде: 127.0.0.1:8080
+trusted_proxies = ["10.0.0.2/32"]                   # IP отдельного хоста Caddy /32
+owner_login = "owner"                               # логин в Authelia
+user_header = "Remote-User"                         # default Remote-User
+allowed_origins = ["https://chat.example.com"]
+# max_json_body_bytes опущен — действует значение по умолчанию 524288 (512 KiB)
+header_read_timeout = "10s"
+body_read_timeout = "30s"
+max_connections = 256
+proxy_secret_file = "/etc/canterlot/proxy.secret"
+logout_url = "https://auth.example.com/logout"
+multi_process = false                               # true включает LISTEN/NOTIFY
 
-[http.ws]                                           # crates/canterlot-hub/src/config.rs:289
-max_connection_age = "30m"                          # crates/canterlot-hub/src/config.rs:291 (принудительный реконнект для повторной аутентификации)
-max_subscriptions = 16                              # crates/canterlot-hub/src/config.rs:292
-queue_messages = 64                                 # crates/canterlot-hub/src/config.rs:293 (диапазон 2..=256)
-queue_bytes = 65536                                 # crates/canterlot-hub/src/config.rs:294 (диапазон 4096..=1048576)
-delta_window = "25ms"                               # crates/canterlot-hub/src/config.rs:296 (не более 25ms)
-poll_interval = "2s"                                # crates/canterlot-hub/src/config.rs:298
-stall_timeout = "15s"                               # crates/canterlot-hub/src/config.rs:300
+[http.ws]
+max_connection_age = "30m"                          # принудительный реконнект для повторной аутентификации
+max_subscriptions = 16
+queue_messages = 64                                 # уменьшено против умолчания 256; диапазон 2..=256
+queue_bytes = 65536                                 # уменьшено против умолчания 1048576; диапазон 4096..=1048576
+delta_window = "25ms"                               # не более 25ms
+poll_interval = "2s"
+stall_timeout = "15s"
 
-[limits]                                            # crates/canterlot-hub/src/config.rs:319
-weekly_reserve_pct = 95                             # crates/canterlot-hub/src/config.rs:320 (порог включения «кранча»; диапазон кодом не проверяется — значения выше 100 не имеют смысла)
-snapshot_min_interval = "10m"                       # crates/canterlot-hub/src/config.rs:322
-history_days = 90                                   # crates/canterlot-hub/src/config.rs:323
-default_resume_text = "Лимиты восстановлены, продолжай с того места, где остановился." # crates/canterlot-hub/src/config.rs:324
-reset_grace = "20s"                                 # crates/canterlot-hub/src/config.rs:326
-verify_backoff = ["30s", "1m", "2m", "5m"]          # crates/canterlot-hub/src/config.rs:328
-poll_min_interval = "5m"                            # crates/canterlot-hub/src/config.rs:330
-unknown_reset_retry = "30m"                         # crates/canterlot-hub/src/config.rs:332
-reserve_exit_hysteresis_permille = 20               # crates/canterlot-hub/src/config.rs:335
-warn_pcts = [80, 90, 95]                            # crates/canterlot-hub/src/config.rs:336
-stale_after = "35m"                                 # crates/canterlot-hub/src/config.rs:338
-unverified_wake_after = "20m"                       # crates/canterlot-hub/src/config.rs:341
+[limits]
+weekly_reserve_pct = 95                             # порог недельного резерва: с этого показания новые ходы провайдера удерживаются (`weekly_reserve`), «кранч» на это не влияет; диапазон кодом не проверяется, значения выше 100 не имеют смысла
+snapshot_min_interval = "10m"
+history_days = 90
+default_resume_text = "Лимиты восстановлены, продолжай с того места, где остановился."
+reset_grace = "20s"
+verify_backoff = ["30s", "1m", "2m", "5m"]
+poll_min_interval = "5m"
+unknown_reset_retry = "30m"
+reserve_exit_hysteresis_permille = 20
+warn_pcts = [80, 90, 95]
+stale_after = "35m"
+unverified_wake_after = "20m"
 
-[limits.poll_floor]                                 # crates/canterlot-hub/src/config.rs:334
-claude = "30m"                                      # crates/canterlot-hub/src/config.rs:387
-codex = "5m"                                        # crates/canterlot-hub/src/config.rs:388
+[limits.poll_floor]
+claude = "30m"
+codex = "5m"
 
-[activity]                                          # crates/canterlot-hub/src/config.rs:400
-stalled_generating = "5m"                           # crates/canterlot-hub/src/config.rs:402
-stalled_tool = "30m"                                # crates/canterlot-hub/src/config.rs:404
-tick = "15s"                                        # crates/canterlot-hub/src/config.rs:406
-debounce = "250ms"                                  # crates/canterlot-hub/src/config.rs:408
+[activity]
+stalled_generating = "5m"
+stalled_tool = "30m"
+tick = "15s"
+debounce = "250ms"
+idle_quiet = "5s"                                   # сколько сессия стоит в idle без событий, чтобы считаться устоявшейся (межсессионные итоги)
 
-[scheduler]                                         # crates/canterlot-hub/src/config.rs:424
-max_pending_per_conversation = 50                   # crates/canterlot-hub/src/config.rs:425
-retry_queue_full = "60s"                            # crates/canterlot-hub/src/config.rs:427
-max_attempts = 20                                   # crates/canterlot-hub/src/config.rs:428
-idle_poll = "1s"                                    # crates/canterlot-hub/src/config.rs:430
+[scheduler]
+max_pending_per_conversation = 50
+retry_queue_full = "60s"
+max_attempts = 20
+idle_poll = "1s"
 
-[attachments]                                       # crates/canterlot-hub/src/config.rs:446
-blob_dir = "/var/lib/canterlot/attachments"         # crates/canterlot-hub/src/config.rs:447
-max_concurrent_uploads = 4                          # crates/canterlot-hub/src/config.rs:448
-gc_grace = "24h"                                    # crates/canterlot-hub/src/config.rs:450
-gc_interval = "1h"                                  # crates/canterlot-hub/src/config.rs:452
+[attachments]
+blob_dir = "/var/lib/canterlot/attachments"
+max_concurrent_uploads = 4
+gc_grace = "24h"
+gc_interval = "1h"
 
-[machines]                                          # crates/canterlot-hub/src/config.rs:468
-disk_warn_pct = 85                                  # crates/canterlot-hub/src/config.rs:469
-metrics_stale_after = "90s"                         # crates/canterlot-hub/src/config.rs:471
+[machines]
+disk_warn_pct = 85
+metrics_stale_after = "90s"
+
+[session_tools]                                     # пределы межсессионных инструментов, таблица необязательна
+max_spawn_depth = 3
+max_chain_depth = 8
+pair_sends = 10
+pair_window = "10m"
+sender_sends = 30
+sender_window = "10m"
+parent_spawns = 10
+spawn_window = "1h"
 ```
 
 ### 2.5. Секрет прокси и перенос на сервер Caddy
@@ -423,7 +434,7 @@ npm ci
 npm run build
 ```
 
-Скрипт `web/scripts/print-csp.mjs` вычисляет SHA-256 хеши инлайн-скриптов из `web/build/200.html` и генерирует заголовок Content-Security-Policy ([README.md:445](../../README.md#L445)):
+Скрипт `web/scripts/print-csp.mjs` вычисляет SHA-256 хеши инлайн-скриптов из `web/build/200.html` и генерирует заголовок Content-Security-Policy ([README.md](../../README.md#статическая-публикация)):
 ```bash
 export CANTERLOT_CSP="$(node scripts/print-csp.mjs https://chat.example.com)"
 ```
@@ -431,7 +442,7 @@ export CANTERLOT_CSP="$(node scripts/print-csp.mjs https://chat.example.com)"
 
 ### 4.2. Конфигурация Caddyfile
 
-Конфигурация сайта строго воспроизводит канонический блок из [README.md:453-486](../../README.md#L453-L486):
+Конфигурация сайта строго воспроизводит канонический блок из [README.md](../../README.md#статическая-публикация):
 
 > [!IMPORTANT]
 > Блок `route { ... }` критически необходим. В стандартном порядке директив Caddy удаление заголовков (`request_header -...`) выполнилось бы **после** `forward_auth`, удалив только что проставленный заголовок аутентификации. Внутри `route` порядок выполнения строго соответствует порядку строк в конфиге!
@@ -455,7 +466,7 @@ chat.example.com {
         # 3. Политика безопасности контента (значение из переменной CANTERLOT_CSP)
         header Content-Security-Policy "{$CANTERLOT_CSP}"
 
-        # 4. Проксирование API, WebSocket и публичного healthcheck на хаб
+        # 4. Проксирование API, WebSocket и healthcheck на хаб (за forward_auth, как и всё остальное)
         @api path /api/* /healthz
         handle @api {
             reverse_proxy 10.0.0.10:8080 {
@@ -572,53 +583,55 @@ getent hosts hub.example.internal
 
 Конфигурационный файл располагается по пути `~/.config/canterlot/worker.toml`.
 
-Полный набор полей, валидируемый структурой `WorkerConfig` ([crates/canterlot-worker/src/config.rs:13](../../crates/canterlot-worker/src/config.rs#L13)):
+Полный набор полей, которые принимает структура `WorkerConfig` ([crates/canterlot-worker/src/config.rs](../../crates/canterlot-worker/src/config.rs)), кроме таблиц адаптеров (о них ниже):
 
 ```toml
 # Корневые параметры соединения и инсталляции
-hub_url = "https://hub.example.internal:7443"        # crates/canterlot-worker/src/config.rs:14
-ca_cert = "/home/user/.config/canterlot/ca.pem"      # crates/canterlot-worker/src/config.rs:15
-token_file = "/home/user/.config/canterlot/token"    # crates/canterlot-worker/src/config.rs:16 (права 0600)
-machine_id = "019a1b10-0000-7000-8000-000000000001" # crates/canterlot-worker/src/config.rs:17
-installation_id = "019a1b10-0000-7000-8000-000000000002" # crates/canterlot-worker/src/config.rs:18
-restore_generation = "019a1b10-0000-7000-8000-000000000003" # crates/canterlot-worker/src/config.rs:19
-data_dir = "/home/user/.local/state/canterlot-worker" # crates/canterlot-worker/src/config.rs:20 (права 0700)
+hub_url = "https://hub.example.internal:7443"
+ca_cert = "/home/user/.config/canterlot/ca.pem"
+token_file = "/home/user/.config/canterlot/token"    # права 0600
+machine_id = "019a1b10-0000-7000-8000-000000000001"
+installation_id = "019a1b10-0000-7000-8000-000000000002"
+restore_generation = "019a1b10-0000-7000-8000-000000000003"
+data_dir = "/home/user/.local/state/canterlot-worker" # права 0700
 
-[timers]                                            # crates/canterlot-worker/src/config.rs:56
-handshake = "10s"                                   # crates/canterlot-worker/src/config.rs:58
-http2_keepalive_interval = "30s"                    # crates/canterlot-worker/src/config.rs:60
-http2_keepalive_timeout = "10s"                     # crates/canterlot-worker/src/config.rs:62
-heartbeat = "5s"                                    # crates/canterlot-worker/src/config.rs:64
-heartbeat_ack = "5s"                                # crates/canterlot-worker/src/config.rs:66
-range_ack = "10s"                                   # crates/canterlot-worker/src/config.rs:68
-backoff_min = "250ms"                               # crates/canterlot-worker/src/config.rs:70
-backoff_max = "30s"                                 # crates/canterlot-worker/src/config.rs:72
-backoff_reset_after = "30s"                         # crates/canterlot-worker/src/config.rs:74
+[timers]
+handshake = "10s"
+http2_keepalive_interval = "30s"
+http2_keepalive_timeout = "10s"
+heartbeat = "5s"
+heartbeat_ack = "5s"
+range_ack = "10s"
+backoff_min = "250ms"
+backoff_max = "30s"
+backoff_reset_after = "30s"
 
-[execution]                                         # crates/canterlot-worker/src/config.rs:35
+[execution]
 # Корни рабочих каталогов; ["/"] разрешает любой абсолютный путь, как решил владелец.
-allowed_workdir_roots = ["/"] # crates/canterlot-worker/src/config.rs:36
-supervisor_exe = "/usr/local/bin/canterlot-worker"  # crates/canterlot-worker/src/config.rs:37 (current_exe по умолчанию)
-spawn_timeout = "10s"                               # crates/canterlot-worker/src/config.rs:39
+allowed_workdir_roots = ["/"]
+supervisor_exe = "/usr/local/bin/canterlot-worker"  # current_exe по умолчанию
+spawn_timeout = "10s"
 
-[execution.supervisor]                              # crates/canterlot-worker/src/config.rs:79
-attach_wait = "30s"                                 # crates/canterlot-worker/src/config.rs:81
-ready_deadline = "30s"                              # crates/canterlot-worker/src/config.rs:83
-transmit_deadline = "10s"                           # crates/canterlot-worker/src/config.rs:85
-stop_grace = "5s"                                   # crates/canterlot-worker/src/config.rs:87
-stop_retry = "2s"                                   # crates/canterlot-worker/src/config.rs:89
+[execution.supervisor]
+attach_wait = "30s"
+ready_deadline = "30s"
+transmit_deadline = "10s"
+stop_grace = "5s"
+stop_retry = "2s"
 
-[machine]                                           # crates/canterlot-worker/src/config.rs:272
-metrics_interval = "30s"                            # crates/canterlot-worker/src/config.rs:274
+[machine]
+metrics_interval = "30s"
+# codexbar_path = "/home/user/.local/bin/codexbar"  # без значения: PATH, затем ~/.local/bin
+limits_poll_interval = "15m"                        # меньше 15 минут поднимается до 15
 
-[attachments]                                       # crates/canterlot-worker/src/config.rs:296
-fetch_parallelism = 2                               # crates/canterlot-worker/src/config.rs:297 (1 или 2)
-fetch_retry = "2s"                                  # crates/canterlot-worker/src/config.rs:299
-fetch_attempts = 5                                  # crates/canterlot-worker/src/config.rs:300
-fetch_backoff_cap = "30s"                           # crates/canterlot-worker/src/config.rs:302
+[attachments]
+fetch_parallelism = 2                               # 1 или 2
+fetch_retry = "2s"
+fetch_attempts = 5
+fetch_backoff_cap = "30s"
 ```
 
-Таблицы адаптеров `[claude_code]` и `[codex]` (в том числе необязательный `[codex].home_dir`) показаны в примере `worker.toml` в [README.md](../../README.md). Раздел `[[instruction_profiles]]` из конфигурации воркера удалён: с ним воркер не запустится, потому что пресеты инструкций хранит хаб и редактируются они в PWA ([docs/design/pilot.md#4-создание-сессии-и-пресеты-инструкций](../design/pilot.md#4-создание-сессии-и-пресеты-инструкций)).
+Таблицы адаптеров `[claude_code]`, `[codex]` (в том числе `[codex].home_dir`) и необязательная `[opencode]` (без неё OpenCode не показывается и не запускается; вход в отдельную базу canterlot описан в README) показаны в примере `worker.toml` в [README.md](../../README.md). Раздел `[[instruction_profiles]]` из конфигурации воркера удалён: с ним воркер не запустится, потому что пресеты инструкций хранит хаб и редактируются они в PWA ([docs/design/pilot.md#4-создание-сессии-и-пресеты-инструкций](../design/pilot.md#4-создание-сессии-и-пресеты-инструкций)).
 
 ### 6.3. Права доступа к файлам и каталогам
 
@@ -660,7 +673,7 @@ WantedBy=default.target
 Директива `KillMode=process` предписывает systemd посылать сигнал SIGTERM **исключительно** основному процессу воркера (`Worker`).
 
 1. При запуске каждого агентского исполнения воркер стартует изолированный процесс сопровождения `canterlot-worker supervise` ([crates/canterlot-worker/src/supervisor/run.rs:218-223](../../crates/canterlot-worker/src/supervisor/run.rs#L218-L223)), который сразу создаёт новую сессию операционной системы через `setsid`.
-2. Внутри новой сессии процесс сопровождения запускает дочерний CLI харнесса (`claude` или `codex`).
+2. Внутри новой сессии процесс сопровождения запускает дочерний CLI харнесса (`claude`, `codex` или `opencode serve`).
 3. При перезапуске воркера (`systemctl --user restart canterlot-worker`):
    - Главный процесс воркера корректно завершается.
    - Процессы сопровождения и CLI продолжают выполняться без сбоев.
@@ -701,9 +714,11 @@ cd web && npm ci && npm run build && cd ..
 
 1. **Хаб (LXC)**:
    ```bash
-   cp target/release/canterlot-hub /usr/local/bin/canterlot-hub
+   install -m 0755 target/release/canterlot-hub /usr/local/bin/canterlot-hub.new
+   mv -f /usr/local/bin/canterlot-hub.new /usr/local/bin/canterlot-hub
    systemctl restart canterlot-hub
    ```
+   Бинарник кладётся рядом под новым именем и подменяется атомарным `rename` (`mv` в пределах одной файловой системы): работающий процесс держит старый inode, а путь сразу указывает на новый файл. `cp` поверх запущенного бинарника падает с `Text file busy`, а `install` прямо в целевой путь на мгновение оставляет его пустым. Раскладка по каталогам `releases/<sha>` со ссылкой `current` устроена так же: новый релиз кладётся рядом, ссылка меняется атомарным `rename`.
    *Хаб перезапускается первым*. На старте команда `serve` автоматически выполняет накат новых миграций базы данных PostgreSQL под advisory lock `sqlx`.
 2. **Caddy (Web Server)**:
    При изменениях в PWA:
@@ -712,10 +727,11 @@ cd web && npm ci && npm run build && cd ..
    - Перезагрузите сервис Caddy с обновлённой переменной окружения: `systemctl restart caddy` (или `caddy reload`).
 3. **Воркер (Рабочая VM)**:
    ```bash
-   cp target/release/canterlot-worker /usr/local/bin/canterlot-worker
+   install -m 0755 target/release/canterlot-worker /usr/local/bin/canterlot-worker.new
+   mv -f /usr/local/bin/canterlot-worker.new /usr/local/bin/canterlot-worker
    systemctl --user restart canterlot-worker
    ```
-   Воркер перезапускается последним.
+   Воркер перезапускается последним. Процессы сопровождения запущены из того же файла (`supervisor_exe`) и переживают перезапуск, поэтому `cp` здесь падает при любой живой сессии. После подмены они дорабатывают на старом бинарнике, новые исполнения стартуют на новом.
 
 ### 7.3. Что выживает при обновлении
 
@@ -747,12 +763,12 @@ cd web && npm ci && npm run build && cd ..
 При откате базы данных хаба из снапшота Proxmox без одновременного отката воркера возникает ситуация рассинхронизации: база данных хаба откатывается назад во времени, а локальные журналы воркера (`CJ` и `SJ`) содержат факты и события, которых хаб больше не помнит.
 
 **Поведение пилота**:
-1. При последующем подключении воркера к хабу расхождение курсоров фиксируется как неустранимая ошибка рассинхронизации: воркер возвращает ошибку `WorkerError::StateDivergence` ([crates/canterlot-worker/src/session.rs:836-840](../../crates/canterlot-worker/src/session.rs#L836-L840)).
-2. Процесс воркера немедленно завершает работу с кодом выхода 1 ([crates/canterlot-worker/src/main.rs:44-46](../../crates/canterlot-worker/src/main.rs#L44-L46)).
+1. При последующем подключении воркера к хабу расхождение курсоров фиксируется как неустранимая ошибка рассинхронизации: воркер возвращает ошибку `WorkerError::StateDivergence` ([crates/canterlot-worker/src/session.rs](../../crates/canterlot-worker/src/session.rs)).
+2. Процесс воркера немедленно завершает работу с кодом выхода 1 ([crates/canterlot-worker/src/main.rs](../../crates/canterlot-worker/src/main.rs)). С `Restart=always` systemd перезапускает воркер каждые 3 секунды, и каждый запуск снова завершается той же ошибкой: в `journalctl --user -u canterlot-worker` это повторяющаяся строка `hub and worker journal cursors diverged`. До восстановления остановите службу (`systemctl --user stop canterlot-worker`).
 
 **Штатные пути восстановления в пилоте**:
 - **Синхронный откат**: одновременное восстановление LXC хаба и VM воркера из парных снапшотов Proxmox VE, снятых в один и тот же момент времени при остановленных сервисах.
-- **Сброс локального состояния воркера**: администратор хаба выполняет ротацию токена со сбросом локального состояния через CLI ([crates/canterlot-hub/src/main.rs:48-56](../../crates/canterlot-hub/src/main.rs#L48-L56)):
+- **Сброс локального состояния воркера**: администратор хаба выполняет ротацию токена со сбросом локального состояния через CLI ([crates/canterlot-hub/src/main.rs](../../crates/canterlot-hub/src/main.rs)):
   ```bash
   sudo -u canterlot canterlot-hub machine rotate-token \
       --config /etc/canterlot/hub.toml \
@@ -786,11 +802,12 @@ cd web && npm ci && npm run build && cd ..
   - Linger: выполнен `loginctl enable-linger $USER`.
 - [ ] **12. Тестирование прокси**: запуск `bash scripts/check-proxy.sh https://chat.example.com cookies.txt` завершается успешно (код возврата 0).
 - [ ] **13. Сквозная доступность и приёмка**:
-  - Публичная проверка сертификата и шлюза:
+  - Публичная проверка сертификата и шлюза (через Authelia, нужен jar с сессией, как для `check-proxy.sh`):
     ```bash
-    curl -fsS https://chat.example.com/healthz
+    curl -fsS -b cookies.txt https://chat.example.com/healthz
     # Ожидается: {"status":"ok"}
     ```
+    Без сессии Authelia ответ будет переходом на страницу входа: `/healthz` закрыт `forward_auth`, как и весь хост.
   - Локальная проверка готовности внутри LXC хаба:
     ```bash
     curl -fsS http://10.0.0.10:8080/readyz
