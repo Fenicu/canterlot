@@ -242,7 +242,7 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
     }
     values.sort_by(f64::total_cmp);
     let mid = values.len() / 2;
-    Some(if values.len() % 2 == 0 {
+    Some(if values.len().is_multiple_of(2) {
         (values[mid - 1] + values[mid]) / 2.0
     } else {
         values[mid]
@@ -433,8 +433,8 @@ pub async fn summary(
         .bind(owner_id).bind(provider).bind(from).bind(to).bind(tz).fetch_all(&mut *conn).await?;
     let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
     let speeds = for_runs(conn, &ids).await?;
-    let mut grouped: HashMap<(String, String), (Vec<&ModelSpeed>, Vec<&ModelSpeed>)> =
-        HashMap::new();
+    type TodayAndPeriod<'a> = (Vec<&'a ModelSpeed>, Vec<&'a ModelSpeed>);
+    let mut grouped: HashMap<(String, String), TodayAndPeriod> = HashMap::new();
     for (id, provider, day, last_day) in &rows {
         for speed in speeds.get(id).into_iter().flatten() {
             let entry = grouped
