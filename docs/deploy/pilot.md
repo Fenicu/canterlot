@@ -255,7 +255,7 @@ claude = "30m"
 codex = "5m"
 
 [activity]
-stalled_generating = "5m"
+stalled_generating = "30m"
 stalled_tool = "30m"
 tick = "15s"
 debounce = "250ms"

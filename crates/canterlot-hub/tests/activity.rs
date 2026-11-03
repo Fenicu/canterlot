@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 fn thresholds() -> Thresholds {
     Thresholds {
-        stalled_generating: Duration::from_secs(300),
+        stalled_generating: Duration::from_secs(1800),
         stalled_tool: Duration::from_secs(1800),
         idle_quiet: Duration::from_secs(5),
     }
@@ -45,6 +45,7 @@ fn inputs() -> ActivityInputs {
         process: Some(ProcessFacts {
             alive: true,
             cpu_permille: 50,
+            descendants: Some(0),
         }),
         link: LinkState::Available,
         awaiting_attachments: false,
@@ -124,7 +125,8 @@ fn state_table_matches_pilot_section_9() {
         },
     ));
     let mut i = base.clone();
-    i.now += TimeDelta::seconds(301);
+    i.now += TimeDelta::seconds(1801);
+    i.process.as_mut().unwrap().cpu_permille = 0;
     rows.push((
         i,
         S::Stalled,
@@ -132,7 +134,7 @@ fn state_table_matches_pilot_section_9() {
             last_event_at: base.now,
             phase: "generating".into(),
             process_alive: Some(true),
-            cpu_busy: Some(true),
+            cpu_busy: Some(false),
             link: "available".into(),
         },
     ));
@@ -206,21 +208,22 @@ fn running_turn_beats_quota_hold() {
 #[test]
 fn a_new_turn_after_a_long_idle_counts_silence_from_its_own_start() {
     let mut i = inputs();
+    i.process.as_mut().unwrap().cpu_permille = 0;
     i.last_event_at = Some(i.now - TimeDelta::hours(1));
     i.execution.as_mut().unwrap().phase_at = Some(i.now - TimeDelta::hours(1));
     i.turn_started_at = Some(i.now);
     assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
 
-    i.now += TimeDelta::seconds(301);
+    i.now += TimeDelta::seconds(1801);
     let activity = activity::compute(&i, &thresholds());
     assert_eq!(activity.state, S::Stalled);
     assert_eq!(
         activity.evidence,
         E::Stalled {
-            last_event_at: i.now - TimeDelta::seconds(301),
+            last_event_at: i.now - TimeDelta::seconds(1801),
             phase: "generating".into(),
             process_alive: Some(true),
-            cpu_busy: Some(true),
+            cpu_busy: Some(false),
             link: "available".into(),
         },
         "the stall clock starts at the turn, not at the previous event"
@@ -228,14 +231,15 @@ fn a_new_turn_after_a_long_idle_counts_silence_from_its_own_start() {
 }
 
 #[test]
-fn stalled_thresholds_are_5_minutes_for_generation_and_30_for_tools_and_configurable() {
+fn stalled_thresholds_are_generous_for_generation_and_configurable() {
     for (phase, seconds) in [
-        ("generating", 300),
-        ("unknown", 300),
+        ("generating", 1800),
+        ("unknown", 1800),
         ("running_tool", 1800),
         ("context_maintenance", 1800),
     ] {
         let mut i = inputs();
+        i.process.as_mut().unwrap().cpu_permille = 0;
         i.execution.as_mut().unwrap().phase = phase.into();
         i.now += TimeDelta::seconds(seconds);
         assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
@@ -363,6 +367,93 @@ fn attachment_wait_is_working_delivering_attachments_and_never_stalled() {
     assert!(
         matches!(activity::compute(&i, &thresholds()).evidence, E::Working { phase, .. } if phase == "delivering_attachments")
     );
+}
+
+#[test]
+fn running_tool_with_live_descendants_is_working_even_when_the_cli_is_idle() {
+    let mut i = inputs();
+    i.execution.as_mut().unwrap().phase = "running_tool".into();
+    i.process = Some(ProcessFacts {
+        alive: true,
+        cpu_permille: 0,
+        descendants: Some(1),
+    });
+    i.now += TimeDelta::hours(2);
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+}
+
+#[test]
+fn running_tool_with_no_live_descendants_is_stalled_after_the_tool_threshold() {
+    let mut i = inputs();
+    i.execution.as_mut().unwrap().phase = "running_tool".into();
+    i.process = Some(ProcessFacts {
+        alive: true,
+        cpu_permille: 0,
+        descendants: Some(0),
+    });
+    i.now += TimeDelta::seconds(1800);
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+    i.now += TimeDelta::seconds(1);
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Stalled);
+}
+
+#[test]
+fn an_old_worker_without_descendant_evidence_does_not_stall_a_running_tool() {
+    let mut i = inputs();
+    i.execution.as_mut().unwrap().phase = "running_tool".into();
+    i.process = Some(ProcessFacts {
+        alive: true,
+        cpu_permille: 0,
+        descendants: None,
+    });
+    i.now += TimeDelta::hours(2);
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+}
+
+#[test]
+fn generating_with_busy_cpu_is_working() {
+    let mut i = inputs();
+    i.process = Some(ProcessFacts {
+        alive: true,
+        cpu_permille: 500,
+        descendants: Some(0),
+    });
+    i.now += TimeDelta::hours(2);
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+}
+
+#[test]
+fn generating_without_progress_is_stalled_only_after_a_generous_threshold() {
+    let generous = Thresholds {
+        stalled_generating: Duration::from_secs(1800),
+        stalled_tool: Duration::from_secs(1800),
+        idle_quiet: Duration::from_secs(5),
+    };
+    let mut i = inputs();
+    i.process = Some(ProcessFacts {
+        alive: true,
+        cpu_permille: 0,
+        descendants: Some(0),
+    });
+    i.now += TimeDelta::seconds(1799);
+    assert_eq!(activity::compute(&i, &generous).state, S::Working);
+    i.now += TimeDelta::seconds(2);
+    assert_eq!(activity::compute(&i, &generous).state, S::Stalled);
+}
+
+#[test]
+fn unknown_liveness_never_claims_a_stall() {
+    for phase in ["generating", "running_tool", "context_maintenance"] {
+        let mut i = inputs();
+        i.execution.as_mut().unwrap().phase = phase.into();
+        i.process = None;
+        i.now += TimeDelta::days(1);
+        assert_eq!(
+            activity::compute(&i, &thresholds()).state,
+            S::Working,
+            "{phase}"
+        );
+    }
 }
 
 #[test]

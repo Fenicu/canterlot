@@ -891,6 +891,7 @@ fn pilot_records_roundtrip() {
             alive: true,
             cpu_permille: 80,
             rss_bytes: 1000,
+            descendants: Some(2),
         }],
     };
     let limits = LimitsReport {

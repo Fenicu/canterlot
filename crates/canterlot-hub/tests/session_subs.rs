@@ -67,6 +67,7 @@ fn old_facts(now: DateTime<Utc>) -> SettleFacts {
         since: now - TimeDelta::hours(1),
         last_turn_at: None,
         last_event_at: Some(now - TimeDelta::hours(1)),
+        phase_since: None,
     }
 }
 
@@ -225,17 +226,23 @@ fn settled_maps_the_other_states_directly() {
 }
 
 #[test]
-fn fingerprint_is_state_since_and_last_turn() {
+fn fingerprint_is_state_mark_and_last_turn() {
     let since = DateTime::parse_from_rfc3339("2026-11-01T10:00:00.123456789Z")
         .unwrap()
         .to_utc();
     assert_eq!(
-        settle::fingerprint(Settled::Idle, since, None),
+        settle::fingerprint(Settled::Idle, since, None, None),
         "idle|2026-11-01T10:00:00.123456Z|"
     );
     assert_eq!(
-        settle::fingerprint(Settled::Stalled, since, Some(since)),
+        settle::fingerprint(Settled::Stalled, since, Some(since), None),
         "stalled|2026-11-01T10:00:00.123456Z|2026-11-01T10:00:00.123456Z"
+    );
+    let phase = since + TimeDelta::minutes(5);
+    assert_eq!(
+        settle::fingerprint(Settled::Stalled, since, Some(since), Some(phase)),
+        "stalled|2026-11-01T10:05:00.123456Z|2026-11-01T10:00:00.123456Z",
+        "stalled держится на начале фазы, а не на since"
     );
 }
 
@@ -286,6 +293,32 @@ async fn refresh_at(pool: &PgPool, id: Uuid, now: DateTime<Utc>) -> Refresh {
     activity::refresh(pool, id, now, &thresholds(), Uuid::now_v7())
         .await
         .unwrap()
+}
+
+async fn alive_metrics(pool: &PgPool, machine: Uuid, execution: Uuid, at: DateTime<Utc>) {
+    metrics_with(pool, machine, execution, at, 0, 0).await;
+}
+
+async fn metrics_with(
+    pool: &PgPool,
+    machine: Uuid,
+    execution: Uuid,
+    at: DateTime<Utc>,
+    cpu_permille: u32,
+    descendants: u32,
+) {
+    sqlx::query("delete from machine_metrics where machine_id=$1")
+        .bind(machine)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,$2,1,1,100,100,50,0,0,0,'[]',$3)")
+        .bind(machine)
+        .bind(at)
+        .bind(json!([{"execution_id":execution,"alive":true,"cpu_permille":cpu_permille,"descendants":descendants}]))
+        .execute(pool)
+        .await
+        .unwrap();
 }
 
 async fn finish_turn(
@@ -504,6 +537,7 @@ async fn stalled_fires_once_per_episode(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    alive_metrics(&pool, p.machine, execution.execution_id, now).await;
     sqlx::query(
         "update queue_state set run_slot='running',run_slot_input_id=$2,
                 run_slot_since=$3,hold_reasons='[]'
@@ -533,9 +567,137 @@ async fn stalled_fires_once_per_episode(pool: PgPool) {
     assert_eq!(jobs(&pool, p.subscriber).await.len(), 1);
 
     let again = back + TimeDelta::minutes(6);
+    alive_metrics(&pool, p.machine, execution.execution_id, again).await;
     refresh_at(&pool, p.target, again).await;
     refresh_at(&pool, p.target, again + TimeDelta::seconds(15)).await;
     assert_eq!(jobs(&pool, p.subscriber).await.len(), 2, "a new episode");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn unknown_liveness_never_fires_a_stall(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    sqlx::query(
+        "update executions set phase='generating',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(now - TimeDelta::minutes(10))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(now - TimeDelta::minutes(10))
+    .execute(&pool)
+    .await
+    .unwrap();
+    subscribe(&pool, &p).await;
+    // Метрик нет: воркер не смог снять живость, значит и `stalled` не утверждаем.
+    for step in 0..3 {
+        refresh_at(&pool, p.target, now + TimeDelta::seconds(step * 900)).await;
+    }
+    assert!(jobs(&pool, p.subscriber).await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cpu_busy_generation_never_fires_a_stall(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    let phase_at = now - TimeDelta::minutes(10);
+    sqlx::query(
+        "update executions set phase='generating',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Реальный случай: модель ещё ничего не написала, но процесс занят работой.
+    metrics_with(&pool, p.machine, execution.execution_id, now, 500, 0).await;
+    subscribe(&pool, &p).await;
+    refresh_at(&pool, p.target, now).await;
+    assert!(jobs(&pool, p.subscriber).await.is_empty());
+    let later = now + TimeDelta::minutes(20);
+    metrics_with(&pool, p.machine, execution.execution_id, later, 500, 0).await;
+    refresh_at(&pool, p.target, later).await;
+    assert!(
+        jobs(&pool, p.subscriber).await.is_empty(),
+        "занятый CPU — работа, а не зависание"
+    );
+    let state: String = sqlx::query_scalar(
+        "select activity_state from conversation_derived where conversation_id=$1",
+    )
+    .bind(p.target)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "working");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stalled_is_not_repeated_when_the_state_flaps_in_the_same_phase(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    let phase_at = now - TimeDelta::minutes(10);
+    sqlx::query(
+        "update executions set phase='generating',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    alive_metrics(&pool, p.machine, execution.execution_id, now).await;
+    subscribe(&pool, &p).await;
+    refresh_at(&pool, p.target, now).await;
+    assert_eq!(jobs(&pool, p.subscriber).await.len(), 1);
+
+    // Короткое пробуждение: отметка события сдвинулась, фаза та же.
+    sqlx::query("update executions set last_event_at=$2 where id=$1")
+        .bind(execution.execution_id)
+        .bind(now + TimeDelta::seconds(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(2)).await;
+    let later = now + TimeDelta::seconds(302);
+    alive_metrics(&pool, p.machine, execution.execution_id, later).await;
+    refresh_at(&pool, p.target, later).await;
+    assert_eq!(
+        jobs(&pool, p.subscriber).await.len(),
+        1,
+        "та же фаза и то же подозрение не повторяются"
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

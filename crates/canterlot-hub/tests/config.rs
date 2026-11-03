@@ -151,7 +151,7 @@ fn pilot_sections_parse_with_defaults() {
     assert_eq!(limits.warn_pcts, [80, 90, 95]);
     assert_eq!(limits.stale_after, D::from_secs(2100));
     assert_eq!(limits.unverified_wake_after, D::from_secs(1200));
-    assert_eq!(config.activity.stalled_generating, D::from_secs(300));
+    assert_eq!(config.activity.stalled_generating, D::from_secs(1800));
     assert_eq!(config.activity.stalled_tool, D::from_secs(1800));
     assert_eq!(config.activity.tick, D::from_secs(15));
     assert_eq!(config.activity.debounce, D::from_millis(250));

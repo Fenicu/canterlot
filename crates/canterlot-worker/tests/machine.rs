@@ -126,6 +126,7 @@ fn execution_probe_counts_only_members_with_matching_start_ticks() {
         }])
         .unwrap();
     assert!(!sample.executions[0].alive);
+    assert_eq!(sample.executions[0].descendants, Some(0));
     assert_eq!(sample.executions[0].rss_bytes, 0);
     let sample = c
         .sample(&[ExecutionProbe {
@@ -134,6 +135,7 @@ fn execution_probe_counts_only_members_with_matching_start_ticks() {
         }])
         .unwrap();
     assert!(sample.executions[0].alive);
+    assert_eq!(sample.executions[0].descendants, Some(0));
     assert_eq!(
         sample.executions[0].rss_bytes,
         12 * rustix::param::page_size() as u64
@@ -160,6 +162,11 @@ fn execution_cpu_sums_descendants_of_the_cli() {
     process(dir.path(), 21, 10, 49, 1000);
     let row = c.sample(&[probe]).unwrap().executions.remove(0);
     assert!(row.cpu_permille > 0 && row.cpu_permille < 5000);
+    assert_eq!(
+        row.descendants,
+        Some(2),
+        "11 и 12 под CLI, 21 старше CLI и не считается"
+    );
     assert_eq!(row.rss_bytes, 36 * rustix::param::page_size() as u64);
 }
 #[test]

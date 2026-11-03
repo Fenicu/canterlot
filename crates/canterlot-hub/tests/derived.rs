@@ -119,6 +119,9 @@ async fn projector(
 #[sqlx::test(migrations = "./migrations")]
 async fn stalled_is_detected_by_the_tick_without_any_event(pool: PgPool) {
     let (s, e) = running(&pool).await;
+    sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,clock_timestamp(),1,1,100,100,50,0,0,0,'[]',$2)")
+        .bind(s.machine_id).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":0,"descendants":0}]))
+        .execute(&pool).await.unwrap();
     sqlx::query("update executions set phase_at=clock_timestamp(),last_event_at=clock_timestamp() where id=$1")
         .bind(e)
         .execute(&pool)
@@ -130,8 +133,13 @@ async fn stalled_is_detected_by_the_tick_without_any_event(pool: PgPool) {
     };
     let (stop, task, _) = projector(&pool, config).await;
     until_state(&pool, s.conversation_id, "working").await;
-    sqlx::query("update executions set phase_at=clock_timestamp()-interval '10 minutes',last_event_at=clock_timestamp()-interval '10 minutes' where id=$1")
+    sqlx::query("update executions set phase_at=clock_timestamp()-interval '31 minutes',last_event_at=clock_timestamp()-interval '31 minutes' where id=$1")
         .bind(e)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update queue_state set run_slot_since=clock_timestamp()-interval '31 minutes' where conversation_id=$1")
+        .bind(s.conversation_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -142,7 +150,10 @@ async fn stalled_is_detected_by_the_tick_without_any_event(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn stalled_never_changes_execution_queue_or_commands(pool: PgPool) {
-    let (s, _) = running(&pool).await;
+    let (s, e) = running(&pool).await;
+    sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,clock_timestamp(),1,1,100,100,50,0,0,0,'[]',$2)")
+        .bind(s.machine_id).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":0,"descendants":0}]))
+        .execute(&pool).await.unwrap();
     let snapshot = "select jsonb_build_object('executions',(select jsonb_agg(to_jsonb(e)) from executions e),'queue',(select jsonb_agg(to_jsonb(q)) from queue_state q),'commands',(select jsonb_agg(to_jsonb(c)) from commands c))";
     let before: Value = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();
     refresh(&pool, s.conversation_id).await;
@@ -219,9 +230,9 @@ async fn unread_counts_text_warning_and_error_blocks_after_the_read_marker(pool:
 async fn process_evidence_comes_only_from_fresh_metrics(pool: PgPool) {
     let (s, e) = running(&pool).await;
     let now = Utc::now();
-    sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,$2,1,1,100,100,50,0,0,0,'[]',$3)").bind(s.machine_id).bind(now).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":50}])).execute(&pool).await.unwrap();
+    sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,$2,1,1,100,100,50,0,0,0,'[]',$3)").bind(s.machine_id).bind(now).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":0,"descendants":0}])).execute(&pool).await.unwrap();
     let mut conn = pool.acquire().await.unwrap();
-    for (age, expected) in [(0, Some(true)), (91, None)] {
+    for (age, fresh) in [(0, true), (91, false)] {
         let i = activity::load_inputs(
             &mut conn,
             s.conversation_id,
@@ -231,10 +242,66 @@ async fn process_evidence_comes_only_from_fresh_metrics(pool: PgPool) {
         .await
         .unwrap();
         let a = activity::compute(&i, &thresholds());
-        assert!(
-            matches!(a.evidence,activity::Evidence::Stalled { process_alive,cpu_busy,.. } if process_alive==expected && cpu_busy==expected)
-        );
+        if fresh {
+            assert!(
+                matches!(a.evidence,activity::Evidence::Stalled { process_alive,cpu_busy,.. } if process_alive==Some(true) && cpu_busy==Some(false))
+            );
+        } else {
+            assert_eq!(
+                a.state,
+                activity::ActivityState::Working,
+                "без свежих метрик судить о зависании нельзя"
+            );
+        }
     }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn live_tool_descendants_keep_a_silent_tool_working(pool: PgPool) {
+    let (s, e) = running(&pool).await;
+    sqlx::query("update executions set phase='running_tool',phase_at=clock_timestamp()-interval '2 hours',last_event_at=clock_timestamp()-interval '2 hours' where id=$1")
+        .bind(e)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update queue_state set run_slot_since=clock_timestamp()-interval '2 hours' where conversation_id=$1")
+        .bind(s.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let set_metrics = |descendants: u32, at: chrono::DateTime<Utc>| {
+        let pool = pool.clone();
+        let machine = s.machine_id;
+        let execution = e;
+        async move {
+            sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,$2,1,1,100,100,50,0,0,0,'[]',$3) on conflict(machine_id) do update set observed_at=excluded.observed_at,machine_time_ms=excluded.machine_time_ms,executions=excluded.executions").bind(machine).bind(at).bind(json!([{"execution_id":execution,"alive":true,"cpu_permille":0,"descendants":descendants}])).execute(&pool).await.unwrap();
+        }
+    };
+    set_metrics(1, now).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let inputs = activity::load_inputs(&mut conn, s.conversation_id, now, Duration::from_secs(90))
+        .await
+        .unwrap();
+    assert_eq!(
+        activity::compute(&inputs, &thresholds()).state,
+        activity::ActivityState::Working,
+        "живой потомок инструмента — доказательство работы"
+    );
+    set_metrics(0, now + TimeDelta::seconds(1)).await;
+    let inputs = activity::load_inputs(
+        &mut conn,
+        s.conversation_id,
+        now + TimeDelta::seconds(1),
+        Duration::from_secs(90),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        activity::compute(&inputs, &thresholds()).state,
+        activity::ActivityState::Stalled,
+        "потомков нет и события молчат дольше порога"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -299,6 +366,19 @@ async fn event_append_publishes_the_notice_in_process_and_pg_notify_only_in_mult
 #[sqlx::test(migrations = "./migrations")]
 async fn missed_notice_is_repaired_by_the_lag_sweep(pool: PgPool) {
     let (s, e) = running(&pool).await;
+    sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,clock_timestamp(),1,1,100,100,50,0,0,0,'[]',$2)")
+        .bind(s.machine_id).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":0,"descendants":0}]))
+        .execute(&pool).await.unwrap();
+    sqlx::query("update executions set phase_at=clock_timestamp()-interval '31 minutes',last_event_at=clock_timestamp()-interval '31 minutes' where id=$1")
+        .bind(e)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update queue_state set run_slot_since=clock_timestamp()-interval '31 minutes' where conversation_id=$1")
+        .bind(s.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let (stop, task, bus) = projector(
         &pool,
         ActivityConfig {

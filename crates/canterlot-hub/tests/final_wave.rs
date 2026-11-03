@@ -807,12 +807,22 @@ async fn scheduled_history_keeps_the_newest_terminal_jobs(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn mark_read_preserves_configured_metrics_freshness(pool: PgPool) {
     let (s, execution) = running(&pool).await;
+    sqlx::query("update executions set phase_at=clock_timestamp()-interval '31 minutes',last_event_at=clock_timestamp()-interval '31 minutes' where id=$1")
+        .bind(execution)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update queue_state set run_slot_since=clock_timestamp()-interval '31 minutes' where conversation_id=$1")
+        .bind(s.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let (mut deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     deps.installation.owner_id = s.owner_id;
     deps.machines.metrics_stale_after = Duration::from_secs(3600);
     sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,clock_timestamp()-interval '5 minutes',1,1,50,100,50,0,0,0,'[]',$2)")
-        .bind(s.machine_id).bind(json!([{"execution_id":execution,"alive":true,"cpu_permille":100}])).execute(&pool).await.unwrap();
+        .bind(s.machine_id).bind(json!([{"execution_id":execution,"alive":true,"cpu_permille":0,"descendants":0}])).execute(&pool).await.unwrap();
     activity::refresh_with_metrics(
         &pool,
         s.conversation_id,
@@ -824,7 +834,7 @@ async fn mark_read_preserves_configured_metrics_freshness(pool: PgPool) {
     .await
     .unwrap();
     let before = row(&pool, s.conversation_id).await["activity_evidence"].clone();
-    assert_eq!(before["cpu_busy"], true);
+    assert_eq!(before["cpu_busy"], false);
     let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
     assert_eq!(
         client

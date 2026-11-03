@@ -735,13 +735,19 @@ async fn machine_metrics_and_stalled_activity_over_wss(pool: PgPool) {
     // Молчание создаём сдвигом отметок, а не ожиданием: под нагрузкой реальный порог обгонял запуск CLI.
     // Хвост записей журнала ещё может обновить отметку, поэтому сдвиг повторяется до вердикта.
     until("silence is projected as stalled", async || {
-        sqlx::query("update executions set phase_at=clock_timestamp()-interval '10 minutes',last_event_at=clock_timestamp()-interval '10 minutes' where conversation_id=$1")
+        sqlx::query("update executions set phase_at=clock_timestamp()-interval '31 minutes',last_event_at=clock_timestamp()-interval '31 minutes' where conversation_id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Потоковые блоки тоже свидетельство прогресса: сдвигаем их отметки вместе с ходом.
+        sqlx::query("update blocks set updated_at=clock_timestamp()-interval '31 minutes' where conversation_id=$1")
             .bind(id)
             .execute(&pool)
             .await
             .unwrap();
         // Часы молчания идут от начала хода: сдвигаем и его, иначе слот выглядит только что занятым.
-        sqlx::query("update queue_state set run_slot_since=clock_timestamp()-interval '10 minutes' where conversation_id=$1")
+        sqlx::query("update queue_state set run_slot_since=clock_timestamp()-interval '31 minutes' where conversation_id=$1")
             .bind(id)
             .execute(&pool)
             .await

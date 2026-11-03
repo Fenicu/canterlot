@@ -59,6 +59,9 @@ pub struct SettleFacts {
     pub since: DateTime<Utc>,
     pub last_turn_at: Option<DateTime<Utc>>,
     pub last_event_at: Option<DateTime<Utc>>,
+    /// Начало текущей фазы исполнения: для `stalled` отпечаток держится на ней,
+    /// чтобы дребезг состояния не повторял одно и то же подозрение.
+    pub phase_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -131,16 +134,23 @@ pub fn settled(
 }
 
 /// База хранит микросекунды: точнее сравнивать нельзя, иначе отпечаток разойдётся с прочитанным.
+/// У `stalled` опорное время — начало фазы, а не `since`: возврат из короткого пробуждения
+/// в ту же фазу не должен считаться новым эпизодом.
 pub fn fingerprint(
     state: Settled,
     since: DateTime<Utc>,
     last_turn_at: Option<DateTime<Utc>>,
+    phase_since: Option<DateTime<Utc>>,
 ) -> String {
     let at = |value: DateTime<Utc>| value.to_rfc3339_opts(SecondsFormat::Micros, true);
+    let mark = match state {
+        Settled::Stalled => phase_since.unwrap_or(since),
+        _ => since,
+    };
     format!(
         "{}|{}|{}",
         state.fingerprint_name(),
-        at(since),
+        at(mark),
         last_turn_at.map(at).unwrap_or_default()
     )
 }
