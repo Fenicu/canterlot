@@ -131,8 +131,24 @@ export class BlockModel {
     return this.#text.get();
   }
   set text(value: string) {
+    if (this.#text.get() === value) return;
     this.#text.set(value);
     this.lineCount = countLines(value);
+  }
+
+  /** Хвост дописывается к уже показанному: считаем переводы строк только в нём. */
+  appendText(chunk: string, value: string): void {
+    const prev = this.#text.get();
+    if (prev === value) return;
+    const lines = this.lineCount;
+    if (lines === null || prev.length === 0) {
+      this.lineCount = countLines(value);
+    } else {
+      const breaks = lines - (prev.endsWith("\n") ? 0 : 1);
+      this.lineCount =
+        breaks + countNewlines(chunk) + (value.endsWith("\n") ? 0 : 1);
+    }
+    this.#text.set(value);
   }
   get rev(): number {
     return this.#rev.get();
@@ -172,11 +188,17 @@ export class BlockModel {
   }
 }
 
+function countNewlines(value: string): number {
+  let breaks = 0;
+  for (let index = value.indexOf("\n"); index >= 0; index = value.indexOf("\n", index + 1))
+    breaks++;
+  return breaks;
+}
+
 /** Как `str::lines` хаба: перевод строки в конце новой строки не открывает. */
 function countLines(value: string): number {
   if (value.length === 0) return 0;
-  const breaks = value.split("\n").length;
-  return value.endsWith("\n") ? breaks - 1 : breaks;
+  return countNewlines(value) + (value.endsWith("\n") ? 0 : 1);
 }
 
 function display(block: BlockModel): string {
@@ -192,7 +214,8 @@ function publish(block: BlockModel): void {
 function appendBody(block: BlockModel, chunk: string): void {
   block.body += chunk;
   block.bytes += utf8Length(chunk);
-  publish(block);
+  if (display(block) === block.body) block.appendText(chunk, block.body);
+  else publish(block);
 }
 
 function replaceBody(block: BlockModel, content: string): void {
