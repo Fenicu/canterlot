@@ -208,7 +208,8 @@ struct JobRow {
     attempts: i32,
     failures: i32,
     result: Option<Value>,
-    created_at: DateTime<Utc>,
+    /// Начало терпения переполненной очереди: первая заблокированная попытка.
+    blocked_since: Option<DateTime<Utc>>,
 }
 impl JobRow {
     fn message(&self) -> Result<ScheduledMessage, sqlx::Error> {
@@ -624,6 +625,9 @@ impl Scheduler {
         };
         if let Some(mut current) = current {
             let waits_for_queue = current.kind == "session_task" && reason == "queue_full";
+            if waits_for_queue && current.blocked_since.is_none() {
+                current.blocked_since = Some(now);
+            }
             if !waits_for_queue {
                 current.failures = current.failures.saturating_add(1);
             }
@@ -632,7 +636,9 @@ impl Scheduler {
             }
             let release_job = matches!(current.kind.as_str(), "wake" | "limit_check");
             let exhausted = if waits_for_queue {
-                now - current.created_at >= SESSION_TASK_QUEUE_PATIENCE
+                current
+                    .blocked_since
+                    .is_some_and(|since| now - since >= SESSION_TASK_QUEUE_PATIENCE)
             } else {
                 !release_job && current.failures as u32 >= self.service.config.max_attempts
             };
@@ -647,10 +653,11 @@ impl Scheduler {
                     }
                 } else {
                     if let Err(error) =
-                        sqlx::query("update scheduled_jobs set failures=$2,attempts=$3 where id=$1")
+                        sqlx::query("update scheduled_jobs set failures=$2,attempts=$3,blocked_since=$4 where id=$1")
                             .bind(current.id)
                             .bind(current.failures)
                             .bind(current.attempts)
+                            .bind(current.blocked_since)
                             .execute(&mut *tx)
                             .await
                     {
@@ -703,8 +710,8 @@ impl Scheduler {
                         return Err(error);
                     }
                 };
-                let updated = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,failures=$5,updated_at=clock_timestamp() where id=$1 returning *")
-                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).bind(current.failures).fetch_one(&mut *tx).await;
+                let updated = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,failures=$5,blocked_since=$6,updated_at=clock_timestamp() where id=$1 returning *")
+                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).bind(current.failures).bind(current.blocked_since).fetch_one(&mut *tx).await;
                 let updated: JobRow = match updated {
                     Ok(updated) => updated,
                     Err(error) => {
@@ -741,7 +748,7 @@ impl Scheduler {
         if job.kind == "message" && job.message().is_err() {
             sqlx::query("update scheduled_jobs set payload='{\"content\":[],\"attachment_ids\":[]}' where id=$1").bind(job.id).execute(&mut *conn).await?;
         }
-        let updated:JobRow=sqlx::query_as("update scheduled_jobs set state=$2,attempts=$3,result=$4,failures=$5,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1 returning *")
+        let updated:JobRow=sqlx::query_as("update scheduled_jobs set state=$2,attempts=$3,result=$4,failures=$5,blocked_since=case when $2='fired' then null else blocked_since end,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1 returning *")
             .bind(job.id).bind(state).bind(job.attempts).bind(result).bind(job.failures).fetch_one(&mut *conn).await?;
         // После отправки ссылку держит ввод; после отказа файлы отдаются сборщику.
         crate::attachments::unlink_scheduled_in_tx(conn, &[job.id]).await?;
@@ -1029,7 +1036,7 @@ async fn finish_limit(
     state: &str,
     result: Value,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("update scheduled_jobs set state=$2,result=$3,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1")
+    sqlx::query("update scheduled_jobs set state=$2,result=$3,blocked_since=case when $2='fired' then null else blocked_since end,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1")
         .bind(id).bind(state).bind(result).execute(conn).await?;
     Ok(())
 }
@@ -1053,6 +1060,76 @@ pub(crate) async fn publish_archive_cancellations(
 
 #[cfg(test)]
 mod tests {
+    /// Терпение очереди считается с первой заблокированной попытки, а не с создания
+    /// задания: давно созданное событие не сгорает на первом `queue_full`.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn queue_full_patience_runs_from_the_first_block(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let seed = crate::testkit::seed(&pool).await;
+        let id = uuid::Uuid::now_v7();
+        let now = chrono::Utc::now();
+        let created_at = now - chrono::TimeDelta::days(2);
+        sqlx::query(
+            "insert into scheduled_jobs (id, owner_id, conversation_id, kind, run_at, payload, attempts, failures, created_at)
+             values ($1, $2, $3, 'session_task', $4, $5, 0, 0, $6)",
+        )
+        .bind(id)
+        .bind(seed.owner_id)
+        .bind(seed.conversation_id)
+        .bind(now - chrono::TimeDelta::seconds(1))
+        .bind(serde_json::json!({"action": "event"}))
+        .bind(created_at)
+        .execute(&pool)
+        .await?;
+        let scheduler = super::Scheduler::new(
+            pool.clone(),
+            crate::dispatcher::Dispatcher::channel().0,
+            crate::config::SchedulerConfig::default(),
+        );
+        let mut report = super::TickReport::default();
+        let attempt: super::JobRow = sqlx::query_as("select * from scheduled_jobs where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await?;
+        scheduler
+            .record_failure(&attempt, now, "queue_full", false, &mut report)
+            .await?;
+        let (state, blocked_since, failures): (String, Option<chrono::DateTime<chrono::Utc>>, i32) =
+            sqlx::query_as("select state,blocked_since,failures from scheduled_jobs where id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(state, "pending", "первый blocked не сжигает задание");
+        assert_eq!(failures, 0, "queue_full не расходует отказы");
+        let blocked_since = blocked_since.expect("first block records its start");
+        assert!(
+            (now - blocked_since).num_seconds().abs() < 5,
+            "blocked_since is the attempt time: {blocked_since}"
+        );
+
+        let attempt: super::JobRow = sqlx::query_as("select * from scheduled_jobs where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await?;
+        let mut report = super::TickReport::default();
+        scheduler
+            .record_failure(
+                &attempt,
+                blocked_since + chrono::TimeDelta::hours(24),
+                "queue_full",
+                false,
+                &mut report,
+            )
+            .await?;
+        let state: String = sqlx::query_scalar("select state from scheduled_jobs where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(state, "failed", "сутки терпения от первого blocked истекли");
+        Ok(())
+    }
+
     /// Повтор с ядовитой нагрузкой: `record_failure` возвращает ошибку и синхронно
     /// откатывает транзакцию, не оставляя блокировки строки задания.
     #[sqlx::test(migrations = "./migrations")]
@@ -1071,7 +1148,7 @@ mod tests {
             attempts: 0,
             failures: 0,
             result: None,
-            created_at: chrono::Utc::now(),
+            blocked_since: None,
         };
         sqlx::query(
             "insert into scheduled_jobs (id, owner_id, conversation_id, kind, run_at, payload, attempts, failures)
