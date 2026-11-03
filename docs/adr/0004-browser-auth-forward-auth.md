@@ -62,7 +62,7 @@ Cookie, токенов и сессий в хабе нет.
 хаб. Секрет хранится в файле (`proxy_secret_file`, не короче 32 байт,
 видимые ASCII), значение не попадает в журнал и ответы. Caddy обязан сначала
 убрать из запроса клиента `Remote-*` и `X-Canterlot-Proxy`, затем выполнить
-`forward_auth`; конфигурация и проверка в README и `scripts/check-proxy.sh`.
+`forward_auth`; конфигурация и проверка в `docs/http.md` и `scripts/check-proxy.sh`.
 
 ### CSRF
 

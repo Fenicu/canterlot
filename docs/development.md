@@ -1,0 +1,112 @@
+# Разработка и структура
+
+## Структура
+
+| Путь | Назначение |
+| --- | --- |
+| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, типизированный HTTP, журнал операций, черновики, загрузка вложений, синхронизация WSS в `src/lib/sync`, FakeHub в `testing/fake-hub`, лента чата, поле ввода, оболочка и список сессий, экраны машин, истории лимитов, настроек и истории изменений, платформа `src/lib/pwa` (установка, обновление по version.json, очистка), manifest и иконки из токенов, unit и браузерные проверки |
+| `crates/canterlot-journal/` | Локальный журнал команд и событий воркера |
+| `crates/canterlot-proto/` | Типы protobuf, контракты gRPC и локального IPC управляющей службы с сопровождением |
+| `crates/canterlot-worker/` | Воркер: TLS-сеанс, журналы, сопровождение исполнений, адаптеры и `machine/{metrics,limits}` |
+| `crates/canterlot-hub/` | Хаб: PostgreSQL, gRPC-сервер, диспетчер, outbox, факты агента и данные машин |
+| `crates/canterlot-hub/src/{runs,limits}.rs` | Ходы, расход по моделям и агентам, снимки лимитов и история |
+| `crates/canterlot-hub/src/{crunch.rs,http/crunch.rs}` | Правила лимитов: удержания «кранча», недельный резерв, пробуждение после сброса, опрос лимитов, `spend-reserve` |
+| `crates/canterlot-hub/src/{machine_info,singleton}.rs` | Каталог и метрики машин, проекция доступности и блокировки фоновых служб |
+| `crates/canterlot-hub/src/http/` | HTTP хаба на axum: вход по заголовку прокси, CSRF и Origin, ошибки, `healthz`/`readyz`, `me`, `config`, OpenAPI |
+| `crates/canterlot-hub/src/{background,dberr}.rs` | Единое место запуска фоновых служб; безопасное описание ошибок базы данных |
+| `crates/canterlot-hub/src/{activity,bus,scheduler}.rs` | Проекция активности и непрочитанного, шина уведомлений и транзакционный планировщик |
+| `crates/canterlot-hub/src/{conversations,groups}.rs` | Создание сессий, атрибуты, группы, список и прочитанность |
+| `crates/canterlot-hub/src/{presets,http/presets,grpc/agent}.rs`, `migrations/0021_instruction_presets.sql`, `migrations/0022_conversation_presets.sql` | Пресеты инструкций: версии текста, CRUD API, события, снимок, стартовый пресет исполнителя и вызовы инструментов агента (`presets.list`, `presets.save`, `presets.apply`) |
+| `crates/canterlot-worker/src/adapter/{canterlot_mcp/,codex/home.rs}` | MCP-сервер canterlot (разрешения, вопросы, лимиты, инструменты пресетов) и собственный `CODEX_HOME` для пресетов, кроме «Как у владельца», плюс изолированные дома делегированных сессий |
+| `crates/canterlot-hub/src/http/{conversations,groups,machines,limits}.rs`, `migrations/0023_machine_workdirs.sql`, `migrations/0026_machine_home_dir.sql` | HTTP сессий и групп, чтение машин, лимитов и недавних каталогов: хаб запоминает до 20 проверенных каталогов на машину и отдаёт последние 3, домашний каталог воркера приходит в отчёте машины; лист «Как у владельца» читает глобальные файлы и память с живой машины (`GET /api/v1/machines/{id}/owner-instructions` и `.../file`, возможность `owner_instructions_v1`, в базе не кэшируется) |
+| `crates/canterlot-hub/src/requests.rs`, `migrations/0018_requests.sql`, `migrations/0024_decision_unconfirmed.sql` | Запросы агента и разрешения: таблица requests (с состоянием `decision_unconfirmed`), первый ответ побеждает, команда `deliver_decision` через outbox, `POST /api/v1/conversations/{id}/requests/{id}/decision`, события `request_opened`, `request_decided`, `request_transmitting`, `request_closed`, удержание очереди и активность `WaitingForUser` |
+| `crates/canterlot-hub/src/todos.rs`, `migrations/0028_agent_todos.sql` | Список задач агента: последний полный список каждой дорожки, отсечение устаревших ревизий, снимок и событие `todo_updated` (pilot.md §12.2) |
+| `crates/canterlot-hub/src/background_tasks.rs`, `migrations/0033_background_tasks.sql` | Фоновые задачи агента: последнее состояние каждой задачи по `(conversation_id, task_id)`, связь с блоком вызова, отсечение устаревшего, признак хода, начатого самим CLI, в `executions.wake_turn` |
+| `crates/canterlot-hub/migrations/{0019_blocks_approved_by,0025_blocks_approved_by_check}.sql` | Отметка блока `approved_by`: единственное допустимое значение `cli_policy` (действие разрешено политикой самого CLI без запроса), прочие при накате обнуляются, остальное отсекает CHECK |
+| `crates/canterlot-hub/src/deletion.rs`, `migrations/0027_conversation_tombstones.sql` | Удаление остановленной сессии одной транзакцией: надгробие без содержимого, скрытые заглушки в журналах владельца, освобождение файлов после commit, подтверждение поздних записей журнала без применения; на машине остаются журналы, копии вложений и история CLI |
+| `crates/canterlot-worker/src/exec/{group,lost}.rs`, `crates/canterlot-hub/migrations/0037_resolve_owner_lost.sql` | Выход из `owner_lost`: сверка группы после смерти сопровождения (сессия, метка в окружении, снимок `group.json`), доотправка его журнала, `failed(supervisor_died)` и `stopped(machine_rebooted)`, решение владельца `POST /api/v1/conversations/{id}/resolve-owner-lost` (возможность `owner_exit_v1`) |
+| `crates/canterlot-hub/src/compactions.rs`, `migrations/{0038_compaction_timeline,0039_close_open_compactions}.sql` | Сжатие контекста строками ленты `compaction`, закрытие незавершённых у остановленных исполнений |
+| `crates/canterlot-hub/migrations/0040_monthly_limits.sql` | Месячное окно лимитов (OpenCode Go) |
+| `crates/canterlot-hub/migrations/0042_block_files.sql` | Файлы, отданные агентом через `share_file`: строка `block_files` и готовое вложение |
+| `crates/canterlot-hub/migrations/{0043_run_working,0046_run_working_union}.sql` | Рабочее время хода: длительность без ожидания владельца (открытых запросов) внутри хода |
+| `crates/canterlot-hub/migrations/{0044_steer_input,0045_input_revision}.sql` | «Отправить сейчас» (команда `steer_input`) и правка ввода в очереди по ревизии |
+| `crates/canterlot-hub/migrations/{0041_queue_run_slot_since,0047_dispatch_claim}.sql` | Начало текущего хода для «Подвисла?» и граница выдачи: команду, выбранную outbox, больше не правят |
+| `crates/canterlot-hub/src/session_tools/`, `crates/canterlot-hub/src/http/session_tools.rs`, `crates/canterlot-hub/migrations/0035_session_tools.sql` | Межсессионные инструменты модели (`pilot.md` §12): `settle` (устоявшееся состояние и отпечаток), `subs` (подписки), `jobs` и `summary` (событие и итог), `access`, `origin`, `read`, `send`, `spawn`, `whitelist`, `wait`, `accept`; белый список и приём результата по HTTP |
+| `crates/canterlot-worker/src/worktree.rs`, `crates/canterlot-worker/src/supervisor/git_facts.rs` | Отдельная рабочая копия делегированной сессии (подготовка и уборка) и факты git на конец хода |
+| `crates/canterlot-worker/tests/session_tools_e2e.rs` | Сквозные сценарии межсессионных инструментов: запуск в копии, подписки, одобрение, приём, цикл и перезапуски |
+| `crates/canterlot-hub/migrations/0020_midsession_effort.sql` | Признак `settings_midsession_effort` харнесса в каталоге машины: можно ли менять усилие у идущего исполнения (по умолчанию да; Claude Code меняет его только перезапуском, поэтому нет) |
+| `crates/canterlot-hub/build.rs` | Пересборка встроенных миграций при добавлении SQL-файла |
+| `crates/canterlot-hub/src/{snapshot,history}.rs` | Транзакционные снимки с границей журнала, история по scope_seq, блоки, ходы и делегирование |
+| `crates/canterlot-hub/src/{subscriptions.rs,http/ws.rs}` | WSS canterlot.v1: подписки по курсору, pull-based pump, слияние дельт и отключение зависшего клиента |
+| `crates/canterlot-hub/src/http/{snapshot,history}.rs` | GET снимков, истории и диапазона событий с заглушками внутренних видов |
+| `docs/api/events.schema.json` | JSON Schema 2020-12 событий браузера и кадров canterlot.v1 |
+| `crates/canterlot-hub/src/http/scheduled.rs` | Создание, список, изменение и отмена отложенных сообщений |
+| `crates/canterlot-hub/src/{attachments/,http/attachments.rs}` | Вложения хаба: загрузка частями в staging, проверенная надёжная публикация, метаданные, привязка к вводу, сборщик и безопасная выдача |
+| `crates/canterlot-hub/src/grpc/attachments.rs` | Выдача вложений машине через `FetchAttachment`, возобновление по смещению и ограничение потоков |
+| `crates/canterlot-worker/src/attachments.rs` | Загрузка вложений с возобновлением, проверка SHA-256 и надёжная публикация в каталоге исполнения |
+| `crates/canterlot-hub/src/{media.rs,grpc/media.rs,http/media.rs}`, `migrations/0015_block_media.sql` | Картинки, на которые смотрел агент: приём `PutMedia`, надёжная публикация, ссылка из блока по записи `BlockMedia`, выдача `GET /api/v1/media/{id}` |
+| `crates/canterlot-worker/src/media.rs` | Копия картинки в каталоге исполнения: тип по сигнатуре, размеры, SHA-256; загрузка на хаб с повторами |
+| `crates/canterlot-worker/tests/exec_media.rs` | Сквозные проверки картинок: ссылка только после публикации, перезапуски хаба и воркера, пропуск крупных и чужих файлов, независимость SJ и управления |
+| `crates/canterlot-worker/tests/pilot_e2e.rs` | Сквозные сценарии пилота через HTTP и WSS: настоящий хаб, воркер, сопровождение и синтетический CLI |
+| `crates/canterlot-hub/tests/contract_coverage.rs` | Заморозка контракта: таблицы `api.md` против OpenAPI и схемы событий, ключ идемпотентности у каждого изменяющего маршрута |
+| `docs/api/openapi.json` | Машиночитаемый контракт API, генерируется `scripts/gen-openapi.sh` |
+| `scripts/{gen-openapi,check-proxy}.sh` | Перегенерация OpenAPI; приёмка заголовков Caddy и Authelia |
+| `docs/adr/0004-browser-auth-forward-auth.md` | Вход браузера через прокси с forward-auth |
+| `spikes/` | Прототипы этапа 0, не продуктовый код |
+| `docs/stage0/` | Отчёты этапа 0: матрица возможностей, доказательства, ограничения |
+| `crates/canterlot-proto/src/harness.rs` | Единая таблица харнессов и провайдеров |
+| `docs/design/api.md` | Контракт API пилота: представление данных, ошибки, маршруты, виды событий, покрытие экранов |
+| `docs/design/` | Автоматы состояний, правила идемпотентности и протоколы восстановления |
+| `docs/adr/` | Решения по архитектуре и их обоснования |
+
+## Тулчейн
+
+- Rust 1.99.1 (закреплён в `rust-toolchain.toml`)
+- protoc 36.2
+- Node.js 24 LTS (сборка PWA)
+
+## Разработка
+
+Проверки идут через `cargo-nextest` (`scripts/install-tools.sh` ставит готовый бинарник; `check.sh` делает это сам). Три уровня:
+
+- `scripts/check.sh --fast` — для небольшой правки и для помощников по ходу задачи: fmt, clippy со всеми фичами, тесты изменённых крейтов и тех, кто от них зависит (для изменённого файла `tests/x.rs` только этот бинарник), первая же ошибка останавливает прогон; в вебе svelte-check, eslint, токены, vitest по diff и изменённые спеки Playwright на phone.
+- `scripts/check.sh` — полная, перед слиянием в main: сравнивает с main и пропускает Rust, если менялись только web или документы, и web, если менялся только Rust; файлы `docs/api/*` (сгенерированные контракты), `scripts/*` и `.config/*` включают обе половины. `--all` отключает выбор по путям, `--base REF` меняет основу сравнения. Один clippy `--all-targets --all-features` идёт в отдельном каталоге `target/lint` одновременно с тестами; сборка без фич только проверяется `cargo check`, и из её тестов запускается единственный собственный: синтетический адаптер отключён.
+- `scripts/check-web.sh --stack` — сквозной набор на настоящем хабе, только перед выкаткой.
+
+Все тесты всех бинарников идут одним пулом, процесс на тест (`.config/nextest.toml`): потоков по числу ядер (`CANTERLOT_TEST_THREADS`); вдвое больше ускоряет пул, но рядом с линтом ломает тайминги тестов с сопровождением. Лимиты внутри процесса в таком режиме не работают, поэтому тяжёлые сценарии с сопровождением ограничены группой `heavy-e2e`, а три теста на голодание управляющего канала идут по одному и занимают часть пула (группа `starvation`). Долгие тесты видны в итоге как SLOW, `scripts/slowest-tests.py` печатает самые долгие. Повтор упавшего теста разрешён только для карантина: записи помечены `QUARANTINE` с причиной в `.config/nextest.toml` и в спеках Playwright, `scripts/list-quarantine.sh` их перечисляет, а `.superpowers/carry/flaky-tests.md` хранит историю; остальные тесты молча не перезапускаются. `cargo test` по-прежнему работает, но без групп. Сквозные сценарии пилота: `cargo nextest run --workspace --all-features -E 'binary(pilot_e2e)'`; процессы сопровождения и синтетического CLI тест убивает при завершении. Стенд с настройками как у `serve` (лимиты, активность, планировщик, хранилище вложений) собирает `testkit::spawn_test_hub_with`. Перед запуском `scripts/reap-stray-tests.sh` снимает тестовые супервизоры этой копии старше 30 минут: они намеренно переживают воркера, поэтому убитый прогон оставляет их работать. Каждая пересборка оставляет старые копии тестовых бинарников; `scripts/prune-target.sh` (его зовёт полная проверка) убирает все, кроме свежих.
+
+В профиле `dev` зависимости собираются с `opt-level = 1`: SCRAM-аутентификация sqlx в неоптимизированной сборке стоила 0,3 с процессора на каждое подключение к тестовой базе. Инкрементальная сборка включена (кеш выходит на плато около 6 ГБ).
+
+Спека на диске и IPC переживают релиз, который их записал: сопровождение живёт дольше воркера. `tests/spec_compat.rs` держит замороженную спеку старого релиза в `tests/fixtures/spec/`: при удалении или переименовании поля настройки адаптера добавляйте сюда спеку уходящего релиза. Совместимость со старым сопровождением проверяется вручную, без переменных тесты идут на текущем бинарнике: `CANTERLOT_OLD_RELEASE_BIN=<бинарник релиза> cargo test -p canterlot-worker --all-features --test spec_compat` (рукопожатие и журнал настоящего выпущенного бинарника; тест берёт из `tests/fixtures/spec/` спеку, которую бинарник принимает, поэтому для каждого выпуска с удалённым полем настройки нужна своя) и `CANTERLOT_E2E_SUPERVISOR_BIN=<бинарник старого коммита, собранный с --all-features> cargo test -p canterlot-worker --all-features --test exec_e2e` (весь сценарий на синтетическом CLI).
+
+Перегенерация перечня лицензий зависимостей — `scripts/gen-licenses.sh` (обновляет `docs/licenses/THIRD_PARTY.md`).
+
+Для тестов хаба нужны Docker и `strace` (регрессии порядка fsync); `strace` также используется сквозной проверкой долговечности каталогов worker. Из корня репозитория запустите PostgreSQL 18.6 и тесты:
+
+```bash
+scripts/test-db.sh up
+source ~/.cargo/env
+cargo nextest run --workspace --all-features
+```
+
+База доступна на `127.0.0.1:55440`. Тестовые пользователь, пароль и база: `canterlot`.
+`DATABASE_URL` задан в `.cargo/config.toml`; переменная окружения позволяет использовать другую тестовую базу.
+Каждый тест схемы создаёт отдельную базу через `sqlx::test`, поэтому пользователю PostgreSQL нужно право `CREATEDB`.
+Функции подготовки данных доступны с feature `testkit` и автоматически подключаются при тестировании хаба.
+Параллельные рабочие копии на одной машине поднимают отдельный сервер: `CANTERLOT_TEST_PG_PORT=55441 scripts/test-db.sh up`.
+Затем `DATABASE_URL=postgres://canterlot:canterlot@127.0.0.1:55441/canterlot cargo nextest run --workspace --all-features`. Одной переменной порта для `cargo test` мало: `.cargo/config.toml` указывает на общую базу 55440. `scripts/check.sh` сам выставляет `DATABASE_URL` по `CANTERLOT_TEST_PG_PORT`, если `DATABASE_URL` не задан.
+sqlx называет тестовые базы по пути теста, поэтому две копии на одном сервере удаляли бы базы друг друга.
+`down` и `psql` принимают ту же переменную.
+
+```bash
+scripts/test-db.sh psql
+scripts/test-db.sh down
+```
+
+Данные контейнера хранятся в tmpfs и теряются при его остановке.
+
+## Обновление контракта пилота
+
+Порядок обновления: хаб первым, затем воркер. Возможность `todo_v1` разрешает запись `TodoUpdated`: со старым хабом воркер отбрасывает список задач, ход не страдает. Возможность `background_v1` так же разрешает `BackgroundWorkChanged`. Возможность `pilot_v1` согласуется через `Hello.optional_capabilities` и `Accepted.capabilities`; до её подтверждения записи и команды пилота не используются. Возможность `session_tools_v1` разрешает рабочие копии (`StartExecution.worktree`, `RemoveWorktree`, `WorktreeRemoved`), факты git в `RunFinished` и признак `isolate_mcp` делегированных сессий; миграция `0035_session_tools` выполняется внутри `serve`, поэтому хаб обновляется первым (неизвестная запись `RecordBody` останавливает журнал, `streams.md` §3), затем PWA и воркер. Со старым воркером команды с этой возможностью остаются ожидающими, изолированный запуск отвечает `capability_missing`, а делегированная сессия ждёт обновления воркера и ни при каких условиях не стартует с серверами владельца; обычные сессии не меняются. Работающие CLI сохраняют прежний список инструментов и инструкции до перезапуска. Возможность `owner_exit_v1` так же требует хаб первым: без неё команда `resolve_owner_lost` остаётся ожидающей. `send_now_v1` («Отправить сейчас», команда `steer_input`) и `owner_instructions_v1` (лист «Как у владельца») так же требуют обновлённого воркера; со старым кнопка отвечает отказом с подписью (`capability_missing`). Откат хаба ниже возможности, которую воркер уже использовал, не поддерживается; после подключения воркера откат через миграцию 0035 невозможен. Если обновление всё же разошлось и хаб не может применить запись журнала, запись не теряется: она остаётся на машине неподтверждённой, а на экране машины появляется предупреждение `cj_journal_stopped` или `sj_journal_stopped`. Журнал команд держит всю машину, журнал сессии только свою сессию. Обновление хаба или воркера снимает стоп само, ручных действий не требуется; в логах искать `journal_stopped` у хаба и `journal_refused` у воркера. Обновление управляющей службы воркера сохраняет живые процессы сопровождения и их исполнения.
+
+Фоновые службы (`singleton.rs`) восстанавливают отдельное соединение и advisory lock после сбоя с задержкой 250 мс → 30 с, которая сбрасывается после 60 с непрерывной работы; второй хаб остаётся пассивным. `readyz` сообщает имена недоступных служб (`reason: service`, `services`). Планировщик считает ошибки отдельно от опросов и обрабатывает задания независимо. Временные ошибки пробуждений и проверок лимита повторяются неограниченно с задержкой не более 60 с; для остальных заданий действует `max_attempts`. Ежечасное обслуживание удаляет завершённые и ошибочные задания через 30 дней, общие ключи идемпотентности и события через 7 дней. Ключ отправки ввода и хеш запроса сохраняются в самом вводе: поздний повтор после очистки возвращает исходный ответ. Новый лимит получает собственный срок автопродолжения; поздний факт прерванного владельцем хода его не включает. Подробности восстановления, срок автоматического продолжения и форматы событий: [контракт API](design/api.md#восстановление-фоновых-служб-и-обслуживание).
