@@ -747,6 +747,7 @@ test('list_reserves_the_limits_strip_and_hides_zero_counts_until_the_snapshot', 
   // До снимка нули в счёте вкладок не выдают себя за пустой список, а место полосы лимитов занято.
   await expect(page.locator('.strip-slot')).toHaveCount(1);
   await expect(page.locator('.tabs .count')).toHaveCount(0);
+  await expect(page.locator('.strip-slot')).toBeVisible();
   const slot = (await page.locator('.strip-slot').boundingBox())!;
   release();
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
@@ -755,9 +756,11 @@ test('list_reserves_the_limits_strip_and_hides_zero_counts_until_the_snapshot', 
   // Пришедшая полоса не выше оставленного места: строки под ней не уезжают вниз.
   const stripNode = page.locator('.limits').first();
   await expect(stripNode).toBeVisible();
-  const strip = (await stripNode.boundingBox())!;
-  expect(strip.height).toBeLessThanOrEqual(slot.height + 1);
-  expect(Math.abs(strip.y - slot.y)).toBeLessThanOrEqual(1);
+  await expect.poll(async () => (await stripNode.boundingBox())?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(slot.height + 1);
+  await expect.poll(async () => {
+    const box = await stripNode.boundingBox();
+    return box ? Math.abs(box.y - slot.y) : Number.POSITIVE_INFINITY;
+  }).toBeLessThanOrEqual(1);
 });
 
 test('list_bottom_edge_fades_instead_of_slicing_the_next_row', async ({ page }) => {

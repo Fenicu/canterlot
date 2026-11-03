@@ -224,7 +224,7 @@ test.describe('stack: input and queue', () => {
 
     await schedule(new Date(Date.now() + 3_600_000).toISOString(), 'Z-отменить');
     await expect(strip).toContainText('Z-отменить', { timeout: 15_000 });
-    await strip.getByRole('button', { name: 'Отменить' }).click();
+    await strip.getByRole('button', { name: 'Отменить: Z-отменить', exact: true }).click();
     await expect(strip).not.toContainText('Z-отменить', { timeout: 15_000 });
 
     await schedule(new Date(Date.now() + 3000).toISOString(), synthetic.script([synthetic.delta('Z-сработало')]));
