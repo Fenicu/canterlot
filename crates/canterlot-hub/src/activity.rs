@@ -351,7 +351,10 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
         let live_descendants = process
             .descendants
             .map_or(process.alive, |descendants| descendants > 0);
-        if process.alive && ((tool_phase && live_descendants) || cpu_busy) {
+        // Занятый CPU — работа, даже если фаза не инструмент: удалённая модель может
+        // долго ждать токены без CPU, значит обратное неверно. Живой инструмент
+        // доказывает работу и без CPU: его дерево просто спит.
+        if cpu_busy || (process.alive && tool_phase && live_descendants) {
             return working(&e.phase);
         }
         let threshold = if tool_phase {

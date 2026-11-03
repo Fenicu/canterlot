@@ -296,6 +296,17 @@ async fn refresh_at(pool: &PgPool, id: Uuid, now: DateTime<Utc>) -> Refresh {
 }
 
 async fn alive_metrics(pool: &PgPool, machine: Uuid, execution: Uuid, at: DateTime<Utc>) {
+    metrics_with(pool, machine, execution, at, 0, 0).await;
+}
+
+async fn metrics_with(
+    pool: &PgPool,
+    machine: Uuid,
+    execution: Uuid,
+    at: DateTime<Utc>,
+    cpu_permille: u32,
+    descendants: u32,
+) {
     sqlx::query("delete from machine_metrics where machine_id=$1")
         .bind(machine)
         .execute(pool)
@@ -304,7 +315,7 @@ async fn alive_metrics(pool: &PgPool, machine: Uuid, execution: Uuid, at: DateTi
     sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,$2,1,1,100,100,50,0,0,0,'[]',$3)")
         .bind(machine)
         .bind(at)
-        .bind(json!([{"execution_id":execution,"alive":true,"cpu_permille":0,"descendants":0}]))
+        .bind(json!([{"execution_id":execution,"alive":true,"cpu_permille":cpu_permille,"descendants":descendants}]))
         .execute(pool)
         .await
         .unwrap();
@@ -592,6 +603,53 @@ async fn unknown_liveness_never_fires_a_stall(pool: PgPool) {
         refresh_at(&pool, p.target, now + TimeDelta::seconds(step * 900)).await;
     }
     assert!(jobs(&pool, p.subscriber).await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cpu_busy_generation_never_fires_a_stall(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    let phase_at = now - TimeDelta::minutes(10);
+    sqlx::query(
+        "update executions set phase='generating',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Реальный случай: модель ещё ничего не написала, но процесс занят работой.
+    metrics_with(&pool, p.machine, execution.execution_id, now, 500, 0).await;
+    subscribe(&pool, &p).await;
+    refresh_at(&pool, p.target, now).await;
+    assert!(jobs(&pool, p.subscriber).await.is_empty());
+    let later = now + TimeDelta::minutes(20);
+    metrics_with(&pool, p.machine, execution.execution_id, later, 500, 0).await;
+    refresh_at(&pool, p.target, later).await;
+    assert!(
+        jobs(&pool, p.subscriber).await.is_empty(),
+        "занятый CPU — работа, а не зависание"
+    );
+    let state: String = sqlx::query_scalar(
+        "select activity_state from conversation_derived where conversation_id=$1",
+    )
+    .bind(p.target)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "working");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
