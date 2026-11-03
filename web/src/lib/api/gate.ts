@@ -1,25 +1,6 @@
-class HttpHealthTracker {
-  #lastOkAt: number | null = null;
+import { http, httpHealth } from "#lib/api/http.js";
 
-  get lastOkAt(): number | null {
-    return this.#lastOkAt;
-  }
-
-  /** Совместимость с уже написанными проверками. */
-  get lastSuccessAt(): number {
-    return this.#lastOkAt ?? 0;
-  }
-
-  recordSuccess(timestamp = Date.now()): void {
-    this.#lastOkAt = timestamp;
-  }
-
-  reset(): void {
-    this.#lastOkAt = null;
-  }
-}
-
-export const httpHealth = new HttpHealthTracker();
+export { httpHealth };
 
 export interface SendGateEnv {
   onLine(): boolean;
@@ -61,8 +42,7 @@ export async function canSendNow(env?: SendGateEnv): Promise<"ok" | "offline"> {
   }
 
   try {
-    const { http: request } = await import("#lib/api/http.js");
-    await request("GET", "/api/v1/me", undefined, { timeoutMs: 2000 });
+    await http("GET", "/api/v1/me", undefined, { timeoutMs: 2000 });
     return "ok";
   } catch {
     return "offline";
