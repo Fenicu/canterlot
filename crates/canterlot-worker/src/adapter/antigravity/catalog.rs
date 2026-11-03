@@ -42,11 +42,20 @@ impl AntigravityCatalog {
                 .iter()
                 .map(|entry| {
                     let window = super::limits::context_window(&entry.id);
+                    // У модели один effort: суффикс семейства. Переключателя нет,
+                    // поэтому форма не показывает выбор, но значению есть откуда взяться.
+                    let effort = entry
+                        .id
+                        .rsplit('-')
+                        .next()
+                        .filter(|suffix| matches!(*suffix, "low" | "medium" | "high"))
+                        .map(str::to_owned)
+                        .or_else(|| self.current_effort.clone())
+                        .or_else(|| self.efforts.first().cloned());
                     ModelCatalog {
                         id: entry.id.clone(),
                         title: entry.title.clone(),
-                        // Переключатель effort не показывается до контрактного теста P14.
-                        efforts: Vec::new(),
+                        efforts: effort.into_iter().collect(),
                         images: Some(false),
                         context_window: (window > 0).then_some(window),
                     }

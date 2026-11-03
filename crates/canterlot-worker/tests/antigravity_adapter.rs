@@ -711,7 +711,15 @@ fn catalog_parses_the_recorded_p1_frame() {
     .harness();
     assert_eq!(entry.permission_modes, vec!["owner", "ask", "bypass"]);
     assert!(!entry.images);
-    assert!(entry.models.iter().all(|model| model.efforts.is_empty()));
+    // Один effort на модель: переключателя нет, но форма может отправить значение.
+    for model in &entry.models {
+        assert_eq!(model.efforts.len(), 1, "{}", model.id);
+    }
+    assert_eq!(
+        entry.models[0].efforts,
+        vec!["high".to_owned()],
+        "effort follows the model suffix"
+    );
     assert!(
         entry
             .models
@@ -2516,7 +2524,10 @@ async fn failed_restart_stops_the_execution_without_the_old_settings() {
     assert!(!started.native_conversation_id.is_empty());
     // Новая настройка не запускается: сессии нет в `session/list`.
     bench.fake.rewrite(Script {
-        steps: vec![init_step(), Script::expect("session/list", session_list(&[]))],
+        steps: vec![
+            init_step(),
+            Script::expect("session/list", session_list(&[])),
+        ],
         ..Default::default()
     });
 
