@@ -1148,6 +1148,25 @@
               }
             }
           },
+          "409": {
+            "description": "Конфликт состояния, причина в details.reason",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
             "headers": {
@@ -1678,6 +1697,25 @@
               }
             }
           },
+          "409": {
+            "description": "Конфликт состояния, причина в details.reason",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
             "headers": {
@@ -1750,6 +1788,25 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SendNowOutcome"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Конфликт состояния, причина в details.reason",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             }
@@ -3299,6 +3356,25 @@
               }
             }
           },
+          "409": {
+            "description": "Конфликт состояния, причина в details.reason",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
             "headers": {
@@ -3492,6 +3568,13 @@
                 },
                 "description": "Часы хаба: целые миллисекунды Unix"
               }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
             }
           },
           "429": {
@@ -3503,6 +3586,13 @@
                   "minimum": 0
                 },
                 "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
               }
             }
           },

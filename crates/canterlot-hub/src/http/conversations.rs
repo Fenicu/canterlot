@@ -182,9 +182,10 @@ async fn settings(
     Correlation(c): Correlation,
     ApiJson(patch): ApiJson<conversations::SettingsPatch>,
 ) -> Result<Json<conversations::SettingsView>, ApiError> {
-    Ok(Json(
-        conversations::change_settings(&s.pool, o.owner_id, id, &key, patch, c).await?,
-    ))
+    let result = conversations::change_settings(&s.pool, o.owner_id, id, &key, patch, c)
+        .await
+        .map_err(ApiError::from);
+    Ok(Json(deleted_or(&s, o.owner_id, id, result).await?))
 }
 #[derive(Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -201,12 +202,15 @@ async fn interrupt(
     IdempotencyKey(key): IdempotencyKey,
     Correlation(c): Correlation,
 ) -> Result<Json<crate::delivery::control::StopOutcome>, ApiError> {
-    let result = crate::delivery::control::request_stop(&s.pool, o.owner_id, id, &key, c).await?;
+    let result = crate::delivery::control::request_stop(&s.pool, o.owner_id, id, &key, c)
+        .await
+        .map_err(ApiError::from);
+    let result = deleted_or(&s, o.owner_id, id, result).await?;
     s.dispatcher.trigger(id);
     Ok(Json(result))
 }
 
-#[utoipa::path(post,path="/api/v1/conversations/{id}/compact",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Сжатие контекста запрошено",body=crate::delivery::control::CompactOutcome)))]
+#[utoipa::path(post,path="/api/v1/conversations/{id}/compact",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Сжатие контекста запрошено",body=crate::delivery::control::CompactOutcome),(status=409,description="Конфликт состояния, причина в details.reason",body=super::error::ErrorEnvelope)))]
 async fn compact(
     State(s): State<AppState>,
     o: Owner,
@@ -214,9 +218,10 @@ async fn compact(
     IdempotencyKey(key): IdempotencyKey,
     Correlation(c): Correlation,
 ) -> Result<Json<crate::delivery::control::CompactOutcome>, ApiError> {
-    let result =
-        crate::delivery::control::request_compaction(&s.pool, o.owner_id, id, &key, c).await?;
-    Ok(Json(result))
+    let result = crate::delivery::control::request_compaction(&s.pool, o.owner_id, id, &key, c)
+        .await
+        .map_err(ApiError::from);
+    Ok(Json(deleted_or(&s, o.owner_id, id, result).await?))
 }
 
 #[utoipa::path(post,path="/api/v1/conversations/{id}/stop",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=StopBody,responses((status=200,description="Остановка исполнения запрошена",body=crate::delivery::control::StopExecutionOutcome)))]
@@ -231,7 +236,9 @@ async fn stop(
     let result = crate::delivery::control::request_stop_execution(
         &s.pool, o.owner_id, id, body.force, &key, c,
     )
-    .await?;
+    .await
+    .map_err(ApiError::from);
+    let result = deleted_or(&s, o.owner_id, id, result).await?;
     s.dispatcher.trigger(id);
     Ok(Json(result))
 }
@@ -261,7 +268,7 @@ async fn continue_queue(
     Ok(Json(result))
 }
 
-#[utoipa::path(post,path="/api/v1/inputs/{id}/cancel",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Отмена запрошена",body=crate::delivery::control::CancelOutcome)))]
+#[utoipa::path(post,path="/api/v1/inputs/{id}/cancel",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Отмена запрошена",body=crate::delivery::control::CancelOutcome),(status=409,description="Конфликт состояния, причина в details.reason",body=super::error::ErrorEnvelope)))]
 async fn cancel_input(
     State(s): State<AppState>,
     o: Owner,
@@ -282,7 +289,7 @@ async fn cancel_input(
     Ok(Json(result))
 }
 
-#[utoipa::path(post,path="/api/v1/conversations/{id}/inputs/{input_id}/send-now",tag="conversations",params(("id"=Uuid,Path),("input_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Ожидающий ввод влит в идущий ход",body=crate::delivery::control::SendNowOutcome)))]
+#[utoipa::path(post,path="/api/v1/conversations/{id}/inputs/{input_id}/send-now",tag="conversations",params(("id"=Uuid,Path),("input_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Ожидающий ввод влит в идущий ход",body=crate::delivery::control::SendNowOutcome),(status=409,description="Конфликт состояния, причина в details.reason",body=super::error::ErrorEnvelope)))]
 async fn send_now(
     State(s): State<AppState>,
     o: Owner,
@@ -306,8 +313,9 @@ async fn send_now(
         c,
         &capabilities.unwrap_or_default(),
     )
-    .await?;
-    Ok(Json(result))
+    .await
+    .map_err(ApiError::from);
+    Ok(Json(deleted_or(&s, o.owner_id, id, result).await?))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -319,7 +327,7 @@ pub struct EditInputBody {
     expected_revision: i64,
 }
 
-#[utoipa::path(patch,path="/api/v1/conversations/{id}/inputs/{input_id}",tag="conversations",params(("id"=Uuid,Path),("input_id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=EditInputBody,responses((status=200,description="Ожидающий ввод исправлен",body=crate::delivery::control::EditInputOutcome)))]
+#[utoipa::path(patch,path="/api/v1/conversations/{id}/inputs/{input_id}",tag="conversations",params(("id"=Uuid,Path),("input_id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=EditInputBody,responses((status=200,description="Ожидающий ввод исправлен",body=crate::delivery::control::EditInputOutcome),(status=409,description="Конфликт состояния, причина в details.reason",body=super::error::ErrorEnvelope)))]
 async fn edit_input(
     State(s): State<AppState>,
     o: Owner,
@@ -341,8 +349,9 @@ async fn edit_input(
             correlation_id: c,
         },
     )
-    .await?;
-    Ok(Json(result))
+    .await
+    .map_err(ApiError::from);
+    Ok(Json(deleted_or(&s, o.owner_id, id, result).await?))
 }
 #[derive(Clone, PartialEq, Eq, Deserialize, serde::Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

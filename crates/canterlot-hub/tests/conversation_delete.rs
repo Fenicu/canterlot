@@ -891,6 +891,34 @@ async fn a_deleted_conversation_answers_conversation_deleted_everywhere(pool: Pg
             format!("/api/v1/conversations/{id}/resume"),
             Some(json!({})),
         ),
+        (
+            Method::POST,
+            format!("/api/v1/conversations/{id}/interrupt"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/v1/conversations/{id}/stop"),
+            Some(json!({})),
+        ),
+        (
+            Method::POST,
+            format!("/api/v1/conversations/{id}/compact"),
+            None,
+        ),
+        (
+            Method::PATCH,
+            format!("/api/v1/conversations/{id}/settings"),
+            Some(json!({"effort":"high"})),
+        ),
+        (
+            Method::POST,
+            format!(
+                "/api/v1/conversations/{id}/inputs/{}/send-now",
+                Uuid::now_v7()
+            ),
+            None,
+        ),
     ] {
         let key = (method != Method::GET).then(|| Uuid::now_v7().to_string());
         let response = f.client.send(method, &path, key.as_deref(), body).await;

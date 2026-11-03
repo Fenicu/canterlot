@@ -161,7 +161,7 @@ async fn history(
     }
     Ok(Json(History { usage, series }))
 }
-#[utoipa::path(post,path="/api/v1/limits/refresh",tag="limits",responses((status=202,description="Просьба об опросе отправлена воркерам; новые показания придут событием limits_changed",body=RefreshView),(status=429,description="Опрос просили слишком недавно"),(status=409,description="Нет доступного воркера с лимитами")))]
+#[utoipa::path(post,path="/api/v1/limits/refresh",tag="limits",responses((status=202,description="Просьба об опросе отправлена воркерам; новые показания придут событием limits_changed",body=RefreshView),(status=429,description="Опрос просили слишком недавно",body=super::error::ErrorEnvelope),(status=409,description="Нет доступного воркера с лимитами",body=super::error::ErrorEnvelope)))]
 async fn refresh(
     State(s): State<AppState>,
     _o: Owner,

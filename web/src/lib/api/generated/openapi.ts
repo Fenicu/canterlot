@@ -2980,6 +2980,17 @@ export interface operations {
                     "application/json": components["schemas"]["CompactOutcome"];
                 };
             };
+            /** @description Конфликт состояния, причина в details.reason */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {
                 headers: {
@@ -3256,6 +3267,17 @@ export interface operations {
                     "application/json": components["schemas"]["EditInputOutcome"];
                 };
             };
+            /** @description Конфликт состояния, причина в details.reason */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {
                 headers: {
@@ -3292,6 +3314,17 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SendNowOutcome"];
+                };
+            };
+            /** @description Конфликт состояния, причина в details.reason */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
@@ -4136,6 +4169,17 @@ export interface operations {
                     "application/json": components["schemas"]["CancelOutcome"];
                 };
             };
+            /** @description Конфликт состояния, причина в details.reason */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {
                 headers: {
@@ -4247,7 +4291,9 @@ export interface operations {
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
             /** @description Опрос просили слишком недавно */
             429: {
@@ -4256,7 +4302,9 @@ export interface operations {
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {
