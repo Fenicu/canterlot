@@ -460,13 +460,13 @@ export class ChatStore {
   #pruneBlocks(): void {
     // Открытая лента субагента держит свои страницы вне окна разговора.
     if (this.#lanes.size > 0) return;
-    const keep = new Set<string>();
+    const keep: string[] = [];
     for (const entry of this.timeline.entries)
-      if (entry.kind === "block") keep.add(entry.block.id);
+      if (entry.kind === "block") keep.push(entry.block.id);
     for (const entry of this.#laneLive.get())
-      if (entry.kind === "block") keep.add(entry.block.id);
+      if (entry.kind === "block") keep.push(entry.block.id);
     for (const block of this.blocks.values())
-      if (isSubagentCall(block)) keep.add(block.id);
+      if (isSubagentCall(block)) keep.push(block.id);
     pruneBlocks(this.blocks, keep);
   }
 
