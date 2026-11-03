@@ -176,7 +176,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Accept the result of a session you started: it stops that session and removes its worktree; commits stay on the branch. Call it after you have read the result. Do not call it while you still need to continue that session, and not for sessions you did not start."
         }
         "session_interrupt" => {
-            "Stop the current turn of a session you started, leaving its process and worktree in place. Only the direct parent may do this; the owner's root sessions are untouchable. Do not call it on a session you did not start. Idempotent: a second call answers the same command id, and a session with nothing running says so."
+            "Stop the current turn of a session you started, leaving its process and worktree in place. Its queue then waits for you: your next session_send to it resumes it and is delivered. Only the direct parent may do this; the owner's root sessions are untouchable. Do not call it on a session you did not start. Idempotent: a second call answers the same command id, and a session with nothing running says so."
         }
         "session_stop" => {
             "Stop the process of a session you started but keep its worktree and branch, unlike session_accept. Only the direct parent may do this; the owner's root sessions are untouchable. Do not call it on a session you did not start. Idempotent: a second call says already_stopping or nothing_running."

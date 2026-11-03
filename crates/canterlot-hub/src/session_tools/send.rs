@@ -24,6 +24,7 @@ const CLOSED_BY_UNSUBSCRIBE: &str = "unsubscribed";
 
 const HINT_SUBSCRIBED: &str = "Queued. You are subscribed: the result arrives in your queue as a [canterlot] message. Do not poll; end your turn if you have nothing else to do.";
 const HINT_STOPPED: &str = "Queued, but the target session is stopped: the message waits until the owner resumes it. Do not poll; end your turn if you have nothing else to do.";
+const HINT_PAUSED: &str = "Queued, but the target session's queue is paused by the owner: the message waits until the owner continues it in the app. Do not poll; end your turn if you have nothing else to do.";
 const HINT_NOT_SUBSCRIBED: &str =
     "Queued. You are not subscribed: no [canterlot] message will tell you the result.";
 const HINT_SUBSCRIBE: &str = "Subscribed: when the session settles, a [canterlot] message arrives in your queue. Do not poll; end your turn if you have nothing else to do.";
@@ -165,19 +166,67 @@ async fn answer(
     deduplicated: bool,
 ) -> Result<Value, sqlx::Error> {
     let target_stopped = executions::live(&mut *conn, target).await?.is_none();
+    let target_paused: bool = sqlx::query_scalar(
+        "select coalesce((select pause_reasons<>'[]'::jsonb from queue_state
+                          where conversation_id=$1),false)",
+    )
+    .bind(target)
+    .fetch_one(&mut *conn)
+    .await?;
     let subscribed = subscribed(conn, caller.conversation_id, target).await?;
-    let hint = match (target_stopped, subscribed) {
-        (_, false) => HINT_NOT_SUBSCRIBED,
-        (true, true) => HINT_STOPPED,
-        (false, true) => HINT_SUBSCRIBED,
+    let hint = match (target_stopped, target_paused, subscribed) {
+        (true, _, true) => HINT_STOPPED,
+        (false, true, _) => HINT_PAUSED,
+        (_, _, false) => HINT_NOT_SUBSCRIBED,
+        (false, false, true) => HINT_SUBSCRIBED,
     };
     Ok(json!({
         "input_id": input_id,
         "deduplicated": deduplicated,
         "subscribed": subscribed,
         "target_stopped": target_stopped,
+        "target_paused": target_paused,
         "hint": hint,
     }))
+}
+
+/// Пауза `user_stop`, которую поставил `session_interrupt` этого же родителя, снимается его
+/// следующим сообщением, как продолжение очереди владельцем. Пауза остаётся, если в очереди
+/// есть другая причина или последней остановкой либо продолжением распорядился владелец.
+/// Вызывается под очередью цели.
+async fn lift_interrupt_pause(
+    conn: &mut PgConnection,
+    caller: &Caller,
+    sender: Uuid,
+    target: Uuid,
+) -> Result<(), ToolError> {
+    let ours: bool = sqlx::query_scalar(
+        "select exists(
+           select 1 from conversations c join queue_state q on q.conversation_id=c.id
+           where c.id=$1 and c.owner_id=$2 and c.parent_conversation_id=$3
+             and q.pause_reasons='[{\"reason\":\"user_stop\"}]'::jsonb
+             and (select k.key from idempotency_keys k
+                  where k.owner_id=$2 and k.conversation_id=$1
+                    and k.operation in ('request_stop','request_stop_execution','continue_queue')
+                  order by k.created_at desc, k.key desc limit 1) like $4)",
+    )
+    .bind(target)
+    .bind(caller.owner_id)
+    .bind(sender)
+    .bind(format!("{}%", super::control::INTERRUPT_KEY_PREFIX))
+    .fetch_one(&mut *conn)
+    .await?;
+    if ours {
+        crate::delivery::control::continue_queue_in_tx(
+            conn,
+            caller.owner_id,
+            target,
+            caller.call_id,
+        )
+        .await
+        .map_err(|_| ToolError::new(ToolErrorCode::Internal))?;
+    }
+    Ok(())
 }
 
 pub async fn send(
@@ -228,6 +277,7 @@ async fn send_in_tx(
     }
     access::check_read_only(&sender, &target)?;
     lock_queue(conn, target_id).await?;
+    lift_interrupt_pause(conn, caller, sender.id, target_id).await?;
     let now = Utc::now();
     let depth = access::current_depth(conn, sender.id).await?;
     if args.attachment_ids.is_empty()
