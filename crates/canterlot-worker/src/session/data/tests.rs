@@ -130,7 +130,16 @@ async fn sj_window_stops_at_eight_and_lost_head_retries_only_once() {
     let (tx, mut inbound) = link(&hub).await;
     let thread = StoreThread::new(store);
     let (sender, mut relay) = mpsc::channel(16);
-    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let runtime = tempfile::Builder::new()
+        .prefix("cl-rt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let manager = ExecutionManager::new_with_runtime_dir(
+        Default::default(),
+        thread.client(),
+        sender.clone(),
+        Some(runtime.path().to_path_buf()),
+    );
     let journal = Uuid::now_v7();
     for seq in 1..=12 {
         sender
@@ -202,7 +211,16 @@ async fn another_journal_progress_and_duplicate_acks_do_not_postpone_the_head() 
     let (tx, mut inbound) = link(&hub).await;
     let thread = StoreThread::new(store);
     let (sender, mut relay) = mpsc::channel(8);
-    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let runtime = tempfile::Builder::new()
+        .prefix("cl-rt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let manager = ExecutionManager::new_with_runtime_dir(
+        Default::default(),
+        thread.client(),
+        sender.clone(),
+        Some(runtime.path().to_path_buf()),
+    );
     let first = Uuid::now_v7();
     let other = Uuid::now_v7();
     sender
@@ -288,7 +306,16 @@ async fn stale_post_reattach_batch_cannot_jump_the_committed_cursor() {
     let (tx, mut inbound) = link(&hub).await;
     let thread = StoreThread::new(store);
     let (sender, mut relay) = mpsc::channel(8);
-    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let runtime = tempfile::Builder::new()
+        .prefix("cl-rt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let manager = ExecutionManager::new_with_runtime_dir(
+        Default::default(),
+        thread.client(),
+        sender.clone(),
+        Some(runtime.path().to_path_buf()),
+    );
     let journal = Uuid::now_v7();
     for seq in [7, 3] {
         sender
@@ -345,7 +372,16 @@ async fn fail_shipped_batch(status: Status) -> (Vec<String>, Result<(), WorkerEr
     .await;
     let thread = StoreThread::new(store);
     let (sender, mut relay) = mpsc::channel(8);
-    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let runtime = tempfile::Builder::new()
+        .prefix("cl-rt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let manager = ExecutionManager::new_with_runtime_dir(
+        Default::default(),
+        thread.client(),
+        sender.clone(),
+        Some(runtime.path().to_path_buf()),
+    );
     let diagnostics = JournalDiagnostics::default();
     let (_active, mut active) = watch::channel(true);
     let timers = WorkerTimers::default();
@@ -450,7 +486,16 @@ async fn pilot_sj_is_withheld_while_other_sj_ships_and_allowed_prefix_is_contigu
     let (tx, mut inbound) = link(&hub).await;
     let thread = StoreThread::new(store);
     let (sender, mut relay) = mpsc::channel(8);
-    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let runtime = tempfile::Builder::new()
+        .prefix("cl-rt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let manager = ExecutionManager::new_with_runtime_dir(
+        Default::default(),
+        thread.client(),
+        sender.clone(),
+        Some(runtime.path().to_path_buf()),
+    );
     let hidden = Uuid::now_v7();
     let mixed = Uuid::now_v7();
     let ordinary = Uuid::now_v7();
@@ -568,7 +613,16 @@ impl Resend {
         let (tx, mut inbound) = link(&hub).await;
         let thread = StoreThread::new(store);
         let (sender, mut relay) = mpsc::channel(8);
-        let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+        let runtime = tempfile::Builder::new()
+            .prefix("cl-rt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let manager = ExecutionManager::new_with_runtime_dir(
+            Default::default(),
+            thread.client(),
+            sender.clone(),
+            Some(runtime.path().to_path_buf()),
+        );
         let actors = setup
             .actors
             .iter()

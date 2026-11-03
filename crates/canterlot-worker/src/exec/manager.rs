@@ -3,7 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use canterlot_proto::{
@@ -33,7 +33,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{ExecError, Shared, SjRelay, lost, open, procfs, spawn};
+use super::{ExecError, Shared, SjRelay, lost, maintenance, open, procfs, spawn};
 use crate::{
     adapter,
     attachments::{AttachmentStore, FetchError, RetryPolicy},
@@ -299,6 +299,29 @@ pub(super) fn spawn_actor(shared: &Arc<Shared>, id: Uuid, start: Start) {
     let actor = Actor::new(shared.clone(), id, generation, receiver);
     let task = tokio::spawn(actor.run(start));
     shared.tasks.lock().expect("tasks lock").push(task);
+}
+
+/// Сокеты и каталоги прерванных запусков: только то, на что нет непогашенной записи.
+pub(super) async fn sweep_runtime(shared: &Shared) -> Result<(), ExecError> {
+    let records = shared
+        .store
+        .call(|store| Ok(open(store)?.ownership().all()))
+        .await?;
+    let data_dir = shared.data_dir().await?.clone();
+    let runtime_dir = shared.runtime_dir.clone();
+    let spawn_timeout = shared.config.spawn_timeout;
+    tokio::task::spawn_blocking(move || {
+        maintenance::sweep_runtime(
+            &data_dir,
+            runtime_dir.as_deref(),
+            &records,
+            spawn_timeout,
+            SystemTime::now(),
+        )
+    })
+    .await
+    .map_err(|_| ExecError::Shutdown)??;
+    Ok(())
 }
 
 pub(super) async fn cleanup_released(shared: &Shared) -> Result<(), ExecError> {
@@ -2524,7 +2547,12 @@ mod tests {
             .unwrap();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         actor
@@ -2585,7 +2613,12 @@ mod tests {
             store.accept_command(&command).unwrap();
             let thread = StoreThread::new(store);
             let (relay, _rx) = mpsc::channel(1);
-            let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+            let manager = ExecutionManager::new_with_runtime_dir(
+                ExecutionConfig::default(),
+                thread.client(),
+                relay,
+                Some(root.path().join("runtime")),
+            );
             let (_tx, rx) = mpsc::unbounded_channel();
             let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
             actor.handed.insert((cid, 1));
@@ -2672,7 +2705,12 @@ mod tests {
         store.accept_command(&stop).unwrap();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         let attachment = Uuid::now_v7();
@@ -2740,7 +2778,12 @@ mod tests {
             .unwrap();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         actor.fetching.insert(
@@ -2799,7 +2842,12 @@ mod tests {
         store.accept_command_with_pilot(&input, true).unwrap();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         let cancel = CancellationToken::new();
@@ -2859,7 +2907,12 @@ mod tests {
         assert!(!store.command_state(&cid).unwrap().unwrap().terminal);
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         let journal = Uuid::now_v7();
@@ -2898,7 +2951,12 @@ mod tests {
         let id = Uuid::now_v7();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         actor.exec_dir = Some(root.path().to_owned());
@@ -2948,7 +3006,12 @@ mod tests {
         let id = Uuid::now_v7();
         let thread = StoreThread::new(store);
         let (relay, _rx) = mpsc::channel(1);
-        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
         let (_tx, rx) = mpsc::unbounded_channel();
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         let share_id = Uuid::now_v7();

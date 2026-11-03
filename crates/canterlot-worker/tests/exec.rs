@@ -163,6 +163,7 @@ struct Env {
     config: ExecutionConfig,
     thread: Option<StoreThread>,
     manager: Option<ExecutionManager>,
+    runtime: TempDir,
     relay: mpsc::Receiver<SjRelay>,
     bodies: Vec<Body>,
     seen: HashSet<(Uuid, u64)>,
@@ -203,7 +204,16 @@ impl Env {
         };
         let thread = open_store(root.path());
         let (sender, relay) = mpsc::channel(64);
-        let manager = ExecutionManager::new(config.clone(), thread.client(), sender);
+        let runtime = tempfile::Builder::new()
+            .prefix("cl-rt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let manager = ExecutionManager::new_with_runtime_dir(
+            config.clone(),
+            thread.client(),
+            sender,
+            Some(runtime.path().to_path_buf()),
+        );
         Env {
             guard: ProcessGuard::for_executable(root.path(), &supervisor_exe),
             root,
@@ -211,6 +221,7 @@ impl Env {
             config,
             thread: Some(thread),
             manager: Some(manager),
+            runtime,
             relay,
             bodies: Vec::new(),
             seen: HashSet::new(),
@@ -377,10 +388,11 @@ impl Env {
     fn reopen(&mut self) {
         let thread = open_store(self.root.path());
         let (sender, relay) = mpsc::channel(64);
-        self.manager = Some(ExecutionManager::new(
+        self.manager = Some(ExecutionManager::new_with_runtime_dir(
             self.config.clone(),
             thread.client(),
             sender,
+            Some(self.runtime.path().to_path_buf()),
         ));
         self.thread = Some(thread);
         self.relay = relay;
@@ -576,14 +588,26 @@ async fn ownership_is_durable_before_cli_start() {
     assert_eq!(record.sj_journal_id, journal);
     assert_eq!(record.secret_sha256.len(), 32);
     assert!(!record.boot_id.is_empty());
-    let expected = match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(runtime) => Path::new(&runtime)
-            .join("canterlot")
-            .join(format!("{}.sock", env.execution)),
-        None => Path::new(&record.exec_dir).join("ipc.sock"),
-    };
+    let expected = env
+        .runtime
+        .path()
+        .join("canterlot")
+        .join(format!("{}.sock", env.execution));
     assert_eq!(Path::new(&record.ipc_socket), expected);
     env.stop().await;
+}
+
+#[tokio::test]
+async fn startup_sweeps_stale_runtime_state() {
+    let mut env = Env::new().await;
+    let sockets = env.runtime.path().join("canterlot");
+    fs::create_dir_all(&sockets).unwrap();
+    let id = Uuid::now_v7();
+    let path = sockets.join(format!("{id}.sock"));
+    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    env.manager().startup_verify().await.unwrap();
+    assert!(!path.exists());
+    env.close_manager().await;
 }
 
 #[tokio::test]

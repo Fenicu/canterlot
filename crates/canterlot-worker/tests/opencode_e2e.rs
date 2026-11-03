@@ -54,6 +54,7 @@ struct Env {
     work: PathBuf,
     thread: Option<StoreThread>,
     manager: Option<ExecutionManager>,
+    runtime: TempDir,
     relay: mpsc::Receiver<SjRelay>,
     bodies: Vec<Body>,
     seen: HashSet<(Uuid, u64)>,
@@ -114,7 +115,16 @@ impl Env {
             toml::from_str(&worker_toml(root.path(), &work, &table)).unwrap();
         let thread = StoreThread::new(WorkerStore::open(&root.path().join("store")).unwrap());
         let (sender, relay) = mpsc::channel(64);
-        let manager = ExecutionManager::new(config.execution.clone(), thread.client(), sender);
+        let runtime = tempfile::Builder::new()
+            .prefix("cl-rt-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let manager = ExecutionManager::new_with_runtime_dir(
+            config.execution.clone(),
+            thread.client(),
+            sender,
+            Some(runtime.path().to_path_buf()),
+        );
         manager.configure_adapters(
             config.claude_code.clone(),
             config.codex.clone(),
@@ -128,6 +138,7 @@ impl Env {
             work,
             thread: Some(thread),
             manager: Some(manager),
+            runtime,
             relay,
             bodies: Vec::new(),
             seen: HashSet::new(),
@@ -143,7 +154,12 @@ impl Env {
         self.thread.take().unwrap().close().await.unwrap();
         let thread = StoreThread::new(WorkerStore::open(&self.root.path().join("store")).unwrap());
         let (sender, relay) = mpsc::channel(64);
-        let manager = ExecutionManager::new(self.config.execution.clone(), thread.client(), sender);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            self.config.execution.clone(),
+            thread.client(),
+            sender,
+            Some(self.runtime.path().to_path_buf()),
+        );
         manager.configure_adapters(
             self.config.claude_code.clone(),
             self.config.codex.clone(),
@@ -169,7 +185,12 @@ impl Env {
         fs::rename(&store, self.root.path().join("store-dead")).unwrap();
         let thread = StoreThread::new(WorkerStore::open(&store).unwrap());
         let (sender, relay) = mpsc::channel(64);
-        let manager = ExecutionManager::new(self.config.execution.clone(), thread.client(), sender);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            self.config.execution.clone(),
+            thread.client(),
+            sender,
+            Some(self.runtime.path().to_path_buf()),
+        );
         manager.configure_adapters(
             self.config.claude_code.clone(),
             self.config.codex.clone(),

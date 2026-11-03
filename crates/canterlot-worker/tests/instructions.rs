@@ -581,6 +581,8 @@ mod manager_tests {
         work: PathBuf,
         thread: Option<StoreThread>,
         manager: Option<ExecutionManager>,
+        #[allow(dead_code)]
+        runtime: TempDir,
         relay: mpsc::Receiver<SjRelay>,
         execution: Uuid,
         conversation: Uuid,
@@ -603,7 +605,16 @@ mod manager_tests {
             };
             let thread = StoreThread::new(WorkerStore::open(&root.path().join("store")).unwrap());
             let (sender, relay) = mpsc::channel(64);
-            let manager = ExecutionManager::new(config, thread.client(), sender);
+            let runtime = tempfile::Builder::new()
+                .prefix("cl-rt-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let manager = ExecutionManager::new_with_runtime_dir(
+                config,
+                thread.client(),
+                sender,
+                Some(runtime.path().to_path_buf()),
+            );
             manager.on_hub_session(HashMap::new());
             Env {
                 guard: ProcessGuard::new(root.path()),
@@ -611,6 +622,7 @@ mod manager_tests {
                 work,
                 thread: Some(thread),
                 manager: Some(manager),
+                runtime,
                 relay,
                 execution: Uuid::now_v7(),
                 conversation: Uuid::now_v7(),
