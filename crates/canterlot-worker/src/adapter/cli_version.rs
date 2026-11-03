@@ -6,6 +6,15 @@ pub enum CliVersion {
     UntestedNewer(String),
 }
 
+impl CliVersion {
+    /// Версия без подписи CLI: годится для имени закреплённой копии и журнала.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Verified(label) | Self::UntestedNewer(label) => label,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionError {
     NotFound,

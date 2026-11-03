@@ -10,6 +10,7 @@ pub mod cli_version;
 pub mod codex;
 pub mod frame_names;
 pub mod held_tool;
+pub mod jsonrpc;
 pub mod labels;
 pub mod limit_note;
 pub mod opencode;
