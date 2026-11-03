@@ -22,6 +22,11 @@ test('settings_screen_shows_login_connection_theme_enter_install_and_signout', a
     await expect(main.getByRole('button', { name: 'Установить приложение' })).toHaveCount(0);
   }
   await expect(main.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible();
+  // Обе кнопки раздела во всю ширину, а подпись после двоеточия со строчной.
+  const clear = (await main.getByRole('button', { name: 'Очистить данные на устройстве' }).boundingBox())!;
+  const out = (await main.getByRole('button', { name: 'Выйти', exact: true }).boundingBox())!;
+  expect(Math.abs(clear.width - out.width)).toBeLessThanOrEqual(1);
+  await expect(main.getByText(/^Обновление: [а-яё]/)).toBeVisible();
   await expect(main.getByText(/Authelia.*собственной странице/)).toBeVisible();
 });
 
