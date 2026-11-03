@@ -46,9 +46,19 @@
     const update = () => place();
     window.addEventListener('resize', update);
     window.addEventListener('scroll', update, true);
+    const outside = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (field?.contains(target)) return;
+      const listEl = document.getElementById(listId);
+      if (listEl?.contains(target)) return;
+      suggester.clear();
+    };
+    document.addEventListener('pointerdown', outside, true);
     return () => {
       window.removeEventListener('resize', update);
       window.removeEventListener('scroll', update, true);
+      document.removeEventListener('pointerdown', outside, true);
     };
   });
 

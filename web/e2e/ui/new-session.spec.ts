@@ -42,6 +42,7 @@ test('new_session_sheet_follows_mockup_07_and_creates_a_started_session', async 
   await expect(page.getByRole('option', { name: /Машина недоступна: связь нестабильна/ })).toHaveAttribute('disabled', '');
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
+  await pathField(page).press('Escape');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
@@ -64,6 +65,7 @@ test('new_session_defaults_to_bypass_and_lets_the_owner_pick_a_labelled_mode', a
   await page.goto('/new');
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
+  await pathField(page).press('Escape');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
@@ -91,6 +93,7 @@ test('new_session_offers_recent_workdirs_and_submits_a_typed_path', async ({ pag
   await page.getByRole('button', { name: '/srv/canterlot' }).click();
   await expect(page.getByRole('textbox', { name: 'Рабочая папка' })).toHaveValue('/srv/canterlot');
   await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/tmp/typed-by-hand');
+  await pathField(page).press('Escape');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
@@ -152,6 +155,7 @@ test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({
     ]
   });
   await page.goto('/new');
+  await pathField(page).press('Escape');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   const field = page.getByRole('combobox', { name: 'Модель' });
   await expect(field).toHaveValue('opus[1m]');
@@ -201,6 +205,7 @@ test('new_session_choices_by_pointer_are_not_lost_while_the_folder_list_is_open'
   const list = page.getByRole('listbox', { name: 'Подсказки папок' });
   await pathField(page).fill('/srv/c');
   await expect(list).toBeVisible();
+  await pathField(page).press('Escape');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await expect(page.getByRole('radio', { name: 'Claude Code' })).toBeChecked();
   await expect(list).toBeHidden();
@@ -260,6 +265,7 @@ test('new_session_choices_survive_a_machine_list_refresh', async ({ page }) => {
   });
   await openWithMachine(page);
   await pathField(page).fill('/srv/canterlot');
+  await pathField(page).press('Escape');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
@@ -292,6 +298,7 @@ test('new_session_shows_no_list_and_no_error_when_the_machine_does_not_answer', 
   await page.waitForTimeout(400);
   await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toHaveCount(0);
   await expect(page.getByRole('alert')).toHaveCount(0);
+  await pathField(page).press('Escape');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
   await expect(page.getByRole('button', { name: 'Создать' })).toBeEnabled();
