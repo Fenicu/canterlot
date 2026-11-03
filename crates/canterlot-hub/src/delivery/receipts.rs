@@ -493,18 +493,21 @@ pub(crate) async fn settle_steers_of_execution_in_tx(
     Ok(())
 }
 
+/// Недогасшие вливания старше `$1` секунд; под неё заведён частичный индекс
+/// `commands_steer_open`.
+pub const OPEN_STEERS_SQL: &str = "select id from commands where kind = 'steer_input'
+   and delivery_state <> 'completed'
+   and created_at < now() - make_interval(secs => $1) order by created_at, id";
+
 /// Гасит вливания, итог которых не пришёл за `older_than`. Возвращает их число.
 pub async fn expire_steers(
     pool: &PgPool,
     older_than: std::time::Duration,
 ) -> Result<u64, sqlx::Error> {
-    let steers: Vec<Uuid> = sqlx::query_scalar(
-        "select id from commands where kind = 'steer_input' and delivery_state <> 'completed'
-           and created_at < now() - make_interval(secs => $1) order by created_at, id",
-    )
-    .bind(older_than.as_secs_f64())
-    .fetch_all(pool)
-    .await?;
+    let steers: Vec<Uuid> = sqlx::query_scalar(OPEN_STEERS_SQL)
+        .bind(older_than.as_secs_f64())
+        .fetch_all(pool)
+        .await?;
     let mut settled = 0;
     for steer in steers {
         let done = crate::db::in_tx(pool, move |conn| {

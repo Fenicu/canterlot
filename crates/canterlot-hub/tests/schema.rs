@@ -943,3 +943,27 @@ async fn command_and_block_lookups_use_indexes(pool: PgPool) -> Result<(), sqlx:
     }
     Ok(())
 }
+
+/// Раз в 5 секунд диспетчер гасит просроченные вливания: запрос должен идти
+/// частичным индексом, а не перебирать таблицу команд.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn steer_expiry_query_uses_the_partial_index(pool: PgPool) -> Result<(), sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    sqlx::query("set enable_seqscan = off")
+        .execute(&mut *conn)
+        .await?;
+    let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "explain {}",
+        canterlot_hub::delivery::receipts::OPEN_STEERS_SQL
+    )))
+    .bind(300.0_f64)
+    .fetch_all(&mut *conn)
+    .await?;
+    sqlx::query("reset enable_seqscan")
+        .execute(&mut *conn)
+        .await?;
+    let plan = lines.join("\n");
+    assert!(plan.contains("commands_steer_open"), "{plan}");
+    assert!(!plan.contains("Seq Scan on commands"), "{plan}");
+    Ok(())
+}
