@@ -53,14 +53,31 @@ pub enum Step {
         error: Option<Value>,
         #[serde(default)]
         delay_ms: u64,
+        /// id запроса в записи: по нему `Respond` находит настоящий id клиента.
+        #[serde(default)]
+        recorded_id: Option<Value>,
     },
     Send {
         frame: Value,
         #[serde(default)]
         delay_ms: u64,
     },
+    /// Ответ на уже прочитанный запрос; порядок кадров сохраняется как в записи.
+    Respond {
+        recorded_id: Value,
+        #[serde(default)]
+        result: Option<Value>,
+        #[serde(default)]
+        error: Option<Value>,
+    },
     Delay {
         ms: u64,
+    },
+    /// Ответ нашего клиента на запрос сервера (у него нет `method`).
+    ExpectReply {
+        id: Value,
+        #[serde(default)]
+        result: Option<Value>,
     },
     Die {
         code: i32,
@@ -77,6 +94,7 @@ impl Script {
             result: Some(result),
             error: None,
             delay_ms: 0,
+            recorded_id: None,
         }
     }
 
@@ -87,53 +105,102 @@ impl Script {
             result: None,
             error: Some(error),
             delay_ms: 0,
+            recorded_id: None,
         }
     }
 
-    /// Сценарий из записи: входящий запрос → ответ, уведомления после него — отдельными кадрами.
+    /// Уведомление клиента: ответа нет, поэтому сценарий только читает кадр.
+    pub fn notification(method: &str) -> Step {
+        Step::Expect {
+            method: method.into(),
+            params: None,
+            result: None,
+            error: None,
+            delay_ms: 0,
+            recorded_id: None,
+        }
+    }
+
+    pub fn send(frame: Value) -> Step {
+        Step::Send { frame, delay_ms: 0 }
+    }
+
+    pub fn send_after(frame: Value, delay_ms: u64) -> Step {
+        Step::Send { frame, delay_ms }
+    }
+
+    /// Прочитать ответ клиента на запрос сервера с этим id.
+    pub fn reply(id: Value) -> Step {
+        Step::ExpectReply { id, result: None }
+    }
+
+    /// Сценарий из записи: немедленный ответ (рукопожатие) остаётся при запросе,
+    /// а ответ на prompt отправляется там же, где был в записи — после потока
+    /// уведомлений. Порядок кадров сохраняется.
     pub fn from_evidence(name: &str) -> Self {
         let mut script = Self::default();
-        let mut pending: Option<(Value, usize)> = None;
-        for line in evidence_lines(name) {
-            let frame = match line.get("line").and_then(Value::as_str) {
-                Some(text) => match serde_json::from_str::<Value>(text) {
-                    Ok(frame) => frame,
-                    Err(_) => continue,
-                },
-                None => continue,
-            };
-            match line.get("dir").and_then(Value::as_str) {
-                Some("in") => {
+        let frames: Vec<(String, Value)> = evidence_lines(name)
+            .into_iter()
+            .filter_map(|line| {
+                let dir = line.get("dir")?.as_str()?.to_owned();
+                let frame = serde_json::from_str::<Value>(line.get("line")?.as_str()?).ok()?;
+                Some((dir, frame))
+            })
+            .collect();
+        let mut index = 0;
+        while index < frames.len() {
+            let (dir, frame) = &frames[index];
+            match dir.as_str() {
+                "in" => {
                     if let Some(method) = frame["method"].as_str() {
-                        script.steps.push(Script::expect(method, json!({})));
-                        pending = Some((frame["id"].clone(), script.steps.len() - 1));
+                        let recorded_id = frame.get("id").filter(|id| !id.is_null()).cloned();
+                        if let Some((next_dir, response)) = frames.get(index + 1)
+                            && next_dir == "out"
+                            && response.get("method").is_none()
+                            && response["id"] == frame["id"]
+                        {
+                            script.steps.push(Step::Expect {
+                                method: method.into(),
+                                params: None,
+                                result: response.get("result").cloned(),
+                                error: response.get("error").cloned(),
+                                delay_ms: 0,
+                                recorded_id: None,
+                            });
+                            index += 2;
+                            continue;
+                        }
+                        script.steps.push(Step::Expect {
+                            method: method.into(),
+                            params: None,
+                            result: None,
+                            error: None,
+                            delay_ms: 0,
+                            recorded_id,
+                        });
+                    } else if frame.get("id").is_some()
+                        && (frame.get("result").is_some() || frame.get("error").is_some())
+                    {
+                        script.steps.push(Script::reply(frame["id"].clone()));
                     }
                 }
-                Some("out") => {
-                    let response = frame.get("method").is_none();
-                    let matches_pending =
-                        pending.as_ref().is_some_and(|(id, _)| *id == frame["id"]);
-                    if response && matches_pending {
-                        if let Some((_, index)) = pending.take()
-                            && let Step::Expect { result, error, .. } = &mut script.steps[index]
-                        {
-                            if let Some(value) = frame.get("error") {
-                                *error = Some(value.clone());
-                            } else {
-                                *result = Some(frame.get("result").cloned().unwrap_or(Value::Null));
-                            }
-                        }
-                    } else if frame.get("method").is_some() {
-                        script.steps.push(Step::Send { frame, delay_ms: 0 });
+                "out" => {
+                    if frame.get("method").is_some() {
+                        script.steps.push(Step::Send {
+                            frame: frame.clone(),
+                            delay_ms: 0,
+                        });
+                    } else {
+                        script.steps.push(Step::Respond {
+                            recorded_id: frame["id"].clone(),
+                            result: frame.get("result").cloned(),
+                            error: frame.get("error").cloned(),
+                        });
                     }
                 }
                 _ => {}
             }
-        }
-        if let Some((_, index)) = pending
-            && let Step::Expect { result, .. } = &mut script.steps[index]
-        {
-            *result = None;
+            index += 1;
         }
         script
     }
@@ -216,6 +283,8 @@ pub fn main(args: Vec<String>) -> ExitCode {
     let stdin = std::io::stdin();
     let mut input = BufReader::new(stdin.lock());
     let mut output = std::io::stdout();
+    let mut recorded_ids: std::collections::HashMap<String, Value> =
+        std::collections::HashMap::new();
     for step in &script.steps {
         match step {
             Step::Expect {
@@ -224,6 +293,7 @@ pub fn main(args: Vec<String>) -> ExitCode {
                 result,
                 error,
                 delay_ms,
+                recorded_id,
             } => {
                 let mut line = String::new();
                 match input.read_line(&mut line) {
@@ -253,6 +323,13 @@ pub fn main(args: Vec<String>) -> ExitCode {
                 if *delay_ms > 0 {
                     std::thread::sleep(Duration::from_millis(*delay_ms));
                 }
+                if let Some(recorded) = recorded_id {
+                    recorded_ids.insert(recorded.to_string(), frame["id"].clone());
+                }
+                if error.is_none() && result.is_none() {
+                    // Уведомление: отвечать нечем.
+                    continue;
+                }
                 let mut reply = json!({"jsonrpc": "2.0", "id": frame["id"]});
                 if let Some(error) = error {
                     reply["error"] = error.clone();
@@ -264,6 +341,54 @@ pub fn main(args: Vec<String>) -> ExitCode {
                     return ExitCode::from(70);
                 }
                 let _ = output.flush();
+            }
+            Step::Respond {
+                recorded_id,
+                result,
+                error,
+            } => {
+                let Some(id) = recorded_ids.get(&recorded_id.to_string()) else {
+                    log.entry(json!({"dir": "unexpected", "missing_response": recorded_id}));
+                    return ExitCode::from(66);
+                };
+                let mut reply = json!({"jsonrpc": "2.0", "id": id});
+                if let Some(error) = error {
+                    reply["error"] = error.clone();
+                } else {
+                    reply["result"] = result.clone().unwrap_or_else(|| json!({}));
+                }
+                log.entry(json!({"dir": "out", "frame": reply}));
+                if writeln!(output, "{reply}").is_err() {
+                    return ExitCode::from(70);
+                }
+                let _ = output.flush();
+            }
+            Step::ExpectReply { id, result } => {
+                let mut line = String::new();
+                match input.read_line(&mut line) {
+                    Ok(0) => {
+                        log.entry(json!({"dir": "eof"}));
+                        return ExitCode::SUCCESS;
+                    }
+                    Ok(_) => {}
+                    Err(_) => return ExitCode::from(70),
+                }
+                let frame = match serde_json::from_str::<Value>(line.trim_end()) {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        log.entry(json!({"dir": "in", "invalid": true}));
+                        return ExitCode::from(66);
+                    }
+                };
+                log.entry(json!({"dir": "in", "frame": frame}));
+                let matches_id = frame.get("method").is_none() && frame["id"] == *id;
+                let matches_result = result
+                    .as_ref()
+                    .is_none_or(|expected| subset(expected, &frame["result"]));
+                if !matches_id || !matches_result {
+                    log.entry(json!({"dir": "unexpected", "frame": frame}));
+                    return ExitCode::from(66);
+                }
             }
             Step::Send { frame, delay_ms } => {
                 if *delay_ms > 0 {
@@ -288,16 +413,30 @@ pub fn main(args: Vec<String>) -> ExitCode {
             }
         }
     }
-    // Сценарий кончился: лишний запрос — ошибка сценария, EOF — чистый выход.
-    let mut line = String::new();
-    match input.read_line(&mut line) {
-        Ok(0) => {}
-        Ok(_) => {
-            let frame = serde_json::from_str::<Value>(line.trim_end()).unwrap_or(Value::Null);
-            log.entry(json!({"dir": "unexpected", "frame": frame}));
-            return ExitCode::from(66);
+    // Сценарий кончился: ответы клиента на уже отправленные запросы читаются и
+    // журналируются, лишний запрос — ошибка сценария, EOF — чистый выход.
+    loop {
+        let mut line = String::new();
+        match input.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let frame = match serde_json::from_str::<Value>(line.trim_end()) {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        log.entry(json!({"dir": "in", "invalid": true}));
+                        return ExitCode::from(66);
+                    }
+                };
+                log.entry(json!({"dir": "in", "frame": frame}));
+                let reply = frame.get("method").is_none()
+                    && (frame.get("result").is_some() || frame.get("error").is_some());
+                if !reply {
+                    log.entry(json!({"dir": "unexpected", "frame": frame}));
+                    return ExitCode::from(66);
+                }
+            }
+            Err(_) => return ExitCode::from(70),
         }
-        Err(_) => return ExitCode::from(70),
     }
     if script.ignore_eof {
         loop {
@@ -349,5 +488,95 @@ impl Log {
         {
             let _ = writeln!(file, "{value}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prompt_expects(script: &Script) -> Vec<&Step> {
+        script
+            .steps
+            .iter()
+            .filter(
+                |step| matches!(step, Step::Expect { method, .. } if method == "session/prompt"),
+            )
+            .collect()
+    }
+
+    #[test]
+    fn evidence_keeps_the_update_frames_before_the_prompt_response() {
+        let script = Script::from_evidence("t2_text");
+        let prompts = prompt_expects(&script);
+        assert_eq!(prompts.len(), 1);
+        assert!(matches!(
+            prompts[0],
+            Step::Expect {
+                result: None,
+                recorded_id: Some(_),
+                ..
+            }
+        ));
+        let prompt = script
+            .steps
+            .iter()
+            .position(
+                |step| matches!(step, Step::Expect { method, .. } if method == "session/prompt"),
+            )
+            .unwrap();
+        assert!(matches!(
+            &script.steps[prompt + 1],
+            Step::Send { frame, .. } if frame["params"]["update"]["sessionUpdate"] == "user_message_chunk"
+        ));
+        assert!(script.steps.iter().any(|step| matches!(
+            step,
+            Step::Respond {
+                result: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn both_prompts_of_the_steer_record_get_their_own_response() {
+        let script = Script::from_evidence("t7-cancel-p3-steer");
+        assert_eq!(prompt_expects(&script).len(), 3);
+        let responses: Vec<&Step> = script
+            .steps
+            .iter()
+            .filter(|step| {
+                matches!(
+                    step,
+                    Step::Respond { result: Some(result), .. } if result.get("stopReason").is_some()
+                )
+            })
+            .collect();
+        assert_eq!(responses.len(), 3);
+    }
+
+    #[test]
+    fn a_cancel_notification_is_read_without_a_reply() {
+        let script = Script::from_evidence("t7c-cancel-perm");
+        assert!(matches!(
+            script.steps.iter().find(|step| matches!(
+                step,
+                Step::Expect { method, .. } if method == "session/cancel"
+            )),
+            Some(Step::Expect {
+                result: None,
+                error: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_reply_to_the_permission_request_is_verified() {
+        let script = Script::from_evidence("t5-deny");
+        assert!(script.steps.iter().any(|step| matches!(
+            step,
+            Step::ExpectReply { id, .. } if id == &json!("1")
+        )));
     }
 }
