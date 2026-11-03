@@ -599,6 +599,54 @@ test.describe('E2E Requests and Recovery', () => {
     description: `Подробное описание варианта ${n}: на узком экране оно занимает несколько строк и делает карточку выше экрана.`
   }));
 
+  // Прокручивается сама карточка: закреплённая «Ответить» лежит на её скруглённом низу,
+  // под кнопкой не проезжает текст, а отступы справа и слева совпадают.
+  async function expectCardScrollsItself(page: Page) {
+    const geometry = await page.locator('.request-cards-slot').evaluate((slot) => {
+      const card = slot.querySelector('.card-root')!;
+      const actions = card.querySelector('.actions')!;
+      const outer = slot.getBoundingClientRect();
+      const box = card.getBoundingClientRect();
+      const bar = actions.getBoundingClientRect();
+      return {
+        slotScrolls: slot.scrollHeight > slot.clientHeight + 1,
+        cardScrolls: card.scrollHeight > card.clientHeight + 1,
+        insetStart: box.left - outer.left,
+        insetEnd: outer.right - box.right,
+        barBottom: bar.bottom,
+        cardBottom: box.bottom,
+        radius: parseFloat(getComputedStyle(card).borderBottomLeftRadius)
+      };
+    });
+    expect(geometry.slotScrolls).toBe(false);
+    expect(geometry.cardScrolls).toBe(true);
+    expect(Math.abs(geometry.insetStart - geometry.insetEnd)).toBeLessThanOrEqual(1);
+    expect(Math.abs(geometry.barBottom - geometry.cardBottom)).toBeLessThanOrEqual(1);
+    expect(geometry.radius).toBeGreaterThan(0);
+  }
+
+  test('docked_question_scrolls_inside_its_card_with_the_answer_bar_on_its_rounded_edge', async ({ page }) => {
+    const { hub, api, id } = await bootChat(page);
+    hub.append(`conversation:${id}`, {
+      kind: 'request_opened',
+      conversation_id: id,
+      payload: {
+        request_id: api.id(),
+        kind: 'question',
+        payload: {
+          questions: ['ВЕРСИЯ', 'ТЕГИ', 'ПРОВЕРКИ'].map((header, index) => ({ id: `q${index}`, header, text: `Вопрос ${index + 1}: что выбрать?`, options: LONG_OPTIONS }))
+        }
+      }
+    });
+    hub.flush();
+    await expect(page.getByRole('button', { name: 'Ответить' })).toBeInViewport();
+    await expectCardScrollsItself(page);
+    await page.locator('.card-root').evaluate((card) => card.scrollTo({ top: card.scrollHeight / 2 }));
+    await expectCardScrollsItself(page);
+    await page.locator('.card-root').evaluate((card) => card.scrollTo({ top: card.scrollHeight }));
+    await expectCardScrollsItself(page);
+  });
+
   for (const theme of ['dark', 'light'] as const) {
     for (const viewport of [
       { width: 384, height: 800 },
@@ -652,13 +700,10 @@ test.describe('E2E Requests and Recovery', () => {
         expect(Math.abs(headerAfter!.y - headerBefore!.y)).toBeLessThanOrEqual(1);
         expect(Math.abs(composerAfter!.y - composerBefore!.y)).toBeLessThanOrEqual(1);
 
-        const slot = page.locator('.request-cards-slot');
         const submit = page.getByRole('button', { name: 'Ответить' });
         // Кнопка отправки закреплена и видна без прокрутки.
         await expect(submit).toBeInViewport();
-
-        const scrollable = await slot.evaluate((el) => el.scrollHeight > el.clientHeight + 1);
-        expect(scrollable).toBe(true);
+        await expectCardScrollsItself(page);
 
         await page.locator('[data-question="q1"] [data-option="Вариант 1"]').click();
 
@@ -680,7 +725,7 @@ test.describe('E2E Requests and Recovery', () => {
         await expect
           .poll(() =>
             custom.evaluate((el) => {
-              const slotEl = el.closest('.request-cards-slot');
+              const slotEl = el.closest('.card-root');
               if (!slotEl) return false;
               const field = el.getBoundingClientRect();
               const box = slotEl.getBoundingClientRect();

@@ -519,15 +519,18 @@
     cursor: not-allowed;
   }
 
-  /* Кнопка ответа закреплена у нижнего края прокручиваемой карточки. */
+  /* Кнопка ответа закреплена у нижнего края прокручиваемой карточки и закрывает её
+     нижний отступ, чтобы под кнопкой не проезжал текст. */
   .actions {
     --fade: var(--surface);
+    --under: var(--card-pad-block, var(--s0));
     display: flex;
     position: sticky;
-    bottom: var(--s0);
+    bottom: calc(-1 * var(--under));
     z-index: 1;
     margin-top: var(--s2);
-    padding-block: var(--s4) var(--s2);
+    margin-bottom: calc(-1 * var(--under));
+    padding-block: var(--s4) var(--under);
     background: var(--fade);
   }
 
