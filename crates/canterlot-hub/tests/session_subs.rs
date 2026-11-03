@@ -653,6 +653,137 @@ async fn cpu_busy_generation_never_fires_a_stall(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn live_tool_descendants_never_fire_a_stall(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    let phase_at = now - TimeDelta::hours(2);
+    sqlx::query(
+        "update executions set phase='running_tool',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Живой потомок инструмента — работа, даже если CLI сам не тратит CPU.
+    metrics_with(&pool, p.machine, execution.execution_id, now, 0, 2).await;
+    subscribe(&pool, &p).await;
+    refresh_at(&pool, p.target, now).await;
+    assert!(jobs(&pool, p.subscriber).await.is_empty());
+    let state: String = sqlx::query_scalar(
+        "select activity_state from conversation_derived where conversation_id=$1",
+    )
+    .bind(p.target)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "working");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stale_metrics_never_fire_a_stall(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    let phase_at = now - TimeDelta::hours(2);
+    sqlx::query(
+        "update executions set phase='generating',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Снимок старше `metrics_stale_after`: живость неизвестна, значит не утверждаем простой.
+    metrics_with(
+        &pool,
+        p.machine,
+        execution.execution_id,
+        now - TimeDelta::hours(1),
+        0,
+        0,
+    )
+    .await;
+    subscribe(&pool, &p).await;
+    refresh_at(&pool, p.target, now).await;
+    assert!(jobs(&pool, p.subscriber).await.is_empty());
+    let state: String = sqlx::query_scalar(
+        "select activity_state from conversation_derived where conversation_id=$1",
+    )
+    .bind(p.target)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "working");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn execution_cpu_above_one_core_is_accepted_and_busy(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    let phase_at = now - TimeDelta::minutes(20);
+    sqlx::query(
+        "update executions set phase='generating',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    metrics_with(&pool, p.machine, execution.execution_id, now, 2400, 0).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let inputs = activity::load_inputs(
+        &mut conn,
+        p.target,
+        now,
+        MachinesConfig::default().metrics_stale_after,
+    )
+    .await
+    .unwrap();
+    let process = inputs.process.expect("metric above one core is accepted");
+    assert_eq!(process.cpu_permille, 1000, "clamped only for comparison");
+    assert_eq!(activity::compute(&inputs, &thresholds()).state, S::Working);
+    subscribe(&pool, &p).await;
+    refresh_at(&pool, p.target, now).await;
+    assert!(jobs(&pool, p.subscriber).await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn stalled_is_not_repeated_when_the_state_flaps_in_the_same_phase(pool: PgPool) {
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
