@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 
@@ -20,16 +20,9 @@ struct Snapshot {
     records: Vec<Vec<u8>>,
 }
 
-#[derive(Default, Deserialize, Serialize)]
-struct TerminalAcks {
-    executions: HashSet<Uuid>,
-}
-
 pub struct OwnershipStore {
     journal: Journal,
     latest: HashMap<Uuid, Ownership>,
-    terminal_acked: HashSet<Uuid>,
-    terminal_path: PathBuf,
     poisoned: bool,
     snapshot_path: PathBuf,
     #[cfg(feature = "fault-injection")]
@@ -48,12 +41,6 @@ impl OwnershipStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Snapshot::default(),
             Err(error) => return Err(error.into()),
         };
-        let terminal_path = path.join("terminal.toml");
-        let terminal_acked = match std::fs::read_to_string(&terminal_path) {
-            Ok(text) => toml::from_str::<TerminalAcks>(&text)?.executions,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
-            Err(error) => return Err(error.into()),
-        };
         let mut latest = HashMap::new();
         for bytes in snapshot.records {
             let record = Ownership::decode(bytes.as_slice())?;
@@ -70,8 +57,6 @@ impl OwnershipStore {
         Ok(Self {
             journal,
             latest,
-            terminal_acked,
-            terminal_path,
             poisoned: false,
             snapshot_path,
             #[cfg(feature = "fault-injection")]
@@ -108,44 +93,11 @@ impl OwnershipStore {
         self.latest.get(&execution_id)
     }
 
-    /// Терминальные факты CJ, подтверждённые хабом: только такие записи можно забыть.
-    pub(crate) fn acknowledge_terminal(
-        &mut self,
-        executions: impl IntoIterator<Item = Uuid>,
-    ) -> Result<(), StoreError> {
-        let before = self.terminal_acked.len();
-        self.terminal_acked.extend(executions);
-        if self.terminal_acked.len() != before {
-            write_private_atomic(
-                &self.terminal_path,
-                toml::to_string(&TerminalAcks {
-                    executions: self.terminal_acked.clone(),
-                })?
-                .as_bytes(),
-            )?;
-        }
-        Ok(())
-    }
-
     pub fn compact(&mut self) -> Result<(), StoreError> {
         if self.poisoned {
             return Err(StoreError::NeedsReopen);
         }
         let result = (|| {
-            self.latest
-                .retain(|id, record| !retired(id, record, &self.terminal_acked));
-            let before = self.terminal_acked.len();
-            self.terminal_acked
-                .retain(|id| self.latest.contains_key(id));
-            if self.terminal_acked.len() != before {
-                write_private_atomic(
-                    &self.terminal_path,
-                    toml::to_string(&TerminalAcks {
-                        executions: self.terminal_acked.clone(),
-                    })?
-                    .as_bytes(),
-                )?;
-            }
             let snapshot = Snapshot {
                 seq: self.journal.last_seq(),
                 records: self.latest.values().map(Message::encode_to_vec).collect(),
@@ -211,96 +163,10 @@ impl OwnershipStore {
     }
 }
 
-fn retired(id: &Uuid, record: &Ownership, terminal_acked: &HashSet<Uuid>) -> bool {
-    record.phase == OwnershipPhase::Released as i32
-        && !record.exec_dir.is_empty()
-        && !Path::new(&record.exec_dir).exists()
-        && terminal_acked.contains(id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn compaction_drops_only_released_acknowledged_records_without_exec_dir() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("ownership");
-        let existing = root.path().join("execution");
-        std::fs::create_dir(&existing).unwrap();
-        let mut store = OwnershipStore::open(&path).unwrap();
-        let record = |id: Uuid, phase: OwnershipPhase, exec_dir: &Path| Ownership {
-            execution_id: id.to_string(),
-            generation: 1,
-            phase: phase as i32,
-            exec_dir: exec_dir.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
-        let kept_existing = record(Uuid::now_v7(), OwnershipPhase::Released, &existing);
-        let kept_unacknowledged = record(
-            Uuid::now_v7(),
-            OwnershipPhase::Released,
-            &root.path().join("missing"),
-        );
-        let dropped = record(
-            Uuid::now_v7(),
-            OwnershipPhase::Released,
-            &root.path().join("missing"),
-        );
-        let live = record(
-            Uuid::now_v7(),
-            OwnershipPhase::Attached,
-            &root.path().join("missing"),
-        );
-        let no_terminal = record(
-            Uuid::now_v7(),
-            OwnershipPhase::Released,
-            &root.path().join("missing"),
-        );
-        for record in [
-            &kept_existing,
-            &kept_unacknowledged,
-            &dropped,
-            &live,
-            &no_terminal,
-        ] {
-            store.append(record.clone()).unwrap();
-        }
-
-        store
-            .acknowledge_terminal([
-                Uuid::parse_str(&kept_existing.execution_id).unwrap(),
-                Uuid::parse_str(&dropped.execution_id).unwrap(),
-                Uuid::parse_str(&live.execution_id).unwrap(),
-            ])
-            .unwrap();
-        store.compact().unwrap();
-
-        for kept in [&kept_existing, &kept_unacknowledged, &live, &no_terminal] {
-            assert_eq!(
-                store.get(Uuid::parse_str(&kept.execution_id).unwrap()),
-                Some(kept)
-            );
-        }
-        assert!(
-            store
-                .get(Uuid::parse_str(&dropped.execution_id).unwrap())
-                .is_none()
-        );
-        drop(store);
-
-        let store = OwnershipStore::open(&path).unwrap();
-        assert!(
-            store
-                .get(Uuid::parse_str(&dropped.execution_id).unwrap())
-                .is_none()
-        );
-        assert!(
-            store
-                .get(Uuid::parse_str(&live.execution_id).unwrap())
-                .is_some()
-        );
-    }
     #[test]
     fn compaction_preserves_latest_records_and_generation_after_reopen() {
         let root = tempfile::tempdir().unwrap();

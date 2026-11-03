@@ -742,9 +742,6 @@ impl ExecutionManager {
                         if let Err(error) = manager::gc_worktrees(&shared).await {
                             tracing::warn!(reason = %error, "worktree build gc failed");
                         }
-                        if let Err(error) = manager::prune_receipts(&shared).await {
-                            tracing::warn!(reason = %error, "receipts horizon failed");
-                        }
                     }
                     changed = shutdown.changed() => {
                         if changed.is_err() || *shutdown.borrow() {
@@ -762,7 +759,6 @@ impl ExecutionManager {
         manager::cleanup_released(&self.shared).await?;
         manager::sweep_runtime(&self.shared).await?;
         manager::gc_worktrees(&self.shared).await?;
-        manager::prune_receipts(&self.shared).await?;
         self.start_maintenance();
         let records = self
             .shared
