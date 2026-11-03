@@ -206,6 +206,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[job, owner, conversation],
     )
     .await;
+    exec(
+        pool,
+        "insert into alarms(id,owner_id,conversation_id,created_by,kind,fire_at,call_id)
+         values($1,$2,$3,'agent','at',now()+interval '1 hour',$4)",
+        &[Uuid::now_v7(), owner, conversation, Uuid::now_v7()],
+    )
+    .await;
     // Потомок и подписки в обе стороны: после удаления остаются потомок без родителя и ничего больше.
     let delegate = f.conversation().await;
     exec(
