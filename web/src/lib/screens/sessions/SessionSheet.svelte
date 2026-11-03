@@ -115,7 +115,10 @@
   const known = (values: string[], current: string) => (values.includes(current) ? values : [current, ...values]);
   const modelOptions = $derived(known(harness?.models.map((entry) => entry.id) ?? [], model).map((value) => ({ value, label: harness?.models.find((entry) => entry.id === value)?.title || value })));
   const effortOptions = $derived(known(harness?.models.find((entry) => entry.id === model)?.efforts ?? ['low', 'medium', 'high'], effort).map((value) => ({ value, label: effortLabel(value) })));
-  const permissionOptions = $derived(known(harness?.permission_modes ?? [...PERMISSION_MODES], permission).map((value) => ({ value, label: permissionLabel(value) })));
+  const permissionOptions = $derived(known(
+    (harness?.permission_modes ?? [...PERMISSION_MODES]).filter((mode) => !((harness?.provider ?? item.harness?.provider) === 'antigravity' && mode === 'read_only')),
+    permission
+  ).map((value) => ({ value, label: permissionLabel(value) })));
   const swatches = COLOR_KEYS.map((key) => ({ key, name: COLOR_NAMES[key] }));
 
   let panel = $state<HTMLElement | null>(null);

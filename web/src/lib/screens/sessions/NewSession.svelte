@@ -38,9 +38,11 @@
   const machine = $derived(machines.find((item) => item.id === machineId));
   const home = $derived(machine?.home_dir ?? '');
   const harnesses = $derived(machine?.harnesses ?? []);
-  const models = $derived(harnesses.find((item) => item.id === harness)?.models ?? []);
+  const selectedHarness = $derived(harnesses.find((item) => item.id === harness));
+  const provider = $derived(selectedHarness?.provider ?? 'claude');
+  const models = $derived(selectedHarness?.models ?? []);
   const efforts = $derived(models.find((item) => item.id === modelId)?.efforts ?? []);
-  const permissions = $derived(harnesses.find((item) => item.id === harness)?.permission_modes ?? []);
+  const permissions = $derived((selectedHarness?.permission_modes ?? []).filter((mode) => !(provider === 'antigravity' && mode === 'read_only')));
   const BUILTIN_PRESETS: PresetSummaryLike[] = [
     {
       id: 'clean',
@@ -78,7 +80,6 @@
   const effortOptions = $derived([{ value: '', label: 'Выбрать' }, ...efforts.map((item) => ({ value: item, label: effortLabel(item) }))]);
   const presetOptions = $derived(presets.map((item) => ({ value: item.id, label: item.title })));
   const permissionOptions = $derived(permissions.map((value) => ({ value, label: permissionLabel(value) })));
-  const provider = $derived(harnesses.find((item) => item.id === harness)?.provider ?? 'claude');
   const imagesNote = $derived(modelImagesNote(models.find((item) => item.id === modelId)?.images));
   const catalogNote = $derived(provider === 'antigravity' ? ANTIGRAVITY_CATALOG_NOTE : '');
   const gate = $derived.by(() => {

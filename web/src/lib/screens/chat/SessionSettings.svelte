@@ -170,7 +170,9 @@
 
 	// Available permission modes
 	const availablePermissionModes = $derived(
-		harness?.permission_modes ?? [...PERMISSION_MODES]
+		(harness?.permission_modes ?? [...PERMISSION_MODES]).filter(
+			(mode) => !(provider === 'antigravity' && mode === 'read_only')
+		)
 	);
 
 	// Модель сессии могли убрать из каталога: она остаётся видна, пока владелец не выберет другую.
