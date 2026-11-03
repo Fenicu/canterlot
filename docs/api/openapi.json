@@ -6763,7 +6763,9 @@
           "attachment_not_ready",
           "attachment_not_found",
           "run_in_progress",
-          "no_live_execution"
+          "no_live_execution",
+          "conversation_closed",
+          "nul_character"
         ]
       },
       "ErrorScope": {

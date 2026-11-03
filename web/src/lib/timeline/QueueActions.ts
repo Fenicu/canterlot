@@ -1,4 +1,4 @@
-import type { InputView } from "#lib/stores/inputs.js";
+import type { AttachmentRef, InputView } from "#lib/stores/inputs.js";
 import type { OpJournal } from "#lib/ops/journal.js";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { DraftStore } from "#lib/drafts/store.js";
@@ -262,6 +262,14 @@ const EDIT_INPUT_REASONS = new Set([
   "limits_mismatch",
 ]);
 
+/** Порядок вложений в правке значим так же, как в теле запроса. */
+function sameAttachmentIds(current: AttachmentRef[], wanted: string[]): boolean {
+  return (
+    current.length === wanted.length &&
+    current.every((attachment, index) => attachment.attachment_id === wanted[index])
+  );
+}
+
 /**
  * Правка ожидающего ввода сравнением-и-заменой по ревизии. Устаревшая ревизия
  * и ушедший из очереди ввод отклоняются хабом с причиной, а не затирают чужое.
@@ -290,10 +298,13 @@ export async function editInput(
     if (err instanceof NetworkError) return { reason: "network" };
     const reason = refusalReason(err);
     // Своя же правка, дошедшая до хаба раньше потерянного ответа, не конфликт.
+    // Сверяем и порядок вложений: иначе чужая правка с тем же текстом
+    // выглядела бы сохранённой.
     if (
       reason === "revision_conflict" &&
       input.revision === expectedRevision + 1 &&
-      input.text === text
+      input.text === text &&
+      sameAttachmentIds(input.attachments, attachmentIds)
     )
       return "saved";
     return { reason: EDIT_INPUT_REASONS.has(reason) ? reason : "unknown" };

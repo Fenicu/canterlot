@@ -194,6 +194,8 @@ error_reasons! {
     AttachmentNotFound => "attachment_not_found", AttachmentUnavailable;
     RunInProgress => "run_in_progress", InvalidState;
     NoLiveExecution => "no_live_execution", InvalidState;
+    ConversationClosed => "conversation_closed", ConversationClosed;
+    NulCharacter => "nul_character", InvalidRequest;
 }
 
 /// Отказ команды управления: код по причине, сама причина в `details.reason`.
@@ -654,11 +656,56 @@ mod tests {
             .collect()
     }
 
+    /// Причины, которые `control.rs` действительно отдаёт наружу: литералы в
+    /// полях `reason` литералов `ControlError::InvalidRequest`. Совпадения в
+    /// шаблонах `match` (`SubmitError::InvalidContent { reason: "empty" }`)
+    /// отказами не являются.
+    fn control_refusal_reasons(source: &str) -> Vec<&str> {
+        const MARKER: &str = "ControlError::InvalidRequest";
+        let mut reasons = Vec::new();
+        let mut rest = source;
+        while let Some(at) = rest.find(MARKER) {
+            rest = &rest[at + MARKER.len()..];
+            let Some(open) = rest.find('{') else { break };
+            rest = &rest[open + 1..];
+            let Some(field) = rest.trim_start().strip_prefix("reason:") else {
+                continue;
+            };
+            let Some(literal) = field.trim_start().strip_prefix('"') else {
+                continue;
+            };
+            if let Some(end) = literal.find('"') {
+                reasons.push(&literal[..end]);
+            }
+        }
+        reasons
+    }
+
+    #[test]
+    fn control_refusals_ignore_match_patterns() {
+        let source = r#"
+            .map_err(|error| match error {
+                SubmitError::InvalidContent { reason: "empty" } => {
+                    ControlError::InvalidRequest {
+                        reason: "empty_content",
+                    }
+                }
+                _ => ControlError::InvalidRequest {
+                    reason: "content_too_long",
+                },
+            })
+        "#;
+        assert_eq!(
+            control_refusal_reasons(source),
+            vec!["empty_content", "content_too_long"]
+        );
+    }
+
     #[test]
     fn every_control_refusal_reason_is_published() {
         let control = include_str!("../delivery/control.rs");
         let idempotency = include_str!("../idempotency.rs");
-        let mut found = quoted_after(control, "reason: \"");
+        let mut found = control_refusal_reasons(control);
         found.extend(quoted_after(idempotency, "Err(\""));
         assert!(!found.is_empty());
         let unlisted: Vec<_> = found
@@ -692,12 +739,14 @@ mod tests {
             "attachment_unavailable",
             "attachment_not_found",
             "capability_missing",
+            "conversation_closed",
         ] {
             assert_eq!(refusal(reason).status, StatusCode::CONFLICT, "{reason}");
         }
         for reason in [
             "invalid_idempotency_key",
             "empty_content",
+            "nul_character",
             "content_too_long",
         ] {
             assert_eq!(refusal(reason).status, StatusCode::BAD_REQUEST, "{reason}");

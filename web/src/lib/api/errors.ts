@@ -295,6 +295,8 @@ export const REASON_TEXT: Record<ErrorReason, string> = {
   attachment_not_found: "Вложение недоступно",
   run_in_progress: "Идёт ход: сжать можно между ходами",
   no_live_execution: "Сессия не запущена",
+  conversation_closed: "Разговор закрыт",
+  nul_character: "В сообщении недопустимый нулевой символ",
 };
 
 /** Причина отказа, если хаб её прислал и она известна вкладке. */

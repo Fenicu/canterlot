@@ -1334,7 +1334,7 @@ export interface components {
             error: components["schemas"]["ErrorBody"];
         };
         /** @enum {string} */
-        ErrorReason: "closed_without_decision" | "generation_advanced" | "invalid_idempotency_key" | "input_not_queued" | "no_running_turn" | "request_open" | "compacting" | "unsupported_harness" | "capability_missing" | "revision_conflict" | "steer_in_flight" | "empty_content" | "content_too_long" | "attachment_unavailable" | "attachment_not_ready" | "attachment_not_found" | "run_in_progress" | "no_live_execution";
+        ErrorReason: "closed_without_decision" | "generation_advanced" | "invalid_idempotency_key" | "input_not_queued" | "no_running_turn" | "request_open" | "compacting" | "unsupported_harness" | "capability_missing" | "revision_conflict" | "steer_in_flight" | "empty_content" | "content_too_long" | "attachment_unavailable" | "attachment_not_ready" | "attachment_not_found" | "run_in_progress" | "no_live_execution" | "conversation_closed" | "nul_character";
         /** @enum {string} */
         ErrorScope: "browser" | "auth" | "hub_db" | "delivery" | "worker_disk" | "cli_start" | "adapter_protocol" | "agent_service";
         Evidence: {
