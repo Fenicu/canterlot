@@ -51,6 +51,10 @@ export class FakeHub {
     return structuredClone(event);
   }
   head(scope: string): string { return this.journal(scope).head; }
+  /** Есть живая подписка на scope: снимок уже взят, и события, добавленные после, до клиента дойдут. */
+  subscribed(scope: string): boolean {
+    return [...this.sessions].some(session => !session.closed && [...session.subscriptions.values()].some(sub => sub.scope === scope));
+  }
   log(scope: string): HubEvent[] { return structuredClone(this.journal(scope).events); }
   range(scope: string, after: string, limit: number): RangeResult {
     const state = this.journal(scope);
