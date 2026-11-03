@@ -51,6 +51,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "owner_exit_v1",
     "owner_instructions_v1",
     "send_now_v1",
+    "alarms_v1",
 ];
 
 #[derive(Clone)]

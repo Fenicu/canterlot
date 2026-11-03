@@ -11,8 +11,9 @@ pub enum PermissionMode {
     ReadOnly,
 }
 
-/// Чтение через MCP canterlot; сохранение и применение пресета решает режим, как у других.
-const READ_TOOLS: [&str; 7] = [
+/// Чтение через MCP canterlot и будильники: они касаются только своей очереди,
+/// поэтому разрешены и в `ask`, и в `read_only`. Сохранение и применение пресета решает режим.
+const READ_TOOLS: [&str; 10] = [
     "canterlot_canterlot_limits",
     "canterlot_canterlot_presets_list",
     "canterlot_sessions_list",
@@ -21,6 +22,9 @@ const READ_TOOLS: [&str; 7] = [
     "canterlot_session_subscribe",
     "canterlot_session_unsubscribe",
     "canterlot_session_wait",
+    "canterlot_alarm_set",
+    "canterlot_alarm_cancel",
+    "canterlot_alarm_list",
 ];
 
 fn rule(action: &str, effect: &str) -> Value {
@@ -70,5 +74,32 @@ impl PermissionMode {
     /// Правила для `PATCH`: `null` сервер игнорирует, снять их можно только пустым списком.
     pub fn session_rules(self) -> Value {
         self.ruleset().unwrap_or_else(|| Value::Array(Vec::new()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn allowed(mode: PermissionMode, tool: &str) -> bool {
+        mode.ruleset()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["action"] == tool && rule["effect"] == "allow")
+    }
+
+    #[test]
+    fn alarms_are_allowed_in_ask_and_read_only() {
+        for mode in [PermissionMode::Ask, PermissionMode::ReadOnly] {
+            for tool in [
+                "canterlot_alarm_set",
+                "canterlot_alarm_cancel",
+                "canterlot_alarm_list",
+            ] {
+                assert!(allowed(mode, tool), "{mode:?} {tool}");
+            }
+        }
     }
 }
