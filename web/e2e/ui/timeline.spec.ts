@@ -483,6 +483,29 @@ test('incomplete_block_is_marked_and_partial_text_stays', async ({ page }) => {
   await expect(page.getByText('Процесс агента завершился')).toBeVisible();
 });
 
+test('interrupted_tool_reads_stopped_like_the_text_next_to_it', async ({ page }) => {
+  const { api, id } = await boot(page, 0);
+  const call = toolBlock(api, '');
+  call.tool_name = 'Bash';
+  call.summary = 'Bash: sleep 90';
+  call.state = 'incomplete';
+  call.incomplete_reason = 'process_exited';
+  call.created_seq = '1';
+  const text = textBlock(api, 'частичный текст ответа', '2', 'incomplete');
+  text.incomplete_reason = 'interrupted';
+  api.histories.set(id, [call, text]);
+  api.bindConversation(id);
+  await page.reload();
+  const row = page.locator('.tool').filter({ hasText: 'sleep 90' });
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  // Одна остановка — одно слово и один цвет, а не «Ошибка» рядом с «Прервано».
+  await expect(row.locator('.pill')).toHaveText('Прервано');
+  await expect(row.locator('.pill')).toHaveAttribute('data-state', 'stopped');
+  await expect(page.locator('[role="log"] .pill[data-state="error"]')).toHaveCount(0);
+  const warning = await page.evaluate(() => { const probe = document.createElement('span'); probe.style.color = 'var(--warning)'; document.body.append(probe); const value = getComputedStyle(probe).color; probe.remove(); return value; });
+  await expect(row.locator('.pill')).toHaveCSS('color', warning);
+});
+
 test('error_and_warning_blocks_carry_text_not_colour_alone', async ({ page }) => {
   const { api, id } = await boot(page, 0);
   const warning = textBlock(api, 'мало места', '1');

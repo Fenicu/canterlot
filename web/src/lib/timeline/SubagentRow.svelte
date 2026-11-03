@@ -45,6 +45,7 @@
   .status { color: var(--secondary); font-size: var(--fs-sm); }
   .status[data-state='running'] { color: var(--accent-link); }
   .status[data-state='error'] { color: var(--danger); }
+  .status[data-state='stopped'] { color: var(--warning); }
   .chevron { flex: none; color: var(--secondary); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
 </style>

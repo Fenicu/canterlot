@@ -261,15 +261,16 @@ test('delegation_collapses_old_subagents_into_a_row_and_opens_each_lane', async 
 	const toggle = scope.getByRole('button', { name: /^Завершённые/ });
 	await expect(toggle).toHaveText('Завершённые · 14, прервано 1');
 	await expect(toggle).toHaveAttribute('aria-expanded', 'false');
-	const danger = await page.evaluate(() => {
+	// Прерванное — тем же цветом, что и в ленте, а не цветом ошибки.
+	const warning = await page.evaluate(() => {
 		const probe = document.createElement('i');
-		probe.style.color = 'var(--danger)';
+		probe.style.color = 'var(--warning)';
 		document.body.append(probe);
 		const value = getComputedStyle(probe).color;
 		probe.remove();
 		return value;
 	});
-	await expect(toggle.locator('.danger')).toHaveCSS('color', danger);
+	await expect(toggle.locator('.warning')).toHaveCSS('color', warning);
 
 	await toggle.click();
 	await expect(toggle).toHaveAttribute('aria-expanded', 'true');
@@ -278,6 +279,7 @@ test('delegation_collapses_old_subagents_into_a_row_and_opens_each_lane', async 
 	await expect(older.first()).toHaveText('старый-13');
 	await expect(older.last()).toHaveText('старый-0');
 	await expect(scope.locator('.older').getByText('Прервано')).toHaveCount(1);
+	await expect(scope.locator('.older').getByText('Прервано')).toHaveCSS('color', warning);
 
 	if (isMobile) {
 		await scope.locator('.tree-node').filter({ hasText: 'идёт' }).click();
@@ -389,4 +391,25 @@ test('lane_of_an_old_subagent_outside_the_loaded_window_shows_its_steps', async 
 	await expect(page.locator('.header-title')).toHaveText('Старая разведка');
 	await expect(page.locator('.subtitle')).toContainText('general-purpose');
 	await expect(page.locator('.live-line')).toContainText('Готово');
+});
+
+test('feed_and_delegation_panel_name_an_unfinished_subagent_the_same_way', async ({ page, isMobile }) => {
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const id = seedConversation(api, { title: 'Один субагент', model: 'opus-5.5', harness: { id: 'claude_code', title: 'Claude Code', provider: 'claude' } } as never);
+	api.histories.set(id, agentCall(api, 'Explore', 'run-1', 10, 8, 'final', 1));
+	api.bindConversation(id);
+	await installChatRoutes(page, hub, api);
+	if (!isMobile) await page.setViewportSize({ width: 1440, height: 900 });
+	await page.goto(`/c/${id}`);
+	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+	const feed = page.locator('[role="log"] .sub .status');
+	await expect(feed).toHaveAttribute('data-state', 'stopped');
+	await expect(feed).toHaveText(/^Прервано/);
+	if (isMobile) await page.getByRole('button', { name: /^Делегирование/ }).click();
+	else await page.locator('.topbar').getByRole('button', { name: /Делегирование/ }).click();
+	const scope = isMobile ? page.getByRole('dialog', { name: 'Делегирование' }) : page.locator('[data-pane="lane"]');
+	const node = scope.locator('.tree-node').filter({ hasText: 'Explore' });
+	await expect(node.locator('.warning')).toHaveText('Прервано');
+	expect(await feed.evaluate((el) => getComputedStyle(el).color)).toBe(await node.locator('.warning').evaluate((el) => getComputedStyle(el).color));
 });
