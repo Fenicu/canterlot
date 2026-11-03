@@ -216,6 +216,7 @@ const REJECTIONS: Record<string, string> = {
   already_transmitted: "Сообщение уже передано агенту",
   undetermined: "Приём не подтверждён",
   unsupported_command: "Машина не поддерживает это действие",
+  capability_missing: "Машина не поддерживает это действие",
   request_closed: "Запрос уже закрыт",
 };
 
