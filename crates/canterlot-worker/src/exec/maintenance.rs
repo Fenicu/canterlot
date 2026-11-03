@@ -2,81 +2,74 @@
 //! и забытые результаты сборки в рабочих копиях.
 
 use std::{
-    collections::HashSet,
     fs, io,
     os::unix::{fs::FileTypeExt, net::UnixStream},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
-use canterlot_proto::worker::ipc::{Ownership, OwnershipPhase};
 use uuid::Uuid;
 
-/// Удаляет сокеты без каталога исполнения и каталоги, оставшиеся от прерванного запуска.
-/// Не трогает ничего, на что указывает непогашенная запись принадлежности или живой сокет.
-pub(crate) fn sweep_runtime(
+/// Каталог исполнения, оставшийся от прерванного запуска.
+pub(crate) struct StaleExecution {
+    pub id: Uuid,
+    pub dir: PathBuf,
+    pub socket: PathBuf,
+}
+
+/// Каталоги старше срока запуска: каталог мог остаться от прерванной подготовки.
+pub(crate) fn stale_executions(
     data_dir: &Path,
     runtime_dir: Option<&Path>,
-    records: &[Ownership],
     spawn_timeout: Duration,
     now: SystemTime,
-) -> io::Result<()> {
-    #[cfg(any(test, feature = "fault-injection"))]
-    guard_test_runtime(runtime_dir)?;
+) -> io::Result<Vec<StaleExecution>> {
     let executions = data_dir.join("executions");
-    let known: HashSet<Uuid> = records
-        .iter()
-        .filter_map(|record| Uuid::parse_str(&record.execution_id).ok())
-        .collect();
-    let unreleased_sockets: HashSet<PathBuf> = records
-        .iter()
-        .filter(|record| record.phase != OwnershipPhase::Released as i32)
-        .map(|record| PathBuf::from(&record.ipc_socket))
-        .collect();
-
-    if let Ok(entries) = fs::read_dir(&executions) {
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir() {
-                continue;
-            }
-            let Ok(id) = Uuid::parse_str(&entry.file_name().to_string_lossy()) else {
-                continue;
-            };
-            if known.contains(&id) {
-                continue;
-            }
-            let socket = socket_path(runtime_dir, &executions, id);
-            if is_live_socket(&socket)
-                || is_live_socket(&executions.join(id.to_string()).join("ipc.sock"))
-            {
-                continue;
-            }
-            let old = entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|modified| now.duration_since(modified).ok())
-                .is_some_and(|age| age > spawn_timeout);
-            if old {
-                match fs::remove_dir_all(entry.path()) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-            }
+    let Ok(entries) = fs::read_dir(&executions) else {
+        return Ok(Vec::new());
+    };
+    let mut stale = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(id) = Uuid::parse_str(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > spawn_timeout);
+        if old {
+            stale.push(StaleExecution {
+                id,
+                dir: entry.path(),
+                socket: socket_path(runtime_dir, &executions, id),
+            });
         }
     }
+    Ok(stale)
+}
 
+/// Сокеты без каталога исполнения.
+pub(crate) fn stale_sockets(
+    data_dir: &Path,
+    runtime_dir: Option<&Path>,
+) -> io::Result<Vec<(Uuid, PathBuf)>> {
     let Some(runtime_dir) = runtime_dir else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let sockets = runtime_dir.join("canterlot");
     let Ok(entries) = fs::read_dir(&sockets) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
+    let executions = data_dir.join("executions");
+    let mut stale = Vec::new();
     for entry in entries.flatten() {
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -91,40 +84,74 @@ pub(crate) fn sweep_runtime(
         let Ok(id) = Uuid::parse_str(name) else {
             continue;
         };
-        if executions.join(id.to_string()).exists()
-            || unreleased_sockets.contains(&path)
-            || is_live_socket(&path)
-        {
+        if executions.join(id.to_string()).exists() {
             continue;
         }
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        stale.push((id, path));
     }
-    Ok(())
+    Ok(stale)
+}
+
+/// Удаляет каталог, если его не занял запуск: возраст и сокеты сверяются снова.
+pub(crate) fn remove_stale_execution(
+    execution: &StaleExecution,
+    spawn_timeout: Duration,
+    now: SystemTime,
+) -> io::Result<()> {
+    let old = fs::symlink_metadata(&execution.dir)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| age > spawn_timeout);
+    if !old || is_live_socket(&execution.socket) || is_live_socket(&execution.dir.join("ipc.sock"))
+    {
+        return Ok(());
+    }
+    match fs::remove_dir_all(&execution.dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Удаляет сокет, если каталог исполнения не появился и сокет не ожил.
+pub(crate) fn remove_stale_socket(id: Uuid, path: &Path, executions: &Path) -> io::Result<()> {
+    if executions.join(id.to_string()).exists() || is_live_socket(path) {
+        return Ok(());
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// В тестовой сборке уборка не имеет права трогать общий каталог сокетов.
-#[cfg(any(test, feature = "fault-injection"))]
-fn guard_test_runtime(runtime_dir: Option<&Path>) -> io::Result<()> {
-    let Some(runtime_dir) = runtime_dir else {
-        return Ok(());
-    };
-    let temp = std::path::absolute(std::env::temp_dir())?;
-    let runtime = std::path::absolute(runtime_dir)?;
-    if runtime.starts_with(&temp) {
-        return Ok(());
+pub(crate) fn ensure_test_runtime_allowed(runtime_dir: Option<&Path>) -> io::Result<()> {
+    #[cfg(any(test, feature = "fault-injection"))]
+    {
+        let Some(runtime_dir) = runtime_dir else {
+            return Ok(());
+        };
+        let temp = std::path::absolute(std::env::temp_dir())?;
+        let runtime = std::path::absolute(runtime_dir)?;
+        if runtime.starts_with(&temp) {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to sweep runtime outside {}: {}",
+                temp.display(),
+                runtime.display()
+            ),
+        ))
     }
-    Err(io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        format!(
-            "refusing to sweep runtime outside {}: {}",
-            temp.display(),
-            runtime.display()
-        ),
-    ))
+    #[cfg(not(any(test, feature = "fault-injection")))]
+    {
+        let _ = runtime_dir;
+        Ok(())
+    }
 }
 
 fn socket_path(runtime_dir: Option<&Path>, executions: &Path, id: Uuid) -> PathBuf {
@@ -244,7 +271,10 @@ mod tests {
     use canterlot_proto::worker::ipc::{Ownership, OwnershipPhase};
     use uuid::Uuid;
 
-    use super::{idle_worktrees, remove_build, sweep_runtime};
+    use super::{
+        ensure_test_runtime_allowed, idle_worktrees, remove_build, remove_stale_execution,
+        remove_stale_socket, stale_executions, stale_sockets,
+    };
 
     fn old(path: &Path) {
         let old = SystemTime::now() - Duration::from_secs(8 * 3600);
@@ -353,18 +383,8 @@ mod tests {
     }
     #[test]
     fn sweep_refuses_runtime_outside_the_temp_dir() {
-        let root = tempfile::Builder::new()
-            .prefix("cl-")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let error = sweep_runtime(
-            &root.path().join("data"),
-            Some(Path::new("/canterlot-worker-test-runtime")),
-            &[],
-            Duration::from_secs(10),
-            SystemTime::now(),
-        )
-        .unwrap_err();
+        let error = ensure_test_runtime_allowed(Some(Path::new("/canterlot-worker-test-runtime")))
+            .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
@@ -444,14 +464,30 @@ mod tests {
         let old_inner_listener = UnixListener::bind(old_inner_live_dir.join("ipc.sock")).unwrap();
         old(&old_inner_live_dir);
 
-        sweep_runtime(
-            &data,
-            Some(&runtime),
-            &[released, unreleased, released_dir_record],
-            Duration::from_secs(10),
-            SystemTime::now(),
-        )
-        .unwrap();
+        let now = SystemTime::now();
+        let timeout = Duration::from_secs(10);
+        let records = [released, unreleased, released_dir_record];
+        let executions_stale = stale_executions(&data, Some(&runtime), timeout, now).unwrap();
+        let sockets_stale = stale_sockets(&data, Some(&runtime)).unwrap();
+        for execution in executions_stale {
+            if records
+                .iter()
+                .any(|record| record.execution_id == execution.id.to_string())
+            {
+                continue;
+            }
+            remove_stale_execution(&execution, timeout, now).unwrap();
+        }
+        for (id, path) in sockets_stale {
+            let unreleased = records.iter().any(|record| {
+                record.phase != OwnershipPhase::Released as i32
+                    && Path::new(&record.ipc_socket) == path.as_path()
+            });
+            if unreleased {
+                continue;
+            }
+            remove_stale_socket(id, &path, &executions).unwrap();
+        }
 
         assert!(!socket(&sockets, stale_socket).exists());
         assert!(!socket(&sockets, released_socket).exists());

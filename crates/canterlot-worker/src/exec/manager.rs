@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
     time::{Duration, SystemTime},
@@ -301,26 +301,64 @@ pub(super) fn spawn_actor(shared: &Arc<Shared>, id: Uuid, start: Start) {
     shared.tasks.lock().expect("tasks lock").push(task);
 }
 
-/// Сокеты и каталоги прерванных запусков: только то, на что нет непогашенной записи.
+/// Сокеты и каталоги прерванных запусков: только то, на что нет записи принадлежности.
 pub(super) async fn sweep_runtime(shared: &Shared) -> Result<(), ExecError> {
-    let records = shared
-        .store
-        .call(|store| Ok(open(store)?.ownership().all()))
-        .await?;
     let data_dir = shared.data_dir().await?.clone();
     let runtime_dir = shared.runtime_dir.clone();
     let spawn_timeout = shared.config.spawn_timeout;
-    tokio::task::spawn_blocking(move || {
-        maintenance::sweep_runtime(
-            &data_dir,
-            runtime_dir.as_deref(),
-            &records,
-            spawn_timeout,
-            SystemTime::now(),
-        )
+    maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref())?;
+    let executions_dir = data_dir.join("executions");
+    let now = SystemTime::now();
+    let (executions, sockets) = tokio::task::spawn_blocking({
+        let data_dir = data_dir.clone();
+        let runtime_dir = runtime_dir.clone();
+        move || {
+            Ok::<_, io::Error>((
+                maintenance::stale_executions(
+                    &data_dir,
+                    runtime_dir.as_deref(),
+                    spawn_timeout,
+                    now,
+                )?,
+                maintenance::stale_sockets(&data_dir, runtime_dir.as_deref())?,
+            ))
+        }
     })
     .await
     .map_err(|_| ExecError::Shutdown)??;
+    for execution in executions {
+        before_recheck(&execution.id.to_string()).await;
+        shared
+            .store
+            .call(move |slot| {
+                if open(slot)?.ownership().get(execution.id).is_some() {
+                    return Ok(());
+                }
+                maintenance::remove_stale_execution(&execution, spawn_timeout, SystemTime::now())?;
+                Ok(())
+            })
+            .await?;
+    }
+    for (id, path) in sockets {
+        before_recheck(&id.to_string()).await;
+        let executions_dir = executions_dir.clone();
+        shared
+            .store
+            .call(move |slot| {
+                let store = open(slot)?;
+                let unreleased = store
+                    .ownership()
+                    .unreleased()
+                    .iter()
+                    .any(|record| Path::new(&record.ipc_socket) == path.as_path());
+                if unreleased {
+                    return Ok(());
+                }
+                maintenance::remove_stale_socket(id, &path, &executions_dir)?;
+                Ok(())
+            })
+            .await?;
+    }
     Ok(())
 }
 
@@ -3051,6 +3089,95 @@ mod tests {
         super::gc_worktrees(&manager.shared).await.unwrap();
         *BEFORE_RECHECK.lock().unwrap() = None;
         assert!(worktree.join("target/debug/old").exists());
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_socket_when_ownership_appears_after_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let id = Uuid::now_v7();
+        let runtime = root.path().join("runtime");
+        let sockets = runtime.join("canterlot");
+        fs::create_dir_all(&sockets).unwrap();
+        let socket = sockets.join(format!("{id}.sock"));
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(runtime.clone()),
+        );
+        let client = thread.client();
+        let hook_socket = socket.clone();
+        *BEFORE_RECHECK.lock().unwrap() = Some(std::sync::Arc::new(move |_| {
+            let client = client.clone();
+            let socket = hook_socket.clone();
+            Box::pin(async move {
+                client
+                    .call(move |slot| {
+                        open(slot)?.ownership_mut()?.append(Ownership {
+                            execution_id: id.to_string(),
+                            ipc_socket: socket.to_string_lossy().into_owned(),
+                            phase: OwnershipPhase::Attached as i32,
+                            ..Default::default()
+                        })?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            })
+        }));
+        super::sweep_runtime(&manager.shared).await.unwrap();
+        *BEFORE_RECHECK.lock().unwrap() = None;
+        assert!(socket.exists());
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_execution_when_ownership_appears_after_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let id = Uuid::now_v7();
+        let exec_dir = data.join("executions").join(id.to_string());
+        fs::create_dir_all(&exec_dir).unwrap();
+        age_tree(&exec_dir);
+
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        let client = thread.client();
+        *BEFORE_RECHECK.lock().unwrap() = Some(std::sync::Arc::new(move |_| {
+            let client = client.clone();
+            Box::pin(async move {
+                client
+                    .call(move |slot| {
+                        open(slot)?.ownership_mut()?.append(Ownership {
+                            execution_id: id.to_string(),
+                            phase: OwnershipPhase::Attached as i32,
+                            ..Default::default()
+                        })?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            })
+        }));
+        super::sweep_runtime(&manager.shared).await.unwrap();
+        *BEFORE_RECHECK.lock().unwrap() = None;
+        assert!(exec_dir.exists());
         manager.shutdown().await;
         thread.close().await.unwrap();
     }
