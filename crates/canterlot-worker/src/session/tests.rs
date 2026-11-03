@@ -5,6 +5,13 @@ use super::*;
 pub(super) mod support;
 
 #[test]
+fn test_runtime_dir_stays_inside_storage() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = default_runtime_dir(&root.path().join("store")).unwrap();
+    assert!(runtime.starts_with(root.path()));
+}
+
+#[test]
 fn hub_status_preserves_code_and_static_message() {
     for code in [
         tonic::Code::PermissionDenied,

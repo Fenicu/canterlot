@@ -526,7 +526,8 @@ impl Pilot {
 
     pub async fn start_worker(&mut self) {
         let store = WorkerStore::open(&self.config.data_dir).unwrap();
-        let worker = Worker::new(self.config.clone(), store);
+        let worker = Worker::new(self.config.clone(), store)
+            .with_runtime_dir(self.config.data_dir.join("runtime"));
         let state = worker.state();
         let (stop, rx) = watch::channel(false);
         self.worker = Some((stop, tokio::spawn(worker.run(rx))));

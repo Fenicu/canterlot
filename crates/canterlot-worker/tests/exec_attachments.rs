@@ -359,7 +359,8 @@ async fn attachment_records_are_not_written_for_a_session_without_pilot_v1() {
     config.data_dir = root.path().join("store");
     config.execution.allowed_workdir_roots = vec![root.path().to_path_buf()];
     config.execution.supervisor_exe = Some(env!("CARGO_BIN_EXE_canterlot-worker").into());
-    let worker = Worker::new(config.clone(), WorkerStore::open(&config.data_dir).unwrap());
+    let worker = Worker::new(config.clone(), WorkerStore::open(&config.data_dir).unwrap())
+        .with_runtime_dir(config.data_dir.join("runtime"));
     let mut state = worker.state();
     let (stop, rx) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(worker.run(rx));

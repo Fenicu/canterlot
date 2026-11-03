@@ -21,6 +21,8 @@ pub(crate) fn sweep_runtime(
     spawn_timeout: Duration,
     now: SystemTime,
 ) -> io::Result<()> {
+    #[cfg(any(test, feature = "fault-injection"))]
+    guard_test_runtime(runtime_dir)?;
     let executions = data_dir.join("executions");
     let known: HashSet<Uuid> = records
         .iter()
@@ -102,6 +104,27 @@ pub(crate) fn sweep_runtime(
         }
     }
     Ok(())
+}
+
+/// В тестовой сборке уборка не имеет права трогать общий каталог сокетов.
+#[cfg(any(test, feature = "fault-injection"))]
+fn guard_test_runtime(runtime_dir: Option<&Path>) -> io::Result<()> {
+    let Some(runtime_dir) = runtime_dir else {
+        return Ok(());
+    };
+    let temp = std::path::absolute(std::env::temp_dir())?;
+    let runtime = std::path::absolute(runtime_dir)?;
+    if runtime.starts_with(&temp) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "refusing to sweep runtime outside {}: {}",
+            temp.display(),
+            runtime.display()
+        ),
+    ))
 }
 
 fn socket_path(runtime_dir: Option<&Path>, executions: &Path, id: Uuid) -> PathBuf {
@@ -328,6 +351,23 @@ mod tests {
         assert!(cache_tree.join("node_modules").is_symlink());
         assert!(cache_outside.exists());
     }
+    #[test]
+    fn sweep_refuses_runtime_outside_the_temp_dir() {
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let error = sweep_runtime(
+            &root.path().join("data"),
+            Some(Path::new("/canterlot-worker-test-runtime")),
+            &[],
+            Duration::from_secs(10),
+            SystemTime::now(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
     #[test]
     fn sweep_removes_only_stale_runtime_state() {
         let root = tempfile::Builder::new()

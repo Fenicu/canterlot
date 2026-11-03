@@ -228,7 +228,8 @@ impl Fixture {
         let store = WorkerStore::open(&self.config.data_dir)
             .unwrap()
             .with_probe(self.probe.clone());
-        let worker = Worker::new(self.config.clone(), store);
+        let worker = Worker::new(self.config.clone(), store)
+            .with_runtime_dir(self.config.data_dir.join("runtime"));
         let state = worker.state();
         let (stop, shutdown) = watch::channel(false);
         RunningWorker {

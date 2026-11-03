@@ -405,8 +405,14 @@ impl Fixture {
         let store = WorkerStore::open(&self.config.data_dir)
             .unwrap()
             .with_probe(self.store_probe.clone());
-        let worker =
-            Worker::new(self.config.clone(), store).with_session_probe(self.session_probe.clone());
+        // Дочерние сценарии задают свой временный XDG_RUNTIME_DIR; остальные тесты — приватный.
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|path| path.starts_with(std::env::temp_dir()))
+            .unwrap_or_else(|| self.config.data_dir.join("runtime"));
+        let worker = Worker::new(self.config.clone(), store)
+            .with_runtime_dir(runtime_dir)
+            .with_session_probe(self.session_probe.clone());
         let state = worker.state();
         let (stop, shutdown) = watch::channel(false);
         self.worker = Some(RunningWorker {

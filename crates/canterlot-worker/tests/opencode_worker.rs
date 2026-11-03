@@ -185,7 +185,8 @@ impl Stack {
         .unwrap();
         let store = WorkerStore::open(&config.data_dir).unwrap();
         let machine_id = config.machine_id;
-        let worker = Worker::new(config, store);
+        let runtime_dir = config.data_dir.join("runtime");
+        let worker = Worker::new(config, store).with_runtime_dir(runtime_dir);
         let state = worker.state();
         let (stop, shutdown) = watch::channel(false);
         let join = tokio::spawn(worker.run(shutdown));

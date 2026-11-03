@@ -398,7 +398,7 @@ impl Shared {
     }
 }
 
-fn runtime_dir_from_env() -> Option<PathBuf> {
+pub(crate) fn runtime_dir_from_env() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
 }
 
