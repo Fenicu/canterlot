@@ -734,3 +734,26 @@ test('search_focus_ring_wraps_the_whole_bar', async ({ page }) => {
   await expect(field).toHaveCSS('outline-style', 'none');
   await expect(page.locator('.search')).not.toHaveCSS('outline-style', 'none');
 });
+
+test('list_reserves_the_limits_strip_and_hides_zero_counts_until_the_snapshot', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  seedMockupSessions(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/v1/snapshot**', async (route) => { await held; await route.fallback(); });
+  await page.goto('/sessions');
+  // До снимка нули в счёте вкладок не выдают себя за пустой список, а место полосы лимитов занято.
+  await expect(page.locator('.strip-slot')).toHaveCount(1);
+  await expect(page.locator('.tabs .count')).toHaveCount(0);
+  const slot = (await page.locator('.strip-slot').boundingBox())!;
+  release();
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.strip-slot')).toHaveCount(0);
+  await expect(page.locator('.tabs .count').first()).toBeVisible();
+  // Пришедшая полоса не выше оставленного места: строки под ней не уезжают вниз.
+  const strip = (await page.locator('.limits').first().boundingBox())!;
+  expect(strip.height).toBeLessThanOrEqual(slot.height + 1);
+  expect(Math.abs(strip.y - slot.y)).toBeLessThanOrEqual(1);
+});

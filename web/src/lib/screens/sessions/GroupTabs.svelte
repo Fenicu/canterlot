@@ -4,10 +4,13 @@
   let {
     tabs,
     current,
+    counted = true,
     onselect
   }: {
     tabs: { tab: Tab; label: string; count: number }[];
     current: Tab;
+    /** Счёт известен только после снимка: до него нули выглядели бы как пустой список. */
+    counted?: boolean;
     onselect: (tab: Tab) => void;
   } = $props();
 
@@ -68,7 +71,7 @@
       tabindex={same(item.tab, current) ? 0 : -1}
       onclick={() => onselect(item.tab)}
     >
-      {item.label} <span class="count">{item.count}</span>
+      {item.label}{#if counted}{' '}<span class="count">{item.count}</span>{/if}
     </button>
   {/each}
 </div>
