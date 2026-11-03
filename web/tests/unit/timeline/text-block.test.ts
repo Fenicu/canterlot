@@ -50,8 +50,7 @@ describe("TextBlock", () => {
     unmount(view);
   });
 
-  it("streaming_never_shows_a_shorter_prefix_than_received", () => {
-    const target = document.createElement("div");
+  it("streaming_never_shows_a_shorter_prefix_than_received", () => {    const target = document.createElement("div");
     document.body.appendChild(target);
     const block = new BlockModel("b-2", "text");
     const view = mount(TextBlock, { target, props: { block } });
@@ -65,6 +64,22 @@ describe("TextBlock", () => {
     observer.disconnect();
     expect(seen.every((text) => !text.trim() || ["раз", "раз два", "раз два три"].includes(text.trim()))).toBe(true);
     expect(target.textContent?.trim()).toBe("раз два три");
+    unmount(view);
+  });
+
+  it("quote_copy_button_appears_only_for_a_final_block", () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const block = new BlockModel("b-q", "text");
+    block.text = "> цитата";
+    const view = mount(TextBlock, { target, props: { block } });
+    flushSync();
+    expect(target.querySelector('button[aria-label="Скопировать цитату"]')).toBeNull();
+
+    block.state = "final";
+    flushSync();
+    const button = target.querySelector('button[aria-label="Скопировать цитату"]');
+    expect(button).not.toBeNull();
     unmount(view);
   });
 });

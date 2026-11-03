@@ -52,12 +52,12 @@
 
 <div class="text prose" data-block={block.id} use:highlightFinal={streaming ? null : block.text} use:edgeFade>
   {#each rendered.chunks as chunk (chunk.id)}
-    <Html html={chunk.html} />
+    <Html html={chunk.html} copy source={streaming ? undefined : block.text} final={!streaming} />
   {/each}
   {#if rendered.tail.plain}
     <div class="tail"><div use:appendText={rendered.tail.text ?? ''}></div>{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
   {:else if rendered.tail.html}
-    <div class="tail"><Html html={rendered.tail.html} />{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
+    <div class="tail"><Html html={rendered.tail.html} copy />{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
   {:else if streaming}
     <span class="caret" aria-hidden="true"></span>
   {/if}

@@ -404,7 +404,7 @@ test('long_code_scrolls_inside_the_block_at_360px', async ({ page }) => {
   await expect.poll(() => pre.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
 });
 
-test('quote_with_a_long_code_line_stays_inside_the_card', async ({ page }) => {
+test('quote_with_a_long_code_line_stays_inside_the_card_and_both_copy_buttons_work', async ({ page }, testInfo) => {
   const command = `Write-Host "${'x'.repeat(400)}"`;
   const quote = [
     '> ## Обновление сборки mc',
@@ -420,6 +420,20 @@ test('quote_with_a_long_code_line_stays_inside_the_card', async ({ page }) => {
     '>',
     '> > Вложенная цитата'
   ].join('\n');
+  const inner = [
+    '## Обновление сборки mc',
+    '',
+    'Друзья, **обновляем** сборку `mc`:',
+    '',
+    '1. Скачайте архив',
+    '2. Выполните в PowerShell:',
+    '   ```powershell',
+    `   ${command}`,
+    '   ```',
+    '3. Готово',
+    '',
+    '> Вложенная цитата'
+  ].join('\n');
   const { api, id } = await boot(page, 0);
   api.histories.set(id, [textBlock(api, quote, '1')]);
   api.bindConversation(id);
@@ -427,12 +441,52 @@ test('quote_with_a_long_code_line_stays_inside_the_card', async ({ page }) => {
   const card = page.locator('article.card').last();
   const pre = card.locator('pre').first();
   await expect(pre).toBeVisible();
+  const phone = testInfo.project.name === 'phone';
+  const codeButton = card.getByRole('button', { name: 'Скопировать код' });
+  const quoteButton = card.getByRole('button', { name: 'Скопировать цитату' });
+  await expect(codeButton).toBeVisible();
+  await expect(quoteButton).toBeVisible();
 
   const cardBox = await card.boundingBox();
   const preBox = await pre.boundingBox();
   expect(preBox!.x + preBox!.width).toBeLessThanOrEqual(cardBox!.x + cardBox!.width + 1);
   expect(await card.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(0);
   expect(await pre.evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(true);
+
+  if (phone) {
+    await expect(codeButton).toHaveCSS('opacity', '1');
+  } else {
+    await expect(codeButton).toHaveCSS('opacity', '0');
+    await card.locator('.code-block').first().hover();
+    await expect(codeButton).toHaveCSS('opacity', '1');
+  }
+
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text: string) => { (window as unknown as { __copied?: string }).__copied = text; } }
+    });
+  });
+  const copied = () => page.evaluate(() => (window as unknown as { __copied?: string }).__copied);
+
+  await codeButton.click();
+  await expect.poll(copied).toBe(`${command}\n`);
+  await expect(codeButton).toContainText('Скопировано');
+  await expect(codeButton).not.toContainText('Скопировано', { timeout: 4000 });
+
+  if (!phone) await card.locator('blockquote').first().hover();
+  await quoteButton.click();
+  await expect.poll(copied).toBe(inner);
+  await expect(quoteButton).toContainText('Скопировано');
+
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async () => { throw new Error('denied'); } }
+    });
+  });
+  await quoteButton.click();
+  await expect(quoteButton).toContainText('Не удалось скопировать');
 });
 
 test('subagent_row_links_to_the_lane_and_shows_live_status', async ({ page }) => {
