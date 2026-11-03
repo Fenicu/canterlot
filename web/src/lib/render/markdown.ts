@@ -52,3 +52,6 @@ export function createMarkdown(): MdRenderer {
     }
   };
 }
+
+/** Один разборщик на приложение: создание MarkdownIt дороже самого рендера. */
+export const sharedMarkdown = createMarkdown();

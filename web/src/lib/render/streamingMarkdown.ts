@@ -24,6 +24,60 @@ export interface StreamingResult {
   stats: RenderStats;
 }
 
+/** Готовый HTML финальных блоков: возврат к ответу не разбирает markdown заново. */
+export class RenderCache {
+  readonly #html = new Map<string, string>();
+  #bytes = 0;
+
+  constructor(
+    readonly maxEntries = 200,
+    readonly maxBytes = 4 * 1024 * 1024,
+  ) {}
+
+  get size(): number {
+    return this.#html.size;
+  }
+
+  get bytes(): number {
+    return this.#bytes;
+  }
+
+  get(key: string): string | undefined {
+    const html = this.#html.get(key);
+    if (html === undefined) return undefined;
+    this.#html.delete(key);
+    this.#html.set(key, html);
+    return html;
+  }
+
+  set(key: string, html: string): void {
+    const bytes = html.length * 2;
+    if (bytes > this.maxBytes) return;
+    const previous = this.#html.get(key);
+    if (previous !== undefined) {
+      this.#bytes -= previous.length * 2;
+      this.#html.delete(key);
+    }
+    this.#html.set(key, html);
+    this.#bytes += bytes;
+    while (
+      this.#html.size > this.maxEntries ||
+      this.#bytes > this.maxBytes
+    ) {
+      const oldest = this.#html.keys().next().value;
+      if (oldest === undefined) break;
+      const dropped = this.#html.get(oldest)!;
+      this.#html.delete(oldest);
+      this.#bytes -= dropped.length * 2;
+    }
+  }
+
+  clear(): void {
+    this.#html.clear();
+    this.#bytes = 0;
+  }
+}
+
 const encoder = new TextEncoder();
 
 function utf8Bytes(s: string): number {
@@ -243,6 +297,8 @@ export function splitStable(
   return { boundaries: boundaries.slice(lo), openFence: standaloneSplitter.openFence };
 }
 
+export const finalHtmlCache = new RenderCache();
+
 export class StreamingMarkdown {
   private renderer: MdRenderer;
   private chunkCache = new Map<string, string>();
@@ -252,14 +308,26 @@ export class StreamingMarkdown {
   private chunkEnd = 0;
   private closedBoundaries = 0;
 
-  constructor(r: MdRenderer) {
+  constructor(
+    r: MdRenderer,
+    private cache: RenderCache | null = finalHtmlCache,
+  ) {
     this.renderer = r;
   }
 
-  update(text: string, final: boolean): StreamingResult {
+  update(text: string, final: boolean, key?: string): StreamingResult {
     if (final) {
+      const cached = key ? this.cache?.get(key) : undefined;
+      if (cached !== undefined) {
+        return {
+          chunks: [{ id: 'final', html: cached }],
+          tail: { html: '', plain: false },
+          stats: { rendered: this.totalRendered, cached: 1, tailBytes: 0 }
+        };
+      }
       const html = this.renderer.render(text);
       this.totalRendered++;
+      if (key) this.cache?.set(key, html);
       return {
         chunks: [{ id: 'final', html }],
         tail: { html: '', plain: false },

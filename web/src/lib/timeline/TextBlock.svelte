@@ -2,16 +2,28 @@
   import { edgeFade } from '#lib/render/edgeFade.js';
   import { highlightWithin } from '#lib/render/highlight.js';
   import Html from '#lib/render/Html.svelte';
-  import { createMarkdown } from '#lib/render/markdown.js';
+  import { sharedMarkdown } from '#lib/render/markdown.js';
   import { StreamingMarkdown } from '#lib/render/streamingMarkdown.js';
   import type { BlockModel } from '#lib/stores/blocks.js';
 
-  let { block }: { block: Pick<BlockModel, 'id' | 'text' | 'state'> } = $props();
-  const engine = new StreamingMarkdown(createMarkdown());
+  let {
+    block
+  }: {
+    block: Pick<BlockModel, 'id' | 'text' | 'state'> & {
+      rev?: number;
+      checksum?: string | null;
+    };
+  } = $props();
+  const engine = new StreamingMarkdown(sharedMarkdown);
 
   const streaming = $derived(block.state === 'streaming' || block.state === 'stale');
+  const finalKey = $derived(
+    streaming
+      ? undefined
+      : `${block.id}:${block.checksum ?? block.rev ?? 0}:${block.text.length}`
+  );
   // Дельта рисуется в том же кадре, в котором её применил пакет событий.
-  const rendered = $derived(engine.update(block.text, !streaming));
+  const rendered = $derived(engine.update(block.text, !streaming, finalKey));
 
   /** Длинный простой хвост растёт дописыванием в тот же текстовый узел: браузер не пересобирает абзац заново. */
   function appendText(node: HTMLElement, initial: string) {

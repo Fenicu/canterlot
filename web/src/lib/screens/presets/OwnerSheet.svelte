@@ -2,7 +2,7 @@
   import { untrack } from 'svelte';
   import { getOwnerFile, getOwnerOverview } from '#lib/api/client.js';
   import { ApiError } from '#lib/api/http.js';
-  import { createMarkdown } from '#lib/render/markdown.js';
+  import { sharedMarkdown } from '#lib/render/markdown.js';
   import Html from '#lib/render/Html.svelte';
   import Button from '#lib/ui/Button.svelte';
   import Select from '#lib/ui/Select.svelte';
@@ -19,7 +19,7 @@
     onclose: () => void;
   } = $props();
 
-  const engine = createMarkdown();
+  const engine = sharedMarkdown;
   let machineId = $state(untrack(() => initialMachine));
   let loading = $state(true);
   let error = $state('');
