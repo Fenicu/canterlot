@@ -778,7 +778,8 @@ export class ChatStore {
         return;
       case "compaction_finished":
         // Тихая строка уже в истории: подтягиваем хвост, переживает перезагрузку.
-        this.reloadTail().catch(() => undefined);
+        // Оторванное окно получит её со страницей: перечитанный хвост увёл бы владельца из чтения.
+        if (!this.timeline.tailDetached) this.reloadTail().catch(() => undefined);
         return;
       case "compaction_started":
         if (event.kind === "compaction_started") {
@@ -1266,7 +1267,9 @@ export class ChatStore {
           (entry) => BigInt(entry.seq) < BigInt(floor),
         )
       : [];
-    const keepOlder = older.every((entry) => terminalEntry(entry));
+    // Оторванное окно с хвостом снимка не стыкуется: между ними дыра.
+    const keepOlder =
+      !this.timeline.tailDetached && older.every((entry) => terminalEntry(entry));
     if (!keepOlder) this.timeline.applyHistoryPage([], "tail");
     this.#ingest(items, "tail");
     if (!keepOlder) {

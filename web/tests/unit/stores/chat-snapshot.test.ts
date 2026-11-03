@@ -230,6 +230,25 @@ describe("лента дальше 3000 записей", () => {
     expect(chat.timeline.hasOlder).toBe(true);
   });
 
+  it("конец сжатия не уводит читающего старое к хвосту", async () => {
+    const chat = chatOf({ history: longHistory(3300) });
+    await detach(chat, 3300);
+    const before = chat.timeline.entries;
+    apply(chat, ev("compaction_finished", { id: "c1", ok: true }, "4001"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(chat.timeline.tailDetached).toBe(true);
+    expect(chat.timeline.entries).toBe(before);
+  });
+
+  it("снимок при оторванном окне заменяет его хвостом без разрыва", async () => {
+    const chat = chatOf({ history: longHistory(3300) });
+    await detach(chat, 3300);
+    snapshot(chat, { history: await longHistory(3300)(CONV, {}) });
+    expect(chat.timeline.tailDetached).toBe(false);
+    expect(chat.timeline.oldestSeq()).toBe("3201");
+    expect(chat.timeline.hasOlder).toBe(true);
+  });
+
   it("переполненное удержание сбрасывается и просит свежий снимок", async () => {
     let release: ((page: { items: HistoryItem[] }) => void) | undefined;
     let resyncs = 0;
