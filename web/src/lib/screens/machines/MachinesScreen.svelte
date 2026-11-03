@@ -43,7 +43,7 @@
     {:else if !runtime || runtime.machines.status === 'idle' || runtime.machines.status === 'loading_snapshot'}<p>Загружаю машины…</p>
     {:else if !machine}<p>Машины ещё не подключены. Подключите воркер к хабу</p>
     {:else}
-      {#if machines.length > 1}<Segmented name="machine" label="Машина" options={machines.map(m => ({ value: m.id, label: m.name }))} bind:value={selected} />{/if}
+      {#if machines.length > 1}<Segmented name="machine" label="Машина" options={machines.map(m => ({ value: m.id, label: m.availability === 'degraded' ? `${m.name} · нестабильно` : m.availability === 'unavailable' ? `${m.name} · не в сети` : m.name }))} bind:value={selected} />{/if}
       <div class="heading"><h2>{machine.name}</h2><span class="availability" data-availability={machine.availability}>{machineStatus(machine.availability)}</span></div>
       {#if machine.os}<p class="note">{({ linux: 'Linux', darwin: 'macOS', windows: 'Windows' } as Record<string, string>)[machine.os] ?? machine.os}</p>{/if}
       {#if machine.worker_version}<p class="note">Версия воркера {machine.worker_version}</p>{/if}
@@ -74,7 +74,8 @@
 <style>
   .heading { display: flex; flex-wrap: wrap; gap: var(--s4); justify-content: space-between; align-items: center; margin-top: var(--s8); }
   .heading h2 { margin: 0; font-size: var(--fs-heading); }
-  .availability { border-radius: var(--radius-pill); background: var(--raised); padding: var(--s3) var(--s6); color: var(--success); }
+  /* Состояние — подпись цветом, а не заливная капсула, которую легко принять за кнопку. */
+  .availability { color: var(--success); font-size: var(--fs-meta); font-weight: var(--weight-medium); }
   [data-availability='degraded'], .notice { color: var(--warning); }
   [data-availability='unavailable'] { color: var(--muted); }
   .stale { color: var(--muted); }
