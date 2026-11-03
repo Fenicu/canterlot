@@ -437,11 +437,31 @@ impl Tracker {
 
     /// Сжатие не подтвердилось до срока: ответ уже не припишется к команде.
     pub fn forget_command(&mut self, command_id: Uuid) {
+        let removed: Vec<PromptKind> = self
+            .prompts
+            .values()
+            .filter(|meta| meta.command_id == command_id)
+            .map(|meta| meta.kind)
+            .collect();
+        for kind in removed {
+            if kind == PromptKind::Turn
+                && let Some(turn) = self.turn.as_mut()
+            {
+                turn.outstanding = turn.outstanding.saturating_sub(1);
+            }
+        }
         self.prompts.retain(|_, meta| meta.command_id != command_id);
         self.echoes.retain(|wait| wait.command_id != command_id);
         self.unconfirmed.remove(&command_id);
         self.early_rejects.remove(&command_id);
         self.answered_unproven.remove(&command_id);
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| turn.command_id == command_id && turn.outstanding == 0)
+        {
+            self.turn = None;
+        }
         if self.compaction == Some(command_id) {
             self.compaction = None;
             self.compact_proved = false;
@@ -718,6 +738,30 @@ mod tests {
             Some(Effect::CompactDone { ok: true })
         ));
         assert_eq!(tracker.last_compact_ok(), Some(true));
+    }
+
+    #[test]
+    fn forgetting_a_steer_keeps_the_original_turn() {
+        let first = Uuid::now_v7();
+        let steer = Uuid::now_v7();
+        let mut tracker = Tracker::new();
+        tracker.begin(first);
+        tracker.register(4, first, PromptKind::Turn);
+        tracker.register(5, steer, PromptKind::Turn);
+        tracker.forget_command(steer);
+        assert!(tracker.has_turn());
+        let (command, ..) = closed(tracker.on_response(4, &Ok(usage(1, 1, 0))));
+        assert_eq!(command, first);
+    }
+
+    #[test]
+    fn forgetting_the_original_prompt_closes_the_turn() {
+        let first = Uuid::now_v7();
+        let mut tracker = Tracker::new();
+        tracker.begin(first);
+        tracker.register(4, first, PromptKind::Turn);
+        tracker.forget_command(first);
+        assert!(!tracker.has_turn());
     }
 
     #[test]

@@ -334,6 +334,7 @@ impl AntigravityAdapter {
             self.responses.insert(id, result);
             return;
         }
+        self.stall_at = None;
         match self.tracker.on_response(id, &result) {
             Some(Effect::TurnClosed {
                 command_id,
@@ -849,7 +850,14 @@ impl Adapter for AntigravityAdapter {
             if self.exit_reported {
                 return std::future::pending().await;
             }
-            self.pump_once().await;
+            match self.stall_at {
+                Some(at) => {
+                    let _ = timeout_at(at, self.pump_once()).await;
+                }
+                None => {
+                    self.pump_once().await;
+                }
+            }
         }
     }
 
