@@ -263,6 +263,50 @@
   --syn-symbol: #094f91;
 }
 
+[data-palette=vscode][data-theme=dark] {
+  color-scheme: dark;
+  --bg: #1f1f1f;
+  --chat-bg: #181818;
+  --surface: #252526;
+  --raised: #2b2b2b;
+  --hover: #2a2d2e;
+  --selected: #1f3a52;
+  --text: #cccccc;
+  --secondary: #c0c0c0;
+  --muted: #b0b0b0;
+  --time: #a8a8a8;
+  --line: #3a3a3a;
+  --control-line: #3c3c3c;
+  --chip: #3a3a3a;
+  --chip-text: #dddddd;
+  --badge: #8a8a8a;
+  --accent: #0078d4;
+  --accent-link: #4daafc;
+  --accent-ink: #ffffff;
+  --accent-soft: #0d2b45;
+  --success: #89d185;
+  --success-soft: #1d2f24;
+  --warning: #d7ba7d;
+  --warning-soft: #352d1c;
+  --danger: #f48771;
+  --danger-soft: #3a211e;
+  --blue: #75beff;
+  --code: #181818;
+  --scrim: #111111;
+  --chart-secondary: #75beff;
+  --transparent: transparent;
+  --popover: #252526;
+  --popover-hover: #2f2f2f;
+  --syn-keyword: #569cd6;
+  --syn-control: #c586c0;
+  --syn-string: #ce9178;
+  --syn-function: #dcdcaa;
+  --syn-type: #4ec9b0;
+  --syn-comment: #6a9955;
+  --syn-number: #b5cea8;
+  --syn-variable: #9cdcfe;
+  --syn-symbol: #4daafc;
+}
 
 [data-palette=vscode][data-theme=light] {
   color-scheme: light;
