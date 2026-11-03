@@ -114,6 +114,8 @@ const FAILURES: Record<string, string> = {
   context_exhausted: "исчерпан контекст",
   crashed: "процесс завершился с ошибкой",
   start_failed: "не удалось запустить",
+  codex_state_backfill_stuck:
+    "застряло обновление базы Codex: перенесите state_5.sqlite из домашнего каталога canterlot и запустите снова",
   protocol_incompatible: "несовместимый протокол агента",
   start_rejected: "запуск отклонён машиной",
   worktree_not_git: "исходная папка не репозиторий git",
@@ -191,6 +193,16 @@ const DIAGNOSTIC_KINDS: Record<string, string> = {
 
 export function diagnosticKindLabel(value: Value): string {
   return lookup(DIAGNOSTIC_KINDS, value) ?? "Служебное событие";
+}
+
+const DIAGNOSTIC_EVENT_TYPES: Record<string, string> = {
+  codex_state_backfill: "Codex обновляет свою базу",
+  codex_state_backfill_stuck: "застряло обновление базы Codex",
+};
+
+/** Причина события адаптера по-русски; неизвестную показываем как есть. */
+export function diagnosticEventLabel(value: Value): string | undefined {
+  return lookup(DIAGNOSTIC_EVENT_TYPES, value);
 }
 
 const BLOCK_ENDS: Record<string, string> = {

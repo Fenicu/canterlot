@@ -155,6 +155,9 @@ enum StopCause {
     },
     StartCancelled,
     StartFailed,
+    /// Codex оставил в своей базе незавершённый перенос sqlite: запуск без
+    /// вмешательства владельца больше не пройдёт.
+    CodexStateBackfillStuck,
     InvalidInstructions,
     Exited {
         code: Option<i32>,
@@ -1750,9 +1753,9 @@ impl Supervisor {
                         ..Default::default()
                     }))?;
                 }
-                let cause = match other {
-                    Ok(Err(crate::adapter::AdapterError::StartFailed("cli_too_old"))) => {
-                        StopCause::CliIncompatible
+                let cause = match &other {
+                    Ok(Err(crate::adapter::AdapterError::StartFailed(reason))) => {
+                        start_failure_cause(Some(*reason))
                     }
                     _ => StopCause::StartFailed,
                 };
@@ -3109,6 +3112,11 @@ impl Supervisor {
                 ("stopped", "start_cancelled", "stopped")
             }
             StopCause::StartFailed => ("failed", "start_failed", "start_failed"),
+            StopCause::CodexStateBackfillStuck => (
+                "failed",
+                "codex_state_backfill_stuck",
+                "codex_state_backfill_stuck",
+            ),
             StopCause::InvalidInstructions => {
                 ("failed", "invalid_instructions", "invalid_instructions")
             }
@@ -3175,6 +3183,15 @@ impl Supervisor {
     }
 }
 
+/// Причина остановки по отказу запуска: застрявший перенос базы Codex — свой исход.
+fn start_failure_cause(reason: Option<&str>) -> StopCause {
+    match reason {
+        Some("cli_too_old") => StopCause::CliIncompatible,
+        Some("codex_state_backfill_stuck") => StopCause::CodexStateBackfillStuck,
+        _ => StopCause::StartFailed,
+    }
+}
+
 /// Причина остановки по обязательной диагностике адаптера; неизвестная трактуется как несовместимость.
 fn required_diagnostic_cause(kind: &str) -> StopCause {
     match kind {
@@ -3205,6 +3222,22 @@ mod tests {
         assert!(matches!(
             required_diagnostic_cause("mcp_isolation_failed"),
             StopCause::StartFailed
+        ));
+    }
+
+    #[test]
+    fn stuck_codex_state_backfill_keeps_its_reason() {
+        assert!(matches!(
+            start_failure_cause(Some("codex_state_backfill_stuck")),
+            StopCause::CodexStateBackfillStuck
+        ));
+        assert!(matches!(
+            start_failure_cause(Some("app_server_failed")),
+            StopCause::StartFailed
+        ));
+        assert!(matches!(
+            start_failure_cause(Some("cli_too_old")),
+            StopCause::CliIncompatible
         ));
     }
 
