@@ -2923,6 +2923,11 @@ impl Supervisor {
         ) {
             return self.compaction_record(&id, attempt, CompactionState::Superseded);
         }
+        // Без compact_v1 хаб не примет ни эпизод, ни сброс контекста: сжатие прошло бы
+        // без строки в ленте.
+        if !self.compact_v1 {
+            return self.compaction_record(&id, attempt, CompactionState::NotApplicable);
+        }
         let (Some(command), None, Some(adapter)) = (
             Uuid::parse_str(&id).ok(),
             self.active_turn,
@@ -3257,6 +3262,7 @@ mod tests {
         steer_accept: bool,
         steer_undetermined: bool,
         refused: Vec<String>,
+        compact_calls: usize,
     }
 
     struct StubAdapter {
@@ -3324,6 +3330,11 @@ mod tests {
             } else {
                 InterruptOutcome::NotApplicable
             }
+        }
+
+        async fn compact(&mut self, _command: Uuid) -> crate::adapter::CompactOutcome {
+            self.state.lock().unwrap().compact_calls += 1;
+            crate::adapter::CompactOutcome::Accepted
         }
 
         async fn refuse_request(&mut self, request_id: &str, _message: &str) {
@@ -4152,6 +4163,30 @@ mod tests {
         assert!(
             !supervisor.interrupted,
             "a later clean exit is a normal exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_without_compact_v1_is_not_applicable() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        supervisor.compact_v1 = false;
+        let id = Uuid::now_v7().to_string();
+        supervisor.on_compact(id.clone(), 1).await.unwrap();
+        assert_eq!(
+            state.lock().unwrap().compact_calls,
+            0,
+            "never sent to the agent"
+        );
+        assert!(supervisor.pending_compaction.is_none());
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(
+            bodies.iter().any(|body| matches!(
+                body,
+                Body::CompactionStatus(status)
+                    if status.command_id == id
+                        && status.state == i32::from(CompactionState::NotApplicable)
+            )),
+            "{bodies:?}"
         );
     }
 }
