@@ -806,6 +806,7 @@ fn pilot_records_roundtrip() {
         used_permille: 954,
         resets_at_ms: 123456,
         observed_machine_ms: 123000,
+        ..Default::default()
     };
     for (tag, body) in [
         (23, record_body::Body::LimitObserved(observation.clone())),
@@ -1262,6 +1263,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
             used_permille: 954,
             resets_at_ms: 123456,
             observed_machine_ms: 123000,
+            ..Default::default()
         }],
         weekly_reserve_active: true,
     };

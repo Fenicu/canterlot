@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use canterlot_proto::worker::v1::{LimitObservation, LimitWindow};
+use canterlot_proto::worker::v1::{LimitDataConfidence, LimitObservation, LimitWindow};
 use canterlot_worker::{
     config::MachineConfig,
     machine::{
@@ -58,6 +58,35 @@ fn codex_windows_are_mapped_by_length() {
     assert_eq!(
         rows(&observed),
         vec![(FIVE, 0, 1_793_501_361_000), (WEEK, 970, 1_793_774_201_000)]
+    );
+}
+
+#[test]
+fn data_confidence_is_carried_and_absence_stays_unknown() {
+    let estimated = r#"[{"provider":"claude","usage":{
+        "dataConfidence":"estimated",
+        "primary":{"usedPercent":44,"windowMinutes":300}}}]"#;
+    let observed = observations_from_output("claude", estimated.as_bytes(), NOW_MS).unwrap();
+    assert!(
+        observed
+            .iter()
+            .all(|o| o.data_confidence == LimitDataConfidence::Estimated as i32)
+    );
+
+    let exact = observations_from_output("codex", CODEX.as_bytes(), NOW_MS).unwrap();
+    assert!(
+        exact
+            .iter()
+            .all(|o| o.data_confidence == LimitDataConfidence::Exact as i32)
+    );
+
+    // Старый CodexBar поля не отдаёт: это не «оценка», но и не подтверждённая точность.
+    let missing =
+        observations_from_output("claude", CLAUDE_WEEKLY_ONLY.as_bytes(), NOW_MS).unwrap();
+    assert!(
+        missing
+            .iter()
+            .all(|o| o.data_confidence == LimitDataConfidence::Unspecified as i32)
     );
 }
 
@@ -188,6 +217,7 @@ impl Fallback {
             used_permille: 7,
             resets_at_ms: 0,
             observed_machine_ms: 1,
+            ..Default::default()
         }]
     }
 }

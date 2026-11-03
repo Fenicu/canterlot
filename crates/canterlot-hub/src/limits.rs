@@ -10,7 +10,8 @@ use crate::{
 use canterlot_proto::{
     limits::MAX_MESSAGE_BYTES,
     worker::v1::{
-        ControlDown, LimitObservation, LimitReached, LimitWindow, LimitsSnapshot, control_down,
+        ControlDown, LimitDataConfidence, LimitObservation, LimitReached, LimitWindow,
+        LimitsSnapshot, control_down,
     },
 };
 use chrono::{DateTime, NaiveDate, Utc};
@@ -56,6 +57,41 @@ pub enum ObservationSource {
     Session,
     Poll,
 }
+/// Точность показаний провайдера. `estimated` приходит от CodexBar, когда он считает
+/// расход по локальным журналам, а не по данным провайдера.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DataConfidence {
+    Exact,
+    Estimated,
+}
+impl DataConfidence {
+    pub fn from_proto(value: i32) -> Self {
+        match LimitDataConfidence::try_from(value) {
+            Ok(LimitDataConfidence::Estimated) => Self::Estimated,
+            _ => Self::Exact,
+        }
+    }
+    pub fn from_stored(value: &str) -> Self {
+        if value == "estimated" {
+            Self::Estimated
+        } else {
+            Self::Exact
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Estimated => "estimated",
+        }
+    }
+    fn proto(self) -> i32 {
+        match self {
+            Self::Exact => LimitDataConfidence::Exact as i32,
+            Self::Estimated => LimitDataConfidence::Estimated as i32,
+        }
+    }
+}
 pub struct Observation {
     pub provider: String,
     pub window: Window,
@@ -63,6 +99,7 @@ pub struct Observation {
     pub resets_at: Option<DateTime<Utc>>,
     pub observed_at: DateTime<Utc>,
     pub source: ObservationSource,
+    pub data_confidence: DataConfidence,
     pub machine_id: Uuid,
     pub execution_id: Option<Uuid>,
 }
@@ -86,6 +123,8 @@ pub struct ProviderLimits {
     /// У провайдера нет пятичасового окна: клиенты прячут счётчик, история остаётся.
     pub five_hour_absent: bool,
     pub five_hour_absent_at: Option<DateTime<Utc>>,
+    /// Точность последнего показания; старые записи без поля считаются точными.
+    pub data_confidence: DataConfidence,
 }
 #[derive(Debug, Serialize)]
 pub struct WindowState {
@@ -137,7 +176,12 @@ pub async fn record_observation_in_tx(
     }
     Ok(result)
 }
-type StoredReading = (Option<i32>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+type StoredReading = (
+    Option<i32>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    String,
+);
 
 pub(crate) fn known_provider(provider: &str) -> bool {
     !canterlot_proto::harness::harnesses_of(provider).is_empty()
@@ -170,11 +214,13 @@ pub(crate) async fn record_in_tx(
  .bind(&o.provider).bind(window).bind(i32::from(o.used_permille)).bind(o.resets_at).bind(observed_at).bind(now).bind(match o.source{ObservationSource::Session=>"session",ObservationSource::Poll=>"poll"}).bind(o.machine_id).bind(o.execution_id).execute(&mut *conn).await?;
     }
     let current: Option<StoredReading> = sqlx::query_as(match o.window {
-        Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at from provider_limits where provider=$1",
-        Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at from provider_limits where provider=$1",
-        Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at from provider_limits where provider=$1",
+        Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at,data_confidence from provider_limits where provider=$1",
+        Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at,data_confidence from provider_limits where provider=$1",
+        Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at,data_confidence from provider_limits where provider=$1",
     }).bind(&o.provider).fetch_optional(&mut *conn).await?;
-    let (used, reset, seen) = current.unwrap_or_default();
+    let (used, reset, seen, stored_confidence) =
+        current.unwrap_or((None, None, None, DataConfidence::Exact.as_str().into()));
+    let stored_confidence = DataConfidence::from_stored(&stored_confidence);
     let absent_at: Option<DateTime<Utc>> = if o.window == Window::FiveHour {
         sqlx::query_scalar("select five_hour_absent_at from provider_limits where provider=$1")
             .bind(&o.provider)
@@ -188,17 +234,19 @@ pub(crate) async fn record_in_tx(
         && absent_at.is_none_or(|absent| absent < observed_at);
     if newer {
         sqlx::query(match o.window {
-            Window::Weekly => "update provider_limits set weekly_used_permille=$2,weekly_resets_at=$3,weekly_observed_at=$4,updated_at=$5 where provider=$1",
-            Window::FiveHour => "update provider_limits set five_hour_used_permille=$2,five_hour_resets_at=$3,five_hour_observed_at=$4,five_hour_absent_at=null,updated_at=$5 where provider=$1",
-            Window::Monthly => "update provider_limits set monthly_used_permille=$2,monthly_resets_at=$3,monthly_observed_at=$4,updated_at=$5 where provider=$1",
-        }).bind(&o.provider).bind(i32::from(o.used_permille)).bind(o.resets_at).bind(observed_at).bind(now).execute(&mut *conn).await?;
+            Window::Weekly => "update provider_limits set weekly_used_permille=$2,weekly_resets_at=$3,weekly_observed_at=$4,data_confidence=$5,updated_at=$6 where provider=$1",
+            Window::FiveHour => "update provider_limits set five_hour_used_permille=$2,five_hour_resets_at=$3,five_hour_observed_at=$4,five_hour_absent_at=null,data_confidence=$5,updated_at=$6 where provider=$1",
+            Window::Monthly => "update provider_limits set monthly_used_permille=$2,monthly_resets_at=$3,monthly_observed_at=$4,data_confidence=$5,updated_at=$6 where provider=$1",
+        }).bind(&o.provider).bind(i32::from(o.used_permille)).bind(o.resets_at).bind(observed_at).bind(o.data_confidence.as_str()).bind(now).execute(&mut *conn).await?;
     }
     if newer && o.window == Window::Weekly {
         weekly_stage(conn, o, observed_at, now, config).await?;
     }
-    // Возвращение окна после отметки об отсутствии клиентам тоже нужно показать.
-    let changed =
-        used != Some(i32::from(o.used_permille)) || reset != o.resets_at || absent_at.is_some();
+    // Возвращение окна после отметки об отсутствии и смена точности клиентам тоже нужны.
+    let changed = used != Some(i32::from(o.used_permille))
+        || reset != o.resets_at
+        || absent_at.is_some()
+        || stored_confidence != o.data_confidence;
     Ok(Recorded {
         snapshot_stored: store,
         provider_changed: newer && changed,
@@ -278,10 +326,10 @@ pub(crate) async fn emit_changed(
         // Отсутствующее окно уходит клиентам событием без значения: `used_permille` и `resets_at` равны null.
         let payload = match (state, p.five_hour_absent_at) {
             (Some(s), _) => Some(
-                json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(wire),"observed_at":wire(s.observed_at),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve}),
+                json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(wire),"observed_at":wire(s.observed_at),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str()}),
             ),
             (None, Some(absent)) if window == Window::FiveHour => Some(
-                json!({"provider":provider,"window":window,"used_permille":null,"resets_at":null,"observed_at":wire(absent),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve}),
+                json!({"provider":provider,"window":window,"used_permille":null,"resets_at":null,"observed_at":wire(absent),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str()}),
             ),
             _ => None,
         };
@@ -445,6 +493,11 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
                     .try_get::<Option<DateTime<Utc>>, _>("five_hour_absent_at")?
                     .is_some(),
                 five_hour_absent_at: r.try_get("five_hour_absent_at")?,
+                data_confidence: DataConfidence::from_stored(
+                    r.try_get::<Option<String>, _>("data_confidence")?
+                        .as_deref()
+                        .unwrap_or("exact"),
+                ),
             })
         })
         .collect()
@@ -481,6 +534,7 @@ fn snapshot_message(
                         .resets_at
                         .map_or(0, |at| at.timestamp_millis().max(0) as u64),
                     observed_machine_ms: seen.timestamp_millis().max(0) as u64,
+                    data_confidence: p.data_confidence.proto(),
                 });
             }
         }

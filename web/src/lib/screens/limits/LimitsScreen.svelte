@@ -63,7 +63,7 @@
       {@const primary = view.five.absent ? view.week : view.five}
       {@const windowLabel = view.five.absent ? 'нед' : '5ч'}
       <section data-tone={view.tone}>
-        <p class="note">{providerName(provider.provider)} сейчас · осталось</p>
+        <p class="note">{providerName(provider.provider)} сейчас · осталось {#if provider.data_confidence === 'estimated'}· оценка{/if}</p>
         <strong class="value">{primary.text}&#32;/ <span class="window">{windowLabel}</span></strong>
         {#if !view.five.absent}<p class="other">{view.week.known ? `${view.week.text} недели` : 'Нет данных недели'}</p>{/if}
         {#if view.month}<p class="other">{['мес', view.month.text, view.month.reset].filter(Boolean).join(' · ')}</p>{/if}

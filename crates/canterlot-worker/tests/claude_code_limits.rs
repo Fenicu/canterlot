@@ -310,6 +310,7 @@ impl CountingSource {
             used_permille: 123,
             resets_at_ms: 0,
             observed_machine_ms: 1,
+            ..Default::default()
         }]
     }
 }
@@ -339,6 +340,7 @@ impl LimitsSource for ClaudeOnlySource {
             used_permille: 260,
             resets_at_ms: 0,
             observed_machine_ms: 1,
+            ..Default::default()
         }]
     }
 }

@@ -2494,6 +2494,7 @@ impl Supervisor {
                             used_permille: u32::from(used_permille),
                             resets_at_ms: resets_at_ms.unwrap_or(0),
                             observed_machine_ms: now_ms(),
+                            ..Default::default()
                         }),
                         LimitFact::Reached {
                             window: w,

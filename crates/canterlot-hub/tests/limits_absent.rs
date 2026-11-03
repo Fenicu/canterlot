@@ -3,7 +3,7 @@
 
 use canterlot_hub::{
     config::LimitsConfig,
-    limits::{self, Observation, ObservationSource, Window},
+    limits::{self, DataConfidence, Observation, ObservationSource, Window},
     testkit,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -29,6 +29,7 @@ async fn observe(pool: &PgPool, s: &testkit::Seed, window: Window, used: u16, wh
             resets_at: Some(when + Duration::hours(3)),
             observed_at: when,
             source: ObservationSource::Poll,
+            data_confidence: DataConfidence::Exact,
             machine_id: s.machine_id,
             execution_id: None,
         },
@@ -198,6 +199,7 @@ async fn opencode_readings_store_and_its_absence_leaves_claude_alone(pool: PgPoo
                 resets_at: Some(when + Duration::hours(3)),
                 observed_at: when,
                 source: ObservationSource::Poll,
+                data_confidence: DataConfidence::Exact,
                 machine_id: s.machine_id,
                 execution_id: None,
             },

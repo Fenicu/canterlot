@@ -45,6 +45,15 @@ test('limits_history_follows_mockup_10_with_an_accessible_data_table', async ({ 
   for (const query of historyRequests) { expect(query.get('tz')).toBeTruthy(); expect(query.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}T/); expect(query.get('to')).toMatch(/^\d{4}-\d{2}-\d{2}T/); }
 });
 
+test('estimated_reading_is_called_out_on_the_limits_page', async ({ page }) => {
+  await bootSecondary(page, '/limits', null, (api) => {
+    const claude = api.limits.find((item) => item.provider === 'claude');
+    if (claude) claude.data_confidence = 'estimated';
+  });
+  const card = page.locator('main .current section').first();
+  await expect(card).toContainText('оценка');
+});
+
 test('subtitle_names_the_shown_providers_and_cards_keep_their_shape', async ({ page }) => {
   const phone = test.info().project.name === 'phone';
   if (phone) await page.setViewportSize({ width: 384, height: 900 });

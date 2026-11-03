@@ -1238,6 +1238,12 @@ export interface components {
         CrunchView: {
             enabled: boolean;
         };
+        /**
+         * @description Точность показаний провайдера. `estimated` приходит от CodexBar, когда он считает
+         *     расход по локальным журналам, а не по данным провайдера.
+         * @enum {string}
+         */
+        DataConfidence: "exact" | "estimated";
         DecisionAnswer: string | string[];
         /** @enum {string} */
         DecisionBehavior: "allow" | "deny";
@@ -1976,6 +1982,8 @@ export interface components {
             weekly: components["schemas"]["Point"][];
         };
         ProviderView: {
+            /** @description `estimated`, когда CodexBar вывел расход из локальных журналов, иначе `exact`. */
+            data_confidence: components["schemas"]["DataConfidence"];
             five_hour?: components["schemas"]["WindowView"] | null;
             /** @description У провайдера нет пятичасового окна (например, план без этого лимита): счётчик скрывается. */
             five_hour_absent: boolean;

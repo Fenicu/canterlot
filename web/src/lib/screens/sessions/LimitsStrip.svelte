@@ -93,6 +93,7 @@
                 {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
               {/if}
             </span>
+            {#if row.estimated}<span class="estimated" title="Расход выведен из локальных журналов, а не получен от провайдера">оценка</span>{/if}
           </span>
         {/each}
       </span>
@@ -155,6 +156,7 @@
   .meter[data-stale] .pct, .meter[data-known='false'] .pct { color: var(--muted); font-weight: var(--weight-normal); }
   .none { grid-column: 2 / -1; justify-self: start; color: var(--muted); }
   .reserve { grid-column: 2 / -1; grid-row: 3; justify-self: start; }
+  .estimated { grid-column: 2 / -1; justify-self: start; color: var(--muted); font-size: var(--fs-xs); }
   .reset { display: none; color: var(--muted); }
   .limits[open] .reset { display: inline; }
   .chevron { flex: none; color: var(--secondary); transition: transform var(--duration-fast) var(--ease); }

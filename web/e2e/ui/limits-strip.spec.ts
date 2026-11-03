@@ -62,6 +62,16 @@ test('collapsed_strip_shows_the_remaining_share_of_both_windows_per_provider', a
   await shot(page, 'strip-collapsed');
 });
 
+test('estimated_reading_is_labelled_in_the_strip_in_words', async ({ page }) => {
+  await boot(page, (api) => {
+    claude(api).data_confidence = 'estimated';
+  });
+  const strip = page.locator('.limits').first();
+  const rows = strip.locator('.row');
+  await expect(rows.nth(0).getByText('оценка', { exact: true })).toBeVisible();
+  await expect(rows.nth(1).getByText('оценка')).toHaveCount(0);
+});
+
 test('expanded_strip_puts_resets_beside_meters_and_offers_the_refresh_button', async ({ page }) => {
   await boot(page);
   const strip = page.locator('.limits').first();

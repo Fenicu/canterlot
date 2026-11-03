@@ -79,7 +79,7 @@
         <section><h2>Enter на клавиатуре</h2><Segmented name="enter" label="Enter на клавиатуре" options={[{ value: 'auto', label: 'Авто' }, { value: 'send', label: 'Отправка' }, { value: 'newline', label: 'Новая строка' }]} bind:value={enter} /><p class="note">Авто: на телефоне новая строка, на компьютере отправка. Shift+Enter добавляет строку</p></section>
         <section><h2>Данные и выход</h2><Button {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(false)} full>Очистить данные на устройстве</Button><div class="logout"><Button full {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(true)}>Выйти</Button></div>{#if busy}<p role="status">Очищаю данные на устройстве…</p>{/if}<p class="note">{config.auth.logout_url ? 'Перед выходом через Authelia данные на устройстве будут удалены' : 'Сессия Authelia завершается на собственной странице'}</p></section>
       </div><div>
-        <section><h2>Подключение</h2><p>Логин: <strong>{login}</strong></p><p>{connectionText}</p>{#if sync}<p class="note">Последняя синхронизация: {fmt.clock(sync)}</p>{/if}</section>
+        <section><h2>Подключение</h2><p>Логин: <strong>{login}</strong></p><p>{connectionText}</p><p class="note sync">{#if sync}Последняя синхронизация: {fmt.clock(sync)}{/if}</p></section>
         <section><h2>Предупреждения о лимитах</h2><div class="card"><p>Предупредить при {config.limit_thresholds.warn_pcts.join('%, ')}%</p><p>Резерв владельца {config.limit_thresholds.weekly_reserve_pct}%</p><p class="note">Для 5 часов и недели, Claude и Codex. Кранч ждёт сброса, сохраняя резерв владельца</p></div><a href={resolve('/limits')}>История лимитов</a></section>
         <section><a href={resolve('/machines')}>Машины</a></section>
         <SpawnWhitelist />
@@ -93,6 +93,8 @@
   section { margin-bottom: var(--s10); }
   .card { padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
   section > a { display: inline-flex; align-items: center; min-height: var(--target); }
+  /* Строка синхронизации появляется после первого снимка: её место занято с первого кадра. */
+  .sync { min-height: calc(var(--fs-meta) * var(--lh-body)); }
   .versions { color: var(--secondary); }
   .logout { display: block; margin-top: var(--s6); color: var(--danger); width: 100%; }
   @media (min-width: 1100px) { .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s10); } }
