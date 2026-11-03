@@ -15,6 +15,7 @@
   import Field from '#lib/ui/Field.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
+  import Textarea from '#lib/ui/Textarea.svelte';
 
   let { chat }: { chat: ChatStore } = $props();
   const items = $derived(chat.strip());
@@ -214,8 +215,7 @@
       {#if input.revision > 1}<p class="note">Изменено</p>{/if}
       {#if editClosed[input.key] && !editing[input.key] && input.state === 'queued'}<p class="note">{editClosed[input.key]}</p>{/if}
       {#if editing[input.key]}
-        <label class="edit-label" for="strip-edit-{input.key}">Текст сообщения</label>
-        <textarea id="strip-edit-{input.key}" class="edit-text" bind:value={editTexts[input.key]} rows="3"></textarea>
+        <Textarea label="Текст сообщения" id="strip-edit-{input.key}" bind:value={editTexts[input.key]} />
         {#if (editKept[input.key] ?? []).length > 0}
           <ul class="files">
             {#each input.attachments.filter((file) => (editKept[input.key] ?? []).includes(file.attachment_id)) as file (file.attachment_id)}
@@ -229,9 +229,9 @@
         {#if editErrors[input.key]}<p class="note">{editErrors[input.key]}</p>{/if}
         <span class="actions">
           {#if editBusy[input.key]}
-            <Button disabled={true} reason="Сохраняется…">Сохранить</Button>
+            <Button variant="primary" disabled={true} reason="Сохраняется…">Сохранить</Button>
           {:else}
-            <Button onclick={() => void saveQueuedEdit(input)}>Сохранить</Button>
+            <Button variant="primary" onclick={() => void saveQueuedEdit(input)}>Сохранить</Button>
           {/if}
           <Button onclick={() => { editing = { ...editing, [input.key]: false }; }}>Отмена</Button>
         </span>
@@ -306,8 +306,6 @@
   .pill :global(button) { color: var(--secondary); }
   .note { margin: 0; padding-inline: var(--s6); color: var(--muted); font-size: var(--fs-sm); }
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); padding-inline: var(--s2); }
-  .edit-label { color: var(--secondary); font-size: var(--fs-sm); padding-inline: var(--s6); }
-  .edit-text { width: 100%; min-height: calc(var(--target) * 2); resize: vertical; border-radius: var(--radius-sm); padding: var(--s3) var(--s4); font: inherit; }
   .files { display: flex; flex-wrap: wrap; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
   .edit-file { display: flex; align-items: center; gap: var(--s2); }
   .more { align-self: flex-start; min-height: var(--target); padding-inline: var(--s6); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-sm); }
