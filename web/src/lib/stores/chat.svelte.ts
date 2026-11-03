@@ -166,6 +166,7 @@ export function executionLive(execution: ChatExecution | null): boolean {
 }
 type QueuedInput = QueueSnapshot["queued"][number];
 export type ScheduledMessage = components["schemas"]["ScheduledMessage"];
+export type AlarmView = components["schemas"]["AlarmView"];
 
 export interface SnapshotData {
   detail?: Record<string, unknown> | null;
@@ -173,6 +174,7 @@ export interface SnapshotData {
   queue?: Partial<QueueSnapshot>;
   history?: HistoryPage;
   scheduled?: ScheduledMessage[];
+  alarms?: AlarmView[];
   open_requests?: unknown[];
   todos?: TodoList[];
   background?: BackgroundTask[];
@@ -315,6 +317,7 @@ export class ChatStore {
     resume_pending: false,
   });
   scheduled = $state<ScheduledMessage[]>([]);
+  alarms = $state<AlarmView[]>([]);
   phase = $state<Record<string, unknown> | null>(null);
   interrupt = $state<Record<string, unknown> | null>(null);
   attachments = new SvelteMap<string, Record<string, unknown>>();
@@ -452,6 +455,7 @@ export class ChatStore {
     this.activity = null;
     this.context = null;
     this.scheduled = [];
+    this.alarms = [];
     this.settings = { effective: null, pending: null, rev: 0 };
     this.crunch = { enabled: false, resume_pending: false };
   }
@@ -885,6 +889,15 @@ export class ChatStore {
       case "limit_reached":
         if (event.kind === "limit_reached") this.#diagnose(event);
         return;
+      case "alarm_changed":
+        if (event.kind === "alarm_changed") {
+          const next = this.alarms.filter(
+            (item) => item.alarm_id !== event.payload.alarm_id,
+          );
+          if (event.payload.state !== "cancelled") next.push(event.payload);
+          this.alarms = next;
+        }
+        return;
       case "scheduled_changed":
         if (event.kind === "scheduled_changed") {
           const next = this.scheduled.filter(
@@ -1270,6 +1283,7 @@ export class ChatStore {
       if (data.queue.run_slot) this.queue.run_slot = data.queue.run_slot;
     }
     if (data.scheduled) this.scheduled = data.scheduled;
+    if (data.alarms) this.alarms = data.alarms;
     if (data.open_requests) this.requests.reconcileSnapshot(data.open_requests);
     if (data.todos) this.todos.ingestSnapshot(data.todos);
     if (data.background) this.background.ingestSnapshot(data.background);

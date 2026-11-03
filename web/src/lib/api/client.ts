@@ -336,6 +336,26 @@ export function deleteScheduled(
   );
 }
 
+export function deleteAlarm(
+  conversationId: string,
+  alarmId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<
+      operations["delete__api_v1_conversations__id__alarms__alarm_id_"]
+    >
+  >
+> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/alarms/${id(alarmId)}`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function createAttachment(
   body: Body<operations["post__api_v1_attachments"]>,
   key: string,

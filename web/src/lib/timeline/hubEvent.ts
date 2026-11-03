@@ -1,5 +1,6 @@
 import { failureLabel, providerLabel } from '#lib/format/labels.js';
 import { fmt } from '#lib/format/ru.js';
+import { alarmEventLine } from '#lib/timeline/alarm.js';
 import type { InputOrigin } from '#lib/stores/inputs.js';
 
 export type HubEvent = NonNullable<InputOrigin['event']>;
@@ -19,7 +20,7 @@ const STATUS: Record<string, string> = {
 export const LEGACY_LIMIT = 420;
 
 export function isEventOrigin(origin: InputOrigin | null | undefined): boolean {
-  return origin?.kind === 'event';
+  return origin?.kind === 'event' || origin?.kind === 'alarm';
 }
 
 export function isSessionEvent(event: HubEvent | null | undefined): boolean {
@@ -148,6 +149,8 @@ export function eventLine(event: HubEvent, title: string): string | null {
       }
     case 'deleted':
       return title ? `${name} удалена` : 'Сессия удалена';
+    case 'alarm':
+      return alarmEventLine(event);
     default:
       return null;
   }

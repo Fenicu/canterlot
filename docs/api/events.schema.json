@@ -88,6 +88,9 @@
       "$ref": "#/$defs/scheduled_changed"
     },
     {
+      "$ref": "#/$defs/alarm_changed"
+    },
+    {
       "$ref": "#/$defs/limits_changed"
     },
     {
@@ -3555,6 +3558,214 @@
       ],
       "additionalProperties": false
     },
+    "alarm_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "alarm_changed"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "alarm_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "conversation_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "type": "string"
+            },
+            "condition": {
+              "type": "string"
+            },
+            "session_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Uuid"
+              }
+            },
+            "states": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "fires_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "deadline_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "only_on_timeout": {
+              "type": "boolean"
+            },
+            "batch": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": [
+                "armed",
+                "fired",
+                "cancelled",
+                "expired",
+                "failed"
+              ]
+            },
+            "fired_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "failure_reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fired_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "note_bytes": {
+              "type": "integer"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Time"
+            }
+          },
+          "required": [
+            "alarm_id",
+            "conversation_id",
+            "key",
+            "kind",
+            "condition",
+            "session_ids",
+            "states",
+            "fires_at",
+            "deadline_at",
+            "only_on_timeout",
+            "batch",
+            "state",
+            "fired_reason",
+            "failure_reason",
+            "fired_at",
+            "note",
+            "note_bytes",
+            "created_at"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "limits_changed": {
       "type": "object",
       "properties": {
@@ -5159,6 +5370,9 @@
                 },
                 {
                   "$ref": "#/$defs/scheduled_changed"
+                },
+                {
+                  "$ref": "#/$defs/alarm_changed"
                 },
                 {
                   "$ref": "#/$defs/limits_changed"

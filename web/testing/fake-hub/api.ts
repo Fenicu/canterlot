@@ -1,5 +1,5 @@
 import { utf8Length, utf8Slice, type BlockPage } from '../../src/lib/stores/blocks';
-import type { HistoryBlock, HistoryItem, HistoryPage, LanePage, SnapshotData } from '../../src/lib/stores/chat.svelte';
+import type { AlarmView, HistoryBlock, HistoryItem, HistoryPage, LanePage, SnapshotData } from '../../src/lib/stores/chat.svelte';
 import type { DelegationNode } from '../../src/lib/stores/delegation';
 import type { Counts, ListRow, ListSnapshot } from '../../src/lib/stores/list.svelte';
 import type { ProviderLimits } from '../../src/lib/stores/limits';
@@ -215,7 +215,14 @@ export class FakeHubApi {
 			for (const task of (ev.payload as { tasks: BackgroundTask[] }).tasks) background.set(task.task_id, task);
 		}
 		const todos = new Map<string | null, TodoList>();
+		const alarms = new Map<string, AlarmView>();
 		for (const ev of this.hub.log(`conversation:${id}`)) {
+			if (ev.kind === 'alarm_changed') {
+				const alarm = ev.payload as AlarmView;
+				if (alarm.state === 'cancelled') alarms.delete(alarm.alarm_id);
+				else alarms.set(alarm.alarm_id, alarm);
+				continue;
+			}
 			if (ev.kind !== 'todo_updated') continue;
 			const list = ev.payload as TodoList;
 			todos.set(list.lane_block_id ?? null, list);
@@ -241,6 +248,7 @@ export class FakeHubApi {
 			},
 			history: this.page(id, {}),
 			scheduled: [],
+			alarms: [...alarms.values()],
 			open_requests,
 			todos: [...todos.values()].sort((a, b) => Number(a.lane_block_id !== null) - Number(b.lane_block_id !== null)),
 			background: [...background.values()],
