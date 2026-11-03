@@ -1156,10 +1156,12 @@ export class ChatStore {
     if (data.detail) {
       this.detail = data.detail;
       this.turnRecorded = data.detail.turn_recorded === true;
-      if (data.detail.execution)
-        this.execution = data.detail.execution as ChatExecution;
+      // Нет живого исполнения — хаб присылает null, а не пропускает поле.
+      this.execution = (data.detail.execution as ChatExecution | null | undefined) ?? null;
       if (data.detail.activity)
         this.activity = data.detail.activity as Record<string, unknown>;
+      this.phase = phaseOf(this.activity);
+      this.interrupt = null;
       if (data.detail.settings) {
         const s = data.detail.settings as {
           effective?: unknown;
@@ -1406,6 +1408,20 @@ export class ChatStore {
       );
     }
   }
+}
+
+/** Фаза хода в снимке есть только в показаниях активности. */
+function phaseOf(activity: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (activity?.state !== "working") return null;
+  const evidence = activity.evidence as
+    | { phase?: unknown; tool_name?: unknown; summary?: unknown }
+    | undefined;
+  if (typeof evidence?.phase !== "string") return null;
+  return {
+    phase: evidence.phase,
+    tool_name: evidence.tool_name ?? null,
+    summary: evidence.summary ?? null,
+  };
 }
 
 function visible(): boolean {
