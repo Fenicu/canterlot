@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { TreeNode } from './grouping';
+  import { kidsTitle, type TreeNode } from './grouping';
   import Icon from '#lib/ui/Icon.svelte';
   import SessionRow from './SessionRow.svelte';
 
@@ -43,7 +43,7 @@
       onclick={() => ontoggleKids(node.item.id)}
     >
       <span class="stem" aria-hidden="true">└</span>
-      <span class="kids-title">Делегированные · {node.children.length}{node.running > 0 ? ` · работает ${node.running}` : ''}</span>
+      <span class="kids-title">{kidsTitle(node)}</span>
       <span class="chevron" class:open={node.open}><Icon name="chevron" /></span>
     </button>
     {#if node.open}

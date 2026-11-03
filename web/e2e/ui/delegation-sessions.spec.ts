@@ -81,11 +81,17 @@ async function bootList(page: Page) {
 }
 
 test('child_nests_under_parent_and_keeps_counts', async ({ page }) => {
-  const { ids } = await bootList(page);
+  const { hub, api, ids } = await bootList(page);
   // Разделители в строке-сгибе не слипаются с числом работающих.
   const fold = page.getByRole('button', { name: /делегированные: 2/ });
   await expect(fold).toBeVisible();
   await expect(fold).toContainText('Делегированные · 2 · работает 1');
+  // Ребёнок, который ждёт владельца, считается отдельно, а не как работающий.
+  const asking = { state: 'waiting_for_user', evidence: { question: 'Какой лог?' }, since: '2026-10-28T12:00:00.000Z' };
+  (api.list.get(ids.done) as ListRow).activity = asking as never;
+  hub.append('conversations', { kind: 'derived_changed', conversation_id: ids.done, payload: derivedPayload(api, ids.done, asking) });
+  hub.flush();
+  await expect(fold).toHaveText(/Делегированные · 2 · работает 1 · ждёт 1/);
   const child = page.locator(`[data-session="${ids.child}"]`);
   await expect(child).toBeVisible();
   await expect(child).toHaveClass(/depth-1/);

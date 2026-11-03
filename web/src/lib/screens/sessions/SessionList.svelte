@@ -134,7 +134,7 @@
     const deleted = store.list.deleted;
     return results
       .filter((item) => !deleted.has(item.id))
-      .map((item) => ({ item, depth: 0, open: true, running: 0, children: [] }));
+      .map((item) => ({ item, depth: 0, open: true, running: 0, waiting: 0, children: [] }));
   });
   const kids = $derived({ collapsed: collapsedSet(kidsCollapsed), expanded: collapsedSet(kidsExpanded) });
   const sections = $derived(
