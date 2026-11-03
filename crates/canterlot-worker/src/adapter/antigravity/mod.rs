@@ -741,6 +741,9 @@ impl Adapter for AntigravityAdapter {
         self.send_cancel().await;
         let limit = Instant::now() + self.interrupt_deadline;
         loop {
+            if self.eof || self.exited {
+                return InterruptOutcome::Undetermined;
+            }
             let done = match target {
                 Target::Turn => !self.tracker.has_turn(),
                 Target::Compact => !self.tracker.has_compaction(),
@@ -755,9 +758,6 @@ impl Adapter for AntigravityAdapter {
                     }
                     _ => InterruptOutcome::NotApplicable,
                 };
-            }
-            if self.eof || self.exited {
-                return InterruptOutcome::Undetermined;
             }
             if timeout_at(limit, self.pump_once()).await.is_err() {
                 self.stall_at = Some(Instant::now() + self.turn_stall_deadline);

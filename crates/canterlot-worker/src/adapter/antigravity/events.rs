@@ -239,7 +239,7 @@ impl Translator {
         }
         match status {
             "pending" => {}
-            "in_progress" => self.release(id, fed),
+            "in_progress" => self.release(id, true, fed),
             "completed" | "failed" => self.finish_tool(id, status, value, fed),
             _ => fed.events.push(AdapterEvent::Diagnostic {
                 kind: "unknown_tool_status",
@@ -250,7 +250,7 @@ impl Translator {
         }
     }
 
-    fn release(&mut self, id: &str, fed: &mut Fed) {
+    fn release(&mut self, id: &str, with_phase: bool, fed: &mut Fed) {
         let Some(state) = self.tools.get_mut(id) else {
             return;
         };
@@ -264,15 +264,17 @@ impl Translator {
             return;
         };
         state.released = true;
-        fed.events.push(AdapterEvent::Phase {
-            phase: Phase::RunningTool,
-            tool_name: Some(state.name.clone()),
-            summary: Some(state.summary.clone()),
-        });
+        if with_phase {
+            fed.events.push(AdapterEvent::Phase {
+                phase: Phase::RunningTool,
+                tool_name: Some(state.name.clone()),
+                summary: Some(state.summary.clone()),
+            });
+        }
     }
 
     fn finish_tool(&mut self, id: &str, status: &str, value: &Value, fed: &mut Fed) {
-        self.release(id, fed);
+        self.release(id, false, fed);
         let Some(state) = self.tools.remove(id) else {
             return;
         };

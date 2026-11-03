@@ -262,11 +262,10 @@ fn tool_update(id: &str, status: &str, raw_output: Option<Value>) -> Value {
 
 async fn drain(adapter: &mut AntigravityAdapter) -> Vec<AdapterEvent> {
     let mut out = Vec::new();
-    loop {
-        match tokio::time::timeout(Duration::from_millis(400), adapter.next_event()).await {
-            Ok(event) => out.push(event),
-            Err(_) => break,
-        }
+    while let Ok(event) =
+        tokio::time::timeout(Duration::from_millis(400), adapter.next_event()).await
+    {
+        out.push(event);
     }
     out
 }
