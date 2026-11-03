@@ -10,7 +10,7 @@
   import { APP_VERSION } from '#lib/stores/appVersion.js';
   import { fmt } from '#lib/format/ru.js';
   import { ticker } from '#lib/ticker.svelte.js';
-  import { theme, type ThemePref } from '#lib/theme.js';
+  import { theme, type PalettePref, type ThemePref } from '#lib/theme.js';
   import { getEnterPref, setEnterPref, type EnterPref } from '#lib/composer/prefs.js';
   import { currentUpdate, installation } from '#lib/pwa/register.js';
   import { staleness } from '#lib/pwa/sync-state.js';
@@ -72,9 +72,8 @@
     {:else if !config}<p>Загружаю настройки…</p>
     {:else}
       <div class="settings-grid"><div>
-        <section><h2>Тема</h2><Segmented name="theme" label="Тема" options={[{ value: 'dark', label: 'Тёмная' }, { value: 'light', label: 'Светлая' }, { value: 'system', label: 'Как в системе' }]} bind:value={() => theme.pref, (value) => theme.set(value as ThemePref)} />
-
-        </section>
+        <section><h2>Тема</h2><Segmented name="palette" label="Тема" options={[{ value: 'aquamarine', label: 'Аквамарин' }, { value: 'standard', label: 'Стандартная' }, { value: 'vscode', label: 'VS Code' }]} bind:value={() => theme.palette, (value) => theme.setPalette(value as PalettePref)} /></section>
+        <section><h2>Режим</h2><Segmented name="theme" label="Режим" options={[{ value: 'dark', label: 'Тёмный' }, { value: 'light', label: 'Светлый' }, { value: 'system', label: 'Как в системе' }]} bind:value={() => theme.pref, (value) => theme.set(value as ThemePref)} /></section>
         <section><h2>Скорость анимаций</h2><Segmented name="motion" label="Скорость анимаций" options={[{ value: 'off', label: 'Выкл' }, { value: 'slower', label: 'Медленнее' }, { value: 'normal', label: 'Обычно' }, { value: 'faster', label: 'Быстрее' }]} bind:value={motion} /><p class="note">Появление текста, дорожки этапов и раскрытие блоков. Системное уменьшение движения имеет приоритет</p></section>
         <section><h2>Enter на клавиатуре</h2><Segmented name="enter" label="Enter на клавиатуре" options={[{ value: 'auto', label: 'Авто' }, { value: 'send', label: 'Отправка' }, { value: 'newline', label: 'Новая строка' }]} bind:value={enter} /><p class="note">Авто: на телефоне новая строка, на компьютере отправка. Shift+Enter добавляет строку</p></section>
         <section><h2>Данные и выход</h2><Button {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(false)} full>Очистить данные на устройстве</Button><div class="logout"><Button full {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(true)}>Выйти</Button></div>{#if busy}<p role="status">Очищаю данные на устройстве…</p>{/if}<p class="note">{config.auth.logout_url ? 'Перед выходом через Authelia данные на устройстве будут удалены' : 'Сессия Authelia завершается на собственной странице'}</p></section>
