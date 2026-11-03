@@ -496,7 +496,7 @@ async fn edit_races_outbox_claim_without_losing_the_new_text(pool: PgPool) -> Te
         };
         barrier.wait().await;
         let (edited, claimed) = tokio::join!(edit_task, claim);
-        let claimed = claimed.unwrap()?.expect("steer is still pending");
+        let claimed = claimed.unwrap()?.expect("steer is still pending").row;
         // Диспетчер либо успел первым и правит уже новый текст, либо правка
         // отклонена: старого текста после захвата быть не может.
         match edited.unwrap() {
@@ -589,5 +589,94 @@ async fn edit_replaces_attachment_list(pool: PgPool) -> TestResult {
         .collect();
     assert_eq!(texts, vec!["без лишнего"]);
     assert_eq!(deliver_text(&pool, command_id).await, "без лишнего");
+    Ok(())
+}
+
+/// Правка проверяет текст так же, как отправка: NUL — отказ с причиной, а не
+/// ошибка базы.
+#[sqlx::test(migrations = "./migrations")]
+async fn edit_refuses_nul_character(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let (input_id, _) = input(&pool, &seed, "исходный").await;
+    assert!(matches!(
+        edit(&pool, &seed, input_id, "до\0после", 1, "nul").await,
+        Err(ControlError::InvalidRequest {
+            reason: "nul_character"
+        })
+    ));
+    assert_eq!(revision(&pool, input_id).await, 1);
+    Ok(())
+}
+
+async fn ready_attachment(pool: &PgPool, owner: Uuid, conversation: Uuid, name: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into attachments(id,owner_id,conversation_id,name,mime,size_bytes,sha256,state)
+         values($1,$2,$3,$4,'text/plain',8,'2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881','ready')",
+    )
+    .bind(id)
+    .bind(owner)
+    .bind(conversation)
+    .bind(name)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+/// Пересланный другой сессией ввод держит вложения её разговора. Правка,
+/// которая их оставляет, проходит; чужое вложение, не привязанное к вводу,
+/// по-прежнему отклоняется.
+#[sqlx::test(migrations = "./migrations")]
+async fn edit_keeps_attachments_of_a_forwarded_input(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    sqlx::query("update machines set capabilities = '{pilot_v1}', limits_ok = true where id = $1")
+        .bind(seed.machine_id)
+        .execute(&pool)
+        .await?;
+    let source = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
+    let (input_id, command_id) = input(&pool, &seed, "от другой сессии").await;
+    sqlx::query("update inputs set origin = $2 where id = $1")
+        .bind(input_id)
+        .bind(json!({"kind": "message", "from": source, "chain_depth": 1}))
+        .execute(&pool)
+        .await?;
+    let kept = ready_attachment(&pool, seed.owner_id, source, "keep.txt").await;
+    let dropped = ready_attachment(&pool, seed.owner_id, source, "drop.txt").await;
+    let stranger = ready_attachment(&pool, seed.owner_id, source, "stranger.txt").await;
+    sqlx::query(
+        "insert into input_attachments(input_id,attachment_id,position) values($1,$2,0),($1,$3,1)",
+    )
+    .bind(input_id)
+    .bind(kept)
+    .bind(dropped)
+    .execute(&pool)
+    .await?;
+    let request = |attachment_ids: Vec<Uuid>, key: &str, revision: i64| EditInput {
+        owner_id: seed.owner_id,
+        conversation_id: seed.conversation_id,
+        input_id,
+        text: "поправлено".into(),
+        attachment_ids,
+        expected_revision: revision,
+        idempotency_key: key.into(),
+        correlation_id: Uuid::now_v7(),
+    };
+    assert!(matches!(
+        request_edit_input(&pool, request(vec![kept, stranger], "stranger", 1)).await,
+        Err(ControlError::InvalidRequest {
+            reason: "attachment_not_ready"
+        })
+    ));
+    let outcome = request_edit_input(&pool, request(vec![kept], "kept", 1)).await?;
+    assert_eq!(outcome.revision, 2);
+    let linked: Vec<Uuid> = sqlx::query_scalar(
+        "select attachment_id from input_attachments where input_id = $1 order by position",
+    )
+    .bind(input_id)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(linked, vec![kept]);
+    assert_eq!(deliver_text(&pool, command_id).await, "поправлено");
     Ok(())
 }

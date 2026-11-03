@@ -90,6 +90,35 @@ test('send_now_buttons_appear_while_a_turn_runs_and_post_to_the_hub', async ({ p
   await expect(page.getByText('Вливается в идущий ход').first()).toBeVisible();
 });
 
+test('rejected_steer_keeps_the_message_queued_with_a_caption', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  const inputId = (api.histories.get(id) as { id: string }[])[1]!.id;
+  working(hub, api, id, (api.histories.get(id) as { id: string }[])[0]!.id);
+  const steer = api.id();
+  await page.route('**/send-now', async (route) => {
+    await route.fulfill({ json: { data: { requested: { steer_command_id: steer } } } });
+  });
+  await page.getByRole('button', { name: 'Отправить сейчас' }).first().click();
+  await expect(page.getByText('Вливается в идущий ход').first()).toBeVisible();
+  // Агент отказался принять сообщение в идущий ход: оно остаётся в очереди.
+  hub.append(`conversation:${id}`, {
+    kind: 'input_state_changed',
+    conversation_id: id,
+    payload: {
+      input_id: inputId,
+      state: 'queued',
+      attempt: 0,
+      cause: 'steer_rejected',
+      command_id: steer,
+      reason: 'Internal error'
+    }
+  });
+  hub.flush();
+  await expect(page.getByText('Не удалось влить в ход: сообщение уйдёт следующим').first()).toBeVisible();
+  await expect(page.getByText('Вливается в идущий ход')).toHaveCount(0);
+  await expect(page.locator('.strip').getByText('В очередь')).toBeVisible();
+});
+
 test('send_now_button_appears_on_the_queued_owner_bubble', async ({ page }) => {
   const { hub, api, id } = await boot(page, 'codex', false);
   // Своё сообщение, отправленное без хода, висит пузырём, но хода нет —

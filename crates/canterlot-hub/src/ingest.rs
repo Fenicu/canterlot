@@ -1254,6 +1254,7 @@ async fn apply_body(
                 } else {
                     let machine_time = i64::try_from(fact.machine_time_ms)
                         .map_err(|_| IngestError::InvalidRecord)?;
+                    lock_command_queue(conn, command_id).await?;
                     sqlx::query("update commands set delivery_state = 'stored_on_machine', stored_at = coalesce(stored_at, now()), machine_stored_at_ms = coalesce(machine_stored_at_ms, $3) where id = $1 and dispatch_attempt = $2 and delivery_state = 'pending'")
                         .bind(command_id).bind(dispatch_attempt).bind(machine_time).execute(&mut *conn).await?;
                     store_machine_time_in_tx(
@@ -1270,53 +1271,15 @@ async fn apply_body(
         Body::CommandRejected(fact) => {
             let command_id = parse_id(&fact.command_id)?;
             let dispatch_attempt = attempt(fact.dispatch_attempt)?;
-            if let Some(target) = command(conn, machine_id, command_id).await? {
-                if target.kind == "deliver_input" {
-                    apply_input_receipt_in_tx(
-                        conn,
-                        command_id,
-                        dispatch_attempt,
-                        InputReceipt::RejectedBeforeTransmission {
-                            reason: fact.reason.clone(),
-                        },
-                        correlation_id,
-                    )
-                    .await?;
-                } else if target.kind == "start_execution" {
-                    reject_start(
-                        conn,
-                        machine_id,
-                        command_id,
-                        dispatch_attempt,
-                        &fact.reason,
-                        correlation_id,
-                    )
-                    .await?;
-                } else if target.kind == "deliver_decision" {
-                    crate::requests::fail_decision_command_in_tx(
-                        conn,
-                        command_id,
-                        dispatch_attempt,
-                        &fact.reason,
-                        correlation_id,
-                    )
-                    .await?;
-                } else if target.kind == "remove_worktree" {
-                    // Отказ воркера не должен оставить копию в `removing` навсегда.
-                    crate::session_tools::accept::apply_removal_in_tx(
-                        conn,
-                        machine_id,
-                        command_id,
-                        dispatch_attempt,
-                        crate::session_tools::accept::Removal::Failed,
-                        "rejected",
-                        correlation_id,
-                    )
-                    .await?;
-                } else {
-                    complete_rejected(conn, command_id, dispatch_attempt, &fact.reason).await?;
-                }
-            }
+            apply_command_rejected_in_tx(
+                conn,
+                machine_id,
+                command_id,
+                dispatch_attempt,
+                &fact.reason,
+                correlation_id,
+            )
+            .await?;
         }
         Body::DispatchDeferred(fact) => {
             receipt(
@@ -1623,6 +1586,82 @@ async fn apply_body(
     Ok(false)
 }
 
+/// Отказ машины принять команду: тот же итог, пришёл ли он записью журнала
+/// или хаб сам не может отправить команду этому сеансу.
+pub(crate) async fn apply_command_rejected_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    command_id: Uuid,
+    dispatch_attempt: i32,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<(), IngestError> {
+    let Some(target) = command(conn, machine_id, command_id).await? else {
+        return Ok(());
+    };
+    if target.kind == "deliver_input" {
+        apply_input_receipt_in_tx(
+            conn,
+            command_id,
+            dispatch_attempt,
+            InputReceipt::RejectedBeforeTransmission {
+                reason: reason.to_owned(),
+            },
+            correlation_id,
+        )
+        .await?;
+    } else if target.kind == "start_execution" {
+        reject_start(
+            conn,
+            machine_id,
+            command_id,
+            dispatch_attempt,
+            reason,
+            correlation_id,
+        )
+        .await?;
+    } else if target.kind == "deliver_decision" {
+        crate::requests::fail_decision_command_in_tx(
+            conn,
+            command_id,
+            dispatch_attempt,
+            reason,
+            correlation_id,
+        )
+        .await?;
+    } else if target.kind == "remove_worktree" {
+        // Отказ воркера не должен оставить копию в `removing` навсегда.
+        crate::session_tools::accept::apply_removal_in_tx(
+            conn,
+            machine_id,
+            command_id,
+            dispatch_attempt,
+            crate::session_tools::accept::Removal::Failed,
+            "rejected",
+            correlation_id,
+        )
+        .await?;
+    } else if target.kind == "steer_input" {
+        // Отказ вливания оставляет ввод в очереди; причину видит владелец.
+        apply_input_receipt_in_tx(
+            conn,
+            command_id,
+            dispatch_attempt,
+            InputReceipt::ExplicitRejection {
+                reason: reason.to_owned(),
+            },
+            correlation_id,
+        )
+        .await?;
+        complete_rejected(conn, command_id, dispatch_attempt, reason).await?;
+    } else {
+        lock_command_queue(conn, command_id).await?;
+        complete_rejected(conn, command_id, dispatch_attempt, reason).await?;
+    }
+
+    Ok(())
+}
+
 async fn reject_start(
     conn: &mut PgConnection,
     machine_id: Uuid,
@@ -1631,13 +1670,7 @@ async fn reject_start(
     reason: &str,
     correlation_id: Uuid,
 ) -> Result<(), IngestError> {
-    // Очередь блокируется раньше чтения команды: тот же порядок, что у квитанций и диспетчера.
-    sqlx::query(
-        "select q.conversation_id from queue_state q join commands c on c.conversation_id = q.conversation_id where c.id = $1 for update of q",
-    )
-    .bind(command_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    lock_command_queue(conn, command_id).await?;
     let Some(target) = command(conn, machine_id, command_id).await? else {
         return Ok(());
     };
@@ -1655,6 +1688,18 @@ async fn reject_start(
         .await?;
     }
     complete_rejected(conn, command_id, dispatch_attempt, reason).await
+}
+
+/// Очередь блокируется раньше строки команды: тот же порядок, что у квитанций,
+/// диспетчера, захвата outbox и правки.
+async fn lock_command_queue(conn: &mut PgConnection, command_id: Uuid) -> Result<(), IngestError> {
+    sqlx::query(
+        "select q.conversation_id from queue_state q join commands c on c.conversation_id = q.conversation_id where c.id = $1 for update of q",
+    )
+    .bind(command_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 async fn complete_rejected(

@@ -190,6 +190,9 @@ export async function sendNow(
   }
 }
 
+/** Вливание не удалось (агент отказал или ход кончился): сообщение ждёт следующего хода. */
+export const STEER_RETURNED_LABEL = "Не удалось влить в ход: сообщение уйдёт следующим";
+
 /** Подпись отказа «Отправить сейчас» и скрытие кнопки, когда она неуместна. */
 export function sendNowCaption(reason: string): string | null {
   switch (reason) {

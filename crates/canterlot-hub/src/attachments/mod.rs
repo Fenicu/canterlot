@@ -707,49 +707,15 @@ pub async fn lock_ready_in_tx(
     catalog: &HarnessBrief,
     machine: &MachineGate,
 ) -> Result<Vec<AttachmentRef>, AttachmentError> {
-    if !machine.pilot {
-        return Err(AttachmentError::CapabilityMissing);
-    }
-    if !machine.limits_ok {
-        return Err(AttachmentError::LimitsMismatch);
-    }
-    check_ids(attachment_ids)?;
-    let rows = sqlx::query(
-        "select id, owner_id, conversation_id, name, mime, size_bytes, sha256, state
-         from attachments where id = any($1) order by id for share",
+    lock_checked_in_tx(
+        conn,
+        owner_id,
+        attachment_ids,
+        catalog,
+        machine,
+        |_, conversation| conversation == conversation_id,
     )
-    .bind(attachment_ids)
-    .fetch_all(&mut *conn)
-    .await?;
-    let mut by_id = HashMap::with_capacity(rows.len());
-    for row in rows {
-        by_id.insert(row.try_get::<Uuid, _>("id")?, row);
-    }
-    let mut refs = Vec::with_capacity(attachment_ids.len());
-    for id in attachment_ids {
-        let Some(row) = by_id.get(id) else {
-            return Err(AttachmentError::NotReady);
-        };
-        if row.try_get::<Uuid, _>("owner_id")? != owner_id
-            || row.try_get::<Uuid, _>("conversation_id")? != conversation_id
-            || row.try_get::<String, _>("state")? != "ready"
-        {
-            return Err(AttachmentError::NotReady);
-        }
-        let mime: String = row.try_get("mime")?;
-        if mime.starts_with("image/") && !catalog.images {
-            return Err(AttachmentError::Unsupported);
-        }
-        refs.push(AttachmentRef {
-            attachment_id: id.to_string(),
-            name: row.try_get("name")?,
-            image: native_image(&mime),
-            mime,
-            size: row.try_get::<i64, _>("size_bytes")? as u64,
-            sha256: row.try_get("sha256")?,
-        });
-    }
-    Ok(refs)
+    .await
 }
 
 /// Вложения из разговора вызывающего, передаваемые другому разговору без повторной загрузки:
@@ -761,6 +727,25 @@ pub async fn lock_forwarded_in_tx(
     attachment_ids: &[Uuid],
     catalog: &HarnessBrief,
     machine: &MachineGate,
+) -> Result<Vec<AttachmentRef>, AttachmentError> {
+    lock_checked_in_tx(
+        conn,
+        owner_id,
+        attachment_ids,
+        catalog,
+        machine,
+        |_, conversation| conversation == source_conversation_id,
+    )
+    .await
+}
+
+async fn lock_checked_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    attachment_ids: &[Uuid],
+    catalog: &HarnessBrief,
+    machine: &MachineGate,
+    allowed: impl Fn(Uuid, Uuid) -> bool,
 ) -> Result<Vec<AttachmentRef>, AttachmentError> {
     if !machine.pilot {
         return Err(AttachmentError::CapabilityMissing);
@@ -786,7 +771,7 @@ pub async fn lock_forwarded_in_tx(
             return Err(AttachmentError::NotReady);
         };
         if row.try_get::<Uuid, _>("owner_id")? != owner_id
-            || row.try_get::<Uuid, _>("conversation_id")? != source_conversation_id
+            || !allowed(*id, row.try_get::<Uuid, _>("conversation_id")?)
             || row.try_get::<String, _>("state")? != "ready"
         {
             return Err(AttachmentError::NotReady);
@@ -803,6 +788,46 @@ pub async fn lock_forwarded_in_tx(
             size: row.try_get::<i64, _>("size_bytes")? as u64,
             sha256: row.try_get("sha256")?,
         });
+    }
+    Ok(refs)
+}
+
+/// Заново связывает вложения правленого ввода. Новое вложение берётся из
+/// разговора ввода; уже привязанное к вводу (`kept`) остаётся, откуда бы оно
+/// ни пришло: у пересланного другой сессией ввода это разговор отправителя.
+#[allow(clippy::too_many_arguments)]
+pub async fn relink_edited_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    input_id: Uuid,
+    attachment_ids: &[Uuid],
+    kept: &[Uuid],
+    catalog: &HarnessBrief,
+    machine: &MachineGate,
+) -> Result<Vec<AttachmentRef>, AttachmentError> {
+    let refs = lock_checked_in_tx(
+        conn,
+        owner_id,
+        attachment_ids,
+        catalog,
+        machine,
+        |id, conversation| conversation == conversation_id || kept.contains(&id),
+    )
+    .await?;
+    sqlx::query("delete from input_attachments where input_id = $1")
+        .bind(input_id)
+        .execute(&mut *conn)
+        .await?;
+    for (position, id) in attachment_ids.iter().enumerate() {
+        sqlx::query(
+            "insert into input_attachments (input_id, attachment_id, position) values ($1, $2, $3)",
+        )
+        .bind(input_id)
+        .bind(id)
+        .bind(position as i32)
+        .execute(&mut *conn)
+        .await?;
     }
     Ok(refs)
 }

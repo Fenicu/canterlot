@@ -447,14 +447,22 @@ fn envelope(command: Command) -> ControlDown {
     }
 }
 
+/// Захват команды для отправки: свежая строка и признак, что метку поставил
+/// именно этот вызов. Метка, поставленная раньше (прошлым соединением,
+/// прошлой задачей или прошлым процессом хаба), значит, что команда могла
+/// уже уйти в транспорт: такой захват снимать нельзя.
+#[derive(sqlx::FromRow)]
+pub struct Claim {
+    #[sqlx(flatten)]
+    pub row: CommandRow,
+    pub newly_claimed: bool,
+}
+
 /// Захватывает команду для отправки под замком очереди и возвращает её свежую
 /// строку. После захвата правка ввода отклоняется, поэтому payload, прочитанный
 /// здесь, уже не может разойтись с отправленным. Для ввода и вливания замок тот
 /// же, что у правки, выдачи и квитанций.
-pub async fn claim_for_send(
-    pool: &PgPool,
-    row: &CommandRow,
-) -> Result<Option<CommandRow>, sqlx::Error> {
+pub async fn claim_for_send(pool: &PgPool, row: &CommandRow) -> Result<Option<Claim>, sqlx::Error> {
     let id = row.id;
     let attempt = row.dispatch_attempt;
     let conversation_id = row.conversation_id;
@@ -469,11 +477,17 @@ pub async fn claim_for_send(
                 .execute(&mut *conn)
                 .await?;
             }
-            sqlx::query_as::<_, CommandRow>(
-                "update commands set dispatch_claimed_at = coalesce(dispatch_claimed_at, now())
-                 where id = $1 and dispatch_attempt = $2 and delivery_state = 'pending'
-                 returning id, machine_id, conversation_id, execution_id, execution_generation,
-                           kind, payload, dispatch_attempt",
+            sqlx::query_as::<_, Claim>(
+                "with prev as (
+                     select id, dispatch_claimed_at from commands
+                     where id = $1 and dispatch_attempt = $2 and delivery_state = 'pending'
+                     for update
+                 )
+                 update commands c set dispatch_claimed_at = coalesce(c.dispatch_claimed_at, now())
+                 from prev where c.id = prev.id
+                 returning c.id, c.machine_id, c.conversation_id, c.execution_id,
+                           c.execution_generation, c.kind, c.payload, c.dispatch_attempt,
+                           prev.dispatch_claimed_at is null as newly_claimed",
             )
             .bind(id)
             .bind(attempt)
@@ -525,8 +539,9 @@ pub enum HandOff {
     Closed,
 }
 
-/// Отдаёт захваченную команду транспорту. При отказе канала (и если эта
-/// попытка ещё не уходила) захват снимается: команда не ушла и её можно отменить.
+/// Отдаёт захваченную команду транспорту. При отказе канала захват снимается,
+/// только если его поставил этот же вызов `claim_for_send` (`release`):
+/// команда не ушла и её можно отменить.
 pub async fn hand_off(
     pool: &PgPool,
     row: &CommandRow,
@@ -757,21 +772,29 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             } else if registry.availability(machine) != Availability::Available {
                 continue;
             }
-            let row = match claim_for_send(&pool, &row).await {
-                Ok(Some(row)) => row,
+            let (row, fresh) = match claim_for_send(&pool, &row).await {
+                Ok(Some(claim)) => (claim.row, claim.newly_claimed),
                 Ok(None) => continue,
                 Err(_) => {
                     eprintln!("outbox_database_error");
                     continue;
                 }
             };
-            let fresh = !sent.contains_key(&row.id);
             let command = match to_proto_for_connection(&row, &registry, connection) {
                 Ok(command) => command,
-                Err(OutboxError::CapabilityMissing | OutboxError::SessionChanged) => {
+                Err(OutboxError::SessionChanged) => {
                     // Команда не попала в транспорт: захват не должен держать отмену.
                     if fresh {
                         release_claim(&pool, &row).await;
+                    }
+                    continue;
+                }
+                Err(OutboxError::CapabilityMissing) => {
+                    // Сеанс команду не поймёт: она не должна висеть вечно.
+                    tokio::select! {
+                        biased;
+                        _ = wait_for_shutdown(&mut shutdown) => return,
+                        result = refuse_missing_capability(&pool, &row, fresh) => if result.is_err() { eprintln!("outbox_rejection_error"); },
                     }
                     continue;
                 }
@@ -816,6 +839,53 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             }
         }
     }
+}
+
+/// Команда, которую сеанс не поймёт. Не уходившая с хаба (`fresh`) завершается
+/// отказом `capability_missing`, как если бы его прислала машина. Ввод или
+/// вливание, которые уже уходили прошлому сеансу, могли дойти до агента:
+/// приём считается неподтверждённым, решает владелец, повтора нет. Прочие
+/// команды прошлого сеанса ждут его итога.
+async fn refuse_missing_capability(
+    pool: &PgPool,
+    row: &CommandRow,
+    fresh: bool,
+) -> Result<(), crate::ingest::IngestError> {
+    let (kind, id, attempt, machine_id) = (
+        row.kind.clone(),
+        row.id,
+        row.dispatch_attempt,
+        row.machine_id,
+    );
+    if !fresh && !matches!(kind.as_str(), "deliver_input" | "steer_input") {
+        return Ok(());
+    }
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            if fresh {
+                crate::ingest::apply_command_rejected_in_tx(
+                    &mut *conn,
+                    machine_id,
+                    id,
+                    attempt,
+                    "capability_missing",
+                    Uuid::now_v7(),
+                )
+                .await
+            } else {
+                apply_input_receipt_in_tx(
+                    &mut *conn,
+                    id,
+                    attempt,
+                    InputReceipt::AcceptanceUndetermined,
+                    Uuid::now_v7(),
+                )
+                .await?;
+                Ok(())
+            }
+        })
+    })
+    .await
 }
 
 async fn reject(pool: &PgPool, row: &CommandRow, reason: &str) -> Result<(), sqlx::Error> {

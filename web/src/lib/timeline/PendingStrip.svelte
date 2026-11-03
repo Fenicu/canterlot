@@ -4,7 +4,7 @@
   import { getRuntime } from '#lib/app/runtime.js';
   import { returnToComposer } from '#lib/composer/returned.js';
   import { cancelInput } from '#lib/timeline/QueueActions.js';
-  import { editInput, editInputCaption, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
+  import { STEER_RETURNED_LABEL, editInput, editInputCaption, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
   import type { InputView } from '#lib/stores/inputs.js';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { turnIsLive } from '#lib/composer/sendRules.js';
@@ -240,7 +240,8 @@
         <p class="note">Прервёт текущий шаг</p>
       {/if}
       {#if steerNotes[input.key]}<p class="note">{steerNotes[input.key]}</p>{/if}
-      {#if steered[input.key] && input.state === 'queued'}<p class="note">Вливается в идущий ход</p>{/if}
+      {#if input.state === 'queued' && input.steer === 'returned'}<p class="note">{STEER_RETURNED_LABEL}</p>
+      {:else if input.state === 'queued' && (steered[input.key] || input.steer === 'pending')}<p class="note">Вливается в идущий ход</p>{/if}
       {#if lost[input.key]}
         <p class="note">Передача уже началась, обычная отмена невозможна</p>
         <span class="actions"><Button onclick={() => interrupt(chat.id, crypto.randomUUID())}>Прервать исполнение</Button></span>

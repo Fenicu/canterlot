@@ -20,7 +20,7 @@ use crate::{
     attachments::{self, AttachmentError},
     events::{self, NewEvent, Scope},
     idempotency::{self, Begin},
-    model::{CommandKind, DeliveryState, InputState},
+    model::{CommandKind, DeliveryState, InputState, PauseReason},
 };
 
 const OPERATION: &str = "submit_input";
@@ -607,6 +607,23 @@ async fn submit_attempt(
     .await?.rows_affected();
     if inserted == 0 {
         return Ok(Attempt::LostRace);
+    }
+    // Повтор как новое — решение владельца по неподтверждённому вводу: его
+    // пауза больше не держит очередь.
+    if let Some(id) = retry_of {
+        let mut queue: super::LockedQueue =
+            sqlx::query_as("select * from queue_state where conversation_id = $1 for update")
+                .bind(req.conversation_id)
+                .fetch_one(&mut *conn)
+                .await?;
+        queue
+            .pause_reasons
+            .0
+            .retain(|reason| *reason != PauseReason::UnconfirmedDelivery { input_id: id });
+        let slot = queue.slot()?;
+        queue
+            .save(&mut *conn, &slot, None, req.correlation_id)
+            .await?;
     }
 
     let title_changed = if auto_title && input_seq == 1 {

@@ -77,6 +77,13 @@ pub async fn run(
             biased;
             _ = wait_for_shutdown(&mut shutdown) => break,
             _ = async {
+                if machine.is_none()
+                    && crate::delivery::receipts::expire_steers(&pool, timers.steer_outcome)
+                        .await
+                        .is_err()
+                {
+                    eprintln!("dispatcher_database_error");
+                }
                 if let Ok(conversations) = queued_conversations(&pool, machine).await {
                     for conversation in conversations {
                         dispatch(&pool, &registry, conversation).await;

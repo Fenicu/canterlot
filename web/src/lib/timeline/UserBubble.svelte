@@ -13,7 +13,7 @@
   import type { Stage } from '#lib/ui/stage-track.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import type { InputView } from '#lib/stores/inputs.js';
-  import { retryAsNew, returnToDraft, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
+  import { STEER_RETURNED_LABEL, retryAsNew, returnToDraft, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
   import { editInput, editInputCaption } from '#lib/timeline/QueueActions.js';
   import { deliveryIndex, deliveryLabel } from '#lib/timeline/present.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
@@ -229,7 +229,8 @@
     </div>
     {#if harnessId === 'opencode' && showSendNow}<p class="reason">Прервёт текущий шаг</p>{/if}
     {#if sendNowReason}<p class="reason">{sendNowReason}</p>{/if}
-    {#if sendNowSent}<p class="reason">Вливается в идущий ход</p>{/if}
+    {#if input.steer === 'returned'}<p class="reason">{STEER_RETURNED_LABEL}</p>
+    {:else if sendNowSent || input.steer === 'pending'}<p class="reason">Вливается в идущий ход</p>{/if}
   {:else if sendNowReason && input.state === 'queued'}
     <p class="reason">{sendNowReason}</p>
   {/if}

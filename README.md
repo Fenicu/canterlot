@@ -147,6 +147,7 @@ degraded_after = "15s"
 unavailable_after = "30s"
 command_stored_receipt = "5s"
 dispatch_sweep = "5s"
+steer_outcome = "2m"
 http2_keepalive_interval = "30s"
 http2_keepalive_timeout = "10s"
 

@@ -983,7 +983,7 @@ pub async fn request_send_now(
     conversation_id: Uuid,
     input_id: Uuid,
     idempotency_key: &str,
-    _correlation_id: Uuid,
+    correlation_id: Uuid,
     machine_capabilities: &[String],
 ) -> Result<SendNowOutcome, ControlError> {
     idempotency::validate_key(idempotency_key)
@@ -1002,6 +1002,11 @@ pub async fn request_send_now(
                 lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
             {
                 return Ok(outcome);
+            }
+            if queue.closed {
+                return Err(ControlError::InvalidRequest {
+                    reason: "conversation_closed",
+                });
             }
             let input: Option<(String, Uuid, Value)> = sqlx::query_as(
                 "select i.state, i.command_id, i.content from inputs i
@@ -1142,6 +1147,26 @@ pub async fn request_send_now(
                 .execute(&mut *conn)
                 .await?;
                 notify_outbox(&mut *conn, machine_id).await?;
+                // Другие вкладки видят, что ввод уже вливается.
+                events::append(
+                    &mut *conn,
+                    NewEvent {
+                        scope: Scope::Conversation {
+                            id: conversation_id,
+                        },
+                        kind: "input_state_changed",
+                        conversation_id: Some(conversation_id),
+                        execution_id: Some(execution_id),
+                        payload: json!({
+                            "input_id": input_id,
+                            "state": "queued",
+                            "cause": "steer_requested",
+                            "command_id": steer_command_id,
+                        }),
+                        correlation_id,
+                    },
+                )
+                .await?;
                 SendNowOutcome::Requested { steer_command_id }
             };
             record(
@@ -1214,6 +1239,11 @@ pub async fn request_edit_input(
             {
                 return Ok(outcome);
             }
+            if queue.closed {
+                return Err(ControlError::InvalidRequest {
+                    reason: "conversation_closed",
+                });
+            }
             let input: Option<(String, i64, Uuid)> = sqlx::query_as(
                 "select i.state, i.revision, i.command_id from inputs i
                  where i.id = $1 and i.conversation_id = $2",
@@ -1265,6 +1295,19 @@ pub async fn request_edit_input(
                 });
             }
             let mut blocks = vec![crate::delivery::submit::ContentBlock::Text { text }];
+            // Те же правила текста, что у отправки: NUL иначе дошёл бы до jsonb.
+            crate::delivery::submit::validate_message_content(&blocks, !attachment_ids.is_empty())
+                .map_err(|error| ControlError::InvalidRequest {
+                    reason: match error {
+                        crate::delivery::SubmitError::InvalidContent {
+                            reason: "nul_character",
+                        } => "nul_character",
+                        crate::delivery::SubmitError::InvalidContent { reason: "empty" } => {
+                            "empty_content"
+                        }
+                        _ => "content_too_long",
+                    },
+                })?;
             if !attachment_ids.is_empty() {
                 if crate::attachments::check_ids(&attachment_ids).is_err() {
                     return Err(ControlError::InvalidRequest {
@@ -1273,16 +1316,19 @@ pub async fn request_edit_input(
                 }
                 let (catalog, machine) =
                     crate::attachments::gate_for(&mut *conn, conversation_id).await?;
-                sqlx::query("delete from input_attachments where input_id = $1")
-                    .bind(input_id)
-                    .execute(&mut *conn)
-                    .await?;
-                let refs = crate::attachments::link_in_tx(
+                let kept: Vec<Uuid> = sqlx::query_scalar(
+                    "select attachment_id from input_attachments where input_id = $1",
+                )
+                .bind(input_id)
+                .fetch_all(&mut *conn)
+                .await?;
+                let refs = crate::attachments::relink_edited_in_tx(
                     &mut *conn,
                     owner_id,
                     conversation_id,
                     input_id,
                     &attachment_ids,
+                    &kept,
                     &catalog,
                     &machine,
                 )

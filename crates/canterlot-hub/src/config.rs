@@ -52,6 +52,9 @@ pub struct HubTimers {
     pub command_stored_receipt: Duration,
     #[serde(with = "humantime_serde")]
     pub dispatch_sweep: Duration,
+    /// Срок итога «Отправить сейчас»: без итога вливание считается неподтверждённым.
+    #[serde(with = "humantime_serde")]
+    pub steer_outcome: Duration,
 }
 
 impl Default for HubTimers {
@@ -64,6 +67,7 @@ impl Default for HubTimers {
             http2_keepalive_timeout: Duration::from_secs(10),
             command_stored_receipt: Duration::from_secs(5),
             dispatch_sweep: Duration::from_secs(5),
+            steer_outcome: Duration::from_secs(120),
         }
     }
 }

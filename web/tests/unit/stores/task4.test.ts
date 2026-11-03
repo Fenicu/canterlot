@@ -878,6 +878,56 @@ describe("stores task 4", () => {
     expect(chat.timeline.entries.map((item) => item.seq)).toEqual(["1", "10"]);
   });
 
+  it("steer_events_mark_the_queued_input_without_touching_its_rejection", () => {
+    const chat = chatOf();
+    const view = queuedView("idem-steer", "00000000-0000-4000-8000-0000000000c9");
+    chat.applier.applySnapshot(
+      { queue: { queued: [view], pause_reasons: [], hold_reasons: [], run_slot: "free" } },
+      "9",
+    );
+    const steer = "00000000-0000-4000-8000-0000000000d9";
+    chat.applier.applyEvents([
+      {
+        event: ev(
+          "input_state_changed",
+          { input_id: view.id, state: "queued", cause: "steer_requested", command_id: steer },
+          "10",
+        ),
+        overlap: false,
+      },
+    ]);
+    expect(chat.inputs.get("idem-steer")!.steer).toBe("pending");
+    chat.applier.applyEvents([
+      {
+        event: ev(
+          "input_state_changed",
+          {
+            input_id: view.id,
+            state: "queued",
+            attempt: 0,
+            cause: "steer_rejected",
+            command_id: steer,
+            reason: "Internal error",
+          },
+          "11",
+        ),
+        overlap: false,
+      },
+    ]);
+    const input = chat.inputs.get("idem-steer")!;
+    expect(input.steer).toBe("returned");
+    expect(input.state).toBe("queued");
+    expect(input.rejection).toBeUndefined();
+    expect(chat.strip().map((item) => item.key)).toEqual(["idem-steer"]);
+    chat.applier.applyEvents([
+      {
+        event: ev("input_state_changed", { input_id: view.id, state: "transmitting" }, "12"),
+        overlap: false,
+      },
+    ]);
+    expect(chat.inputs.get("idem-steer")!.steer).toBeUndefined();
+  });
+
   it("snapshot_queue_restores_queued_inputs_and_their_count_after_a_reload", () => {
     const chat = chatOf();
     const first = queuedView("idem-q1", "00000000-0000-4000-8000-0000000000c1");

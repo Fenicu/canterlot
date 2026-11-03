@@ -1300,3 +1300,78 @@ async fn auto_title_is_cut_at_a_word_boundary_and_collapses_whitespace(pool: PgP
         assert_eq!(title, expected);
     }
 }
+
+/// «Отправить повторно как новое» — решение владельца по неподтверждённому
+/// вводу: пауза этого ввода снимается, повтор не ждёт ещё и «Продолжить».
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn retry_as_new_clears_the_unconfirmed_delivery_pause(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = testkit::seed_conversation(&pool, owner, machine).await;
+    let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
+    let path = format!("/api/v1/conversations/{id}/inputs");
+    let first = client
+        .send(
+            Method::POST,
+            &path,
+            Some("first"),
+            Some(serde_json::json!({"content":[{"type":"text","text":"Первое"}]})),
+        )
+        .await;
+    assert_eq!(first.status, 201);
+    let input: Uuid = first.json::<Value>()["input_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let other = Uuid::now_v7();
+    sqlx::query("update inputs set state='acceptance_unconfirmed' where id=$1")
+        .bind(input)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update queue_state set pause_reasons=$2 where conversation_id=$1")
+        .bind(id)
+        .bind(serde_json::json!([
+            {"reason":"unconfirmed_delivery","input_id":input},
+            {"reason":"unconfirmed_delivery","input_id":other}
+        ]))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let retry = client
+        .send(
+            Method::POST,
+            &path,
+            Some("retry"),
+            Some(serde_json::json!({"content":[{"type":"text","text":"Повтор"}],"retry_of":input})),
+        )
+        .await;
+    assert_eq!(retry.status, 201);
+    let pauses: Value =
+        sqlx::query_scalar("select pause_reasons from queue_state where conversation_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        pauses,
+        serde_json::json!([{"reason":"unconfirmed_delivery","input_id":other}])
+    );
+    let changed: i64 = sqlx::query_scalar(
+        "select count(*) from events where kind='queue_state_changed' and conversation_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(changed >= 1);
+}

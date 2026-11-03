@@ -2449,3 +2449,227 @@ async fn bound_sj_rejects_foreign_phase_and_close_without_effect(pool: PgPool) -
     }
     Ok(())
 }
+
+/// Запись о вливании берёт замок очереди раньше строки команды, как захват
+/// outbox и правка: иначе они взаимно блокируются, и Postgres рвёт одну сторону.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn steer_records_lock_the_queue_before_the_command(pool: PgPool) -> TestResult {
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
+
+    let (seed, execution, input) = setup(&pool).await;
+    for rejected in [false, true] {
+        let steer = Uuid::now_v7();
+        sqlx::query(
+            "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
+                                   kind, payload, target_command_id, delivery_state, dispatch_attempt,
+                                   dispatch_claimed_at)
+             values ($1, $2, $3, $4, 1, 'steer_input', '{}'::jsonb, $5, 'pending', 1, now())",
+        )
+        .bind(steer)
+        .bind(seed.machine_id)
+        .bind(seed.conversation_id)
+        .bind(execution.execution_id)
+        .bind(input.command_id)
+        .execute(&pool)
+        .await?;
+        let body = if rejected {
+            record_body::Body::CommandRejected(CommandRejected {
+                command_id: steer.to_string(),
+                dispatch_attempt: 1,
+                reason: "invalid".into(),
+            })
+        } else {
+            stored(steer)
+        };
+        let mut queue_lock = pool.begin().await?;
+        sqlx::query(
+            "select conversation_id from queue_state where conversation_id = $1 for update",
+        )
+        .bind(seed.conversation_id)
+        .execute(&mut *queue_lock)
+        .await?;
+        let ingest = Ingest::new(pool.clone());
+        let digest = seed.credential_digest();
+        let task = tokio::spawn(async move {
+            ingest
+                .apply_batch(
+                    seed.machine_id,
+                    &digest,
+                    JournalKind::Cj,
+                    &batch(Uuid::now_v7(), vec![body]),
+                )
+                .await
+        });
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like 'select q.%queue_state%')")
+                    .fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        // Строка вливания свободна: захват под замком очереди её получит.
+        sqlx::query("select id from commands where id = $1 for update nowait")
+            .bind(steer)
+            .execute(&mut *queue_lock)
+            .await?;
+        queue_lock.commit().await?;
+        assert!(matches!(
+            timeout(Duration::from_secs(2), task).await???,
+            IngestOutcome::Committed { .. }
+        ));
+        let delivery: String =
+            sqlx::query_scalar("select delivery_state from commands where id = $1")
+                .bind(steer)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            delivery,
+            if rejected {
+                "completed"
+            } else {
+                "stored_on_machine"
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Время приёма влитого ввода пишется в сам ввод, хотя квитанция приходит на
+/// команду вливания.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn steered_input_gets_agent_confirmation_time(pool: PgPool) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let queued = submit_input(
+        &pool,
+        SubmitInput {
+            owner_id: seed.owner_id,
+            conversation_id: seed.conversation_id,
+            idempotency_key: Uuid::now_v7().to_string(),
+            content: vec![ContentBlock::Text {
+                text: "steered".into(),
+            }],
+            received_at: Utc::now(),
+            correlation_id: Uuid::now_v7(),
+            origin: None,
+        },
+    )
+    .await?;
+    let steer = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
+                               kind, payload, target_command_id, delivery_state, dispatch_attempt,
+                               dispatch_claimed_at)
+         values ($1, $2, $3, $4, 1, 'steer_input', '{}'::jsonb, $5, 'pending', 0, now())",
+    )
+    .bind(steer)
+    .bind(seed.machine_id)
+    .bind(seed.conversation_id)
+    .bind(execution.execution_id)
+    .bind(queued.command_id)
+    .execute(&pool)
+    .await?;
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![record_body::Body::InputAccepted(InputAccepted {
+                    command_id: steer.to_string(),
+                    dispatch_attempt: 0,
+                    machine_time_ms: 505,
+                })],
+            ),
+        )
+        .await?;
+    let (state, confirmed): (String, Option<i64>) =
+        sqlx::query_as("select state, agent_confirmed_machine_ms from inputs where id = $1")
+            .bind(queued.input_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!((state.as_str(), confirmed), ("accepted", Some(505)));
+    Ok(())
+}
+
+/// Исполнение кончилось смертью сопровождения: вливание, дошедшее до машины,
+/// становится неподтверждённым приёмом, не ушедшее — возвращает ввод в
+/// очередь. Ни одно не висит и не уходит второй раз.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn ended_execution_settles_its_open_steers(pool: PgPool) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let mut steers = Vec::new();
+    for (text, stored) in [("stored", true), ("unsent", false)] {
+        let queued = submit_input(
+            &pool,
+            SubmitInput {
+                owner_id: seed.owner_id,
+                conversation_id: seed.conversation_id,
+                idempotency_key: Uuid::now_v7().to_string(),
+                content: vec![ContentBlock::Text { text: text.into() }],
+                received_at: Utc::now(),
+                correlation_id: Uuid::now_v7(),
+                origin: None,
+            },
+        )
+        .await?;
+        let steer = Uuid::now_v7();
+        sqlx::query(
+            "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
+                                   kind, payload, target_command_id, delivery_state, dispatch_attempt,
+                                   dispatch_claimed_at)
+             values ($1, $2, $3, $4, 1, 'steer_input', '{}'::jsonb, $5,
+                     case when $6 then 'stored_on_machine' else 'pending' end, 0,
+                     case when $6 then now() end)",
+        )
+        .bind(steer)
+        .bind(seed.machine_id)
+        .bind(seed.conversation_id)
+        .bind(execution.execution_id)
+        .bind(queued.command_id)
+        .bind(stored)
+        .execute(&pool)
+        .await?;
+        steers.push((steer, queued.input_id));
+    }
+    let mut failed = execution_fact(execution.execution_id, execution.generation, "failed");
+    if let record_body::Body::ExecutionState(fact) = &mut failed {
+        fact.outcome = "supervisor_died".into();
+    }
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    execution_fact(execution.execution_id, execution.generation, "stopping"),
+                    failed,
+                ],
+            ),
+        )
+        .await?;
+    let mut states = Vec::new();
+    for (steer, input) in steers {
+        let (delivery, state): (String, String) = sqlx::query_as(
+            "select c.delivery_state, i.state from commands c, inputs i where c.id = $1 and i.id = $2",
+        )
+        .bind(steer)
+        .bind(input)
+        .fetch_one(&pool)
+        .await?;
+        states.push((delivery, state));
+    }
+    assert_eq!(
+        states,
+        vec![
+            ("completed".to_owned(), "acceptance_unconfirmed".to_owned()),
+            ("completed".to_owned(), "queued".to_owned()),
+        ]
+    );
+    Ok(())
+}

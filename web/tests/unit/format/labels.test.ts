@@ -119,6 +119,10 @@ describe("format/labels", () => {
     }
   });
 
+  it("capability_missing_rejection_names_the_machine", () => {
+    expect(rejectionLabel("capability_missing")).toBe("Машина не поддерживает это действие");
+  });
+
   it("object_prototype_keys_are_not_mistaken_for_labels", () => {
     expect(permissionLabel("constructor")).toMatch(/[А-Яа-яЁё]/);
     expect(effortLabel("toString")).toMatch(/[А-Яа-яЁё]/);
