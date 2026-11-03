@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs::{self, OpenOptions},
     io::Write,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -155,8 +156,20 @@ pub(super) fn prepare(
     })
 }
 
+fn build_jobs_env(configured: u32, inherited: Option<&OsStr>) -> Option<String> {
+    inherited.is_none().then(|| configured.max(1).to_string())
+}
+
 /// Сопровождение запускается отдельным процессом без привязки к жизни этого; ждём его только ради zombie.
-pub(super) fn spawn_supervisor(exe: &Path, dir: &Path) -> std::io::Result<Spawned> {
+pub(super) fn spawn_supervisor(
+    exe: &Path,
+    dir: &Path,
+    configured_build_jobs: u32,
+) -> std::io::Result<Spawned> {
+    let build_jobs = build_jobs_env(
+        configured_build_jobs,
+        std::env::var_os("CARGO_BUILD_JOBS").as_deref(),
+    );
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -173,6 +186,9 @@ pub(super) fn spawn_supervisor(exe: &Path, dir: &Path) -> std::io::Result<Spawne
             .stdout(log.try_clone()?)
             .stderr(log.try_clone()?)
             .kill_on_drop(false);
+        if let Some(value) = &build_jobs {
+            command.env("CARGO_BUILD_JOBS", value);
+        }
         command.spawn()
     })?;
     Ok(Spawned(Some(child)))
@@ -232,4 +248,15 @@ pub(super) async fn connect_attach(
         write,
         attached,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_jobs_env;
+
+    #[test]
+    fn cargo_build_jobs_defaults_but_never_overrides_the_parent() {
+        assert_eq!(build_jobs_env(6, None).as_deref(), Some("6"));
+        assert_eq!(build_jobs_env(6, Some("12".as_ref())), None);
+    }
 }

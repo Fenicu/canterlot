@@ -1260,7 +1260,7 @@ impl Actor {
             self.cancel_start().await?;
             return Ok(false);
         }
-        let mut child = match spawn::spawn_supervisor(&exe, &dir) {
+        let mut child = match spawn::spawn_supervisor(&exe, &dir, self.shared.config.build_jobs) {
             Ok(child) => child,
             Err(_) => {
                 return self

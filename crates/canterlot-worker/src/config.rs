@@ -41,6 +41,8 @@ pub struct ExecutionConfig {
     pub supervisor_exe: Option<PathBuf>,
     #[serde(with = "humantime_serde")]
     pub spawn_timeout: Duration,
+    /// Предел параллельной сборки для запускаемых сессий; не перекрывает уже заданный `CARGO_BUILD_JOBS`.
+    pub build_jobs: u32,
     pub supervisor: SupervisorTimers,
 }
 
@@ -50,6 +52,7 @@ impl Default for ExecutionConfig {
             allowed_workdir_roots: Vec::new(),
             supervisor_exe: None,
             spawn_timeout: Duration::from_secs(10),
+            build_jobs: 6,
             supervisor: SupervisorTimers::default(),
         }
     }

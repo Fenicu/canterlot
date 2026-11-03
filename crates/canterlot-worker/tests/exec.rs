@@ -196,6 +196,7 @@ impl Env {
             allowed_workdir_roots: vec![work.clone()],
             supervisor_exe: Some(supervisor_exe.clone()),
             spawn_timeout: Duration::from_secs(10),
+            build_jobs: 7,
             supervisor: SupervisorTimers {
                 stop_grace: Duration::from_secs(1),
                 stop_retry: Duration::from_millis(200),
@@ -624,6 +625,23 @@ async fn startup_sweeps_stale_runtime_state() {
     assert!(!path.exists());
     assert!(!worktree.join("target").exists());
     env.close_manager().await;
+}
+
+#[tokio::test]
+async fn spawned_cli_gets_cargo_build_jobs() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    let environ = fs::read(format!("/proc/{}/environ", record.cli_pid)).unwrap();
+    let value = environ
+        .split(|byte| *byte == 0)
+        .find_map(|entry| entry.strip_prefix(b"CARGO_BUILD_JOBS="))
+        .map(|value| String::from_utf8_lossy(value).into_owned());
+    let expected = std::env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| "7".into());
+    assert_eq!(value.as_deref(), Some(expected.as_str()));
+    env.stop().await;
 }
 
 #[tokio::test]

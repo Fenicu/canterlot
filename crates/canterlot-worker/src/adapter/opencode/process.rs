@@ -17,7 +17,15 @@ use tokio::{
 };
 
 /// Ровно это наследуется от воркера: ключи провайдеров и служебные переменные отрезаны.
-const INHERITED_ENV: [&str; 6] = ["PATH", "HOME", "USER", "LANG", "TERM", "XDG_CONFIG_HOME"];
+const INHERITED_ENV: [&str; 7] = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "TERM",
+    "XDG_CONFIG_HOME",
+    "CARGO_BUILD_JOBS",
+];
 
 /// Каталоги canterlot для OpenCode. База, журнал и файлы shell лежат здесь:
 /// база владельца не годится, сервер на ней подхватит чужие исполнения.
