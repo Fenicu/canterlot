@@ -1438,6 +1438,8 @@ export interface components {
         };
         History: {
             series: components["schemas"]["ProviderSeries"][];
+            /** @description Медианы скорости ответа по моделям; Codex не передаёт времени генерации и сюда не попадает. */
+            speed: components["schemas"]["ModelSpeedSummary"][];
             usage: components["schemas"]["UsageDay"][];
         };
         HistoryPage: {
@@ -1752,6 +1754,31 @@ export interface components {
             /** Format: date-time */
             observed_at: string;
         };
+        ModelSpeed: {
+            /**
+             * Format: int64
+             * @description Медиана по запросам хода: от начала запроса до первого кадра ответа.
+             */
+            first_token_ms?: number | null;
+            /**
+             * Format: int64
+             * @description Сумма времени генерации по запросам хода; нет, если его нельзя выделить честно.
+             */
+            generation_ms?: number | null;
+            model: string;
+            /** Format: int64 */
+            output_tokens: number;
+            /** Format: double */
+            tokens_per_second?: number | null;
+        };
+        ModelSpeedSummary: {
+            model: string;
+            /** @description Весь запрошенный диапазон. */
+            period: components["schemas"]["SpeedStats"];
+            provider: string;
+            /** @description Последний день диапазона в часовом поясе запроса. */
+            today: components["schemas"]["SpeedStats"];
+        };
         ModelUsageView: {
             agent: string;
             /** Format: int64 */
@@ -2047,6 +2074,8 @@ export interface components {
             parts: components["schemas"]["PartView"][];
             /** Format: uuid */
             run_id: string;
+            /** @description Скорость ответа по моделям основного агента; пусто, если её нельзя выделить честно. */
+            speed: components["schemas"]["ModelSpeed"][];
             /** Format: date-time */
             started_at: string;
             usage: components["schemas"]["ModelUsageView"][];
@@ -2160,6 +2189,23 @@ export interface components {
                 items: components["schemas"]["MachineView"][];
             };
             scope: string;
+        };
+        SpeedStats: {
+            /**
+             * Format: int64
+             * @description Медиана по ходам.
+             */
+            first_token_ms?: number | null;
+            /**
+             * Format: int64
+             * @description Ходы, по которым посчитана скорость генерации.
+             */
+            runs: number;
+            /**
+             * Format: double
+             * @description Медиана по ходам.
+             */
+            tokens_per_second?: number | null;
         };
         /** @enum {string} */
         SpendOutcome: "continued" | "already_continued" | "not_held";

@@ -1271,6 +1271,42 @@ async fn limits_history_has_five_hour_series_and_agent_breakdown(pool: PgPool) {
     agents.sort();
     assert_eq!(agents, vec!["helper", "main"]);
 }
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn limits_history_reports_median_speed_per_model_for_today_and_the_period(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    limits_fixture(&f).await;
+    let h = f.request(Method::GET, HISTORY, None, 200).await;
+    assert_eq!(h["speed"], json!([]));
+    sqlx::query("update runs set finished_at=started_at+interval '10 seconds',exact=true")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    // Первый кадр через секунду, 20 выходных токенов за две секунды генерации.
+    sqlx::query("insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,created_seq,agent,model,input_command_id,created_at,finished_at) select gen_random_uuid(),execution_id,conversation_id,'text','final',1,1,'main','synthetic-small',input_command_id,started_at+interval '1 second',started_at+interval '3 seconds' from runs").execute(&f.pool).await.unwrap();
+    let runs: i64 = sqlx::query_scalar("select count(*) from runs")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let h = f.request(Method::GET, HISTORY, None, 200).await;
+    let speed = &h["speed"][0];
+    assert_eq!(speed["provider"], "claude");
+    assert_eq!(speed["model"], "synthetic-small");
+    assert_eq!(speed["period"]["tokens_per_second"], 10.0);
+    assert_eq!(speed["period"]["first_token_ms"], 1000);
+    assert_eq!(speed["period"]["runs"], runs);
+    // Конец диапазона в Москве уже 28-е, а ходы были 27-го.
+    assert_eq!(speed["today"]["runs"], 0);
+    assert!(speed["today"]["tokens_per_second"].is_null());
+    let today = HISTORY.replace("2026-10-28T00", "2026-10-27T20");
+    let h = f.request(Method::GET, &today, None, 200).await;
+    assert_eq!(h["speed"][0]["today"]["tokens_per_second"], 10.0);
+    assert_eq!(h["speed"][0]["today"]["runs"], runs);
+    let codex = HISTORY.replace("provider=claude", "provider=codex");
+    assert_eq!(
+        f.request(Method::GET, &codex, None, 200).await["speed"],
+        json!([])
+    );
+}
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn forced_archive_skips_claimed_jobs_and_rolls_back_every_effect(pool: PgPool) {

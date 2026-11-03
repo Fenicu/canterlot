@@ -43,6 +43,7 @@ pub mod session;
 pub mod session_tools;
 pub mod singleton;
 pub mod snapshot;
+pub mod speed;
 pub mod subscriptions;
 pub mod todos;
 
