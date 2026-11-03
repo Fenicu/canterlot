@@ -6348,6 +6348,14 @@
           }
         }
       },
+      "DataConfidence": {
+        "type": "string",
+        "description": "Точность показаний провайдера. `estimated` приходит от CodexBar, когда он считает\nрасход по локальным журналам, а не по данным провайдера.",
+        "enum": [
+          "exact",
+          "estimated"
+        ]
+      },
       "DecisionAnswer": {
         "oneOf": [
           {
@@ -9244,9 +9252,14 @@
         "required": [
           "provider",
           "weekly_reserve_active",
-          "five_hour_absent"
+          "five_hour_absent",
+          "data_confidence"
         ],
         "properties": {
+          "data_confidence": {
+            "$ref": "#/components/schemas/DataConfidence",
+            "description": "`estimated`, когда CodexBar вывел расход из локальных журналов, иначе `exact`."
+          },
           "five_hour": {
             "oneOf": [
               {

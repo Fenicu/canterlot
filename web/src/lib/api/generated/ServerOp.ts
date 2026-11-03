@@ -847,6 +847,7 @@ export interface LimitsChanged {
     observed_at: Time;
     weekly_reserve_active: boolean;
     weekly_reserve_resets_at: Time | null;
+    data_confidence?: "exact" | "estimated";
   };
 }
 export interface LimitReached {

@@ -1,4 +1,6 @@
-use canterlot_proto::worker::v1::{LimitAbsence, LimitObservation, LimitWindow};
+use canterlot_proto::worker::v1::{
+    LimitAbsence, LimitDataConfidence, LimitObservation, LimitWindow,
+};
 use serde_json::Value;
 use std::{
     fmt,
@@ -87,6 +89,11 @@ pub fn reading_from_output(
         })
         .ok_or(CodexBarError::Output)?;
     let usage = entry.get("usage").ok_or(CodexBarError::Output)?;
+    let data_confidence = match usage.get("dataConfidence").and_then(Value::as_str) {
+        Some("estimated") => LimitDataConfidence::Estimated as i32,
+        Some("exact") => LimitDataConfidence::Exact as i32,
+        _ => LimitDataConfidence::Unspecified as i32,
+    };
     let seen_ms = usage
         .get("updatedAt")
         .and_then(Value::as_str)
@@ -127,6 +134,7 @@ pub fn reading_from_output(
                 .and_then(super::limits::rfc3339_ms)
                 .unwrap_or(0),
             observed_machine_ms: seen_ms,
+            data_confidence,
         });
     }
     let absent = if !five_hour_row && !observations.is_empty() {

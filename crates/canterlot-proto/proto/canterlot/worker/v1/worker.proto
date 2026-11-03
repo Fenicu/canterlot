@@ -581,12 +581,21 @@ enum LimitWindow {
   LIMIT_WINDOW_MONTHLY = 3;
 }
 
+// Насколько показание окна близко к данным провайдера. Пустое значение —
+// отчёт старого воркера, клиенты считают его точным.
+enum LimitDataConfidence {
+  LIMIT_DATA_CONFIDENCE_UNSPECIFIED = 0;
+  LIMIT_DATA_CONFIDENCE_EXACT = 1;
+  LIMIT_DATA_CONFIDENCE_ESTIMATED = 2;
+}
+
 message LimitObservation {
   string provider = 1;
   LimitWindow window = 2;
   uint32 used_permille = 3;
   uint64 resets_at_ms = 4;
   uint64 observed_machine_ms = 5;
+  LimitDataConfidence data_confidence = 6;
 }
 
 // Окно, которого у провайдера нет: полное успешное чтение не содержит его при других окнах.

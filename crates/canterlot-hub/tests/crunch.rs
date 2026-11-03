@@ -19,7 +19,7 @@ use canterlot_hub::{
     dispatcher::Dispatcher,
     executions,
     ingest::Ingest,
-    limits::{self, Observation, ObservationSource, Recorded, Window},
+    limits::{self, DataConfidence, Observation, ObservationSource, Recorded, Window},
     model::{HoldReason, PauseReason, RunSlot},
     scheduler::{ClaimedJob, JobKind, Scheduler, TickReport},
     session::Registry,
@@ -290,6 +290,7 @@ impl Env {
                 resets_at,
                 observed_at,
                 source,
+                data_confidence: DataConfidence::Exact,
                 machine_id: machine,
                 execution_id: None,
             },
@@ -2719,6 +2720,7 @@ async fn lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http(p
                 used_permille: 960,
                 resets_at_ms: far.timestamp_millis() as u64,
                 observed_machine_ms: (machine_ms + (round + 1) * 60_000) as u64,
+                ..Default::default()
             }),
         ];
         let owner = env.owner;

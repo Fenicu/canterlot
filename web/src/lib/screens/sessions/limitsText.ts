@@ -18,6 +18,8 @@ export interface LimitRow {
   empty: boolean;
   /** Провайдер на недельном резерве: это дополнение к остаткам, а не замена им. */
   reserve: boolean;
+  /** Показание выведено из локальных журналов, а не получено от провайдера. */
+  estimated: boolean;
 }
 
 export interface LimitStrip {
@@ -61,6 +63,7 @@ export function limitStrip(
       month: view.month,
       empty: !provider.five_hour && !provider.weekly && !provider.monthly,
       reserve: provider.weekly_reserve_active,
+      estimated: provider.data_confidence === "estimated",
     })),
     tone,
     updated: latest ? `обновлено ${dayClock(latest, now)}` : "",

@@ -3655,6 +3655,12 @@
                   "type": "null"
                 }
               ]
+            },
+            "data_confidence": {
+              "enum": [
+                "exact",
+                "estimated"
+              ]
             }
           },
           "required": [

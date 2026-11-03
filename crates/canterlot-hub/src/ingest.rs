@@ -919,7 +919,7 @@ impl Ingest {
         body: &Body,
         correlation: Uuid,
     ) -> Result<(bool, Option<(String, crate::limits::Window)>, bool), IngestError> {
-        use crate::limits::{self, Observation, ObservationSource, Window};
+        use crate::limits::{self, DataConfidence, Observation, ObservationSource, Window};
         let now = chrono::Utc::now();
         if matches!(body, Body::LimitObserved(_) | Body::LimitReached(_)) {
             let execution: Option<Uuid> =
@@ -965,6 +965,7 @@ impl Ingest {
                             Self::hub_time_for(registry, machine, f.observed_machine_ms, now)
                         }),
                         source: ObservationSource::Session,
+                        data_confidence: DataConfidence::from_proto(f.data_confidence),
                         machine_id: machine,
                         execution_id: Some(run.execution_id),
                     };
@@ -2112,7 +2113,7 @@ impl crate::grpc::Ingest for Ingest {
         machine_id: Uuid,
         report: canterlot_proto::worker::v1::LimitsReport,
     ) -> Result<(), tonic::Status> {
-        use crate::limits::{self, Observation, ObservationSource, Window};
+        use crate::limits::{self, DataConfidence, Observation, ObservationSource, Window};
         let mut observations = Vec::new();
         let now = chrono::Utc::now();
         for f in report.observations {
@@ -2141,6 +2142,7 @@ impl crate::grpc::Ingest for Ingest {
                     observed_at: at
                         .unwrap_or_else(|| self.hub_time(machine_id, f.observed_machine_ms, now)),
                     source: ObservationSource::Poll,
+                    data_confidence: DataConfidence::from_proto(f.data_confidence),
                     machine_id,
                     execution_id: None,
                 },

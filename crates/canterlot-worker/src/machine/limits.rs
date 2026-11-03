@@ -104,6 +104,7 @@ impl LimitsSource for FileLimitsSource {
                 used_permille: used as u32,
                 resets_at_ms: row["resets_at_ms"].as_u64().unwrap_or(0),
                 observed_machine_ms: at,
+                ..Default::default()
             })
         })
         .collect()

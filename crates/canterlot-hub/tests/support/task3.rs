@@ -169,6 +169,7 @@ pub fn observation(used: u32, ms: i64) -> LimitObservation {
         used_permille: used,
         observed_machine_ms: ms as u64,
         resets_at_ms: 0,
+        ..Default::default()
     }
 }
 pub fn report() -> MachineReport {

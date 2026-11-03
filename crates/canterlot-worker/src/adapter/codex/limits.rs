@@ -142,6 +142,7 @@ pub fn observations_from_read_response(
                 used_permille: u32::from(permille),
                 resets_at_ms: resets_at_ms.unwrap_or_default(),
                 observed_machine_ms: observed_ms,
+                ..Default::default()
             });
         }
     }

@@ -530,6 +530,7 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
             resets_at: None,
             observed_at: chrono::Utc::now(),
             source: canterlot_hub::limits::ObservationSource::Poll,
+            data_confidence: canterlot_hub::limits::DataConfidence::Exact,
             machine_id: f.seed.machine_id,
             execution_id: None,
         },

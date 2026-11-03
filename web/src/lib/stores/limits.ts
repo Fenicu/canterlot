@@ -15,6 +15,8 @@ export interface ProviderLimits {
   weekly_reserve_resets_at?: string | null;
   /** У провайдера нет пятичасового окна (план без этого лимита): счётчик не показывается. */
   five_hour_absent?: boolean;
+  /** `estimated`, когда CodexBar вывел расход из локальных журналов, а не от провайдера. */
+  data_confidence?: "exact" | "estimated";
 }
 
 export interface LimitThresholds {

@@ -162,6 +162,12 @@ describe("sessions/limits", () => {
     expect(limitStrip([only], NOW, cfg).rows[0]).toMatchObject({ empty: true });
   });
 
+  it("estimated_confidence_is_kept_on_the_provider_row", () => {
+    const estimated = { ...provider("claude", 100, 200), data_confidence: "estimated" as const };
+    const strip = limitStrip([estimated, provider("codex", 100, 200)], NOW, cfg);
+    expect(strip.rows.map((row) => row.estimated)).toEqual([true, false]);
+  });
+
   it("monthly_window_is_kept_apart_and_old_rows_stay_without_it", () => {
     const withMonth = {
       ...provider("opencode", 125, 340),

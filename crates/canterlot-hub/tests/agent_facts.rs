@@ -10,7 +10,7 @@ use canterlot_hub::{
     events::Scope,
     executions,
     ingest::{Ingest, IngestError, JournalKind},
-    limits::{self, Observation, ObservationSource, Window},
+    limits::{self, DataConfidence, Observation, ObservationSource, Window},
     model::ExecutionState,
     runs, testkit,
 };
@@ -620,6 +620,7 @@ fn obs(s: &testkit::Seed, used: u16, at: DateTime<Utc>) -> Observation {
         resets_at: None,
         observed_at: at,
         source: ObservationSource::Session,
+        data_confidence: DataConfidence::Exact,
         machine_id: s.machine_id,
         execution_id: None,
     }
@@ -666,6 +667,40 @@ async fn limit_observed_updates_provider_state_and_emits_limits_changed_once(
     );
     Ok(())
 }
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn estimated_confidence_reaches_current_state_and_event(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    let at = Utc::now();
+    let mut estimated = obs(&s, 400, at);
+    estimated.data_confidence = DataConfidence::Estimated;
+    assert!(record(&pool, &s, &estimated).await.provider_changed);
+
+    let stored: String =
+        sqlx::query_scalar("select data_confidence from provider_limits where provider='claude'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored, "estimated");
+    let mut conn = pool.acquire().await?;
+    let current = limits::current(&mut conn).await?;
+    assert_eq!(current[0].data_confidence, DataConfidence::Estimated);
+    let payload: Value = sqlx::query_scalar(
+        "select payload from events where kind='limits_changed' order by id desc limit 1",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(payload["data_confidence"], "estimated");
+
+    let mut exact = obs(&s, 410, at + Duration::seconds(1));
+    exact.data_confidence = DataConfidence::Exact;
+    assert!(record(&pool, &s, &exact).await.provider_changed);
+    let stored: String =
+        sqlx::query_scalar("select data_confidence from provider_limits where provider='claude'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored, "exact");
+    Ok(())
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn replayed_stale_observation_never_lowers_the_stored_reading(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
