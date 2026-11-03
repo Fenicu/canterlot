@@ -155,7 +155,7 @@ test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   const field = page.getByRole('combobox', { name: 'Модель' });
   await expect(field).toHaveValue('opus[1m]');
-  await expect(field.locator('option')).toContainText(['Выберите модель', 'Opus 1M', 'Fable 1M', 'Opus', 'Haiku']);
+  await expect(field.locator('option')).toContainText(['Выбрать', 'Opus 1M', 'Fable 1M', 'Opus', 'Haiku']);
   await field.selectOption('haiku');
   await expect(field).toHaveValue('haiku');
   await field.selectOption('opus[1m]');
@@ -361,4 +361,14 @@ test('focus_ring_of_a_full_width_field_fits_inside_the_sheet', async ({ page }) 
   expect(fit.ring).toBeGreaterThan(0);
   expect(fit.start).toBeGreaterThanOrEqual(0);
   expect(fit.end).toBeGreaterThanOrEqual(0);
+});
+
+test('model_and_effort_placeholders_fit_their_half_width_fields', async ({ page }) => {
+  await page.setViewportSize({ width: 384, height: 800 });
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  for (const name of ['Модель', 'Усилие']) {
+    const select = page.getByRole('combobox', { name });
+    await expect(select.locator('option').first()).toHaveText('Выбрать');
+  }
 });
