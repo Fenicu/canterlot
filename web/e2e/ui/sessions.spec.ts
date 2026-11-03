@@ -757,3 +757,10 @@ test('list_reserves_the_limits_strip_and_hides_zero_counts_until_the_snapshot', 
   expect(strip.height).toBeLessThanOrEqual(slot.height + 1);
   expect(Math.abs(strip.y - slot.y)).toBeLessThanOrEqual(1);
 });
+
+test('list_bottom_edge_fades_instead_of_slicing_the_next_row', async ({ page }) => {
+  await boot(page);
+  const scroll = page.locator('[data-list-scroll]');
+  // Строка под краем гаснет к навигации, а не стоит полоской верхушек букв.
+  expect(await scroll.evaluate((node) => getComputedStyle(node).maskImage || getComputedStyle(node).webkitMaskImage)).toContain('linear-gradient');
+});
