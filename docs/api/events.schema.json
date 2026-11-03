@@ -332,6 +332,12 @@
             "$ref": "#/$defs/Uuid"
           }
         },
+        "group_pins": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GroupPin"
+          }
+        },
         "machine": {
           "type": "object",
           "properties": {
@@ -387,6 +393,22 @@
         "harness",
         "workdir",
         "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "GroupPin": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "pinned_at": {
+          "$ref": "#/$defs/Time"
+        }
+      },
+      "required": [
+        "group_id",
+        "pinned_at"
       ],
       "additionalProperties": false
     },
@@ -2305,6 +2327,12 @@
                 "$ref": "#/$defs/Uuid"
               }
             },
+            "group_pins": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GroupPin"
+              }
+            },
             "machine": {
               "type": "object",
               "properties": {
@@ -2563,6 +2591,12 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/Uuid"
+              }
+            },
+            "group_pins": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/GroupPin"
               }
             },
             "machine": {
