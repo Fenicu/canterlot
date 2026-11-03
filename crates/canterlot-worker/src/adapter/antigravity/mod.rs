@@ -1007,7 +1007,7 @@ impl Adapter for AntigravityAdapter {
         }
         self.tracker
             .register(id, input.command_id, PromptKind::Turn);
-        self.tracker.expect_echo(input.command_id, &text);
+        self.tracker.expect_echo(id, input.command_id, &text);
         self.tracker.await_echo(input.command_id);
         if let Some(translator) = self.translator.as_mut() {
             translator.begin_turn(Some(input.command_id));
@@ -1100,7 +1100,7 @@ impl Adapter for AntigravityAdapter {
                 let params = input::prompt_params(&self.session_id(), &text);
                 let (id, message) = self.rpc.request_v2("session/prompt", params);
                 self.tracker.register(id, command_id, PromptKind::Turn);
-                self.tracker.expect_echo(command_id, &text);
+                self.tracker.expect_echo(id, command_id, &text);
                 self.tracker.await_echo(command_id);
                 if !self.write_message(message).await {
                     self.tracker.forget_command(command_id);
@@ -1217,7 +1217,7 @@ impl Adapter for AntigravityAdapter {
         let (id, message) = self.rpc.request_v2("session/prompt", params);
         self.tracker
             .register(id, input.command_id, PromptKind::Turn);
-        self.tracker.expect_echo(input.command_id, &text);
+        self.tracker.expect_echo(id, input.command_id, &text);
         self.tracker.await_echo(input.command_id);
         if !self.write_message(message).await {
             self.tracker.forget_command(input.command_id);
@@ -1245,7 +1245,7 @@ impl Adapter for AntigravityAdapter {
         let params = input::prompt_params(&self.session_id(), input::COMPACT_TEXT);
         let (id, message) = self.rpc.request_v2("session/prompt", params);
         self.tracker.register(id, command, PromptKind::Compact);
-        self.tracker.expect_echo(command, input::COMPACT_TEXT);
+        self.tracker.expect_echo(id, command, input::COMPACT_TEXT);
         self.tracker.await_echo(command);
         if let Some(translator) = self.translator.as_mut() {
             translator.begin_turn(None);

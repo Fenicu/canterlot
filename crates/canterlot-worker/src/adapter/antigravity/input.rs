@@ -177,6 +177,8 @@ struct PromptMeta {
 }
 
 struct EchoWait {
+    /// Prompt, которому принадлежит ожидание: ответ снимает его, чужое эхо не продлевает.
+    rpc_id: i64,
     command_id: Uuid,
     text: String,
 }
@@ -289,8 +291,9 @@ impl Tracker {
     }
 
     /// Ожидание эха текста: чанк с чужим текстом доказательством не считается.
-    pub fn expect_echo(&mut self, command_id: Uuid, text: &str) {
+    pub fn expect_echo(&mut self, rpc_id: i64, command_id: Uuid, text: &str) {
         self.echoes.push_back(EchoWait {
+            rpc_id,
             command_id,
             text: text.to_owned(),
         });
@@ -324,6 +327,11 @@ impl Tracker {
 
     /// Позднее эхо после `Undetermined` становится `InputAccepted`.
     pub fn on_echo(&mut self, text: &str) -> Option<Effect> {
+        // Эхо доказывает приём только живому prompt: ожидание отвечённого prompt
+        // иначе съело бы эхо следующего ввода с тем же текстом.
+        let prompts = &self.prompts;
+        self.echoes
+            .retain(|wait| prompts.contains_key(&wait.rpc_id));
         let position = self.echoes.iter().position(|wait| wait.text == text)?;
         let wait = self.echoes.remove(position)?;
         if let Some(meta) = self
@@ -355,6 +363,8 @@ impl Tracker {
     /// Ответ prompt: вклад в ход, закрытие хода или итог сжатия.
     pub fn on_response(&mut self, id: i64, result: &Result<Value, RpcError>) -> Option<Effect> {
         let meta = self.prompts.remove(&id)?;
+        // Ответ закрывает ожидание эха своего prompt: чужой ввод его не наследует.
+        self.echoes.retain(|wait| wait.rpc_id != id);
         let awaiting_echo = !meta.proved && self.waiting == Some(meta.command_id);
         if awaiting_echo {
             self.waiting = None;
@@ -370,8 +380,6 @@ impl Tracker {
                     .and_then(|value| value["stopReason"].as_str())
                     .map(str::to_owned);
                 if !meta.proved {
-                    self.echoes
-                        .retain(|wait| wait.command_id != meta.command_id);
                     self.unconfirmed.remove(&meta.command_id);
                     if let Err(error) = result {
                         self.early_rejects
@@ -395,8 +403,6 @@ impl Tracker {
                         }
                     }
                     Err(error) => {
-                        self.echoes
-                            .retain(|wait| wait.command_id != meta.command_id);
                         self.unconfirmed.remove(&meta.command_id);
                         // Отказ после срока (`Undetermined`) больше некому вручить:
                         // без терминального исхода ход молча пропал бы, а supervisor
@@ -591,14 +597,14 @@ mod tests {
         let mut tracker = Tracker::new();
         assert!(tracker.begin(first));
         tracker.register(4, first, PromptKind::Turn);
-        tracker.expect_echo(first, "one");
+        tracker.expect_echo(4, first, "one");
         tracker.await_echo(first);
         assert!(matches!(tracker.on_echo("one"), Some(Effect::Proof(id)) if id == first));
         assert!(tracker.take_proved(first));
         tracker.stop_waiting();
 
         tracker.register(5, second, PromptKind::Turn);
-        tracker.expect_echo(second, "two");
+        tracker.expect_echo(5, second, "two");
         tracker.await_echo(second);
         assert!(matches!(tracker.on_echo("two"), Some(Effect::Proof(id)) if id == second));
         assert!(tracker.take_proved(second));
@@ -621,10 +627,10 @@ mod tests {
         let mut tracker = Tracker::new();
         tracker.begin(first);
         tracker.register(4, first, PromptKind::Turn);
-        tracker.expect_echo(first, "one");
+        tracker.expect_echo(4, first, "one");
         tracker.on_echo("one");
         tracker.register(5, first, PromptKind::Turn);
-        tracker.expect_echo(first, "two");
+        tracker.expect_echo(5, first, "two");
         tracker.on_echo("two");
         assert!(tracker.on_response(4, &Ok(usage(10, 1, 2))).is_none());
         let (command, usage, ..) = closed(tracker.on_response(5, &Ok(usage(20, 3, 4))));
@@ -640,7 +646,7 @@ mod tests {
         let mut tracker = Tracker::new();
         tracker.begin(command);
         tracker.register(2, command, PromptKind::Turn);
-        tracker.expect_echo(command, "our text");
+        tracker.expect_echo(2, command, "our text");
         tracker.await_echo(command);
         assert!(tracker.on_echo("foreign").is_none());
         assert!(!tracker.take_proved(command));
@@ -652,7 +658,7 @@ mod tests {
         let mut tracker = Tracker::new();
         tracker.begin(command);
         tracker.register(2, command, PromptKind::Turn);
-        tracker.expect_echo(command, "text");
+        tracker.expect_echo(2, command, "text");
         tracker.await_echo(command);
         tracker.stop_waiting();
         tracker.mark_unconfirmed(command);
@@ -665,7 +671,7 @@ mod tests {
         let mut tracker = Tracker::new();
         tracker.begin(command);
         tracker.register(2, command, PromptKind::Turn);
-        tracker.expect_echo(command, "text");
+        tracker.expect_echo(2, command, "text");
         tracker.await_echo(command);
         assert!(
             tracker
@@ -692,7 +698,7 @@ mod tests {
         let mut tracker = Tracker::new();
         tracker.begin(command);
         tracker.register(2, command, PromptKind::Turn);
-        tracker.expect_echo(command, "text");
+        tracker.expect_echo(2, command, "text");
         tracker.on_echo("text");
         let (id, _, failed, _) = closed(tracker.on_response(
             2,
@@ -712,7 +718,7 @@ mod tests {
         let mut tracker = Tracker::new();
         tracker.begin(command);
         tracker.register(2, command, PromptKind::Turn);
-        tracker.expect_echo(command, "text");
+        tracker.expect_echo(2, command, "text");
         tracker.await_echo(command);
         assert!(tracker.on_response(2, &Ok(usage(1, 1, 0))).is_some());
         assert!(tracker.take_answered_unproven(command));
@@ -723,7 +729,7 @@ mod tests {
         let command = Uuid::now_v7();
         let mut tracker = Tracker::new();
         tracker.register(5, command, PromptKind::Compact);
-        tracker.expect_echo(command, COMPACT_TEXT);
+        tracker.expect_echo(5, command, COMPACT_TEXT);
         tracker.await_echo(command);
         assert!(
             tracker
@@ -746,7 +752,7 @@ mod tests {
         let command = Uuid::now_v7();
         let mut tracker = Tracker::new();
         tracker.register(5, command, PromptKind::Compact);
-        tracker.expect_echo(command, COMPACT_TEXT);
+        tracker.expect_echo(5, command, COMPACT_TEXT);
         tracker.on_echo(COMPACT_TEXT);
         assert!(tracker.has_compaction());
         assert!(matches!(
@@ -787,7 +793,7 @@ mod tests {
         let mut tracker = Tracker::new();
         tracker.begin(command);
         tracker.register(4, command, PromptKind::Turn);
-        tracker.expect_echo(command, "ask");
+        tracker.expect_echo(4, command, "ask");
         tracker.on_echo("ask");
         tracker.expect_continuation(true);
         assert!(
@@ -810,13 +816,13 @@ mod tests {
         let command = Uuid::now_v7();
         let mut tracker = Tracker::new();
         tracker.register(5, command, PromptKind::Compact);
-        tracker.expect_echo(command, COMPACT_TEXT);
+        tracker.expect_echo(5, command, COMPACT_TEXT);
         assert!(tracker.on_eof().is_none());
         assert_eq!(tracker.last_compact_ok(), None);
 
         let command = Uuid::now_v7();
         tracker.register(5, command, PromptKind::Compact);
-        tracker.expect_echo(command, COMPACT_TEXT);
+        tracker.expect_echo(5, command, COMPACT_TEXT);
         tracker.on_echo(COMPACT_TEXT);
         assert!(matches!(
             tracker.on_eof(),

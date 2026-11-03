@@ -1324,6 +1324,60 @@ async fn a_late_echo_after_the_deadline_is_input_accepted() {
 }
 
 #[tokio::test]
+async fn a_steer_answered_without_an_echo_does_not_keep_its_echo_for_the_next_input() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 2),
+        Script::send(user_chunk("one")),
+        deferred("session/prompt", 3),
+        // Ответ steer без эха: ожидание эха не должно пережить свой prompt.
+        respond(3, end_turn(Some(usage(1, 1, 0)))),
+        respond(2, end_turn(Some(usage(1, 1, 0)))),
+        deferred("session/prompt", 4),
+        Script::send(user_chunk("two")),
+        respond(4, end_turn(Some(usage(1, 1, 0)))),
+    ];
+    let mut bench = Bench::with_timing(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+        Duration::from_millis(300),
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+    bench.start().await;
+    let first = send("one");
+    assert!(matches!(
+        bench.adapter.transmit(&first, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let steer = send("two");
+    assert!(matches!(
+        bench.adapter.steer(&steer).await,
+        SteerOutcome::Undetermined
+    ));
+    let events = drain(&mut bench.adapter).await;
+    assert_eq!(finished(&events), vec![first.command_id]);
+
+    let next = send("two");
+    assert!(
+        matches!(
+            bench.adapter.transmit(&next, &bench.group).await,
+            TransmitOutcome::Accepted(ref proof) if proof.command_id == next.command_id
+        ),
+        "the stale steer echo must not eat the next input's proof"
+    );
+    let events = drain(&mut bench.adapter).await;
+    assert_eq!(finished(&events), vec![next.command_id]);
+    bench.close().await;
+}
+
+#[tokio::test]
 async fn a_rejection_after_the_deadline_fails_the_turn_instead_of_dropping_it() {
     let steps = vec![
         init_step(),
