@@ -607,7 +607,7 @@ pub(crate) async fn store_machine_time_in_tx(
                 .bind(command_id).bind(attempt).bind(machine_time_ms).execute(conn).await?;
         }
         InputReceipt::TransmissionStarted | InputReceipt::Accepted => {
-            sqlx::query("update inputs i set transmitted_machine_ms = case when $4 then coalesce(transmitted_machine_ms, $3) else transmitted_machine_ms end, agent_confirmed_machine_ms = case when not $4 then coalesce(agent_confirmed_machine_ms, $3) else agent_confirmed_machine_ms end from commands c where c.id = $1 and c.dispatch_attempt = $2 and i.command_id = c.id")
+            sqlx::query("update inputs i set transmitted_machine_ms = case when $4 then coalesce(transmitted_machine_ms, $3) else transmitted_machine_ms end, agent_confirmed_machine_ms = case when not $4 then coalesce(agent_confirmed_machine_ms, $3) else agent_confirmed_machine_ms end from commands c where c.id = $1 and c.dispatch_attempt = $2 and i.command_id = case when c.kind = 'steer_input' then c.target_command_id else c.id end")
                 .bind(command_id).bind(attempt).bind(machine_time_ms).bind(*receipt == InputReceipt::TransmissionStarted).execute(conn).await?;
         }
         _ => {}

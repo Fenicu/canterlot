@@ -2536,3 +2536,62 @@ async fn steer_records_lock_the_queue_before_the_command(pool: PgPool) -> TestRe
     }
     Ok(())
 }
+
+/// Время приёма влитого ввода пишется в сам ввод, хотя квитанция приходит на
+/// команду вливания.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn steered_input_gets_agent_confirmation_time(pool: PgPool) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let queued = submit_input(
+        &pool,
+        SubmitInput {
+            owner_id: seed.owner_id,
+            conversation_id: seed.conversation_id,
+            idempotency_key: Uuid::now_v7().to_string(),
+            content: vec![ContentBlock::Text {
+                text: "steered".into(),
+            }],
+            received_at: Utc::now(),
+            correlation_id: Uuid::now_v7(),
+            origin: None,
+        },
+    )
+    .await?;
+    let steer = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
+                               kind, payload, target_command_id, delivery_state, dispatch_attempt,
+                               dispatch_claimed_at)
+         values ($1, $2, $3, $4, 1, 'steer_input', '{}'::jsonb, $5, 'pending', 0, now())",
+    )
+    .bind(steer)
+    .bind(seed.machine_id)
+    .bind(seed.conversation_id)
+    .bind(execution.execution_id)
+    .bind(queued.command_id)
+    .execute(&pool)
+    .await?;
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![record_body::Body::InputAccepted(InputAccepted {
+                    command_id: steer.to_string(),
+                    dispatch_attempt: 0,
+                    machine_time_ms: 505,
+                })],
+            ),
+        )
+        .await?;
+    let (state, confirmed): (String, Option<i64>) = sqlx::query_as(
+        "select state, agent_confirmed_machine_ms from inputs where id = $1",
+    )
+    .bind(queued.input_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((state.as_str(), confirmed), ("accepted", Some(505)));
+    Ok(())
+}
