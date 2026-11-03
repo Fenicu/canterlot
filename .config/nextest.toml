@@ -40,11 +40,6 @@ filter = 'package(canterlot-worker) & (binary(attachments) | binary(claude_code_
 test-group = "heavy-e2e"
 slow-timeout = { period = "30s", terminate-after = 8 }
 
-# QUARANTINE: падает только в полном прогоне рядом с параллельным clippy (3 из 3 прогонов с линтом, 0 из 12 отдельно): оборванное получение удержания после остановки воркера
-[[profile.default.overrides]]
-filter = 'package(canterlot-worker) & test(=media_upload_resumes_after_reconnect_without_duplicate_record)'
-retries = 2
-
 # Карантин нестабильных тестов. Повтор разрешён только здесь: каждая запись с причиной и строкой
 # в .superpowers/carry/flaky-tests.md. Повтор виден в выводе как TRY n и итоговый FLAKY, молча
 # ничего не перезапускается. Запись помечается строкой с причиной (слово в верхнем регистре, см. выше), её показывает
