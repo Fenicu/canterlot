@@ -342,3 +342,23 @@ test('list_and_new_session_have_no_horizontal_scroll_at_360px_and_320px_and_200_
     await page.goto('/sessions');
   }
 });
+
+test('focus_ring_of_a_full_width_field_fits_inside_the_sheet', async ({ page }) => {
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  const field = pathField(page);
+  await field.focus();
+  const fit = await field.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const ring = parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset);
+    const box = element.getBoundingClientRect();
+    let clipper = element.parentElement!;
+    while (clipper.parentElement && getComputedStyle(clipper).overflowY === 'visible' && getComputedStyle(clipper).overflowX === 'visible') clipper = clipper.parentElement;
+    const clip = clipper.getBoundingClientRect();
+    return { ring, start: box.left - ring - clip.left, end: clip.right - (box.right + ring) };
+  });
+  // Кольцо фокуса видно целиком: ближайший обрезающий контейнер, тело листа или панель, его не срезает.
+  expect(fit.ring).toBeGreaterThan(0);
+  expect(fit.start).toBeGreaterThanOrEqual(0);
+  expect(fit.end).toBeGreaterThanOrEqual(0);
+});

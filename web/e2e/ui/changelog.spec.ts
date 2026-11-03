@@ -24,6 +24,11 @@ test('update_shows_new_entries_once_and_not_after_reload', async ({ page }) => {
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText(APP_VERSION, { exact: true })).toBeVisible();
   await expect(dialog.getByText('Первая пронумерованная версия.')).toBeVisible();
+  // Лист открылся сам: фокус на заголовке, а не кольцом на «Закрыть».
+  await expect(dialog.getByRole('heading', { name: 'Что нового' })).toBeFocused();
+  await expect(dialog.getByRole('button', { name: 'Закрыть' })).not.toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', { name: 'Закрыть' })).toBeFocused();
   await dialog.getByRole('button', { name: 'Понятно', exact: true }).click();
   await expect(dialog).toHaveCount(0);
 
