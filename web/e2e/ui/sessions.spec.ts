@@ -56,6 +56,22 @@ test('selected_group_tab_stands_out_in_both_themes', async ({ page }) => {
   expect(await fillContrast(selected)).toBeGreaterThanOrEqual(3);
 });
 
+test('phone_tabs_fade_only_the_edge_with_more_tabs_and_keep_the_selected_tab_clear', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'на рабочем столе вкладки переносятся, а не листаются');
+  await boot(page);
+  const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
+  await expect(tablist).toHaveAttribute('data-fade-end', '');
+  await expect(tablist).not.toHaveAttribute('data-fade-start', '');
+  await tablist.getByRole('tab', { name: /Архив/ }).click();
+  await expect(tablist).toHaveAttribute('data-fade-start', '');
+  await expect(tablist).not.toHaveAttribute('data-fade-end', '');
+  // Выбранная вкладка целиком вне гаснущей полосы.
+  const strip = (await tablist.boundingBox())!;
+  const tab = (await tablist.getByRole('tab', { selected: true }).boundingBox())!;
+  expect(tab.x + tab.width).toBeLessThanOrEqual(strip.x + strip.width + 1);
+  expect(tab.x).toBeGreaterThanOrEqual(strip.x + 18);
+});
+
 test('tabs_of_the_desktop_list_stay_compact_and_left_aligned', async ({ page, isMobile }) => {
   test.skip(isMobile, 'телефон листает вкладки');
   await page.setViewportSize({ width: 1707, height: 960 });

@@ -16,6 +16,38 @@
     return a.kind !== 'group' || b.kind !== 'group' || a.id === b.id;
   }
 
+  let strip = $state<HTMLElement | null>(null);
+  let fadeStart = $state(false);
+  let fadeEnd = $state(false);
+
+  // Край гаснет только там, где за ним есть ещё вкладки.
+  function measure() {
+    if (!strip) return;
+    fadeStart = strip.scrollLeft > 1;
+    fadeEnd = strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1;
+  }
+
+  // Выбранная вкладка не прячется под гаснущим краем.
+  $effect(() => {
+    void current;
+    void tabs.map((item) => item.label + item.count).join();
+    const node = strip;
+    if (!node) return;
+    const tab = node.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (tab && node.scrollWidth > node.clientWidth) {
+      const pad = parseFloat(getComputedStyle(node).scrollPaddingInlineStart) || 0;
+      const box = node.getBoundingClientRect();
+      const own = tab.getBoundingClientRect();
+      if (own.left < box.left + pad) node.scrollLeft -= box.left + pad - own.left;
+      else if (own.right > box.right - pad) node.scrollLeft += own.right - (box.right - pad);
+    }
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    for (const child of node.children) observer.observe(child);
+    return () => observer.disconnect();
+  });
+
   function move(event: KeyboardEvent) {
     const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
     const back = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
@@ -27,7 +59,7 @@
   }
 </script>
 
-<div class="tabs" class:fade={tabs.length > 3} role="tablist" aria-label="Группы сессий" tabindex="-1" onkeydown={move}>
+<div bind:this={strip} class="tabs" data-fade-start={fadeStart ? '' : undefined} data-fade-end={fadeEnd ? '' : undefined} role="tablist" aria-label="Группы сессий" tabindex="-1" onkeydown={move} onscroll={measure}>
   {#each tabs as item, index (item.label + index)}
     <button
       type="button"
@@ -51,7 +83,10 @@
     margin: var(--s3) var(--gutter);
     padding-block: var(--s2);
   }
-  .fade { mask-image: linear-gradient(to left, var(--transparent), var(--text) var(--s9)); }
+  .tabs { scroll-padding-inline: var(--s9); }
+  [data-fade-end] { mask-image: linear-gradient(to left, var(--transparent), var(--text) var(--s9)); }
+  [data-fade-start] { mask-image: linear-gradient(to right, var(--transparent), var(--text) var(--s9)); }
+  [data-fade-start][data-fade-end] { mask-image: linear-gradient(to right, var(--transparent), var(--text) var(--s9), var(--text) calc(100% - var(--s9)), var(--transparent)); }
   :global([data-pane='list']) .tabs { mask-image: none; }
   button {
     flex: 1 0 auto;
