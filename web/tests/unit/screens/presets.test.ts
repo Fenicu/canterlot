@@ -3,6 +3,7 @@ import {
   byteCounter,
   formatOrigin,
   formatOwnerMtime,
+  memoryProjects,
   formatSize,
   isAgentMarked,
   ownerHarnessSummary,
@@ -88,7 +89,7 @@ describe("presets/model", () => {
       { kind: "opencode_global", harness: "opencode", path: "/d", present: false, size: 0, mtime: null, reason: "" },
     ];
     const summary = ownerHarnessSummary(files);
-    expect(summary.find((item) => item.harness === "claude")).toMatchObject({ found: 1, total: 100 });
+    expect(summary.find((item) => item.harness === "claude")).toMatchObject({ title: "Claude Code", found: 1, total: 100 });
     expect(summary.find((item) => item.harness === "codex")?.text).toContain("2,0 КиБ");
     expect(summary.find((item) => item.harness === "opencode")?.found).toBe(0);
   });
@@ -97,6 +98,10 @@ describe("presets/model", () => {
     expect(formatSize(0)).toBe("0 Б");
     expect(formatSize(2048)).toBe("2,0 КиБ");
     expect(formatOwnerMtime(null)).toBe("");
-    expect(formatOwnerMtime("2026-10-28T12:00:00.000Z")).toContain("28.10.2026");
+    const now = Date.parse("2026-11-03T12:00:00.000Z");
+    expect(formatOwnerMtime("2026-10-28T12:00:00.000Z", now)).toMatch(/^28 октября, \d\d:00$/);
+    expect(formatOwnerMtime("2025-10-28T12:00:00.000Z", now)).toMatch(/^28 октября 2025, \d\d:00$/);
+    expect(memoryProjects(0)).toBe("нет проектов");
+    expect(["1", "2", "5", "11", "21", "22"].map((n) => memoryProjects(Number(n)))).toEqual(["1 проект", "2 проекта", "5 проектов", "11 проектов", "21 проект", "22 проекта"]);
   });
 });

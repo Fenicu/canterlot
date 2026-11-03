@@ -58,6 +58,16 @@ export const fmt = {
 	clock(ts: number): string {
 		return clockFmt.format(ts);
 	},
+	/** Дата без времени: «2 ноября», с годом, если он не текущий. */
+	date(ts: number, now: number): string {
+		const date = new Date(ts);
+		const label = dayFmt.format(date);
+		return date.getFullYear() === new Date(now).getFullYear() ? label : `${label} ${date.getFullYear()}`;
+	},
+	/** Дата и время: «28 октября, 15:00», с годом, если он не текущий. */
+	stamp(ts: number, now: number): string {
+		return `${fmt.date(ts, now)}, ${clockFmt.format(ts)}`;
+	},
 	/** Диапазон дат ISO: «24–30 октября» или «28 октября – 2 ноября». */
 	dayRange(from: string | undefined, to: string | undefined): string {
 		if (!from || !to) return from ?? to ?? '';

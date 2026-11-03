@@ -7,7 +7,7 @@
   import Button from '#lib/ui/Button.svelte';
   import Select from '#lib/ui/Select.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
-  import { formatOwnerMtime, formatSize, OWNER_KIND_META, ownerHarnessSummary } from './presetsModel.js';
+  import { formatOwnerMtime, formatSize, memoryProjects, OWNER_KIND_META, ownerHarnessSummary } from './presetsModel.js';
 
   let {
     machines,
@@ -32,7 +32,6 @@
     Record<string, { loading: boolean; error: string; text: string; truncated: boolean; files?: { name: string; size: number; mtime: string | null }[] }>
   >({});
   let projectId = $state('');
-  let memory = $state<{ loading: boolean; error: string } | null>(null);
 
   const summary = $derived(overview ? ownerHarnessSummary(overview.files) : []);
   const machineName = $derived(machines.find((m) => m.id === machineId)?.name ?? '');
@@ -140,9 +139,9 @@
   {:else if overview}
     <ul class="summary" data-owner-summary>
       {#each summary as item (item.harness)}
-        <li>{item.harness}: {item.text}</li>
+        <li>{item.title}: {item.text}</li>
       {/each}
-      <li>память: {overview.memory_projects.length === 0 ? 'нет проектов' : `${overview.memory_projects.length} проект`}</li>
+      <li>Память Claude Code: {memoryProjects(overview.memory_projects.length)}</li>
     </ul>
     {#each overview.files as file (file.kind)}
       {@const meta = OWNER_KIND_META[file.kind]}
@@ -174,15 +173,17 @@
       {#if overview.memory_projects.length === 0}
         <p class="note">Проектов с памятью нет.</p>
       {:else}
-        <Select
-          label="Проект"
-          options={overview.memory_projects.map((p) => ({ value: p.id, label: p.id }))}
-          bind:value={projectId}
-        />
+        <div class="stack">
+          <Select
+            label="Проект"
+            options={overview.memory_projects.map((p) => ({ value: p.id, label: p.id }))}
+            bind:value={projectId}
+          />
+          {#if projectId}<Button onclick={() => void loadMemory('MEMORY.md')}>Показать MEMORY.md</Button>{/if}
+        </div>
         {#if projectId}
           {@const key = 'memory:MEMORY.md'}
           {@const indexState = contents[key]}
-          <Button onclick={() => void loadMemory('MEMORY.md')}>Показать MEMORY.md</Button>
           {#if expanded === key || (indexState && !indexState.loading && !indexState.error && expanded?.startsWith('memory:'))}
             {#if !indexState || indexState.loading}
               <p>Читаю файл…</p>
@@ -217,17 +218,21 @@
       {/if}
     </section>
   {/if}
-  {#if memory}{/if}
 </Sheet>
 
 <style>
-  .summary { list-style: none; margin: 0 0 var(--s4); padding: var(--s4); background: var(--surface-raised); border-radius: var(--radius-card); display: flex; flex-direction: column; gap: var(--s1); font-size: var(--fs-meta); color: var(--secondary); }
-  section { background: var(--surface); border-radius: var(--radius-card); padding: var(--s6); margin-bottom: var(--s4); }
-  .row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--s2); }
+  /* Карточки приподняты над листом; поля и кнопки внутри них берут фон выбора, как в настройках сессии. */
+  .summary { list-style: none; margin: var(--s6) 0 var(--s4); padding: var(--s6); background: var(--raised); border-radius: var(--radius-card); display: flex; flex-direction: column; gap: var(--s1); font-size: var(--fs-meta); color: var(--secondary); }
+  section { --field-bg: var(--selected); --button-bg: var(--selected); display: flex; flex-direction: column; align-items: flex-start; gap: var(--s3); background: var(--raised); border-radius: var(--radius-card); padding: var(--s6); margin-bottom: var(--s4); }
+  section > :global(*) { max-width: 100%; }
+  section p { margin: 0; }
+  .row { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); }
+  .stack { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s4); align-self: stretch; }
+  .stack > :global(.field) { align-self: stretch; }
   .meta, .note, .path { font-size: var(--fs-meta); color: var(--secondary); }
   .path { overflow-wrap: anywhere; }
-  .md { max-height: 40vh; overflow-y: auto; margin-top: var(--s4); overscroll-behavior: contain; }
-  .files { list-style: none; margin: var(--s4) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
+  .md { align-self: stretch; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
+  .files { align-self: stretch; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
   .link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-align: left; }
   .error { color: var(--danger); }
 </style>
