@@ -758,6 +758,8 @@ async fn settings_survive_worker_restart_between_dispatch_and_accept(pool: PgPoo
     std::fs::write(&ca, &hub.pki.ca_pem).unwrap();
     let work = root.path().join("work");
     std::fs::create_dir(&work).unwrap();
+    let runtime = root.path().join("runtime");
+    std::fs::create_dir(&runtime).unwrap();
     let config = root.path().join("worker.toml");
     std::fs::write(&config, format!("hub_url = \"https://localhost:{}\"\nca_cert = {:?}\ntoken_file = {:?}\nmachine_id = \"{}\"\ninstallation_id = \"{}\"\nrestore_generation = \"{}\"\ndata_dir = {:?}\n[execution]\nallowed_workdir_roots = [{:?}]\nsupervisor_exe = {:?}\n[timers]\nheartbeat = \"100ms\"\nbackoff_min = \"100ms\"\nbackoff_max = \"500ms\"\n", hub.addr.port(),ca.to_str().unwrap(),token.to_str().unwrap(),machine.machine_id,hub.installation.installation_id,hub.installation.restore_generation,root.path().join("data").to_str().unwrap(),work.to_str().unwrap(),binary.to_str().unwrap())).unwrap();
     let spawn = || {
@@ -766,6 +768,7 @@ async fn settings_survive_worker_restart_between_dispatch_and_accept(pool: PgPoo
             .arg("--config")
             .arg(&config)
             .env("CANTERLOT_FAULT_HOLD_AT", "before_gate")
+            .env("XDG_RUNTIME_DIR", &runtime)
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

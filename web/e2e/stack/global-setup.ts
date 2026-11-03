@@ -230,7 +230,11 @@ allowed_workdir_roots = ["${workRoot}"]
 
   // 12. Spawn Worker process
   let workerLogs = '';
+  // Свой каталог сокетов: воркер стенда не видит и не убирает сокеты настоящего воркера.
+  const workerRuntime = join(stackDir, 'runtime');
+  mkdirSync(workerRuntime, { recursive: true, mode: 0o700 });
   const workerProcess: ChildProcess = spawn(workerBin, ['run', '--config', workerToml], {
+    env: { ...process.env, XDG_RUNTIME_DIR: workerRuntime },
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false
   });

@@ -55,7 +55,7 @@ join_background() {
         if wait "${pids[$index]}"; then
             printf '    %s: ok\n' "${names[$index]}"
         else
-            printf '--- %s упал ---\n' "${names[$index]}"
+            printf -- '--- %s упал ---\n' "${names[$index]}"
             tail -n 60 "$logs/${names[$index]}.log"
             failed=1
         fi

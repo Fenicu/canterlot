@@ -317,9 +317,12 @@ async fn no_listening_socket_on_worker(pool: PgPool) {
     let path = directory.path().join("worker.toml");
     fs::write(&path, format!("hub_url = {:?}\nca_cert = {:?}\ntoken_file = {:?}\nmachine_id = {:?}\ninstallation_id = {:?}\nrestore_generation = {:?}\ndata_dir = {:?}\n", config.hub_url, config.ca_cert, config.token_file, config.machine_id.to_string(), config.installation_id.to_string(), config.restore_generation.to_string(), config.data_dir)).unwrap();
     drop(store);
+    let runtime = directory.path().join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
         .args(["run", "--config"])
         .arg(path)
+        .env("XDG_RUNTIME_DIR", &runtime)
         .kill_on_drop(true)
         .spawn()
         .unwrap();
@@ -1199,9 +1202,12 @@ async fn sigterm_closes_streams_and_releases_journal_locks() {
     fs::write(&path, format!("hub_url = {:?}\nca_cert = {:?}\ntoken_file = {:?}\nmachine_id = {:?}\ninstallation_id = {:?}\nrestore_generation = {:?}\ndata_dir = {:?}\n", config.hub_url, config.ca_cert, config.token_file, config.machine_id.to_string(), config.installation_id.to_string(), config.restore_generation.to_string(), config.data_dir)).unwrap();
     let data_dir = config.data_dir.clone();
     drop(store);
+    let runtime = data_dir.parent().unwrap().join("runtime");
+    fs::create_dir_all(&runtime).unwrap();
     let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
         .args(["run", "--config"])
         .arg(path)
+        .env("XDG_RUNTIME_DIR", &runtime)
         .kill_on_drop(true)
         .stderr(std::process::Stdio::piped())
         .spawn()
