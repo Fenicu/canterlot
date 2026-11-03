@@ -362,6 +362,8 @@ test('desktop_panel_lists_child_sessions', async ({ page, isMobile }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`/c/${parent}`);
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  // Как и значок на телефоне, кнопка на рабочем столе показывает число работающих.
+  await expect(page.getByRole('button', { name: 'Делегирование' })).toHaveText('Делегирование · 1');
   await page.getByRole('button', { name: 'Делегирование' }).click();
   const panel = page.locator('[data-pane="lane"]');
   await expect(panel).toBeVisible();

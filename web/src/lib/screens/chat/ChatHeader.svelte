@@ -68,7 +68,7 @@
 
 	let menuOpen = $state(false);
 	const delegated = $derived(hasChildren || chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
-	const running = $derived(!pane.desktop && delegated ? runningCount(liveNodes(chat)) + childRunning : 0);
+	const running = $derived(delegated ? runningCount(liveNodes(chat)) + childRunning : 0);
 	let confirmingForce = $state(false);
 	let actionError = $state<string | null>(null);
 
@@ -199,7 +199,7 @@
 
 		<div class="header-actions">
 			{#if pane.desktop && delegated}
-				<button type="button" class="pane-action" aria-pressed={pane.view === 'delegation'} onclick={() => pane.toggle('delegation')}>Делегирование</button>
+				<button type="button" class="pane-action" aria-pressed={pane.view === 'delegation'} onclick={() => pane.toggle('delegation')}>{running > 0 ? `Делегирование · ${running}` : 'Делегирование'}</button>
 			{/if}
 			{#if !pane.desktop && delegated && onOpenDelegation}
 				<button
@@ -316,11 +316,11 @@
 						</div>
 					{/if}
 				{:else}
-					<MenuItem onclick={() => void handleRun()}>{runLabel(chat.turnRecorded)}</MenuItem>
+					<MenuItem icon="play" onclick={() => void handleRun()}>{runLabel(chat.turnRecorded)}</MenuItem>
 				{/if}
 
 				{#if isLive && hasUserStop}
-					<MenuItem onclick={() => void handleContinueQueue()}>Продолжить очередь</MenuItem>
+					<MenuItem icon="retry" onclick={() => void handleContinueQueue()}>Продолжить очередь</MenuItem>
 				{/if}
 			</Menu>
 		</div>

@@ -707,3 +707,12 @@ test('header_keeps_the_subtitle_readable_and_names_a_long_title', async ({ page 
 	// Тема ушла в меню, и названию остаётся две трети ширины телефона.
 	expect((await heading.boundingBox())!.width).toBeGreaterThanOrEqual(256);
 });
+
+test('session_menu_items_start_their_text_at_one_line', async ({ page }) => {
+	await bootChat(page);
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	const items = page.getByRole('menuitem');
+	await expect(items.filter({ hasText: 'Запустить' })).toBeVisible();
+	const starts = await items.evaluateAll((nodes) => nodes.map((node) => Math.round(node.querySelector('span')!.getBoundingClientRect().left)));
+	expect(new Set(starts).size).toBe(1);
+});
