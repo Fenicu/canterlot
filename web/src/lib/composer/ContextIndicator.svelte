@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorText } from '#lib/api/errors.js';
 	import Button from '#lib/ui/Button.svelte';
 	import Gauge from '#lib/ui/Gauge.svelte';
 	import { turnIsLive } from '#lib/composer/sendRules.js';
@@ -60,8 +61,8 @@
 		try {
 			await compactSessionContext(chat.id);
 			open = false;
-		} catch {
-			error = 'Сжать не удалось';
+		} catch (err) {
+			error = errorText(err, 'Сжать не удалось');
 		} finally {
 			busy = false;
 		}

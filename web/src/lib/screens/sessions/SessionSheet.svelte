@@ -2,6 +2,7 @@
   import { ApiError } from '#lib/api/http.js';
   import { deleteConversation, getConversation, patchConversation, setConversationGroups, patchSettings, setCrunch } from '#lib/api/client.js';
   import { errorText } from '#lib/api/errors.js';
+  import { intents } from '#lib/ops/intent.js';
   import { stopSession } from '#lib/screens/chat/controls.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { PERMISSION_MODES, effortLabel, permissionHint, permissionLabel, permissionValue } from '#lib/format/labels.js';
@@ -77,17 +78,38 @@
     })
     .catch(() => undefined);
 
+  let saveError = $state('');
+
+  /** Правка уходит сразу; отказ или обрыв возвращают прежнее значение и показывают причину. */
+  async function attempt(fallback: string, call: () => Promise<unknown>, revert: () => void): Promise<boolean> {
+    saveError = '';
+    try {
+      await call();
+      return true;
+    } catch (err) {
+      revert();
+      saveError = errorText(err, fallback);
+      return false;
+    }
+  }
+
   $effect(() => {
     const value = pinned;
     if (value === sentPin) return;
     sentPin = value;
-    void patch({ pinned: value });
+    void attempt('Не удалось закрепить', () => patch({ pinned: value }), () => {
+      sentPin = !value;
+      pinned = !value;
+    });
   });
   $effect(() => {
     const value = crunch;
     if (value === sentCrunch) return;
     sentCrunch = value;
-    void saveCrunch();
+    void attempt('Не удалось сохранить кранч', saveCrunchNow, () => {
+      sentCrunch = !value;
+      crunch = !value;
+    });
   });
   const harness = $derived(machine?.harnesses.find((entry) => entry.id === item.harness.id));
   const known = (values: string[], current: string) => (values.includes(current) ? values : [current, ...values]);
@@ -146,45 +168,98 @@
     return list.map((reason) => (reason === 'live_execution' ? turn || 'идёт ход агента' : (reasonText[reason] ?? 'активная работа')));
   }
 
-  async function patch(body: { title?: string; color?: string; pinned?: boolean; archived?: boolean; force?: boolean }, key = crypto.randomUUID()) {
-    await patchConversation(item.id, body, key);
+  async function patch(body: { title?: string; color?: string; pinned?: boolean; archived?: boolean; force?: boolean }) {
+    const id = item.id;
+    await intents.run(`conversation:${id}:${JSON.stringify(body)}`, (key) => patchConversation(id, body, key));
   }
 
   async function saveTitle() {
     const next = title.trim();
     if (next === item.title || next === sentTitle) return;
+    const before = sentTitle;
     sentTitle = next;
-    await patch({ title: next });
+    await attempt('Не удалось переименовать', () => patch({ title: next }), () => {
+      sentTitle = before;
+      title = before;
+    });
   }
 
   async function saveColor(value: string) {
+    const before = chosen;
     chosen = value;
-    await patch({ color: value });
+    await attempt('Не удалось сменить цвет', () => patch({ color: value }), () => {
+      chosen = before;
+    });
   }
 
+  async function saveSetting(body: { model?: string; effort?: string; permission_mode?: string }, revert: () => void) {
+    const id = item.id;
+    await attempt(
+      'Не удалось сохранить настройку',
+      () => intents.run(`settings:${id}:${JSON.stringify(body)}`, (key) => patchSettings(id, body, key)),
+      revert
+    );
+  }
+
+  // Select уже записал новое значение через bind: прежнее помним по последнему сохранённому.
+  let savedModel = seed.model ?? 'opus';
+  let savedEffort = seed.effort ?? 'medium';
+  let savedPermission = permissionValue(seed.permission_mode);
+
   async function saveModel(val: string) {
+    const before = savedModel;
     model = val;
-    await patchSettings(item.id, { model: val }, crypto.randomUUID());
+    savedModel = val;
+    await saveSetting({ model: val }, () => {
+      model = before;
+      savedModel = before;
+    });
   }
 
   async function saveEffort(val: string) {
+    const before = savedEffort;
     effort = val;
-    await patchSettings(item.id, { effort: val }, crypto.randomUUID());
+    savedEffort = val;
+    await saveSetting({ effort: val }, () => {
+      effort = before;
+      savedEffort = before;
+    });
   }
 
   async function savePermission(val: string) {
+    const before = savedPermission;
     permission = val;
-    await patchSettings(item.id, { permission_mode: val }, crypto.randomUUID());
+    savedPermission = val;
+    await saveSetting({ permission_mode: val }, () => {
+      permission = before;
+      savedPermission = before;
+    });
+  }
+
+  async function saveCrunchNow() {
+    // Окно могло закрыться, пока ждали текст: адрес сессии берём до ожидания.
+    const id = item.id;
+    await seeded;
+    const body = { enabled: crunch, resume_text: resumeText };
+    await intents.run(`crunch:${id}:${JSON.stringify(body)}`, (key) => setCrunch(id, body, key));
   }
 
   async function saveCrunch() {
-    await seeded;
-    await setCrunch(item.id, { enabled: crunch, resume_text: resumeText }, crypto.randomUUID());
+    await attempt('Не удалось сохранить текст продолжения', saveCrunchNow, () => undefined);
   }
 
   async function saveGroups(id: string, on: boolean) {
+    const before = members;
+    const conversation = item.id;
     members = on ? [...members, id] : members.filter((itemId) => itemId !== id);
-    await setConversationGroups(item.id, { group_ids: members }, crypto.randomUUID());
+    const body = { group_ids: members };
+    await attempt(
+      'Не удалось изменить группы',
+      () => intents.run(`groups:${conversation}:${JSON.stringify(body)}`, (key) => setConversationGroups(conversation, body, key)),
+      () => {
+        members = before;
+      }
+    );
   }
 
   async function sessionNow(id: string): Promise<{ live: boolean; turn: string }> {
@@ -243,6 +318,7 @@
   }
 
   async function archive(force = false) {
+    saveError = '';
     try {
       await patch({ archived: true, force: force || undefined });
       reasons = [];
@@ -252,7 +328,7 @@
         reasons = await reasonLabels(err.details?.reasons ?? []);
         return;
       }
-      throw err;
+      saveError = errorText(err, 'Не удалось архивировать');
     }
   }
 </script>
@@ -309,6 +385,7 @@
     <button type="button" class="archive remove" onclick={() => void askDelete()}>
       <Icon name="trash" /><span>Удалить</span><small>Без возможности вернуть</small>
     </button>
+    {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
     {#if stopping}<p class="note" role="status">Останавливаю процесс</p>{/if}
     {#if deleteError}<p class="error" role="alert">{deleteError}</p>{/if}
   </div>
