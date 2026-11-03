@@ -8,6 +8,7 @@ import type { ConnectionStatus } from "#lib/sync/connection.js";
 import type { LimitsView } from "#lib/api/config.js";
 import type { AttachmentRef } from "#lib/stores/inputs.js";
 import { freshInput } from "#lib/stores/inputs.js";
+import { intents } from "#lib/ops/intent.js";
 import { utf8Length } from "#lib/stores/blocks.js";
 import { attachmentKind } from "#lib/timeline/attachments.js";
 import { UploadLimitError } from "#lib/uploads/uploader.js";
@@ -318,16 +319,18 @@ export class ComposerModel {
     this.interruptLabel = "Прерываю…";
 
     let outcome: unknown;
+    const conversationId = this.deps.conversationId;
     try {
-      const key = crypto.randomUUID();
-      if (this.deps.interruptApi) {
-        outcome = await this.deps.interruptApi(this.deps.conversationId, key);
-      } else {
+      // Повтор после обрыва идёт тем же ключом: хаб не заведёт второе прерывание.
+      outcome = await intents.run(`interrupt:${conversationId}`, async (key) => {
+        if (this.deps.interruptApi)
+          return this.deps.interruptApi(conversationId, key);
         const { interrupt } = await import("#lib/api/client.js");
-        outcome = (await interrupt(this.deps.conversationId, key)).data;
-      }
+        return (await interrupt(conversationId, key)).data;
+      });
     } catch {
-      this.interruptLabel = "Прервать";
+      // Кнопка остаётся на виду с причиной: молча вернуть «Прервать» значит скрыть сбой.
+      this.interruptLabel = "Не прервано, повторить";
       this.interruptRunning = false;
       return;
     }

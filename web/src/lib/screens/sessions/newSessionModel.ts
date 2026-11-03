@@ -122,6 +122,7 @@ export class NewSessionModel {
   #server: Partial<Record<Field, string>> = {};
   #refusedForm = "";
   #key = "";
+  #inflight: Promise<{ conversationId: string }> | null = null;
 
   constructor(
     private machines: MachinesStore,
@@ -206,9 +207,21 @@ export class NewSessionModel {
     this.recent = response?.data.workdirs.slice(0, 3) ?? [];
   }
 
-  async submit(): Promise<{ conversationId: string }> {
+  /** Повторное нажатие до исхода ждёт ту же операцию: одна сессия на одно намерение. */
+  submit(): Promise<{ conversationId: string }> {
+    if (this.#inflight) return this.#inflight;
+    const flight = this.#submit().finally(() => {
+      this.#inflight = null;
+    });
+    this.#inflight = flight;
+    return flight;
+  }
+
+  async #submit(): Promise<{ conversationId: string }> {
     const gate = this.canSubmit;
     if (!gate.ok) throw new Error(gate.reason);
+    // Ключ назначается до первого await: второе нажатие не может получить другой.
+    this.#key ||= crypto.randomUUID();
     const op = await this.ops.begin(
       "create_conversation",
       {
@@ -227,9 +240,8 @@ export class NewSessionModel {
         },
         start: true,
       },
-      { persist: true, key: this.#key || undefined },
+      { persist: true, key: this.#key },
     );
-    this.#key = op.key;
     try {
       await this.ops.run(op);
     } catch (err) {

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { createGroup, deleteGroup, patchGroup } from '#lib/api/client.js';
+  import { errorText } from '#lib/api/errors.js';
+  import { intents } from '#lib/ops/intent.js';
   import { fmt } from '#lib/format/ru.js';
   import Button from '#lib/ui/Button.svelte';
   import Field from '#lib/ui/Field.svelte';
@@ -24,30 +26,53 @@
     return `${count} ${fmt.plural(count, ['сессия', 'сессии', 'сессий'])}`;
   };
 
+  let error = $state('');
+  const creating = $derived(intents.busy(`group-create:${name.trim()}`));
+
+  async function guarded(fallback: string, call: () => Promise<unknown>): Promise<boolean> {
+    error = '';
+    try {
+      await call();
+      return true;
+    } catch (err) {
+      error = errorText(err, fallback);
+      return false;
+    }
+  }
+
   async function add() {
     const next = name.trim();
     if (!next) return;
-    await createGroup({ name: next }, crypto.randomUUID());
-    name = '';
+    if (await guarded('Не удалось создать группу', () => intents.run(`group-create:${next}`, (key) => createGroup({ name: next }, key)))) name = '';
   }
 
-  async function rename(id: string, value: string, previous: string) {
-    const next = value.trim();
+  async function rename(input: HTMLInputElement, id: string, previous: string) {
+    const next = input.value.trim();
     if (!next || next === previous) return;
-    await patchGroup(id, { name: next }, crypto.randomUUID());
+    const body = { name: next };
+    const ok = await guarded('Не удалось переименовать группу', () => intents.run(`group-patch:${id}:${JSON.stringify(body)}`, (key) => patchGroup(id, body, key)));
+    if (!ok) input.value = previous;
   }
 
   async function move(index: number, dir: number) {
     const other = ordered[index + dir];
     const current = ordered[index];
     if (!other || !current) return;
-    await patchGroup(current.id, { position: other.position }, crypto.randomUUID());
-    await patchGroup(other.id, { position: current.position }, crypto.randomUUID());
+    const place = (id: string, position: number) => intents.run(`group-patch:${id}:${position}`, (key) => patchGroup(id, { position }, key));
+    await guarded('Не удалось изменить порядок', async () => {
+      await place(current.id, other.position);
+      try {
+        await place(other.id, current.position);
+      } catch (err) {
+        // Вторая половина обмена не дошла: первую возвращаем, иначе у двух групп одна позиция.
+        await place(current.id, current.position).catch(() => undefined);
+        throw err;
+      }
+    });
   }
 
   async function remove(id: string) {
-    await deleteGroup(id, crypto.randomUUID());
-    confirmId = '';
+    if (await guarded('Не удалось удалить группу', () => intents.run(`group-delete:${id}`, (key) => deleteGroup(id, key)))) confirmId = '';
   }
 </script>
 
@@ -55,7 +80,7 @@
   <div class="manager">
     {#each ordered as group, index (group.id)}
       <div class="group">
-        <input aria-label={`Название ${group.name}`} value={group.name} onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void rename(group.id, event.currentTarget.value, group.name); } }} onblur={(event) => void rename(group.id, event.currentTarget.value, group.name)} />
+        <input aria-label={`Название ${group.name}`} value={group.name} onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void rename(event.currentTarget, group.id, group.name); } }} onblur={(event) => void rename(event.currentTarget, group.id, group.name)} />
         <div class="controls">
           <span class="count">{sessions(group.id)}</span>
           <IconButton filled icon="up" label="Выше" inert={index === 0} onclick={() => void move(index, -1)} />
@@ -74,11 +99,16 @@
       </div>
     {/each}
     <p class="note">Название сохраняется по Enter или когда фокус уходит из поля.</p>
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
     <form onsubmit={(event) => { event.preventDefault(); void add(); }}>
       <Field label="Новая группа">
         {#snippet children({ id })}<input {id} bind:value={name} aria-label="Название группы" placeholder="Название группы" />{/snippet}
       </Field>
-      <Button type="submit">Создать</Button>
+      {#if creating}
+        <Button disabled={true} reason="Группа создаётся">Создаю…</Button>
+      {:else}
+        <Button type="submit">Создать</Button>
+      {/if}
     </form>
     <div class="done"><Button variant="primary" onclick={onclose}>Готово</Button></div>
   </div>
@@ -95,6 +125,7 @@
   .actions { display: flex; flex-wrap: wrap; gap: var(--s3); }
   .danger { --accent: var(--danger); --accent-ink: var(--bg); display: contents; }
   .note { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
+  .error { margin: 0; color: var(--danger); font-size: var(--fs-sm); }
   form { display: flex; align-items: flex-end; gap: var(--s3); }
   form > :global(.field) { flex: 1; }
   .done { display: flex; justify-content: flex-end; }

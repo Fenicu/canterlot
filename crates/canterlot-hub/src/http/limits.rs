@@ -67,6 +67,7 @@ pub struct RefreshView {
     pub retry_after_secs: u64,
 }
 #[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct HistoryParams {
     pub provider: Option<String>,
     pub from: Option<DateTime<Utc>>,
@@ -175,7 +176,7 @@ async fn history(
         speed,
     }))
 }
-#[utoipa::path(post,path="/api/v1/limits/refresh",tag="limits",responses((status=202,description="Просьба об опросе отправлена воркерам; новые показания придут событием limits_changed",body=RefreshView),(status=429,description="Опрос просили слишком недавно"),(status=409,description="Нет доступного воркера с лимитами")))]
+#[utoipa::path(post,path="/api/v1/limits/refresh",tag="limits",responses((status=202,description="Просьба об опросе отправлена воркерам; новые показания придут событием limits_changed",body=RefreshView),(status=429,description="Опрос просили слишком недавно",body=super::error::ErrorEnvelope),(status=409,description="Нет доступного воркера с лимитами",body=super::error::ErrorEnvelope)))]
 async fn refresh(
     State(s): State<AppState>,
     _o: Owner,

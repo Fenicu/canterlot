@@ -127,12 +127,15 @@
 	async function saveResumeText() {
 		if (savingCrunch) return;
 		savingCrunch = true;
+		actionError = null;
 		try {
 			await updateCrunch(chat.id, {
 				enabled: chat.crunch.enabled,
 				resume_text: resumeText
 			});
 			editingCrunch = false;
+		} catch (err) {
+			actionError = errorText(err, 'Не удалось сохранить текст продолжения');
 		} finally {
 			savingCrunch = false;
 		}

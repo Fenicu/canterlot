@@ -38,6 +38,121 @@ async fn decision_endpoint_unknown_request_answers_404(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn queue_refusals_answer_409_with_a_published_reason(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let conversation = testkit::seed_conversation(&pool, owner, machine).await;
+    let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{conversation}/inputs"),
+            Some("submit"),
+            Some(json!({"content":[{"type":"text","text":"первый"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let input = submitted.json::<Value>()["input_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let edit_path = format!("/api/v1/conversations/{conversation}/inputs/{input}");
+    let refused = |status: u16, code: &str, reason: &str, response: testkit::TestResponse| {
+        assert_eq!(response.status, status, "{reason}");
+        let body = response.json::<Value>();
+        assert_eq!(body["error"]["code"], code, "{reason}");
+        assert_eq!(body["error"]["details"]["reason"], reason);
+    };
+
+    let stale = client
+        .send(
+            Method::PATCH,
+            &edit_path,
+            Some("edit-stale"),
+            Some(json!({"text":"другой","expected_revision":99})),
+        )
+        .await;
+    refused(409, "invalid_state", "revision_conflict", stale);
+
+    let edit = json!({"text":"второй","expected_revision":1});
+    let first = client
+        .send(
+            Method::PATCH,
+            &edit_path,
+            Some("edit-1"),
+            Some(edit.clone()),
+        )
+        .await;
+    assert_eq!(first.status, 200);
+    let replay = client
+        .send(Method::PATCH, &edit_path, Some("edit-1"), Some(edit))
+        .await;
+    assert_eq!(
+        replay.status, 200,
+        "a retried edit with its key is a replay"
+    );
+    assert_eq!(replay.json::<Value>(), first.json::<Value>());
+    let revision = first.json::<Value>()["revision"].as_i64().unwrap();
+
+    let empty = client
+        .send(
+            Method::PATCH,
+            &edit_path,
+            Some("edit-empty"),
+            Some(json!({"text":"  ","expected_revision":revision})),
+        )
+        .await;
+    refused(400, "invalid_request", "empty_content", empty);
+
+    let send_now = client
+        .send(
+            Method::POST,
+            &format!("{edit_path}/send-now"),
+            Some("send-now"),
+            None,
+        )
+        .await;
+    refused(409, "invalid_state", "no_running_turn", send_now);
+
+    let compact = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{conversation}/compact"),
+            Some("compact"),
+            None,
+        )
+        .await;
+    refused(409, "invalid_state", "no_live_execution", compact);
+
+    let cancelled = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/inputs/{input}/cancel"),
+            Some("cancel"),
+            None,
+        )
+        .await;
+    assert_eq!(cancelled.status, 200);
+    let late = client
+        .send(
+            Method::PATCH,
+            &edit_path,
+            Some("edit-late"),
+            Some(json!({"text":"третий","expected_revision":revision})),
+        )
+        .await;
+    refused(409, "invalid_state", "input_not_queued", late);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn submit_cancel_interrupt_stop_continue_map_to_domain_outcomes(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;

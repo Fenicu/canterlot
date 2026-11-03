@@ -165,9 +165,12 @@
     });
   });
 
+  let creating = $state(false);
+
   async function send() {
-    if (!model || !gate.ok) return;
+    if (!model || !gate.ok || creating) return;
     error = '';
+    creating = true;
     try {
       const created = await model.submit();
       const share = page.url.searchParams.get('share');
@@ -175,6 +178,8 @@
       else await goto(resolve(`/c/${created.conversationId}` as '/'));
     } catch (err) {
       error = errorText(err, 'Не удалось создать сессию');
+    } finally {
+      creating = false;
     }
   }
 </script>
@@ -206,7 +211,9 @@
     {#if crunch}<Textarea label="Текст продолжения" bind:value={resume} />{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if model?.errors.machine}<p class="error">{model.errors.machine}</p>{/if}
-    {#if gate.ok}
+    {#if creating}
+      <Button variant="primary" full disabled reason="Сессия создаётся" onclick={send}>Создаю…</Button>
+    {:else if gate.ok}
       <Button variant="primary" full onclick={send}>Создать</Button>
     {:else}
       <Button variant="primary" full disabled reason={gate.reason} onclick={send}>Создать</Button>

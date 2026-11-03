@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Проверка веба.
-#   scripts/check-web.sh                 svelte-check, eslint, токены, vitest, Playwright e2e/ui и e2e/parity
+#   scripts/check-web.sh                 сверка сгенерированных типов API, svelte-check, eslint, токены, vitest, Playwright e2e/ui и e2e/parity
 #   scripts/check-web.sh --fast          то же без Playwright, vitest только по изменённым файлам;
 #                                        изменённые спеки e2e запускаются на phone
 #   scripts/check-web.sh --fast --base REF  сравнивать с REF (по умолчанию main)
@@ -70,6 +70,16 @@ if [[ ! -d node_modules || package-lock.json -nt node_modules/.package-lock.json
     npm ci
 fi
 npx --no-install svelte-kit sync
+
+# Сгенерированные типы сверяются с docs/api: в быстром режиме, только когда менялся контракт или сами типы.
+api_changed=1
+if ((fast)) && api_base=$(git merge-base HEAD "$base" 2>/dev/null); then
+    api_changed=$({ git diff --name-only "$api_base" -- ../docs/api src/lib/api/generated scripts/gen-api.mjs; git ls-files --others --exclude-standard -- ../docs/api src/lib/api/generated; } | grep -c . || true)
+fi
+if ((api_changed)); then
+    printf '\n==> сгенерированные типы API\n'
+    node scripts/gen-api.mjs --check
+fi
 
 unit=(npx --no-install vitest run)
 specs=()

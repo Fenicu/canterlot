@@ -1,7 +1,10 @@
 import {
   ApiError,
   AuthRequired,
+  envelopeMissing,
   envelopeOf,
+  HUB_UNAVAILABLE,
+  htmlVerdict,
   NetworkError,
   session,
 } from "#lib/api/http.js";
@@ -119,7 +122,23 @@ export function patchChunk(
         }
       }
 
-      if (xhr.status === 0 || contentType.includes("text/html")) {
+      if (xhr.status === 0) {
+        session.state = "expired";
+        reject(new AuthRequired("redirect"));
+        return;
+      }
+
+      if (contentType.includes("text/html")) {
+        let page = "";
+        try {
+          page = xhr.responseText ?? "";
+        } catch {
+          page = "";
+        }
+        if (htmlVerdict(xhr.status, headers, page) === "unavailable") {
+          reject(new NetworkError(HUB_UNAVAILABLE));
+          return;
+        }
         session.state = "expired";
         reject(new AuthRequired("redirect"));
         return;
@@ -138,13 +157,9 @@ export function patchChunk(
         } catch {
           code = undefined;
         }
-        if (code === "forbidden_user" || code === "origin_rejected") {
+        if (code === "forbidden_user") {
           session.state = "expired";
-          reject(
-            new AuthRequired(
-              code === "forbidden_user" ? "forbidden_user" : "redirect",
-            ),
-          );
+          reject(new AuthRequired("forbidden_user"));
           return;
         }
       }
@@ -165,7 +180,7 @@ export function patchChunk(
         errorBody = undefined;
       }
       if (!errorBody) {
-        reject(new NetworkError("response_without_envelope"));
+        reject(envelopeMissing(xhr.status));
         return;
       }
 

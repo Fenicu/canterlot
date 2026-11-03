@@ -5,6 +5,8 @@ import {
   NetworkError,
   AuthRequired,
   authProbeResult,
+  HUB_UNAVAILABLE,
+  htmlVerdict,
   session,
 } from "#lib/api/http.js";
 import { clock } from "#lib/clock.js";
@@ -223,8 +225,11 @@ describe("api/http", () => {
         );
       }),
     );
-    await expect(http("GET", "/api/v1/me")).rejects.toThrow(AuthRequired);
-    expect(session.state).toBe("expired");
+    // Повторный вход не исправит адрес вне allowed_origins: это ошибка настройки, а не истёкшая сессия.
+    const rejected = await http("GET", "/api/v1/me").catch((e: unknown) => e);
+    expect(rejected).toBeInstanceOf(ApiError);
+    expect((rejected as ApiError).code).toBe("origin_rejected");
+    expect(session.state).toBe("ok");
 
     // 5. HTML body on /api/
     session.reset?.();
@@ -244,6 +249,72 @@ describe("api/http", () => {
       AuthRequired,
     );
     expect(session.state).toBe("expired");
+  });
+
+  it("proxy_error_page_is_hub_unavailable_not_an_expired_login", async () => {
+    for (const status of [502, 503, 504]) {
+      session.reset();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response("<html><body><h1>502 Bad Gateway</h1>nginx</body></html>", {
+              status,
+              headers: { "Content-Type": "text/html" },
+            }),
+        ),
+      );
+      const failure = await http("GET", "/api/v1/conversations").catch((e: unknown) => e);
+      expect(failure).toBeInstanceOf(NetworkError);
+      expect((failure as NetworkError).message).toBe(HUB_UNAVAILABLE);
+      expect(session.state).toBe("ok");
+    }
+  });
+
+  it("plain_text_5xx_without_envelope_is_hub_unavailable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("Bad Gateway", { status: 502, headers: { "Content-Type": "text/plain" } })),
+    );
+    const failure = await http("GET", "/api/v1/conversations").catch((e: unknown) => e);
+    expect((failure as NetworkError).message).toBe(HUB_UNAVAILABLE);
+  });
+
+  it("html_4xx_is_auth_only_with_login_markers", () => {
+    expect(htmlVerdict(404, new Headers(), "<h1>Not Found</h1>")).toBe("unavailable");
+    expect(htmlVerdict(404, new Headers(), "<title>Authelia</title>")).toBe("auth");
+    expect(htmlVerdict(400, new Headers({ "www-authenticate": "Basic" }))).toBe("auth");
+    expect(htmlVerdict(200, new Headers())).toBe("auth");
+    expect(htmlVerdict(302, new Headers())).toBe("auth");
+    expect(htmlVerdict(500, new Headers(), "<title>Authelia</title>")).toBe("unavailable");
+  });
+
+  it("manual_redirect_status_is_auth_required", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 302, headers: { Location: "https://auth.example/" } })),
+    );
+    await expect(http("GET", "/api/v1/me")).rejects.toThrow(AuthRequired);
+    expect(session.state).toBe("expired");
+  });
+
+  it("unknown_error_code_from_a_newer_hub_is_an_api_error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: { code: "brand_new", message: "Новая ошибка", scope: "future", retry: "later", correlation_id: "c-new" },
+            }),
+            { status: 409, headers: { "Content-Type": "application/json" } },
+          ),
+      ),
+    );
+    const failure = await http("GET", "/api/v1/me").catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).retry).toBe("never");
+    expect((failure as ApiError).message).toBe("Новая ошибка");
   });
 
   it("network_failure_on_a_mutation_is_outcome_unknown_not_a_refusal", async () => {

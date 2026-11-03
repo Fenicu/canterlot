@@ -3,9 +3,11 @@ import type { OpJournal } from "#lib/ops/journal.js";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { DraftStore } from "#lib/drafts/store.js";
 import { cancelInput as apiCancelInput, editInput as apiEditInput, sendNow as apiSendNow } from "#lib/api/client.js";
-import { ApiError } from "#lib/api/http.js";
+import { errorText, REASON_TEXT, type ErrorReason } from "#lib/api/errors.js";
+import { ApiError, NetworkError } from "#lib/api/http.js";
+import { intents } from "#lib/ops/intent.js";
 import { returnToComposer } from "#lib/composer/returned.js";
-import { freshInput } from "#lib/stores/inputs.js";
+import { freshInput, placeInput } from "#lib/stores/inputs.js";
 
 export interface CancelDeps {
   clientCancel?: (
@@ -19,23 +21,26 @@ export interface CancelDeps {
  * Результаты соответствуют Delivery D3:
  * - 'cancelled': отмена подтверждена сервером
  * - 'requested': команда отмены отправлена исполнителю
- * - 'lost': передача уже началась, обычная отмена невозможна
+ * - 'lost': хаб ответил, что передача уже началась, обычная отмена невозможна
+ * - 'failed': отмена не дошла или отклонена; прерывать ход по ней нельзя
  */
 export async function cancelInput(
   input: InputView,
   deps?: CancelDeps,
-): Promise<"cancelled" | "requested" | "lost"> {
+): Promise<"cancelled" | "requested" | "lost" | { failed: string }> {
   if (!input.id) {
     input.state = "cancelled";
     input.placement = "none";
     return "cancelled";
   }
+  const id = input.id;
 
   try {
-    const key = crypto.randomUUID();
-    const response = deps?.clientCancel
-      ? await deps.clientCancel(input.id, key)
-      : await apiCancelInput(input.id, key);
+    const response = await intents.run(`cancel:${id}`, (key) =>
+      deps?.clientCancel
+        ? deps.clientCancel(id, key)
+        : apiCancelInput(id, key),
+    );
 
     const data = (response as { data?: unknown })?.data ?? response;
 
@@ -55,9 +60,14 @@ export async function cancelInput(
       }
     }
 
-    return "lost";
-  } catch {
-    return "lost";
+    return { failed: "Хаб ответил непонятно, отмена не подтверждена" };
+  } catch (err) {
+    return {
+      failed:
+        err instanceof NetworkError
+          ? "Нет связи, отмена не отправлена"
+          : errorText(err, "Отменить не удалось"),
+    };
   }
 }
 
@@ -111,7 +121,17 @@ export async function retryAsNew(
     key: newKey,
   });
 
-  void deps.ops.run(op);
+  void deps.ops.run(op).catch((err: unknown) => {
+    // Отказ хаба показываем на самом пузыре, а не теряем в необработанном промисе.
+    const current = deps.chat.inputs.get(newKey);
+    if (!current) return;
+    deps.chat.inputs.set(newKey, {
+      ...current,
+      state: "rejected",
+      placement: placeInput("rejected"),
+      rejection: errorText(err, "Повторная отправка не удалась"),
+    });
+  });
 }
 
 export interface ReturnDraftDeps {
@@ -173,25 +193,30 @@ export async function sendNow(
   deps?: SendNowDeps,
 ): Promise<SendNowResult> {
   if (!input.id) return "noop";
+  const id = input.id;
   try {
-    const key = crypto.randomUUID();
-    if (deps?.clientSendNow) await deps.clientSendNow(conversationId, input.id, key);
-    else await apiSendNow(conversationId, input.id, key);
+    await intents.run(`send-now:${id}`, (key) =>
+      deps?.clientSendNow
+        ? deps.clientSendNow(conversationId, id, key)
+        : apiSendNow(conversationId, id, key),
+    );
     return "requested";
   } catch (err) {
-    if (err instanceof ApiError) {
-      const reason =
-        err.code === "invalid_request" && typeof err.details?.reason === "string"
-          ? err.details.reason
-          : "unknown";
-      if (reason === "unknown" || SEND_NOW_REASONS.has(reason)) return { reason };
-    }
-    return { reason: "unknown" };
+    if (err instanceof NetworkError) return { reason: "network" };
+    const reason = refusalReason(err);
+    return { reason: SEND_NOW_REASONS.has(reason) ? reason : "unknown" };
   }
 }
 
 /** Вливание не удалось (агент отказал или ход кончился): сообщение ждёт следующего хода. */
 export const STEER_RETURNED_LABEL = "Не удалось влить в ход: сообщение уйдёт следующим";
+
+/** Причина отказа хаба независимо от кода: конфликты состояния идут 409, ошибки запроса 400. */
+function refusalReason(err: unknown): string {
+  return err instanceof ApiError && typeof err.details?.reason === "string"
+    ? err.details.reason
+    : "unknown";
+}
 
 /** Подпись отказа «Отправить сейчас» и скрытие кнопки, когда она неуместна. */
 export function sendNowCaption(reason: string): string | null {
@@ -206,6 +231,8 @@ export function sendNowCaption(reason: string): string | null {
     case "unsupported_harness":
     case "capability_missing":
       return null;
+    case "network":
+      return "Нет связи с хабом, повторите";
     default:
       return "Не получилось отправить сейчас";
   }
@@ -248,21 +275,28 @@ export async function editInput(
   deps?: EditInputDeps,
 ): Promise<EditInputResult> {
   if (!input.id) return "noop";
+  const id = input.id;
+  const body = { text, attachment_ids: attachmentIds, expected_revision: expectedRevision };
+  // Повтор той же правки после обрыва идёт тем же ключом, и хаб отвечает первым исходом.
+  const scope = `edit:${id}:${JSON.stringify(body)}`;
   try {
-    const key = crypto.randomUUID();
-    const body = { text, attachment_ids: attachmentIds, expected_revision: expectedRevision };
-    if (deps?.clientEditInput) await deps.clientEditInput(conversationId, input.id, body, key);
-    else await apiEditInput(conversationId, input.id, body, key);
+    await intents.run(scope, (key) =>
+      deps?.clientEditInput
+        ? deps.clientEditInput(conversationId, id, body, key)
+        : apiEditInput(conversationId, id, body, key),
+    );
     return "saved";
   } catch (err) {
-    if (err instanceof ApiError) {
-      const reason =
-        err.code === "invalid_request" && typeof err.details?.reason === "string"
-          ? err.details.reason
-          : "unknown";
-      if (reason === "unknown" || EDIT_INPUT_REASONS.has(reason)) return { reason };
-    }
-    return { reason: "unknown" };
+    if (err instanceof NetworkError) return { reason: "network" };
+    const reason = refusalReason(err);
+    // Своя же правка, дошедшая до хаба раньше потерянного ответа, не конфликт.
+    if (
+      reason === "revision_conflict" &&
+      input.revision === expectedRevision + 1 &&
+      input.text === text
+    )
+      return "saved";
+    return { reason: EDIT_INPUT_REASONS.has(reason) ? reason : "unknown" };
   }
 }
 
@@ -287,7 +321,11 @@ export function editInputCaption(reason: string): string | null {
     case "capability_missing":
     case "limits_mismatch":
       return "Машина сейчас не принимает вложения";
+    case "network":
+      return "Нет связи с хабом, правка не сохранена";
     default:
-      return "Не получилось сохранить";
+      return reason in REASON_TEXT
+        ? REASON_TEXT[reason as ErrorReason]
+        : "Не получилось сохранить";
   }
 }

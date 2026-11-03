@@ -166,6 +166,8 @@
 
 Ответы на секретные вопросы (`is_secret` у вопроса или у всего запроса) хаб отдаёт как `"[redacted]"` везде: в ответе на решение и его повторе, `details.winner_decision`, `open_requests` снимка, событии `request_decided`, истории и хранилище ключей идемпотентности. Полный ответ есть только в команде `deliver_decision` до её погашения. `decision_conflict` содержит `details.winner_decision` и `details.current_state`; `request_not_open` содержит `details.current_state` и `details.reason` (`closed_without_decision` или `generation_advanced`). `decision_invalid` содержит `details.question_id`, если ошибка относится к конкретному вопросу. `preset_revision_conflict` содержит `details.current_revision` (версию, с которой нужно повторить правку), `preset_invalid` — `details.field` (`title`, `description` или `text`). Решения и ответы в details доступны только владельцу сессии и не записываются в журналы ошибок.
 
+Отказы команд очереди и управления (`send-now`, правка ввода, отмена, сжатие, остановка) несут `details.reason` из перечисления `ErrorReason`. Конфликт состояния идёт `409`: `invalid_state` для `input_not_queued`, `revision_conflict`, `steer_in_flight`, `no_running_turn`, `request_open`, `compacting`, `unsupported_harness`, `run_in_progress`, `no_live_execution`; `capability_missing`, `attachment_not_ready` и `attachment_unavailable` (также для `attachment_not_found`) приходят своими кодами. Ошибка самого запроса идёт `400 invalid_request`: `invalid_idempotency_key`, `empty_content`, `content_too_long`. Прочие `invalid_request` при создании и изменении сессии и вводе называют поле в `details.field`.
+
 Для недопустимой ссылки `retry_of` код `invalid_request` возвращается со статусом 422.
 
 Ответы `offset_mismatch`, `upload_in_progress` и `resource_limit` загрузки вложения несут заголовок `Upload-Offset` с принятым смещением; оборванное тело загрузки даёт `400 invalid_request` с тем же заголовком.
@@ -299,10 +301,10 @@
 | --- | --- | --- |
 | `POST /api/v1/conversations/{id}/inputs` | `content[]` (`{"type":"text","text"}`), `attachment_ids?` (до 10 готовых вложений), `retry_of?` | 201, `SubmittedInput`; блоки `attachment` хаб добавляет после текста сам |
 | `POST /api/v1/inputs/{id}/cancel` | - | `CancelOutcome` |
-| `PATCH /api/v1/conversations/{id}/inputs/{input_id}` | `text`, `attachment_ids?`, `expected_revision` | `EditInputOutcome`: правка ожидающего ввода сравнением-и-заменой; 400, если ввод уже не в очереди или ревизия устарела |
-| `POST /api/v1/conversations/{id}/inputs/{input_id}/send-now` | - | `SendNowOutcome`: влить ожидающий ввод в идущий ход; 400, если ввод уже не в очереди или ход не идёт |
+| `PATCH /api/v1/conversations/{id}/inputs/{input_id}` | `text`, `attachment_ids?`, `expected_revision` | `EditInputOutcome`: правка ожидающего ввода сравнением-и-заменой; `409 invalid_state`, если ввод уже не в очереди или ревизия устарела; повтор с тем же ключом возвращает первый ответ |
+| `POST /api/v1/conversations/{id}/inputs/{input_id}/send-now` | - | `SendNowOutcome`: влить ожидающий ввод в идущий ход; `409 invalid_state`, если ввод уже не в очереди или ход не идёт |
 | `POST /api/v1/conversations/{id}/interrupt` | - | `StopOutcome`: пауза очереди, прерывание, отзыв |
-| `POST /api/v1/conversations/{id}/compact` | - | `CompactOutcome`: сжатие контекста между ходами живого исполнения; 400 без живого исполнения и во время хода. В застрявшей сессии помечает прогресс в причине паузы, итог снимает её. Тратит токены, поэтому только по действию владельца |
+| `POST /api/v1/conversations/{id}/compact` | - | `CompactOutcome`: сжатие контекста между ходами живого исполнения; `409 invalid_state` без живого исполнения и во время хода. В застрявшей сессии помечает прогресс в причине паузы, итог снимает её. Тратит токены, поэтому только по действию владельца |
 | `POST /api/v1/conversations/{id}/stop` | `force?` | `StopExecutionOutcome`. Для исполнения в `owner_lost` вариант `owner_lost`: команды и паузы `user_stop` нет, выход только через `resolve-owner-lost` |
 | `POST /api/v1/conversations/{id}/resolve-owner-lost` | - | `ResolveOwnerLostOutcome`: `requested`, `already_requested` или `not_owner_lost`. Решение владельца: машина проверяет сопровождение и возвращает живую сессию (`owner_reclaimed`), иначе завершает остаток группы; итог приходит `execution_state_changed` с `failed` (`supervisor_died` или `admin_resolved`, второе значит, что завершение не подтверждено) |
 | `POST /api/v1/conversations/{id}/queue/continue` | - | `ContinueOutcome` |

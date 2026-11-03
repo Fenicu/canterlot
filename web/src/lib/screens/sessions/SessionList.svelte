@@ -15,6 +15,7 @@
 
 <script lang="ts">
   import { listConversations } from '#lib/api/client.js';
+  import { errorText } from '#lib/api/errors.js';
   import { loadConfig } from '#lib/api/config.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { clock } from '#lib/clock.js';
@@ -52,6 +53,7 @@
   let query = $state('');
   let searchOpen = $state(false);
   let results = $state<ListRow[] | null>(null);
+  let searchError = $state('');
   let sheetId = $state('');
   let sheetRow = $state({ top: 0, bottom: 0 });
   let listNode = $state<HTMLElement | null>(null);
@@ -110,6 +112,7 @@
 
   $effect(() => {
     const text = query.trim();
+    searchError = '';
     if (!text) {
       results = null;
       return;
@@ -118,7 +121,10 @@
       void listConversations({ q: text, limit: 50 }).then((response) => {
         if (query.trim() !== text) return;
         results = response.data.items as unknown as ListRow[];
-      }).catch(() => undefined);
+      }).catch((err: unknown) => {
+        // Сбой поиска не должен выглядеть как «ничего не найдено».
+        if (query.trim() === text) searchError = errorText(err, 'Поиск не удался');
+      });
     }, 250);
     return () => window.clearTimeout(timer);
   });
@@ -306,6 +312,7 @@
     {#if runtime && runtime.machines.items.size === 0 && ready}
       <EmptyState kind="machines" />
     {/if}
+    {#if searchError}<p class="search-error" role="alert">{searchError}</p>{/if}
     {#if results && results.length === 0}
       <EmptyState kind="search" onreset={resetSearch} />
     {:else if ready && rows.length === 0 && !results}
@@ -350,6 +357,7 @@
 </svelte:element>
 
 <style>
+  .search-error { margin: var(--s2) var(--gutter); color: var(--danger); font-size: var(--fs-sm); }
   .list { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
   .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding-block: var(--s2); }
   .brand { flex: 1 0 auto; margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }

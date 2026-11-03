@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { errorText } from '#lib/api/errors.js';
   import { ApiError } from '#lib/api/http.js';
+  import { intents } from '#lib/ops/intent.js';
   import { deleteScheduled, interrupt, patchScheduled } from '#lib/api/client.js';
   import { getRuntime } from '#lib/app/runtime.js';
   import { unconfirmed } from '#lib/ops/journal.js';
@@ -57,11 +59,29 @@
     );
   }
 
+  let cancelNotes = $state<Record<string, string>>({});
+  let editError = $state('');
+  let savingScheduled = $state(false);
+  let interruptError = $state('');
+
   async function cancel(key: string) {
     const input = chat.inputs.get(key);
     if (!input) return;
+    cancelNotes = Object.fromEntries(Object.entries(cancelNotes).filter(([noted]) => noted !== key));
     const outcome = await cancelInput(input);
+    // Прервать ход предлагаем только по ответу хаба «передача началась», а не по обрыву связи.
     if (outcome === 'lost') lost = { ...lost, [key]: true };
+    else if (typeof outcome === 'object') cancelNotes = { ...cancelNotes, [key]: outcome.failed };
+  }
+
+  async function interruptRun() {
+    interruptError = '';
+    try {
+      const id = chat.id;
+      await intents.run(`interrupt:${id}`, (key) => interrupt(id, key));
+    } catch (err) {
+      interruptError = errorText(err, 'Прервать не удалось');
+    }
   }
 
   function openEdit(id: string, text: string, raw: string) {
@@ -81,26 +101,33 @@
     const id = editId;
     if (!id) return;
     const at = Date.parse(editAt);
+    const body = {
+      content: [{ type: 'text' as const, text: editText }],
+      run_at: Number.isFinite(at) ? new Date(at).toISOString() : undefined
+    };
+    editError = '';
+    savingScheduled = true;
     try {
-      await patchScheduled(
-        id,
-        {
-          content: [{ type: 'text', text: editText }],
-          run_at: Number.isFinite(at) ? new Date(at).toISOString() : undefined
-        },
-        crypto.randomUUID()
-      );
+      await intents.run(`scheduled-edit:${id}:${JSON.stringify(body)}`, (key) => patchScheduled(id, body, key));
       editId = null;
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'not_pending') notes = { ...notes, [id]: 'Уже отправлено' };
+      if (err instanceof ApiError && err.code === 'not_pending') {
+        notes = { ...notes, [id]: 'Уже отправлено' };
+        editId = null;
+      } else editError = errorText(err, 'Сохранить не удалось');
+    } finally {
+      savingScheduled = false;
     }
   }
 
   async function cancelScheduled(id: string) {
     try {
-      await deleteScheduled(id, crypto.randomUUID());
+      await intents.run(`scheduled-cancel:${id}`, (key) => deleteScheduled(id, key));
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'not_pending') notes = { ...notes, [id]: 'Уже отправлено' };
+      notes = {
+        ...notes,
+        [id]: err instanceof ApiError && err.code === 'not_pending' ? 'Уже отправлено' : errorText(err, 'Отменить не удалось')
+      };
     }
   }
 
@@ -208,9 +235,14 @@
           {/if}
         {/if}
         {#if input.state === 'queued' || input.state === 'on_machine'}
-          <IconButton icon="close" label="Отменить" onclick={() => cancel(input.key)} />
+          {#if input.id && intents.busy(`cancel:${input.id}`)}
+            <IconButton icon="close" label="Отменяется…" inert={true} />
+          {:else}
+            <IconButton icon="close" label="Отменить" onclick={() => cancel(input.key)} />
+          {/if}
         {/if}
       </span>
+      {#if cancelNotes[input.key]}<p class="note" role="alert">{cancelNotes[input.key]}</p>{/if}
       {#if input.cancelRequested}<p class="note">{CANCEL_REQUESTED_LABEL}</p>{/if}
       {#if input.revision > 1}<p class="note">Изменено</p>{/if}
       {#if editClosed[input.key] && !editing[input.key] && input.state === 'queued'}<p class="note">{editClosed[input.key]}</p>{/if}
@@ -245,7 +277,14 @@
       {:else if input.state === 'queued' && (steered[input.key] || input.steer === 'pending')}<p class="note">Вливается в идущий ход</p>{/if}
       {#if lost[input.key]}
         <p class="note">Передача уже началась, обычная отмена невозможна</p>
-        <span class="actions"><Button onclick={() => interrupt(chat.id, crypto.randomUUID())}>Прервать исполнение</Button></span>
+        <span class="actions">
+          {#if intents.busy(`interrupt:${chat.id}`)}
+            <Button disabled={true} reason="Прерываю…">Прервать исполнение</Button>
+          {:else}
+            <Button onclick={() => void interruptRun()}>Прервать исполнение</Button>
+          {/if}
+        </span>
+        {#if interruptError}<p class="note" role="alert">{interruptError}</p>{/if}
       {/if}
       {#if unconfirmed(op)}
         <p class="note">Отправка не подтверждена, повторяю</p>
@@ -258,9 +297,13 @@
       <span class="pill">
         <span class="label">{atOf(item)}</span>
         <span class="text">{textOf(item)}</span>
-        {#if !notes[item.id]}
+        {#if notes[item.id] !== 'Уже отправлено'}
           <IconButton icon="edit" label="Изменить" onclick={() => openEdit(item.id, textOf(item), item.run_at)} />
-          <IconButton icon="close" label="Отменить" onclick={() => cancelScheduled(item.id)} />
+          {#if intents.busy(`scheduled-cancel:${item.id}`)}
+            <IconButton icon="close" label="Отменяется…" inert={true} />
+          {:else}
+            <IconButton icon="close" label="Отменить" onclick={() => cancelScheduled(item.id)} />
+          {/if}
         {/if}
       </span>
       {#if notes[item.id]}<p class="note">{notes[item.id]}</p>{/if}
@@ -291,7 +334,12 @@
       <Field label="Время">
         {#snippet children({ id })}<input {id} type="datetime-local" bind:value={editAt} aria-label="Время отложенного сообщения" />{/snippet}
       </Field>
-      <Button variant="primary" full onclick={saveEdit}>Сохранить</Button>
+      {#if editError}<p class="note" role="alert">{editError}</p>{/if}
+      {#if savingScheduled}
+        <Button variant="primary" full disabled={true} reason="Сохраняется…">Сохранить</Button>
+      {:else}
+        <Button variant="primary" full onclick={saveEdit}>Сохранить</Button>
+      {/if}
     </div>
   </Sheet>
 {/if}
