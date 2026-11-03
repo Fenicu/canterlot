@@ -324,23 +324,60 @@ pub(super) async fn sweep_runtime(shared: &Shared) -> Result<(), ExecError> {
     Ok(())
 }
 
+/// Тестовый барьер между перечислением и удалением: проверяет, что решение перечитывается.
+#[cfg(test)]
+pub(super) type BeforeRecheck = std::sync::Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
+#[cfg(test)]
+pub(super) static BEFORE_RECHECK: std::sync::Mutex<Option<BeforeRecheck>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+async fn before_recheck(key: &str) {
+    let hook = BEFORE_RECHECK
+        .lock()
+        .expect("maintenance hook lock")
+        .clone();
+    if let Some(hook) = hook {
+        hook(key.to_owned()).await;
+    }
+}
+
+#[cfg(not(test))]
+async fn before_recheck(_: &str) {}
+
 /// Сборка в рабочей копии без живого исполнения: `target` и кэш узлов старше шести часов.
 pub(super) async fn gc_worktrees(shared: &Shared) -> Result<(), ExecError> {
-    let records = shared
-        .store
-        .call(|store| Ok(open(store)?.ownership().all()))
-        .await?;
     let data_dir = shared.data_dir().await?.clone();
-    tokio::task::spawn_blocking(move || {
-        maintenance::gc_worktrees(
-            &data_dir,
-            &records,
-            SystemTime::now(),
-            Duration::from_secs(6 * 3600),
-        )
+    let idle_worktrees = tokio::task::spawn_blocking(move || {
+        maintenance::idle_worktrees(&data_dir, SystemTime::now(), Duration::from_secs(6 * 3600))
     })
     .await
     .map_err(|_| ExecError::Shutdown)??;
+    for worktree in idle_worktrees {
+        before_recheck(&worktree.conversation_id).await;
+        let conversation_id = worktree.conversation_id.clone();
+        let path = worktree.path.clone();
+        // Проверка и удаление в потоке хранилища: запись принадлежности не вклинится между ними.
+        shared
+            .store
+            .call(move |slot| {
+                let store = open(slot)?;
+                let live = store
+                    .ownership()
+                    .unreleased()
+                    .iter()
+                    .any(|record| record.conversation_id == conversation_id);
+                if live {
+                    return Ok(());
+                }
+                maintenance::remove_build(&path)?;
+                Ok(())
+            })
+            .await?;
+    }
     Ok(())
 }
 
@@ -2960,6 +2997,60 @@ mod tests {
                 .unwrap()
         );
         drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    fn age_tree(path: &Path) {
+        let old = SystemTime::now() - Duration::from_secs(8 * 3600);
+        fs::File::open(path).unwrap().set_modified(old).unwrap();
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                age_tree(&entry.path());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gc_keeps_build_when_ownership_appears_after_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let conversation = Uuid::now_v7();
+        let worktree = data.join("worktrees").join(conversation.to_string());
+        fs::create_dir_all(worktree.join("target/debug")).unwrap();
+        fs::write(worktree.join("target/debug/old"), "old").unwrap();
+        age_tree(&worktree.join("target"));
+
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        let client = thread.client();
+        *BEFORE_RECHECK.lock().unwrap() = Some(std::sync::Arc::new(move |_| {
+            let client = client.clone();
+            Box::pin(async move {
+                client
+                    .call(move |slot| {
+                        open(slot)?.ownership_mut()?.append(Ownership {
+                            execution_id: Uuid::now_v7().to_string(),
+                            conversation_id: conversation.to_string(),
+                            phase: OwnershipPhase::Attached as i32,
+                            ..Default::default()
+                        })?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            })
+        }));
+        super::gc_worktrees(&manager.shared).await.unwrap();
+        *BEFORE_RECHECK.lock().unwrap() = None;
+        assert!(worktree.join("target/debug/old").exists());
         manager.shutdown().await;
         thread.close().await.unwrap();
     }

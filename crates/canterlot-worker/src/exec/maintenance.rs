@@ -121,23 +121,22 @@ fn is_live_socket(path: &Path) -> bool {
     }
 }
 
-/// Убирает `target` и кэш `node_modules/.cache` в рабочих копиях, где нет живого
-/// исполнения и сборка не менялась дольше `idle`.
-pub(crate) fn gc_worktrees(
+/// Рабочие копии, где сборка не менялась дольше `idle`.
+pub(crate) struct IdleWorktree {
+    pub conversation_id: String,
+    pub path: PathBuf,
+}
+
+pub(crate) fn idle_worktrees(
     data_dir: &Path,
-    records: &[Ownership],
     now: SystemTime,
     idle: Duration,
-) -> io::Result<()> {
-    let live: HashSet<&str> = records
-        .iter()
-        .filter(|record| record.phase != OwnershipPhase::Released as i32)
-        .map(|record| record.conversation_id.as_str())
-        .collect();
+) -> io::Result<Vec<IdleWorktree>> {
     let worktrees = data_dir.join("worktrees");
     let Ok(entries) = fs::read_dir(&worktrees) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
+    let mut idle_worktrees = Vec::new();
     for entry in entries.flatten() {
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -149,7 +148,7 @@ pub(crate) fn gc_worktrees(
         let Some(name) = name.to_str() else {
             continue;
         };
-        if Uuid::parse_str(name).is_err() || live.contains(name) {
+        if Uuid::parse_str(name).is_err() {
             continue;
         }
         let worktree = entry.path();
@@ -162,12 +161,24 @@ pub(crate) fn gc_worktrees(
         if !now.duration_since(newest).is_ok_and(|age| age > idle) {
             continue;
         }
-        fs::remove_dir_all(&target)?;
-        if let Some(modules) = direct_dir(&worktree, "node_modules")
-            && let Some(cache) = direct_dir(&modules, ".cache")
-        {
-            fs::remove_dir_all(cache)?;
-        }
+        idle_worktrees.push(IdleWorktree {
+            conversation_id: name.to_owned(),
+            path: worktree,
+        });
+    }
+    Ok(idle_worktrees)
+}
+
+/// Убирает `target` и кэш `node_modules/.cache` в рабочей копии.
+pub(crate) fn remove_build(worktree: &Path) -> io::Result<()> {
+    let Some(target) = direct_dir(worktree, "target") else {
+        return Ok(());
+    };
+    fs::remove_dir_all(&target)?;
+    if let Some(modules) = direct_dir(worktree, "node_modules")
+        && let Some(cache) = direct_dir(&modules, ".cache")
+    {
+        fs::remove_dir_all(cache)?;
     }
     Ok(())
 }
@@ -210,7 +221,7 @@ mod tests {
     use canterlot_proto::worker::ipc::{Ownership, OwnershipPhase};
     use uuid::Uuid;
 
-    use super::{gc_worktrees, sweep_runtime};
+    use super::{idle_worktrees, remove_build, sweep_runtime};
 
     fn old(path: &Path) {
         let old = SystemTime::now() - Duration::from_secs(8 * 3600);
@@ -267,12 +278,7 @@ mod tests {
         fs::create_dir_all(live_tree.join("target")).unwrap();
         fs::write(live_tree.join("target/old"), "old").unwrap();
         old_tree(&live_tree.join("target"));
-        let live_record = Ownership {
-            execution_id: Uuid::now_v7().to_string(),
-            conversation_id: live.to_string(),
-            phase: OwnershipPhase::Attached as i32,
-            ..Default::default()
-        };
+        let live_conversation = live.to_string();
 
         let fresh = Uuid::now_v7();
         let fresh_tree = worktrees.join(fresh.to_string());
@@ -301,13 +307,14 @@ mod tests {
         fs::create_dir_all(&cache_outside).unwrap();
         std::os::unix::fs::symlink(&cache_outside, cache_tree.join("node_modules")).unwrap();
 
-        gc_worktrees(
-            &data,
-            &[live_record],
-            SystemTime::now(),
-            Duration::from_secs(6 * 3600),
-        )
-        .unwrap();
+        let idle_builds =
+            idle_worktrees(&data, SystemTime::now(), Duration::from_secs(6 * 3600)).unwrap();
+        for worktree in idle_builds {
+            if worktree.conversation_id == live_conversation {
+                continue;
+            }
+            remove_build(&worktree.path).unwrap();
+        }
 
         assert!(!idle_tree.join("target").exists());
         assert!(!idle_tree.join("node_modules/.cache").exists());
