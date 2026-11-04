@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
-	import { browserRuntime } from './open';
+	import { browserRuntime } from '#lib/app/browser.js';
 	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
 	import { loadConfig } from '#lib/api/config.js';
 	import Composer from '#lib/composer/Composer.svelte';

@@ -6,7 +6,7 @@
   import { loadConfig } from '#lib/api/config.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
-  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import { browserRuntime } from '#lib/app/browser.js';
   import { DEFAULT_PERMISSION_MODE, NO_MODELS_HINT, effortLabel, modelImagesNote, permissionHint, permissionLabel } from '#lib/format/labels.js';
   import Button from '#lib/ui/Button.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';

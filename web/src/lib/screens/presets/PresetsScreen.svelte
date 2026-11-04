@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { deletePreset } from '#lib/api/client.js';
   import { fmt } from '#lib/format/ru.js';

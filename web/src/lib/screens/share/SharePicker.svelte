@@ -3,7 +3,8 @@
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
-  import { browserRuntime, leaseChatSession, sessionUploads } from '#lib/screens/chat/open.js';
+  import { browserRuntime } from '#lib/app/browser.js';
+  import { leaseChatSession, sessionUploads } from '#lib/screens/chat/open.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { takeShare, type ShareItem } from '#lib/pwa/share.js';
   import { leaveAttachmentNotice } from '#lib/composer/attachmentNotice.js';

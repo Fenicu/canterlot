@@ -6,7 +6,8 @@ import {
   eventsRange,
   markRead,
 } from "#lib/api/client.js";
-import { createRuntime, getRuntime, type Runtime } from "#lib/app/runtime.js";
+import { browserRuntime, onOwnerCleanup, onRuntimeReady } from "#lib/app/browser.js";
+import { getRuntime, type Runtime } from "#lib/app/runtime.js";
 import { probe } from "#lib/perf/probe.js";
 import { UploadManager } from "#lib/uploads/manager.js";
 import { sha256Hex, type BlockPage } from "#lib/stores/blocks.js";
@@ -17,19 +18,14 @@ import {
   type SnapshotData,
 } from "#lib/stores/chat.svelte.js";
 import type { RangeResult } from "#lib/sync/scope.js";
-import { onOwnerRetired } from "#lib/storage/owner.js";
-import { resetConfig } from "#lib/api/config.js";
-import { restoreComposerText } from "#lib/composer/restore.js";
 
 /** Сколько отпущенных чатов держать готовыми к возврату; остальные освобождаются целиком. */
 const WARM_CHATS = 4;
 
-let pending: Promise<Runtime> | null = null;
 const chats = new Map<string, ChatStore>();
 const opening = new Map<string, Promise<ChatStore>>();
 const holds = new Map<string, number>();
 let uploads: UploadManager | null = null;
-let cleanupBound = false;
 let deletionBound: Runtime | null = null;
 
 /** Удалённая сессия: открытый экран покажет это, а тёплая копия и загрузки исчезают сразу. */
@@ -47,22 +43,16 @@ function bindDeletion(runtime: Runtime): void {
   });
 }
 
-function bindCleanup(): void {
-  if (cleanupBound) return;
-  cleanupBound = true;
-  onOwnerRetired(() => {
-    restoreComposerText("");
-    for (const chat of chats.values()) chat.dispose();
-    chats.clear();
-    opening.clear();
-    uploads?.dispose();
-    uploads = null;
-    pending = null;
-    deletionBound = null;
-    resetConfig();
-    cleanupBound = false;
-  });
-}
+onRuntimeReady(bindDeletion);
+
+onOwnerCleanup(() => {
+  for (const chat of chats.values()) chat.dispose();
+  chats.clear();
+  opening.clear();
+  uploads?.dispose();
+  uploads = null;
+  deletionBound = null;
+});
 
 export function sessionUploads(): UploadManager {
   const runtime = getRuntime();
@@ -71,36 +61,6 @@ export function sessionUploads(): UploadManager {
     void uploads.resumePending();
   }
   return uploads;
-}
-
-export function browserRuntime(): Promise<Runtime> {
-  bindCleanup();
-  try {
-    const runtime = getRuntime();
-    bindDeletion(runtime);
-    return Promise.resolve(runtime);
-  } catch {
-    pending ??= createRuntime({
-      fetch: globalThis.fetch.bind(globalThis),
-      WebSocket: globalThis.WebSocket,
-      indexedDB: globalThis.indexedDB,
-      clock: { now: () => Date.now() },
-      schedule: (fn, ms) => {
-        const id = setTimeout(fn, ms);
-        return () => clearTimeout(id);
-      },
-    });
-    return pending
-      .then((runtime) => {
-        bindCleanup();
-        bindDeletion(runtime);
-        return runtime;
-      })
-      .catch((error) => {
-        pending = null;
-        throw error;
-      });
-  }
 }
 
 export interface ChatLease {

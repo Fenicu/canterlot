@@ -20,7 +20,7 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { clock } from '#lib/clock.js';
   import { ticker } from '#lib/ticker.svelte.js';
-  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import { browserRuntime } from '#lib/app/browser.js';
   import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import Menu from '#lib/ui/Menu.svelte';

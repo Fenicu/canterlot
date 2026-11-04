@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fmt } from '#lib/format/ru.js';
   import { onMount } from 'svelte';
-  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { limitsHistory } from '#lib/api/client.js';
   import { ApiError } from '#lib/api/http.js';
