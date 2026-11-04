@@ -88,6 +88,8 @@ impl From<std::io::Error> for PrepareError {
 pub struct Pinned {
     pub executable: PathBuf,
     pub version: CliVersion,
+    /// Копия другой версии, уже лежавшая в data_dir: система обновилась.
+    pub previous: Option<String>,
 }
 
 fn resolve_source(path: &Path) -> Option<PathBuf> {
@@ -119,19 +121,45 @@ pub async fn prepare_pinned(cfg: &AntigravityConfig) -> Result<Pinned, PrepareEr
     let bin_dir = data_dir.join("antigravity").join("bin");
     create_private_dir(&bin_dir)?;
     let target = bin_dir.join(format!("agy-{}", version.label()));
-    if !target.is_file() && target != source {
+    let previous = if !target.is_file() && target != source {
+        let previous = other_copy(&bin_dir, version.label());
         // Копия через временное имя: оборванный запуск не оставит половину файла.
         let temporary = bin_dir.join(format!(".agy-{}-copy", std::process::id()));
         std::fs::copy(&source, &temporary)?;
         set_executable(&temporary)?;
         std::fs::rename(&temporary, &target)?;
+        previous
     } else {
         set_executable(&target)?;
-    }
+        None
+    };
     Ok(Pinned {
         executable: target,
         version,
+        previous,
     })
+}
+
+/// Старшая закреплённая копия другой версии: признак того, что системный `agy`
+/// обновился после прошлого запуска.
+fn other_copy(bin_dir: &Path, current: &str) -> Option<String> {
+    let mut found: Vec<((u32, u32, u32), String)> = std::fs::read_dir(bin_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let label = name.strip_prefix("agy-")?;
+            if label == current {
+                return None;
+            }
+            version::parse_version(label)
+                .ok()
+                .map(|version| (version, label.to_owned()))
+        })
+        .collect();
+    found.sort_by_key(|(version, _)| *version);
+    found.pop().map(|(_, label)| label)
 }
 
 fn create_private_dir(path: &Path) -> Result<(), PrepareError> {

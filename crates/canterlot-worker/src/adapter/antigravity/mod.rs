@@ -870,6 +870,15 @@ impl AntigravityAdapter {
         let pinned = process::prepare_pinned(&self.cfg)
             .await
             .map_err(|_| AdapterError::StartFailed("cli_not_found"))?;
+        if let Some(previous) = &pinned.previous {
+            tracing::warn!(
+                kind = "antigravity_cli_version_changed",
+                previous,
+                current = pinned.version.label(),
+                "the configured agy changed; a new pinned copy is used"
+            );
+            self.diagnostic("antigravity_cli_version_changed", false);
+        }
         self.proc = Some(
             Process::spawn(
                 &pinned.executable,
@@ -1076,6 +1085,15 @@ impl Adapter for AntigravityAdapter {
                 return Err(AdapterError::StartFailed("cli_pin_failed"));
             }
         };
+        if let Some(previous) = &pinned.previous {
+            tracing::warn!(
+                kind = "antigravity_cli_version_changed",
+                previous,
+                current = pinned.version.label(),
+                "the configured agy changed; a new pinned copy is used"
+            );
+            self.diagnostic("antigravity_cli_version_changed", false);
+        }
         if matches!(pinned.version, version::CliVersion::UntestedNewer(_)) {
             self.diagnostic("untested_cli_version", false);
         }

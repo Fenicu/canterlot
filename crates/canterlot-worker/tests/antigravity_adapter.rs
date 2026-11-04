@@ -789,6 +789,35 @@ async fn unknown_version_is_allowed_with_a_diagnostic() {
 }
 
 #[tokio::test]
+async fn a_changed_system_binary_gets_a_new_pinned_copy_and_a_diagnostic() {
+    let script = Script {
+        version: "agy 1.5.0".into(),
+        steps: vec![init_step(), new_step()],
+        ..Default::default()
+    };
+    let mut bench = Bench::new(script, "", "", "owner");
+    let bin = bench.fake.data_dir().join("antigravity/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("agy-1.4.12"), b"old copy").unwrap();
+    bench.start().await;
+    assert!(matches!(
+        bench.adapter.next_event().await,
+        AdapterEvent::Diagnostic {
+            kind: "antigravity_cli_version_changed",
+            required: false,
+            ..
+        }
+    ));
+    assert!(bin.join("agy-1.5.0").is_file());
+    assert_eq!(
+        std::fs::read(bin.join("agy-1.4.12")).unwrap(),
+        b"old copy",
+        "an existing pinned copy is never overwritten"
+    );
+    bench.close().await;
+}
+
+#[tokio::test]
 async fn catalog_probe_reads_real_models_and_excludes_the_family_option() {
     let script = Script {
         steps: vec![init_step(), new_step()],
