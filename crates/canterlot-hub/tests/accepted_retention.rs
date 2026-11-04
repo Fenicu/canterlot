@@ -39,6 +39,64 @@ async fn accept_at(pool: &PgPool, id: Uuid, at: DateTime<Utc>) {
         .unwrap();
 }
 
+async fn archive_at(pool: &PgPool, id: Uuid, at: DateTime<Utc>) {
+    sqlx::query("update conversations set archived_at=$2 where id=$1")
+        .bind(id)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn close_subscription(
+    pool: &PgPool,
+    owner: Uuid,
+    subscriber: Uuid,
+    target: Uuid,
+    at: DateTime<Utc>,
+    reason: &str,
+) {
+    sqlx::query(
+        "insert into session_subscriptions(id,owner_id,subscriber_id,target_id,chain_depth,
+                                            closed_at,closed_reason)
+         values($1,$2,$3,$4,0,$5,$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(owner)
+    .bind(subscriber)
+    .bind(target)
+    .bind(at)
+    .bind(reason)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn cleanup_job(pool: &PgPool, owner: Uuid, id: Uuid, state: &str, at: DateTime<Utc>) {
+    sqlx::query(
+        "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,state,payload,
+                                     fired_at,updated_at)
+         values($1,'session_task',$2,$3,$4,$5,$6,$4,$4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(owner)
+    .bind(id)
+    .bind(at)
+    .bind(state)
+    .bind(serde_json::json!({"action": "cleanup", "conversation_id": id}))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn backfill_sql() -> &'static str {
+    const MIGRATION: &str = include_str!("../migrations/0059_accepted_retention.sql");
+    let start = MIGRATION
+        .find("update conversations")
+        .expect("migration keeps the backfill UPDATE");
+    &MIGRATION[start..]
+}
+
 async fn exists(pool: &PgPool, id: Uuid) -> bool {
     sqlx::query_scalar("select exists(select 1 from conversations where id=$1)")
         .bind(id)
@@ -355,4 +413,154 @@ async fn archive_list_excludes_accepted_delegate_but_tree_and_detail_keep_it(poo
         .expect("принятая делегация открывается по ссылке");
     assert!(detail.attributes.archived);
     assert!(detail.attributes.accepted);
+}
+
+async fn accepted_at_of(pool: &PgPool, id: Uuid) -> Option<DateTime<Utc>> {
+    sqlx::query_scalar("select accepted_at from conversations where id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn same_second(actual: Option<DateTime<Utc>>, expected: DateTime<Utc>) -> bool {
+    actual.is_some_and(|at| (at - expected).num_seconds().abs() <= 1)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn migration_backfills_accepted_at_from_old_accept_evidence(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    let now = Utc::now();
+
+    // Старый путь: подписка закрыта приёмом.
+    let by_subscription = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
+    archive_at(&pool, by_subscription, now - TimeDelta::days(5)).await;
+    close_subscription(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        by_subscription,
+        now - TimeDelta::days(4),
+        "accepted",
+    )
+    .await;
+
+    // Старый путь: задание уборки отработало.
+    let by_cleanup = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
+    archive_at(&pool, by_cleanup, now - TimeDelta::days(6)).await;
+    cleanup_job(
+        &pool,
+        seed.owner_id,
+        by_cleanup,
+        "fired",
+        now - TimeDelta::days(3),
+    )
+    .await;
+
+    // Старый путь: рабочая копия убрана, времени кроме архива нет.
+    let by_worktree = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
+    archive_at(&pool, by_worktree, now - TimeDelta::days(2)).await;
+    sqlx::query("update conversations set worktree=$2 where id=$1")
+        .bind(by_worktree)
+        .bind(serde_json::json!({
+            "state": "removed",
+            "branch": "canterlot/abcd1234",
+            "path": "/data/worktrees/x",
+        }))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Без следа приёма: остановленная/архивированная владельцем делегация.
+    let untouched = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
+    archive_at(&pool, untouched, now - TimeDelta::days(10)).await;
+
+    // Неудавшаяся уборка — не признак принятой сессии.
+    let failed_cleanup = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
+    archive_at(&pool, failed_cleanup, now - TimeDelta::days(10)).await;
+    cleanup_job(
+        &pool,
+        seed.owner_id,
+        failed_cleanup,
+        "failed",
+        now - TimeDelta::days(9),
+    )
+    .await;
+
+    // Принятая, но не архивированная сессия остаётся вне срока.
+    let not_archived = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
+    close_subscription(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        not_archived,
+        now - TimeDelta::days(9),
+        "accepted",
+    )
+    .await;
+
+    // Корневая сессия владельца не становится делегацией.
+    let owners_own = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
+    archive_at(&pool, owners_own, now - TimeDelta::days(10)).await;
+    close_subscription(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        owners_own,
+        now - TimeDelta::days(9),
+        "accepted",
+    )
+    .await;
+
+    let changed = sqlx::query(backfill_sql()).execute(&pool).await.unwrap();
+    assert_eq!(
+        changed.rows_affected(),
+        3,
+        "отмечены только три следа приёма"
+    );
+    assert!(
+        same_second(
+            accepted_at_of(&pool, by_subscription).await,
+            now - TimeDelta::days(4)
+        ),
+        "время берётся из закрытой подписки"
+    );
+    assert!(
+        same_second(
+            accepted_at_of(&pool, by_cleanup).await,
+            now - TimeDelta::days(3)
+        ),
+        "время берётся из отработавшей уборки"
+    );
+    assert!(
+        same_second(
+            accepted_at_of(&pool, by_worktree).await,
+            now - TimeDelta::days(2)
+        ),
+        "без отметки времени остаётся архив"
+    );
+    for id in [untouched, failed_cleanup, not_archived, owners_own] {
+        assert_eq!(
+            accepted_at_of(&pool, id).await,
+            None,
+            "без следа приёма: {id}"
+        );
+    }
+
+    // Повтор миграции ничего не меняет.
+    let changed = sqlx::query(backfill_sql()).execute(&pool).await.unwrap();
+    assert_eq!(changed.rows_affected(), 0);
+
+    // Дальше работает обычная уборка: старые уходят, свежая и чужие остаются.
+    let deleted = scheduler(&pool)
+        .purge_accepted_retention(now)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 2);
+    assert!(!exists(&pool, by_subscription).await);
+    assert!(!exists(&pool, by_cleanup).await);
+    assert!(exists(&pool, by_worktree).await);
+    for id in [untouched, failed_cleanup, not_archived, owners_own] {
+        assert!(exists(&pool, id).await);
+    }
 }
