@@ -780,8 +780,9 @@ async fn overlapping_batches_keep_each_summary_in_the_first_batch_that_collected
     assert!(
         second_collected["sessions"]
             .get(f.child.to_string())
+            .and_then(|entry| entry.get("subscription_id"))
             .is_none(),
-        "the first batch owns the summary"
+        "the first batch owns the summary; the second only counts the state"
     );
 }
 
@@ -1131,4 +1132,140 @@ async fn arm_path_uses_completion_for_satisfied_condition(pool: PgPool) {
         "the already settled target is part of the initial all collection"
     );
     assert!(collected["sessions"].get(f.child2.to_string()).is_none());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn deletion_produces_exactly_one_notice(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    f.refresh_id(f.child2, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child2, now + TimeDelta::seconds(1)).await;
+
+    // Удаление цели: обычная подписка шлёт одно сообщение, пачка только засчитывает.
+    let mut tx = f.pool.begin().await.unwrap();
+    subs::on_target_deleted_in_tx(&mut tx, f.child, now).await.unwrap();
+    canterlot_hub::session_tools::alarms::on_target_deleted_in_tx(
+        &mut tx,
+        f.child,
+        now,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    // В настоящем удалении разговор уже убран, поэтому итог события говорит «was deleted».
+    sqlx::query("delete from session_subscriptions where target_id=$1 or subscriber_id=$1")
+        .bind(f.child)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from queue_state where conversation_id=$1")
+        .bind(f.child)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from conversations where id=$1")
+        .bind(f.child)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(alarm_state(&f.pool, alarm_id(&armed)).await.0, "fired");
+
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(10))
+            .await
+            .unwrap()
+            .fired,
+        2,
+        "the deletion notice and the batch are separate deliveries"
+    );
+    let inputs = f.alarm_inputs().await;
+    let notices = inputs
+        .iter()
+        .filter(|(text, _)| text.contains("was deleted"))
+        .count();
+    assert_eq!(notices, 1, "deletion is announced once: {inputs:?}");
+    let batch = inputs
+        .iter()
+        .find(|(text, _)| text.contains("settled (all, batched)"))
+        .expect("the batch input");
+    assert!(batch.0.contains("reported separately"), "{}", batch.0);
+    assert!(!batch.0.contains("was deleted"), "{}", batch.0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn failed_and_idle_complete_an_all_batch_with_the_failure_reported_once(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+
+    let execution = Uuid::now_v7();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state,outcome)
+         values($1,$2,1,'failed','error')",
+    )
+    .bind(execution)
+    .bind(f.child)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    f.refresh_id(f.child, now).await;
+    assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
+    assert_eq!(f.event_jobs().await, 1, "failed goes out as a normal result");
+
+    let sch = scheduler(&f.pool, Default::default());
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(10)).await.unwrap().fired,
+        1
+    );
+
+    f.refresh_id(f.child2, now + TimeDelta::seconds(10)).await;
+    f.refresh_id(f.child2, now + TimeDelta::seconds(20)).await;
+    assert_eq!(
+        alarm_state(&f.pool, id).await.0,
+        "fired",
+        "a failed target satisfies all"
+    );
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(30)).await.unwrap().fired,
+        1
+    );
+    let inputs = f.alarm_inputs().await;
+    assert_eq!(inputs.len(), 2, "one failure notice and one batch");
+    assert_eq!(
+        inputs
+            .iter()
+            .filter(|(text, _)| text.contains("is now failed"))
+            .count(),
+        1,
+        "the failure is reported once"
+    );
+    let batch = inputs
+        .iter()
+        .find(|(text, _)| text.contains("settled (all, batched)"))
+        .expect("the batch input");
+    assert!(batch.0.contains("reported separately"), "{}", batch.0);
+    assert!(batch.0.contains(&f.child.to_string()), "{}", batch.0);
 }

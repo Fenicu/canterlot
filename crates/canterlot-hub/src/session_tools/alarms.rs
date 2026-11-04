@@ -73,6 +73,11 @@ struct CollectedSession {
     state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fingerprint: Option<String>,
+    /// Цель условия устоялась в подходящем состоянии. Это отдельный факт от удержания
+    /// итога: пачка удерживает только `idle`/`stopped`, остальные состояния приходят
+    /// обычной подпиской и здесь только засчитываются.
+    #[serde(default)]
+    satisfied: bool,
     /// Пачка хранит, из какой подписки и какого поколения взят итог.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subscription_id: Option<Uuid>,
@@ -103,18 +108,22 @@ impl Collected {
         self.sessions.insert(id.to_string(), entry);
     }
 
-    /// Все цели условия собраны и в подходящем состоянии.
+    /// Все цели условия засчитаны. Удаление цели закрывает пачку даже тогда, когда
+    /// `deleted` не перечислен в `states`: отдельное сообщение об удалении уже ушло
+    /// обычной подпиской, пачке остаётся только посчитать его.
     fn complete(&self, condition: &SessionCondition) -> bool {
         condition.session_ids.iter().all(|id| {
-            self.get(*id)
-                .is_some_and(|entry| condition.states.contains(&entry.state))
+            self.get(*id).is_some_and(|entry| {
+                entry.satisfied
+                    && (condition.states.contains(&entry.state) || entry.state == "deleted")
+            })
         })
     }
 
     fn any_matching(&self, condition: &SessionCondition) -> bool {
         self.sessions
             .values()
-            .any(|entry| condition.states.contains(&entry.state))
+            .any(|entry| entry.satisfied && condition.states.contains(&entry.state))
     }
 }
 
@@ -539,6 +548,8 @@ async fn apply_settled_in_tx(
         return Ok(Applied::Skipped);
     };
     let matching = condition.states.iter().any(|wanted| wanted == state);
+    // Пачка засчитывает и удаление цели, даже если `deleted` не перечислен в `states`:
+    // отдельное сообщение об удалении уже ушло обычной подпиской.
     if !matching && !(row.batch && state == "deleted") {
         return Ok(Applied::Skipped);
     }
@@ -552,37 +563,35 @@ async fn apply_settled_in_tx(
     let mut collected = Collected::parse(&row.collected);
     let already = collected
         .get(target_id)
-        .is_some_and(|entry| entry.fingerprint.as_deref() == Some(fingerprint));
-    if row.batch {
-        // Пачку наполняет подписка, удерживая итог вместе с его поколением. Удаление
-        // цели известно только здесь, поэтому оно добавляется напрямую.
-        if !already && state != "deleted" {
-            return Ok(Applied::Skipped);
+        .is_some_and(|entry| entry.satisfied);
+    if !already {
+        // Удержанный пачкой итог заводит подписка; здесь он только получает отметку
+        // «условие выполнено». Иначе отметка и владение итогом расходятся.
+        match collected.get(target_id).cloned() {
+            Some(mut entry) if entry.subscription_id.is_some() => {
+                entry.satisfied = true;
+                collected.insert(target_id, entry);
+            }
+            Some(mut entry) => {
+                entry.state = state.into();
+                entry.fingerprint = Some(fingerprint.into());
+                entry.satisfied = true;
+                collected.insert(target_id, entry);
+            }
+            None => {
+                collected.insert(
+                    target_id,
+                    CollectedSession {
+                        state: state.into(),
+                        fingerprint: Some(fingerprint.into()),
+                        satisfied: true,
+                        subscription_id: None,
+                        armed_at: None,
+                        chain_depth: 0,
+                    },
+                );
+            }
         }
-        if !already {
-            collected.insert(
-                target_id,
-                CollectedSession {
-                    state: state.into(),
-                    fingerprint: Some(fingerprint.into()),
-                    subscription_id: None,
-                    armed_at: None,
-                    chain_depth: 0,
-                },
-            );
-            persist_collected(conn, row, &collected, now).await?;
-        }
-    } else if !already {
-        collected.insert(
-            target_id,
-            CollectedSession {
-                state: state.into(),
-                fingerprint: Some(fingerprint.into()),
-                subscription_id: None,
-                armed_at: None,
-                chain_depth: 0,
-            },
-        );
         persist_collected(conn, row, &collected, now).await?;
     }
     let met = if condition.all {
@@ -650,6 +659,7 @@ pub async fn hold_for_batch_in_tx(
             CollectedSession {
                 state: state.into(),
                 fingerprint: Some(fingerprint.into()),
+                satisfied: true,
                 subscription_id: Some(subscription_id),
                 armed_at: Some(armed_at),
                 chain_depth,
@@ -964,6 +974,7 @@ pub async fn set(
                         CollectedSession {
                             state: state.clone(),
                             fingerprint: condition.armed.get(&target.to_string()).cloned(),
+                            satisfied: true,
                             subscription_id: None,
                             armed_at: None,
                             chain_depth,
@@ -1556,6 +1567,7 @@ async fn fill_timeout_collected(
             CollectedSession {
                 state: state.unwrap_or_else(|| "unknown".into()),
                 fingerprint: None,
+                satisfied: false,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
@@ -1608,31 +1620,31 @@ async fn render_one_in_tx(
     };
     let collected = Collected::parse(&row.collected);
     let mut text = render_condition_text(row, now);
-    let entries = condition
+    // Итог держат только цели, которые пачка собрала; остальные состояния уже пришли
+    // обычной подпиской и упоминаются одной строкой, без повторного уведомления.
+    let held: Vec<(Uuid, CollectedSession)> = condition
         .session_ids
         .iter()
-        .filter(|id| {
+        .filter_map(|id| {
             collected
-                .get(**id)
-                .is_some_and(|entry| entry.subscription_id.is_some() || entry.state == "deleted")
+                .get(*id)
+                .filter(|entry| entry.subscription_id.is_some())
+                .map(|entry| (*id, entry.clone()))
         })
-        .count()
-        .max(1);
+        .collect();
+    let reported: Vec<(Uuid, String)> = condition
+        .session_ids
+        .iter()
+        .filter_map(|id| {
+            collected
+                .get(*id)
+                .filter(|entry| entry.subscription_id.is_none() && entry.satisfied)
+                .map(|entry| (*id, entry.state.clone()))
+        })
+        .collect();
     // Общий предел сообщения делится между итогами поровну.
-    let budget = summary::TEXT_LIMIT.saturating_sub(text.len() + 512) / entries;
-    for target in &condition.session_ids {
-        let Some(entry) = collected.get(*target) else {
-            continue;
-        };
-        if entry.state == "deleted" {
-            text.push_str("\n\n");
-            text.push_str(&format!("[canterlot] Session {target} was deleted."));
-            continue;
-        }
-        if entry.subscription_id.is_none() {
-            // Цель не собралась до срока: она перечислена в строке «Not settled».
-            continue;
-        }
+    let budget = summary::TEXT_LIMIT.saturating_sub(text.len() + 512) / held.len().max(1);
+    for (target, entry) in &held {
         text.push_str("\n\n");
         if let Some(built) =
             summary::build(conn, owner_id, *target, &entry.state, entry.armed_at).await?
@@ -1644,6 +1656,12 @@ async fn render_one_in_tx(
                 entry.state
             ));
         }
+    }
+    for (target, state) in &reported {
+        text.push_str("\n\n");
+        text.push_str(&format!(
+            "[canterlot] Session {target} is {state}; reported separately."
+        ));
     }
     if let Some(note) = row.note.as_deref().filter(|note| !note.is_empty()) {
         text.push_str("\nNote: ");
@@ -1713,9 +1731,9 @@ fn render_condition_text(row: &AlarmRow, now: DateTime<Utc>) -> String {
                 .session_ids
                 .iter()
                 .filter(|id| {
-                    collected.get(**id).is_some_and(|entry| {
-                        entry.subscription_id.is_none() && entry.state != "deleted"
-                    })
+                    collected
+                        .get(**id)
+                        .is_none_or(|entry| !entry.satisfied)
                 })
                 .map(Uuid::to_string)
                 .collect::<Vec<_>>()
@@ -1723,11 +1741,7 @@ fn render_condition_text(row: &AlarmRow, now: DateTime<Utc>) -> String {
             let settled = condition
                 .session_ids
                 .iter()
-                .filter(|id| {
-                    collected.get(**id).is_some_and(|entry| {
-                        entry.subscription_id.is_some() || entry.state == "deleted"
-                    })
-                })
+                .filter(|id| collected.get(**id).is_some_and(|entry| entry.satisfied))
                 .count();
             return format!(
                 "[canterlot] Alarm {name}timed out after {age}: {settled}/{} sessions settled (batched){late}. Not settled: {missed}.",
@@ -1859,6 +1873,7 @@ mod tests {
             CollectedSession {
                 state: "idle".into(),
                 fingerprint: Some("a".into()),
+                satisfied: true,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
@@ -1870,6 +1885,7 @@ mod tests {
             CollectedSession {
                 state: "idle".into(),
                 fingerprint: Some("b".into()),
+                satisfied: true,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
