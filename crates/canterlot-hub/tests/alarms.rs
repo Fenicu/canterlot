@@ -1818,6 +1818,74 @@ async fn released_batch_event_keeps_the_held_answer(pool: PgPool) {
     );
 }
 
+/// Цель уже устоялась при взводе пачки: её отпечаток не изменится, поэтому она
+/// засчитывается сразу, и пачка ждёт только остальных, а не срока.
+#[sqlx::test(migrations = "./migrations")]
+async fn already_settled_target_completes_a_batch_without_the_deadline(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let execution = Uuid::now_v7();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state,outcome)
+         values($1,$2,1,'failed','error')",
+    )
+    .bind(execution)
+    .bind(f.child)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    f.refresh_id(f.child, now).await;
+
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
+    let collected = alarm_state(&f.pool, id).await.2;
+    assert_eq!(
+        collected["sessions"][f.child.to_string()]["state"],
+        "failed",
+        "a settled target is recorded at arm time"
+    );
+
+    f.refresh_id(f.child2, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child2, now + TimeDelta::seconds(1)).await;
+    assert_eq!(
+        alarm_state(&f.pool, id).await.0,
+        "fired",
+        "the batch does not wait for the deadline"
+    );
+    assert_eq!(
+        f.event_jobs().await,
+        0,
+        "the already-settled failure belongs to the subscription"
+    );
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(10))
+            .await
+            .unwrap()
+            .fired,
+        1,
+        "one batch input"
+    );
+    let inputs = f.alarm_inputs().await;
+    let batch = inputs
+        .iter()
+        .find(|(text, _)| text.contains("settled (all, batched)"))
+        .expect("the batch input");
+    assert!(batch.0.contains("reported separately"), "{}", batch.0);
+    assert!(batch.0.contains(&f.child2.to_string()), "{}", batch.0);
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
     let f = Fx::new(pool).await;

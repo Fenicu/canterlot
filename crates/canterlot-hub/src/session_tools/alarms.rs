@@ -103,6 +103,10 @@ struct CollectedSession {
     /// Владение итогом. У старых записей поля нет: выводим из подписки и `satisfied`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ownership: Option<Ownership>,
+    /// Цель уже устоялась при взводе пачки: её итог ушёл подпиской раньше, и в сообщении
+    /// пачки об этом говорит отдельная строка.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    settled_before_arming: bool,
     /// Пачка хранит, из какой подписки и какого поколения взят итог.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subscription_id: Option<Uuid>,
@@ -642,6 +646,7 @@ async fn apply_settled_in_tx(
                         fingerprint: Some(fingerprint.into()),
                         satisfied: false,
                         ownership: Some(Ownership::Pending),
+                        settled_before_arming: false,
                         subscription_id: None,
                         armed_at: None,
                         chain_depth: 0,
@@ -657,6 +662,7 @@ async fn apply_settled_in_tx(
             fingerprint: None,
             satisfied: false,
             ownership: None,
+            settled_before_arming: false,
             subscription_id: None,
             armed_at: None,
             chain_depth: 0,
@@ -767,6 +773,7 @@ pub async fn hold_for_batch_in_tx(
                 fingerprint: Some(fingerprint.into()),
                 satisfied: true,
                 ownership: Some(Ownership::Held),
+                settled_before_arming: false,
                 subscription_id: Some(subscription_id),
                 armed_at: Some(armed_at),
                 chain_depth,
@@ -1081,8 +1088,10 @@ pub async fn set(
                 return Ok(response);
             }
             let mut collected = Collected::default();
-            if condition.all && !batch {
-                // Цель, уже осевшая до взвода, входит в итог `all`: ждём только остальных.
+            if condition.all {
+                // Цель, уже осевшая до взвода, входит в итог `all`, и для пачки тоже:
+                // её отпечаток больше не изменится, поэтому без этого пачка ждала бы срока.
+                // Итог `idle`/`stopped` подписка уже отдала до взвода — об этом говорит строка.
                 for (target, state) in &current_states {
                     if !states.iter().any(|wanted| wanted == state) {
                         continue;
@@ -1094,6 +1103,7 @@ pub async fn set(
                             fingerprint: condition.armed.get(&target.to_string()).cloned(),
                             satisfied: true,
                             ownership: Some(Ownership::Separate),
+                            settled_before_arming: matches!(state.as_str(), "idle" | "stopped"),
                             subscription_id: None,
                             armed_at: None,
                             chain_depth,
@@ -1716,6 +1726,7 @@ async fn fill_timeout_collected(
                 fingerprint: None,
                 satisfied: false,
                 ownership: None,
+                settled_before_arming: false,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
@@ -1834,7 +1845,7 @@ async fn render_one_in_tx(
     // Владение проверяется на каждой отдаче: отписка, приём или переподписка
     // с новым поколением выбрасывают удержанный итог.
     let mut held: Vec<(Uuid, CollectedSession)> = Vec::new();
-    let mut reported: Vec<(Uuid, String)> = Vec::new();
+    let mut reported: Vec<(Uuid, String, bool)> = Vec::new();
     for target in &condition.session_ids {
         let Some(entry) = collected.get(*target).cloned() else {
             continue;
@@ -1844,7 +1855,7 @@ async fn render_one_in_tx(
                 held.push((*target, entry));
             }
         } else if entry.satisfied && entry.owned() == Ownership::Separate {
-            reported.push((*target, entry.state));
+            reported.push((*target, entry.state, entry.settled_before_arming));
         }
     }
     // Общий предел сообщения делится между итогами поровну.
@@ -1869,11 +1880,17 @@ async fn render_one_in_tx(
             ));
         }
     }
-    for (target, state) in &reported {
+    for (target, state, before_arming) in &reported {
         text.push_str("\n\n");
-        text.push_str(&format!(
-            "[canterlot] Session {target} is {state}; reported separately."
-        ));
+        if *before_arming {
+            text.push_str(&format!(
+                "[canterlot] Session {target} was already {state} before the alarm was armed."
+            ));
+        } else {
+            text.push_str(&format!(
+                "[canterlot] Session {target} is {state}; reported separately."
+            ));
+        }
     }
     if let Some(note) = row.note.as_deref().filter(|note| !note.is_empty()) {
         text.push_str("\nNote: ");
@@ -2083,6 +2100,7 @@ mod tests {
                 fingerprint: Some("a".into()),
                 satisfied: true,
                 ownership: None,
+                settled_before_arming: false,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
@@ -2097,6 +2115,7 @@ mod tests {
                 fingerprint: Some("b".into()),
                 satisfied: true,
                 ownership: None,
+                settled_before_arming: false,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
