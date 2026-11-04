@@ -1073,6 +1073,11 @@ impl Adapter for AntigravityAdapter {
         if matches!(pinned.version, version::CliVersion::UntestedNewer(_)) {
             self.diagnostic("untested_cli_version", false);
         }
+        // На 1.4.12 ответ на вопрос через cancel + prompt ломает сессию:
+        // карточка не показывается, `open_question` отменяет ход.
+        if !version::supports_questions(&pinned.version) {
+            self.questions_enabled = false;
+        }
         self.instructions = spec.instructions.clone();
         self.workdir = spec.workdir.clone();
         self.permission_mode = spec.permission_mode.clone();

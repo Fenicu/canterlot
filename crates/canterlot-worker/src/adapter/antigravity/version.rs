@@ -1,4 +1,5 @@
-//! Проверенный `agy` 1.4.12: разбор `--version` и вердикт `agentInfo.version`.
+//! Проверенные `agy` 1.4.12 и 1.5.0: разбор `--version` и вердикт `agentInfo.version`.
+//! Вопросы отвечаются только на 1.5.0: на 1.4.12 cancel + prompt ломает сессию.
 
 use super::process::base_env;
 use crate::adapter::cli_version::VersionPolicy;
@@ -15,7 +16,10 @@ pub use crate::adapter::cli_version::{CliVersion, VersionError};
 const OUTPUT_CAP: u64 = 64 * 1024;
 
 pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (1, 4, 12);
-pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(1, 4, 12)];
+pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(1, 4, 12), (1, 5, 0)];
+
+/// Вопросы `ask_question` отвечаются обычным prompt только с 1.5.0.
+pub const QUESTIONS_SINCE: (u32, u32, u32) = (1, 5, 0);
 
 const POLICY: VersionPolicy = VersionPolicy {
     prefix: "agy",
@@ -35,6 +39,10 @@ pub fn classify_agent(version: &str) -> Result<CliVersion, VersionError> {
 
 pub fn is_verified(version: &str) -> bool {
     matches!(classify_agent(version), Ok(CliVersion::Verified(_)))
+}
+
+pub fn supports_questions(version: &CliVersion) -> bool {
+    matches!(parse_version(version.label()), Ok(found) if found >= QUESTIONS_SINCE)
 }
 
 pub async fn check(executable: &Path) -> Result<CliVersion, VersionError> {
@@ -99,9 +107,17 @@ mod tests {
     }
 
     #[test]
-    fn only_1_4_12_is_verified() {
+    fn only_the_probed_releases_are_verified() {
         assert!(is_verified("1.4.12"));
-        assert!(!is_verified("1.4.13"));
+        assert!(is_verified("1.5.0"));
+        assert!(!is_verified("1.5.1"));
         assert!(!is_verified("1.4.11"));
+    }
+
+    #[test]
+    fn questions_need_1_5_0() {
+        assert!(!supports_questions(&CliVersion::Verified("1.4.12".into())));
+        assert!(supports_questions(&CliVersion::Verified("1.5.0".into())));
+        assert!(supports_questions(&CliVersion::UntestedNewer("1.5.1".into())));
     }
 }

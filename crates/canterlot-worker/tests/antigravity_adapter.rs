@@ -757,9 +757,9 @@ async fn missing_session_in_list_fails_start() {
 #[tokio::test]
 async fn unknown_version_is_allowed_with_a_diagnostic() {
     let mut initialized = evidence_result("p1-diagnostics.jsonl", 1);
-    initialized["agentInfo"]["version"] = "1.5.0".into();
+    initialized["agentInfo"]["version"] = "1.6.0".into();
     let script = Script {
-        version: "agy 1.5.0".into(),
+        version: "agy 1.6.0".into(),
         steps: vec![Script::expect("initialize", initialized), new_step()],
         ..Default::default()
     };
@@ -777,7 +777,7 @@ async fn unknown_version_is_allowed_with_a_diagnostic() {
         bench
             .fake
             .data_dir()
-            .join("antigravity/bin/agy-1.5.0")
+            .join("antigravity/bin/agy-1.6.0")
             .is_file()
     );
     bench
