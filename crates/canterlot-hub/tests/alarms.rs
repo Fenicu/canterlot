@@ -2368,6 +2368,75 @@ async fn replacement_takes_target_conversations_before_the_old_alarm(pool: PgPoo
     assert_eq!(replaced["state"], "armed");
 }
 
+/// Запертый будильник пропускает оценку, а подписка успевает закрыться обычным `idle`.
+/// После освобождения пачка признаёт этот итог отдельным и срабатывает сразу, не ждав срока.
+#[sqlx::test(migrations = "./migrations")]
+async fn locked_alarm_counts_an_idle_subscription_closed_separately(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child], "all": true},
+                "batch": true,
+                "deadline_seconds": 600,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+
+    let mut blocker = f.pool.begin().await.unwrap();
+    sqlx::query("select id from alarms where id=$1 for update")
+        .bind(id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
+    let reason: Option<String> = sqlx::query_scalar(
+        "select closed_reason from session_subscriptions
+         where subscriber_id=$1 and target_id=$2",
+    )
+    .bind(f.orchestrator)
+    .bind(f.child)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(reason.as_deref(), Some("idle"), "the subscription closed itself");
+    assert_eq!(f.event_jobs().await, 1, "the ordinary event is queued");
+
+    blocker.commit().await.unwrap();
+    f.refresh_id(f.child, now + TimeDelta::seconds(10)).await;
+    assert_eq!(
+        alarm_state(&f.pool, id).await.0,
+        "fired",
+        "the batch adopts the separately closed result without the deadline"
+    );
+    let collected = alarm_state(&f.pool, id).await.2;
+    assert_eq!(
+        collected["sessions"][f.child.to_string()]["ownership"],
+        "separate"
+    );
+    assert_eq!(f.event_jobs().await, 1, "no second ordinary event");
+
+    let report = scheduler(&f.pool, Default::default())
+        .tick(now + TimeDelta::seconds(20))
+        .await
+        .unwrap();
+    assert!(report.fired >= 1, "the batch delivery runs");
+    let inputs = f.alarm_kind_inputs().await;
+    assert_eq!(inputs.len(), 1);
+    assert!(
+        inputs[0].0.contains("reported separately"),
+        "the batch says the result came separately: {}",
+        inputs[0].0
+    );
+}
+
 /// Строку подписки держит чужая транзакция: `idle` нельзя ни удержать, ни отдать
 /// обычным событием. Пачка ждёт, а на следующем обходе забирает итог себе.
 #[sqlx::test(migrations = "./migrations")]

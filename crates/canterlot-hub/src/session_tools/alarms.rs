@@ -704,6 +704,9 @@ async fn apply_settled_in_tx(
 }
 
 /// Подписка уже отдала это устоявшееся состояние обычным событием: отпечаток совпал.
+/// Обычное терминальное закрытие (`idle`/`stopped`/`failed`) не мешает признать это:
+/// будильник мог быть заперт в момент оценки, а подписка успела закрыться сама.
+/// Отписка и приём закрывают подписку своими причинами и итог не воскрешают.
 async fn subscription_reported_in_tx(
     conn: &mut PgConnection,
     subscriber_id: Uuid,
@@ -712,7 +715,8 @@ async fn subscription_reported_in_tx(
 ) -> Result<bool, sqlx::Error> {
     let reported: Option<bool> = sqlx::query_scalar(
         "select last_fingerprint is not distinct from $3 from session_subscriptions
-         where subscriber_id=$1 and target_id=$2 and closed_at is null
+         where subscriber_id=$1 and target_id=$2
+           and (closed_at is null or closed_reason in ('idle','stopped','failed'))
          order by armed_at desc limit 1",
     )
     .bind(subscriber_id)
