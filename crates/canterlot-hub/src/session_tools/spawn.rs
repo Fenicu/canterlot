@@ -889,7 +889,8 @@ async fn allow(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Started, T
     if mode.wider_than_parent && !launch.spec.wider_than_parent {
         return Err(ToolError::new(ToolErrorCode::PermissionModeTooWide));
     }
-    let mut attempt = conn.begin().await?;
+    // Вложенная точка сохранения на уже открытой транзакции, не новое соединение.
+    let mut attempt = conn.begin().await?; // db::begin: savepoint
     match start_child(&mut attempt, launch).await {
         Ok(child) => {
             attempt.commit().await?;
