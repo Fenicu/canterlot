@@ -45,6 +45,32 @@ describe('alarm plaques', () => {
     expect(chip).toContain('до');
   });
 
+  it('shows a limit-reset condition from the hub text', () => {
+    const chip = alarmChip({
+      ...base,
+      kind: 'condition',
+      fires_at: null,
+      deadline_at: '2026-11-05T12:00:00.000Z',
+      condition: 'claude weekly window resets after 2026-11-05 10:00 UTC; deadline 2026-11-05 12:00 UTC'
+    });
+    expect(chip).toContain('Будильник');
+    expect(chip).toContain('weekly window resets');
+  });
+
+  it('shows a machine condition and its thresholds in the detail', () => {
+    const alarm = {
+      ...base,
+      kind: 'condition',
+      fires_at: null,
+      deadline_at: '2026-11-05T12:00:00.000Z',
+      condition: 'machine: free disk above 40 GB, load below 2 per core; deadline 2026-11-05 12:00 UTC'
+    };
+    expect(alarmChip(alarm)).toContain('machine');
+    expect(alarmDetail(alarm)).toContain(
+      'Условие: machine: free disk above 40 GB, load below 2 per core; deadline 2026-11-05 12:00 UTC'
+    );
+  });
+
   it('marks a watchdog and a failed delivery', () => {
     expect(alarmChip({ ...base, only_on_timeout: true })).toContain('Сторож');
     expect(alarmChip({ ...base, state: 'failed', failure_reason: 'delivery_failed' })).toContain(
@@ -61,6 +87,9 @@ describe('alarm plaques', () => {
     );
     expect(alarmEventLine({ alarm_key: 'gate', fired_reason: 'timed_out' })).toContain(
       'истёк срок'
+    );
+    expect(alarmEventLine({ alarm_key: 'gate', fired_reason: 'by_clock' })).toContain(
+      'по часам'
     );
   });
 });

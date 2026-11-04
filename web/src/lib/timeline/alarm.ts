@@ -33,13 +33,20 @@ function verbs(states: string[]): string {
 export function alarmChip(alarm: AlarmView): string {
   if (alarm.state === 'failed') return 'Будильник · не доставлен';
   if (alarm.only_on_timeout) {
-    return `Сторож · ${targets(alarm.session_ids)} · до ${moment(alarm.deadline_at)}`;
+    const watched = alarm.session_ids.length
+      ? targets(alarm.session_ids)
+      : alarm.condition || 'условие';
+    return `Сторож · ${watched} · до ${moment(alarm.deadline_at)}`;
   }
   if (alarm.kind === 'at') {
     const at = moment(alarm.fires_at);
     return at ? `Будильник · ${at}` : 'Будильник';
   }
   const name = alarm.key ? `«${alarm.key}» · ` : '';
+  // Условия лимита и машины приходят готовой английской строкой из хаба.
+  if (!alarm.session_ids.length && alarm.condition) {
+    return `Будильник · ${name}${alarm.condition}`;
+  }
   return `Будильник · ${name}когда ${targets(alarm.session_ids)} ${verbs(alarm.states)} · до ${moment(alarm.deadline_at)}`;
 }
 
@@ -47,7 +54,8 @@ export function alarmChip(alarm: AlarmView): string {
 export function alarmDetail(alarm: AlarmView): string[] {
   const lines: string[] = [];
   if (alarm.kind === 'at') lines.push(`Время: ${moment(alarm.fires_at)}`);
-  else lines.push(`Состояния: ${verbs(alarm.states)}`);
+  else if (alarm.session_ids.length) lines.push(`Состояния: ${verbs(alarm.states)}`);
+  else if (alarm.condition) lines.push(`Условие: ${alarm.condition}`);
   if (alarm.fired_reason === 'timed_out') lines.push('Срок условия истёк');
   if (alarm.failure_reason === 'delivery_failed') lines.push('Не удалось доставить сообщение');
   if (alarm.note) lines.push(`Заметка: ${alarm.note}`);
@@ -65,6 +73,8 @@ export function alarmEventLine(event: {
       return `Будильник${name ? ` ${name}` : ''}: истёк срок условия`;
     case 'condition':
       return `Будильник${name ? ` ${name}` : ''}: условие выполнено`;
+    case 'by_clock':
+      return `Будильник${name ? ` ${name}` : ''}: сработал по часам`;
     default:
       return `Будильник${name ? ` ${name}` : ''}: сработал`;
   }
