@@ -821,6 +821,19 @@ pub async fn set(
         tx.commit().await?;
         return Ok(stored);
     }
+    // Порядок блокировок (docs/design/delivery.md): строки `conversations` по возрастанию ID
+    // берутся до правки старого будильника. Иначе замена держит будильник и ждёт разговор,
+    // пока удаление цели держит разговор и ждёт будильник.
+    let when = args.when.as_ref().map(parse_condition).transpose()?;
+    let mut conversation_ids = vec![caller.conversation_id];
+    if let Some((condition, _)) = &when {
+        conversation_ids.extend(condition.session_ids.iter().copied());
+    }
+    conversation_ids.sort_unstable();
+    conversation_ids.dedup();
+    for id in conversation_ids {
+        access::session_in_tx(&mut tx, caller.owner_id, id).await?;
+    }
     let waiter = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
 
     let replaced = if let Some(key) = args.key.as_deref() {
@@ -902,11 +915,8 @@ pub async fn set(
                 false,
             )
         } else {
-            let when = args
-                .when
-                .as_ref()
-                .ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
-            let (mut condition, states) = parse_condition(when)?;
+            let (mut condition, states) =
+                when.ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
             if batch && !condition.all {
                 return Err(ToolError::with_message(
                     ToolErrorCode::InvalidArguments,
@@ -1420,6 +1430,9 @@ pub async fn deliver_job_in_tx(
     let Some(conversation) = job.conversation_id else {
         return Ok(crate::crunch::JobOutcome::Cancelled("invalid_payload"));
     };
+    // Порядок блокировок: очередь получателя раньше подписок и будильников. Приём
+    // результата держит очередь и закрывает подписку, поэтому обратный порядок даёт цикл.
+    send::lock_queue(conn, conversation).await?;
     let mut rows: Vec<AlarmRow> = sqlx::query_as(
         "select * from alarms where conversation_id=$1 and (
              (state='fired' and delivered_input_id is null)
@@ -1560,6 +1573,8 @@ pub async fn abandon_deliver_in_tx(
     payload: &Value,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
+    // Отпускание удержанного берёт строки подписок: очередь получателя идёт первой.
+    send::lock_queue(conn, conversation_id).await?;
     let Some(id) = payload
         .get("alarm_id")
         .and_then(Value::as_str)

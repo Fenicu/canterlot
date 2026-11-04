@@ -713,6 +713,7 @@ pub async fn remember_workdir(
     Ok(())
 }
 
+/// Первая блокировка инструментов сессии: docs/design/delivery.md, «Порядок блокировок».
 pub(crate) async fn lock_owner(conn: &mut PgConnection, owner: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query(
         "select pg_advisory_xact_lock(hashtextextended('canterlot:attributes:'||$1::text,0))",

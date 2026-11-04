@@ -1775,6 +1775,157 @@ async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
     assert_eq!(unique.len(), keys.len(), "each part has its own key");
 }
 
+/// Ждём, пока чужая транзакция встанет на блокировке: этого достаточно, чтобы
+/// воспроизвести чередование двух порядков без гонки.
+async fn wait_until_someone_waits(pool: &PgPool) {
+    for _ in 0..300 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity
+             where datname=current_database() and wait_event_type='Lock'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the other transaction never blocked");
+}
+
+/// Доставка будильника держит строку подписки и идёт в очередь получателя, а приём
+/// результата держит очередь и закрывает подписку. Очередь берётся первой — цикла нет.
+#[sqlx::test(migrations = "./migrations")]
+async fn delivery_takes_the_recipient_queue_before_the_subscription(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    f.call(
+        "alarms.set",
+        json!({
+            "when": {"kind": "session_state", "session_ids": [f.child], "all": true},
+            "batch": true,
+            "key": "wave"
+        }),
+    )
+    .await
+    .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    let (id, owner_id, conversation_id, run_at, payload, attempts): (
+        Uuid,
+        Uuid,
+        Uuid,
+        DateTime<Utc>,
+        Value,
+        i32,
+    ) = sqlx::query_as(
+        "select id,owner_id,conversation_id,run_at,payload,attempts from scheduled_jobs
+         where kind='session_task' and payload->>'action'='alarm_deliver' and conversation_id=$1",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    let job = canterlot_hub::scheduler::ClaimedJob {
+        id,
+        kind: canterlot_hub::scheduler::JobKind::SessionTask,
+        owner_id,
+        conversation_id: Some(conversation_id),
+        run_at,
+        payload,
+        attempts,
+    };
+
+    // Приём результата: очередь уже у него.
+    let mut accept = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(f.orchestrator)
+        .execute(&mut *accept)
+        .await
+        .unwrap();
+    let pool = f.pool.clone();
+    let delivery = tokio::spawn(async move {
+        let mut tx = pool.begin().await.unwrap();
+        let outcome = canterlot_hub::session_tools::alarms::deliver_job_in_tx(
+            &mut tx,
+            &job,
+            Utc::now(),
+            Uuid::now_v7(),
+        )
+        .await
+        .expect("delivery must not hit a deadlock");
+        tx.commit().await.unwrap();
+        outcome
+    });
+    wait_until_someone_waits(&f.pool).await;
+
+    // Второй шаг приёма в той же транзакции, что держит очередь: закрыть подписку.
+    subs::close_for_accept_in_tx(&mut accept, f.orchestrator, None, "accepted")
+        .await
+        .expect("accept must not deadlock with delivery");
+    accept.commit().await.unwrap();
+    delivery.await.unwrap();
+}
+
+/// Замена будильника правит старый будильник и проверяет строки целей, а удаление цели
+/// держит разговор и удаляет будильник. Строки разговоров берутся первыми — цикла нет.
+#[sqlx::test(migrations = "./migrations")]
+async fn replacement_takes_target_conversations_before_the_old_alarm(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let first = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child]},
+                "deadline_seconds": 600,
+                "key": "watch"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first["state"], "armed");
+
+    // Удаление цели: очередь, затем строка разговора, затем будильники.
+    let mut deletion = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(f.child)
+        .execute(&mut *deletion)
+        .await
+        .unwrap();
+    sqlx::query("select machine_id from conversations where id=$1 for update")
+        .bind(f.child)
+        .execute(&mut *deletion)
+        .await
+        .unwrap();
+
+    let context = f.context.clone();
+    let caller = f.caller();
+    let child = f.child;
+    let replacement = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [child]},
+                "deadline_seconds": 600,
+                "key": "watch"
+            }),
+        )
+        .await
+    });
+    wait_until_someone_waits(&f.pool).await;
+
+    canterlot_hub::session_tools::alarms::on_target_deleted_in_tx(&mut deletion, f.child, now)
+        .await
+        .expect("deletion must not deadlock with replacement");
+    deletion.commit().await.unwrap();
+    let replaced = replacement.await.unwrap().unwrap();
+    assert_eq!(replaced["state"], "armed");
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn retention_deletes_old_terminal_alarms(pool: PgPool) {
     let f = Fx::new(pool).await;
