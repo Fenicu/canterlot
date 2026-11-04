@@ -21,11 +21,11 @@
 | `Apache-2.0/MIT` | 3 | 0 | 0 | 3 |
 | `BSD-2-Clause` | 0 | 1 | 9 | 10 |
 | `BSD-2-Clause OR Apache-2.0 OR MIT` | 2 | 0 | 0 | 2 |
-| `BSD-3-Clause` | 1 | 2 | 3 | 6 |
+| `BSD-3-Clause` | 2 | 2 | 3 | 7 |
 | `BlueOak-1.0.0` | 0 | 0 | 2 | 2 |
 | `CC0-1.0` | 0 | 0 | 1 | 1 |
 | `ISC` | 2 | 1 | 10 | 13 |
-| `MIT` | 63 | 68 | 159 | 290 |
+| `MIT` | 64 | 65 | 157 | 286 |
 | `MIT AND BSD-3-Clause` | 1 | 0 | 0 | 1 |
 | `MIT OR Apache-2.0` | 208 | 0 | 0 | 208 |
 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | 2 | 0 | 0 | 2 |
@@ -39,7 +39,7 @@
 | `Unlicense OR MIT` | 3 | 0 | 0 | 3 |
 | `Zlib` | 2 | 0 | 0 | 2 |
 | `Zlib OR Apache-2.0 OR MIT` | 1 | 0 | 0 | 1 |
-| **ИТОГО** | **360** | **90** | **211** | **661** |
+| **ИТОГО** | **362** | **87** | **209** | **658** |
 
 ## Требуют внимания
 
@@ -49,7 +49,7 @@
 
 ### Rust-крейты
 
-Среди Rust-крейтов рабочего пространства пакеты с неразрешёнными лицензиями отсутствуют (все 360 зависимостей удовлетворяют allowlist).
+Среди Rust-крейтов рабочего пространства пакеты с неразрешёнными лицензиями отсутствуют (все 362 зависимости удовлетворяют allowlist).
 
 ### npm (runtime)
 
@@ -69,7 +69,7 @@
 
 ## Крейты Rust
 
-Зависимости рабочего пространства Cargo (исключая собственные крейты `canterlot-*` и прототипы `spikes`). Всего: 360.
+Зависимости рабочего пространства Cargo (исключая собственные крейты `canterlot-*` и прототипы `spikes`). Всего: 362.
 
 | Крейт | Версия | Лицензия | Выбрано | Репозиторий |
 | --- | --- | --- | --- | --- |
@@ -217,6 +217,7 @@
 | `lock_api` | 0.4.14 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/Amanieu/parking_lot](https://github.com/Amanieu/parking_lot) |
 | `log` | 0.4.34 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/log](https://github.com/rust-lang/log) |
 | `lru-slab` | 0.1.3 | `MIT OR Apache-2.0 OR Zlib` | `MIT` | [https://github.com/Ralith/lru-slab](https://github.com/Ralith/lru-slab) |
+| `matchers` | 0.2.0 | `MIT` | `MIT` | [https://github.com/hawkw/matchers](https://github.com/hawkw/matchers) |
 | `matchit` | 0.8.4 | `MIT AND BSD-3-Clause` | `MIT AND BSD-3-Clause` | [https://github.com/ibraheemdev/matchit](https://github.com/ibraheemdev/matchit) |
 | `md-5` | 0.11.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/hashes](https://github.com/RustCrypto/hashes) |
 | `memchr` | 2.8.3 | `Unlicense OR MIT` | `MIT` | [https://github.com/BurntSushi/memchr](https://github.com/BurntSushi/memchr) |
@@ -308,6 +309,7 @@
 | `serde_urlencoded` | 0.7.1 | `MIT/Apache-2.0` | `MIT` | [https://github.com/nox/serde_urlencoded](https://github.com/nox/serde_urlencoded) |
 | `sha1` | 0.10.7 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/hashes](https://github.com/RustCrypto/hashes) |
 | `sha1` | 0.11.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/hashes](https://github.com/RustCrypto/hashes) |
+| `sha1_smol` | 1.0.1 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/mitsuhiko/sha1-smol](https://github.com/mitsuhiko/sha1-smol) |
 | `sha2` | 0.10.9 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/hashes](https://github.com/RustCrypto/hashes) |
 | `sha2` | 0.11.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/hashes](https://github.com/RustCrypto/hashes) |
 | `sharded-slab` | 0.1.7 | `MIT` | `MIT` | [https://github.com/hawkw/sharded-slab](https://github.com/hawkw/sharded-slab) |
@@ -436,7 +438,7 @@
 
 ## Runtime-пакеты npm
 
-Пакеты веб-интерфейса `web/`, поставляемые в составе клиентского приложения. Всего: 90.
+Пакеты веб-интерфейса `web/`, поставляемые в составе клиентского приложения. Всего: 87.
 
 | Пакет | Версия | Лицензия | Выбрано | Репозиторий |
 | --- | --- | --- | --- | --- |
@@ -466,10 +468,9 @@
 | `@rolldown/pluginutils` | 1.0.1 | `MIT` | `MIT` | [https://github.com/rolldown/plugins](https://github.com/rolldown/plugins) |
 | `@standard-schema/spec` | 1.1.0 | `MIT` | `MIT` | [https://github.com/standard-schema/standard-schema](https://github.com/standard-schema/standard-schema) |
 | `@sveltejs/acorn-typescript` | 1.0.13 | `MIT` | `MIT` | [https://github.com/sveltejs/acorn-typescript](https://github.com/sveltejs/acorn-typescript) |
-| `@sveltejs/kit` | 2.70.3 | `MIT` | `MIT` | [https://github.com/sveltejs/kit](https://github.com/sveltejs/kit) |
+| `@sveltejs/kit` | 3.1.0 | `MIT` | `MIT` | [https://github.com/sveltejs/kit](https://github.com/sveltejs/kit) |
 | `@sveltejs/vite-plugin-svelte` | 7.3.1 | `MIT` | `MIT` | [https://github.com/sveltejs/vite-plugin-svelte](https://github.com/sveltejs/vite-plugin-svelte) |
-| `@types/cookie` | 0.6.0 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
-| `@types/estree` | 1.0.9 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/estree` | 1.0.10 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
 | `@types/node` | 24.19.2 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
 | `@types/trusted-types` | 2.0.7 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
 | `@typescript-eslint/types` | 8.72.1 | `MIT` | `MIT` | [https://github.com/typescript-eslint/typescript-eslint](https://github.com/typescript-eslint/typescript-eslint) |
@@ -478,7 +479,7 @@
 | `aria-query` | 5.3.1 | `Apache-2.0` | `Apache-2.0` | [https://github.com/A11yance/aria-query](https://github.com/A11yance/aria-query) |
 | `axobject-query` | 4.1.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/A11yance/axobject-query](https://github.com/A11yance/axobject-query) |
 | `clsx` | 2.1.1 | `MIT` | `MIT` | [https://github.com/lukeed/clsx](https://github.com/lukeed/clsx) |
-| `cookie` | 0.6.0 | `MIT` | `MIT` | [https://github.com/jshttp/cookie](https://github.com/jshttp/cookie) |
+| `cookie` | 2.0.1 | `MIT` | `MIT` | [https://github.com/jshttp/cookie](https://github.com/jshttp/cookie) |
 | `deepmerge` | 4.3.1 | `MIT` | `MIT` | [https://github.com/TehShrike/deepmerge](https://github.com/TehShrike/deepmerge) |
 | `detect-libc` | 2.1.2 | `Apache-2.0` | `Apache-2.0` | [https://github.com/lovell/detect-libc](https://github.com/lovell/detect-libc) |
 | `devalue` | 5.9.4 | `MIT` | `MIT` | [https://github.com/sveltejs/devalue](https://github.com/sveltejs/devalue) |
@@ -491,7 +492,6 @@
 | `highlight.js` | 11.12.0 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/highlightjs/highlight.js](https://github.com/highlightjs/highlight.js) |
 | `html-to-image` | 1.11.13 | `MIT` | `MIT` | [https://github.com/bubkoo/html-to-image](https://github.com/bubkoo/html-to-image) |
 | `is-reference` | 3.0.3 | `MIT` | `MIT` | [https://github.com/Rich-Harris/is-reference](https://github.com/Rich-Harris/is-reference) |
-| `kleur` | 4.1.5 | `MIT` | `MIT` | [https://github.com/lukeed/kleur](https://github.com/lukeed/kleur) |
 | `lightningcss` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | [https://github.com/parcel-bundler/lightningcss](https://github.com/parcel-bundler/lightningcss) |
 | `lightningcss-android-arm64` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | - |
 | `lightningcss-darwin-arm64` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | - |
@@ -518,13 +518,12 @@
 | `postcss` | 8.5.32 | `MIT` | `MIT` | [https://github.com/postcss/postcss](https://github.com/postcss/postcss) |
 | `punycode.js` | 2.3.1 | `MIT` | `MIT` | [https://github.com/mathiasbynens/punycode.js](https://github.com/mathiasbynens/punycode.js) |
 | `rolldown` | 1.2.15 | `MIT` | `MIT` | [https://github.com/rolldown/rolldown](https://github.com/rolldown/rolldown) |
-| `set-cookie-parser` | 3.2.1 | `MIT` | `MIT` | [https://github.com/nfriedly/set-cookie-parser](https://github.com/nfriedly/set-cookie-parser) |
 | `sirv` | 3.0.2 | `MIT` | `MIT` | [https://github.com/lukeed/sirv](https://github.com/lukeed/sirv) |
 | `source-map-js` | 1.2.2 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/7rulnik/source-map-js](https://github.com/7rulnik/source-map-js) |
 | `svelte` | 5.57.3 | `MIT` | `MIT` | [https://github.com/sveltejs/svelte](https://github.com/sveltejs/svelte) |
 | `tinyglobby` | 0.2.17 | `MIT` | `MIT` | [https://github.com/SuperchupuDev/tinyglobby](https://github.com/SuperchupuDev/tinyglobby) |
 | `totalist` | 3.0.1 | `MIT` | `MIT` | [https://github.com/lukeed/totalist](https://github.com/lukeed/totalist) |
-| `typescript` | 5.9.3 | `Apache-2.0` | `Apache-2.0` | [https://github.com/microsoft/TypeScript](https://github.com/microsoft/TypeScript) |
+| `typescript` | 6.0.3 | `Apache-2.0` | `Apache-2.0` | [https://github.com/microsoft/TypeScript](https://github.com/microsoft/TypeScript) |
 | `uc.micro` | 3.0.0 | `MIT` | `MIT` | [https://github.com/markdown-it/uc.micro](https://github.com/markdown-it/uc.micro) |
 | `undici-types` | 7.24.6 | `MIT` | `MIT` | [https://github.com/nodejs/undici](https://github.com/nodejs/undici) |
 | `vite` | 8.3.5 | `MIT` | `MIT` | [https://github.com/vitejs/vite](https://github.com/vitejs/vite) |
@@ -533,7 +532,7 @@
 
 ## Пакеты npm для разработки
 
-Пакеты, используемые только на этапе сборки, линтинга и тестирования (`dev: true`); не поставляются конечным пользователям. Всего записей: 211.
+Пакеты, используемые только на этапе сборки, линтинга и тестирования (`dev: true`); не поставляются конечным пользователям. Всего записей: 209.
 
 - `@apidevtools/json-schema-ref-parser` (11.9.3) — `MIT`
 - `@asamuzakjp/css-color` (7.1.9) — `MIT`
@@ -570,7 +569,7 @@
 - `@redocly/ajv` (8.11.2) — `MIT`
 - `@redocly/config` (0.22.0) — `MIT`
 - `@redocly/openapi-core` (1.34.22) — `MIT`
-- `@sveltejs/adapter-static` (3.0.10) — `MIT`
+- `@sveltejs/adapter-static` (4.0.0) — `MIT`
 - `@sveltejs/load-config` (0.2.3) — `MIT`
 - `@types/chai` (5.2.3) — `MIT`
 - `@types/deep-eql` (4.0.2) — `MIT`
@@ -674,7 +673,6 @@
 - `locate-path` (6.0.0) — `MIT`
 - `lodash` (4.18.1) — `MIT`
 - `lru-cache` (11.5.3) — `BlueOak-1.0.0`
-- `magic-string` (1.4.5) — `MIT`
 - `mdn-data` (2.27.1) — `CC0-1.0`
 - `minimatch` (10.2.6) — `BlueOak-1.0.0`
 - `minimatch` (5.1.9) — `ISC`
