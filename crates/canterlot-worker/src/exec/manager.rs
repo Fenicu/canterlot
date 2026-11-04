@@ -1128,7 +1128,7 @@ impl Actor {
                     Ok(true) => {}
                     Ok(false) => return Ok(()),
                     Err(error) if self.supervisor.is_none() => {
-                        tracing::warn!(execution_id = %self.id, error_kind = ?std::mem::discriminant(&error), "supervisor start failed");
+                        tracing::debug!(execution_id = %self.id, error = %error, "supervisor start failed");
                         self.spawn_failed(&command, true, "supervisor_start_failed")
                             .await?;
                         return Ok(());
@@ -1431,6 +1431,13 @@ impl Actor {
         owned: bool,
         reason: &str,
     ) -> Result<bool, ExecError> {
+        // Причина отказа — короткий код; пути и содержимое сюда не попадают.
+        tracing::warn!(
+            execution_id = %self.id,
+            kind = "start_failed",
+            reason,
+            "execution start failed"
+        );
         reject(&self.shared, command, reason).await?;
         if owned {
             ownership_update(&self.shared, self.id, |record| {
@@ -1903,6 +1910,26 @@ impl Actor {
                 self.finished = true;
                 self.reconnect_at = None;
                 let outcome = exited.reason;
+                // Итог сопровождения виден в журнале воркера: отказ запуска не должен
+                // оставаться только в `supervisor.log`, который удаляется с каталогом.
+                if matches!(
+                    outcome.as_str(),
+                    "start_failed" | "crashed" | "protocol_incompatible"
+                ) {
+                    tracing::warn!(
+                        execution_id = %self.id,
+                        kind = "execution_exited",
+                        outcome = %outcome,
+                        "execution failed"
+                    );
+                } else {
+                    tracing::info!(
+                        execution_id = %self.id,
+                        kind = "execution_exited",
+                        outcome = %outcome,
+                        "execution exited"
+                    );
+                }
                 self.shared.with_info(self.id, |info| {
                     if info.state != "stopped" && info.state != "failed" {
                         info.state = match outcome.as_str() {

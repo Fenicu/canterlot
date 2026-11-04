@@ -36,8 +36,6 @@ use tokio::{
 };
 use uuid::Uuid;
 
-#[path = "support/fake_exec.rs"]
-mod fake_exec;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 use process_guard::ProcessGuard;
@@ -2721,5 +2719,105 @@ async fn unknown_control_message_keeps_the_link_and_capabilities_are_advertised(
             !interrupt_states(b, id).is_empty()
         })
         .await;
+    harness.shutdown().await;
+}
+
+#[path = "support/antigravity.rs"]
+mod antigravity;
+use antigravity::fake_exec;
+
+/// Делегированная сессия Antigravity: адаптер передаёт в `session/new` только сервер
+/// canterlot, поэтому запуск с `isolate_mcp` не отвергается изоляцией MCP.
+#[tokio::test]
+async fn delegated_antigravity_start_passes_only_the_canterlot_mcp() {
+    use canterlot_worker::adapter::antigravity::replay::Script;
+
+    let script = Script::from_evidence("p1-diagnostics.jsonl");
+    let mut steps = vec![script.steps[0].clone(), script.steps[2].clone()];
+    let model_effort = Script::from_evidence("p14-model-effort.jsonl");
+    steps.push(model_effort.steps[3].clone());
+    steps.push(model_effort.steps[7].clone());
+    let fake = antigravity::Fake::new(Script {
+        version: "agy 1.5.0".into(),
+        steps,
+        ..Default::default()
+    });
+    let spec = format!(
+        "[antigravity]\nenabled = true\nbinary = \"{}\"\ndata_dir = \"{}\"\n",
+        fake.exe.display(),
+        fake.data_dir().display()
+    );
+    let mut harness = Harness::start_with(&[], "1s", &spec).await;
+    harness.attach_and_ship(0).await;
+    let workdir = harness._root.path().to_string_lossy().into_owned();
+    harness
+        .send(down::Msg::StartCli(StartCli {
+            profile: "antigravity".into(),
+            workdir,
+            model: "gemini-3.8-flash-medium".into(),
+            effort: "medium".into(),
+            permission_mode: "bypass".into(),
+            isolate_mcp: true,
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+    harness
+        .next_message(|message| matches!(message, up::Msg::CliStarted(_)))
+        .await;
+
+    let new = fake
+        .requests()
+        .into_iter()
+        .find(|entry| entry["frame"]["method"] == "session/new")
+        .expect("session/new reached the CLI");
+    let servers = new["frame"]["params"]["mcpServers"]
+        .as_array()
+        .expect("mcpServers");
+    assert_eq!(servers.len(), 1, "{servers:?}");
+    assert_eq!(servers[0]["name"], "canterlot");
+
+    harness.shutdown().await;
+    fake.wait_gone().await;
+}
+
+/// Отказ запуска без адаптера доходит до хаба диагностикой, а не только строкой в лог.
+#[tokio::test]
+async fn an_unknown_profile_start_is_a_diagnostic_in_the_journal() {
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness
+        .send(down::Msg::StartCli(StartCli {
+            profile: "missing".into(),
+            workdir: harness._root.path().to_string_lossy().into_owned(),
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+    let bodies = harness
+        .wait_records("start failure diagnostic", |bodies| {
+            let diagnostic = bodies.iter().any(|body| {
+                matches!(body, Body::AdapterDiagnostic(fact)
+                    if fact.kind == "start_failed" && fact.event_type == "unknown_profile")
+            });
+            let failed = bodies.iter().any(
+                |body| matches!(body, Body::ExecutionState(fact) if fact.outcome == "start_failed"),
+            );
+            diagnostic && failed
+        })
+        .await;
+    assert!(
+        bodies.iter().any(
+            |body| matches!(body, Body::ExecutionState(fact) if fact.outcome == "start_failed")
+        ),
+        "the execution must still fail: {:?}",
+        bodies.iter().map(kind).collect::<Vec<_>>()
+    );
     harness.shutdown().await;
 }

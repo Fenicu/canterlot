@@ -1071,6 +1071,14 @@ enum EchoEnd {
 
 #[async_trait::async_trait]
 impl Adapter for AntigravityAdapter {
+    /// MCP сессии задаёт только ACP-клиент: в `session/new` уходит единственный
+    /// сервер canterlot. Список и настройки MCP владельца адаптер не читает и
+    /// не передаёт; перекрытие глобального списка `agy` — открытая проба P16
+    /// (`docs/stage0/antigravity.md`).
+    fn isolates_mcp(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: Support::Supported,

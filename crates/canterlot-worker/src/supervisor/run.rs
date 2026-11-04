@@ -598,6 +598,20 @@ impl Supervisor {
         self.sj.append(bounded_record(self.spec.execution_id, body))
     }
 
+    /// Отказ запуска до адаптера: строка журнала процесса и диагностика хабу, чтобы
+    /// отказ видел владелец, а не только удалённый `supervisor.log` исполнения.
+    /// Причина — короткий код, без секретов и путей.
+    fn fail_start(&mut self, reason: &'static str) -> Result<(), SupervisorError> {
+        tracing::warn!(kind = "start_failed", reason, "adapter start failed");
+        self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+            execution_id: self.spec.execution_id.to_string(),
+            kind: "start_failed".into(),
+            event_type: safe_event_type(reason),
+            ..Default::default()
+        }))?;
+        Ok(())
+    }
+
     fn state_record(
         &mut self,
         state: &str,
@@ -1664,19 +1678,11 @@ impl Supervisor {
             antigravity: self.spec.antigravity.clone(),
         };
         let Some(mut adapter) = registry_with(&start.profile, &context) else {
-            tracing::warn!(
-                kind = "start_failed",
-                reason = "unknown_profile",
-                "adapter start failed"
-            );
+            self.fail_start("unknown_profile")?;
             return self.begin_stop(StopCause::StartFailed, false);
         };
         if start.isolate_mcp && !adapter.isolates_mcp() {
-            tracing::warn!(
-                kind = "start_failed",
-                reason = "mcp_isolation_unsupported",
-                "adapter start failed"
-            );
+            self.fail_start("mcp_isolation_unsupported")?;
             return self.begin_stop(StopCause::StartFailed, false);
         }
         adapter.set_stop_grace(timers.stop_grace);
@@ -1696,21 +1702,13 @@ impl Supervisor {
         let Some(instructions) = start.instructions.as_ref() else {
             // Хаб всегда присылает инструкции (план 2c, задача 3): их отсутствие —
             // старый хаб, молчаливый откат на конфигурацию владельца запрещён.
-            tracing::warn!(
-                kind = "start_failed",
-                reason = "instructions_missing",
-                "adapter start failed"
-            );
+            self.fail_start("instructions_missing")?;
             return self.begin_stop(StopCause::InvalidInstructions, false);
         };
         let instructions = match InstructionSpec::from_proto(Some(instructions)) {
             Ok(instructions) => instructions,
             Err(_) => {
-                tracing::warn!(
-                    kind = "start_failed",
-                    reason = "invalid_instructions",
-                    "adapter start failed"
-                );
+                self.fail_start("invalid_instructions")?;
                 return self.begin_stop(StopCause::InvalidInstructions, false);
             }
         };
@@ -1746,14 +1744,20 @@ impl Supervisor {
                     "adapter start failed"
                 );
                 // Шаг запуска без текста разговора: иначе владелец увидит только «не запустилось».
-                if let Ok(Err(crate::adapter::AdapterError::StartFailed(reason))) = &other {
-                    self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
-                        execution_id: self.spec.execution_id.to_string(),
-                        kind: "start_failed".into(),
-                        event_type: safe_event_type(reason),
-                        ..Default::default()
-                    }))?;
-                }
+                // Отказ адаптера, его прочая ошибка и срок дают разные коды причины.
+                let event_type = match &other {
+                    Ok(Err(crate::adapter::AdapterError::StartFailed(reason))) => {
+                        safe_event_type(reason)
+                    }
+                    Ok(Err(_)) => "adapter_error".into(),
+                    _ => "adapter_start_timeout".into(),
+                };
+                self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+                    execution_id: self.spec.execution_id.to_string(),
+                    kind: "start_failed".into(),
+                    event_type,
+                    ..Default::default()
+                }))?;
                 let cause = match &other {
                     Ok(Err(crate::adapter::AdapterError::StartFailed(reason))) => {
                         start_failure_cause(Some(*reason))

@@ -3605,3 +3605,16 @@ async fn a_quota_error_after_the_echo_fails_the_turn_without_a_limit_until_the_l
     assert_eq!(run, 1_048_576);
     bench.close().await;
 }
+
+/// Делегированная сессия стартует без MCP-серверов владельца: адаптер передаёт
+/// только сервер canterlot в `session/new` и ничего не читает из `~/.gemini`.
+#[test]
+fn delegated_sessions_can_start_without_owner_mcp_servers() {
+    let cfg = AntigravityConfig {
+        enabled: true,
+        binary: None,
+        data_dir: None,
+    };
+    let adapter = AntigravityAdapter::new(cfg, PathBuf::new(), WAIT);
+    assert!(adapter.isolates_mcp());
+}
