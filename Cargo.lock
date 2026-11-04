@@ -337,7 +337,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "canterlot-hub"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "canterlot-journal"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "crc32c",
  "tempfile",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "canterlot-proto"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "prost",
  "serde",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "canterlot-worker"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
