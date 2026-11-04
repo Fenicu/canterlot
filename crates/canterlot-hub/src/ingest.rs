@@ -2109,9 +2109,16 @@ impl crate::grpc::Ingest for Ingest {
             .fetch_one(&self.pool)
             .await
             .map_err(|_| tonic::Status::internal("machine_metrics_database"))?;
-        crate::machine_info::apply_metrics(&self.pool, owner, machine_id, &metrics, Uuid::now_v7())
-            .await
-            .map_err(|_| tonic::Status::internal("machine_metrics_database"))?;
+        crate::machine_info::apply_metrics_with_registry(
+            &self.pool,
+            owner,
+            machine_id,
+            &metrics,
+            self.registry.as_ref(),
+            Uuid::now_v7(),
+        )
+        .await
+        .map_err(|_| tonic::Status::internal("machine_metrics_database"))?;
         Ok(())
     }
     async fn limits_report(

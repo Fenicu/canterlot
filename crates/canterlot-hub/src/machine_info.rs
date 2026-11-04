@@ -6,6 +6,7 @@ use canterlot_proto::{
     limits::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_INPUT, MAX_METRICS_EXECUTIONS},
     worker::v1::{MachineMetrics, MachineReport},
 };
+use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
 use sqlx::{PgConnection, PgPool};
 use std::{
@@ -215,6 +216,48 @@ pub async fn apply_metrics(
     m: &MachineMetrics,
     correlation_id: Uuid,
 ) -> Result<MetricsOutcome, sqlx::Error> {
+    apply_metrics_with_registry(pool, owner_id, machine_id, m, None, correlation_id).await
+}
+
+/// Окно правдоподобия часов машины без сверенного смещения: выборка, снятая
+/// заметно раньше приёма или в будущем, не доказывает свежесть условия.
+const SAMPLE_TIME_MAX_AGE: TimeDelta = TimeDelta::hours(24);
+const SAMPLE_TIME_MAX_AHEAD: TimeDelta = TimeDelta::minutes(5);
+const METRICS_STALE_AGE: TimeDelta = TimeDelta::seconds(91);
+
+/// Время выборки в часах хаба: смещение сеанса, если оно известно, иначе
+/// собственные часы выборки в пределах правдоподобия. Нулевая или нелепая
+/// отметка не должна доказывать условие: такая выборка считается устаревшей.
+fn sample_observed_at(
+    registry: Option<&Registry>,
+    machine_id: Uuid,
+    machine_ms: u64,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    if machine_ms == 0 {
+        return now;
+    }
+    let mapped = registry
+        .and_then(|registry| registry.to_hub_time(machine_id, machine_ms))
+        .or_else(|| {
+            i64::try_from(machine_ms)
+                .ok()
+                .and_then(DateTime::from_timestamp_millis)
+        });
+    match mapped {
+        Some(at) if at >= now - SAMPLE_TIME_MAX_AGE && at <= now + SAMPLE_TIME_MAX_AHEAD => at,
+        _ => now - METRICS_STALE_AGE,
+    }
+}
+
+pub(crate) async fn apply_metrics_with_registry(
+    pool: &PgPool,
+    owner_id: Uuid,
+    machine_id: Uuid,
+    m: &MachineMetrics,
+    registry: Option<&Registry>,
+    correlation_id: Uuid,
+) -> Result<MetricsOutcome, sqlx::Error> {
     if let Some(reason) = validate(m) {
         return Ok(ignored(reason));
     }
@@ -238,7 +281,10 @@ pub async fn apply_metrics(
     if ids.len() != m.executions.len() {
         return Ok(ignored("duplicate_execution"));
     }
-    let now = chrono::Utc::now();
+    let now = Utc::now();
+    // Свежесть условия считается по времени выборки, а не по времени приёма:
+    // задержанный отчёт не должен срабатывать старыми показаниями.
+    let observed_at = sample_observed_at(registry, machine_id, m.machine_time_ms, now);
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
     machine(&mut *conn, owner_id, machine_id).await?;
@@ -265,12 +311,12 @@ pub async fn apply_metrics(
     }
     emit(&mut *conn,owner_id,"machine_metrics",json!({"machine_id":machine_id,"machine_time_ms":m.machine_time_ms,"cpu_cores":m.cpu_cores,"cpu_permille":m.cpu_permille,"mem_total_bytes":m.mem_total_bytes,"mem_available_bytes":m.mem_available_bytes,"load1_centi":m.load1_centi,"load5_centi":m.load5_centi,"load15_centi":m.load15_centi,"disks":disks,"executions":executions}),correlation_id).await?;
     // Сторож машины проверяет взведённые будильники этой машины на каждом свежем отчёте.
-    // Показание только что записано, поэтому `observed_at` — это время приёма.
+    // Выборка могла быть снята раньше приёма: оба условия сверяются с её временем.
     crate::session_tools::alarms::evaluate_machine_in_tx(
         &mut *conn,
         machine_id,
         &m,
-        now,
+        observed_at,
         now,
         correlation_id,
     )

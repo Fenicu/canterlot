@@ -2719,7 +2719,8 @@ async fn retention_deletes_old_terminal_alarms(pool: PgPool) {
 fn metrics_with(ms: u64, free_gb: f64, load_per_core: f64, mem_gb: f64) -> MachineMetrics {
     let cores = 4_u32;
     MachineMetrics {
-        machine_time_ms: ms,
+        // Реалистичная отметка: свежесть условия считается по времени выборки.
+        machine_time_ms: Utc::now().timestamp_millis() as u64 + ms,
         cpu_cores: cores,
         cpu_permille: 50,
         mem_total_bytes: (mem_gb * 1e9) as u64 + 1,
@@ -3288,6 +3289,50 @@ async fn machine_condition_ignores_stale_metrics(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(state, "fired");
+}
+
+/// Свежесть машинного условия считается по времени самой выборки, а не по
+/// моменту приёма: задержанная выборка, снятая до взвода, условие не выполняет.
+#[sqlx::test(migrations = "./migrations")]
+async fn machine_condition_uses_the_sample_timestamp_not_arrival(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let armed_at = Utc::now();
+    f.arm_machine("freed", Some(40.0), Some(2.0), Some(10.0))
+        .await
+        .unwrap();
+    let mut delayed = metrics_with(1, 50.0, 0.5, 20.0);
+    delayed.machine_time_ms = (armed_at - TimeDelta::minutes(2)).timestamp_millis() as u64;
+    machine_info::apply_metrics(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &delayed,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let state: String = sqlx::query_scalar(
+        "select state from alarms where conversation_id=$1 and condition->>'kind'='machine'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "armed", "a sample taken before arming cannot fire");
+
+    let mut fresh = metrics_with(2, 50.0, 0.5, 20.0);
+    fresh.machine_time_ms = Utc::now().timestamp_millis() as u64;
+    machine_info::apply_metrics(&f.pool, f.owner, f.machine, &fresh, Uuid::now_v7())
+        .await
+        .unwrap();
+    let state: String = sqlx::query_scalar(
+        "select state from alarms where conversation_id=$1 and condition->>'kind'='machine'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "fired", "a fresh sample fires");
 }
 
 #[sqlx::test(migrations = "./migrations")]
