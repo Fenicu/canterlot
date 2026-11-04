@@ -45,30 +45,53 @@ describe('alarm plaques', () => {
     expect(chip).toContain('до');
   });
 
-  it('shows a limit-reset condition from the hub text', () => {
-    const chip = alarmChip({
-      ...base,
-      kind: 'condition',
-      fires_at: null,
-      deadline_at: '2026-11-05T12:00:00.000Z',
-      condition: 'claude weekly window resets after 2026-11-05 10:00 UTC; deadline 2026-11-05 12:00 UTC'
-    });
-    expect(chip).toContain('Будильник');
-    expect(chip).toContain('weekly window resets');
-  });
-
-  it('shows a machine condition and its thresholds in the detail', () => {
+  it('shows a limit-reset condition in Russian from structured fields', () => {
     const alarm = {
       ...base,
       kind: 'condition',
       fires_at: null,
       deadline_at: '2026-11-05T12:00:00.000Z',
-      condition: 'machine: free disk above 40 GB, load below 2 per core; deadline 2026-11-05 12:00 UTC'
+      condition: 'claude five_hour window resets after 2026-11-05 10:00 UTC; deadline 2026-11-05 12:00 UTC',
+      provider: 'claude',
+      window: 'five_hour',
+      below_percent: 40
     };
-    expect(alarmChip(alarm)).toContain('machine');
-    expect(alarmDetail(alarm)).toContain(
-      'Условие: machine: free disk above 40 GB, load below 2 per core; deadline 2026-11-05 12:00 UTC'
+    expect(alarmChip(alarm)).toBe(
+      'Будильник · «gate» · Сброс лимита Claude, окно 5 ч или расход не выше 40%'
     );
+    expect(alarmDetail(alarm)).toContain(
+      'Условие: Сброс лимита Claude, окно 5 ч или расход не выше 40%'
+    );
+  });
+
+  it('shows a machine condition and its thresholds in Russian', () => {
+    const alarm = {
+      ...base,
+      kind: 'condition',
+      fires_at: null,
+      deadline_at: '2026-11-05T12:00:00.000Z',
+      condition: 'machine: free disk above 50 GB, load below 0.5 per core; deadline 2026-11-05 12:00 UTC',
+      free_disk_gb_above: 50,
+      load_per_core_below: 0.5,
+      mem_available_gb_above: 8
+    };
+    const text =
+      'Машина: свободно на диске больше 50 ГБ, нагрузка на ядро ниже 0,5, память больше 8 ГБ';
+    expect(alarmChip(alarm)).toBe(`Будильник · «gate» · ${text}`);
+    expect(alarmDetail(alarm)).toContain(`Условие: ${text}`);
+  });
+
+  it('names a limit-reset watchdog in Russian', () => {
+    const chip = alarmChip({
+      ...base,
+      kind: 'condition',
+      only_on_timeout: true,
+      deadline_at: '2026-11-05T12:00:00.000Z',
+      condition: 'claude weekly window resets; deadline 2026-11-05 12:00 UTC',
+      provider: 'claude',
+      window: 'weekly'
+    });
+    expect(chip).toContain('Сторож · Сброс лимита Claude, окно неделя · до');
   });
 
   it('marks a watchdog and a failed delivery', () => {
@@ -88,8 +111,8 @@ describe('alarm plaques', () => {
     expect(alarmEventLine({ alarm_key: 'gate', fired_reason: 'timed_out' })).toContain(
       'истёк срок'
     );
-    expect(alarmEventLine({ alarm_key: 'gate', fired_reason: 'by_clock' })).toContain(
-      'по часам'
+    expect(alarmEventLine({ alarm_key: 'gate', fired_reason: 'by_clock' })).toBe(
+      'Будильник «gate»: лимит, вероятно, сброшен (по часам, без подтверждения)'
     );
   });
 });

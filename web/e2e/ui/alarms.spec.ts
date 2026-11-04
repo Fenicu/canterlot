@@ -62,6 +62,32 @@ test('armed_alarm_plaque_shows_the_note_and_can_be_cancelled', async ({ page }) 
   await expect(strip(page)).toHaveCount(0);
 });
 
+test('machine_alarm_plaque_describes_its_thresholds_in_russian', async ({ page }) => {
+  const { hub, id } = await boot(page);
+  hub.append(`conversation:${id}`, {
+    kind: 'alarm_changed',
+    conversation_id: id,
+    payload: alarm({
+      conversation_id: id,
+      alarm_id: '00000000-0000-4000-8000-0000000000a3',
+      key: 'freed',
+      kind: 'condition',
+      condition: 'machine: free disk above 50 GB, load below 0.5 per core; deadline 2026-11-05 12:00 UTC',
+      fires_at: null,
+      deadline_at: '2026-11-05T12:00:00.000Z',
+      free_disk_gb_above: 50,
+      load_per_core_below: 0.5,
+      mem_available_gb_above: 8
+    })
+  });
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+  await expect(strip(page)).toContainText(
+    'Машина: свободно на диске больше 50 ГБ, нагрузка на ядро ниже 0,5, память больше 8 ГБ'
+  );
+});
+
 test('alarm_event_is_a_quiet_feed_line_and_a_live_change_adds_a_plaque', async ({ page }) => {
   const { hub, api, id } = await boot(page);
   seedInput(api, id, {

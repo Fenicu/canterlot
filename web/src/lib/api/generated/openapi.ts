@@ -967,6 +967,8 @@ export interface components {
             /** Format: uuid */
             alarm_id: string;
             batch: boolean;
+            /** Format: double */
+            below_percent?: number | null;
             condition: string;
             /** Format: uuid */
             conversation_id: string;
@@ -976,15 +978,27 @@ export interface components {
             fired_at?: string | null;
             fired_reason?: string | null;
             fires_at?: string | null;
+            /**
+             * Format: double
+             * @description Разобранное условие `machine` для подписей PWA на русском.
+             */
+            free_disk_gb_above?: number | null;
             key?: string | null;
             kind: string;
+            /** Format: double */
+            load_per_core_below?: number | null;
+            /** Format: double */
+            mem_available_gb_above?: number | null;
             note?: string | null;
             /** Format: int64 */
             note_bytes: number;
             only_on_timeout: boolean;
+            /** @description Разобранное условие `limit_reset` для подписей PWA на русском. */
+            provider?: string | null;
             session_ids: string[];
             state: string;
             states: string[];
+            window?: string | null;
         };
         /**
          * @description Применённый пресет в эффективных настройках: ссылка, название и версии.

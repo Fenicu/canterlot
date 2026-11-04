@@ -5425,6 +5425,13 @@
           "batch": {
             "type": "boolean"
           },
+          "below_percent": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
           "condition": {
             "type": "string"
           },
@@ -5465,6 +5472,14 @@
               "null"
             ]
           },
+          "free_disk_gb_above": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Разобранное условие `machine` для подписей PWA на русском."
+          },
           "key": {
             "type": [
               "string",
@@ -5473,6 +5488,20 @@
           },
           "kind": {
             "type": "string"
+          },
+          "load_per_core_below": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "mem_available_gb_above": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           },
           "note": {
             "type": [
@@ -5486,6 +5515,13 @@
           },
           "only_on_timeout": {
             "type": "boolean"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Разобранное условие `limit_reset` для подписей PWA на русском."
           },
           "session_ids": {
             "type": "array",
@@ -5502,6 +5538,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "window": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

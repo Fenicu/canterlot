@@ -846,6 +846,12 @@ export interface AlarmChanged {
     key: string | null;
     kind: string;
     condition: string;
+    provider?: string | null;
+    window?: string | null;
+    below_percent?: number | null;
+    free_disk_gb_above?: number | null;
+    load_per_core_below?: number | null;
+    mem_available_gb_above?: number | null;
     session_ids: Uuid[];
     states: string[];
     fires_at: Time | null;

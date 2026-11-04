@@ -1,3 +1,4 @@
+import { providerLabel } from '#lib/format/labels.js';
 import { fmt } from '#lib/format/ru.js';
 import type { AlarmView } from '#lib/stores/chat.svelte.js';
 
@@ -29,13 +30,50 @@ function verbs(states: string[]): string {
   return known.length ? [...new Set(known)].join(' или ') : 'изменится';
 }
 
+const LIMIT_WINDOWS: Record<string, string> = {
+  five_hour: '5 ч',
+  weekly: 'неделя',
+  monthly: 'месяц'
+};
+
+function limitText(alarm: AlarmView): string {
+  const window = alarm.window ? (LIMIT_WINDOWS[alarm.window] ?? 'окно') : 'окно';
+  const base = `Сброс лимита ${providerLabel(alarm.provider)}, окно ${window}`;
+  return alarm.below_percent != null
+    ? `${base} или расход не выше ${fmt.number(alarm.below_percent)}%`
+    : base;
+}
+
+function machineText(alarm: AlarmView): string {
+  const parts: string[] = [];
+  if (alarm.free_disk_gb_above != null)
+    parts.push(`свободно на диске больше ${fmt.number(alarm.free_disk_gb_above)} ГБ`);
+  if (alarm.load_per_core_below != null)
+    parts.push(`нагрузка на ядро ниже ${fmt.number(alarm.load_per_core_below)}`);
+  if (alarm.mem_available_gb_above != null)
+    parts.push(`память больше ${fmt.number(alarm.mem_available_gb_above)} ГБ`);
+  return parts.length ? `Машина: ${parts.join(', ')}` : 'Машина';
+}
+
+function structured(alarm: AlarmView): string | null {
+  if (alarm.provider != null) return limitText(alarm);
+  if (
+    alarm.free_disk_gb_above != null ||
+    alarm.load_per_core_below != null ||
+    alarm.mem_available_gb_above != null
+  )
+    return machineText(alarm);
+  return null;
+}
+
 /** Плашка под лентой: время, условие или сторож. */
 export function alarmChip(alarm: AlarmView): string {
   if (alarm.state === 'failed') return 'Будильник · не доставлен';
+  const condition = structured(alarm);
   if (alarm.only_on_timeout) {
     const watched = alarm.session_ids.length
       ? targets(alarm.session_ids)
-      : alarm.condition || 'условие';
+      : condition || alarm.condition || 'условие';
     return `Сторож · ${watched} · до ${moment(alarm.deadline_at)}`;
   }
   if (alarm.kind === 'at') {
@@ -43,7 +81,8 @@ export function alarmChip(alarm: AlarmView): string {
     return at ? `Будильник · ${at}` : 'Будильник';
   }
   const name = alarm.key ? `«${alarm.key}» · ` : '';
-  // Условия лимита и машины приходят готовой английской строкой из хаба.
+  // Условия лимита и машины собираются из полей, чтобы не показывать английский текст хаба.
+  if (condition) return `Будильник · ${name}${condition}`;
   if (!alarm.session_ids.length && alarm.condition) {
     return `Будильник · ${name}${alarm.condition}`;
   }
@@ -53,8 +92,10 @@ export function alarmChip(alarm: AlarmView): string {
 /** Что показывает раскрытая плашка: условие, заметку и причину сбоя. */
 export function alarmDetail(alarm: AlarmView): string[] {
   const lines: string[] = [];
+  const condition = structured(alarm);
   if (alarm.kind === 'at') lines.push(`Время: ${moment(alarm.fires_at)}`);
   else if (alarm.session_ids.length) lines.push(`Состояния: ${verbs(alarm.states)}`);
+  else if (condition) lines.push(`Условие: ${condition}`);
   else if (alarm.condition) lines.push(`Условие: ${alarm.condition}`);
   if (alarm.fired_reason === 'timed_out') lines.push('Срок условия истёк');
   if (alarm.failure_reason === 'delivery_failed') lines.push('Не удалось доставить сообщение');
@@ -74,7 +115,7 @@ export function alarmEventLine(event: {
     case 'condition':
       return `Будильник${name ? ` ${name}` : ''}: условие выполнено`;
     case 'by_clock':
-      return `Будильник${name ? ` ${name}` : ''}: сработал по часам`;
+      return `Будильник${name ? ` ${name}` : ''}: лимит, вероятно, сброшен (по часам, без подтверждения)`;
     default:
       return `Будильник${name ? ` ${name}` : ''}: сработал`;
   }

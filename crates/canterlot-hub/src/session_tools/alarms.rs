@@ -321,6 +321,14 @@ pub struct AlarmView {
     pub key: Option<String>,
     pub kind: String,
     pub condition: String,
+    /// Разобранное условие `limit_reset` для подписей PWA на русском.
+    pub provider: Option<String>,
+    pub window: Option<String>,
+    pub below_percent: Option<f64>,
+    /// Разобранное условие `machine` для подписей PWA на русском.
+    pub free_disk_gb_above: Option<f64>,
+    pub load_per_core_below: Option<f64>,
+    pub mem_available_gb_above: Option<f64>,
     pub session_ids: Vec<Uuid>,
     pub states: Vec<String>,
     pub fires_at: Option<String>,
@@ -587,28 +595,33 @@ fn view(row: &AlarmRow) -> AlarmView {
     } else {
         None
     };
+    let limit = if kind == Some("limit_reset") {
+        row.condition
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<LimitCondition>(value.clone()).ok())
+    } else {
+        None
+    };
+    let machine = if kind == Some("machine") {
+        row.condition
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<MachineCondition>(value.clone()).ok())
+    } else {
+        None
+    };
     let condition = match kind {
         Some("session_state") => parsed.as_ref().and_then(|condition| {
             row.deadline_at
                 .map(|deadline| condition_text(condition, deadline, row.only_on_timeout, row.batch))
         }),
-        Some("limit_reset") => row
-            .condition
-            .as_ref()
-            .and_then(|value| serde_json::from_value::<LimitCondition>(value.clone()).ok())
-            .and_then(|condition| {
-                row.deadline_at
-                    .map(|deadline| limit_condition_text(&condition, deadline, row.only_on_timeout))
-            }),
-        Some("machine") => row
-            .condition
-            .as_ref()
-            .and_then(|value| serde_json::from_value::<MachineCondition>(value.clone()).ok())
-            .and_then(|condition| {
-                row.deadline_at.map(|deadline| {
-                    machine_condition_text(&condition, deadline, row.only_on_timeout)
-                })
-            }),
+        Some("limit_reset") => limit.as_ref().and_then(|condition| {
+            row.deadline_at
+                .map(|deadline| limit_condition_text(condition, deadline, row.only_on_timeout))
+        }),
+        Some("machine") => machine.as_ref().and_then(|condition| {
+            row.deadline_at
+                .map(|deadline| machine_condition_text(condition, deadline, row.only_on_timeout))
+        }),
         _ => None,
     }
     .unwrap_or_else(|| match row.kind.as_str() {
@@ -624,6 +637,18 @@ fn view(row: &AlarmRow) -> AlarmView {
         key: row.key.clone(),
         kind: row.kind.clone(),
         condition,
+        provider: limit.as_ref().map(|condition| condition.provider.clone()),
+        window: limit.as_ref().map(|condition| condition.window.clone()),
+        below_percent: limit.as_ref().and_then(|condition| condition.below_percent),
+        free_disk_gb_above: machine
+            .as_ref()
+            .and_then(|condition| condition.free_disk_gb_above),
+        load_per_core_below: machine
+            .as_ref()
+            .and_then(|condition| condition.load_per_core_below),
+        mem_available_gb_above: machine
+            .as_ref()
+            .and_then(|condition| condition.mem_available_gb_above),
         session_ids: parsed
             .as_ref()
             .map(|condition| condition.session_ids.clone())

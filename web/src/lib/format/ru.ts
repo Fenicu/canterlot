@@ -101,6 +101,10 @@ export const fmt = {
 	tokens(n: number): string {
 		return grouped(n);
 	},
+	/** Число в русской записи: «50», «0,5». */
+	number(value: number): string {
+		return grouped(value);
+	},
 	/** Скорость генерации: «142 ток/с», медленнее десяти — с десятыми. */
 	tokensPerSecond(value: number): string {
 		const text = value < 10 ? value.toFixed(1).replace('.', ',') : grouped(Math.round(value));

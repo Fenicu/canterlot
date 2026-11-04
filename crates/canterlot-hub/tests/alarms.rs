@@ -485,6 +485,27 @@ async fn cancel_by_key_and_id_is_idempotent(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn list_carries_structured_limit_and_machine_conditions(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.arm_limit("usage", "claude", "weekly", Some(40.0))
+        .await
+        .unwrap();
+    f.arm_machine("freed", Some(50.0), Some(0.5), Some(8.0))
+        .await
+        .unwrap();
+    let list = f.call("alarms.list", json!({})).await.unwrap();
+    let alarms = list["alarms"].as_array().unwrap();
+    let limit = alarms.iter().find(|alarm| alarm["key"] == "usage").unwrap();
+    assert_eq!(limit["provider"], "claude");
+    assert_eq!(limit["window"], "weekly");
+    assert_eq!(limit["below_percent"], 40.0);
+    let machine = alarms.iter().find(|alarm| alarm["key"] == "freed").unwrap();
+    assert_eq!(machine["free_disk_gb_above"], 50.0);
+    assert_eq!(machine["load_per_core_below"], 0.5);
+    assert_eq!(machine["mem_available_gb_above"], 8.0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn session_state_condition_fires_after_the_target_settles(pool: PgPool) {
     let f = Fx::new(pool).await;
     let now = Utc::now();
