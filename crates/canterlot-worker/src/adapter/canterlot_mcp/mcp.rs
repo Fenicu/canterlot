@@ -188,7 +188,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Stop the process of a session you started but keep its worktree and branch, unlike session_accept. Only the direct parent may do this; the owner's root sessions are untouchable. Do not call it on a session you did not start. Idempotent: a second call says already_stopping or nothing_running."
         }
         "alarm_set" => {
-            "Wake yourself later with a [canterlot] message: at a time (`at` or `in_seconds`) or when sessions settle (`when.kind=session_state`). Survives restarts of the hub and of your session. Use it instead of sleep commands or polling, then end your turn. Do not poll. You already get a message when a session you started settles: use `all` to wait for every target, `batch` to hold their summaries into one message, or `only_on_timeout` as a watchdog."
+            "Wake yourself later with a [canterlot] message: at a time (`at` or `in_seconds`) or when a condition holds (`when`): sessions settle (`session_state`), a limit window resets (`limit_reset`), or the machine frees up (`machine`). Survives restarts of the hub and of your session. Use it instead of sleep commands or polling, then end your turn. Do not poll. You already get a message when a session you started settles: use `all` to wait for every target, `batch` to hold their summaries into one message, or `only_on_timeout` as a watchdog."
         }
         "alarm_cancel" => {
             "Cancel one of your armed alarms by id or key. Idempotent: a finished alarm answers already_fired or already_cancelled. Do not pass both id and key."
@@ -290,10 +290,16 @@ fn session_input_schema(mcp_name: &str) -> Value {
                     "additionalProperties": false,
                     "required": ["kind"],
                     "properties": {
-                        "kind": {"enum": ["session_state"]},
+                        "kind": {"enum": ["session_state", "limit_reset", "machine"]},
                         "session_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20},
                         "states": {"type": "array", "items": {"enum": ["idle", "waiting_for_user", "stalled", "quota_paused", "failed", "stopped", "deleted"]}},
                         "all": {"type": "boolean", "description": "Wait until every listed session settles (default: any)."},
+                        "provider": {"enum": ["claude", "codex", "opencode"]},
+                        "window": {"enum": ["five_hour", "weekly", "monthly"]},
+                        "below_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                        "free_disk_gb_above": {"type": "number", "minimum": 0},
+                        "load_per_core_below": {"type": "number", "minimum": 0},
+                        "mem_available_gb_above": {"type": "number", "minimum": 0},
                     },
                 },
                 "deadline_seconds": {"type": "integer", "minimum": 60, "maximum": 604800, "description": "Give up on the condition after this long and wake you with timed_out. Default 86400."},
@@ -922,6 +928,18 @@ mod tests {
         let when = &alarm("alarm_set")["inputSchema"]["properties"]["when"]["properties"];
         assert_eq!(when["session_ids"]["maxItems"], json!(20));
         assert!(when["all"].is_object());
+        assert_eq!(
+            when["provider"]["enum"],
+            json!(["claude", "codex", "opencode"])
+        );
+        assert_eq!(
+            when["window"]["enum"],
+            json!(["five_hour", "weekly", "monthly"])
+        );
+        assert!(when["below_percent"].is_object());
+        assert!(when["free_disk_gb_above"].is_object());
+        assert!(when["load_per_core_below"].is_object());
+        assert!(when["mem_available_gb_above"].is_object());
         assert!(alarm("alarm_set")["inputSchema"]["properties"]["batch"].is_object());
         assert!(alarm("alarm_set")["inputSchema"]["properties"]["only_on_timeout"].is_object());
         assert_eq!(
