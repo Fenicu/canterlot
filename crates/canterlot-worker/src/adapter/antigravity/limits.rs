@@ -242,7 +242,13 @@ impl AntigravityLimitsSource {
         let mut child = crate::adapter::spawn_with_retry_io(|| {
             let mut command = Command::new(&pinned.executable);
             command
-                .args(["-p", "/usage", "--output-format", "json"])
+                .args([
+                    "-p",
+                    "/usage",
+                    "--output-format",
+                    "json",
+                    "--disable-telemetry",
+                ])
                 .current_dir(&data_dir)
                 .env_clear()
                 .stdin(Stdio::null())

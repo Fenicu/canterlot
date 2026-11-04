@@ -74,6 +74,10 @@ async fn usage_runs_the_pinned_copy_in_the_data_dir_without_a_turn() {
     assert!(args.contains(&"/usage"));
     assert!(args.contains(&"--output-format"));
     assert!(args.contains(&"json"));
+    assert!(
+        args.contains(&"--disable-telemetry"),
+        "the /usage probe is not telemetry-free: {args:?}"
+    );
     assert_eq!(
         usage["cwd"].as_str(),
         Some(fake.data_dir().to_string_lossy().as_ref())
