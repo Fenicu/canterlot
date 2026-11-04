@@ -20,7 +20,7 @@ use crate::{
     dispatcher::Dispatcher,
     events::{self, NewEvent, Scope},
     executions, idempotency,
-    limits::{self, Window},
+    limits::{self, DataConfidence, Window},
     model::{ExecutionState, HoldReason, PauseReason},
     scheduler::ClaimedJob,
     session::{Availability, CAPABILITY_PILOT_V1, Registry},
@@ -579,6 +579,61 @@ async fn check_reset(
     })
 }
 
+/// Подтверждение сброса с оглядкой на точность показаний: оценочный отсчёт сам сброс не
+/// доказывает, даже если его `resets_at` уже сдвинут. Нужны два отдельных отсчёта после
+/// `wake_at`, каждый из которых показывает сброс; точное показание доказывает сброс одно.
+async fn check_reset_confirmed(
+    conn: &mut PgConnection,
+    provider: &str,
+    window: Window,
+    wake_at: DateTime<Utc>,
+) -> Result<ResetCheck, sqlx::Error> {
+    let check = check_reset(conn, provider, window, wake_at).await?;
+    if check != ResetCheck::Verified {
+        return Ok(check);
+    }
+    let confidence: Option<String> =
+        sqlx::query_scalar("select data_confidence from provider_limits where provider=$1")
+            .bind(provider)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let confidence = DataConfidence::from_stored(confidence.as_deref().unwrap_or("exact"));
+    if confidence == DataConfidence::Exact {
+        return Ok(ResetCheck::Verified);
+    }
+    // Исчезнувшее пятичасовое окно подтверждает отчёт об отсутствии, а не показание.
+    if window == Window::FiveHour {
+        let absent: Option<DateTime<Utc>> =
+            sqlx::query_scalar("select five_hour_absent_at from provider_limits where provider=$1")
+                .bind(provider)
+                .fetch_optional(&mut *conn)
+                .await?
+                .flatten();
+        if absent.is_some_and(|at| at >= wake_at) {
+            return Ok(ResetCheck::Verified);
+        }
+    }
+    // Считаются только отсчёты, которые сами показывают сброс: предшествующий `NotReset`
+    // подтверждением не является, а ранний сдвиг `resets_at` стоит до срока.
+    let readings: i64 = sqlx::query_scalar(
+        "select count(distinct observed_at) from limit_snapshots
+         where provider=$1 and window_kind=$2 and observed_at >= $3
+           and used_permille < 1000
+           and (resets_at > $3 or resets_at is null)",
+    )
+    .bind(provider)
+    .bind(window.as_str())
+    .bind(wake_at)
+    .fetch_one(&mut *conn)
+    .await?;
+    if readings < 2 {
+        // Один оценочный отсчёт сброс не доказывает: его подтвердит второй отсчёт или
+        // точное показание, иначе сработает запасной путь по часам.
+        return Ok(ResetCheck::NoReading);
+    }
+    Ok(ResetCheck::Verified)
+}
+
 /// Пробуждение «кранча»: подтверждение по лимитам, снятие удержания и, если можно, текст продолжения.
 pub async fn handle_wake_in_tx(
     conn: &mut PgConnection,
@@ -632,7 +687,7 @@ pub async fn handle_wake_in_tx(
                 poll: false,
             });
         }
-        match check_reset(conn, provider, window, wake_at).await? {
+        match check_reset_confirmed(conn, provider, window, wake_at).await? {
             ResetCheck::Verified => {}
             ResetCheck::NoReading if now >= wake_at + delta(config.unverified_wake_after)? => {
                 by_clock = true;
