@@ -329,6 +329,8 @@ pub struct ApiError {
     pub correlation_id: Uuid,
     /// Текущее смещение загрузки вложения для заголовка `Upload-Offset`.
     pub upload_offset: Option<u64>,
+    /// Ошибка получена из временного сбоя базы (40P01/40001), а не из любого `Internal`.
+    transient: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -372,12 +374,17 @@ impl ApiError {
             details: None,
             correlation_id: current_correlation().unwrap_or(Uuid::nil()),
             upload_offset: None,
+            transient: false,
         }
     }
 
     pub fn with_details(mut self, details: ErrorDetails) -> Self {
         self.details = Some(Box::new(details));
         self
+    }
+
+    pub(crate) fn transient(&self) -> bool {
+        self.transient
     }
 }
 
@@ -419,11 +426,14 @@ impl IntoResponse for ApiError {
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
         let info = dberr::describe(&error);
-        let api = ApiError::new(if info.is_unavailable() {
+        let mut api = ApiError::new(if info.is_unavailable() {
             ErrorCode::DbUnavailable
         } else {
             ErrorCode::Internal
         });
+        // Повторять имеет смысл только временный сбой самой базы, а не всякий
+        // `Internal`: детерминированный отказ не изменится от второй попытки.
+        api.transient = crate::db::is_transient(&error);
         tracing::error!(
             kind = "db_error",
             sqlstate = info.sqlstate.as_deref().unwrap_or("-"),

@@ -65,10 +65,7 @@ transient_from_db!(
 
 impl TransientError for crate::http::error::ApiError {
     fn is_transient(&self) -> bool {
-        matches!(
-            self.code,
-            crate::http::error::ErrorCode::Internal | crate::http::error::ErrorCode::DbUnavailable
-        )
+        self.transient()
     }
 }
 

@@ -2129,6 +2129,99 @@ async fn run_replays_stored_response_and_conflicts_on_other_request(pool: PgPool
     assert_eq!(effect_count(&pool).await, 2);
 }
 
+/// Временным считается только сбой базы 40P01/40001. Детерминированная
+/// `internal` повторяется один раз, а взаимоблокировка — до трёх.
+#[sqlx::test(migrations = "./migrations")]
+async fn api_error_retries_only_a_deadlock_from_the_database(pool: PgPool) {
+    let owner = seed_owner(&pool).await;
+    let runs = Arc::new(AtomicUsize::new(0));
+
+    let deterministic = {
+        let pool = pool.clone();
+        let runs = runs.clone();
+        async move {
+            run_in_tx::<Effect, ApiError, _>(
+                &pool,
+                owner,
+                "internal",
+                "probe",
+                &json!({"case": "internal"}),
+                None,
+                move |_conn| {
+                    Box::pin(async move {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        Err(ApiError::new(ErrorCode::Internal))
+                    })
+                },
+            )
+            .await
+        }
+    };
+    let error = match deterministic.await {
+        Ok(_) => panic!("an internal error must not succeed"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::Internal);
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "a deterministic internal error is not retried"
+    );
+
+    runs.store(0, Ordering::SeqCst);
+    sqlx::query("create sequence test_deadlock_once")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"create function test_deadlock_once() returns trigger language plpgsql as $$
+           begin
+             if nextval('test_deadlock_once') = 1 then
+               raise exception 'deadlock detected' using errcode = '40P01';
+             end if;
+             return new;
+           end $$"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger test_deadlock_once before insert on idempotency_keys
+         for each row execute function test_deadlock_once()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let retried = {
+        let pool = pool.clone();
+        let runs = runs.clone();
+        async move {
+            run_in_tx::<Effect, ApiError, _>(
+                &pool,
+                owner,
+                "deadlock",
+                "probe",
+                &json!({"case": "deadlock"}),
+                None,
+                move |_conn| {
+                    Box::pin(async move {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        Ok(Effect { id: Uuid::now_v7() })
+                    })
+                },
+            )
+            .await
+        }
+    };
+    let outcome = retried.await.expect("the deadlock is retried");
+    assert!(!outcome.replayed);
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        2,
+        "a 40P01 ApiError is retried"
+    );
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn run_in_tx_executes_once_for_concurrent_same_key(pool: PgPool) {
     seed_probe_tables(&pool).await;
