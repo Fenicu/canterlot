@@ -68,6 +68,15 @@ struct Collected {
     sessions: BTreeMap<String, CollectedSession>,
 }
 
+/// Старые записи хранили границу временем: не разбираем её, но и не теряем остальное.
+fn boundary_or_none<'de, D>(deserializer: D) -> Result<Option<summary::Boundary>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CollectedSession {
     state: String,
@@ -86,9 +95,14 @@ struct CollectedSession {
     #[serde(default)]
     chain_depth: i32,
     /// Граница завершения, которую покрывает удержанный итог: более поздний ход цели
-    /// не должен подменить его при отрисовке.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    boundary: Option<DateTime<Utc>>,
+    /// не должен подменить его при отрисовке. Идентичность хода и блоков хаба, не время.
+    /// У старых записей здесь время: такое поле просто отбрасывается, не сбрасывая запись.
+    #[serde(
+        default,
+        deserialize_with = "boundary_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    boundary: Option<summary::Boundary>,
 }
 
 impl Collected {
@@ -633,7 +647,7 @@ pub async fn hold_for_batch_in_tx(
     fingerprint: &str,
     subscription_id: Uuid,
     armed_at: DateTime<Utc>,
-    boundary: DateTime<Utc>,
+    boundary: Option<&summary::Boundary>,
     chain_depth: i32,
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
@@ -674,7 +688,7 @@ pub async fn hold_for_batch_in_tx(
                 subscription_id: Some(subscription_id),
                 armed_at: Some(armed_at),
                 chain_depth,
-                boundary: Some(boundary),
+                boundary: boundary.cloned(),
             },
         );
         persist_collected(conn, &mut row, &collected, now).await?;
@@ -904,7 +918,7 @@ pub async fn set(
                 return Err(ToolError::new(ToolErrorCode::InvalidArguments));
             }
             let deadline = now + TimeDelta::seconds(deadline_seconds);
-            let mut current_states: Vec<(Uuid, String, DateTime<Utc>)> = Vec::new();
+            let mut current_states: Vec<(Uuid, String)> = Vec::new();
             let mut all_met = true;
             let mut any_met = false;
             for target in condition.session_ids.clone() {
@@ -922,11 +936,7 @@ pub async fn set(
                     condition
                         .armed
                         .insert(target.to_string(), current.fingerprint.clone());
-                    current_states.push((
-                        target,
-                        current.state.as_str().to_string(),
-                        current.boundary,
-                    ));
+                    current_states.push((target, current.state.as_str().to_string()));
                 } else {
                     all_met = false;
                 }
@@ -940,7 +950,7 @@ pub async fn set(
                     json!(
                         current_states
                             .iter()
-                            .map(|(id, state, _)| json!({"session_id": id, "state": state}))
+                            .map(|(id, state)| json!({"session_id": id, "state": state}))
                             .collect::<Vec<_>>()
                     )
                 };
@@ -981,7 +991,7 @@ pub async fn set(
             let mut collected = Collected::default();
             if condition.all && !batch {
                 // Цель, уже осевшая до взвода, входит в итог `all`: ждём только остальных.
-                for (target, state, boundary) in &current_states {
+                for (target, state) in &current_states {
                     if !states.iter().any(|wanted| wanted == state) {
                         continue;
                     }
@@ -994,7 +1004,7 @@ pub async fn set(
                             subscription_id: None,
                             armed_at: None,
                             chain_depth,
-                            boundary: Some(*boundary),
+                            boundary: None,
                         },
                     );
                 }
@@ -1739,13 +1749,13 @@ async fn render_one_in_tx(
     let budget = summary::TEXT_LIMIT.saturating_sub(text.len() + 512) / held.len().max(1);
     for (target, entry) in &held {
         text.push_str("\n\n");
-        if let Some(built) = summary::build_through(
+        if let Some(built) = summary::build_bounded(
             conn,
             owner_id,
             *target,
             &entry.state,
             entry.armed_at,
-            entry.boundary,
+            entry.boundary.as_ref(),
         )
         .await?
         {

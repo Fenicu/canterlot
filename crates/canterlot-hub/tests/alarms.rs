@@ -1440,6 +1440,86 @@ async fn later_run_does_not_replace_a_held_result(pool: PgPool) {
     );
 }
 
+/// Ход, чей ответ пришёл в хаб после `finished_at` (повтор журнала после переподключения):
+/// граница удержанного итога — идентификатор хода, а не время воркера.
+#[sqlx::test(migrations = "./migrations")]
+async fn replayed_answer_after_the_run_finished_reaches_the_held_summary(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    let execution = Uuid::now_v7();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state,outcome)
+         values($1,$2,1,'stopped','done')",
+    )
+    .bind(execution)
+    .bind(f.child)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let command = Uuid::now_v7();
+    let finished_at = now + TimeDelta::seconds(1);
+    sqlx::query(
+        "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state)
+         values($1,$2,$3,$4,1,'deliver_input','{}','completed')",
+    )
+    .bind(command)
+    .bind(f.machine)
+    .bind(f.child)
+    .bind(execution)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into runs(input_command_id,execution_id,conversation_id,started_at,finished_at,duration_ms)
+         values($1,$2,$3,$4-interval '1 second',$4,1000)",
+    )
+    .bind(command)
+    .bind(execution)
+    .bind(f.child)
+    .bind(finished_at)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    // Ответ хаба создан позже завершения хода: часы воркера и хаба расходятся.
+    sqlx::query(
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,input_command_id,parent_block_id,created_seq,created_at)
+         values($1,$2,$3,'text','final',1,'replayed answer',$4,null,1,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution)
+    .bind(f.child)
+    .bind(command)
+    .bind(finished_at + TimeDelta::seconds(30))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+
+    f.refresh_id(f.child, now + TimeDelta::seconds(40)).await;
+    assert_eq!(alarm_state(&f.pool, alarm_id(&armed)).await.0, "fired");
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(50))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    let inputs = f.alarm_inputs().await;
+    let text = &inputs[0].0;
+    assert!(text.contains("replayed answer"), "{text}");
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn cancellation_racing_unsubscribe_does_not_resurrect_the_event(pool: PgPool) {
     let f = Fx::new(pool).await;

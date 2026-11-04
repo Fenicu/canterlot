@@ -6,7 +6,7 @@
 use std::fmt::{self, Write as _};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgConnection, types::Json};
 use uuid::Uuid;
@@ -186,6 +186,51 @@ fn aggregate_git(runs: &[Option<Value>]) -> Option<Git> {
     })
 }
 
+/// Граница завершения, удержанная пачкой: идентичность, а не время.
+///
+/// Часы воркера (`runs.finished_at`) и часы хаба (`blocks.created_at`) идут по-разному,
+/// а после переподключения и повтора журнала ответ цели появляется в базе позже
+/// завершения хода. Поэтому верхняя граница окна — идентификатор последнего хода
+/// (`runs.input_command_id`) и снятая в момент удержания последовательность блоков хаба.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Boundary {
+    /// Последний законченный ход, который покрывает удержанный итог.
+    pub last_command_id: Uuid,
+    /// Команды всех ходов, известных на момент удержания: их ответы входят в итог.
+    pub command_ids: Vec<Uuid>,
+    /// Наибольший `blocks.created_seq` разговора на момент удержания.
+    #[serde(default)]
+    pub block_seq: i64,
+}
+
+/// Граница по текущей проекции цели: последний ход и последовательность блоков хаба.
+/// `None`, если ходов ещё не было: тогда итог строится по прежнему окну подписки.
+pub async fn boundary_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+) -> Result<Option<Boundary>, sqlx::Error> {
+    let command_ids: Vec<Uuid> = sqlx::query_scalar(
+        "select input_command_id from runs where conversation_id=$1 order by input_command_id",
+    )
+    .bind(target_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let Some(last_command_id) = command_ids.last().copied() else {
+        return Ok(None);
+    };
+    let block_seq: i64 = sqlx::query_scalar(
+        "select coalesce(max(created_seq),0)::bigint from blocks where conversation_id=$1",
+    )
+    .bind(target_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(Some(Boundary {
+        last_command_id,
+        command_ids,
+        block_seq,
+    }))
+}
+
 /// Собирает итог. `None`, если цели нет у этого владельца.
 pub async fn build(
     conn: &mut PgConnection,
@@ -194,18 +239,18 @@ pub async fn build(
     state: &str,
     armed_at: Option<DateTime<Utc>>,
 ) -> Result<Option<SessionSummary>, sqlx::Error> {
-    build_through(conn, owner_id, target_id, state, armed_at, None).await
+    build_bounded(conn, owner_id, target_id, state, armed_at, None).await
 }
 
-/// Тот же итог, но не позже границы завершения: удержанный пачкой результат не должен
-/// подменяться более поздним ходом цели.
-pub async fn build_through(
+/// Тот же итог, но не позже удержанной границы: более поздний ход цели не подменяет
+/// результат, который пачка уже собрала. Граница — идентичность, время не сравнивается.
+pub async fn build_bounded(
     conn: &mut PgConnection,
     owner_id: Uuid,
     target_id: Uuid,
     state: &str,
     armed_at: Option<DateTime<Utc>>,
-    through: Option<DateTime<Utc>>,
+    boundary: Option<&Boundary>,
 ) -> Result<Option<SessionSummary>, sqlx::Error> {
     let conversation: Option<(String, String, String, Option<Value>)> = sqlx::query_as(
         "select title,harness,model,worktree from conversations where id=$1 and owner_id=$2",
@@ -217,6 +262,9 @@ pub async fn build_through(
     let Some((title, harness, model, worktree)) = conversation else {
         return Ok(None);
     };
+    // Верхняя граница — идентификатор хода, а не время: часы воркера и хаба расходятся.
+    // Нижняя граница окна остаётся моментом взвода подписки: ход, начатый до него и
+    // законченный после, всё ещё принадлежит окну.
     let runs: Vec<RunRow> = sqlx::query_as(
         "select r.input_command_id,
                 coalesce(r.duration_ms,
@@ -225,18 +273,18 @@ pub async fn build_through(
          from runs r
          left join run_working w on w.input_command_id=r.input_command_id
          where r.conversation_id=$1
+           and ($3::uuid is null or r.input_command_id <= $3)
            and ((r.finished_at is not null
-                 and ($2::timestamptz is null or r.finished_at >= $2)
-                 and ($3::timestamptz is null or r.finished_at <= $3))
+                 and ($2::timestamptz is null or r.finished_at >= $2))
                 or (r.finished_at is null
-                    and $3::timestamptz is null
+                    and $3::uuid is null
                     and exists(select 1 from executions e where e.id=r.execution_id
                                and e.state in ('created','starting','running','stopping'))))
          order by coalesce(r.finished_at,r.started_at),r.started_at,r.input_command_id",
     )
     .bind(target_id)
     .bind(armed_at)
-    .bind(through)
+    .bind(boundary.map(|boundary| boundary.last_command_id))
     .fetch_all(&mut *conn)
     .await?;
     let run_ids: Vec<Uuid> = runs.iter().map(|run| run.0).collect();
@@ -248,15 +296,18 @@ pub async fn build_through(
     .fetch_one(&mut *conn)
     .await?;
     let any_open = runs.iter().any(|run| run.4);
-    let active: bool = sqlx::query_scalar(
-        "select exists(select 1 from executions where conversation_id=$1
-                       and state in ('created','starting','running','stopping')
-                       and ($2::timestamptz is null or created_at <= $2))",
-    )
-    .bind(target_id)
-    .bind(through)
-    .fetch_one(&mut *conn)
-    .await?;
+    // Удержанный итог снят в момент, когда цель уже устоялась: идущего хода в нём нет.
+    let active = if boundary.is_some() {
+        false
+    } else {
+        sqlx::query_scalar(
+            "select exists(select 1 from executions where conversation_id=$1
+                           and state in ('created','starting','running','stopping'))",
+        )
+        .bind(target_id)
+        .fetch_one(&mut *conn)
+        .await?
+    };
     // У идущего хода расход ещё не записан: показываем «unknown», а не нули.
     let (turns, tokens) = if runs.is_empty() && active {
         (None, None)
@@ -272,30 +323,49 @@ pub async fn build_through(
         let previous: Option<Value> = sqlx::query_scalar(
             "select git from runs where conversation_id=$1 and git is not null
              and git->>'available' = 'true'
-             and ($2::timestamptz is null or finished_at <= $2)
+             and ($2::uuid is null or input_command_id <= $2)
              order by started_at desc limit 1",
         )
         .bind(target_id)
-        .bind(through)
+        .bind(boundary.map(|boundary| boundary.last_command_id))
         .fetch_optional(&mut *conn)
         .await?;
         git = aggregate_git(&[previous]);
     }
-    let answer: Option<(Uuid, String, i64)> = sqlx::query_as(
-        "select block_id,left(content,$4::int),octet_length(content)::bigint from blocks
-         where conversation_id=$1 and kind='text' and parent_block_id is null
-           and btrim(content) <> ''
-           and (input_command_id = any($2) or ($3::timestamptz is not null and created_at >= $3))
-           and ($5::timestamptz is null or created_at <= $5)
-         order by created_seq desc,created_at desc limit 1",
-    )
-    .bind(target_id)
-    .bind(&run_ids)
-    .bind(armed_at)
-    .bind(ANSWER_LIMIT as i32)
-    .bind(through)
-    .fetch_optional(&mut *conn)
-    .await?;
+    // Ответ удержанного итога — по идентичности хода или по последовательности блоков хаба,
+    // снятой при удержании. Без границы действует прежнее окно подписки.
+    let answer: Option<(Uuid, String, i64)> = if let Some(boundary) = boundary {
+        sqlx::query_as(
+            "select block_id,left(content,$5::int),octet_length(content)::bigint from blocks
+                 where conversation_id=$1 and kind='text' and parent_block_id is null
+                   and btrim(content) <> ''
+                   and ($2::timestamptz is null or created_at >= $2)
+                   and (input_command_id = any($3) or coalesce(created_seq,0) <= $4)
+                 order by created_seq desc,created_at desc limit 1",
+        )
+        .bind(target_id)
+        .bind(armed_at)
+        .bind(&boundary.command_ids)
+        .bind(boundary.block_seq)
+        .bind(ANSWER_LIMIT as i32)
+        .fetch_optional(&mut *conn)
+        .await?
+    } else {
+        sqlx::query_as(
+            "select block_id,left(content,$4::int),octet_length(content)::bigint from blocks
+                 where conversation_id=$1 and kind='text' and parent_block_id is null
+                   and btrim(content) <> ''
+                   and (input_command_id = any($2)
+                        or ($3::timestamptz is not null and created_at >= $3))
+                 order by created_seq desc,created_at desc limit 1",
+        )
+        .bind(target_id)
+        .bind(&run_ids)
+        .bind(armed_at)
+        .bind(ANSWER_LIMIT as i32)
+        .fetch_optional(&mut *conn)
+        .await?
+    };
     let detail = detail(conn, target_id, state).await?;
     let worktree = worktree.and_then(|value| {
         if matches!(

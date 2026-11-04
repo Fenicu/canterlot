@@ -205,8 +205,6 @@ pub struct Current {
     pub state: Settled,
     pub fingerprint: String,
     pub closes: bool,
-    /// Граница завершения на момент чтения: последний законченный ход или начало состояния.
-    pub boundary: DateTime<Utc>,
 }
 
 /// Осевшее состояние по проекции: отпечаток должен совпасть с тем, что посчитает проектор.
@@ -246,7 +244,6 @@ pub async fn current_in_tx(
             state,
             fingerprint: settle::fingerprint(state, since, inputs.last_turn_at, facts.phase_since),
             closes: state.closes_subscription(inputs.queue.queued),
-            boundary: inputs.last_turn_at.unwrap_or(since),
         }))
 }
 
@@ -322,6 +319,13 @@ pub async fn evaluate_in_tx(
     .fetch_all(&mut *conn)
     .await?;
     let closes = state.closes_subscription(queue.queued);
+    // Граница удержанного итога снимается один раз на всех подписчиков: это идентификаторы
+    // хода и последовательность блоков хаба, а не время воркера.
+    let boundary = if matches!(state, Settled::Idle | Settled::Stopped) {
+        super::summary::boundary_in_tx(conn, target_id).await?
+    } else {
+        None
+    };
     for (id, owner_id, subscriber_id, chain_depth, armed_at) in &open {
         if matches!(state, Settled::Idle | Settled::Stopped)
             && crate::session_tools::alarms::hold_for_batch_in_tx(
@@ -332,7 +336,7 @@ pub async fn evaluate_in_tx(
                 &fingerprint,
                 *id,
                 *armed_at,
-                facts.last_turn_at.unwrap_or(facts.since),
+                boundary.as_ref(),
                 *chain_depth,
                 facts.now,
             )
