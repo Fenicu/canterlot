@@ -212,8 +212,8 @@ async fn delete_in_tx(
     .bind(&execution_ids)
     .execute(&mut *conn)
     .await?;
-    subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
     crate::session_tools::alarms::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
+    subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
     origin::scrub_sender_in_tx(conn, id).await?;
     purge_rows(conn, id, &execution_ids).await?;
     purge_events(conn, owner_id, id, &execution_ids).await?;

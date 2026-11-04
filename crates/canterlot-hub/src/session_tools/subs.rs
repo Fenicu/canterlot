@@ -77,7 +77,8 @@ pub async fn subscribe_explicit_in_tx(
 }
 
 /// Отписка забирает и событие, которое уже ждёт в заданиях: подписчик больше о нём не просил.
-/// Сначала подписка: оценка держит её строку, поэтому её задание к этому моменту уже видно.
+/// Первым идёт `update` строки подписки: он держит её блокировку до commit, поэтому
+/// отпускание удержанного итога либо встанет до него, либо увидит закрытую подписку.
 pub async fn unsubscribe_in_tx(
     conn: &mut PgConnection,
     subscriber_id: Uuid,
@@ -204,6 +205,8 @@ pub struct Current {
     pub state: Settled,
     pub fingerprint: String,
     pub closes: bool,
+    /// Граница завершения на момент чтения: последний законченный ход или начало состояния.
+    pub boundary: DateTime<Utc>,
 }
 
 /// Осевшее состояние по проекции: отпечаток должен совпасть с тем, что посчитает проектор.
@@ -235,13 +238,16 @@ pub async fn current_in_tx(
             .and_then(|execution| execution.phase_at),
     };
     let activity = Activity { state, evidence };
-    Ok(
-        settle::settled(&activity, &inputs.queue, &facts, config).map(|state| Current {
+    // Общее решение «устоявшееся состояние — это завершение»: взвод будильника и явная
+    // подписка не должны считать завершением то, что им не считает доставка события.
+    Ok(settle::settled(&activity, &inputs.queue, &facts, config)
+        .filter(|state| completion::is_completion(*state))
+        .map(|state| Current {
             state,
             fingerprint: settle::fingerprint(state, since, inputs.last_turn_at, facts.phase_since),
             closes: state.closes_subscription(inputs.queue.queued),
-        }),
-    )
+            boundary: inputs.last_turn_at.unwrap_or(since),
+        }))
 }
 
 fn event_job(
@@ -326,6 +332,7 @@ pub async fn evaluate_in_tx(
                 &fingerprint,
                 *id,
                 *armed_at,
+                facts.last_turn_at.unwrap_or(facts.since),
                 *chain_depth,
                 facts.now,
             )
@@ -382,7 +389,8 @@ pub(super) async fn release_held_in_tx(
 ) -> Result<bool, sqlx::Error> {
     let alive: Option<Uuid> = sqlx::query_scalar(
         "select id from session_subscriptions
-         where id=$1 and subscriber_id=$2 and target_id=$3 and armed_at=$4 and closed_at is null",
+         where id=$1 and subscriber_id=$2 and target_id=$3 and armed_at=$4 and closed_at is null
+         for update",
     )
     .bind(subscription_id)
     .bind(subscriber_id)
@@ -412,9 +420,13 @@ pub async fn on_target_deleted_in_tx(
     target_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
+    // Уведомление об удалении одноразовое: строки подписок берутся блокирующе,
+    // чтобы отписка или приём не разошлись с вставкой задания.
     let open: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(
         "select id,owner_id,subscriber_id,chain_depth,armed_at from session_subscriptions
-         where target_id=$1 and subscriber_id<>$1 and closed_at is null",
+         where target_id=$1 and subscriber_id<>$1 and closed_at is null
+         order by id
+         for update",
     )
     .bind(target_id)
     .fetch_all(&mut *conn)

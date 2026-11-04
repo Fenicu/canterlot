@@ -73,6 +73,11 @@ struct CollectedSession {
     state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fingerprint: Option<String>,
+    /// Цель условия устоялась в подходящем состоянии. Это отдельный факт от удержания
+    /// итога: пачка удерживает только `idle`/`stopped`, остальные состояния приходят
+    /// обычной подпиской и здесь только засчитываются.
+    #[serde(default)]
+    satisfied: bool,
     /// Пачка хранит, из какой подписки и какого поколения взят итог.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subscription_id: Option<Uuid>,
@@ -80,6 +85,10 @@ struct CollectedSession {
     armed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     chain_depth: i32,
+    /// Граница завершения, которую покрывает удержанный итог: более поздний ход цели
+    /// не должен подменить его при отрисовке.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boundary: Option<DateTime<Utc>>,
 }
 
 impl Collected {
@@ -103,18 +112,22 @@ impl Collected {
         self.sessions.insert(id.to_string(), entry);
     }
 
-    /// Все цели условия собраны и в подходящем состоянии.
+    /// Все цели условия засчитаны. Удаление цели закрывает пачку даже тогда, когда
+    /// `deleted` не перечислен в `states`: отдельное сообщение об удалении уже ушло
+    /// обычной подпиской, пачке остаётся только посчитать его.
     fn complete(&self, condition: &SessionCondition) -> bool {
         condition.session_ids.iter().all(|id| {
-            self.get(*id)
-                .is_some_and(|entry| condition.states.contains(&entry.state))
+            self.get(*id).is_some_and(|entry| {
+                entry.satisfied
+                    && (condition.states.contains(&entry.state) || entry.state == "deleted")
+            })
         })
     }
 
     fn any_matching(&self, condition: &SessionCondition) -> bool {
         self.sessions
             .values()
-            .any(|entry| condition.states.contains(&entry.state))
+            .any(|entry| entry.satisfied && condition.states.contains(&entry.state))
     }
 }
 
@@ -465,10 +478,14 @@ pub async fn evaluate_session_in_tx(
     }
     let fingerprint =
         settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
+    // Цель взведённых будильников входит в обход проектора (`activity::sweep`), поэтому
+    // пропущенная под чужой блокировкой строка будет оценена на следующем тике. Терять
+    // здесь нечего: в отличие от удаления цели, событие не одноразовое.
     let rows: Vec<AlarmRow> = sqlx::query_as(
         "select * from alarms
          where state='armed' and condition->>'kind'='session_state'
            and condition->'session_ids' ? $1
+         order by id
          for update skip locked",
     )
     .bind(target_id.to_string())
@@ -534,7 +551,14 @@ async fn apply_settled_in_tx(
     else {
         return Ok(Applied::Skipped);
     };
+    // Срок уже наступил: задание срока — единственный хозяин исхода. Устоявшаяся цель
+    // после отсечки не отменяет сторож и не заменяет `timed_out` обычным срабатыванием.
+    if row.deadline_at.is_some_and(|deadline| now >= deadline) {
+        return Ok(Applied::Skipped);
+    }
     let matching = condition.states.iter().any(|wanted| wanted == state);
+    // Пачка засчитывает и удаление цели, даже если `deleted` не перечислен в `states`:
+    // отдельное сообщение об удалении уже ушло обычной подпиской.
     if !matching && !(row.batch && state == "deleted") {
         return Ok(Applied::Skipped);
     }
@@ -548,37 +572,36 @@ async fn apply_settled_in_tx(
     let mut collected = Collected::parse(&row.collected);
     let already = collected
         .get(target_id)
-        .is_some_and(|entry| entry.fingerprint.as_deref() == Some(fingerprint));
-    if row.batch {
-        // Пачку наполняет подписка, удерживая итог вместе с его поколением. Удаление
-        // цели известно только здесь, поэтому оно добавляется напрямую.
-        if !already && state != "deleted" {
-            return Ok(Applied::Skipped);
+        .is_some_and(|entry| entry.satisfied);
+    if !already {
+        // Удержанный пачкой итог заводит подписка; здесь он только получает отметку
+        // «условие выполнено». Иначе отметка и владение итогом расходятся.
+        match collected.get(target_id).cloned() {
+            Some(mut entry) if entry.subscription_id.is_some() => {
+                entry.satisfied = true;
+                collected.insert(target_id, entry);
+            }
+            Some(mut entry) => {
+                entry.state = state.into();
+                entry.fingerprint = Some(fingerprint.into());
+                entry.satisfied = true;
+                collected.insert(target_id, entry);
+            }
+            None => {
+                collected.insert(
+                    target_id,
+                    CollectedSession {
+                        state: state.into(),
+                        fingerprint: Some(fingerprint.into()),
+                        satisfied: true,
+                        subscription_id: None,
+                        armed_at: None,
+                        chain_depth: 0,
+                        boundary: None,
+                    },
+                );
+            }
         }
-        if !already {
-            collected.insert(
-                target_id,
-                CollectedSession {
-                    state: state.into(),
-                    fingerprint: Some(fingerprint.into()),
-                    subscription_id: None,
-                    armed_at: None,
-                    chain_depth: 0,
-                },
-            );
-            persist_collected(conn, row, &collected, now).await?;
-        }
-    } else if !already {
-        collected.insert(
-            target_id,
-            CollectedSession {
-                state: state.into(),
-                fingerprint: Some(fingerprint.into()),
-                subscription_id: None,
-                armed_at: None,
-                chain_depth: 0,
-            },
-        );
         persist_collected(conn, row, &collected, now).await?;
     }
     let met = if condition.all {
@@ -610,6 +633,7 @@ pub async fn hold_for_batch_in_tx(
     fingerprint: &str,
     subscription_id: Uuid,
     armed_at: DateTime<Utc>,
+    boundary: DateTime<Utc>,
     chain_depth: i32,
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
@@ -646,9 +670,11 @@ pub async fn hold_for_batch_in_tx(
             CollectedSession {
                 state: state.into(),
                 fingerprint: Some(fingerprint.into()),
+                satisfied: true,
                 subscription_id: Some(subscription_id),
                 armed_at: Some(armed_at),
                 chain_depth,
+                boundary: Some(boundary),
             },
         );
         persist_collected(conn, &mut row, &collected, now).await?;
@@ -658,7 +684,8 @@ pub async fn hold_for_batch_in_tx(
 }
 
 /// Цель удалена: условие с `deleted` срабатывает, пачка считает её собранной,
-/// сторож молчит, если условие выполнено.
+/// сторож молчит, если условие выполнено. Удаление одноразовое: строки будильников
+/// берутся блокирующе (в порядке id), иначе запертый будильник пропустил бы событие.
 pub async fn on_target_deleted_in_tx(
     conn: &mut PgConnection,
     target_id: Uuid,
@@ -668,7 +695,8 @@ pub async fn on_target_deleted_in_tx(
         "select * from alarms
          where state='armed' and condition->>'kind'='session_state'
            and condition->'session_ids' ? $1
-         for update skip locked",
+         order by id
+         for update",
     )
     .bind(target_id.to_string())
     .fetch_all(&mut *conn)
@@ -876,7 +904,7 @@ pub async fn set(
                 return Err(ToolError::new(ToolErrorCode::InvalidArguments));
             }
             let deadline = now + TimeDelta::seconds(deadline_seconds);
-            let mut current_states: Vec<(Uuid, String)> = Vec::new();
+            let mut current_states: Vec<(Uuid, String, DateTime<Utc>)> = Vec::new();
             let mut all_met = true;
             let mut any_met = false;
             for target in condition.session_ids.clone() {
@@ -894,7 +922,11 @@ pub async fn set(
                     condition
                         .armed
                         .insert(target.to_string(), current.fingerprint.clone());
-                    current_states.push((target, current.state.as_str().to_string()));
+                    current_states.push((
+                        target,
+                        current.state.as_str().to_string(),
+                        current.boundary,
+                    ));
                 } else {
                     all_met = false;
                 }
@@ -908,7 +940,7 @@ pub async fn set(
                     json!(
                         current_states
                             .iter()
-                            .map(|(id, state)| json!({"session_id": id, "state": state}))
+                            .map(|(id, state, _)| json!({"session_id": id, "state": state}))
                             .collect::<Vec<_>>()
                     )
                 };
@@ -949,7 +981,7 @@ pub async fn set(
             let mut collected = Collected::default();
             if condition.all && !batch {
                 // Цель, уже осевшая до взвода, входит в итог `all`: ждём только остальных.
-                for (target, state) in &current_states {
+                for (target, state, boundary) in &current_states {
                     if !states.iter().any(|wanted| wanted == state) {
                         continue;
                     }
@@ -958,9 +990,11 @@ pub async fn set(
                         CollectedSession {
                             state: state.clone(),
                             fingerprint: condition.armed.get(&target.to_string()).cloned(),
+                            satisfied: true,
                             subscription_id: None,
                             armed_at: None,
                             chain_depth,
+                            boundary: Some(*boundary),
                         },
                     );
                 }
@@ -1389,6 +1423,25 @@ pub async fn deliver_job_in_tx(
     .bind(now)
     .fetch_all(&mut *conn)
     .await?;
+    // Пропущенная под чужой блокировкой строка не должна сгореть: доставка одноразовая.
+    // Считаем всё, что ещё ждёт доставки, и просим обычный повтор планировщика.
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from alarms where conversation_id=$1 and (
+             (state='fired' and delivered_input_id is null)
+             or (state='armed' and kind='at' and fire_at <= $2)
+             or (state='armed' and kind='condition' and deadline_at <= $2)
+         )",
+    )
+    .bind(conversation)
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await?;
+    if pending as usize > rows.len() {
+        return Ok(crate::crunch::JobOutcome::Retry {
+            at: now + TimeDelta::seconds(2),
+            poll: false,
+        });
+    }
     if rows.is_empty() {
         return Ok(crate::crunch::JobOutcome::Cancelled("alarm_settled"));
     }
@@ -1421,56 +1474,72 @@ pub async fn deliver_job_in_tx(
             .await?;
         }
     }
-    let text = render_in_tx(conn, job.owner_id, &rows, now).await?;
-    let key = format!("alarm:{}", job.id);
-    let existing: Option<Uuid> =
-        sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
-            .bind(job.owner_id)
-            .bind(&key)
-            .fetch_optional(&mut *conn)
+    let parts = render_parts_in_tx(conn, job.owner_id, &rows, now).await?;
+    let multi = parts.len() > 1;
+    let mut input_ids = Vec::with_capacity(parts.len());
+    let mut delivered = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        let key = if multi {
+            format!("alarm:{}:{index}", job.id)
+        } else {
+            format!("alarm:{}", job.id)
+        };
+        let existing: Option<Uuid> =
+            sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
+                .bind(job.owner_id)
+                .bind(&key)
+                .fetch_optional(&mut *conn)
+                .await?;
+        let input_id = if let Some(input_id) = existing {
+            input_id
+        } else {
+            let first = &rows[part.start];
+            let submitted = submit_input_in_tx(
+                conn,
+                &SubmitInput {
+                    owner_id: job.owner_id,
+                    conversation_id: conversation,
+                    idempotency_key: key,
+                    content: vec![ContentBlock::Text {
+                        text: part.text.clone(),
+                    }],
+                    received_at: now,
+                    correlation_id,
+                    origin: Some(json!({
+                        "kind": "alarm",
+                        "alarm_id": first.id,
+                        "chain_depth": first.chain_depth,
+                        "event": origin::HubEvent {
+                            kind: "alarm".into(),
+                            alarm_id: Some(first.id),
+                            alarm_key: first.key.clone(),
+                            fired_reason: first.fired_reason.clone(),
+                            ..Default::default()
+                        },
+                    })),
+                },
+            )
             .await?;
-    let input_id = if let Some(input_id) = existing {
-        input_id
-    } else {
-        let first = &rows[0];
-        let submitted = submit_input_in_tx(
-            conn,
-            &SubmitInput {
-                owner_id: job.owner_id,
-                conversation_id: conversation,
-                idempotency_key: key,
-                content: vec![ContentBlock::Text { text }],
-                received_at: now,
-                correlation_id,
-                origin: Some(json!({
-                    "kind": "alarm",
-                    "alarm_id": first.id,
-                    "chain_depth": first.chain_depth,
-                    "event": origin::HubEvent {
-                        kind: "alarm".into(),
-                        alarm_id: Some(first.id),
-                        alarm_key: first.key.clone(),
-                        fired_reason: first.fired_reason.clone(),
-                        ..Default::default()
-                    },
-                })),
-            },
+            submitted.input_id
+        };
+        let ids: Vec<Uuid> = rows[part.start..part.end]
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        sqlx::query(
+            "update alarms set delivered_input_id=$2,delivered_at=$3,updated_at=$3 where id=any($1)",
         )
+        .bind(&ids)
+        .bind(input_id)
+        .bind(now)
+        .execute(&mut *conn)
         .await?;
-        submitted.input_id
-    };
-    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
-    sqlx::query(
-        "update alarms set delivered_input_id=$2,delivered_at=$3,updated_at=$3 where id=any($1)",
-    )
-    .bind(&ids)
-    .bind(input_id)
-    .bind(now)
-    .execute(conn)
-    .await?;
+        input_ids.push(input_id);
+        delivered.extend(ids);
+    }
     Ok(crate::crunch::JobOutcome::Done(json!({
-        "input_id": input_id,
-        "alarms": ids,
+        "input_ids": input_ids,
+        "alarms": delivered,
     })))
 }
 
@@ -1500,6 +1569,9 @@ pub async fn abandon_deliver_in_tx(
     .fetch_optional(&mut *conn)
     .await?;
     if let Some(row) = row {
+        // Удержанные пачкой итоги не должны пропасть вместе с недоставленным будильником:
+        // возвращаем их обычной подписке в этой же транзакции.
+        release_collected_in_tx(conn, &row, now).await?;
         changed_in_tx(conn, &row, Uuid::now_v7()).await?;
     }
     Ok(())
@@ -1531,9 +1603,11 @@ async fn fill_timeout_collected(
             CollectedSession {
                 state: state.unwrap_or_else(|| "unknown".into()),
                 fingerprint: None,
+                satisfied: false,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
+                boundary: None,
             },
         );
     }
@@ -1541,29 +1615,89 @@ async fn fill_timeout_collected(
     Ok(())
 }
 
-async fn render_in_tx(
+/// Одна часть слитной доставки: текст и диапазон строк, которые он покрывает.
+struct DeliveryPart {
+    text: String,
+    start: usize,
+    end: usize,
+}
+
+/// Слитная доставка не должна превышать предел одного ввода: несколько крупных пачек
+/// делятся на части, каждая со своим ключом идемпотентности.
+async fn render_parts_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     rows: &[AlarmRow],
     now: DateTime<Utc>,
-) -> Result<String, sqlx::Error> {
-    let mut text = String::new();
+) -> Result<Vec<DeliveryPart>, sqlx::Error> {
     if rows.len() == 1 {
-        text.push_str(&render_one_in_tx(conn, owner_id, &rows[0], now).await?);
-    } else {
-        text.push_str(&format!("[canterlot] {} alarms fired.\n", rows.len()));
-        for row in rows {
-            text.push_str(&format!(
-                "\n- {}",
-                render_one_in_tx(conn, owner_id, row, now)
-                    .await?
-                    .trim_start_matches("[canterlot] ")
-            ));
+        let mut text = render_one_in_tx(conn, owner_id, &rows[0], now).await?;
+        text.push_str("\n\n");
+        text.push_str(AUTOMATION);
+        return Ok(vec![DeliveryPart {
+            text,
+            start: 0,
+            end: 1,
+        }]);
+    }
+    let header = format!("[canterlot] {} alarms fired.\n", rows.len());
+    let continued = format!("[canterlot] {} alarms fired (continued).\n", rows.len());
+    let budget = canterlot_proto::limits::MAX_INPUT_TEXT_BYTES.saturating_sub(4096);
+    let mut parts = Vec::new();
+    let mut text = header;
+    let mut start = 0;
+    for (index, row) in rows.iter().enumerate() {
+        let chunk = render_one_in_tx(conn, owner_id, row, now)
+            .await?
+            .trim_start_matches("[canterlot] ")
+            .to_string();
+        let bullet = format!("\n- {chunk}");
+        if index > start && text.len() + bullet.len() + AUTOMATION.len() + 4 > budget {
+            text.push_str("\n\n");
+            text.push_str(AUTOMATION);
+            parts.push(DeliveryPart {
+                text,
+                start,
+                end: index,
+            });
+            text = continued.clone();
+            start = index;
         }
+        text.push_str(&bullet);
     }
     text.push_str("\n\n");
     text.push_str(AUTOMATION);
-    Ok(text)
+    parts.push(DeliveryPart {
+        text,
+        start,
+        end: rows.len(),
+    });
+    Ok(parts)
+}
+
+/// Жива ли подписка, удержавшая итог, и то же ли это поколение взвода. Строка берётся
+/// блокирующе, чтобы отписка и отпускание сериализовались.
+async fn subscription_alive_in_tx(
+    conn: &mut PgConnection,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    entry: &CollectedSession,
+) -> Result<bool, sqlx::Error> {
+    let (Some(subscription_id), Some(armed_at)) = (entry.subscription_id, entry.armed_at) else {
+        return Ok(false);
+    };
+    let alive: Option<Uuid> = sqlx::query_scalar(
+        "select id from session_subscriptions
+         where id=$1 and subscriber_id=$2 and target_id=$3 and armed_at=$4 and closed_at is null
+         for update",
+    )
+    .bind(subscription_id)
+    .bind(subscriber_id)
+    .bind(target_id)
+    .bind(armed_at)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(alive.is_some())
 }
 
 async fn render_one_in_tx(
@@ -1583,34 +1717,37 @@ async fn render_one_in_tx(
     };
     let collected = Collected::parse(&row.collected);
     let mut text = render_condition_text(row, now);
-    let entries = condition
-        .session_ids
-        .iter()
-        .filter(|id| {
-            collected
-                .get(**id)
-                .is_some_and(|entry| entry.subscription_id.is_some() || entry.state == "deleted")
-        })
-        .count()
-        .max(1);
-    // Общий предел сообщения делится между итогами поровну.
-    let budget = summary::TEXT_LIMIT.saturating_sub(text.len() + 512) / entries;
+    // Итог держат только цели, которые пачка собрала; остальные состояния уже пришли
+    // обычной подпиской и упоминаются одной строкой, без повторного уведомления.
+    // Владение проверяется на каждой отдаче: отписка, приём или переподписка
+    // с новым поколением выбрасывают удержанный итог.
+    let mut held: Vec<(Uuid, CollectedSession)> = Vec::new();
+    let mut reported: Vec<(Uuid, String)> = Vec::new();
     for target in &condition.session_ids {
-        let Some(entry) = collected.get(*target) else {
+        let Some(entry) = collected.get(*target).cloned() else {
             continue;
         };
-        if entry.state == "deleted" {
-            text.push_str("\n\n");
-            text.push_str(&format!("[canterlot] Session {target} was deleted."));
-            continue;
+        if entry.subscription_id.is_some() {
+            if subscription_alive_in_tx(conn, row.conversation_id, *target, &entry).await? {
+                held.push((*target, entry));
+            }
+        } else if entry.satisfied {
+            reported.push((*target, entry.state));
         }
-        if entry.subscription_id.is_none() {
-            // Цель не собралась до срока: она перечислена в строке «Not settled».
-            continue;
-        }
+    }
+    // Общий предел сообщения делится между итогами поровну.
+    let budget = summary::TEXT_LIMIT.saturating_sub(text.len() + 512) / held.len().max(1);
+    for (target, entry) in &held {
         text.push_str("\n\n");
-        if let Some(built) =
-            summary::build(conn, owner_id, *target, &entry.state, entry.armed_at).await?
+        if let Some(built) = summary::build_through(
+            conn,
+            owner_id,
+            *target,
+            &entry.state,
+            entry.armed_at,
+            entry.boundary,
+        )
+        .await?
         {
             text.push_str(&summary::render_bounded(&built, budget));
         } else {
@@ -1619,6 +1756,12 @@ async fn render_one_in_tx(
                 entry.state
             ));
         }
+    }
+    for (target, state) in &reported {
+        text.push_str("\n\n");
+        text.push_str(&format!(
+            "[canterlot] Session {target} is {state}; reported separately."
+        ));
     }
     if let Some(note) = row.note.as_deref().filter(|note| !note.is_empty()) {
         text.push_str("\nNote: ");
@@ -1687,22 +1830,14 @@ fn render_condition_text(row: &AlarmRow, now: DateTime<Utc>) -> String {
             let missed = condition
                 .session_ids
                 .iter()
-                .filter(|id| {
-                    collected.get(**id).is_some_and(|entry| {
-                        entry.subscription_id.is_none() && entry.state != "deleted"
-                    })
-                })
+                .filter(|id| collected.get(**id).is_none_or(|entry| !entry.satisfied))
                 .map(Uuid::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
             let settled = condition
                 .session_ids
                 .iter()
-                .filter(|id| {
-                    collected.get(**id).is_some_and(|entry| {
-                        entry.subscription_id.is_some() || entry.state == "deleted"
-                    })
-                })
+                .filter(|id| collected.get(**id).is_some_and(|entry| entry.satisfied))
                 .count();
             return format!(
                 "[canterlot] Alarm {name}timed out after {age}: {settled}/{} sessions settled (batched){late}. Not settled: {missed}.",
@@ -1834,9 +1969,11 @@ mod tests {
             CollectedSession {
                 state: "idle".into(),
                 fingerprint: Some("a".into()),
+                satisfied: true,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
+                boundary: None,
             },
         );
         assert!(!collected.complete(&condition));
@@ -1845,9 +1982,11 @@ mod tests {
             CollectedSession {
                 state: "idle".into(),
                 fingerprint: Some("b".into()),
+                satisfied: true,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
+                boundary: None,
             },
         );
         assert!(collected.complete(&condition));
