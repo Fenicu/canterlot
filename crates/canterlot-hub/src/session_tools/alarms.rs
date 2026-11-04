@@ -1538,6 +1538,24 @@ pub async fn deliver_job_in_tx(
     // Порядок блокировок: очередь получателя раньше подписок и будильников. Приём
     // результата держит очередь и закрывает подписку, поэтому обратный порядок даёт цикл.
     send::lock_queue(conn, conversation).await?;
+    // Отложенная финализация: строка будильника была заперта в прошлый раз. Повторяем
+    // именно отказ, а не обычную доставку, иначе терпение теряет смысл.
+    let deferred: Option<String> =
+        sqlx::query_scalar("select result->>'deferred_failure' from scheduled_jobs where id=$1")
+            .bind(job.id)
+            .fetch_one(&mut *conn)
+            .await?;
+    if let Some(reason) = deferred {
+        return match fail_delivery_in_tx(conn, conversation, &job.payload, &reason, now).await? {
+            Finalization::Finalized => {
+                Ok(crate::crunch::JobOutcome::Cancelled("delivery_contended"))
+            }
+            Finalization::Deferred => Ok(crate::crunch::JobOutcome::Retry {
+                at: now + TimeDelta::seconds(2),
+                poll: false,
+            }),
+        };
+    }
     let mut rows: Vec<AlarmRow> = sqlx::query_as(
         "select * from alarms where conversation_id=$1 and (
              (state='fired' and delivered_input_id is null)
@@ -1577,9 +1595,26 @@ pub async fn deliver_job_in_tx(
         let blocked_since = blocked_since.flatten();
         let since = blocked_since.unwrap_or(now);
         if now - since >= crate::scheduler::SESSION_TASK_QUEUE_PATIENCE {
-            fail_delivery_in_tx(conn, conversation, &job.payload, "delivery_contended", now)
-                .await?;
-            return Ok(crate::crunch::JobOutcome::Cancelled("delivery_contended"));
+            match fail_delivery_in_tx(conn, conversation, &job.payload, "delivery_contended", now)
+                .await?
+            {
+                Finalization::Finalized => {
+                    return Ok(crate::crunch::JobOutcome::Cancelled("delivery_contended"));
+                }
+                Finalization::Deferred => {
+                    // Строка всё ещё заперта: не держим ни задание, ни очередь,
+                    // а запоминаем, что следующий запуск должен именно финализировать отказ.
+                    sqlx::query("update scheduled_jobs set result=$2 where id=$1")
+                        .bind(job.id)
+                        .bind(json!({"deferred_failure": "delivery_contended"}))
+                        .execute(&mut *conn)
+                        .await?;
+                    return Ok(crate::crunch::JobOutcome::Retry {
+                        at: now + TimeDelta::seconds(2),
+                        poll: false,
+                    });
+                }
+            }
         }
         if blocked_since.is_none() {
             sqlx::query(
@@ -1707,25 +1742,32 @@ pub async fn deliver_job_in_tx(
     })))
 }
 
+/// Итог попытки финализировать отказ доставки. `Deferred` значит, что строка будильника
+/// всё ещё заперта и повторять попытку нужно позже, не удерживая задание и очередь.
+pub enum Finalization {
+    Finalized,
+    Deferred,
+}
+
 /// Задание доставки исчерпало попытки: будильник становится `failed` с причиной в PWA.
 pub async fn abandon_deliver_in_tx(
     conn: &mut PgConnection,
     conversation_id: Uuid,
     payload: &Value,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    fail_delivery_in_tx(conn, conversation_id, payload, "delivery_failed", now).await?;
-    Ok(())
+) -> Result<Finalization, sqlx::Error> {
+    fail_delivery_in_tx(conn, conversation_id, payload, "delivery_failed", now).await
 }
 
 /// Один обработчик отказа доставки: причина видна в PWA, удержанное возвращается подписке.
+/// Строка будильника берётся `for update nowait`: планировщик не ждёт чужую блокировку.
 async fn fail_delivery_in_tx(
     conn: &mut PgConnection,
     conversation_id: Uuid,
     payload: &Value,
     reason: &str,
     now: DateTime<Utc>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Finalization, sqlx::Error> {
     // Отпускание удержанного берёт строки подписок: очередь получателя идёт первой.
     send::lock_queue(conn, conversation_id).await?;
     let Some(id) = payload
@@ -1733,28 +1775,48 @@ async fn fail_delivery_in_tx(
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<Uuid>().ok())
     else {
-        return Ok(false);
+        return Ok(Finalization::Finalized);
     };
-    let row: Option<AlarmRow> = sqlx::query_as(
-        "update alarms set state='failed',failure_reason=$4,updated_at=$2
-         where id=$1 and conversation_id=$3 and delivered_input_id is null
-           and state in ('armed','fired')
-         returning *",
+    let some: bool = sqlx::query_scalar(
+        "select exists(select 1 from alarms
+         where id=$1 and conversation_id=$2 and delivered_input_id is null
+           and state in ('armed','fired'))",
     )
     .bind(id)
-    .bind(now)
     .bind(conversation_id)
-    .bind(reason)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !some {
+        return Ok(Finalization::Finalized);
+    }
+    let row: Option<AlarmRow> = sqlx::query_as(
+        "select * from alarms
+         where id=$1 and conversation_id=$2 and delivered_input_id is null
+           and state in ('armed','fired')
+         for update skip locked",
+    )
+    .bind(id)
+    .bind(conversation_id)
     .fetch_optional(&mut *conn)
     .await?;
     let Some(row) = row else {
-        return Ok(false);
+        // Строку держит чужая транзакция: не ждём её и не держим очередь с заданием.
+        return Ok(Finalization::Deferred);
     };
+    let row: AlarmRow = sqlx::query_as(
+        "update alarms set state='failed',failure_reason=$2,updated_at=$3
+         where id=$1 returning *",
+    )
+    .bind(row.id)
+    .bind(reason)
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await?;
     // Удержанные пачкой итоги не должны пропасть вместе с недоставленным будильником:
     // возвращаем их обычной подписке в этой же транзакции.
     release_collected_in_tx(conn, &row, now).await?;
     changed_in_tx(conn, &row, Uuid::now_v7()).await?;
-    Ok(true)
+    Ok(Finalization::Finalized)
 }
 
 async fn fill_timeout_collected(

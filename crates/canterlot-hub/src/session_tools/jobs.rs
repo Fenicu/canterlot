@@ -196,38 +196,52 @@ async fn deliver(
 
 /// Задание исчерпало попытки или признано негодным: то, что оно должно было закрыть, закрывается
 /// здесь, в той же транзакции. Остальным видам задания закрывать нечего.
+/// `true` значит, что закрытие отложено чужой блокировкой и задание надо повторить позже.
 pub async fn abandon_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     conversation_id: Option<Uuid>,
     payload: &Value,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let Some(conversation) = conversation_id else {
-        return Ok(());
+        return Ok(false);
     };
     let correlation_id = Uuid::now_v7();
     let Some(name) = payload.get("action").and_then(Value::as_str) else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(action) = Action::parse(name) else {
-        return Ok(());
+        return Ok(false);
     };
     match action {
-        Action::Event | Action::Note => Ok(()),
+        Action::Event | Action::Note => Ok(false),
         Action::Spawn => {
-            spawn::abandon_spawn_in_tx(conn, conversation, payload, now, correlation_id).await
+            spawn::abandon_spawn_in_tx(conn, conversation, payload, now, correlation_id)
+                .await
+                .map(|_| false)
         }
         Action::SpawnClose => {
-            spawn::abandon_close_in_tx(conn, conversation, payload, correlation_id).await
+            spawn::abandon_close_in_tx(conn, conversation, payload, correlation_id)
+                .await
+                .map(|_| false)
         }
         Action::Cleanup => {
-            accept::abandon_cleanup_in_tx(conn, owner_id, conversation, now, correlation_id).await
-        }
-        Action::AlarmDeliver => {
-            crate::session_tools::alarms::abandon_deliver_in_tx(conn, conversation, payload, now)
+            accept::abandon_cleanup_in_tx(conn, owner_id, conversation, now, correlation_id)
                 .await
+                .map(|_| false)
         }
+        Action::AlarmDeliver => match crate::session_tools::alarms::abandon_deliver_in_tx(
+            conn,
+            conversation,
+            payload,
+            now,
+        )
+        .await?
+        {
+            crate::session_tools::alarms::Finalization::Finalized => Ok(false),
+            crate::session_tools::alarms::Finalization::Deferred => Ok(true),
+        },
     }
 }
 

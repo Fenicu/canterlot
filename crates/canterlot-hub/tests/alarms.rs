@@ -1084,11 +1084,9 @@ async fn contended_delivery_gives_up_after_the_queue_patience(pool: PgPool) {
         .await
         .unwrap();
 
+    let sch = scheduler(&f.pool, Default::default());
     let at = now + TimeDelta::seconds(40);
-    let report = scheduler(&f.pool, Default::default())
-        .tick(at)
-        .await
-        .unwrap();
+    let report = sch.tick(at).await.unwrap();
     assert_eq!(report.retried, 1, "contention asks for a retry");
     let blocked_since: Option<DateTime<Utc>> = sqlx::query_scalar(
         "select blocked_since from scheduled_jobs
@@ -1106,17 +1104,37 @@ async fn contended_delivery_gives_up_after_the_queue_patience(pool: PgPool) {
     );
     assert!(f.alarm_inputs().await.is_empty());
 
-    // Сутки спустя задание уходит в обработчик отказа, но ждёт освобождения строки.
+    // Сутки спустя задание уходит в обработчик отказа, но не ждёт запертую строку:
+    // отказ откладывается, а постороннее задание всё равно выполняется.
     let later = at + TimeDelta::hours(25);
-    let pool = f.pool.clone();
-    let tick = tokio::spawn(async move { scheduler(&pool, Default::default()).tick(later).await });
-    wait_until_someone_waits(&f.pool).await;
-    assert!(
-        !tick.is_finished(),
-        "abandon waits for the locked alarm row"
-    );
+    canterlot_hub::scheduler::schedule_message(
+        &f.pool,
+        f.owner,
+        "unrelated",
+        canterlot_hub::scheduler::NewScheduled {
+            conversation_id: f.orchestrator,
+            run_at: later,
+            content: vec![ContentBlock::Text {
+                text: "unrelated work".into(),
+            }],
+            attachment_ids: vec![],
+        },
+        Utc::now(),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(5), sch.tick(later))
+        .await
+        .expect("the scheduler must not wait for the alarm row")
+        .unwrap();
+    assert!(report.retried >= 1, "the finalization is deferred");
+    assert_eq!(report.fired, 1, "an unrelated job still runs");
+    assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
+
+    // Строка освободилась: отложенный отказ финализируется без ожидания.
     blocker.commit().await.unwrap();
-    let report = tick.await.unwrap().unwrap();
+    let report = sch.tick(later + TimeDelta::seconds(3)).await.unwrap();
     assert_eq!(report.cancelled, 1);
     let (state, reason): (String, Option<String>) =
         sqlx::query_as("select state,failure_reason from alarms where id=$1")
@@ -1126,7 +1144,7 @@ async fn contended_delivery_gives_up_after_the_queue_patience(pool: PgPool) {
             .unwrap();
     assert_eq!(state, "failed");
     assert_eq!(reason.as_deref(), Some("delivery_contended"));
-    assert!(f.alarm_inputs().await.is_empty());
+    assert!(f.alarm_kind_inputs().await.is_empty());
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -2406,7 +2424,11 @@ async fn locked_alarm_counts_an_idle_subscription_closed_separately(pool: PgPool
     .fetch_one(&f.pool)
     .await
     .unwrap();
-    assert_eq!(reason.as_deref(), Some("idle"), "the subscription closed itself");
+    assert_eq!(
+        reason.as_deref(),
+        Some("idle"),
+        "the subscription closed itself"
+    );
     assert_eq!(f.event_jobs().await, 1, "the ordinary event is queued");
 
     blocker.commit().await.unwrap();

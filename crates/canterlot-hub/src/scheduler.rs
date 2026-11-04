@@ -605,6 +605,23 @@ impl Scheduler {
         Ok(())
     }
 
+    async fn defer_contended_job(
+        &self,
+        job: &JobRow,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let at = now + TimeDelta::seconds(2);
+        sqlx::query(
+            "update scheduled_jobs set run_at=$2,updated_at=clock_timestamp()
+             where id=$1 and state='pending'",
+        )
+        .bind(job.id)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn record_failure(
         &self,
         job: &JobRow,
@@ -671,8 +688,10 @@ impl Scheduler {
                         return Err(error);
                     }
                     // Запрос и уборка закрываются вместе с заданием, иначе они зависли бы навсегда.
-                    if current.kind == "session_task"
-                        && let Err(error) = crate::session_tools::jobs::abandon_in_tx(
+                    // Запертая строка будильника не должна держать ни задание, ни очередь:
+                    // откатываем закрытие и повторяем задание позже.
+                    let deferred = if current.kind == "session_task" {
+                        match crate::session_tools::jobs::abandon_in_tx(
                             &mut tx,
                             current.owner_id,
                             current.conversation_id,
@@ -680,9 +699,21 @@ impl Scheduler {
                             now,
                         )
                         .await
-                    {
+                        {
+                            Ok(deferred) => deferred,
+                            Err(error) => {
+                                let _ = tx.rollback().await;
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if deferred {
                         let _ = tx.rollback().await;
-                        return Err(error);
+                        self.defer_contended_job(&current, now).await?;
+                        report.retried += 1;
+                        return Ok(());
                     }
                 }
                 report.failed += 1;
