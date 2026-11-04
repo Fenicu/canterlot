@@ -25,8 +25,12 @@
   const link = $derived(eventSessionId(origin));
   const rawTitle = $derived(origin?.title?.trim() ?? '');
   const session = $derived(isSessionEvent(event));
+  // Строка будильника считается только для его ввода: у остальных записей текст доставки не читается.
   const alarm = $derived(origin?.kind === 'alarm' ? alarmEntryLine(origin, input.text) : null);
-  const line = $derived(event && !session && !alarm ? eventLine(event, rawTitle) : null);
+  // Подпись события не зависит от строки будильника: правка плашки не пересчитывает её.
+  const line = $derived(
+    event && !session && origin?.kind !== 'alarm' ? eventLine(event, rawTitle) : null
+  );
   const facts = $derived(event ? eventFacts(event) : []);
   const answer = $derived(event?.answer ?? '');
   const long = $derived(isLongText(input.text));

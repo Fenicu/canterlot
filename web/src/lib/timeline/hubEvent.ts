@@ -28,8 +28,11 @@ const STATUS: Record<string, string> = {
 
 export const LEGACY_LIMIT = 420;
 
+// Вызывается на каждой записи ленты при каждой пересборке окна: вид читается один раз,
+// чтобы поле не подписывало строку дважды.
 export function isEventOrigin(origin: InputOrigin | null | undefined): boolean {
-  return origin?.kind === 'event' || origin?.kind === 'alarm';
+  const kind = origin?.kind;
+  return kind === 'event' || kind === 'alarm';
 }
 
 export function isSessionEvent(event: HubEvent | null | undefined): boolean {
@@ -189,9 +192,30 @@ export function alarmFiredCount(origin: InputOrigin | null | undefined, text: st
   return Math.max(alarmIdentifiers(origin).length, alarmTextCount(text));
 }
 
+/** Строка на ввод: слабая ссылка не держит ушедшие записи. */
+const alarmLines = new WeakMap<object, { key: string; text: string; line: string }>();
+
+/** Всё, от чего зависит строка: тот же ввод с тем же текстом не разбирается заново. */
+function alarmLineKey(origin: InputOrigin): string {
+  const event = (origin as AlarmOrigin).event;
+  return [...alarmIdentifiers(origin), event?.alarm_key ?? '', event?.fired_reason ?? ''].join(
+    '\u0000'
+  );
+}
+
 /** Тихая строка-заголовок будильника: имя одного или число сработавших. */
 export function alarmEntryLine(origin: InputOrigin | null | undefined, text: string): string | null {
   if (origin?.kind !== 'alarm') return null;
+  // Текст доставки разбирается один раз на ввод: пересборка окна и снимок не гоняют регулярки заново.
+  const key = alarmLineKey(origin);
+  const known = alarmLines.get(origin);
+  if (known && known.key === key && known.text === text) return known.line;
+  const line = alarmTitleLine(origin, text);
+  alarmLines.set(origin, { key, text, line });
+  return line;
+}
+
+function alarmTitleLine(origin: InputOrigin, text: string): string {
   const event = (origin as AlarmOrigin).event;
   const count = alarmFiredCount(origin, text);
   if (count > 1)

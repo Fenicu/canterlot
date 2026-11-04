@@ -168,6 +168,17 @@ type QueuedInput = QueueSnapshot["queued"][number];
 export type ScheduledMessage = components["schemas"]["ScheduledMessage"];
 export type AlarmView = components["schemas"]["AlarmView"];
 
+/**
+ * Снимок и повторное событие приходят и без изменений: тот же список будильников
+ * не должен заново подписывать и перерисовывать плашку.
+ */
+function sameAlarms(before: AlarmView[], after: AlarmView[]): boolean {
+  return (
+    before.length === after.length &&
+    JSON.stringify(before) === JSON.stringify(after)
+  );
+}
+
 export interface SnapshotData {
   detail?: Record<string, unknown> | null;
   context?: { tokens: number; window_tokens?: number | null } | null;
@@ -895,7 +906,7 @@ export class ChatStore {
             (item) => item.alarm_id !== event.payload.alarm_id,
           );
           if (event.payload.state !== "cancelled") next.push(event.payload);
-          this.alarms = next;
+          if (!sameAlarms(this.alarms, next)) this.alarms = next;
         }
         return;
       case "scheduled_changed":
@@ -1283,7 +1294,8 @@ export class ChatStore {
       if (data.queue.run_slot) this.queue.run_slot = data.queue.run_slot;
     }
     if (data.scheduled) this.scheduled = data.scheduled;
-    if (data.alarms) this.alarms = data.alarms;
+    if (data.alarms && !sameAlarms(this.alarms, data.alarms))
+      this.alarms = data.alarms;
     if (data.open_requests) this.requests.reconcileSnapshot(data.open_requests);
     if (data.todos) this.todos.ingestSnapshot(data.todos);
     if (data.background) this.background.ingestSnapshot(data.background);
