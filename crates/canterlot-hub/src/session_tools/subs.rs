@@ -183,21 +183,36 @@ pub struct ClosedSubscriber {
     pub chain_depth: i32,
 }
 
+/// Цель продолжает работу без ввода от подписчика: будильник, событие о ребёнке или
+/// заметка хаба. Подписчик, услышавший `idle`, должен услышать и продолжение, поэтому
+/// подписка открывается снова со своим окном и глубиной. Ввод от самого подписчика не
+/// в счёт: `session_send` взводит подписку заново и с новым окном. Отписка, приём,
+/// остановка и удаление переписывают причину закрытия и здесь не отменяются.
+pub async fn reopen_for_input_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+    from: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update session_subscriptions set closed_at=null,closed_reason=null
+         where target_id=$1 and closed_reason=$2
+           and ($3::uuid is null or subscriber_id <> $3)",
+    )
+    .bind(target_id)
+    .bind(Settled::Idle.as_str())
+    .bind(from)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// Цель работает дальше без нового ввода: подписчик услышал `idle`, но это был не конец.
 /// Подписка открывается снова со своей глубиной и окном, следующий итог дойдёт до него.
 pub async fn reopen_for_wake_turn_in_tx(
     conn: &mut PgConnection,
     target_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "update session_subscriptions set closed_at=null,closed_reason=null
-         where target_id=$1 and closed_reason=$2",
-    )
-    .bind(target_id)
-    .bind(Settled::Idle.as_str())
-    .execute(conn)
-    .await?;
-    Ok(())
+    reopen_for_input_in_tx(conn, target_id, None).await
 }
 
 /// Осевшее состояние цели на момент чтения.

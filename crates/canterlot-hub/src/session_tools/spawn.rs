@@ -406,9 +406,12 @@ fn resolve_workdir(
             (source.to_owned(), Some(branch.to_owned()))
         }
         (None, Some(_)) => {
+            let path = serde_json::to_string(&place.workdir).unwrap_or_default();
             return Err(ToolError::with_message(
                 ToolErrorCode::WorkdirNotAllowed,
-                "This session works in a git worktree: pass isolated or name a workdir",
+                format!(
+                    "This session works in a git worktree: pass \"isolated\": true for a new worktree, or \"workdir\": {path} to share it"
+                ),
             ));
         }
     };

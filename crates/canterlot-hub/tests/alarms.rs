@@ -6,8 +6,10 @@ use canterlot_hub::{
     conversations::{self, SubmitMessage},
     delivery::ContentBlock,
     dispatcher::Dispatcher,
+    executions,
     limits::{self, DataConfidence, Observation, ObservationSource, Window},
     machine_info,
+    model::ExecutionState,
     scheduler::Scheduler,
     session_tools::{self, Caller, ToolContext, settle::SettleConfig, subs},
     snapshot, testkit,
@@ -245,6 +247,133 @@ impl Fx {
             .unwrap();
         }
     }
+}
+
+/// Сработавший будильник — не конец работы цели: подписка, закрытая её `idle`,
+/// открывается снова, и второй итог охватывает ходы после первого.
+#[sqlx::test(migrations = "./migrations")]
+async fn alarm_after_the_idle_report_reopens_the_subscription(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let execution = executions::start(&f.pool, f.owner, f.child, Uuid::now_v7())
+        .await
+        .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&f.pool, execution.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let mut child_caller = f.caller();
+    child_caller.conversation_id = f.child;
+    let armed = session_tools::call(
+        &f.context,
+        &child_caller,
+        "alarms.set",
+        json!({"at": (now + TimeDelta::seconds(60)).to_rfc3339(), "key": "wake"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(armed["state"], "armed");
+
+    sqlx::query("update executions set last_event_at=$2 where conversation_id=$1")
+        .bind(f.child)
+        .bind(now - TimeDelta::hours(1))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.subscribe(f.child).await;
+    f.refresh_id(f.child, now).await;
+    assert_eq!(f.event_jobs().await, 1);
+    let closed: Value = sqlx::query_scalar(
+        "select to_jsonb(s) from session_subscriptions s
+         where subscriber_id=$1 and target_id=$2",
+    )
+    .bind(f.orchestrator)
+    .bind(f.child)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(closed["closed_reason"], "idle");
+
+    // Срок наступил, доставка ставит будильник вводом Д.
+    scheduler(&f.pool, Default::default())
+        .tick(now + TimeDelta::seconds(70))
+        .await
+        .unwrap();
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "select origin->>'kind' from inputs where conversation_id=$1 order by input_seq",
+    )
+    .bind(f.child)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(kinds, ["alarm"]);
+    let reopened: Value = sqlx::query_scalar(
+        "select to_jsonb(s) from session_subscriptions s
+         where subscriber_id=$1 and target_id=$2",
+    )
+    .bind(f.orchestrator)
+    .bind(f.child)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(
+        reopened["closed_at"].is_null(),
+        "an alarm input is not the end of D"
+    );
+
+    // Д отработал ввод и снова осел.
+    sqlx::query("update inputs set state='accepted' where conversation_id=$1")
+        .bind(f.child)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let command = Uuid::now_v7();
+    let finished_at = now + TimeDelta::seconds(75);
+    sqlx::query(
+        "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state)
+         values($1,$2,$3,$4,$5,'deliver_input','{}','completed')",
+    )
+    .bind(command)
+    .bind(f.machine)
+    .bind(f.child)
+    .bind(execution.execution_id)
+    .bind(execution.generation)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into runs(input_command_id,execution_id,conversation_id,started_at,finished_at)
+         values($1,$2,$3,$4,$4)",
+    )
+    .bind(command)
+    .bind(execution.execution_id)
+    .bind(f.child)
+    .bind(finished_at)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    f.refresh_id(f.child, now + TimeDelta::seconds(90)).await;
+    assert_eq!(f.event_jobs().await, 2, "the continuation gets a report");
+    f.refresh_id(f.child, now + TimeDelta::seconds(100)).await;
+    assert_eq!(f.event_jobs().await, 2, "exactly one report per settling");
+
+    // Второй итог несёт продолжение, а не только первый ход.
+    scheduler(&f.pool, Default::default())
+        .tick(now + TimeDelta::seconds(110))
+        .await
+        .unwrap();
+    let texts: Vec<String> = sqlx::query_scalar(
+        "select content->0->>'text' from inputs where conversation_id=$1 order by input_seq",
+    )
+    .bind(f.orchestrator)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(texts.len(), 2);
+    assert!(texts[1].contains("is now idle."), "{}", texts[1]);
+    assert!(texts[1].contains("Turns: 1,"), "{}", texts[1]);
 }
 
 fn scheduler(pool: &PgPool, config: SchedulerConfig) -> Scheduler {
