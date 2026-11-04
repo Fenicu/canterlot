@@ -1,12 +1,15 @@
 //! Процесс `agy acp`: закреплённая копия, окружение из allowlist, запуск и закрытие.
 
 use super::version::{self, CliVersion, VersionError};
-use crate::adapter::spawn_with_retry_sync;
+use crate::adapter::{spawn_with_retry_io, spawn_with_retry_sync};
 use crate::config::AntigravityConfig;
 use crate::containment::{Containment, Member};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command as TokioCommand;
 
 /// Всё, что переживает `env_clear`; остальное — от владельца и не передаётся.
@@ -83,6 +86,103 @@ impl From<std::io::Error> for PrepareError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
     }
+}
+
+/// Что видит `agy mcp list` закреплённой копии: глобальный список MCP владельца.
+/// Только пустой список доказывает, что делегированной сессии нечего наследовать:
+/// 1.5.0 печатает ровно `No MCP servers configured.`, а настроенные серверы — таблицу
+/// `NAME TYPE STATUS COMMAND/URL`. Всё остальное считается непустым списком.
+/// Имена серверов и пути не логируются и в ошибках не переносятся.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerMcp {
+    Empty,
+    Configured,
+}
+
+#[derive(Debug)]
+pub enum OwnerMcpError {
+    Spawn,
+    Output,
+    Status,
+    Timeout,
+}
+
+const MCP_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+const MCP_LIST_CAP: usize = 64 * 1024;
+const MCP_LIST_EMPTY: &str = "No MCP servers configured.";
+
+/// Кеш на процесс: повторный запуск адаптера с той же закреплённой копией не
+/// спрашивает список снова, а обновлённая копия (другое время правки) — спрашивает.
+static OWNER_MCP: Mutex<Option<(PathBuf, SystemTime, OwnerMcp)>> = Mutex::new(None);
+
+/// Глобальный список MCP владельца читает сам CLI: файлы `~/.gemini` воркер не
+/// открывает. Без хода, коротким процессом в своей группе.
+pub async fn owner_mcp(executable: &Path, workdir: &Path) -> Result<OwnerMcp, OwnerMcpError> {
+    let stamp = std::fs::metadata(executable)
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    if let Some(stamp) = stamp {
+        let cached = OWNER_MCP.lock().expect("owner mcp cache").clone();
+        if let Some((path, at, value)) = cached
+            && path == executable
+            && at == stamp
+        {
+            return Ok(value);
+        }
+    }
+    let value = run_mcp_list(executable, workdir).await?;
+    if let Some(stamp) = stamp {
+        *OWNER_MCP.lock().expect("owner mcp cache") =
+            Some((executable.to_path_buf(), stamp, value));
+    }
+    Ok(value)
+}
+
+async fn run_mcp_list(executable: &Path, workdir: &Path) -> Result<OwnerMcp, OwnerMcpError> {
+    let env = process_env(std::env::vars_os());
+    let mut child = spawn_with_retry_io(|| {
+        let mut command = TokioCommand::new(executable);
+        command
+            .args(["mcp", "list"])
+            .current_dir(workdir)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        for (key, value) in &env {
+            command.env(key, value);
+        }
+        std::future::ready(command.spawn())
+    })
+    .await
+    .map_err(|_| OwnerMcpError::Spawn)?;
+    let mut stdout = child.stdout.take().ok_or(OwnerMcpError::Spawn)?;
+    let run = async {
+        let mut bytes = Vec::new();
+        (&mut stdout)
+            .take(MCP_LIST_CAP as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| OwnerMcpError::Output)?;
+        if bytes.len() > MCP_LIST_CAP {
+            return Err(OwnerMcpError::Output);
+        }
+        let status = child.wait().await.map_err(|_| OwnerMcpError::Spawn)?;
+        if !status.success() {
+            return Err(OwnerMcpError::Status);
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        Ok(if text.trim() == MCP_LIST_EMPTY {
+            OwnerMcp::Empty
+        } else {
+            OwnerMcp::Configured
+        })
+    };
+    tokio::time::timeout(MCP_LIST_TIMEOUT, run)
+        .await
+        .map_err(|_| OwnerMcpError::Timeout)?
 }
 
 #[derive(Clone)]

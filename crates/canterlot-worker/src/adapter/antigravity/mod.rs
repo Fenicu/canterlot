@@ -1071,6 +1071,14 @@ enum EchoEnd {
 
 #[async_trait::async_trait]
 impl Adapter for AntigravityAdapter {
+    /// MCP сессии задаёт только ACP-клиент: в `session/new` уходит единственный
+    /// сервер canterlot. Список и настройки MCP владельца адаптер не читает и
+    /// не передаёт; перекрытие глобального списка `agy` — открытая проба P16
+    /// (`docs/stage0/antigravity.md`).
+    fn isolates_mcp(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: Support::Supported,
@@ -1125,6 +1133,23 @@ impl Adapter for AntigravityAdapter {
                 return Err(AdapterError::StartFailed("cli_pin_failed"));
             }
         };
+        // Делегированная сессия не должна видеть MCP-серверы владельца. Пока P16
+        // не закрыт, единственное доказуемое состояние — пустой глобальный список:
+        // его отдаёт сам CLI, файлы `~/.gemini` адаптер не открывает.
+        if spec.isolate_mcp {
+            let data_dir = self
+                .cfg
+                .data_dir
+                .as_deref()
+                .ok_or(AdapterError::StartFailed("data_dir_missing"))?;
+            match process::owner_mcp(&pinned.executable, data_dir).await {
+                Ok(process::OwnerMcp::Empty) => {}
+                Ok(process::OwnerMcp::Configured) => {
+                    return Err(AdapterError::StartFailed("owner_mcp_not_isolated"));
+                }
+                Err(_) => return Err(AdapterError::StartFailed("mcp_list_failed")),
+            }
+        }
         // Версия и копия фиксируются на всё исполнение: перезапуск настроек
         // не должен подхватить обновившийся или откатившийся системный `agy`.
         self.pinned = Some(pinned.clone());

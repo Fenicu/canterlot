@@ -990,7 +990,15 @@ impl ExecutionManager {
         }
         let validated = match manager::validate(shared, &command, &start, conversation_id).await? {
             Ok(validated) => validated,
-            Err(reason) => return manager::reject(shared, &command, reason).await,
+            Err(reason) => {
+                tracing::warn!(
+                    execution_id = %command.execution_id,
+                    kind = "start_rejected",
+                    reason,
+                    "execution start rejected"
+                );
+                return manager::reject(shared, &command, reason).await;
+            }
         };
         {
             let mut infos = shared.infos.lock().expect("infos lock");

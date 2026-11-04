@@ -64,20 +64,20 @@ async fn usage_runs_the_pinned_copy_in_the_data_dir_without_a_turn() {
                     .is_some_and(|args| args.iter().any(|arg| arg == "/usage"))
         })
         .expect("usage boot");
-    let args: Vec<&str> = usage["args"]
+    let mut args: Vec<&str> = usage["args"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(Value::as_str)
         .collect();
-    assert!(args.contains(&"-p"));
-    assert!(args.contains(&"/usage"));
-    assert!(args.contains(&"--output-format"));
-    assert!(args.contains(&"json"));
-    assert!(
-        args.contains(&"--disable-telemetry"),
-        "the /usage probe is not telemetry-free: {args:?}"
-    );
+    // Двойник запускается обёрткой `fake-agy --script <файл>`; настоящая копия
+    // получает только аргументы ниже.
+    if args.first() == Some(&"--script") {
+        args.drain(..2);
+    }
+    // Точный argv, принятый `agy` 1.5.0: `--disable-telemetry` у `-p` даёт
+    // «flags provided but not defined» и статус 2 (журнал 2026-11-04).
+    assert_eq!(args, ["-p", "/usage", "--output-format", "json"]);
     assert_eq!(
         usage["cwd"].as_str(),
         Some(fake.data_dir().to_string_lossy().as_ref())
@@ -152,4 +152,26 @@ async fn a_foreign_provider_is_not_polled() {
     assert!(source.poll("codex").await.is_empty());
     assert!(source.poll("antigravity").await.len() == 2);
     fake.wait_gone().await;
+}
+
+/// Живая проба `/usage` закреплённой копией `agy` 1.5.0: точный argv без
+/// `--disable-telemetry`. Игнорируется: нужна настоящая копия и вход владельца.
+#[tokio::test]
+#[ignore]
+async fn live_usage_probe_accepts_the_argv() {
+    let home = std::env::var("HOME").expect("HOME");
+    let pinned = Path::new(&home).join(".local/state/canterlot-worker/antigravity/bin/agy-1.5.0");
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let source = AntigravityLimitsSource::new(
+        AntigravityConfig {
+            enabled: true,
+            binary: Some(pinned),
+            data_dir: Some(data_dir.path().to_path_buf()),
+        },
+        Duration::ZERO,
+        LiveLimits::default(),
+    );
+    let observations = source.fetch().await.expect("the /usage probe must run");
+    assert_eq!(observations.len(), 2, "{observations:?}");
+    assert!(observations.iter().all(|o| o.provider == "antigravity"));
 }
