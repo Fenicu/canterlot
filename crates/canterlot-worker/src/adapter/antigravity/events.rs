@@ -364,6 +364,14 @@ fn tool_summary(name: &str, value: &Value, raw: &Value) -> String {
             cut(&format!("{role}: {prompt}"))
         }
         "manage_task" => cut(&format!("Action: {}", raw_input_field(raw, "Action"))),
+        // MCP-инструменты приходят как `mcp_<server>_<tool>`; их схема кладёт
+        // подпись в `rawInput.toolSummary`, а `title` может быть служебным.
+        name if name.starts_with("mcp_") => raw
+            .get("toolSummary")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("title").and_then(Value::as_str))
+            .unwrap_or(name)
+            .to_owned(),
         _ => value
             .get("title")
             .and_then(Value::as_str)
@@ -684,6 +692,41 @@ mod tests {
                 kind: "antigravity_questions_unavailable",
                 ..
             }
+        )));
+    }
+
+    #[test]
+    fn an_mcp_tool_keeps_its_full_name_and_own_summary() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/stage0/evidence/antigravity/p-live-mcp1.jsonl");
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut updates = Vec::new();
+        for line in text.lines() {
+            let entry: Value = serde_json::from_str(line).unwrap();
+            let frame: Value = serde_json::from_str(entry["line"].as_str().unwrap()).unwrap();
+            let update = &frame["params"]["update"];
+            if update["toolCallId"] == "call_404323" {
+                updates.push(update.clone());
+            }
+        }
+        assert_eq!(updates.len(), 2, "tool_call and completed");
+        let mut translator = Translator::new("m");
+        translator.begin_turn(None);
+        let mut events = translator.feed(&updates[0]).events;
+        assert!(events.is_empty(), "the call is held until a status frame");
+        events.extend(translator.feed(&updates[1]).events);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockStarted { tool_name: Some(name), summary: Some(summary), .. }
+                if name == "mcp_echo-probe_echo" && summary == "Echo probe call"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockFinal { text, .. } if text.contains("pong-7391")
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Diagnostic { .. }
         )));
     }
 

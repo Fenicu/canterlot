@@ -2734,6 +2734,64 @@ async fn manage_task_is_a_collapsed_service_tool() {
 }
 
 #[tokio::test]
+async fn an_mcp_tool_call_keeps_its_full_name_and_raw_input() {
+    let text = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/stage0/evidence/antigravity/p-live-mcp1.jsonl"),
+    )
+    .unwrap();
+    let mut frames = Vec::new();
+    for line in text.lines() {
+        let entry: Value = serde_json::from_str(line).unwrap();
+        let frame: Value = serde_json::from_str(entry["line"].as_str().unwrap()).unwrap();
+        if frame["params"]["update"]["toolCallId"] == "call_404323" {
+            frames.push(frame);
+        }
+    }
+    assert_eq!(frames.len(), 2, "tool_call and completed");
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 3),
+        Script::send(user_chunk("Call the echo tool with pong-7391")),
+        Script::send(frames[0].clone()),
+        Script::send(frames[1].clone()),
+        respond(3, end_turn(Some(usage(16_377, 873, 822)))),
+    ];
+    let mut bench = Bench::new(
+        Script {
+            steps,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let input = send("Call the echo tool with pong-7391");
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let events = drain(&mut bench.adapter).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::BlockStarted { tool_name: Some(name), summary: Some(summary), .. }
+            if name == "mcp_echo-probe_echo" && summary == "Echo probe call"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::BlockFinal { text, .. } if text.contains("pong-7391")
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic { .. }
+    )));
+    assert_eq!(finished(&events), vec![input.command_id]);
+    bench.close().await;
+}
+
+#[tokio::test]
 async fn interrupt_without_a_turn_is_not_applicable() {
     let mut bench = Bench::new(
         Script {
