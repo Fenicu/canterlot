@@ -17,6 +17,7 @@ export function seedConversation(api: FakeHubApi, patch: Partial<ListRow> = {}):
 		color: null,
 		pinned: false,
 		archived: false,
+		accepted: false,
 		groups: [],
 		group_pins: [],
 		parent_id: null,
@@ -40,7 +41,7 @@ export function seedConversation(api: FakeHubApi, patch: Partial<ListRow> = {}):
 	api.counts = {
 		all: [...api.list.values()].filter((item) => !item.archived).length,
 		pinned: [...api.list.values()].filter((item) => item.pinned && !item.archived).length,
-		archived: [...api.list.values()].filter((item) => item.archived).length,
+		archived: [...api.list.values()].filter((item) => item.archived && !item.accepted).length,
 		groups: api.counts.groups
 	};
 	api.bindConversation(id);

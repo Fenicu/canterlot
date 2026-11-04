@@ -5876,6 +5876,10 @@
           "created_at"
         ],
         "properties": {
+          "accepted": {
+            "type": "boolean",
+            "description": "Сессия принята родителем через `session_accept`: живёт в архиве до срока хранения."
+          },
           "archived": {
             "type": "boolean"
           },

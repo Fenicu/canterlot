@@ -168,8 +168,7 @@ describe("sessions/grouping", () => {
     expect(sections[0]?.title).toBe("Закреплённые");
   });
 
-  it("counts_come_from_the_snapshot_and_events_not_the_visible_slice", () => {
-    const tabs = tabCounts(
+  it("counts_come_from_the_snapshot_and_events_not_the_visible_slice", () => {    const tabs = tabCounts(
       {
         all: 10,
         pinned: 2,
@@ -193,5 +192,26 @@ describe("sessions/grouping", () => {
     );
     expect(visible[0]?.count).toBe(1);
     expect(tabs[0]?.count).toBe(10);
+  });
+
+  it("archive_tab_and_search_skip_accepted_delegates", () => {
+    const items = [
+      row({ id: "kept", title: "Обычный архив", archived: true }),
+      row({
+        id: "accepted",
+        title: "Принятая делегация",
+        archived: true,
+        accepted: true,
+        parent_id: "parent",
+        spawn_depth: 1,
+      }),
+    ];
+    const sections = buildSections(
+      items,
+      groups,
+      { kind: "archive" },
+      new Set(),
+    );
+    expect(sections[0]?.items.map((node) => node.item.id)).toEqual(["kept"]);
   });
 });

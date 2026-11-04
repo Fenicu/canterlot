@@ -170,6 +170,9 @@ pub struct AttributeView {
     pub color: Option<String>,
     pub pinned: bool,
     pub archived: bool,
+    /// Сессия принята родителем через `session_accept`: живёт в архиве до срока хранения.
+    #[serde(default)]
+    pub accepted: bool,
     pub groups: Vec<Uuid>,
     pub group_pins: Vec<GroupPinView>,
     pub machine: MachineRef,
@@ -351,6 +354,9 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
             archived: row
                 .try_get::<Option<DateTime<Utc>>, _>("archived_at")?
                 .is_some(),
+            accepted: row
+                .try_get::<Option<DateTime<Utc>>, _>("accepted_at")?
+                .is_some(),
             groups: row.try_get("groups")?,
             group_pins: serde_json::from_value(row.try_get("group_pins")?)
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
@@ -397,7 +403,7 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
     })
 }
 pub async fn counts(conn: &mut PgConnection, owner_id: Uuid) -> Result<Counts, sqlx::Error> {
-    let (all,pinned,archived)=sqlx::query_as("select count(*) filter(where archived_at is null),count(*) filter(where archived_at is null and pinned),count(*) filter(where archived_at is not null) from conversations where owner_id=$1").bind(owner_id).fetch_one(&mut *conn).await?;
+    let (all,pinned,archived)=sqlx::query_as("select count(*) filter(where archived_at is null),count(*) filter(where archived_at is null and pinned),count(*) filter(where archived_at is not null and accepted_at is null) from conversations where owner_id=$1").bind(owner_id).fetch_one(&mut *conn).await?;
     let groups=sqlx::query_as::<_,(Uuid,i64)>("select g.id,count(c.id) from conversation_groups g left join conversation_group_members gm on gm.group_id=g.id left join conversations c on c.id=gm.conversation_id and c.owner_id=$1 and c.archived_at is null where g.owner_id=$1 group by g.id order by g.position,g.id").bind(owner_id).fetch_all(conn).await?.into_iter().map(|(id,count)|GroupCount{id,count}).collect();
     Ok(Counts {
         all,
@@ -430,7 +436,7 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
             sql.push(" and c.archived_at is null and c.pinned");
         }
         ListFilter::Archived => {
-            sql.push(" and c.archived_at is not null");
+            sql.push(" and c.archived_at is not null and c.accepted_at is null");
         }
         ListFilter::Group(id) => {
             sql.push(" and c.archived_at is null and exists(select 1 from conversation_group_members gm where gm.conversation_id=c.id and gm.group_id=").push_bind(id).push(")");
@@ -1454,7 +1460,7 @@ pub(crate) async fn update_attributes_in_tx(
             }
         }
     }
-    sqlx::query("update conversations set title=coalesce($2,title),title_source=case when $2::text is null then title_source when length(btrim($2))=0 then 'auto' else 'user' end,color=case when $3 then $4 else color end,pinned=coalesce($5,pinned),pinned_at=case when $5=true and not pinned then clock_timestamp() when $5=false then null else pinned_at end,archived_at=case when $6=true then coalesce(archived_at,clock_timestamp()) when $6=false then null else archived_at end,updated_at=clock_timestamp() where id=$1")
+    sqlx::query("update conversations set title=coalesce($2,title),title_source=case when $2::text is null then title_source when length(btrim($2))=0 then 'auto' else 'user' end,color=case when $3 then $4 else color end,pinned=coalesce($5,pinned),pinned_at=case when $5=true and not pinned then clock_timestamp() when $5=false then null else pinned_at end,archived_at=case when $6=true then coalesce(archived_at,clock_timestamp()) when $6=false then null else archived_at end,accepted_at=case when $6=false then null else accepted_at end,updated_at=clock_timestamp() where id=$1")
             .bind(id).bind(&attrs.title).bind(attrs.color.is_some()).bind(attrs.color.flatten()).bind(attrs.pinned).bind(attrs.archived).execute(&mut *conn).await?;
     emit_attributes(conn, owner_id, id, correlation_id).await?;
     detail(conn, owner_id, id)

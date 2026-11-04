@@ -122,7 +122,7 @@ export class FakeHubApi {
 		this.counts = {
 			all: rows.filter((item) => !item.archived).length,
 			pinned: rows.filter((item) => item.pinned && !item.archived).length,
-			archived: rows.filter((item) => item.archived).length,
+			archived: rows.filter((item) => item.archived && !item.accepted).length,
 			groups: this.groups.map((group) => ({
 				id: group.id,
 				count: rows.filter((item) => item.groups.includes(group.id) && !item.archived).length

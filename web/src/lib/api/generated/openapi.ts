@@ -1058,6 +1058,8 @@ export interface components {
             size: number;
         };
         AttributeView: {
+            /** @description Сессия принята родителем через `session_accept`: живёт в архиве до срока хранения. */
+            accepted?: boolean;
             archived: boolean;
             color?: string | null;
             created_at: string;

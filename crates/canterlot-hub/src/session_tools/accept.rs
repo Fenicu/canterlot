@@ -419,13 +419,25 @@ async fn set_worktree_state(
 }
 
 /// Архив с отменой запланированного и кранча, как при принудительной архивации владельцем.
-/// Занятое задание не мешает: сессия всё равно уходит в архив.
+/// Занятое задание не мешает: сессия всё равно уходит в архив. Приём отмечает срок хранения
+/// (`accepted_at`) до архивации, чтобы поздняя уборка не потеряла признак принятой сессии.
 async fn archive_in_tx(
     conn: &mut PgConnection,
     child: &Child,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    let marked = sqlx::query(
+        "update conversations set accepted_at=coalesce(accepted_at,clock_timestamp()),
+           updated_at=clock_timestamp() where id=$1 and accepted_at is null",
+    )
+    .bind(child.id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
     if child.archived {
+        if marked > 0 {
+            conversations::emit_attributes(conn, child.owner_id, child.id, correlation_id).await?;
+        }
         return Ok(());
     }
     let archived = Attributes {

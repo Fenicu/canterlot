@@ -35,6 +35,8 @@ export interface ListRow {
   color: string | null;
   pinned: boolean;
   archived: boolean;
+  /** Сессия принята родителем: архив скрывает её до срока хранения. */
+  accepted?: boolean;
   groups: string[];
   group_pins: GroupPin[];
   parent_id: string | null;
@@ -86,6 +88,7 @@ const ATTRIBUTES = [
   "color",
   "pinned",
   "archived",
+  "accepted",
   "groups",
   "group_pins",
   "parent_id",
@@ -165,7 +168,7 @@ export class ListStore {
     const needle = q.trim().toLowerCase();
     return [...this.items.values()].filter((item) => {
       if (needle && !item.title.toLowerCase().includes(needle)) return false;
-      if (filter === "archived") return item.archived;
+      if (filter === "archived") return item.archived && !item.accepted;
       if (filter === "pinned") return item.pinned && !item.archived;
       if (typeof filter === "object")
         return item.groups.includes(filter.group) && !item.archived;
@@ -293,6 +296,7 @@ function rowFromCreated(payload: {
   color: string | null;
   pinned: boolean;
   archived: boolean;
+  accepted?: boolean;
   groups: string[];
   group_pins?: GroupPin[];
   parent_id?: string | null;
@@ -326,6 +330,7 @@ function rowFromUpdated(payload: {
   color: string | null;
   pinned: boolean;
   archived: boolean;
+  accepted?: boolean;
   groups: string[];
   group_pins?: GroupPin[];
   machine: ListRow["machine"];

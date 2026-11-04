@@ -132,6 +132,7 @@ pub struct TestHubOptions {
     pub limits: crate::config::LimitsConfig,
     pub activity: crate::config::ActivityConfig,
     pub scheduler: crate::config::SchedulerConfig,
+    pub session_tools: crate::config::SessionToolsConfig,
     pub machines: crate::config::MachinesConfig,
     pub attachments: Option<(
         crate::config::AttachmentsConfig,
@@ -231,6 +232,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         limits,
         activity,
         scheduler: scheduler_config,
+        session_tools,
         machines,
         attachments: attachment_store,
         addr,
@@ -272,7 +274,9 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
     let root = tokio_util::sync::CancellationToken::new();
     let scheduler =
         crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), scheduler_config)
-            .with_limits(registry.clone(), limits.clone());
+            .with_limits(registry.clone(), limits.clone())
+            .with_session_tools(session_tools)
+            .with_blobs(blobs.clone());
     #[cfg(feature = "fault-injection")]
     let scheduler = {
         let mut scheduler = scheduler;

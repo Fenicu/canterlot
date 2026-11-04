@@ -509,6 +509,7 @@ export interface ConversationCreated {
     color: string | null;
     pinned: boolean;
     archived: boolean;
+    accepted?: boolean;
     groups: Uuid[];
     group_pins?: GroupPin[];
     machine: {
@@ -585,6 +586,7 @@ export interface ConversationUpdated {
     color: string | null;
     pinned: boolean;
     archived: boolean;
+    accepted?: boolean;
     groups: Uuid[];
     group_pins?: GroupPin[];
     machine: {
