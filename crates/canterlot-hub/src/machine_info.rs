@@ -238,6 +238,7 @@ pub async fn apply_metrics(
     if ids.len() != m.executions.len() {
         return Ok(ignored("duplicate_execution"));
     }
+    let now = chrono::Utc::now();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
     machine(&mut *conn, owner_id, machine_id).await?;
@@ -263,6 +264,17 @@ pub async fn apply_metrics(
         return Ok(ignored("stale_sample"));
     }
     emit(&mut *conn,owner_id,"machine_metrics",json!({"machine_id":machine_id,"machine_time_ms":m.machine_time_ms,"cpu_cores":m.cpu_cores,"cpu_permille":m.cpu_permille,"mem_total_bytes":m.mem_total_bytes,"mem_available_bytes":m.mem_available_bytes,"load1_centi":m.load1_centi,"load5_centi":m.load5_centi,"load15_centi":m.load15_centi,"disks":disks,"executions":executions}),correlation_id).await?;
+    // Сторож машины проверяет взведённые будильники этой машины на каждом свежем отчёте.
+    // Показание только что записано, поэтому `observed_at` — это время приёма.
+    crate::session_tools::alarms::evaluate_machine_in_tx(
+        &mut *conn,
+        machine_id,
+        &m,
+        now,
+        now,
+        correlation_id,
+    )
+    .await?;
     Ok(MetricsOutcome::Stored)
         })
     })

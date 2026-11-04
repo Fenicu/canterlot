@@ -252,6 +252,7 @@ async fn serve(
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())
             .with_session_tools(session_tools)
+            .with_limits(limits.clone())
             .with_orchestrator(&orchestrator)
             .with_activity(&activity)
             .with_dispatcher(dispatcher.clone());

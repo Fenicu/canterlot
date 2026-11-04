@@ -30,7 +30,11 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use self::settle::SettleConfig;
-use crate::{config::SessionToolsConfig, dispatcher::Dispatcher, session::Registry};
+use crate::{
+    config::{LimitsConfig, SessionToolsConfig},
+    dispatcher::Dispatcher,
+    session::Registry,
+};
 
 /// Имена хаба для инструментов; на стороне модели к ним добавляются префиксы harness.
 pub const TOOLS: &[&str] = &[
@@ -213,6 +217,7 @@ impl From<sqlx::Error> for ToolError {
 pub struct ToolContext {
     pub pool: PgPool,
     pub config: Arc<SessionToolsConfig>,
+    pub limits: Arc<LimitsConfig>,
     pub settle: SettleConfig,
     pub alarms_enabled: bool,
     pub dispatcher: Option<Dispatcher>,

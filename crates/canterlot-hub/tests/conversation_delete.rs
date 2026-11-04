@@ -514,6 +514,7 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
     let context = ToolContext {
         pool: f.pool.clone(),
         config: Default::default(),
+        limits: Default::default(),
         settle: SettleConfig {
             idle_quiet: std::time::Duration::from_secs(5),
         },

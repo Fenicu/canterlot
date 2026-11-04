@@ -95,6 +95,7 @@ pub struct HubGrpc {
     pub timers: HubTimers,
     pub ingest: Arc<dyn Ingest>,
     pub session_tools: Arc<crate::config::SessionToolsConfig>,
+    pub limits: Arc<crate::config::LimitsConfig>,
     pub alarms_enabled: bool,
     pub settle: crate::session_tools::settle::SettleConfig,
     pub dispatcher: Option<crate::dispatcher::Dispatcher>,
@@ -297,6 +298,7 @@ impl HubGrpc {
             timers,
             ingest,
             session_tools: Default::default(),
+            limits: Default::default(),
             alarms_enabled: true,
             settle: (&crate::config::ActivityConfig::default()).into(),
             dispatcher: None,
@@ -311,6 +313,11 @@ impl HubGrpc {
 
     pub fn with_session_tools(mut self, config: crate::config::SessionToolsConfig) -> Self {
         self.session_tools = Arc::new(config);
+        self
+    }
+
+    pub fn with_limits(mut self, config: crate::config::LimitsConfig) -> Self {
+        self.limits = Arc::new(config);
         self
     }
 

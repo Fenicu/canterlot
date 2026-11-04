@@ -158,6 +158,7 @@ async fn handle(
             let context = crate::session_tools::ToolContext {
                 pool: grpc.pool.clone(),
                 config: grpc.session_tools.clone(),
+                limits: grpc.limits.clone(),
                 settle: grpc.settle,
                 alarms_enabled: grpc.alarms_enabled,
                 dispatcher: grpc.dispatcher.clone(),

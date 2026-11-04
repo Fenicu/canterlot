@@ -124,6 +124,7 @@ impl Fx {
             context: ToolContext {
                 pool: pool.clone(),
                 config: Arc::new(config),
+                limits: Default::default(),
                 settle: SettleConfig {
                     idle_quiet: std::time::Duration::from_secs(5),
                 },

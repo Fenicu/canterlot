@@ -56,6 +56,7 @@ impl Fx {
             context: ToolContext {
                 pool: pool.clone(),
                 config: Arc::new(config),
+                limits: Default::default(),
                 settle: SettleConfig { idle_quiet: QUIET },
                 alarms_enabled: true,
                 dispatcher: None,

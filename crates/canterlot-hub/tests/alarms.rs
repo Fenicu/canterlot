@@ -6,10 +6,13 @@ use canterlot_hub::{
     conversations::{self, SubmitMessage},
     delivery::ContentBlock,
     dispatcher::Dispatcher,
+    limits::{self, DataConfidence, Observation, ObservationSource, Window},
+    machine_info,
     scheduler::Scheduler,
     session_tools::{self, Caller, ToolContext, settle::SettleConfig, subs},
     snapshot, testkit,
 };
+use canterlot_proto::worker::v1::{DiskUsage, MachineMetrics};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -53,6 +56,7 @@ impl Fx {
             context: ToolContext {
                 pool: pool.clone(),
                 config: Arc::new(SessionToolsConfig::default()),
+                limits: Default::default(),
                 settle: SettleConfig {
                     idle_quiet: Duration::from_secs(5),
                 },
@@ -93,6 +97,75 @@ impl Fx {
         )
         .await
         .unwrap()
+    }
+
+    async fn observe(
+        &self,
+        provider: &str,
+        window: Window,
+        used: u16,
+        resets_at: Option<DateTime<Utc>>,
+        observed_at: DateTime<Utc>,
+        confidence: DataConfidence,
+    ) {
+        let mut tx = self.pool.begin().await.unwrap();
+        limits::record_observation_in_tx(
+            &mut tx,
+            self.owner,
+            &Observation {
+                provider: provider.into(),
+                window,
+                used_permille: used,
+                resets_at,
+                observed_at,
+                source: ObservationSource::Poll,
+                data_confidence: confidence,
+                machine_id: self.machine,
+                execution_id: None,
+            },
+            observed_at,
+            &self.context.limits,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn arm_limit(
+        &self,
+        key: &str,
+        provider: &str,
+        window: &str,
+        below_percent: Option<f64>,
+    ) -> Result<Value, session_tools::ToolError> {
+        let mut when = json!({"kind": "limit_reset", "provider": provider, "window": window});
+        if let Some(below) = below_percent {
+            when["below_percent"] = json!(below);
+        }
+        self.call("alarms.set", json!({"when": when, "key": key}))
+            .await
+    }
+
+    async fn arm_machine(
+        &self,
+        key: &str,
+        free_disk_gb_above: Option<f64>,
+        load_per_core_below: Option<f64>,
+        mem_available_gb_above: Option<f64>,
+    ) -> Result<Value, session_tools::ToolError> {
+        let mut when = json!({"kind": "machine"});
+        if let Some(value) = free_disk_gb_above {
+            when["free_disk_gb_above"] = json!(value);
+        }
+        if let Some(value) = load_per_core_below {
+            when["load_per_core_below"] = json!(value);
+        }
+        if let Some(value) = mem_available_gb_above {
+            when["mem_available_gb_above"] = json!(value);
+        }
+        self.call("alarms.set", json!({"when": when, "key": key}))
+            .await
     }
 
     async fn refresh(&self, at: DateTime<Utc>) {
@@ -2620,4 +2693,561 @@ async fn retention_deletes_old_terminal_alarms(pool: PgPool) {
             .unwrap();
         assert!(found.is_some(), "alarm {id} is kept");
     }
+}
+
+fn metrics_with(ms: u64, free_gb: f64, load_per_core: f64, mem_gb: f64) -> MachineMetrics {
+    let cores = 4_u32;
+    MachineMetrics {
+        machine_time_ms: ms,
+        cpu_cores: cores,
+        cpu_permille: 50,
+        mem_total_bytes: (mem_gb * 1e9) as u64 + 1,
+        mem_available_bytes: (mem_gb * 1e9) as u64,
+        disks: vec![DiskUsage {
+            label: "data".into(),
+            total_bytes: (free_gb * 1e9) as u64 + 1,
+            free_bytes: (free_gb * 1e9) as u64,
+        }],
+        load1_centi: (load_per_core * f64::from(cores) * 100.0).round() as u32,
+        ..Default::default()
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_fires_on_a_fresh_exact_reading(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        600,
+        Some(reset),
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    let armed = f
+        .arm_limit("window", "claude", "weekly", None)
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    let after = now + TimeDelta::minutes(10);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        100,
+        Some(reset + TimeDelta::hours(1)),
+        after,
+        DataConfidence::Exact,
+    )
+    .await;
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("condition"));
+    let (trigger, verified): (Option<String>, Option<bool>) = sqlx::query_as(
+        "select condition->>'trigger',(condition->>'verified')::boolean from alarms where id=$1",
+    )
+    .bind(id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(trigger.as_deref(), Some("reset"));
+    assert_eq!(verified, Some(true));
+    scheduler(&f.pool, Default::default())
+        .tick(after + TimeDelta::seconds(6))
+        .await
+        .unwrap();
+    let inputs = f.alarm_kind_inputs().await;
+    assert_eq!(inputs.len(), 1);
+    let text = &inputs[0].0;
+    assert!(text.contains("weekly window reset"), "{text}");
+    assert!(text.contains("10% used"), "{text}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_reading_without_reset_does_not_fire(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        600,
+        Some(reset),
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    let armed = f
+        .arm_limit("window", "claude", "weekly", None)
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        700,
+        Some(reset),
+        now + TimeDelta::minutes(10),
+        DataConfidence::Exact,
+    )
+    .await;
+    assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
+    f.observe(
+        "claude",
+        Window::Weekly,
+        500,
+        Some(reset),
+        now + TimeDelta::hours(2),
+        DataConfidence::Exact,
+    )
+    .await;
+    assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_estimated_reading_needs_a_second_one(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        600,
+        Some(reset),
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    let armed = f
+        .arm_limit("window", "claude", "weekly", None)
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        100,
+        Some(reset + TimeDelta::hours(1)),
+        now + TimeDelta::hours(2),
+        DataConfidence::Estimated,
+    )
+    .await;
+    assert_eq!(
+        alarm_state(&f.pool, id).await.0,
+        "armed",
+        "an estimated reading alone does not prove a reset"
+    );
+    f.observe(
+        "claude",
+        Window::Weekly,
+        90,
+        Some(reset + TimeDelta::hours(2)),
+        now + TimeDelta::hours(2) + TimeDelta::minutes(11),
+        DataConfidence::Estimated,
+    )
+    .await;
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("condition"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_missing_window_fires_the_condition(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe(
+        "claude",
+        Window::FiveHour,
+        400,
+        Some(reset),
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    let armed = f
+        .arm_limit("window", "claude", "five_hour", None)
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    let mut tx = f.pool.begin().await.unwrap();
+    limits::record_absence_in_tx(
+        &mut tx,
+        f.owner,
+        "claude",
+        Window::FiveHour,
+        reset + TimeDelta::minutes(5),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("condition"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_without_resets_at_needs_below_percent(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    f.observe(
+        "claude",
+        Window::Weekly,
+        600,
+        None,
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    let error = f
+        .arm_limit("window", "claude", "weekly", None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, session_tools::ToolErrorCode::InvalidArguments);
+    assert!(error.message.contains("resets_at"), "{}", error.message);
+    let armed = f
+        .arm_limit("window", "claude", "weekly", Some(50.0))
+        .await
+        .unwrap();
+    assert_eq!(armed["state"], "armed");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_below_percent_fires_on_a_fresh_reading(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        600,
+        Some(reset),
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    let armed = f
+        .arm_limit("window", "claude", "weekly", Some(30.0))
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    let after = now + TimeDelta::minutes(10);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        200,
+        None,
+        after,
+        DataConfidence::Exact,
+    )
+    .await;
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("condition"));
+    let trigger: Option<String> =
+        sqlx::query_scalar("select condition->>'trigger' from alarms where id=$1")
+            .bind(id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(trigger.as_deref(), Some("below_percent"));
+    scheduler(&f.pool, Default::default())
+        .tick(after + TimeDelta::seconds(6))
+        .await
+        .unwrap();
+    let inputs = f.alarm_kind_inputs().await;
+    let text = &inputs[0].0;
+    assert!(text.contains("20%"), "{text}");
+    assert!(text.contains("below 30%"), "{text}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_probe_is_scheduled_at_resets_at_plus_grace(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        600,
+        Some(reset),
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    f.arm_limit("window", "claude", "weekly", None)
+        .await
+        .unwrap();
+    let (run_at, payload): (DateTime<Utc>, Value) = sqlx::query_as(
+        "select run_at,payload from scheduled_jobs
+         where conversation_id=$1 and payload->>'action'='alarm_probe'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        run_at.timestamp_micros(),
+        (reset + TimeDelta::seconds(f.context.limits.reset_grace.as_secs() as i64))
+            .timestamp_micros()
+    );
+    assert_eq!(payload["provider"], "claude");
+    scheduler(&f.pool, Default::default())
+        .tick(run_at)
+        .await
+        .unwrap();
+    let attempts: i32 = sqlx::query_scalar(
+        "select attempts from scheduled_jobs
+         where conversation_id=$1 and payload->>'action'='alarm_probe'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(
+        attempts >= 1,
+        "the probe asks for a provider poll: {attempts}"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_fires_by_clock_after_thirty_minutes_without_a_reading(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        600,
+        Some(reset),
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    let armed = f
+        .arm_limit("window", "claude", "weekly", None)
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    let probe_at = reset + TimeDelta::seconds(f.context.limits.reset_grace.as_secs() as i64);
+    let sch = scheduler(&f.pool, Default::default());
+    sch.tick(probe_at).await.unwrap();
+    let by_clock = probe_at + TimeDelta::minutes(30) + TimeDelta::seconds(1);
+    sch.tick(by_clock).await.unwrap();
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("by_clock"));
+    let (trigger, verified): (Option<String>, Option<bool>) = sqlx::query_as(
+        "select condition->>'trigger',(condition->>'verified')::boolean from alarms where id=$1",
+    )
+    .bind(id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(trigger.as_deref(), Some("by_clock"));
+    assert_eq!(verified, Some(false));
+    sch.tick(by_clock + TimeDelta::seconds(6)).await.unwrap();
+    let inputs = f.alarm_kind_inputs().await;
+    let text = &inputs[0].0;
+    assert!(text.contains("by clock"), "{text}");
+    assert!(text.contains("no fresh reading"), "{text}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn machine_condition_fires_when_every_threshold_holds(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.arm_machine("freed", Some(40.0), Some(2.0), Some(10.0))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    assert_eq!(
+        machine_info::apply_metrics(
+            &f.pool,
+            f.owner,
+            f.machine,
+            &metrics_with(1, 50.0, 0.5, 20.0),
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap(),
+        machine_info::MetricsOutcome::Stored
+    );
+    let (state, reason, _) = sqlx::query_as::<_, (String, Option<String>, Value)>(
+        "select state,fired_reason,collected from alarms where conversation_id=$1 and condition->>'kind'='machine'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("condition"));
+    scheduler(&f.pool, Default::default())
+        .tick(now + TimeDelta::seconds(6))
+        .await
+        .unwrap();
+    let inputs = f.alarm_kind_inputs().await;
+    let text = &inputs[0].0;
+    assert!(text.contains("50 GB free"), "{text}");
+    assert!(text.contains("load 0.5 per core"), "{text}");
+    assert!(text.contains("20 GB memory available"), "{text}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn machine_condition_waits_for_an_unmet_threshold(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.arm_machine("freed", Some(40.0), Some(2.0), Some(10.0))
+        .await
+        .unwrap();
+    machine_info::apply_metrics(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &metrics_with(1, 50.0, 3.0, 20.0),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let state: String = sqlx::query_scalar(
+        "select state from alarms where conversation_id=$1 and condition->>'kind'='machine'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "armed");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn machine_condition_ignores_stale_metrics(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.arm_machine("freed", Some(40.0), Some(2.0), Some(10.0))
+        .await
+        .unwrap();
+    machine_info::apply_metrics(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &metrics_with(2000, 1.0, 9.0, 1.0),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        machine_info::apply_metrics(
+            &f.pool,
+            f.owner,
+            f.machine,
+            &metrics_with(1000, 50.0, 0.5, 20.0),
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap(),
+        machine_info::MetricsOutcome::Ignored("stale_sample")
+    ));
+    let state: String = sqlx::query_scalar(
+        "select state from alarms where conversation_id=$1 and condition->>'kind'='machine'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "armed");
+    machine_info::apply_metrics(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &metrics_with(3000, 50.0, 0.5, 20.0),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let state: String = sqlx::query_scalar(
+        "select state from alarms where conversation_id=$1 and condition->>'kind'='machine'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "fired");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn machine_condition_only_sees_the_callers_machine(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let other = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'other')")
+        .bind(other)
+        .bind(f.owner)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.arm_machine("freed", Some(40.0), Some(2.0), Some(10.0))
+        .await
+        .unwrap();
+    machine_info::apply_metrics(
+        &f.pool,
+        f.owner,
+        other,
+        &metrics_with(1, 50.0, 0.5, 20.0),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let state: String = sqlx::query_scalar(
+        "select state from alarms where conversation_id=$1 and condition->>'kind'='machine'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "armed");
+    machine_info::apply_metrics(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &metrics_with(2, 50.0, 0.5, 20.0),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let state: String = sqlx::query_scalar(
+        "select state from alarms where conversation_id=$1 and condition->>'kind'='machine'",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "fired");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_machine_alarm_and_a_time_alarm_still_coalesce_into_one_input(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    f.arm_at("time", now + TimeDelta::seconds(35)).await;
+    f.arm_machine("freed", Some(40.0), Some(2.0), Some(10.0))
+        .await
+        .unwrap();
+    machine_info::apply_metrics(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &metrics_with(1, 50.0, 0.5, 20.0),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    scheduler(&f.pool, Default::default())
+        .tick(now + TimeDelta::seconds(40))
+        .await
+        .unwrap();
+    let inputs = f.alarm_kind_inputs().await;
+    assert_eq!(inputs.len(), 1);
+    let text = &inputs[0].0;
+    assert!(text.contains("2 alarms fired"), "{text}");
+    assert!(text.contains("\"time\""), "{text}");
+    assert!(text.contains("\"freed\""), "{text}");
 }

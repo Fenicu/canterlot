@@ -17,10 +17,13 @@ use super::{
     send, settle, subs, summary,
 };
 use crate::{
+    crunch::ResetCheck,
     delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
     events::{self, NewEvent, Scope},
+    limits::{DataConfidence, Window},
     scheduler::ClaimedJob,
 };
+use canterlot_proto::worker::v1::MachineMetrics;
 
 /// Сколько сработавших будильников получателя сливаются в одно сообщение.
 const COALESCE: TimeDelta = TimeDelta::seconds(5);
@@ -32,6 +35,14 @@ const MAX_AT_SECONDS: i64 = 366 * 86400;
 const DEFAULT_DEADLINE_SECONDS: i64 = 86400;
 const MIN_DEADLINE_SECONDS: i64 = 60;
 const MAX_DEADLINE_SECONDS: i64 = 7 * 86400;
+
+/// Сколько ждём свежее показание лимитов после опроса на `resets_at + reset_grace`.
+const PROBE_VERIFY_WINDOW: TimeDelta = TimeDelta::minutes(30);
+/// Повтор задания `alarm_probe`, пока не истекло окно проверки.
+const PROBE_RETRY: TimeDelta = TimeDelta::seconds(30);
+/// Показания машины старше этого не доказывают условие: их заменит следующий отчёт.
+const MACHINE_METRICS_MAX_AGE: TimeDelta = TimeDelta::seconds(90);
+const BYTES_PER_GB: f64 = 1e9;
 
 const DEFAULT_STATES: [&str; 5] = ["idle", "waiting_for_user", "failed", "stopped", "deleted"];
 const ALL_STATES: [&str; 7] = [
@@ -59,6 +70,57 @@ struct SessionCondition {
     /// Отпечаток каждой цели на момент взвода. Условие, уже истинное, не взводится.
     #[serde(default)]
     armed: BTreeMap<String, String>,
+}
+
+/// Условие `limit_reset`: при взводе запоминаем `resets_at` и расход окна.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LimitCondition {
+    kind: String,
+    provider: String,
+    window: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    below_percent: Option<f64>,
+    armed_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resets_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    used_permille: Option<u16>,
+    /// Что именно сработало: `reset`, `below_percent` или `by_clock`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trigger: Option<String>,
+    /// `false` у срабатывания по часам: свежего показания, подтверждающего сброс, не было.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verified: Option<bool>,
+    /// Расход в момент срабатывания: текст сообщения не ходит в лимиты ещё раз.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_used_permille: Option<u16>,
+}
+
+type LimitReading = (
+    Option<i32>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    String,
+);
+
+/// Условие `machine`: все заданные пороги должны выполняться одновременно.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MachineCondition {
+    kind: String,
+    machine_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    free_disk_gb_above: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    load_per_core_below: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mem_available_gb_above: Option<f64>,
+    armed_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_free_disk_gb: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_load_per_core: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_mem_available_gb: Option<f64>,
 }
 
 /// Что уже собрано по целям: для `all` — состояния, для пачки — удержанные итоги.
@@ -189,6 +251,12 @@ struct WhenArgs {
     session_ids: Option<Vec<Uuid>>,
     states: Option<Vec<String>>,
     all: Option<bool>,
+    provider: Option<String>,
+    window: Option<String>,
+    below_percent: Option<f64>,
+    free_disk_gb_above: Option<f64>,
+    load_per_core_below: Option<f64>,
+    mem_available_gb_above: Option<f64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -323,45 +391,178 @@ fn condition_text(
     )
 }
 
-fn parse_condition(when: &WhenArgs) -> Result<(SessionCondition, Vec<String>), ToolError> {
-    if when.kind != "session_state" {
-        // Остальные виды условий появятся отдельными этапами; притворяться, что они
-        // работают, нельзя.
-        return Err(ToolError::with_message(
+fn limit_condition_text(
+    condition: &LimitCondition,
+    deadline: DateTime<Utc>,
+    only_on_timeout: bool,
+) -> String {
+    let below = condition
+        .below_percent
+        .map(|percent| format!(" or usage below {percent}%"))
+        .unwrap_or_default();
+    let reset = condition
+        .resets_at
+        .map(|at| format!(" after {}", clock(at)))
+        .unwrap_or_default();
+    let watchdog = if only_on_timeout { "; watchdog" } else { "" };
+    format!(
+        "{} {} window resets{reset}{below}; deadline {}{watchdog}",
+        condition.provider,
+        condition.window,
+        clock(deadline)
+    )
+}
+
+fn machine_condition_text(
+    condition: &MachineCondition,
+    deadline: DateTime<Utc>,
+    only_on_timeout: bool,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(value) = condition.free_disk_gb_above {
+        parts.push(format!("free disk above {value} GB"));
+    }
+    if let Some(value) = condition.load_per_core_below {
+        parts.push(format!("load below {value} per core"));
+    }
+    if let Some(value) = condition.mem_available_gb_above {
+        parts.push(format!("memory available above {value} GB"));
+    }
+    let watchdog = if only_on_timeout { "; watchdog" } else { "" };
+    format!(
+        "machine: {}; deadline {}{watchdog}",
+        parts.join(", "),
+        clock(deadline)
+    )
+}
+
+/// Разобранное условие: вид решает, что снимать при взводе и где оценивать.
+enum ParsedWhen {
+    Session(SessionCondition, Vec<String>),
+    Limit {
+        provider: String,
+        window: Window,
+        below_percent: Option<f64>,
+    },
+    Machine {
+        free_disk_gb_above: Option<f64>,
+        load_per_core_below: Option<f64>,
+        mem_available_gb_above: Option<f64>,
+    },
+}
+
+fn window_from_str(value: &str) -> Option<Window> {
+    match value {
+        "five_hour" => Some(Window::FiveHour),
+        "weekly" => Some(Window::Weekly),
+        "monthly" => Some(Window::Monthly),
+        _ => None,
+    }
+}
+
+fn threshold(value: Option<f64>) -> Result<Option<f64>, ToolError> {
+    match value {
+        Some(value) if value.is_finite() && value >= 0.0 => Ok(Some(value)),
+        Some(_) => Err(ToolError::new(ToolErrorCode::InvalidArguments)),
+        None => Ok(None),
+    }
+}
+
+fn parse_when(when: &WhenArgs) -> Result<ParsedWhen, ToolError> {
+    let invalid = || ToolError::new(ToolErrorCode::InvalidArguments);
+    let machine_fields = when.free_disk_gb_above.is_some()
+        || when.load_per_core_below.is_some()
+        || when.mem_available_gb_above.is_some();
+    let session_fields = when.session_ids.is_some() || when.states.is_some() || when.all.is_some();
+    let limit_fields =
+        when.provider.is_some() || when.window.is_some() || when.below_percent.is_some();
+    match when.kind.as_str() {
+        "session_state" => {
+            if limit_fields || machine_fields {
+                return Err(invalid());
+            }
+            let ids = when.session_ids.clone().unwrap_or_default();
+            if ids.is_empty() || ids.len() > MAX_TARGETS {
+                return Err(ToolError::with_message(
+                    ToolErrorCode::InvalidArguments,
+                    "session_state needs one to twenty session ids",
+                ));
+            }
+            let mut seen = BTreeSet::new();
+            let ids: Vec<Uuid> = ids.into_iter().filter(|id| seen.insert(*id)).collect();
+            let states = when
+                .states
+                .clone()
+                .unwrap_or_else(|| DEFAULT_STATES.iter().map(|s| s.to_string()).collect());
+            if states.is_empty()
+                || states
+                    .iter()
+                    .any(|state| !ALL_STATES.contains(&state.as_str()))
+            {
+                return Err(invalid());
+            }
+            Ok(ParsedWhen::Session(
+                SessionCondition {
+                    kind: "session_state".into(),
+                    session_ids: ids,
+                    states: states.clone(),
+                    all: when.all.unwrap_or(false),
+                    armed: BTreeMap::new(),
+                },
+                states,
+            ))
+        }
+        "limit_reset" => {
+            if session_fields || machine_fields {
+                return Err(invalid());
+            }
+            let provider = when.provider.clone().ok_or_else(invalid)?;
+            if !crate::limits::known_provider(&provider) {
+                return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+            }
+            let window = when
+                .window
+                .as_deref()
+                .and_then(window_from_str)
+                .ok_or_else(invalid)?;
+            let below_percent = match when.below_percent {
+                Some(percent) if (0.0..=100.0).contains(&percent) => Some(percent),
+                Some(_) => return Err(invalid()),
+                None => None,
+            };
+            Ok(ParsedWhen::Limit {
+                provider,
+                window,
+                below_percent,
+            })
+        }
+        "machine" => {
+            if session_fields || limit_fields {
+                return Err(invalid());
+            }
+            let free_disk_gb_above = threshold(when.free_disk_gb_above)?;
+            let load_per_core_below = threshold(when.load_per_core_below)?;
+            let mem_available_gb_above = threshold(when.mem_available_gb_above)?;
+            if free_disk_gb_above.is_none()
+                && load_per_core_below.is_none()
+                && mem_available_gb_above.is_none()
+            {
+                return Err(ToolError::with_message(
+                    ToolErrorCode::InvalidArguments,
+                    "machine needs at least one threshold",
+                ));
+            }
+            Ok(ParsedWhen::Machine {
+                free_disk_gb_above,
+                load_per_core_below,
+                mem_available_gb_above,
+            })
+        }
+        other => Err(ToolError::with_message(
             ToolErrorCode::InvalidArguments,
-            "Only the session_state condition is supported yet",
-        ));
+            format!("Condition {other} is not supported yet"),
+        )),
     }
-    let ids = when.session_ids.clone().unwrap_or_default();
-    if ids.is_empty() || ids.len() > MAX_TARGETS {
-        return Err(ToolError::with_message(
-            ToolErrorCode::InvalidArguments,
-            "session_state needs one to twenty session ids",
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    let ids: Vec<Uuid> = ids.into_iter().filter(|id| seen.insert(*id)).collect();
-    let states = when
-        .states
-        .clone()
-        .unwrap_or_else(|| DEFAULT_STATES.iter().map(|s| s.to_string()).collect());
-    if states.is_empty()
-        || states
-            .iter()
-            .any(|state| !ALL_STATES.contains(&state.as_str()))
-    {
-        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
-    }
-    Ok((
-        SessionCondition {
-            kind: "session_state".into(),
-            session_ids: ids,
-            states: states.clone(),
-            all: when.all.unwrap_or(false),
-            armed: BTreeMap::new(),
-        },
-        states,
-    ))
 }
 
 fn validate_key(key: Option<&str>) -> Result<(), ToolError> {
@@ -374,23 +575,49 @@ fn validate_key(key: Option<&str>) -> Result<(), ToolError> {
 }
 
 fn view(row: &AlarmRow) -> AlarmView {
-    let parsed = row
+    let kind = row
         .condition
         .as_ref()
-        .and_then(|value| serde_json::from_value::<SessionCondition>(value.clone()).ok());
-    let condition = parsed
-        .as_ref()
-        .and_then(|condition| {
+        .and_then(|value| value.get("kind"))
+        .and_then(Value::as_str);
+    let parsed = if kind == Some("session_state") {
+        row.condition
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<SessionCondition>(value.clone()).ok())
+    } else {
+        None
+    };
+    let condition = match kind {
+        Some("session_state") => parsed.as_ref().and_then(|condition| {
             row.deadline_at
                 .map(|deadline| condition_text(condition, deadline, row.only_on_timeout, row.batch))
-        })
-        .unwrap_or_else(|| match row.kind.as_str() {
-            "at" => row
-                .fire_at
-                .map(|at| format!("at {}", clock(at)))
-                .unwrap_or_default(),
-            _ => String::new(),
-        });
+        }),
+        Some("limit_reset") => row
+            .condition
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<LimitCondition>(value.clone()).ok())
+            .and_then(|condition| {
+                row.deadline_at
+                    .map(|deadline| limit_condition_text(&condition, deadline, row.only_on_timeout))
+            }),
+        Some("machine") => row
+            .condition
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<MachineCondition>(value.clone()).ok())
+            .and_then(|condition| {
+                row.deadline_at.map(|deadline| {
+                    machine_condition_text(&condition, deadline, row.only_on_timeout)
+                })
+            }),
+        _ => None,
+    }
+    .unwrap_or_else(|| match row.kind.as_str() {
+        "at" => row
+            .fire_at
+            .map(|at| format!("at {}", clock(at)))
+            .unwrap_or_default(),
+        _ => String::new(),
+    });
     AlarmView {
         alarm_id: row.id,
         conversation_id: row.conversation_id,
@@ -479,13 +706,44 @@ async fn cancel_jobs_in_tx(
     sqlx::query(
         "update scheduled_jobs set state='cancelled',result=$2,updated_at=clock_timestamp()
          where kind='session_task' and state='pending'
-           and payload->>'action'='alarm_deliver' and payload->>'alarm_id'=$1",
+           and payload->>'action' in ('alarm_deliver','alarm_probe')
+           and payload->>'alarm_id'=$1",
     )
     .bind(alarm_id.to_string())
     .bind(json!({"reason": reason}))
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// Задание опроса лимитов: просит провайдера снять свежее показание к сроку сброса.
+async fn insert_probe_job_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    run_at: DateTime<Utc>,
+    alarm_id: Uuid,
+    provider: &str,
+    probe_at: DateTime<Utc>,
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
+         values($1,'session_task',$2,$3,$4,$5)",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .bind(conversation_id)
+    .bind(run_at)
+    .bind(json!({
+        "action": "alarm_probe",
+        "alarm_id": alarm_id,
+        "provider": provider,
+        "probe_at": time(probe_at),
+    }))
+    .execute(conn)
+    .await?;
+    Ok(id)
 }
 
 /// Условие сработало раньше срока: задание срока больше не нужно, а задание доставки
@@ -506,6 +764,27 @@ async fn cancel_timeout_job_in_tx(
     )
     .bind(alarm_id.to_string())
     .bind(json!({"reason": reason}))
+    .bind(current_job)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Сработавший будильник больше не опрашивает лимиты. Текущее задание исключается:
+/// если сработал сам опрос, он ещё должен завершиться как `Done`.
+async fn cancel_probe_job_in_tx(
+    conn: &mut PgConnection,
+    alarm_id: Uuid,
+    current_job: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update scheduled_jobs set state='cancelled',result=$2,updated_at=clock_timestamp()
+         where kind='session_task' and state='pending'
+           and payload->>'action'='alarm_probe' and payload->>'alarm_id'=$1
+           and ($3::uuid is null or id <> $3)",
+    )
+    .bind(alarm_id.to_string())
+    .bind(json!({"reason": "alarm_settled"}))
     .bind(current_job)
     .execute(conn)
     .await?;
@@ -703,6 +982,335 @@ async fn apply_settled_in_tx(
     Ok(Applied::Fired)
 }
 
+enum LimitStatus {
+    Met {
+        trigger: &'static str,
+        used_permille: Option<u16>,
+    },
+    NotReset,
+    NoReading,
+}
+
+/// Решение по окну лимита: свежее точное показание, подтверждённый сброс или расход ниже
+/// порога. Оценочное показание само по себе сброс не доказывает: нужен второй такой же
+/// отсчёт после срока сброса или точное показание.
+async fn limit_status_in_tx(
+    conn: &mut PgConnection,
+    condition: &LimitCondition,
+) -> Result<LimitStatus, sqlx::Error> {
+    let window = window_from_str(&condition.window)
+        .ok_or_else(|| sqlx::Error::InvalidArgument("invalid window".into()))?;
+    let row: Option<LimitReading> = sqlx::query_as(match window {
+            Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at,data_confidence from provider_limits where provider=$1",
+            Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at,data_confidence from provider_limits where provider=$1",
+            Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at,data_confidence from provider_limits where provider=$1",
+        })
+        .bind(&condition.provider)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let (used, _resets, observed, confidence) =
+        row.unwrap_or((None, None, None, DataConfidence::Exact.as_str().into()));
+    if let Some(below) = condition.below_percent
+        && let Some(used) = used
+        && observed.is_some_and(|observed| observed >= condition.armed_at)
+        && f64::from(used) <= below * 10.0
+    {
+        return Ok(LimitStatus::Met {
+            trigger: "below_percent",
+            used_permille: u16::try_from(used).ok(),
+        });
+    }
+    // Без известного срока сброса остаётся только порог расхода: угадывать сброс по
+    // первому же свежему показанию нельзя.
+    let Some(wake_at) = condition.resets_at else {
+        return Ok(LimitStatus::NoReading);
+    };
+    if window == Window::FiveHour {
+        let absent: Option<DateTime<Utc>> =
+            sqlx::query_scalar("select five_hour_absent_at from provider_limits where provider=$1")
+                .bind(&condition.provider)
+                .fetch_optional(&mut *conn)
+                .await?
+                .flatten();
+        if absent.is_some_and(|absent| absent >= wake_at) {
+            return Ok(LimitStatus::Met {
+                trigger: "reset",
+                used_permille: None,
+            });
+        }
+    }
+    match crate::crunch::check_reset(conn, &condition.provider, window, wake_at).await? {
+        ResetCheck::Verified => {
+            let confidence = DataConfidence::from_stored(&confidence);
+            if confidence == DataConfidence::Estimated
+                && observed.is_some_and(|observed| observed >= wake_at)
+            {
+                let readings: i64 = sqlx::query_scalar(
+                    "select count(*) from limit_snapshots
+                     where provider=$1 and window_kind=$2 and observed_at >= $3",
+                )
+                .bind(&condition.provider)
+                .bind(window.as_str())
+                .bind(wake_at)
+                .fetch_one(&mut *conn)
+                .await?;
+                if readings < 2 {
+                    // Один оценочный отсчёт не доказывает сброс; его подтвердит второй
+                    // или точное показание, иначе сработаем по часам.
+                    return Ok(LimitStatus::NoReading);
+                }
+            }
+            Ok(LimitStatus::Met {
+                trigger: "reset",
+                used_permille: used.and_then(|used| u16::try_from(used).ok()),
+            })
+        }
+        ResetCheck::NotReset => Ok(LimitStatus::NotReset),
+        ResetCheck::NoReading => Ok(LimitStatus::NoReading),
+    }
+}
+
+/// Свежее показание провайдера: взведённые будильники этого окна.
+pub(crate) async fn evaluate_limit_in_tx(
+    conn: &mut PgConnection,
+    provider: &str,
+    window: Window,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let rows: Vec<AlarmRow> = sqlx::query_as(
+        "select * from alarms
+         where state='armed' and condition->>'kind'='limit_reset'
+           and condition->>'provider'=$1 and condition->>'window'=$2
+         order by id
+         for update skip locked",
+    )
+    .bind(provider)
+    .bind(window.as_str())
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut changed = false;
+    for mut row in rows {
+        let Some(mut condition) =
+            serde_json::from_value::<LimitCondition>(row.condition.clone().unwrap_or(Value::Null))
+                .ok()
+        else {
+            continue;
+        };
+        // Срок уже наступил: исход остаётся за заданием срока.
+        if row.deadline_at.is_some_and(|deadline| now >= deadline) {
+            continue;
+        }
+        let LimitStatus::Met {
+            trigger,
+            used_permille,
+        } = limit_status_in_tx(conn, &condition).await?
+        else {
+            continue;
+        };
+        condition.trigger = Some(trigger.into());
+        condition.verified = Some(trigger != "by_clock");
+        condition.observed_used_permille = used_permille;
+        row.condition = Some(serde_json::to_value(&condition).unwrap_or(Value::Null));
+        if row.only_on_timeout {
+            cancel_in_tx(conn, row.id, "condition_met", now, correlation_id).await?;
+        } else {
+            fire_in_tx(
+                conn,
+                &mut row,
+                "condition",
+                now,
+                now,
+                correlation_id,
+                true,
+                None,
+            )
+            .await?;
+        }
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn machine_reading(metrics: &MachineMetrics) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let free_disk_gb = metrics
+        .disks
+        .iter()
+        .map(|disk| disk.free_bytes as f64 / BYTES_PER_GB)
+        .reduce(f64::min);
+    let load_per_core = (metrics.cpu_cores > 0)
+        .then(|| f64::from(metrics.load1_centi) / 100.0 / f64::from(metrics.cpu_cores));
+    let mem_available_gb = Some(metrics.mem_available_bytes as f64 / BYTES_PER_GB);
+    (free_disk_gb, load_per_core, mem_available_gb)
+}
+
+fn machine_holds(
+    condition: &MachineCondition,
+    free_disk_gb: Option<f64>,
+    load_per_core: Option<f64>,
+    mem_available_gb: Option<f64>,
+) -> bool {
+    condition
+        .free_disk_gb_above
+        .is_none_or(|threshold| free_disk_gb.is_some_and(|value| value >= threshold))
+        && condition
+            .load_per_core_below
+            .is_none_or(|threshold| load_per_core.is_some_and(|value| value < threshold))
+        && condition
+            .mem_available_gb_above
+            .is_none_or(|threshold| mem_available_gb.is_some_and(|value| value >= threshold))
+}
+
+/// Свежие метрики машины: взведённые будильники этой машины. Показания старше
+/// `MACHINE_METRICS_MAX_AGE` и снятые до взвода условие не выполняют.
+pub(crate) async fn evaluate_machine_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    metrics: &MachineMetrics,
+    observed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let rows: Vec<AlarmRow> = sqlx::query_as(
+        "select * from alarms
+         where state='armed' and condition->>'kind'='machine'
+           and condition->>'machine_id'=$1
+         order by id
+         for update skip locked",
+    )
+    .bind(machine_id.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let (free_disk_gb, load_per_core, mem_available_gb) = machine_reading(metrics);
+    let mut changed = false;
+    for mut row in rows {
+        let Some(mut condition) = serde_json::from_value::<MachineCondition>(
+            row.condition.clone().unwrap_or(Value::Null),
+        )
+        .ok() else {
+            continue;
+        };
+        if row.deadline_at.is_some_and(|deadline| now >= deadline)
+            || observed_at < condition.armed_at
+            || observed_at < now - MACHINE_METRICS_MAX_AGE
+        {
+            continue;
+        }
+        if !machine_holds(&condition, free_disk_gb, load_per_core, mem_available_gb) {
+            continue;
+        }
+        condition.observed_free_disk_gb = free_disk_gb;
+        condition.observed_load_per_core = load_per_core;
+        condition.observed_mem_available_gb = mem_available_gb;
+        row.condition = Some(serde_json::to_value(&condition).unwrap_or(Value::Null));
+        if row.only_on_timeout {
+            cancel_in_tx(conn, row.id, "condition_met", now, correlation_id).await?;
+        } else {
+            fire_in_tx(
+                conn,
+                &mut row,
+                "condition",
+                now,
+                now,
+                correlation_id,
+                true,
+                None,
+            )
+            .await?;
+        }
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// Задание `alarm_probe`: к `resets_at + reset_grace` просит опрос провайдера, повторяет
+/// его до окна проверки и без свежего показания срабатывает по часам (`by_clock`).
+pub(crate) async fn probe_job_in_tx(
+    conn: &mut PgConnection,
+    job: &ClaimedJob,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<crate::crunch::JobOutcome, sqlx::Error> {
+    let Some(alarm_id) = job
+        .payload
+        .get("alarm_id")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<Uuid>().ok())
+    else {
+        return Ok(crate::crunch::JobOutcome::Cancelled("invalid_payload"));
+    };
+    let Some(conversation_id) = job.conversation_id else {
+        return Ok(crate::crunch::JobOutcome::Cancelled("invalid_payload"));
+    };
+    let probe_at = job
+        .payload
+        .get("probe_at")
+        .and_then(Value::as_str)
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|at| at.with_timezone(&Utc))
+        .unwrap_or(now);
+    let row: Option<AlarmRow> =
+        sqlx::query_as("select * from alarms where id=$1 and conversation_id=$2 for update")
+            .bind(alarm_id)
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(mut row) = row else {
+        return Ok(crate::crunch::JobOutcome::Cancelled("alarm_settled"));
+    };
+    if row.state != "armed" {
+        return Ok(crate::crunch::JobOutcome::Cancelled("alarm_settled"));
+    }
+    if row.deadline_at.is_some_and(|deadline| now >= deadline) {
+        return Ok(crate::crunch::JobOutcome::Cancelled("alarm_settled"));
+    }
+    let Some(mut condition) =
+        serde_json::from_value::<LimitCondition>(row.condition.clone().unwrap_or(Value::Null)).ok()
+    else {
+        return Ok(crate::crunch::JobOutcome::Cancelled("invalid_payload"));
+    };
+    let status = limit_status_in_tx(conn, &condition).await?;
+    let trigger = match status {
+        LimitStatus::Met { trigger, .. } => Some(trigger),
+        LimitStatus::NoReading if now >= probe_at + PROBE_VERIFY_WINDOW => Some("by_clock"),
+        LimitStatus::NoReading | LimitStatus::NotReset => None,
+    };
+    if let Some(trigger) = trigger {
+        condition.trigger = Some(trigger.into());
+        condition.verified = Some(trigger != "by_clock");
+        row.condition = Some(serde_json::to_value(&condition).unwrap_or(Value::Null));
+        if row.only_on_timeout {
+            cancel_in_tx(conn, row.id, "condition_met", now, correlation_id).await?;
+            return Ok(crate::crunch::JobOutcome::Done(
+                json!({"cancelled": "condition_met"}),
+            ));
+        }
+        let reason = if trigger == "by_clock" {
+            "by_clock"
+        } else {
+            "condition"
+        };
+        fire_in_tx(
+            conn,
+            &mut row,
+            reason,
+            now,
+            now,
+            correlation_id,
+            true,
+            Some(job.id),
+        )
+        .await?;
+        return Ok(crate::crunch::JobOutcome::Done(
+            json!({"alarm_id": row.id, "fired": reason}),
+        ));
+    }
+    Ok(crate::crunch::JobOutcome::Retry {
+        at: now + PROBE_RETRY,
+        poll: true,
+    })
+}
+
 /// Подписка уже отдала это устоявшееся состояние обычным событием: отпечаток совпал.
 /// Обычное терминальное закрытие (`idle`/`stopped`/`failed`) не мешает признать это:
 /// будильник мог быть заперт в момент оценки, а подписка успела закрыться сама.
@@ -842,12 +1450,13 @@ async fn fire_in_tx(
     let condition = row.condition.clone();
     sqlx::query(
         "update alarms set state='fired',fired_reason=$2,fired_at=$3,collected=$4,
-           updated_at=$5 where id=$1",
+           condition=$5,updated_at=$6 where id=$1",
     )
     .bind(row.id)
     .bind(reason)
     .bind(fired_at)
     .bind(&row.collected)
+    .bind(&row.condition)
     .bind(now)
     .execute(&mut *conn)
     .await?;
@@ -859,6 +1468,7 @@ async fn fire_in_tx(
         // Условие уже сработало: задание срока больше не нужно. Текущее задание
         // доставки исключено: оно ещё должно доставить остаток частей.
         cancel_timeout_job_in_tx(conn, row.id, "alarm_settled", current_job).await?;
+        cancel_probe_job_in_tx(conn, row.id, current_job).await?;
     }
     if schedule {
         insert_job_in_tx(
@@ -924,9 +1534,9 @@ pub async fn set(
     // Порядок блокировок (docs/design/delivery.md): строки `conversations` по возрастанию ID
     // берутся до правки старого будильника. Иначе замена держит будильник и ждёт разговор,
     // пока удаление цели держит разговор и ждёт будильник.
-    let when = args.when.as_ref().map(parse_condition).transpose()?;
+    let when = args.when.as_ref().map(parse_when).transpose()?;
     let mut conversation_ids = vec![caller.conversation_id];
-    if let Some((condition, _)) = &when {
+    if let Some(ParsedWhen::Session(condition, _)) = &when {
         conversation_ids.extend(condition.session_ids.iter().copied());
     }
     conversation_ids.sort_unstable();
@@ -963,7 +1573,9 @@ pub async fn set(
     }
     let chain_depth = access::current_depth(&mut tx, caller.conversation_id).await?;
 
-    let (kind, fire_at, deadline_at, condition, collected, response, run_at, timeout) =
+    let grace = TimeDelta::from_std(context.limits.reset_grace)
+        .map_err(|_| ToolError::new(ToolErrorCode::InvalidArguments))?;
+    let (kind, fire_at, deadline_at, condition, collected, response, run_at, timeout, probe) =
         if let Some(at) = args.at.as_deref() {
             let at = DateTime::parse_from_rfc3339(at)
                 .map_err(|_| ToolError::new(ToolErrorCode::InvalidArguments))?
@@ -972,7 +1584,6 @@ pub async fn set(
             if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
                 return Err(ToolError::new(ToolErrorCode::InvalidArguments));
             }
-            let condition = None;
             let response = json!({
                 "state": "armed",
                 "alarm_id": Uuid::now_v7(),
@@ -985,11 +1596,12 @@ pub async fn set(
                 "at",
                 Some(at),
                 None,
-                condition,
+                None,
                 Collected::default(),
                 response,
                 at + COALESCE,
                 false,
+                None,
             )
         } else if let Some(seconds) = args.in_seconds {
             if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
@@ -1013,11 +1625,11 @@ pub async fn set(
                 response,
                 at + COALESCE,
                 false,
+                None,
             )
         } else {
-            let (mut condition, states) =
-                when.ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
-            if batch && !condition.all {
+            let parsed = when.ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
+            if batch && !matches!(parsed, ParsedWhen::Session(ref condition, _) if condition.all) {
                 return Err(ToolError::with_message(
                     ToolErrorCode::InvalidArguments,
                     "batch needs session_state with all=true",
@@ -1028,133 +1640,246 @@ pub async fn set(
                 return Err(ToolError::new(ToolErrorCode::InvalidArguments));
             }
             let deadline = now + TimeDelta::seconds(deadline_seconds);
-            let mut current_states: Vec<(Uuid, String)> = Vec::new();
-            let mut all_met = true;
-            let mut any_met = false;
-            for target in condition.session_ids.clone() {
-                if target == caller.conversation_id {
-                    return Err(ToolError::new(ToolErrorCode::SessionNotFound));
-                }
-                access::target_in_tx(&mut tx, &context.config, &waiter, caller.owner_id, target)
-                    .await?;
-                if let Some(current) =
-                    subs::current_in_tx(&mut tx, target, now, &context.settle).await?
-                {
-                    let met = states.iter().any(|state| state == current.state.as_str());
-                    any_met |= met;
-                    all_met &= met;
-                    condition
-                        .armed
-                        .insert(target.to_string(), current.fingerprint.clone());
-                    current_states.push((target, current.state.as_str().to_string()));
-                } else {
-                    all_met = false;
-                }
-            }
-            let satisfied = if condition.all { all_met } else { any_met };
-            if satisfied {
-                // Условие уже истинно: будильник не взводится, но вызов запоминается.
-                let current = if condition.session_ids.len() == 1 {
-                    json!(current_states[0].1)
-                } else {
-                    json!(
-                        current_states
-                            .iter()
-                            .map(|(id, state)| json!({"session_id": id, "state": state}))
-                            .collect::<Vec<_>>()
-                    )
-                };
-                let response = json!({
-                    "state": "satisfied",
-                    "current": current,
-                    "condition": condition_text(&condition, deadline, only_on_timeout, batch),
-                    "hint": HINT_SATISFIED,
-                });
-                let id = Uuid::now_v7();
-                insert_alarm_in_tx(
-                    &mut tx,
-                    id,
-                    caller.owner_id,
-                    caller.conversation_id,
-                    "agent",
-                    args.key.as_deref(),
-                    "condition",
-                    None,
-                    Some(deadline),
-                    only_on_timeout,
-                    batch,
-                    Some(condition.as_value()),
-                    Collected::default(),
-                    args.note.as_deref(),
-                    chain_depth,
-                    "cancelled",
-                    Some("satisfied"),
-                    None,
-                    caller.call_id,
-                    &response,
-                    now,
-                )
-                .await?;
-                tx.commit().await?;
-                return Ok(response);
-            }
-            let mut collected = Collected::default();
-            if condition.all {
-                // Цель, уже осевшая до взвода, входит в итог `all`, и для пачки тоже:
-                // её отпечаток больше не изменится, поэтому без этого пачка ждала бы срока.
-                // Итог `idle`/`stopped` подписка уже отдала до взвода — об этом говорит строка.
-                for (target, state) in &current_states {
-                    if !states.iter().any(|wanted| wanted == state) {
-                        continue;
+            match parsed {
+                ParsedWhen::Session(mut condition, states) => {
+                    let mut current_states: Vec<(Uuid, String)> = Vec::new();
+                    let mut all_met = true;
+                    let mut any_met = false;
+                    for target in condition.session_ids.clone() {
+                        if target == caller.conversation_id {
+                            return Err(ToolError::new(ToolErrorCode::SessionNotFound));
+                        }
+                        access::target_in_tx(
+                            &mut tx,
+                            &context.config,
+                            &waiter,
+                            caller.owner_id,
+                            target,
+                        )
+                        .await?;
+                        if let Some(current) =
+                            subs::current_in_tx(&mut tx, target, now, &context.settle).await?
+                        {
+                            let met = states.iter().any(|state| state == current.state.as_str());
+                            any_met |= met;
+                            all_met &= met;
+                            condition
+                                .armed
+                                .insert(target.to_string(), current.fingerprint.clone());
+                            current_states.push((target, current.state.as_str().to_string()));
+                        } else {
+                            all_met = false;
+                        }
                     }
-                    collected.insert(
-                        *target,
-                        CollectedSession {
-                            state: state.clone(),
-                            fingerprint: condition.armed.get(&target.to_string()).cloned(),
-                            satisfied: true,
-                            ownership: Some(Ownership::Separate),
-                            settled_before_arming: matches!(state.as_str(), "idle" | "stopped"),
-                            subscription_id: None,
-                            armed_at: None,
+                    let satisfied = if condition.all { all_met } else { any_met };
+                    if satisfied {
+                        // Условие уже истинно: будильник не взводится, но вызов запоминается.
+                        let current = if condition.session_ids.len() == 1 {
+                            json!(current_states[0].1)
+                        } else {
+                            json!(
+                                current_states
+                                    .iter()
+                                    .map(|(id, state)| json!({"session_id": id, "state": state}))
+                                    .collect::<Vec<_>>()
+                            )
+                        };
+                        let response = json!({
+                            "state": "satisfied",
+                            "current": current,
+                            "condition": condition_text(&condition, deadline, only_on_timeout, batch),
+                            "hint": HINT_SATISFIED,
+                        });
+                        let id = Uuid::now_v7();
+                        insert_alarm_in_tx(
+                            &mut tx,
+                            id,
+                            caller.owner_id,
+                            caller.conversation_id,
+                            "agent",
+                            args.key.as_deref(),
+                            "condition",
+                            None,
+                            Some(deadline),
+                            only_on_timeout,
+                            batch,
+                            Some(condition.as_value()),
+                            Collected::default(),
+                            args.note.as_deref(),
                             chain_depth,
-                            boundary: None,
-                        },
-                    );
-                }
-            }
-            if batch {
-                for target in condition.session_ids.clone() {
-                    ensure_subscription_in_tx(
-                        &mut tx,
-                        caller.owner_id,
-                        caller.conversation_id,
-                        target,
-                        chain_depth,
-                        now,
-                        &context.settle,
+                            "cancelled",
+                            Some("satisfied"),
+                            None,
+                            caller.call_id,
+                            &response,
+                            now,
+                        )
+                        .await?;
+                        tx.commit().await?;
+                        return Ok(response);
+                    }
+                    let mut collected = Collected::default();
+                    if condition.all {
+                        // Цель, уже осевшая до взвода, входит в итог `all`, и для пачки тоже:
+                        // её отпечаток больше не изменится, поэтому без этого пачка ждала бы срока.
+                        // Итог `idle`/`stopped` подписка уже отдала до взвода — об этом говорит строка.
+                        for (target, state) in &current_states {
+                            if !states.iter().any(|wanted| wanted == state) {
+                                continue;
+                            }
+                            collected.insert(
+                                *target,
+                                CollectedSession {
+                                    state: state.clone(),
+                                    fingerprint: condition.armed.get(&target.to_string()).cloned(),
+                                    satisfied: true,
+                                    ownership: Some(Ownership::Separate),
+                                    settled_before_arming: matches!(
+                                        state.as_str(),
+                                        "idle" | "stopped"
+                                    ),
+                                    subscription_id: None,
+                                    armed_at: None,
+                                    chain_depth,
+                                    boundary: None,
+                                },
+                            );
+                        }
+                    }
+                    if batch {
+                        for target in condition.session_ids.clone() {
+                            ensure_subscription_in_tx(
+                                &mut tx,
+                                caller.owner_id,
+                                caller.conversation_id,
+                                target,
+                                chain_depth,
+                                now,
+                                &context.settle,
+                            )
+                            .await?;
+                        }
+                    }
+                    let response = json!({
+                        "state": "armed",
+                        "alarm_id": Uuid::now_v7(),
+                        "deadline_at": time(deadline),
+                        "condition": condition_text(&condition, deadline, only_on_timeout, batch),
+                        "replaced": replaced,
+                        "hint": HINT_ARMED,
+                    });
+                    (
+                        "condition",
+                        None,
+                        Some(deadline),
+                        Some(condition.as_value()),
+                        collected,
+                        response,
+                        deadline + COALESCE,
+                        true,
+                        None,
                     )
-                    .await?;
+                }
+                ParsedWhen::Limit {
+                    provider,
+                    window,
+                    below_percent,
+                } => {
+                    let (resets_at, used): (Option<DateTime<Utc>>, Option<i32>) = sqlx::query_as(
+                        match window {
+                            Window::Weekly => "select weekly_resets_at,weekly_used_permille from provider_limits where provider=$1",
+                            Window::FiveHour => "select five_hour_resets_at,five_hour_used_permille from provider_limits where provider=$1",
+                            Window::Monthly => "select monthly_resets_at,monthly_used_permille from provider_limits where provider=$1",
+                        },
+                    )
+                    .bind(&provider)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .unwrap_or((None, None));
+                    if resets_at.is_none() && below_percent.is_none() {
+                        return Err(ToolError::with_message(
+                            ToolErrorCode::InvalidArguments,
+                            "limit_reset needs a known resets_at or below_percent: the provider has not reported the next reset",
+                        ));
+                    }
+                    let condition = LimitCondition {
+                        kind: "limit_reset".into(),
+                        provider: provider.clone(),
+                        window: window.as_str().into(),
+                        below_percent,
+                        armed_at: now,
+                        resets_at,
+                        used_permille: used.and_then(|used| u16::try_from(used).ok()),
+                        trigger: None,
+                        verified: None,
+                        observed_used_permille: None,
+                    };
+                    let response = json!({
+                        "state": "armed",
+                        "alarm_id": Uuid::now_v7(),
+                        "deadline_at": time(deadline),
+                        "condition": limit_condition_text(&condition, deadline, only_on_timeout),
+                        "replaced": replaced,
+                        "hint": HINT_ARMED,
+                    });
+                    let probe_at = resets_at.map(|reset| reset + grace);
+                    (
+                        "condition",
+                        None,
+                        Some(deadline),
+                        Some(serde_json::to_value(&condition).unwrap_or(Value::Null)),
+                        Collected::default(),
+                        response,
+                        deadline + COALESCE,
+                        true,
+                        probe_at.map(|at| (at, provider)),
+                    )
+                }
+                ParsedWhen::Machine {
+                    free_disk_gb_above,
+                    load_per_core_below,
+                    mem_available_gb_above,
+                } => {
+                    let machine_id: Option<Uuid> =
+                        sqlx::query_scalar("select machine_id from conversations where id=$1")
+                            .bind(caller.conversation_id)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                    let Some(machine_id) = machine_id else {
+                        return Err(ToolError::new(ToolErrorCode::MachineUnavailable));
+                    };
+                    let condition = MachineCondition {
+                        kind: "machine".into(),
+                        machine_id,
+                        free_disk_gb_above,
+                        load_per_core_below,
+                        mem_available_gb_above,
+                        armed_at: now,
+                        observed_free_disk_gb: None,
+                        observed_load_per_core: None,
+                        observed_mem_available_gb: None,
+                    };
+                    let response = json!({
+                        "state": "armed",
+                        "alarm_id": Uuid::now_v7(),
+                        "deadline_at": time(deadline),
+                        "condition": machine_condition_text(&condition, deadline, only_on_timeout),
+                        "replaced": replaced,
+                        "hint": HINT_ARMED,
+                    });
+                    (
+                        "condition",
+                        None,
+                        Some(deadline),
+                        Some(serde_json::to_value(&condition).unwrap_or(Value::Null)),
+                        Collected::default(),
+                        response,
+                        deadline + COALESCE,
+                        true,
+                        None,
+                    )
                 }
             }
-            let response = json!({
-                "state": "armed",
-                "alarm_id": Uuid::now_v7(),
-                "deadline_at": time(deadline),
-                "condition": condition_text(&condition, deadline, only_on_timeout, batch),
-                "replaced": replaced,
-                "hint": HINT_ARMED,
-            });
-            (
-                "condition",
-                None,
-                Some(deadline),
-                Some(condition),
-                collected,
-                response,
-                deadline + COALESCE,
-                true,
-            )
         };
 
     let id = response["alarm_id"]
@@ -1173,7 +1898,7 @@ pub async fn set(
         deadline_at,
         only_on_timeout,
         batch,
-        condition.as_ref().map(SessionCondition::as_value),
+        condition,
         collected,
         args.note.as_deref(),
         chain_depth,
@@ -1194,6 +1919,18 @@ pub async fn set(
         timeout,
     )
     .await?;
+    if let Some((probe_at, provider)) = probe {
+        insert_probe_job_in_tx(
+            &mut tx,
+            caller.owner_id,
+            caller.conversation_id,
+            probe_at.max(now),
+            id,
+            &provider,
+            probe_at,
+        )
+        .await?;
+    }
     if let Some(row) = row_in_tx(&mut tx, id).await? {
         changed_in_tx(&mut tx, &row, caller.call_id).await?;
     }
@@ -2124,6 +2861,87 @@ fn render_condition_text(row: &AlarmRow, now: DateTime<Utc>) -> String {
     }
 }
 
+fn number(value: f64) -> String {
+    let text = format!("{value:.1}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+fn percent(used_permille: u16) -> String {
+    let percent = f64::from(used_permille) / 10.0;
+    if (percent.fract()).abs() < f64::EPSILON {
+        format!("{}", percent as u16)
+    } else {
+        format!("{percent:.1}")
+    }
+}
+
+fn render_limit_text(row: &AlarmRow, condition: &LimitCondition, now: DateTime<Utc>) -> String {
+    let name = name_of(row.key.as_deref());
+    let late = late_text(row, now);
+    if row.fired_reason.as_deref() == Some("timed_out") {
+        let age = coarse(row.fired_at.unwrap_or(now) - row.created_at);
+        return format!(
+            "[canterlot] Alarm {name}timed out after {age}: {} {} window did not reset{late}.",
+            condition.provider, condition.window
+        );
+    }
+    if row.fired_reason.as_deref() == Some("by_clock") {
+        return format!(
+            "[canterlot] Alarm {name}fired by clock: {} {} window reset has no fresh reading{late}.",
+            condition.provider, condition.window
+        );
+    }
+    let used = condition.observed_used_permille.or(condition.used_permille);
+    if condition.trigger.as_deref() == Some("below_percent") {
+        let used = used.map(percent).unwrap_or_else(|| "?".into());
+        let below = condition
+            .below_percent
+            .map(number)
+            .unwrap_or_else(|| "?".into());
+        return format!(
+            "[canterlot] Alarm {name}fired: {} {} window usage is {used}% (below {below}%){late}.",
+            condition.provider, condition.window
+        );
+    }
+    match used {
+        Some(used) => format!(
+            "[canterlot] Alarm {name}fired: {} {} window reset (now {}% used){late}.",
+            condition.provider,
+            condition.window,
+            percent(used)
+        ),
+        None => format!(
+            "[canterlot] Alarm {name}fired: {} {} window reset{late}.",
+            condition.provider, condition.window
+        ),
+    }
+}
+
+fn render_machine_text(row: &AlarmRow, condition: &MachineCondition, now: DateTime<Utc>) -> String {
+    let name = name_of(row.key.as_deref());
+    let late = late_text(row, now);
+    if row.fired_reason.as_deref() == Some("timed_out") {
+        let age = coarse(row.fired_at.unwrap_or(now) - row.created_at);
+        return format!(
+            "[canterlot] Alarm {name}timed out after {age}: the machine never freed up{late}."
+        );
+    }
+    let mut parts = Vec::new();
+    if let Some(value) = condition.observed_free_disk_gb {
+        parts.push(format!("{} GB free", number(value)));
+    }
+    if let Some(value) = condition.observed_load_per_core {
+        parts.push(format!("load {} per core", number(value)));
+    }
+    if let Some(value) = condition.observed_mem_available_gb {
+        parts.push(format!("{} GB memory available", number(value)));
+    }
+    format!(
+        "[canterlot] Alarm {name}fired: machine has {}{late}.",
+        parts.join(", ")
+    )
+}
+
 fn render_one(row: &AlarmRow, now: DateTime<Utc>) -> String {
     let name = name_of(row.key.as_deref());
     let fired_at = row.fired_at.unwrap_or(now);
@@ -2134,7 +2952,30 @@ fn render_one(row: &AlarmRow, now: DateTime<Utc>) -> String {
             late_text(row, now),
             coarse(fired_at - row.created_at)
         ),
-        _ => render_condition_text(row, now),
+        _ => {
+            let condition_kind = row
+                .condition
+                .as_ref()
+                .and_then(|value| value.get("kind"))
+                .and_then(Value::as_str);
+            match condition_kind {
+                Some("limit_reset") => row
+                    .condition
+                    .as_ref()
+                    .and_then(|value| serde_json::from_value::<LimitCondition>(value.clone()).ok())
+                    .map(|condition| render_limit_text(row, &condition, now))
+                    .unwrap_or_else(|| render_condition_text(row, now)),
+                Some("machine") => row
+                    .condition
+                    .as_ref()
+                    .and_then(|value| {
+                        serde_json::from_value::<MachineCondition>(value.clone()).ok()
+                    })
+                    .map(|condition| render_machine_text(row, &condition, now))
+                    .unwrap_or_else(|| render_condition_text(row, now)),
+                _ => render_condition_text(row, now),
+            }
+        }
     };
     if let Some(note) = row.note.as_deref().filter(|note| !note.is_empty()) {
         text.push_str("\nNote: ");
@@ -2195,8 +3036,16 @@ mod tests {
             session_ids: Some(vec![one, two, one]),
             states: None,
             all: Some(true),
+            provider: None,
+            window: None,
+            below_percent: None,
+            free_disk_gb_above: None,
+            load_per_core_below: None,
+            mem_available_gb_above: None,
         };
-        let (condition, states) = parse_condition(&when).unwrap();
+        let ParsedWhen::Session(condition, states) = parse_when(&when).unwrap() else {
+            panic!("expected a session condition");
+        };
         assert_eq!(condition.session_ids, vec![one, two], "duplicates collapse");
         assert!(condition.all);
         assert_eq!(states.len(), DEFAULT_STATES.len());

@@ -62,6 +62,7 @@ fn context(pool: &PgPool, registry: &Registry) -> ToolContext {
     ToolContext {
         pool: pool.clone(),
         config: Arc::new(SessionToolsConfig::default()),
+        limits: Default::default(),
         settle: SettleConfig {
             idle_quiet: std::time::Duration::from_secs(5),
         },

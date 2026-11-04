@@ -44,17 +44,19 @@ enum Action {
     SpawnClose,
     Cleanup,
     AlarmDeliver,
+    AlarmProbe,
 }
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Event,
         Self::Note,
         Self::Spawn,
         Self::SpawnClose,
         Self::Cleanup,
         Self::AlarmDeliver,
+        Self::AlarmProbe,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -65,6 +67,7 @@ impl Action {
             "spawn_close" => Some(Self::SpawnClose),
             "cleanup" => Some(Self::Cleanup),
             "alarm_deliver" => Some(Self::AlarmDeliver),
+            "alarm_probe" => Some(Self::AlarmProbe),
             _ => None,
         }
     }
@@ -125,6 +128,12 @@ pub async fn run_in_tx(
         }
         Action::AlarmDeliver => {
             crate::session_tools::alarms::deliver_job_in_tx(conn, job, now, correlation_id).await
+        }
+        Action::AlarmProbe => {
+            Ok(
+                crate::session_tools::alarms::probe_job_in_tx(conn, job, now, correlation_id)
+                    .await?,
+            )
         }
     }
 }
@@ -242,6 +251,8 @@ pub async fn abandon_in_tx(
             crate::session_tools::alarms::Finalization::Finalized => Ok(false),
             crate::session_tools::alarms::Finalization::Deferred => Ok(true),
         },
+        // Опрос лимитов ничего не удерживает: срок будильника закроет задание `alarm`.
+        Action::AlarmProbe => Ok(false),
     }
 }
 
@@ -271,6 +282,9 @@ mod tests {
                 Action::Cleanup => json!({"action": "cleanup"}),
                 Action::AlarmDeliver => {
                     json!({"action": "alarm_deliver", "alarm_id": Uuid::now_v7()})
+                }
+                Action::AlarmProbe => {
+                    json!({"action": "alarm_probe", "alarm_id": Uuid::now_v7()})
                 }
             };
             abandon_in_tx(
