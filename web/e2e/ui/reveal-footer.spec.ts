@@ -61,6 +61,8 @@ const MARKDOWN = [
 	...Array.from({ length: 12 }, (_, i) => `const value${i} = "строка кода номер ${i}";`),
 	'```'
 ].join('\n');
+// Последняя видимая строка markdown-хвоста: по ней видно, что проявление догнало поток.
+const MARKDOWN_LAST = 'const value11 = "строка кода номер 11";';
 
 interface Sample {
 	t: number;
@@ -144,7 +146,13 @@ async function waitForScrollStill(page: Page): Promise<void> {
 	}));
 }
 
-async function finish(page: Page, live: Live, blockId: string, text: string): Promise<void> {
+async function finish(
+	page: Page,
+	live: Live,
+	blockId: string,
+	text: string,
+	settleReveal?: () => Promise<void>
+): Promise<void> {
 	const scope = `conversation:${live.id}`;
 	// Подвал стоит на месте, пока лента прижата к низу: для проверки высоты готовой
 	// разметки отрываемся от низа. Уменьшаем окно, чтобы даже короткий ответ прокручивался.
@@ -155,6 +163,7 @@ async function finish(page: Page, live: Live, blockId: string, text: string): Pr
 	await feed.evaluate((el) => { el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 200); });
 	await expect(feed).not.toHaveAttribute('data-pinned', '');
 	await waitForScrollStill(page);
+	await settleReveal?.();
 	const before = await page.locator('[data-role="answer-footer"]').last().evaluate((node) => node.getBoundingClientRect().top);
 	live.hub.append(scope, {
 		kind: 'block_final', conversation_id: live.id,
@@ -181,3 +190,21 @@ for (const [name, text] of [['plain', PLAIN], ['markdown', MARKDOWN]] as const) 
 		await finish(page, live, blockId, text);
 	});
 }
+
+test('answer_footer_does_not_move_up_when_a_fully_revealed_tail_becomes_final', async ({ page }) => {
+	test.setTimeout(60_000);
+	await setMotion(page, 'normal');
+	const live = await boot(page);
+	const blockId = await stream(page, live, MARKDOWN);
+	await finish(page, live, blockId, MARKDOWN, async () => {
+		// Проявление догоняет поток раньше, чем приходит готовый блок: раньше в этот
+		// момент каретка занимала отдельную строку внутри <pre>, и подвал уезжал вверх.
+		await page.waitForFunction(({ id, last }) => {
+			const block = document.querySelector<HTMLElement>(`[data-block="${id}"]`);
+			const tail = block?.querySelector<HTMLElement>('.tail');
+			return !!tail && (tail.textContent ?? '').includes(last);
+		}, { id: blockId, last: MARKDOWN_LAST }, { timeout: 20_000 });
+		// Последним словам нужно снять обёртки проявления.
+		await page.waitForTimeout(250);
+	});
+});

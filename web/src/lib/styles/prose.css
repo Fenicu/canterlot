@@ -1,10 +1,14 @@
 .prose { line-height: var(--lh-body); overflow-wrap: anywhere; }
 .prose .reveal-word { animation: text-reveal var(--duration-text-reveal) var(--ease) both; }
+/* Каретка не занимает места в строке: отрицательное правое поле гасит её ширину
+   с отступом, иначе даже 4px в конце полной строки переносили каретку на новую,
+   а готовый ответ при замене хвоста прыгал вверх на высоту строки. */
 .prose .caret {
   display: inline-block;
   width: var(--caret-width);
   height: var(--caret-height);
   margin-left: var(--s1);
+  margin-right: calc(-1 * (var(--caret-width) + var(--s1)));
   vertical-align: text-bottom;
   background: var(--accent);
   animation: caret var(--duration-caret) alternate infinite;
