@@ -7,7 +7,6 @@
   import AttachmentTray from '#lib/composer/AttachmentTray.svelte';
   import ContextIndicator from '#lib/composer/ContextIndicator.svelte';
   import InterruptButton from '#lib/composer/InterruptButton.svelte';
-  import SendLater from '#lib/composer/SendLater.svelte';
   import { bindDraft } from '#lib/composer/draftBinding.js';
   import { filesFromPayload, hasFileDrag } from '#lib/composer/intake.js';
   import { ComposerModel, EMPTY_DRAFT_REASON, type Limits } from '#lib/composer/model.svelte.js';
@@ -22,6 +21,7 @@
   import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import { probe } from '#lib/perf/probe.js';
+  import type { Component } from 'svelte';
 
   let { chat }: { chat: ChatStore } = $props();
   const runtime = getRuntime();
@@ -53,6 +53,12 @@
   let node = $state<HTMLTextAreaElement | null>(null);
   let file = $state<HTMLInputElement | null>(null);
   let later = $state(false);
+  // Окно «Отправить позже» открывают нечасто: чанк едет только вместе с ним.
+  let SendLater = $state<Component<{ open: boolean; now: number; blocked?: boolean; panelId: string; onclose: () => void; onpick: (at: number) => void }> | null>(null);
+
+  $effect(() => {
+    if (later && !SendLater) import('#lib/composer/SendLater.svelte').then((m) => { SendLater = m.default; });
+  });
   let composing = $state(false);
   let receiving = $state(false);
   let dropDepth = 0;
@@ -310,14 +316,16 @@
     </button>
   </div>
   {#if !touch}<p class="hint">Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже</p>{/if}
-  <SendLater
-    open={later}
-    now={clock.serverNow()}
-    blocked={uploadsPending}
-    panelId={laterId}
-    onclose={() => (later = false)}
-    onpick={(at) => model.sendLater(at)}
-  />
+  {#if SendLater}
+    <SendLater
+      open={later}
+      now={clock.serverNow()}
+      blocked={uploadsPending}
+      panelId={laterId}
+      onclose={() => (later = false)}
+      onpick={(at) => model.sendLater(at)}
+    />
+  {/if}
 </section>
 
 <style>
