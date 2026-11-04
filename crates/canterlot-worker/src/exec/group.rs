@@ -252,6 +252,20 @@ mod tests {
             let marker = self.id.clone();
             self.spawn(sleeper().env(GROUP_MARKER_ENV, marker))
         }
+
+        /// Свежий потомок виден сканеру не сразу: ждём ту же метку, которую читает `list`.
+        async fn wait_observable(&self, survivor: &Member) {
+            let expected = format!("{GROUP_MARKER_ENV}={}", self.id).into_bytes();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !marked(survivor.pid, &expected).is_ok_and(|found| found) {
+                assert!(
+                    Instant::now() < deadline,
+                    "pid {} never showed its group marker",
+                    survivor.pid
+                );
+                sleep(Duration::from_millis(10)).await;
+            }
+        }
     }
 
     fn occupied(group: Group) -> Vec<u32> {
@@ -399,6 +413,7 @@ mod tests {
         fs::remove_file(fixture.dir.path().join(crate::containment::GROUP_FILE)).unwrap();
         assert_eq!(confirmed(&record).await, Group::Unverifiable);
         let survivor = fixture.marked();
+        fixture.wait_observable(&survivor).await;
         assert_eq!(occupied(confirmed(&record).await), [survivor.pid]);
         let spawning = Ownership {
             supervisor_pid: 0,
