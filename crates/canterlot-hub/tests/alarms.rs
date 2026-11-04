@@ -1745,7 +1745,7 @@ async fn retention_deletes_old_terminal_alarms(pool: PgPool) {
             .unwrap();
     }
     sqlx::query("update alarms set updated_at=$2 where id=any($1)")
-        .bind(&[armed, undelivered])
+        .bind([armed, undelivered])
         .bind(old)
         .execute(&f.pool)
         .await
