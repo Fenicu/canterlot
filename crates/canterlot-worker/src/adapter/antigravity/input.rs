@@ -69,8 +69,10 @@ pub fn cancel_notification(session_id: &str) -> Value {
     })
 }
 
-/// Расход одного ответа prompt. `output_tokens` включает мышление: у Antigravity
+/// Расход одного ответа prompt. `output` уже включает мышление: у Antigravity
 /// `thoughtTokens` идут отдельным полем, у canterlot это часть генерации (§6).
+/// Формат решает `totalTokens` самого ответа: 1.5.0 кладёт мышление внутрь
+/// `outputTokens`, 1.4.12 — рядом; без `totalTokens` действует согласованная версия.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Usage {
     pub seen: bool,
@@ -85,19 +87,43 @@ pub struct Usage {
 
 impl Usage {
     pub fn parse(result: &Value) -> Option<Self> {
+        Self::parse_with(result, true)
+    }
+
+    /// `thoughts_in_output` — запасной ответ, когда `totalTokens` нет или он не
+    /// сходится: `true` для 1.5.0+, `false` для 1.4.12.
+    pub fn parse_with(result: &Value, thoughts_in_output: bool) -> Option<Self> {
         let usage = result.get("usage")?;
         if !usage.is_object() {
             return None;
         }
         let number = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let input = number("inputTokens");
+        let output = number("outputTokens");
+        let thought = number("thoughtTokens");
+        let inclusive = match usage.get("totalTokens").and_then(Value::as_u64) {
+            // total = input + output + thought: мышление учтено отдельно.
+            Some(total)
+                if thought > 0 && total == input.saturating_add(output).saturating_add(thought) =>
+            {
+                false
+            }
+            // total = input + output: мышление уже внутри output.
+            Some(total) if total == input.saturating_add(output) => true,
+            _ => thoughts_in_output,
+        };
         Some(Self {
             seen: true,
-            input: number("inputTokens"),
-            output: number("outputTokens"),
-            thought: number("thoughtTokens"),
+            input,
+            output: if inclusive {
+                output
+            } else {
+                output.saturating_add(thought)
+            },
+            thought,
             cache_read: number("cachedReadTokens"),
             cache_write: number("cachedWriteTokens"),
-            last_input: number("inputTokens"),
+            last_input: input,
         })
     }
 
@@ -122,7 +148,7 @@ impl Usage {
             model: model.to_owned(),
             agent: "orchestrator".into(),
             input_tokens: self.input,
-            output_tokens: self.output.saturating_add(self.thought),
+            output_tokens: self.output,
             cache_read_tokens: self.cache_read,
             cache_write_tokens: self.cache_write,
         })
@@ -198,11 +224,18 @@ pub struct Tracker {
     compact_proved: bool,
     last_stop: Option<String>,
     last_compact_ok: Option<bool>,
+    /// Запасной формат, пока в ответе нет `totalTokens`; `None` — как у 1.5.0.
+    thoughts_in_output: Option<bool>,
 }
 
 impl Tracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Согласованная версия: 1.5.0+ уже включает мышление в outputTokens.
+    pub fn set_thoughts_in_output(&mut self, inclusive: bool) {
+        self.thoughts_in_output = Some(inclusive);
     }
 
     pub fn has_turn(&self) -> bool {
@@ -392,11 +425,12 @@ impl Tracker {
                 Some(Effect::CompactDone { ok })
             }
             PromptKind::Turn => {
+                let thoughts_in_output = self.thoughts_in_output.unwrap_or(true);
                 let turn = self.turn.as_mut()?;
                 turn.outstanding = turn.outstanding.saturating_sub(1);
                 match result {
                     Ok(value) => {
-                        turn.usage.add(Usage::parse(value));
+                        turn.usage.add(Usage::parse_with(value, thoughts_in_output));
                         turn.accepted = true;
                         if let Some(stop) = value["stopReason"].as_str() {
                             turn.stop = Some(stop.to_owned());
@@ -570,11 +604,28 @@ mod tests {
         assert_eq!(prompt_text(&message), Err("attachment_missing"));
     }
 
+    fn live_usage(name: &str, input: u64) -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/stage0/evidence/antigravity")
+            .join(name);
+        let text = std::fs::read_to_string(path).unwrap();
+        for line in text.lines() {
+            let entry: Value = serde_json::from_str(line).unwrap();
+            let frame: Value = serde_json::from_str(entry["line"].as_str().unwrap()).unwrap();
+            let usage = &frame["result"]["usage"];
+            if usage["inputTokens"].as_u64() == Some(input) {
+                return frame["result"].clone();
+            }
+        }
+        panic!("usage frame with input {input} in {name}");
+    }
+
     #[test]
-    fn usage_maps_thought_into_output_and_keeps_cache() {
+    fn usage_maps_thought_into_output_continuously() {
+        // totalTokens = input + output + thought: мысли отдельно от output.
         let result = json!({"stopReason": "end_turn", "usage": {
             "inputTokens": 100, "outputTokens": 7, "thoughtTokens": 5,
-            "cachedReadTokens": 3, "cachedWriteTokens": 2, "totalTokens": 115,
+            "cachedReadTokens": 3, "cachedWriteTokens": 2, "totalTokens": 112,
         }});
         let usage = Usage::parse(&result).unwrap();
         let mapped = usage.model_usage("gemini-3.8-flash-low").unwrap();
@@ -584,6 +635,59 @@ mod tests {
         assert_eq!(mapped.cache_write_tokens, 2);
         assert_eq!(mapped.model, "gemini-3.8-flash-low");
         assert_eq!(mapped.agent, "orchestrator");
+    }
+
+    // p-live-question-prompt (agy 1.5.0): totalTokens = input + output,
+    // thoughtTokens уже внутри output. Повторное прибавление удваивало расход.
+    #[test]
+    fn live_1_5_usage_counts_thinking_inside_output_once() {
+        let usage = Usage::parse(&live_usage("p-live-question-prompt.jsonl", 7366)).unwrap();
+        assert_eq!(usage.input, 7366);
+        assert_eq!(usage.output, 451);
+        assert_eq!(usage.thought, 405);
+        assert_eq!(
+            usage
+                .model_usage("gemini-3.8-flash-high")
+                .unwrap()
+                .output_tokens,
+            451
+        );
+    }
+
+    // p-live-question-v1412 (agy 1.4.12): totalTokens = input + output + thought.
+    #[test]
+    fn live_1_4_12_usage_adds_exclusive_thinking() {
+        let usage = Usage::parse(&live_usage("p-live-question-v1412.jsonl", 7215)).unwrap();
+        assert_eq!(usage.input, 7215);
+        assert_eq!(usage.output, 475);
+        assert_eq!(usage.thought, 429);
+        assert_eq!(
+            usage
+                .model_usage("gemini-3.8-flash-high")
+                .unwrap()
+                .output_tokens,
+            475
+        );
+    }
+
+    #[test]
+    fn a_total_decides_the_format_and_an_absent_one_uses_the_fallback() {
+        let inclusive = json!({"usage": {
+            "inputTokens": 7366, "outputTokens": 451, "thoughtTokens": 405,
+            "totalTokens": 7817,
+        }});
+        let exclusive = json!({"usage": {
+            "inputTokens": 7215, "outputTokens": 46, "thoughtTokens": 429,
+            "totalTokens": 7690,
+        }});
+        // total важнее согласованной версии в обе стороны.
+        assert_eq!(Usage::parse_with(&inclusive, false).unwrap().output, 451);
+        assert_eq!(Usage::parse_with(&exclusive, true).unwrap().output, 475);
+        let absent = json!({"usage": {
+            "inputTokens": 10, "outputTokens": 4, "thoughtTokens": 3,
+        }});
+        assert_eq!(Usage::parse_with(&absent, true).unwrap().output, 4);
+        assert_eq!(Usage::parse_with(&absent, false).unwrap().output, 7);
     }
 
     #[test]

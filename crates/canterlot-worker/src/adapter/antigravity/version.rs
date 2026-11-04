@@ -45,6 +45,11 @@ pub fn supports_questions(version: &CliVersion) -> bool {
     matches!(parse_version(version.label()), Ok(found) if found >= QUESTIONS_SINCE)
 }
 
+/// 1.5.0+ кладёт мышление внутрь `outputTokens`; 1.4.12 отдаёт его отдельно.
+pub fn thoughts_in_output(version: &CliVersion) -> bool {
+    !matches!(parse_version(version.label()), Ok(found) if found < QUESTIONS_SINCE)
+}
+
 pub async fn check(executable: &Path) -> Result<CliVersion, VersionError> {
     check_within(executable, Duration::from_secs(5)).await
 }

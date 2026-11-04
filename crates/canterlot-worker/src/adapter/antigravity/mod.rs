@@ -1102,6 +1102,8 @@ impl Adapter for AntigravityAdapter {
         if !version::supports_questions(&pinned.version) {
             self.questions_enabled = false;
         }
+        self.tracker
+            .set_thoughts_in_output(version::thoughts_in_output(&pinned.version));
         self.instructions = spec.instructions.clone();
         self.workdir = spec.workdir.clone();
         self.permission_mode = spec.permission_mode.clone();
