@@ -89,7 +89,7 @@ async fn check_visible(
     caller: &Caller,
     target: Uuid,
 ) -> Result<(), ToolError> {
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     let waiter = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if target == waiter.id {
         return Err(ToolError::new(ToolErrorCode::SessionNotFound));

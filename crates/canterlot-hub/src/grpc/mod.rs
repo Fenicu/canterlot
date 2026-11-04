@@ -345,9 +345,7 @@ impl HubGrpc {
         credential: Vec<u8>,
     ) -> Result<Result<(crate::session::ControlLease, mpsc::Receiver<ControlDown>), Rejected>, Status>
     {
-        let mut tx = self
-            .pool
-            .begin()
+        let mut tx = crate::db::begin(&self.pool)
             .await
             .map_err(|_| Status::internal("database"))?;
         let (owner_id, previous): (Uuid, Option<Uuid>) = match sqlx::query_as(

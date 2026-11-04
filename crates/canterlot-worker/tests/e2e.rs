@@ -347,11 +347,10 @@ impl Fixture {
             );
         }
         // Хаб асинхронно дописывает события машины; счётчики и события читаем одним снимком.
-        let mut snapshot = self
-            .pool
-            .begin_with("begin isolation level repeatable read")
-            .await
-            .unwrap();
+        let mut snapshot =
+            canterlot_hub::db::begin_with(&self.pool, "begin isolation level repeatable read")
+                .await
+                .unwrap();
         let scopes: Vec<(String, i64)> =
             sqlx::query_as("select scope, last_seq from scope_counters order by scope")
                 .fetch_all(&mut *snapshot)
