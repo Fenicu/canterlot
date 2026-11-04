@@ -141,7 +141,7 @@
 
   const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
-  const steerSupported = $derived(harnessId === 'claude_code' || harnessId === 'codex' || harnessId === 'opencode');
+  const steerSupported = $derived(harnessId === 'claude_code' || harnessId === 'codex' || harnessId === 'opencode' || harnessId === 'antigravity');
   let sending = $state<Record<string, boolean>>({});
   let steerNotes = $state<Record<string, string | null>>({});
   let steered = $state<Record<string, boolean>>({});
@@ -272,7 +272,7 @@
           <Button onclick={() => { editing = { ...editing, [input.key]: false }; }}>Отмена</Button>
         </span>
       {/if}
-      {#if input.state === 'queued' && input.id && turnLive && steerSupported && harnessId === 'opencode'}
+      {#if input.state === 'queued' && input.id && turnLive && steerSupported && (harnessId === 'opencode' || harnessId === 'antigravity')}
         <p class="note">Прервёт текущий шаг</p>
       {/if}
       {#if steerNotes[input.key]}<p class="note">{steerNotes[input.key]}</p>{/if}

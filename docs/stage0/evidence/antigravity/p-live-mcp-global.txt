@@ -1,0 +1,1 @@
+agy mcp list -> No MCP servers configured.

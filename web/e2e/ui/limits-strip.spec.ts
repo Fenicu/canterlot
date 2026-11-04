@@ -62,6 +62,24 @@ test('collapsed_strip_shows_the_remaining_share_of_both_windows_per_provider', a
   await shot(page, 'strip-collapsed');
 });
 
+test('antigravity_is_named_on_the_limits_strip', async ({ page }) => {
+  await boot(page, (api) => {
+    const observed = new Date(Date.now() - 60_000).toISOString();
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    api.limits.push({
+      provider: 'antigravity',
+      weekly_reserve_active: false,
+      five_hour: { used_permille: 260, resets_at: reset, observed_at: observed },
+      weekly: { used_permille: 410, resets_at: reset, observed_at: observed }
+    });
+  });
+  const rows = page.locator('.limits').first().locator('.row');
+  await expect(rows).toHaveCount(3);
+  const antigravity = rows.filter({ hasText: 'Antigravity' });
+  await expect(antigravity).toHaveCount(1);
+  await expect(antigravity.locator('.meter').first()).toContainText('74%');
+});
+
 test('estimated_reading_is_labelled_in_the_strip_in_words', async ({ page }) => {
   await boot(page, (api) => {
     claude(api).data_confidence = 'estimated';

@@ -235,6 +235,7 @@ pub(crate) struct AdapterConfig {
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
     pub codex: Option<crate::config::CodexConfig>,
     pub opencode: Option<crate::config::OpenCodeConfig>,
+    pub antigravity: Option<crate::config::AntigravityConfig>,
 }
 
 pub(crate) struct Shared {
@@ -520,11 +521,13 @@ impl ExecutionManager {
         claude_code: Option<crate::config::ClaudeCodeConfig>,
         codex: Option<crate::config::CodexConfig>,
         opencode: Option<crate::config::OpenCodeConfig>,
+        antigravity: Option<crate::config::AntigravityConfig>,
     ) {
         *self.shared.adapters.lock().expect("adapter config lock") = AdapterConfig {
             claude_code,
             codex,
             opencode,
+            antigravity,
         };
     }
 

@@ -539,6 +539,7 @@ async fn start_with_configured_adapters_reaches_running() {
         Some(Default::default()),
         Some(Default::default()),
         Some(Default::default()),
+        None,
     );
     env.hub_session();
     let start = start_command(env.execution, 1, env.conversation, "synthetic", &env.work);

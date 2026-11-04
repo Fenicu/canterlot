@@ -88,6 +88,7 @@ impl Fake {
             }),
             codex: None,
             opencode: None,
+            antigravity: None,
         };
         let adapter =
             adapter::registry_with("claude_code", &context).expect("Claude Code registered");
@@ -185,16 +186,16 @@ fn catalog_lists_claude_code_with_canterlot_permission_modes_when_configured() {
     let cfg = ClaudeCodeConfig::default();
     let cli = CliVersion::Verified("2.1.311".into());
     assert!(
-        !adapter::catalog_with(None, Some(&cli), None, None)
+        !adapter::catalog_with(None, Some(&cli), None, None, None)
             .iter()
             .any(|c| c.harness == "claude_code")
     );
     assert!(
-        !adapter::catalog_with(Some(&cfg), None, None, None)
+        !adapter::catalog_with(Some(&cfg), None, None, None, None)
             .iter()
             .any(|c| c.harness == "claude_code")
     );
-    let catalog = adapter::catalog_with(Some(&cfg), Some(&cli), None, None);
+    let catalog = adapter::catalog_with(Some(&cfg), Some(&cli), None, None, None);
     let c = catalog.iter().find(|c| c.harness == "claude_code").unwrap();
     assert_eq!(c.provider, "claude");
     assert_eq!(c.title, "Claude Code");

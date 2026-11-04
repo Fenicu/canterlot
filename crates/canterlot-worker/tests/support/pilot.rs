@@ -22,8 +22,8 @@ use canterlot_hub::{
 };
 use canterlot_worker::{
     config::{
-        ClaudeCodeConfig, ExecutionConfig, MachineConfig, SupervisorTimers, WorkerConfig,
-        WorkerTimers,
+        AntigravityConfig, ClaudeCodeConfig, ExecutionConfig, MachineConfig, SupervisorTimers,
+        WorkerConfig, WorkerTimers,
     },
     session::{SessionState, Worker, WorkerError},
     store::WorkerStore,
@@ -370,6 +370,7 @@ pub struct PilotOptions {
     pub activity: ActivityConfig,
     pub metrics_interval: Duration,
     pub claude_code: Option<ClaudeCodeConfig>,
+    pub antigravity: Option<AntigravityConfig>,
 }
 
 impl Default for PilotOptions {
@@ -389,6 +390,7 @@ impl Default for PilotOptions {
             },
             metrics_interval: Duration::from_secs(30),
             claude_code: None,
+            antigravity: None,
         }
     }
 }
@@ -489,6 +491,7 @@ impl Pilot {
                 ..Default::default()
             },
             opencode: None,
+            antigravity: options.antigravity,
         };
         let api = TestClient::over_socket(hub.http_addr()).await.as_owner();
         let mut pilot = Self {
@@ -563,27 +566,65 @@ impl Pilot {
 
     /// Сессия с запуском: живое исполнение в состоянии `running`.
     pub async fn create(&self, harness: &str, crunch: bool) -> Uuid {
-        let created = self
-            .post(
-                "/api/v1/conversations",
-                Some(json!({
-                    "machine_id": self.machine,
-                    "harness": harness,
-                    "workdir": self.work.to_str().unwrap(),
-                    "model": "synthetic-large",
-                    "effort": "high",
-                    "crunch": {"enabled": crunch},
-                    "start": true,
-                })),
-                201,
-            )
-            .await;
+        self.create_with(harness, "synthetic-large", "high", None, crunch)
+            .await
+    }
+
+    /// Сессия с явными моделью, усилием и режимом: каталог Antigravity не похож на синтетический.
+    pub async fn create_with(
+        &self,
+        harness: &str,
+        model: &str,
+        effort: &str,
+        permission_mode: Option<&str>,
+        crunch: bool,
+    ) -> Uuid {
+        let mut body = json!({
+            "machine_id": self.machine,
+            "harness": harness,
+            "workdir": self.work.to_str().unwrap(),
+            "model": model,
+            "effort": effort,
+            "crunch": {"enabled": crunch},
+            "start": true,
+        });
+        if let Some(mode) = permission_mode {
+            body["permission_mode"] = json!(mode);
+        }
+        let created = self.post("/api/v1/conversations", Some(body), 201).await;
         let id = uuid(&created["conversation_id"]);
         assert!(created["execution"]["execution_id"].is_string());
-        until("execution running", async || {
-            self.detail(id).await["execution"]["state"] == "running"
+        if timeout(WAIT, async {
+            while self.detail(id).await["execution"]["state"] != "running" {
+                sleep(ms(20)).await;
+            }
         })
-        .await;
+        .await
+        .is_err()
+        {
+            let state: Option<(String, Option<String>)> = sqlx::query_as(
+                "select state,outcome from executions where conversation_id=$1 order by generation desc limit 1",
+            )
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap();
+            let rejected: Option<Value> = sqlx::query_scalar(
+                "select result from commands where conversation_id=$1 and kind='start_execution' order by created_at desc limit 1",
+            )
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap();
+            let mut logs = String::new();
+            if let Ok(entries) = fs::read_dir(self.config.data_dir.join("executions")) {
+                for entry in entries.flatten() {
+                    logs += &fs::read_to_string(entry.path().join("supervisor.log"))
+                        .unwrap_or_default();
+                }
+            }
+            panic!("execution did not start: {state:?} command={rejected:?}\n{logs}");
+        }
         id
     }
 

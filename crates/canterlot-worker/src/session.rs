@@ -419,6 +419,7 @@ pub struct Worker {
     claude_version: Option<crate::adapter::claude_code::version::CliVersion>,
     codex_catalog: Option<crate::adapter::codex::CodexCatalog>,
     opencode_catalog: Option<crate::adapter::opencode::OpenCodeCatalog>,
+    antigravity_catalog: Option<crate::adapter::antigravity::AntigravityCatalog>,
 }
 
 type MetricsFuture = Pin<
@@ -523,6 +524,24 @@ impl Worker {
             idle_ticker.register("opencode", limits_interval);
             routes.insert("opencode".into(), codexbar(None));
         }
+        if let Some(cfg) = &config.antigravity
+            && cfg.enabled
+        {
+            // `/usage` идёт закреплённой копией из каталога данных воркера.
+            let mut cfg = cfg.clone();
+            cfg.data_dir = Some(config.data_dir.clone());
+            idle_ticker.register("antigravity", limits_interval);
+            routes.insert(
+                "antigravity".into(),
+                Arc::new(
+                    crate::adapter::antigravity::limits::AntigravityLimitsSource::new(
+                        cfg,
+                        limits_interval,
+                        live_limits.clone(),
+                    ),
+                ),
+            );
+        }
         let limits_source: Arc<dyn crate::machine::limits::LimitsSource> = if routes.is_empty() {
             default_source
         } else {
@@ -553,6 +572,7 @@ impl Worker {
             claude_version: None,
             codex_catalog: None,
             opencode_catalog: None,
+            antigravity_catalog: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
             config,
@@ -619,6 +639,11 @@ impl Worker {
 
     async fn run_inner(&mut self, mut shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
         let configured = self.config.restore_generation;
+        let data_dir = self.config.data_dir.clone();
+        if let Some(cfg) = &mut self.config.antigravity {
+            // Закреплённая копия всегда в данных воркера, значение из TOML не решает.
+            cfg.data_dir = Some(data_dir);
+        }
         self.store
             .call(move |store| initialize_generation(store.as_mut().unwrap(), configured))
             .await?;
@@ -661,6 +686,28 @@ impl Worker {
             self.config.attachments.clone(),
             runtime_dir,
         );
+        if let Some(cfg) = self.config.antigravity.as_ref().filter(|cfg| cfg.enabled) {
+            self.antigravity_catalog =
+                match crate::adapter::antigravity::catalog::discover(cfg).await {
+                    Ok(catalog) => {
+                        if catalog.models.is_empty() {
+                            tracing::warn!(
+                                kind = "antigravity_no_models",
+                                "Antigravity has no available models"
+                            );
+                        }
+                        Some(catalog)
+                    }
+                    Err(reason) => {
+                        tracing::warn!(
+                            kind = "antigravity_unavailable",
+                            ?reason,
+                            "Antigravity omitted from catalog"
+                        );
+                        None
+                    }
+                };
+        }
         if let Some(cfg) = &self.config.opencode {
             self.opencode_catalog =
                 match crate::adapter::opencode::discover(cfg, &self.config.data_dir).await {
@@ -687,6 +734,7 @@ impl Worker {
             self.config.claude_code.clone(),
             self.config.codex.clone(),
             self.config.opencode.clone(),
+            self.config.antigravity.clone().filter(|cfg| cfg.enabled),
         );
         manager
             .startup_verify()
@@ -1133,6 +1181,7 @@ impl Worker {
             let cli = self.claude_version.clone();
             let codex = self.codex_catalog.clone();
             let opencode = self.opencode_catalog.clone();
+            let antigravity = self.antigravity_catalog.clone();
             Some(ControlUp {
                 msg: Some(control_up::Msg::MachineReport(
                     tokio::task::spawn_blocking(move || {
@@ -1143,6 +1192,7 @@ impl Worker {
                                 cli.as_ref(),
                                 codex.as_ref(),
                                 opencode.as_ref(),
+                                antigravity.as_ref(),
                             ),
                         )
                     })

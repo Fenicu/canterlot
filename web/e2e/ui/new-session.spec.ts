@@ -5,7 +5,7 @@ import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect, fillWorkdir, test } from './fixtures';
 
-async function boot(page: Page, options: { solo?: boolean; home?: string | null; models?: { id: string; title: string; efforts: string[] }[] } = {}) {
+async function boot(page: Page, options: { solo?: boolean; home?: string | null; models?: { id: string; title: string; efforts: string[] }[]; extraHarness?: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[] }[]; permission_modes: string[] } } = {}) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   const { machine } = seedMockupSessions(api);
@@ -15,6 +15,7 @@ async function boot(page: Page, options: { solo?: boolean; home?: string | null;
   const record = api.machines.get(machine)!;
   if (options.home !== undefined) record.home_dir = options.home;
   if (options.models) record.harnesses[0]!.models = options.models;
+  if (options.extraHarness) record.harnesses.push(options.extraHarness);
   seedPresets(api);
   await installChatRoutes(page, hub, api, '00000000-0000-4000-8000-0000000000d1');
   await page.goto('/sessions');
@@ -74,6 +75,47 @@ test('new_session_defaults_to_bypass_and_lets_the_owner_pick_a_labelled_mode', a
   await page.getByRole('button', { name: 'Создать' }).click();
   await expect(page).toHaveURL(/\/c\//);
   expect(bodies[0]?.permission_mode).toBe('bypass');
+});
+
+test('new_session_antigravity_has_no_read_only_mode_and_explains_the_owner_catalog', async ({ page }) => {
+  await boot(page, {
+    extraHarness: {
+      id: 'antigravity',
+      title: 'Antigravity',
+      provider: 'antigravity',
+      models: [
+        { id: 'gemini-3.8-flash-high', title: 'Gemini 3.8 Flash High', efforts: ['high'] }
+      ],
+      permission_modes: ['owner', 'ask', 'bypass']
+    }
+  });
+  const bodies: { harness?: string; model?: string; effort?: string; permission_mode?: string }[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/conversations') {
+      bodies.push({ ...(request.postDataJSON() as { harness?: string }) });
+    }
+  });
+  await page.goto('/new');
+  await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
+  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
+  await pathField(page).press('Escape');
+  await page.getByRole('radio', { name: 'Antigravity' }).check();
+  await expect(page.getByText(/~\/\.gemini владельца/)).toBeVisible();
+  const mode = page.getByRole('combobox', { name: 'Режим разрешений' });
+  await expect(mode).toHaveValue('bypass');
+  const options = (await mode.locator('option').allTextContents()).map((text) => text.trim());
+  expect(options).toEqual(['Как в настройках CLI', 'Спрашивать', 'Без подтверждений']);
+  // У модели один effort: поля выбора нет, значение берётся из каталога.
+  await expect(page.getByRole('combobox', { name: 'Усилие' })).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Модель' })).toHaveValue('gemini-3.8-flash-high');
+  await page.getByRole('button', { name: 'Создать' }).click();
+  await expect(page).toHaveURL(/\/c\//);
+  expect(bodies[0]).toMatchObject({
+    harness: 'antigravity',
+    model: 'gemini-3.8-flash-high',
+    effort: 'high',
+    permission_mode: 'bypass'
+  });
 });
 
 test('new_session_offers_recent_workdirs_and_submits_a_typed_path', async ({ page }) => {

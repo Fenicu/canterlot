@@ -2,6 +2,7 @@ pub const HARNESS_PROVIDERS: &[(&str, &str)] = &[
     ("claude_code", "claude"),
     ("codex", "codex"),
     ("opencode", "opencode"),
+    ("antigravity", "antigravity"),
     ("synthetic", "claude"),
     ("synthetic-exit-on-interrupt", "claude"),
     ("synthetic-codex", "codex"),

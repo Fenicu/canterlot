@@ -75,6 +75,7 @@ fn rules(provider: Option<&str>) -> Option<Rules> {
     match provider {
         Some("claude") => Some(Rules::Streamed),
         Some("opencode") => Some(Rules::CallReady),
+        Some("antigravity") => Some(Rules::CallReady),
         _ => None,
     }
 }
@@ -331,7 +332,7 @@ pub async fn for_runs(
     if run_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let runs = sqlx::query("select r.input_command_id,r.provider,r.started_at,r.finished_at,r.exact,exists(select 1 from compactions k where k.conversation_id=r.conversation_id and k.created_at>=r.started_at and k.created_at<=coalesce(r.finished_at,'infinity')) compacted from runs r where r.input_command_id=any($1) and r.provider in ('claude','opencode')")
+    let runs = sqlx::query("select r.input_command_id,r.provider,r.started_at,r.finished_at,r.exact,exists(select 1 from compactions k where k.conversation_id=r.conversation_id and k.created_at>=r.started_at and k.created_at<=coalesce(r.finished_at,'infinity')) compacted from runs r where r.input_command_id=any($1) and r.provider in ('claude','opencode','antigravity')")
         .bind(run_ids).fetch_all(&mut *conn).await?;
     if runs.is_empty() {
         return Ok(HashMap::new());
@@ -429,7 +430,7 @@ pub async fn summary(
     to: DateTime<Utc>,
     tz: &str,
 ) -> Result<Vec<ModelSpeedSummary>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, NaiveDate, NaiveDate)> = sqlx::query_as("select r.input_command_id,r.provider,(r.started_at at time zone $5)::date,(($4::timestamptz - interval '1 microsecond') at time zone $5)::date from runs r join conversations c on c.id=r.conversation_id where c.owner_id=$1 and ($2::text is null or r.provider=$2) and r.started_at>=$3 and r.started_at<$4 and r.provider in ('claude','opencode') and r.exact and r.finished_at is not null")
+    let rows: Vec<(Uuid, String, NaiveDate, NaiveDate)> = sqlx::query_as("select r.input_command_id,r.provider,(r.started_at at time zone $5)::date,(($4::timestamptz - interval '1 microsecond') at time zone $5)::date from runs r join conversations c on c.id=r.conversation_id where c.owner_id=$1 and ($2::text is null or r.provider=$2) and r.started_at>=$3 and r.started_at<$4 and r.provider in ('claude','opencode','antigravity') and r.exact and r.finished_at is not null")
         .bind(owner_id).bind(provider).bind(from).bind(to).bind(tz).fetch_all(&mut *conn).await?;
     let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
     let speeds = for_runs(conn, &ids).await?;

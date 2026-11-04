@@ -170,7 +170,9 @@
 
 	// Available permission modes
 	const availablePermissionModes = $derived(
-		harness?.permission_modes ?? [...PERMISSION_MODES]
+		(harness?.permission_modes ?? [...PERMISSION_MODES]).filter(
+			(mode) => !(provider === 'antigravity' && mode === 'read_only')
+		)
 	);
 
 	// Модель сессии могли убрать из каталога: она остаётся видна, пока владелец не выберет другую.
@@ -301,16 +303,18 @@
 				hint={pending?.model ? `${modelLabel(effective.model ?? '')} → ${modelLabel(pending.model)} со следующего хода` : undefined}
 				error={!midsessionSupported ? 'Настройка посреди сессии не поддерживается' : (modelError ?? undefined)}
 			/>
-			<Select
-				id="effort"
-				name="effort"
-				label="Усилие"
-				options={effortOptions}
-				bind:value={selectedEffort}
-				disabled={locked}
-				hint={pending?.effort ? 'Применится со следующего хода' : undefined}
-				error={effortError ?? undefined}
-			/>
+			{#if provider !== 'antigravity'}
+				<Select
+					id="effort"
+					name="effort"
+					label="Усилие"
+					options={effortOptions}
+					bind:value={selectedEffort}
+					disabled={locked}
+					hint={pending?.effort ? 'Применится со следующего хода' : undefined}
+					error={effortError ?? undefined}
+				/>
+			{/if}
 		</div>
 		{#if modelImagesNote(currentModelRecord?.images)}<p class="note">{modelImagesNote(currentModelRecord?.images)}</p>{/if}
 

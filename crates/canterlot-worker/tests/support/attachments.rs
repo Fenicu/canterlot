@@ -171,6 +171,7 @@ impl Fixture {
                 ..Default::default()
             },
             opencode: None,
+            antigravity: None,
         };
         let conversation = testkit::seed_conversation(pool, owner, machine.machine_id).await;
         sqlx::query("update conversations set workdir=$2,harness='synthetic' where id=$1")

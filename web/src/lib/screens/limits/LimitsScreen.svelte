@@ -33,11 +33,11 @@
       runtime = rt; thresholds = cfg.limit_thresholds;
       zone = Intl.DateTimeFormat().resolvedOptions().timeZone; days = sevenDays(new Date(clock.serverNow()));
       const range = historyRange(new Date(clock.serverNow()));
-      // OpenCode нужен только для скорости: график и расход по сессиям остаются как были.
-      const [claude, codex, opencode] = await Promise.all(['claude', 'codex', 'opencode'].map(provider => limitsHistory({ provider, ...range, tz: zone })));
+      // OpenCode и Antigravity нужны и для скорости: график и расход по сессиям остаются как были.
+      const [claude, codex, opencode, antigravity] = await Promise.all(['claude', 'codex', 'opencode', 'antigravity'].map(provider => limitsHistory({ provider, ...range, tz: zone })));
       const replies = [claude!, codex!];
       series = replies.flatMap(r => r.data.series); usage = replies.flatMap(r => r.data.usage);
-      speed = [...replies, opencode!].flatMap(r => r.data.speed ?? []);
+      speed = [...replies, opencode!, antigravity!].flatMap(r => r.data.speed ?? []);
     } catch (err) { error = err instanceof ApiError ? `История недоступна: ${err.message}` : 'История недоступна: нет связи с хабом'; }
     finally { loading = false; }
   }

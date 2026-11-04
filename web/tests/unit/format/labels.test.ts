@@ -40,6 +40,7 @@ describe("format/labels", () => {
 
   it("opencode_has_the_owner_names", () => {
     expect(providerLabel("opencode")).toBe("OpenCode");
+    expect(providerLabel("antigravity")).toBe("Antigravity");
     expect(effortLabel("default")).toBe("По умолчанию");
   });
 
@@ -60,6 +61,10 @@ describe("format/labels", () => {
     expect(permissionHint("owner", "opencode")).toContain("opencode.json");
     expect(permissionHint("read_only", "opencode")).toContain("OpenCode");
     expect(permissionHint("owner", "codex")).toContain("sandbox_mode");
+    // Antigravity: режим владельца из ~/.gemini, read_only не поддерживается.
+    expect(permissionHint("owner", "antigravity")).toContain("~/.gemini");
+    expect(permissionHint("ask", "antigravity")).toContain("Antigravity");
+    expect(permissionHint("read_only", "antigravity")).toBe("");
     expect(permissionHint("unknown_mode", "claude")).toBe("");
   });
 

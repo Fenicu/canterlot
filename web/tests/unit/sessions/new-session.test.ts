@@ -195,6 +195,36 @@ describe("sessions/new", () => {
     expect(model.canSubmit).toEqual({ ok: false, reason: "Выберите усилие" });
   });
 
+  it("new_session_takes_antigravity_modes_without_read_only_and_a_single_effort", () => {
+    const antigravity = machine({
+      harnesses: [
+        {
+          id: "antigravity",
+          title: "Antigravity",
+          provider: "antigravity",
+          models: [
+            {
+              id: "gemini-3.8-flash-high",
+              title: "Gemini 3.8 Flash High",
+              efforts: ["high"],
+            },
+          ],
+          permission_modes: ["owner", "ask", "bypass"],
+        },
+      ],
+    });
+    const model = new NewSessionModel(store([antigravity]), config, ops());
+    model.machineId = "m1";
+    model.workdir = "/srv/canterlot";
+    model.harness = "antigravity";
+    model.model = "gemini-3.8-flash-high";
+    model.effort = "high";
+    expect(model.permissions).toEqual(["owner", "ask", "bypass"]);
+    expect(model.permissionMode).toBe("bypass");
+    expect(model.efforts).toEqual(["high"]);
+    expect(model.canSubmit).toEqual({ ok: true });
+  });
+
   it("new_session_maps_every_hub_create_code_to_its_field", async () => {
     const codes: [string, Field][] = [
       ["machine_not_found", "machine"],

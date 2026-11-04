@@ -259,6 +259,7 @@ for line in sys.stdin:
                     ..Default::default()
                 }),
                 opencode: None,
+                antigravity: None,
             };
             let adapter = canterlot_worker::adapter::registry_with("codex", &context).unwrap();
             Self {

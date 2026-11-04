@@ -1559,6 +1559,7 @@ fn registry_builds_the_adapter_from_context_with_supervisor_paths() {
         claude_code: None,
         codex: None,
         opencode: Some(OpenCodeConfig::default()),
+        antigravity: None,
     };
     let adapter = registry_with("opencode", &context).unwrap();
     assert!(adapter.capabilities().interrupt_keeps_process);
