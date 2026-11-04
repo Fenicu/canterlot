@@ -69,3 +69,16 @@ export function alarmEventLine(event: {
       return `Будильник${name ? ` ${name}` : ''}: сработал`;
   }
 }
+
+/**
+ * Сколько будильников описано в доставленном тексте: заголовок пачки
+ * («3 alarms fired») или отдельные строки-разделы. Итоги сессий внутри
+ * пачки начинаются с `[canterlot] Session`, поэтому за будильники не считаются.
+ */
+export function alarmTextCount(text: string): number {
+  let batch = 0;
+  for (const match of text.matchAll(/\[canterlot\]\s*(\d+)\s+alarms?\s+fired\b/gi))
+    batch = Math.max(batch, Number(match[1]));
+  const sections = text.match(/^[ \t]*(?:-[ \t]+)?\[canterlot\]\s+Alarm\b/gim)?.length ?? 0;
+  return Math.max(batch, sections);
+}

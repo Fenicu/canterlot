@@ -95,3 +95,115 @@ test('alarm_event_is_a_quiet_feed_line_and_a_live_change_adds_a_plaque', async (
   });
   await expect(strip(page)).toContainText('Будильник');
 });
+
+test('alarm_entry_is_collapsed_and_expands_to_the_full_batch_text', async ({ page }) => {
+  const { api, id } = await boot(page);
+  const summary = [
+    '[canterlot] Alarm "wave" fired: sessions 00000000-0000-4000-8000-0000000000e5, 00000000-0000-4000-8000-0000000000e6 settled (all, batched).',
+    '',
+    '## Итог сессии «Сборка»',
+    '',
+    'Собрал отчёт и оставил заметки по миграции.',
+    '',
+    '## Итог сессии «Тесты»',
+    '',
+    'Прогнал набор и починил два падения.',
+    '',
+    'Note: Гейт для волны C.'
+  ].join('\n');
+  seedInput(api, id, {
+    kind: 'input',
+    id: api.id(),
+    idempotency_key: 'alarm-batch',
+    state: 'accepted',
+    content: [{ type: 'text', text: summary }],
+    attachments: [],
+    created_seq: '1',
+    feed_seq: '1',
+    created_at: AT,
+    origin: {
+      kind: 'alarm',
+      chain_depth: 0,
+      event: { kind: 'alarm', alarm_key: 'wave', fired_reason: 'condition' }
+    }
+  });
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+  const entry = page.locator('[data-role="alarm"]');
+  await expect(entry).toBeVisible();
+  await expect(entry).toContainText('Будильник «wave»: условие выполнено');
+  const toggle = entry.getByRole('button');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(entry.locator('[data-role="alarm-body"]')).toHaveCount(0);
+  await expect(entry).not.toContainText('Гейт для волны C');
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  const body = entry.locator('[data-role="alarm-body"]');
+  await expect(body).toContainText('Итог сессии «Сборка»');
+  await expect(body).toContainText('Собрал отчёт и оставил заметки по миграции.');
+  await expect(body).toContainText('Note: Гейт для волны C');
+
+  // Клавиатура закрывает и снова открывает тот же вход.
+  await toggle.press('Space');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(entry.locator('[data-role="alarm-body"]')).toHaveCount(0);
+  await toggle.press('Enter');
+  await expect(body).toBeVisible();
+
+  for (const palette of ['aquamarine', 'standard', 'vscode']) {
+    for (const theme of ['dark', 'light']) {
+      await page.evaluate(([nextPalette, nextTheme]) => {
+        document.documentElement.dataset.palette = nextPalette!;
+        document.documentElement.dataset.theme = nextTheme!;
+      }, [palette, theme]);
+      await expect(body).toBeVisible();
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+        `${palette} ${theme}`
+      ).toBe(true);
+    }
+  }
+});
+
+test('coalesced_alarm_entry_counts_the_fired_alarms_in_the_header', async ({ page }) => {
+  const { api, id } = await boot(page);
+  const summary = [
+    '[canterlot] 3 alarms fired.',
+    '',
+    '- [canterlot] Alarm "gate" fired at 14:30 UTC.',
+    '- [canterlot] Alarm "disk" fired: session 00000000-0000-4000-8000-0000000000e5 is idle.',
+    '- [canterlot] Alarm timed out after 10m: 0/1 sessions settled (batched). Not settled: 00000000-0000-4000-8000-0000000000e6.',
+    '',
+    'This is canterlot automation, not the owner.'
+  ].join('\n');
+  seedInput(api, id, {
+    kind: 'input',
+    id: api.id(),
+    idempotency_key: 'alarm-coalesced',
+    state: 'accepted',
+    content: [{ type: 'text', text: summary }],
+    attachments: [],
+    created_seq: '1',
+    feed_seq: '1',
+    created_at: AT,
+    origin: {
+      kind: 'alarm',
+      chain_depth: 0,
+      event: { kind: 'alarm', alarm_key: 'gate', fired_reason: 'time' }
+    }
+  });
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+  const entry = page.locator('[data-role="alarm"]');
+  await expect(entry.locator('.line')).toHaveText('Сработали 3 будильника');
+  await expect(entry).not.toContainText('«gate»');
+  await expect(entry.locator('[data-role="alarm-body"]')).toHaveCount(0);
+
+  await entry.getByRole('button').click();
+  const body = entry.locator('[data-role="alarm-body"]');
+  await expect(body).toContainText('Alarm "disk"');
+  await expect(body).toContainText('Not settled');
+});
