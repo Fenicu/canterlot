@@ -2769,6 +2769,19 @@ async fn delegated_antigravity_start_passes_only_the_canterlot_mcp() {
         .next_message(|message| matches!(message, up::Msg::CliStarted(_)))
         .await;
 
+    // Перед стартом делегата адаптер спрашивает глобальный список MCP владельца.
+    let boot = fake.boot();
+    let args: Vec<&str> = boot["args"]
+        .as_array()
+        .expect("boot args")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        args.windows(2).any(|pair| pair == ["mcp", "list"]),
+        "the delegated start must check the owner MCP list: {args:?}"
+    );
+
     let new = fake
         .requests()
         .into_iter()
@@ -2780,6 +2793,129 @@ async fn delegated_antigravity_start_passes_only_the_canterlot_mcp() {
     assert_eq!(servers.len(), 1, "{servers:?}");
     assert_eq!(servers[0]["name"], "canterlot");
 
+    harness.shutdown().await;
+    fake.wait_gone().await;
+}
+
+/// Настроенный у владельца MCP-сервер не даёт доказать изоляцию: делегат не стартует,
+/// а причина уходит диагностикой в журнал.
+#[tokio::test]
+async fn a_configured_owner_mcp_list_blocks_a_delegated_antigravity_start() {
+    use canterlot_worker::adapter::antigravity::replay::Script;
+
+    let script = Script::from_evidence("p1-diagnostics.jsonl");
+    let steps = vec![script.steps[0].clone(), script.steps[2].clone()];
+    let fake = antigravity::Fake::new(Script {
+        version: "agy 1.5.0".into(),
+        mcp_list: Some(
+            "NAME   TYPE   STATUS   COMMAND/URL\nprobe  stdio  enabled  /usr/bin/touch /tmp/x\n"
+                .into(),
+        ),
+        steps,
+        ..Default::default()
+    });
+    let spec = format!(
+        "[antigravity]\nenabled = true\nbinary = \"{}\"\ndata_dir = \"{}\"\n",
+        fake.exe.display(),
+        fake.data_dir().display()
+    );
+    let mut harness = Harness::start_with(&[], "1s", &spec).await;
+    harness.attach_and_ship(0).await;
+    harness
+        .send(down::Msg::StartCli(StartCli {
+            profile: "antigravity".into(),
+            workdir: harness._root.path().to_string_lossy().into_owned(),
+            permission_mode: "bypass".into(),
+            isolate_mcp: true,
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+    let bodies = harness
+        .wait_records("owner mcp diagnostic", |bodies| {
+            let diagnostic = bodies.iter().any(|body| {
+                matches!(body, Body::AdapterDiagnostic(fact)
+                    if fact.kind == "start_failed"
+                        && fact.event_type == "owner_mcp_not_isolated")
+            });
+            let failed = bodies.iter().any(
+                |body| matches!(body, Body::ExecutionState(fact) if fact.outcome == "start_failed"),
+            );
+            diagnostic && failed
+        })
+        .await;
+    // До ACP-сессии дело не дошло: в журнале только проба списка.
+    let entries = fake.entries();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["frame"]["method"] != "session/new"),
+        "the CLI must not reach a session: {entries:?}"
+    );
+    assert!(bodies.iter().any(|body| matches!(
+        body,
+        Body::AdapterDiagnostic(fact) if fact.event_type == "owner_mcp_not_isolated"
+    )));
+    harness.shutdown().await;
+    fake.wait_gone().await;
+}
+
+/// Отказ `agy mcp list` закрывает запуск диагностикой, а не считается пустым списком.
+#[tokio::test]
+async fn a_failed_owner_mcp_list_blocks_a_delegated_antigravity_start() {
+    use canterlot_worker::adapter::antigravity::replay::Script;
+
+    let fake = antigravity::Fake::new(Script {
+        version: "agy 1.5.0".into(),
+        mcp_list_fails: true,
+        ..Default::default()
+    });
+    let spec = format!(
+        "[antigravity]\nenabled = true\nbinary = \"{}\"\ndata_dir = \"{}\"\n",
+        fake.exe.display(),
+        fake.data_dir().display()
+    );
+    let mut harness = Harness::start_with(&[], "1s", &spec).await;
+    harness.attach_and_ship(0).await;
+    harness
+        .send(down::Msg::StartCli(StartCli {
+            profile: "antigravity".into(),
+            workdir: harness._root.path().to_string_lossy().into_owned(),
+            permission_mode: "bypass".into(),
+            isolate_mcp: true,
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+    let bodies = harness
+        .wait_records("owner mcp failure diagnostic", |bodies| {
+            let diagnostic = bodies.iter().any(|body| {
+                matches!(body, Body::AdapterDiagnostic(fact)
+                    if fact.kind == "start_failed"
+                        && fact.event_type == "mcp_list_failed")
+            });
+            let failed = bodies.iter().any(
+                |body| matches!(body, Body::ExecutionState(fact) if fact.outcome == "start_failed"),
+            );
+            diagnostic && failed
+        })
+        .await;
+    assert!(
+        fake.entries()
+            .iter()
+            .all(|entry| entry["frame"]["method"] != "session/new"),
+        "the failed probe must not reach a session"
+    );
+    assert!(bodies.iter().any(|body| matches!(
+        body,
+        Body::AdapterDiagnostic(fact) if fact.event_type == "mcp_list_failed"
+    )));
     harness.shutdown().await;
     fake.wait_gone().await;
 }

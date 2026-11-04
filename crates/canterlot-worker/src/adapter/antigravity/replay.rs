@@ -29,6 +29,10 @@ pub struct Script {
     pub ignore_eof: bool,
     /// Ответ `agy -p /usage --output-format json`.
     pub usage: Option<Value>,
+    /// Ответ `agy mcp list`; None — «серверов нет», как у чистого владельца.
+    pub mcp_list: Option<String>,
+    /// `agy mcp list` завершается ошибкой: проверка обязана отказать закрыто.
+    pub mcp_list_fails: bool,
 }
 
 impl Default for Script {
@@ -39,6 +43,8 @@ impl Default for Script {
             log: None,
             ignore_eof: false,
             usage: None,
+            mcp_list: None,
+            mcp_list_fails: false,
         }
     }
 }
@@ -289,6 +295,18 @@ pub fn main(args: Vec<String>) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     log.boot(&args);
+    // Глобальный список MCP владельца: ответ без ACP-сессии и хода.
+    if args.iter().any(|arg| arg == "mcp") && args.iter().any(|arg| arg == "list") {
+        match &script.mcp_list {
+            Some(text) => print!("{text}"),
+            None => println!("No MCP servers configured."),
+        }
+        return if script.mcp_list_fails {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
     // Бесквотный `/usage`: тот же бинарник, но без ACP-сессии и хода.
     if args.iter().any(|arg| arg == "-p") && args.iter().any(|arg| arg == "/usage") {
         let usage = script.usage.clone().unwrap_or_else(|| json!({}));

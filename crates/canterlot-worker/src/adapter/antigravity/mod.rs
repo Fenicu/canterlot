@@ -1133,6 +1133,23 @@ impl Adapter for AntigravityAdapter {
                 return Err(AdapterError::StartFailed("cli_pin_failed"));
             }
         };
+        // Делегированная сессия не должна видеть MCP-серверы владельца. Пока P16
+        // не закрыт, единственное доказуемое состояние — пустой глобальный список:
+        // его отдаёт сам CLI, файлы `~/.gemini` адаптер не открывает.
+        if spec.isolate_mcp {
+            let data_dir = self
+                .cfg
+                .data_dir
+                .as_deref()
+                .ok_or(AdapterError::StartFailed("data_dir_missing"))?;
+            match process::owner_mcp(&pinned.executable, data_dir).await {
+                Ok(process::OwnerMcp::Empty) => {}
+                Ok(process::OwnerMcp::Configured) => {
+                    return Err(AdapterError::StartFailed("owner_mcp_not_isolated"));
+                }
+                Err(_) => return Err(AdapterError::StartFailed("mcp_list_failed")),
+            }
+        }
         // Версия и копия фиксируются на всё исполнение: перезапуск настроек
         // не должен подхватить обновившийся или откатившийся системный `agy`.
         self.pinned = Some(pinned.clone());

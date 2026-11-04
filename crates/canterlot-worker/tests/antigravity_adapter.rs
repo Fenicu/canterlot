@@ -11,7 +11,7 @@ use canterlot_worker::{
         SettingsChange, StartSpec, SteerOutcome, Transmission, TransmitOutcome,
         antigravity::{
             AntigravityAdapter, catalog, input,
-            process::ENV_ALLOWLIST,
+            process::{ENV_ALLOWLIST, OwnerMcp, owner_mcp},
             replay::{Script, Step, evidence_result, session_list},
         },
         canterlot_mcp::relay_hello,
@@ -3617,4 +3617,150 @@ fn delegated_sessions_can_start_without_owner_mcp_servers() {
     };
     let adapter = AntigravityAdapter::new(cfg, PathBuf::new(), WAIT);
     assert!(adapter.isolates_mcp());
+}
+
+/// Список владельца спрашивается один раз на закреплённую копию в пределах запуска воркера.
+#[tokio::test]
+async fn the_owner_mcp_list_is_cached_per_pinned_copy() {
+    let fake = Fake::new(Script::default());
+    let workdir = fake.workdir();
+    assert_eq!(
+        owner_mcp(&fake.exe, &workdir).await.unwrap(),
+        OwnerMcp::Empty
+    );
+    assert_eq!(
+        owner_mcp(&fake.exe, &workdir).await.unwrap(),
+        OwnerMcp::Empty
+    );
+    assert_eq!(
+        boots(&fake).len(),
+        1,
+        "the second check must reuse the cached answer"
+    );
+}
+
+/// Владельческая сессия не спрашивает глобальный список MCP: изоляция нужна только делегату.
+#[tokio::test]
+async fn owner_session_starts_despite_the_owner_mcp_list() {
+    let mut bench = Bench::new(
+        Script {
+            steps: handshake(),
+            mcp_list: Some(
+                "NAME   TYPE   STATUS   COMMAND/URL\nprobe  stdio  enabled  /bin/true\n".into(),
+            ),
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.start().await;
+    let boots = boots(&bench.fake);
+    assert_eq!(
+        boots.len(),
+        1,
+        "the owner session starts without a list probe"
+    );
+    bench.close().await;
+}
+
+/// Делегат стартует только на точном пустом ответе `agy mcp list`.
+#[tokio::test]
+async fn delegated_session_starts_at_an_empty_owner_mcp_list() {
+    let mut bench = Bench::new(
+        Script {
+            steps: handshake(),
+            mcp_list: Some("No MCP servers configured.\n".into()),
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.spec.isolate_mcp = true;
+    bench.start().await;
+    let boots = boots(&bench.fake);
+    assert_eq!(boots.len(), 2, "the list probe precedes the ACP session");
+    let probe: Vec<&str> = boots[0]["args"]
+        .as_array()
+        .expect("probe args")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        probe.windows(2).any(|pair| pair == ["mcp", "list"]) && !probe.contains(&"acp"),
+        "the probe runs without a turn: {probe:?}"
+    );
+    let requests = bench.fake.requests();
+    let new = requests
+        .iter()
+        .find(|entry| entry["frame"]["method"] == "session/new")
+        .expect("session/new reached the CLI");
+    let servers = new["frame"]["params"]["mcpServers"]
+        .as_array()
+        .expect("mcpServers");
+    assert_eq!(servers.len(), 1, "{servers:?}");
+    assert_eq!(servers[0]["name"], "canterlot");
+    bench.close().await;
+}
+
+/// Отказ `agy mcp list` не доказывает пустоту: делегат не стартует.
+#[tokio::test]
+async fn delegated_session_fails_closed_when_the_owner_mcp_list_fails() {
+    let mut bench = Bench::new(
+        Script {
+            steps: handshake(),
+            mcp_list_fails: true,
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.spec.isolate_mcp = true;
+    match bench.adapter.start(&bench.spec, &bench.group).await {
+        Err(AdapterError::StartFailed("mcp_list_failed")) => {}
+        other => panic!("expected mcp_list_failed, got {other:?}"),
+    }
+    let boots = boots(&bench.fake);
+    assert_eq!(boots.len(), 1, "only the failed list probe ran");
+    let requests = bench.fake.requests();
+    assert!(
+        requests
+            .iter()
+            .all(|entry| entry["frame"]["method"] != "session/new"),
+        "the CLI must not reach a session"
+    );
+    bench.close().await;
+}
+
+/// Делегат с настроенным у владельца сервером получает отказ до ACP-сессии.
+#[tokio::test]
+async fn delegated_session_refuses_a_configured_owner_mcp_list() {
+    let mut bench = Bench::new(
+        Script {
+            steps: handshake(),
+            mcp_list: Some(
+                "NAME   TYPE   STATUS   COMMAND/URL\nprobe  stdio  enabled  /bin/true\n".into(),
+            ),
+            ..Default::default()
+        },
+        "",
+        "",
+        "bypass",
+    );
+    bench.spec.isolate_mcp = true;
+    match bench.adapter.start(&bench.spec, &bench.group).await {
+        Err(AdapterError::StartFailed("owner_mcp_not_isolated")) => {}
+        other => panic!("expected owner_mcp_not_isolated, got {other:?}"),
+    }
+    let requests = bench.fake.requests();
+    assert_eq!(session_prompts(&requests).len(), 0);
+    assert!(
+        requests
+            .iter()
+            .all(|entry| entry["frame"]["method"] != "session/new"),
+        "the CLI must not reach a session"
+    );
+    bench.close().await;
 }
