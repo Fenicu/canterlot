@@ -1733,6 +1733,91 @@ async fn arm_large_batches(f: &Fx, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
     pairs
 }
 
+/// Отпущенный пачкой итог несёт свою границу: цель успевает сходить ещё раз до
+/// доставки события, но оно показывает удержанный ответ, а не новый.
+#[sqlx::test(migrations = "./migrations")]
+async fn released_batch_event_keeps_the_held_answer(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    let execution = Uuid::now_v7();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state,outcome)
+         values($1,$2,1,'stopped','done')",
+    )
+    .bind(execution)
+    .bind(f.child)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    add_answer_run(
+        &f.pool,
+        f.machine,
+        f.child,
+        execution,
+        now + TimeDelta::seconds(1),
+        1,
+        "held answer",
+    )
+    .await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(2)).await;
+    assert_eq!(
+        alarm_state(&f.pool, alarm_id(&armed)).await.0,
+        "armed",
+        "only one target settled: the batch holds its answer"
+    );
+
+    let cancelled = f
+        .call("alarms.cancel", json!({"alarm_id": alarm_id(&armed)}))
+        .await
+        .unwrap();
+    assert_eq!(cancelled["result"], "cancelled");
+    assert_eq!(f.event_jobs().await, 1, "the held event is released");
+
+    // Цель успела сходить ещё раз до доставки отпущенного события.
+    add_answer_run(
+        &f.pool,
+        f.machine,
+        f.child,
+        execution,
+        now + TimeDelta::seconds(15),
+        2,
+        "newer answer",
+    )
+    .await;
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(20))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    let (text, _): (String, Option<Value>) = sqlx::query_as(
+        "select content->0->>'text',origin from inputs where conversation_id=$1
+         order by input_seq desc limit 1",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(text.contains("held answer"), "{text}");
+    assert!(
+        !text.contains("newer answer"),
+        "the released event keeps the held boundary: {text}"
+    );
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
     let f = Fx::new(pool).await;

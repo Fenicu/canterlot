@@ -254,6 +254,7 @@ fn event_job(
     fingerprint: &str,
     armed_at: DateTime<Utc>,
     chain_depth: i32,
+    boundary: Option<&super::summary::Boundary>,
 ) -> Value {
     json!({
         "action": "event",
@@ -263,6 +264,8 @@ fn event_job(
         "fingerprint": fingerprint,
         "armed_at": armed_at,
         "chain_depth": chain_depth,
+        // Отпущенный пачкой итог несёт свою границу: доставка не подменит его более поздним ходом.
+        "boundary": boundary,
     })
 }
 
@@ -370,6 +373,7 @@ pub async fn evaluate_in_tx(
             &fingerprint,
             *armed_at,
             *chain_depth,
+            None,
         );
         insert_job(conn, *owner_id, *subscriber_id, facts.now, &payload).await?;
     }
@@ -389,6 +393,7 @@ pub(super) async fn release_held_in_tx(
     state: &str,
     fingerprint: &str,
     chain_depth: i32,
+    boundary: Option<&super::summary::Boundary>,
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     let alive: Option<Uuid> = sqlx::query_scalar(
@@ -412,6 +417,7 @@ pub(super) async fn release_held_in_tx(
         fingerprint,
         armed_at,
         chain_depth,
+        boundary,
     );
     insert_job(conn, owner_id, subscriber_id, now, &payload).await?;
     Ok(true)
@@ -436,7 +442,7 @@ pub async fn on_target_deleted_in_tx(
     .fetch_all(&mut *conn)
     .await?;
     for (id, owner_id, subscriber_id, chain_depth, armed_at) in open {
-        let payload = event_job(id, target_id, DELETED, DELETED, armed_at, chain_depth);
+        let payload = event_job(id, target_id, DELETED, DELETED, armed_at, chain_depth, None);
         insert_job(conn, owner_id, subscriber_id, now, &payload).await?;
     }
     Ok(())

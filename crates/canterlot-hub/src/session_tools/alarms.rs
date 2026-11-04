@@ -1307,6 +1307,7 @@ async fn release_collected_in_tx(
             &entry.state,
             fingerprint,
             entry.chain_depth,
+            entry.boundary.as_ref(),
             now,
         )
         .await?;

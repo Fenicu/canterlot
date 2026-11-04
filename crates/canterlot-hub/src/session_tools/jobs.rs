@@ -22,6 +22,9 @@ struct EventJob {
     chain_depth: i32,
     #[serde(default)]
     armed_at: Option<DateTime<Utc>>,
+    /// Граница отпущенного пачкой итога: у старых заданий её нет.
+    #[serde(default)]
+    boundary: Option<summary::Boundary>,
 }
 
 #[derive(Deserialize)]
@@ -134,7 +137,15 @@ async fn event_message(
 ) -> Result<(String, Value), sqlx::Error> {
     let id = event.target_id;
     let depth = event.chain_depth;
-    let summary = summary::build(conn, owner_id, id, &event.state, event.armed_at).await?;
+    let summary = summary::build_bounded(
+        conn,
+        owner_id,
+        id,
+        &event.state,
+        event.armed_at,
+        event.boundary.as_ref(),
+    )
+    .await?;
     Ok(match summary {
         Some(summary) => {
             let event = summary.hub_event();
