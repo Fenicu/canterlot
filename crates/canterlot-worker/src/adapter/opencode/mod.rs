@@ -221,7 +221,12 @@ async fn probe_models(
             .await
             .map_err(drop)?;
         let default = http.get("/api/model/default", REQUEST_WAIT).await.ok();
-        let mut entries = catalog::entries(&models, default.as_ref(), &cfg.providers);
+        let mut entries = catalog::entries(
+            &models,
+            default.as_ref(),
+            &cfg.providers,
+            &cfg.provider_models,
+        );
         if let Some(model) = &cfg.default_model {
             catalog::prefer(&mut entries, model);
         }

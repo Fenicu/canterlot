@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -130,7 +131,7 @@ pub struct ConfigError {
     pub location: Option<(usize, usize)>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigErrorCategory {
     Io(io::ErrorKind),
     Parse,
@@ -138,6 +139,11 @@ pub enum ConfigErrorCategory {
     TokenPermissions,
     UnsupportedTokenPermissions,
     PaidModelPollUnsupported,
+    /// Ошибка `[opencode].provider_models`: провайдер и шаблон, если он виноват.
+    OpenCodeProviderModels {
+        provider: String,
+        pattern: Option<String>,
+    },
 }
 
 impl ConfigError {
@@ -152,7 +158,7 @@ impl ConfigError {
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.category {
+        match &self.category {
             ConfigErrorCategory::Io(kind) => {
                 write!(
                     f,
@@ -187,6 +193,19 @@ impl fmt::Display for ConfigError {
                 "{}: claude_code.allow_paid_model_poll is not supported in the pilot",
                 self.path.display()
             ),
+            ConfigErrorCategory::OpenCodeProviderModels { provider, pattern } => {
+                write!(f, "{}: opencode.provider_models", self.path.display())?;
+                match pattern {
+                    Some(pattern) => write!(
+                        f,
+                        " has an invalid pattern {pattern:?} for provider {provider}"
+                    ),
+                    None => write!(
+                        f,
+                        " names provider {provider}, which is not listed in opencode.providers"
+                    ),
+                }
+            }
         }
     }
 }
@@ -250,6 +269,32 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
             path,
             ConfigErrorCategory::PaidModelPollUnsupported,
         ));
+    }
+    if let Some(opencode) = &config.opencode {
+        for (provider, patterns) in &opencode.provider_models {
+            if provider != crate::adapter::opencode::catalog::GO_PROVIDER
+                && !opencode.providers.iter().any(|p| p == provider)
+            {
+                return Err(ConfigError::new(
+                    path,
+                    ConfigErrorCategory::OpenCodeProviderModels {
+                        provider: provider.clone(),
+                        pattern: None,
+                    },
+                ));
+            }
+            for pattern in patterns {
+                if crate::adapter::opencode::catalog::pattern_parts(pattern).is_none() {
+                    return Err(ConfigError::new(
+                        path,
+                        ConfigErrorCategory::OpenCodeProviderModels {
+                            provider: provider.clone(),
+                            pattern: Some(pattern.clone()),
+                        },
+                    ));
+                }
+            }
+        }
     }
     Ok(config)
 }
@@ -406,6 +451,8 @@ pub struct OpenCodeConfig {
     pub refuse_paths: Vec<PathBuf>,
     /// Провайдеры в каталоге моделей сверх `opencode-go`.
     pub providers: Vec<String>,
+    /// Фильтр моделей по провайдеру: пустой список — ничего, отсутствие записи — все.
+    pub provider_models: BTreeMap<String, Vec<String>>,
     /// Модель, которая идёт первой в каталоге; без неё порядок задаёт OpenCode.
     pub default_model: Option<String>,
     /// Каталог конфигурации владельца; по умолчанию `$XDG_CONFIG_HOME/opencode`.
@@ -419,6 +466,7 @@ impl Default for OpenCodeConfig {
             data_root: None,
             refuse_paths: Vec::new(),
             providers: Vec::new(),
+            provider_models: BTreeMap::new(),
             default_model: None,
             owner_config: None,
         }
