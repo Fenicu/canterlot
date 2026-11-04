@@ -546,6 +546,63 @@ async fn dispatch_waits_for_reconciliation(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn hello_records_alarms_v1_and_drops_unknown_optional_capabilities(
+    pool: PgPool,
+) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let endpoint = Endpoint::from_shared(format!("https://{}", hub.addr))?.tls_config(
+        ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(&hub.pki.ca_pem))
+            .domain_name("localhost"),
+    )?;
+    let hello = Hello {
+        installation_id: hub.installation.installation_id.to_string(),
+        machine_id: seed.machine_id.to_string(),
+        restore_generation: hub.installation.restore_generation.to_string(),
+        protocol_version: canterlot_hub::grpc::PROTOCOL_VERSION,
+        connection_id: Uuid::now_v7().to_string(),
+        cj_journal_id: Uuid::now_v7().to_string(),
+        boot_id: Uuid::now_v7().to_string(),
+        stream_kind: StreamKind::Control as i32,
+        optional_capabilities: vec!["alarms_v1".into(), "not_a_capability_v1".into()],
+        ..Default::default()
+    };
+    let token = canterlot_hub::machines::rotate_token(&pool, seed.machine_id, false, false)
+        .await?
+        .unwrap();
+    let (tx, rx) = mpsc::channel(8);
+    tx.send(ControlUp {
+        msg: Some(control_up::Msg::Hello(hello)),
+    })
+    .await?;
+    let mut req = Request::new(ReceiverStream::new(rx));
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse()?);
+    let mut client = worker_control_client::WorkerControlClient::new(endpoint.connect().await?)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES);
+    let mut control = client.control(req).await?.into_inner();
+    assert!(matches!(
+        control.message().await?.unwrap().msg,
+        Some(control_down::Msg::HelloReply(HelloReply {
+            result: Some(hello_reply::Result::Accepted(Accepted { capabilities, .. })),
+        })) if capabilities == ["alarms_v1"]
+    ));
+    // Известная возможность запоминается, неизвестная не превращается в согласованную.
+    assert_eq!(hub.registry.capabilities(seed.machine_id), ["alarms_v1"]);
+    assert!(hub.registry.has_capability(seed.machine_id, "alarms_v1"));
+    assert!(
+        !hub.registry
+            .has_capability(seed.machine_id, "not_a_capability_v1")
+    );
+    drop(control);
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn dispatch_deferred_generation_closed_requeues_with_hold(pool: PgPool) -> TestResult {
     for (reason, hold) in [
         ("generation_closed", HoldReason::NoLiveExecution),
