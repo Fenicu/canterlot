@@ -1437,3 +1437,55 @@ async fn later_run_does_not_replace_a_held_result(pool: PgPool) {
         "a later run does not replace the held result: {text}"
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cancellation_racing_unsubscribe_does_not_resurrect_the_event(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    assert_eq!(f.event_jobs().await, 0, "the batch holds the result");
+
+    // Отписка держит строку подписки, не завершая транзакцию.
+    let mut unsubscribe = f.pool.begin().await.unwrap();
+    subs::unsubscribe_in_tx(&mut unsubscribe, f.orchestrator, f.child, "unsubscribed")
+        .await
+        .unwrap();
+    let context = f.context.clone();
+    let caller = f.caller();
+    let id = alarm_id(&armed);
+    let cancel = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "alarms.cancel",
+            json!({"alarm_id": id}),
+        )
+        .await
+        .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !cancel.is_finished(),
+        "release waits for the subscription row before inserting the event"
+    );
+    unsubscribe.commit().await.unwrap();
+    cancel.await.unwrap();
+
+    assert_eq!(
+        f.event_jobs().await,
+        0,
+        "an unsubscribed generation cannot resurrect a held result"
+    );
+}
