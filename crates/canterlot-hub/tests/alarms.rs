@@ -2874,6 +2874,101 @@ async fn limit_reset_estimated_reading_needs_a_second_one(pool: PgPool) {
     assert_eq!(reason.as_deref(), Some("condition"));
 }
 
+/// Оценочный отсчёт с уже сдвинутым `resets_at`, снятый до запомненного срока,
+/// не доказывает сброс сам по себе: нужен подтверждающий отсчёт после срока.
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_estimated_early_advanced_reset_does_not_fire(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        600,
+        Some(reset),
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    let armed = f
+        .arm_limit("window", "claude", "weekly", None)
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        100,
+        Some(reset + TimeDelta::hours(1)),
+        now + TimeDelta::minutes(10),
+        DataConfidence::Estimated,
+    )
+    .await;
+    assert_eq!(
+        alarm_state(&f.pool, id).await.0,
+        "armed",
+        "an early estimated reading cannot confirm the captured reset"
+    );
+}
+
+/// Предшествующий `NotReset` после срока не засчитывается как подтверждение:
+/// оценочному сбросу нужны два именно подтверждающих отсчёта после срока.
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_estimated_confirmation_counts_only_reset_readings(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        600,
+        Some(reset),
+        now,
+        DataConfidence::Exact,
+    )
+    .await;
+    let armed = f
+        .arm_limit("window", "claude", "weekly", None)
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    f.observe(
+        "claude",
+        Window::Weekly,
+        700,
+        Some(reset),
+        reset + TimeDelta::minutes(1),
+        DataConfidence::Exact,
+    )
+    .await;
+    f.observe(
+        "claude",
+        Window::Weekly,
+        100,
+        Some(reset + TimeDelta::hours(1)),
+        reset + TimeDelta::minutes(2),
+        DataConfidence::Estimated,
+    )
+    .await;
+    assert_eq!(
+        alarm_state(&f.pool, id).await.0,
+        "armed",
+        "a preceding NotReset reading is not a reset confirmation"
+    );
+    f.observe(
+        "claude",
+        Window::Weekly,
+        90,
+        Some(reset + TimeDelta::hours(2)),
+        reset + TimeDelta::minutes(3),
+        DataConfidence::Estimated,
+    )
+    .await;
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("condition"));
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn limit_reset_missing_window_fires_the_condition(pool: PgPool) {
     let f = Fx::new(pool).await;

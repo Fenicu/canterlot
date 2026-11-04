@@ -1066,13 +1066,18 @@ async fn limit_status_in_tx(
     }
     match crate::crunch::check_reset(conn, &condition.provider, window, wake_at).await? {
         ResetCheck::Verified => {
+            // Оценочный отсчёт подтверждает сброс только вместе со вторым отдельным
+            // отсчётом, который сам показывает сброс после запомненного срока.
+            // Точное показание доказывает сброс само. Ранний сдвиг `resets_at` до
+            // срока не обходит эту проверку: его отсчёт стоит до `wake_at` и не
+            // засчитывается, а предшествующий `NotReset` не является подтверждением.
             let confidence = DataConfidence::from_stored(&confidence);
-            if confidence == DataConfidence::Estimated
-                && observed.is_some_and(|observed| observed >= wake_at)
-            {
+            if confidence == DataConfidence::Estimated {
                 let readings: i64 = sqlx::query_scalar(
-                    "select count(*) from limit_snapshots
-                     where provider=$1 and window_kind=$2 and observed_at >= $3",
+                    "select count(distinct observed_at) from limit_snapshots
+                     where provider=$1 and window_kind=$2 and observed_at >= $3
+                       and used_permille < 1000
+                       and (resets_at > $3 or resets_at is null)",
                 )
                 .bind(&condition.provider)
                 .bind(window.as_str())
