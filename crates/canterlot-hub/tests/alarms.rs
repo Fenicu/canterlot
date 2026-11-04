@@ -1004,3 +1004,93 @@ async fn batch_needs_all_and_conditions_only(pool: PgPool) {
         .unwrap_err();
     assert_eq!(error.code, session_tools::ToolErrorCode::InvalidArguments);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn locked_alarm_does_not_lose_its_deadline_job(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child]},
+                "only_on_timeout": true,
+                "deadline_seconds": 120,
+                "key": "watch"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+
+    // Чужая транзакция держит строку будильника, когда наступает срок.
+    let mut blocked = f.pool.begin().await.unwrap();
+    sqlx::query("select id from alarms where id=$1 for update")
+        .bind(id)
+        .execute(&mut *blocked)
+        .await
+        .unwrap();
+    let sch = scheduler(&f.pool, Default::default());
+    let report = sch.tick(now + TimeDelta::seconds(126)).await.unwrap();
+    assert_eq!(report.retried, 1, "the delivery job asks for a normal retry");
+    assert_eq!(report.cancelled, 0, "a locked alarm is not settled");
+    assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
+    assert!(f.alarm_inputs().await.is_empty());
+
+    blocked.commit().await.unwrap();
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(130)).await.unwrap().fired,
+        1
+    );
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("timed_out"));
+    assert_eq!(f.alarm_inputs().await.len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn locked_alarm_does_not_miss_target_deletion(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child], "states": ["deleted"]},
+                "key": "gone"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+
+    let mut blocked = f.pool.begin().await.unwrap();
+    sqlx::query("select id from alarms where id=$1 for update")
+        .bind(id)
+        .execute(&mut *blocked)
+        .await
+        .unwrap();
+    let pool = f.pool.clone();
+    let child = f.child;
+    let deleted = tokio::spawn(async move {
+        let mut tx = pool.begin().await.unwrap();
+        canterlot_hub::session_tools::alarms::on_target_deleted_in_tx(&mut tx, child, Utc::now())
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !deleted.is_finished(),
+        "deletion waits for the alarm row instead of skipping it"
+    );
+
+    blocked.commit().await.unwrap();
+    deleted.await.unwrap();
+    let (state, reason, collected) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("condition"));
+    assert_eq!(
+        collected["sessions"][f.child.to_string()]["state"],
+        "deleted"
+    );
+}

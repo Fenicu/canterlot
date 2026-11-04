@@ -465,10 +465,14 @@ pub async fn evaluate_session_in_tx(
     }
     let fingerprint =
         settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
+    // Цель взведённых будильников входит в обход проектора (`activity::sweep`), поэтому
+    // пропущенная под чужой блокировкой строка будет оценена на следующем тике. Терять
+    // здесь нечего: в отличие от удаления цели, событие не одноразовое.
     let rows: Vec<AlarmRow> = sqlx::query_as(
         "select * from alarms
          where state='armed' and condition->>'kind'='session_state'
            and condition->'session_ids' ? $1
+         order by id
          for update skip locked",
     )
     .bind(target_id.to_string())
@@ -658,7 +662,8 @@ pub async fn hold_for_batch_in_tx(
 }
 
 /// Цель удалена: условие с `deleted` срабатывает, пачка считает её собранной,
-/// сторож молчит, если условие выполнено.
+/// сторож молчит, если условие выполнено. Удаление одноразовое: строки будильников
+/// берутся блокирующе (в порядке id), иначе запертый будильник пропустил бы событие.
 pub async fn on_target_deleted_in_tx(
     conn: &mut PgConnection,
     target_id: Uuid,
@@ -668,7 +673,8 @@ pub async fn on_target_deleted_in_tx(
         "select * from alarms
          where state='armed' and condition->>'kind'='session_state'
            and condition->'session_ids' ? $1
-         for update skip locked",
+         order by id
+         for update",
     )
     .bind(target_id.to_string())
     .fetch_all(&mut *conn)
@@ -1389,6 +1395,25 @@ pub async fn deliver_job_in_tx(
     .bind(now)
     .fetch_all(&mut *conn)
     .await?;
+    // Пропущенная под чужой блокировкой строка не должна сгореть: доставка одноразовая.
+    // Считаем всё, что ещё ждёт доставки, и просим обычный повтор планировщика.
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from alarms where conversation_id=$1 and (
+             (state='fired' and delivered_input_id is null)
+             or (state='armed' and kind='at' and fire_at <= $2)
+             or (state='armed' and kind='condition' and deadline_at <= $2)
+         )",
+    )
+    .bind(conversation)
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await?;
+    if pending as usize > rows.len() {
+        return Ok(crate::crunch::JobOutcome::Retry {
+            at: now + TimeDelta::seconds(2),
+            poll: false,
+        });
+    }
     if rows.is_empty() {
         return Ok(crate::crunch::JobOutcome::Cancelled("alarm_settled"));
     }
