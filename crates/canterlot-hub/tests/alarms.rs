@@ -1587,7 +1587,6 @@ async fn settle_after_deadline_keeps_the_timeout(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
     let f = Fx::new(pool).await;
-    let now = Utc::now();
     let mut pairs = Vec::new();
     for n in 0..20 {
         let one = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
@@ -1604,6 +1603,8 @@ async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
         .unwrap();
         pairs.push((one, two));
     }
+    // Блоки ответов должны быть позже взвода подписки, иначе окно итога их не увидит.
+    let now = Utc::now();
     for (one, two) in &pairs {
         for (target, n) in [(one, 1_i64), (two, 2_i64)] {
             let execution = Uuid::now_v7();
@@ -1653,6 +1654,11 @@ async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
         "one delivery job coalesces all fired alarms"
     );
     let inputs = f.alarm_inputs().await;
+    let total: usize = inputs.iter().map(|(text, _)| text.len()).sum();
+    assert!(
+        total > canterlot_proto::limits::MAX_INPUT_TEXT_BYTES,
+        "the rendered summaries do not fit one input"
+    );
     assert!(inputs.len() >= 2, "twenty large batches need several parts");
     assert!(
         inputs
