@@ -540,7 +540,7 @@ fn config_errors_do_not_expose_file_contents() {
         let error = load(&path).unwrap_err();
         assert!(error.to_string().contains(path.to_str().unwrap()));
         assert_eq!(error.path, path);
-        assert!(match error.category {
+        assert!(match &error.category {
             ConfigErrorCategory::Parse => {
                 matches!(error.location, Some((line, column)) if line > 0 && column > 0)
             }
@@ -568,7 +568,6 @@ fn config_error_conversions_discard_source_errors() {
         path,
         category,
         location,
-        detail: _,
     } = error;
     assert!(path.as_os_str().is_empty());
     assert_eq!(category, ConfigErrorCategory::Parse);

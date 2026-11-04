@@ -4,7 +4,7 @@
 
 use canterlot_worker::{
     adapter::{self, AdapterContext, opencode::catalog::ModelEntry},
-    config::{OpenCodeConfig, WorkerConfig},
+    config::{self, ConfigErrorCategory, OpenCodeConfig, WorkerConfig},
     supervisor::SupervisorSpec,
 };
 use std::{path::PathBuf, time::Duration};
@@ -24,6 +24,13 @@ data_dir = "/tmp/data"
 {extra}
 "#
     )
+}
+
+fn load_config(extra: &str) -> Result<WorkerConfig, config::ConfigError> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.toml");
+    std::fs::write(&path, worker_toml(extra)).unwrap();
+    config::load(&path)
 }
 
 fn context(opencode: Option<OpenCodeConfig>) -> AdapterContext {
@@ -78,6 +85,96 @@ owner_config = "/home/user/.config/opencode"
     assert_eq!(
         cfg.owner_config,
         Some(PathBuf::from("/home/user/.config/opencode"))
+    );
+}
+
+#[test]
+fn provider_models_filter_is_read() {
+    let config = load_config(
+        r#"
+[opencode]
+providers = ["opencode"]
+
+[opencode.provider_models]
+opencode = ["*-free", "big-pickle", "*"]
+"#,
+    )
+    .unwrap();
+    let cfg = config.opencode.unwrap();
+    assert_eq!(
+        cfg.provider_models["opencode"],
+        ["*-free", "big-pickle", "*"]
+    );
+}
+
+#[test]
+fn invalid_provider_model_pattern_is_refused() {
+    for pattern in ["gpt*mini", "**x", "x**"] {
+        let extra = format!(
+            r#"
+[opencode]
+providers = ["opencode"]
+
+[opencode.provider_models]
+opencode = ["{pattern}"]
+"#
+        );
+        let error = load_config(&extra).unwrap_err();
+        match &error.category {
+            ConfigErrorCategory::OpenCodeProviderModels {
+                provider,
+                pattern: Some(rejected),
+            } => {
+                assert_eq!(provider, "opencode");
+                assert_eq!(rejected, pattern);
+            }
+            other => panic!("unexpected category for {pattern}: {other:?}"),
+        }
+        let message = error.to_string();
+        assert!(message.contains("opencode.provider_models"), "{message}");
+        assert!(message.contains(pattern), "{message}");
+        assert!(message.contains("opencode"), "{message}");
+    }
+}
+
+#[test]
+fn provider_models_entry_for_an_unlisted_provider_is_refused() {
+    let error = load_config(
+        r#"
+[opencode]
+providers = ["opencode"]
+
+[opencode.provider_models]
+anthropic = ["*"]
+"#,
+    )
+    .unwrap_err();
+    match &error.category {
+        ConfigErrorCategory::OpenCodeProviderModels {
+            provider,
+            pattern: None,
+        } => assert_eq!(provider, "anthropic"),
+        other => panic!("unexpected category: {other:?}"),
+    }
+    let message = error.to_string();
+    assert!(message.contains("opencode.provider_models"), "{message}");
+    assert!(message.contains("anthropic"), "{message}");
+}
+
+#[test]
+fn go_provider_models_entry_needs_no_providers_listing() {
+    let config = load_config(
+        r#"
+[opencode]
+
+[opencode.provider_models]
+opencode-go = ["*-free"]
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.opencode.unwrap().provider_models["opencode-go"],
+        ["*-free"]
     );
 }
 

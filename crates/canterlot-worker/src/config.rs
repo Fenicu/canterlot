@@ -129,10 +129,9 @@ pub struct ConfigError {
     pub path: PathBuf,
     pub category: ConfigErrorCategory,
     pub location: Option<(usize, usize)>,
-    pub detail: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigErrorCategory {
     Io(io::ErrorKind),
     Parse,
@@ -140,6 +139,11 @@ pub enum ConfigErrorCategory {
     TokenPermissions,
     UnsupportedTokenPermissions,
     PaidModelPollUnsupported,
+    /// Ошибка `[opencode].provider_models`: провайдер и шаблон, если он виноват.
+    OpenCodeProviderModels {
+        provider: String,
+        pattern: Option<String>,
+    },
 }
 
 impl ConfigError {
@@ -148,14 +152,13 @@ impl ConfigError {
             path: path.to_path_buf(),
             category,
             location: None,
-            detail: None,
         }
     }
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.category {
+        match &self.category {
             ConfigErrorCategory::Io(kind) => {
                 write!(
                     f,
@@ -190,11 +193,20 @@ impl fmt::Display for ConfigError {
                 "{}: claude_code.allow_paid_model_poll is not supported in the pilot",
                 self.path.display()
             ),
-        }?;
-        if let Some(detail) = &self.detail {
-            write!(f, ": {detail}")?;
+            ConfigErrorCategory::OpenCodeProviderModels { provider, pattern } => {
+                write!(f, "{}: opencode.provider_models", self.path.display())?;
+                match pattern {
+                    Some(pattern) => write!(
+                        f,
+                        " has an invalid pattern {pattern:?} for provider {provider}"
+                    ),
+                    None => write!(
+                        f,
+                        " names provider {provider}, which is not listed in opencode.providers"
+                    ),
+                }
+            }
         }
-        Ok(())
     }
 }
 
@@ -235,7 +247,6 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
             });
         ConfigError {
             location,
-            detail: None,
             ..ConfigError::new(path, ConfigErrorCategory::Parse)
         }
     })?;
@@ -261,21 +272,26 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
     }
     if let Some(opencode) = &config.opencode {
         for (provider, patterns) in &opencode.provider_models {
-            if provider != "opencode-go" && !opencode.providers.iter().any(|p| p == provider) {
-                let mut err = ConfigError::new(path, ConfigErrorCategory::Parse);
-                err.detail = Some(format!(
-                    "opencode.provider_models: unknown provider {provider}"
+            if provider != crate::adapter::opencode::catalog::GO_PROVIDER
+                && !opencode.providers.iter().any(|p| p == provider)
+            {
+                return Err(ConfigError::new(
+                    path,
+                    ConfigErrorCategory::OpenCodeProviderModels {
+                        provider: provider.clone(),
+                        pattern: None,
+                    },
                 ));
-                return Err(err);
             }
             for pattern in patterns {
-                let core = pattern.trim_start_matches('*').trim_end_matches('*');
-                if core.contains('*') {
-                    let mut err = ConfigError::new(path, ConfigErrorCategory::Parse);
-                    err.detail = Some(format!(
-                        "opencode.provider_models: invalid pattern {pattern} for {provider}"
+                if crate::adapter::opencode::catalog::pattern_parts(pattern).is_none() {
+                    return Err(ConfigError::new(
+                        path,
+                        ConfigErrorCategory::OpenCodeProviderModels {
+                            provider: provider.clone(),
+                            pattern: Some(pattern.clone()),
+                        },
                     ));
-                    return Err(err);
                 }
             }
         }
