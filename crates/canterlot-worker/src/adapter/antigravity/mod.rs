@@ -72,6 +72,8 @@ pub struct AntigravityAdapter {
     interrupt_deadline: Duration,
     turn_stall_deadline: Duration,
     proc: Option<Process>,
+    /// Копия, выбранная при первом запуске исполнения; перезапуск не ищет новую.
+    pinned: Option<process::Pinned>,
     rpc: RpcClient,
     events: VecDeque<AdapterEvent>,
     session: Option<SessionInfo>,
@@ -112,6 +114,7 @@ impl AntigravityAdapter {
             interrupt_deadline: INTERRUPT_WAIT,
             turn_stall_deadline: TURN_STALL,
             proc: None,
+            pinned: None,
             rpc: RpcClient::new(),
             events: VecDeque::new(),
             session: None,
@@ -867,27 +870,15 @@ impl AntigravityAdapter {
         effort: &str,
         group: &dyn Containment,
     ) -> Result<(), AdapterError> {
-        let pinned = process::prepare_pinned(&self.cfg)
-            .await
-            .map_err(|_| AdapterError::StartFailed("cli_not_found"))?;
-        if let Some(previous) = &pinned.previous {
-            tracing::warn!(
-                kind = "antigravity_cli_version_changed",
-                previous,
-                current = pinned.version.label(),
-                "the configured agy changed; a new pinned copy is used"
-            );
-            self.diagnostic("antigravity_cli_version_changed", false);
-        }
+        let executable = self
+            .pinned
+            .as_ref()
+            .filter(|pinned| pinned.executable.is_file())
+            .map(|pinned| pinned.executable.clone())
+            .ok_or(AdapterError::StartFailed("cli_not_found"))?;
         self.proc = Some(
-            Process::spawn(
-                &pinned.executable,
-                &self.exec_dir,
-                &self.workdir,
-                mode,
-                group,
-            )
-            .map_err(|_| AdapterError::StartFailed("cli_launch_failed"))?,
+            Process::spawn(&executable, &self.exec_dir, &self.workdir, mode, group)
+                .map_err(|_| AdapterError::StartFailed("cli_launch_failed"))?,
         );
         let timeout = self.ready_deadline.max(STEP);
         let proc = self.proc.as_mut().expect("spawned above");
@@ -1085,6 +1076,9 @@ impl Adapter for AntigravityAdapter {
                 return Err(AdapterError::StartFailed("cli_pin_failed"));
             }
         };
+        // Версия и копия фиксируются на всё исполнение: перезапуск настроек
+        // не должен подхватить обновившийся или откатившийся системный `agy`.
+        self.pinned = Some(pinned.clone());
         if let Some(previous) = &pinned.previous {
             tracing::warn!(
                 kind = "antigravity_cli_version_changed",

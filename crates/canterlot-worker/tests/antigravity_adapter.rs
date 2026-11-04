@@ -3113,6 +3113,152 @@ async fn failed_restart_stops_the_execution_without_the_old_settings() {
     bench.close().await;
 }
 
+/// Системный `agy` заменён другим файлом: старый закреплённый ярлык остаётся
+/// единственным источником версии и набора возможностей исполнения.
+fn replace_system_binary(fake: &antigravity::Fake, version: &str) -> PathBuf {
+    let script = fake.dir.path().join("replacement-script.json");
+    let log = fake.dir.path().join("replacement.log");
+    std::fs::write(
+        &script,
+        serde_json::to_vec(&Script {
+            version: format!("agy {version}"),
+            log: Some(log.clone()),
+            ..Default::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    antigravity::fake_exec::write_executable(
+        &fake.exe,
+        format!(
+            "#!/bin/sh\nunset PWD SHLVL OLDPWD _\nexec '{}' --script '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_fake-agy"),
+            script.display()
+        ),
+        0o700,
+    );
+    log
+}
+
+#[tokio::test]
+async fn restart_reuses_the_pinned_copy_and_capabilities_after_a_system_change() {
+    let mut bench = Bench::new(
+        Script {
+            version: "agy 1.5.0".into(),
+            steps: handshake(),
+            ..Default::default()
+        },
+        "",
+        "",
+        "owner",
+    );
+    let started = bench.start().await;
+    assert_eq!(
+        bench.adapter.capabilities().questions,
+        canterlot_worker::adapter::Support::Supported
+    );
+    let first_pid = started.cli_pid;
+    let session_id = started.native_conversation_id.clone();
+    bench.fake.rewrite(restart_script(&session_id));
+    let replacement_log = replace_system_binary(&bench.fake, "1.4.12");
+
+    let mut input = send("after restart");
+    input.settings = Some(SettingsChange {
+        permission_mode: Some("bypass".into()),
+        ..Default::default()
+    });
+    let outcome = bench.adapter.transmit(&input, &bench.group).await;
+    assert!(
+        matches!(outcome, TransmitOutcome::Accepted(_)),
+        "transmit failed; boots={:?} requests={:?}",
+        boots(&bench.fake),
+        bench.fake.requests()
+    );
+    let events = drain(&mut bench.adapter).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::CliRestarted { cli_pid, .. } if *cli_pid != first_pid
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic {
+            kind: "antigravity_cli_version_changed",
+            ..
+        }
+    )));
+    assert_eq!(
+        bench.adapter.capabilities().questions,
+        canterlot_worker::adapter::Support::Supported,
+        "the capability set stays pinned with the binary"
+    );
+    let bin = bench.fake.data_dir().join("antigravity/bin");
+    assert!(bin.join("agy-1.5.0").is_file());
+    assert!(
+        !bin.join("agy-1.4.12").is_file(),
+        "the replacement source is never pinned during a restart"
+    );
+    assert!(
+        !replacement_log.exists()
+            || std::fs::read_to_string(&replacement_log)
+                .unwrap()
+                .trim()
+                .is_empty(),
+        "the replacement system binary is never launched"
+    );
+    assert_eq!(boots(&bench.fake).len(), 2, "the pinned copy boots again");
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn restart_fails_when_the_pinned_copy_disappeared() {
+    let mut bench = Bench::new(
+        Script {
+            steps: handshake(),
+            ..Default::default()
+        },
+        "",
+        "",
+        "owner",
+    );
+    bench.start().await;
+    let pinned = bench.fake.data_dir().join("antigravity/bin/agy-1.4.12");
+    assert!(pinned.is_file());
+    std::fs::remove_file(&pinned).unwrap();
+
+    let mut input = send("after restart");
+    input.settings = Some(SettingsChange {
+        permission_mode: Some("bypass".into()),
+        ..Default::default()
+    });
+    let outcome = bench.adapter.transmit(&input, &bench.group).await;
+    assert!(
+        matches!(&outcome, TransmitOutcome::Rejected(reason) if reason == "settings_restart_failed"),
+        "{outcome:?}"
+    );
+    let events = drain(&mut bench.adapter).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic {
+            kind: "restart_failed",
+            required: true,
+            ..
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::CliRestarted { .. }))
+    );
+    assert_eq!(
+        boots(&bench.fake).len(),
+        1,
+        "a missing pinned copy is not replaced by the system binary"
+    );
+    assert!(!pinned.is_file(), "the restart does not re-pin");
+    assert!(bench.fake.pids().is_empty(), "the old process is stopped");
+    bench.close().await;
+}
+
 #[tokio::test]
 async fn settings_never_restart_the_process_in_the_middle_of_a_turn() {
     let steps = vec![

@@ -85,6 +85,7 @@ impl From<std::io::Error> for PrepareError {
     }
 }
 
+#[derive(Clone)]
 pub struct Pinned {
     pub executable: PathBuf,
     pub version: CliVersion,
