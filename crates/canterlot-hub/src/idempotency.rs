@@ -105,7 +105,8 @@ pub struct Outcome<T> {
 
 /// Выполняет изменение без собственной обработки ключа в одной транзакции с записью ключа.
 /// Повтор возвращает сохранённый ответ без запуска `op`; потерянная гонка за ключ откатывает
-/// все эффекты `op` и повторяет ответ победителя.
+/// все эффекты `op` и повторяет ответ победителя. Взаимоблокировка и сбой сериализации
+/// повторяют всю транзакцию целиком: до трёх попыток с небольшой паузой.
 pub async fn run_in_tx<T, E, F>(
     pool: &PgPool,
     owner_id: Uuid,
@@ -117,10 +118,50 @@ pub async fn run_in_tx<T, E, F>(
 ) -> Result<Outcome<T>, E>
 where
     T: Serialize + DeserializeOwned,
+    E: From<sqlx::Error> + From<IdempotencyConflict> + crate::db::TransientError,
+    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>> + Clone,
+{
+    const ATTEMPTS: u32 = 3;
+    let hash = request_hash(operation, request);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let result = run_once(
+            pool,
+            owner_id,
+            key,
+            operation,
+            &hash,
+            conversation_id,
+            op.clone(),
+        )
+        .await;
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if attempt >= ATTEMPTS || !error.is_transient() {
+                    return Err(error);
+                }
+                tokio::time::sleep(crate::db::retry_delay(Uuid::now_v7(), attempt)).await;
+            }
+        }
+    }
+}
+
+async fn run_once<T, E, F>(
+    pool: &PgPool,
+    owner_id: Uuid,
+    key: &str,
+    operation: &str,
+    hash: &[u8],
+    conversation_id: Option<Uuid>,
+    op: F,
+) -> Result<Outcome<T>, E>
+where
+    T: Serialize + DeserializeOwned,
     E: From<sqlx::Error> + From<IdempotencyConflict>,
     F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>>,
 {
-    let hash = request_hash(operation, request);
     let replay = |stored: Value| -> Result<Outcome<T>, E> {
         serde_json::from_value(stored)
             .map(|value| Outcome {
@@ -129,7 +170,7 @@ where
             })
             .map_err(|error| E::from(sqlx::Error::Decode(Box::new(error))))
     };
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin(pool).await?;
     let mut lock_hash = Sha256::new();
     lock_hash.update(b"canterlot:idempotency:");
     lock_hash.update(owner_id.as_bytes());
@@ -140,7 +181,7 @@ where
         .bind(lock_id)
         .execute(&mut *tx)
         .await?;
-    match lookup(&mut tx, owner_id, key, operation, &hash).await {
+    match lookup(&mut tx, owner_id, key, operation, hash).await {
         Ok(Begin::Replay(stored)) => {
             tx.rollback().await?;
             return replay(stored);
@@ -174,7 +215,7 @@ where
         owner_id,
         key,
         operation,
-        &hash,
+        hash,
         &response,
         conversation_id,
     )
@@ -195,7 +236,7 @@ where
     }
     tx.rollback().await?;
     let mut conn = pool.acquire().await?;
-    match lookup(&mut conn, owner_id, key, operation, &hash).await? {
+    match lookup(&mut conn, owner_id, key, operation, hash).await? {
         Begin::Replay(stored) => replay(stored),
         Begin::New | Begin::Conflict => Err(IdempotencyConflict.into()),
     }

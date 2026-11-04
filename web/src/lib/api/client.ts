@@ -336,6 +336,26 @@ export function deleteScheduled(
   );
 }
 
+export function deleteAlarm(
+  conversationId: string,
+  alarmId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<
+      operations["delete__api_v1_conversations__id__alarms__alarm_id_"]
+    >
+  >
+> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/alarms/${id(alarmId)}`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function createAttachment(
   body: Body<operations["post__api_v1_attachments"]>,
   key: string,
@@ -746,6 +766,42 @@ export function setConversationGroups(
     "PUT",
     `/api/v1/conversations/${id(conversationId)}/groups`,
     body,
+    keyed(key, opts),
+  );
+}
+
+export function pinConversationInGroup(
+  conversationId: string,
+  groupId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["put__api_v1_conversations__id__groups__group_id__pin"]>
+  >
+> {
+  return http(
+    "PUT",
+    `/api/v1/conversations/${id(conversationId)}/groups/${id(groupId)}/pin`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function unpinConversationInGroup(
+  conversationId: string,
+  groupId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["delete__api_v1_conversations__id__groups__group_id__pin"]>
+  >
+> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/groups/${id(groupId)}/pin`,
+    undefined,
     keyed(key, opts),
   );
 }

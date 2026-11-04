@@ -124,9 +124,11 @@ impl Fx {
             context: ToolContext {
                 pool: pool.clone(),
                 config: Arc::new(config),
+                limits: Default::default(),
                 settle: SettleConfig {
                     idle_quiet: std::time::Duration::from_secs(5),
                 },
+                alarms_enabled: true,
                 dispatcher: None,
                 registry: registry.clone(),
                 shutdown: tokio_util::sync::CancellationToken::new(),
@@ -1256,6 +1258,26 @@ async fn isolated_parent_spawns_from_its_source_and_branch(pool: PgPool) {
     assert_eq!(start["worktree"]["source_workdir"], "/tmp/w");
     assert_eq!(start["worktree"]["base"], "canterlot/aaaa");
     assert_eq!(code(f.spawn(inside()).await), Code::WorkdirNotAllowed);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn workdir_error_in_a_worktree_names_both_choices(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query(
+        "update conversations set workdir='/data/worktrees/x',
+           worktree='{\"source_workdir\":\"/tmp/w\",\"branch\":\"canterlot/aaaa\",\"path\":\"/data/worktrees/x\",\"base\":\"HEAD\",\"state\":\"active\"}'
+         where id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let error = f.spawn(inside()).await.unwrap_err();
+    assert_eq!(error.code, Code::WorkdirNotAllowed);
+    assert_eq!(
+        error.message,
+        "This session works in a git worktree: pass \"isolated\": true for a new worktree, or \"workdir\": \"/data/worktrees/x\" to share it"
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

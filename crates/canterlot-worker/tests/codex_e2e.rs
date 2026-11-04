@@ -205,24 +205,55 @@ impl Fake {
     }
 
     fn with_deadline(evidence: Vec<String>, transmit_deadline: Duration) -> Self {
+        Self::build(evidence, transmit_deadline, None)
+    }
+
+    /// Короткая шкала рукопожатия: иначе проверка переноса sqlite ждала бы 20 с.
+    fn with_timing(
+        evidence: Vec<String>,
+        handshake_step: Duration,
+        backfill_timeout: Duration,
+    ) -> Self {
+        Self::build(evidence, WAIT, Some((handshake_step, backfill_timeout)))
+    }
+
+    fn build(
+        evidence: Vec<String>,
+        transmit_deadline: Duration,
+        timing: Option<(Duration, Duration)>,
+    ) -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-codex");
         fake_exec::write_executable(&exe, REPLAY, 0o700);
         write_lines(&dir, "evidence.jsonl", &evidence);
         std::os::unix::fs::symlink(repo_fixtures(), dir.path().join("fixtures")).unwrap();
-        let context = AdapterContext {
-            transmit_deadline,
-            ready_deadline: transmit_deadline,
-            exec_dir: dir.path().join("exec"),
-            claude_code: None,
-            codex: Some(CodexConfig {
-                executable: exe,
-                ..Default::default()
-            }),
-            opencode: None,
-            antigravity: None,
+        let exec_dir = dir.path().join("exec");
+        let codex = CodexConfig {
+            executable: exe,
+            ..Default::default()
         };
-        let adapter = adapter::registry_with("codex", &context).expect("Codex registered");
+        let adapter: Box<dyn Adapter> = match timing {
+            Some((handshake_step, backfill_timeout)) => Box::new(
+                canterlot_worker::adapter::codex::CodexAdapter::new(
+                    codex,
+                    exec_dir,
+                    transmit_deadline,
+                )
+                .with_handshake_timing(handshake_step, backfill_timeout),
+            ),
+            None => {
+                let context = AdapterContext {
+                    transmit_deadline,
+                    ready_deadline: transmit_deadline,
+                    exec_dir,
+                    claude_code: None,
+                    codex: Some(codex),
+                    opencode: None,
+                    antigravity: None,
+                };
+                adapter::registry_with("codex", &context).expect("Codex registered")
+            }
+        };
         let spec = StartSpec {
             execution_id: Uuid::now_v7(),
             generation: 1,
@@ -2009,6 +2040,77 @@ async fn start_fails_when_app_server_exits_at_once() {
         Err(AdapterError::StartFailed(reason)) => assert_eq!(reason, "app_server_failed"),
         other => panic!("expected app_server_failed, got {other:?}"),
     }
+}
+
+// Codex 0.164 переносит состояние в sqlite при первом запуске на доме: app-server
+// пишет об этом в stderr и не отвечает на initialize. Ждать дольше обычного шага
+// обязательно, иначе перенос убивают на середине.
+#[tokio::test]
+async fn start_waits_out_state_db_backfill_reported_on_stderr() {
+    let standard = handshake("thread-mini");
+    let mut lines = vec![
+        standard[0].clone(),
+        w(
+            "err",
+            json!({"msg": "state db backfill is running at /h; waiting up to 30s before retrying startup initialization"}),
+        ),
+        w("sleep", json!(3_000)),
+        standard[1].clone(),
+    ];
+    lines.extend(standard.into_iter().skip(2));
+    let mut fake = Fake::with_timing(lines, Duration::from_secs(2), Duration::from_secs(20));
+    assert_eq!(fake.start().await, "thread-mini");
+    match fake.event().await {
+        AdapterEvent::Diagnostic { kind, .. } => assert_eq!(kind, "codex_state_backfill"),
+        other => panic!("expected backfill diagnostic, got {other:?}"),
+    }
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn start_reports_stuck_state_db_backfill() {
+    use canterlot_worker::adapter::AdapterError;
+    let standard = handshake("thread-mini");
+    let lines = vec![
+        standard[0].clone(),
+        w(
+            "err",
+            json!({"msg": "state db backfill is running at /h; waiting up to 30s before retrying startup initialization"}),
+        ),
+        w(
+            "err",
+            json!({"msg": "Error: failed to initialize sqlite state runtime: timed out waiting for state db backfill for /h (status: running)"}),
+        ),
+        w("out", json!("@exit")),
+    ];
+    let mut fake = Fake::with_timing(lines, Duration::from_secs(2), Duration::from_secs(20));
+    match tokio::time::timeout(WAIT, fake.adapter.start(&fake.spec, &fake.group))
+        .await
+        .unwrap()
+    {
+        Err(AdapterError::StartFailed(reason)) => assert_eq!(reason, "codex_state_backfill_stuck"),
+        other => panic!("expected codex_state_backfill_stuck, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn start_fails_at_normal_step_without_backfill() {
+    use canterlot_worker::adapter::AdapterError;
+    let standard = handshake("thread-mini");
+    let mut fake = Fake::with_timing(
+        vec![standard[0].clone()],
+        Duration::from_secs(2),
+        Duration::from_secs(20),
+    );
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(WAIT, fake.adapter.start(&fake.spec, &fake.group))
+        .await
+        .unwrap()
+    {
+        Err(AdapterError::StartFailed(reason)) => assert_eq!(reason, "app_server_failed"),
+        other => panic!("expected app_server_failed, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(10));
 }
 
 #[tokio::test]

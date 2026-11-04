@@ -18,7 +18,7 @@ use canterlot_hub::{
     scheduler::Scheduler,
     session_tools::{
         settle::{self, SettleConfig, SettleFacts, Settled},
-        subs,
+        subs, summary,
     },
     testkit,
 };
@@ -653,6 +653,137 @@ async fn cpu_busy_generation_never_fires_a_stall(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn live_tool_descendants_never_fire_a_stall(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    let phase_at = now - TimeDelta::hours(2);
+    sqlx::query(
+        "update executions set phase='running_tool',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Живой потомок инструмента — работа, даже если CLI сам не тратит CPU.
+    metrics_with(&pool, p.machine, execution.execution_id, now, 0, 2).await;
+    subscribe(&pool, &p).await;
+    refresh_at(&pool, p.target, now).await;
+    assert!(jobs(&pool, p.subscriber).await.is_empty());
+    let state: String = sqlx::query_scalar(
+        "select activity_state from conversation_derived where conversation_id=$1",
+    )
+    .bind(p.target)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "working");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stale_metrics_never_fire_a_stall(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    let phase_at = now - TimeDelta::hours(2);
+    sqlx::query(
+        "update executions set phase='generating',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Снимок старше `metrics_stale_after`: живость неизвестна, значит не утверждаем простой.
+    metrics_with(
+        &pool,
+        p.machine,
+        execution.execution_id,
+        now - TimeDelta::hours(1),
+        0,
+        0,
+    )
+    .await;
+    subscribe(&pool, &p).await;
+    refresh_at(&pool, p.target, now).await;
+    assert!(jobs(&pool, p.subscriber).await.is_empty());
+    let state: String = sqlx::query_scalar(
+        "select activity_state from conversation_derived where conversation_id=$1",
+    )
+    .bind(p.target)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "working");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn execution_cpu_above_one_core_is_accepted_and_busy(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    let phase_at = now - TimeDelta::minutes(20);
+    sqlx::query(
+        "update executions set phase='generating',phase_at=$2,last_event_at=$2 where id=$1",
+    )
+    .bind(execution.execution_id)
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
+         where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(Uuid::now_v7())
+    .bind(phase_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    metrics_with(&pool, p.machine, execution.execution_id, now, 2400, 0).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let inputs = activity::load_inputs(
+        &mut conn,
+        p.target,
+        now,
+        MachinesConfig::default().metrics_stale_after,
+    )
+    .await
+    .unwrap();
+    let process = inputs.process.expect("metric above one core is accepted");
+    assert_eq!(process.cpu_permille, 1000, "clamped only for comparison");
+    assert_eq!(activity::compute(&inputs, &thresholds()).state, S::Working);
+    subscribe(&pool, &p).await;
+    refresh_at(&pool, p.target, now).await;
+    assert!(jobs(&pool, p.subscriber).await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn stalled_is_not_repeated_when_the_state_flaps_in_the_same_phase(pool: PgPool) {
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
@@ -1059,6 +1190,220 @@ async fn wake_turn_does_not_reopen_what_the_subscriber_gave_up(pool: PgPool) {
     );
 }
 
+async fn pending_jobs(pool: &PgPool, subscriber: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "select count(*) from scheduled_jobs
+         where kind='session_task' and state='pending' and conversation_id=$1",
+    )
+    .bind(subscriber)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn child_event_after_the_idle_report_reopens_the_subscription(pool: PgPool) {
+    let p = pair(&pool).await;
+    let child = testkit::seed_conversation(&pool, p.owner, p.machine).await;
+    let now = Utc::now();
+    let execution = start(&pool, p.owner, p.target).await;
+    long_idle(&pool, p.target, now).await;
+    long_idle(&pool, child, now).await;
+    // О ждёт итог Д, Д ждёт итог своего ребёнка.
+    subscribe(&pool, &p).await;
+    let mut tx = pool.begin().await.unwrap();
+    subs::subscribe_in_tx(&mut tx, p.owner, p.target, child, 1)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    refresh_at(&pool, p.target, now).await;
+    assert_eq!(jobs(&pool, p.subscriber).await.len(), 1);
+    assert_eq!(
+        subscription(&pool, p.subscriber, p.target).await["closed_reason"],
+        "idle"
+    );
+
+    // Ребёнок осел: Д получает событие, а подписка О на Д уже закрыта прошлым idle.
+    refresh_at(&pool, child, now).await;
+    assert_eq!(pending_jobs(&pool, p.target).await, 1);
+    scheduler(&pool)
+        .tick(now + TimeDelta::seconds(10))
+        .await
+        .unwrap();
+    let inputs = delivered(&pool, p.target).await;
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].1["kind"], "event");
+    assert_eq!(inputs[0].1["from"], json!(child));
+    assert!(
+        subscription(&pool, p.subscriber, p.target).await["closed_at"].is_null(),
+        "the child event is not the end of D"
+    );
+
+    // Д продолжил работу по событию и снова осел: О слышит второй итог.
+    sqlx::query("update inputs set state='accepted' where conversation_id=$1")
+        .bind(p.target)
+        .execute(&pool)
+        .await
+        .unwrap();
+    finish_turn(&pool, &p, &execution, now + TimeDelta::seconds(15)).await;
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(30)).await;
+    assert_eq!(jobs(&pool, p.subscriber).await.len(), 2);
+    assert_eq!(
+        subscription(&pool, p.subscriber, p.target).await["closed_reason"],
+        "idle"
+    );
+
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(40)).await;
+    assert_eq!(
+        jobs(&pool, p.subscriber).await.len(),
+        2,
+        "one report per settling, not one per poll"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_message_from_the_subscriber_does_not_use_the_automation_reopen(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    reported_idle(&pool, &p, now).await;
+    let closed = subscription(&pool, p.subscriber, p.target).await;
+
+    submit_input(
+        &pool,
+        SubmitInput {
+            owner_id: p.owner,
+            conversation_id: p.target,
+            idempotency_key: "from-subscriber".into(),
+            content: vec![ContentBlock::Text {
+                text: "continue".into(),
+            }],
+            received_at: now,
+            correlation_id: Uuid::now_v7(),
+            origin: Some(json!({
+                "kind": "message",
+                "from": p.subscriber,
+                "chain_depth": 0,
+                "sha256": "00",
+            })),
+        },
+    )
+    .await
+    .unwrap();
+    let after_input = subscription(&pool, p.subscriber, p.target).await;
+    assert_eq!(
+        after_input["closed_reason"], "idle",
+        "session_send re-arms itself in its own transaction"
+    );
+    assert_eq!(after_input["armed_at"], closed["armed_at"]);
+
+    // Так делает session_send: взводит подписку заново с новым окном.
+    subscribe(&pool, &p).await;
+    let armed = subscription(&pool, p.subscriber, p.target).await;
+    assert_eq!(armed["closed_at"], Value::Null);
+    assert_eq!(armed["last_fingerprint"], Value::Null);
+    assert_ne!(armed["armed_at"], closed["armed_at"]);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn automation_input_does_not_reopen_unsubscribed_or_accepted(pool: PgPool) {
+    let a = pair(&pool).await;
+    let b = pair(&pool).await;
+    let now = Utc::now();
+    reported_idle(&pool, &a, now).await;
+    let mut tx = pool.begin().await.unwrap();
+    subs::unsubscribe_in_tx(&mut tx, a.subscriber, a.target, "unsubscribed")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    reported_idle(&pool, &b, now).await;
+    let mut tx = pool.begin().await.unwrap();
+    let others = subs::close_for_accept_in_tx(&mut tx, b.target, Some(b.subscriber), "accepted")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(others.is_empty());
+
+    for (p, key) in [(&a, "alarm-a"), (&b, "alarm-b")] {
+        submit_input(
+            &pool,
+            SubmitInput {
+                owner_id: p.owner,
+                conversation_id: p.target,
+                idempotency_key: key.into(),
+                content: vec![ContentBlock::Text {
+                    text: "[canterlot] Alarm.".into(),
+                }],
+                received_at: now,
+                correlation_id: Uuid::now_v7(),
+                origin: Some(json!({"kind": "alarm", "chain_depth": 0})),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(
+        subscription(&pool, a.subscriber, a.target).await["closed_reason"],
+        "unsubscribed"
+    );
+    assert_eq!(
+        subscription(&pool, b.subscriber, b.target).await["closed_reason"],
+        "accepted"
+    );
+    assert_eq!(pending_jobs(&pool, a.subscriber).await, 0);
+    assert_eq!(pending_jobs(&pool, b.subscriber).await, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn idle_summary_names_armed_alarms_without_their_notes(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    let first = now + TimeDelta::hours(2);
+    let second = now + TimeDelta::hours(5);
+    for (key, fire_at) in [("gate", first), ("disk", second)] {
+        sqlx::query(
+            "insert into alarms(id,owner_id,conversation_id,created_by,key,kind,fire_at,note,call_id)
+             values($1,$2,$3,'agent',$4,'at',$5,'secret alarm note',$6)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(p.owner)
+        .bind(p.target)
+        .bind(key)
+        .bind(fire_at)
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let mut conn = pool.acquire().await.unwrap();
+    let summary = summary::build(&mut conn, p.owner, p.target, "idle", Some(now))
+        .await
+        .unwrap()
+        .unwrap();
+    let text = summary::render(&summary);
+    assert!(
+        text.contains(&format!(
+            "Alarms: 2 armed, next at {}",
+            first.format("%Y-%m-%d %H:%M UTC")
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("secret alarm note"), "{text}");
+
+    sqlx::query("update alarms set state='cancelled' where conversation_id=$1")
+        .bind(p.target)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let summary = summary::build(&mut conn, p.owner, p.target, "idle", Some(now))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!summary::render(&summary).contains("Alarms:"));
+}
+
 async fn delete(pool: &PgPool, p: &Pair, id: Uuid, key: &str) -> Result<(), deletion::DeleteError> {
     let directory = tempfile::tempdir().unwrap();
     let (_, blobs) = testkit::test_blob_store(directory.path());
@@ -1226,8 +1571,9 @@ async fn queue_full_keeps_the_event_for_a_day(pool: PgPool) {
     assert_eq!((state.as_str(), attempts, failures), ("pending", 6, 0));
     assert_eq!(result, Some(json!({"error":"queue_full"})));
 
-    // Другие отказы считаются по-прежнему: терпение относится только к полной очереди.
-    sqlx::query("update scheduled_jobs set created_at=$1 where kind='session_task'")
+    // Другие отказы считаются по-прежнему: терпение относится только к полной очереди
+    // и отсчитывается от первой блокировки, а не от создания задания.
+    sqlx::query("update scheduled_jobs set blocked_since=$1 where kind='session_task'")
         .bind(at - TimeDelta::hours(24) + TimeDelta::seconds(1))
         .execute(&pool)
         .await

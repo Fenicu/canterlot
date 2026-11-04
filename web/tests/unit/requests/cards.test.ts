@@ -88,17 +88,35 @@ describe('PWA Request Cards', () => {
     });
   });
 
-  function permissionText(payload: unknown): string {
+  function permissionText(payload: unknown, props: Record<string, unknown> = {}): string {
     const target = document.createElement('div');
     document.body.appendChild(target);
     const request: RequestItem = { id: 'req', conversationId: 'conv-1', kind: 'permission', state: 'open', payload };
-    const instance = mount(PermissionCard, { target, props: { request, onDecision: vi.fn() } });
+    const instance = mount(PermissionCard, { target, props: { request, onDecision: vi.fn(), ...props } });
     flushSync();
     const text = target.textContent ?? '';
     void unmount(instance);
     target.remove();
     return text;
   }
+
+  describe('bypass_note', () => {
+    const NOTE = 'Claude Code спрашивает про удаление, которое не может проверить, даже без подтверждений';
+    const PAYLOAD = { tool_name: 'Bash', input: { command: 'rm -rf /tmp/build' } };
+
+    it('explains_the_unchecked_deletion_for_claude_code_in_bypass', () => {
+      expect(permissionText(PAYLOAD, { harnessId: 'claude_code', permissionMode: 'bypass' })).toContain(NOTE);
+    });
+
+    it.each([
+      ['claude_code', 'ask'],
+      ['claude_code', 'owner'],
+      ['codex', 'bypass'],
+      ['', '']
+    ])('stays_quiet_for_%s_in_%s', (harnessId, permissionMode) => {
+      expect(permissionText(PAYLOAD, { harnessId, permissionMode })).not.toContain(NOTE);
+    });
+  });
 
   it('not_applied_card_says_the_answer_did_not_reach_the_agent', () => {
     const cases: Array<[string, string]> = [

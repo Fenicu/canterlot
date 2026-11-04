@@ -19,6 +19,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(create, list))
         .routes(routes!(get, update, remove))
         .routes(routes!(set_groups))
+        .routes(routes!(pin_in_group, unpin_in_group))
         .routes(routes!(set_crunch))
         .routes(routes!(read))
         .routes(routes!(decision))
@@ -915,6 +916,29 @@ async fn set_groups(
     Ok(Json(
         conversations::set_groups(&s.pool, o.owner_id, id, &key, b.group_ids, c).await?,
     ))
+}
+#[utoipa::path(put,path="/api/v1/conversations/{id}/groups/{group_id}/pin",tag="conversations",params(("id"=Uuid,Path),("group_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Сессия закреплена в группе",body=ConversationDetail),(status=404,description="not_found или group_not_found",body=super::error::ErrorEnvelope)))]
+async fn pin_in_group(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, group_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<ConversationDetail>, ApiError> {
+    Ok(Json(
+        conversations::set_group_pin(&s.pool, o.owner_id, id, group_id, true, &key, c).await?,
+    ))
+}
+#[utoipa::path(delete,path="/api/v1/conversations/{id}/groups/{group_id}/pin",tag="conversations",params(("id"=Uuid,Path),("group_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=204,description="Сессия откреплена в группе"),(status=404,description="not_found или group_not_found",body=super::error::ErrorEnvelope)))]
+async fn unpin_in_group(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, group_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<StatusCode, ApiError> {
+    conversations::set_group_pin(&s.pool, o.owner_id, id, group_id, false, &key, c).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 #[utoipa::path(put,path="/api/v1/conversations/{id}/crunch",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=CrunchSetting,responses((status=200,description="Кранч изменён",body=ConversationDetail)))]
 async fn set_crunch(

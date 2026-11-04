@@ -109,6 +109,11 @@ pub async fn discover(cfg: &CodexConfig) -> Result<CodexCatalog, DiscoverError> 
 }
 
 const HANDSHAKE_STEP: Duration = Duration::from_secs(20);
+/// Codex переносит состояние в sqlite при первом запуске на доме и не отвечает
+/// на `initialize`, пока перенос идёт. Столько ждём, увидев об этом строку в stderr.
+const BACKFILL_TIMEOUT: Duration = Duration::from_secs(600);
+const BACKFILL_REPORT: &str = "state db backfill is running";
+const BACKFILL_STUCK: &str = "timed out waiting for state db backfill";
 const CRUNCH_PROBE: Duration = Duration::from_secs(15);
 /// Сколько кнопочное сжатие ждёт пару `contextCompaction`, прежде чем признать отказ.
 const COMPACT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -119,6 +124,10 @@ pub struct CodexAdapter {
     cfg: CodexConfig,
     exec_dir: PathBuf,
     deadline: Duration,
+    /// Срок шага рукопожатия; в тестах короче, чтобы не ждать 20 с.
+    handshake_step: Duration,
+    /// Сколько ждать `initialize`, пока app-server переносит состояние в sqlite.
+    backfill_timeout: Duration,
     proc: Option<AppServerProcess>,
     rpc: RpcClient,
     translator: Option<Translator>,
@@ -207,6 +216,8 @@ impl CodexAdapter {
             cfg,
             exec_dir,
             deadline,
+            handshake_step: HANDSHAKE_STEP,
+            backfill_timeout: BACKFILL_TIMEOUT,
             proc: None,
             rpc: RpcClient::new(),
             translator: None,
@@ -253,6 +264,17 @@ impl CodexAdapter {
             relay_executable: None,
             crunch: None,
         }
+    }
+
+    /// Сроки рукопожатия для тестов: обычный шаг и ожидание переноса sqlite.
+    pub fn with_handshake_timing(
+        mut self,
+        handshake_step: Duration,
+        backfill_timeout: Duration,
+    ) -> Self {
+        self.handshake_step = handshake_step;
+        self.backfill_timeout = backfill_timeout;
+        self
     }
 
     pub fn with_relay_executable(mut self, executable: PathBuf) -> Self {
@@ -882,6 +904,59 @@ impl CodexAdapter {
         }
     }
 
+    /// `initialize` ждёт дольше обычного шага, пока app-server переносит состояние
+    /// в sqlite: в это время он не читает запросы, а убитый перенос оставляет
+    /// в базе статус `running`, после которого Codex больше не запускается.
+    async fn wait_initialize(&mut self, id: i64) -> Option<RpcResult> {
+        let mut until = Instant::now() + self.handshake_step;
+        let mut waiting_backfill = false;
+        loop {
+            if let Some(result) = self.responses.remove(&id) {
+                return Some(result);
+            }
+            if self.eof || self.exited {
+                return None;
+            }
+            if !waiting_backfill && self.stderr_text().contains(BACKFILL_REPORT) {
+                waiting_backfill = true;
+                until = Instant::now() + self.backfill_timeout;
+                self.diagnostic("codex_state_backfill", false);
+            }
+            if timeout_at(until, self.flush_writes()).await.is_err()
+                || timeout_at(until, self.pump_once()).await.is_err()
+            {
+                self.rpc.forget(id);
+                return self.responses.remove(&id);
+            }
+        }
+    }
+
+    fn stderr_text(&self) -> String {
+        self.proc
+            .as_ref()
+            .map(|proc| String::from_utf8_lossy(&proc.stderr_tail()).into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Отказ рукопожатия: отдельно узнаём застрявший перенос sqlite, чтобы владелец
+    /// получил причину и действие, а не общее `app_server_failed`.
+    async fn start_failure(&mut self, fallback: &'static str) -> AdapterError {
+        let mut tail = self.stderr_text();
+        // Читатель stderr — отдельная задача: после выхода процесса даём ей дочитать.
+        for _ in 0..50 {
+            if tail.contains(BACKFILL_STUCK) || !(self.eof || self.exited) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            tail = self.stderr_text();
+        }
+        if tail.contains(BACKFILL_STUCK) {
+            AdapterError::StartFailed("codex_state_backfill_stuck")
+        } else {
+            AdapterError::StartFailed(fallback)
+        }
+    }
+
     // Строка уходит в буфер процесса синхронно, до первой точки ожидания:
     // отмена посреди записи её не теряет и не рвёт (дописывается следующим вызовом).
     async fn flush_writes(&mut self) {
@@ -920,26 +995,22 @@ impl CodexAdapter {
             .rpc
             .request("initialize", thread::initialize_params(worker_version));
         if !self.write_request(message).await {
-            return Err(AdapterError::StartFailed("app_server_failed"));
+            return Err(self.start_failure("app_server_failed").await);
         }
-        if self
-            .wait_response(id, Instant::now() + HANDSHAKE_STEP)
-            .await
-            .is_none()
-        {
-            return Err(AdapterError::StartFailed("app_server_failed"));
+        if self.wait_initialize(id).await.is_none() {
+            return Err(self.start_failure("app_server_failed").await);
         }
         if !self
             .write_request(RpcClient::notification("initialized", json!({})))
             .await
         {
-            return Err(AdapterError::StartFailed("app_server_failed"));
+            return Err(self.start_failure("app_server_failed").await);
         }
         let account = self
             .rpc_round(
                 "account/read",
                 thread::account_read_params(),
-                HANDSHAKE_STEP,
+                self.handshake_step,
             )
             .await
             .ok_or(AdapterError::StartFailed("app_server_failed"))?
@@ -949,7 +1020,7 @@ impl CodexAdapter {
             .rpc_round(
                 "config/read",
                 thread::config_read_params(&self.workdir),
-                HANDSHAKE_STEP,
+                self.handshake_step,
             )
             .await
             .ok_or(AdapterError::StartFailed("app_server_failed"))?
@@ -970,7 +1041,7 @@ impl CodexAdapter {
                 .rpc_round(
                     "model/list",
                     input::model_list_params(cursor.as_deref()),
-                    HANDSHAKE_STEP,
+                    self.handshake_step,
                 )
                 .await
                 .ok_or(AdapterError::StartFailed("model_list_failed"))?
@@ -1016,7 +1087,7 @@ impl CodexAdapter {
                         &spec.workdir,
                         &instructions,
                     ),
-                    HANDSHAKE_STEP,
+                    self.handshake_step,
                 )
                 .await
                 .ok_or(AdapterError::StartFailed("app_server_failed"))?
@@ -1118,7 +1189,7 @@ impl CodexAdapter {
             launch.dev,
         );
         let result = self
-            .rpc_round("thread/resume", params, HANDSHAKE_STEP)
+            .rpc_round("thread/resume", params, self.handshake_step)
             .await
             .ok_or(AdapterError::StartFailed("app_server_failed"))?
             .map_err(|_| AdapterError::StartFailed("resume_failed"))?;

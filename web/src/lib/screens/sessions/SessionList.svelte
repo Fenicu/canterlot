@@ -20,7 +20,7 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { clock } from '#lib/clock.js';
   import { ticker } from '#lib/ticker.svelte.js';
-  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import { browserRuntime } from '#lib/app/browser.js';
   import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import Menu from '#lib/ui/Menu.svelte';
@@ -38,6 +38,7 @@
   import GroupManager from './GroupManager.svelte';
   import GroupTabs from './GroupTabs.svelte';
   import { buildSections, tabCounts, type Tab, type TreeNode } from './grouping';
+  import { readTab, resolveTab, writeTab } from './listTab';
   import LimitsStrip from './LimitsStrip.svelte';
   import SearchBar from './SearchBar.svelte';
   import Section from './Section.svelte';
@@ -50,7 +51,7 @@
   let collapsed = $state<string[]>([]);
   let kidsCollapsed = $state<string[]>([]);
   let kidsExpanded = $state<string[]>([]);
-  let tab = $state<Tab>({ kind: 'all' });
+  let tab = $state<Tab>(readTab());
   let query = $state('');
   let searchOpen = $state(false);
   let results = $state<ListRow[] | null>(null);
@@ -148,6 +149,12 @@
       ? (rows.find((item) => item.id === sheetId) ?? null)
       : null
   );
+  // Меню открыто с вкладки группы: закрепление относится к ней, а не к «Все».
+  const sheetGroup = $derived.by(() => {
+    if (tab.kind !== 'group') return null;
+    const id = tab.id;
+    return groups.find((group) => group.id === id) ?? null;
+  });
   const groupCounts = $derived.by(() => {
     // Делегированные сессии групп не занимают: считают только верхний уровень.
     const counts: Record<string, number> = {};
@@ -160,6 +167,16 @@
   const ready = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' || rows.length > 0 : false);
   // Строки могут прийти из памяти устройства раньше снимка, а лимиты и счёт вкладок — только со снимком.
   const synced = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' : false);
+
+  // Выбор вкладки живёт на устройстве; удалённую группу после снимка заменяет «Все».
+  $effect(() => {
+    if (!synced) return;
+    const next = resolveTab(tab, groups);
+    if (next !== tab) tab = next;
+  });
+  $effect(() => {
+    writeTab(tab);
+  });
 
   // Меню принадлежит строке: смена вкладки, поиска или экрана закрывает его, как и уход строки из списка.
   // Закрытие листа подтверждения меняет запись истории, а не экран.
@@ -328,7 +345,7 @@
           {...section}
           now={now}
           current={openRow?.id ?? ''}
-          heading={tab.kind === 'all' && !results}
+          heading={!results && (tab.kind === 'all' || (tab.kind === 'group' && sections.some((section) => section.id.startsWith('pinned:'))))}
           ontoggle={toggle}
           ontoggleKids={toggleKids}
           onopen={openSheet}
@@ -340,6 +357,7 @@
     {#key sheetItem.id}<SessionSheet
       item={sheetItem}
       groups={groups}
+      group={sheetGroup}
       machine={runtime?.machines.items.get(sheetItem.machine.id) ?? null}
       anchor={sheetRow.bottom}
       anchorTop={sheetRow.top}

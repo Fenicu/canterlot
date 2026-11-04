@@ -22,6 +22,9 @@ struct EventJob {
     chain_depth: i32,
     #[serde(default)]
     armed_at: Option<DateTime<Utc>>,
+    /// Граница отпущенного пачкой итога: у старых заданий её нет.
+    #[serde(default)]
+    boundary: Option<summary::Boundary>,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +32,45 @@ struct NoteJob {
     text: String,
     #[serde(default)]
     origin: Option<Value>,
+}
+
+/// Действие задания `session_task`. Разбор исчерпывающий: новое действие обязано
+/// получить обработчик в `run_in_tx` и `abandon_in_tx`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    Event,
+    Note,
+    Spawn,
+    SpawnClose,
+    Cleanup,
+    AlarmDeliver,
+    AlarmProbe,
+}
+
+impl Action {
+    #[cfg(test)]
+    const ALL: [Self; 7] = [
+        Self::Event,
+        Self::Note,
+        Self::Spawn,
+        Self::SpawnClose,
+        Self::Cleanup,
+        Self::AlarmDeliver,
+        Self::AlarmProbe,
+    ];
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "event" => Some(Self::Event),
+            "note" => Some(Self::Note),
+            "spawn" => Some(Self::Spawn),
+            "spawn_close" => Some(Self::SpawnClose),
+            "cleanup" => Some(Self::Cleanup),
+            "alarm_deliver" => Some(Self::AlarmDeliver),
+            "alarm_probe" => Some(Self::AlarmProbe),
+            _ => None,
+        }
+    }
 }
 
 pub async fn run_in_tx(
@@ -41,8 +83,14 @@ pub async fn run_in_tx(
     let Some(subscriber) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
     };
-    match job.payload.get("action").and_then(Value::as_str) {
-        Some("event") => {
+    let Some(name) = job.payload.get("action").and_then(Value::as_str) else {
+        return Ok(JobOutcome::Cancelled("invalid_payload"));
+    };
+    let Some(action) = Action::parse(name) else {
+        return Ok(JobOutcome::Cancelled("unsupported"));
+    };
+    match action {
+        Action::Event => {
             let Ok(event) = serde_json::from_value::<EventJob>(job.payload.clone()) else {
                 return Ok(JobOutcome::Cancelled("invalid_payload"));
             };
@@ -58,7 +106,7 @@ pub async fn run_in_tx(
             )
             .await
         }
-        Some("note") => {
+        Action::Note => {
             let Ok(note) = serde_json::from_value::<NoteJob>(job.payload.clone()) else {
                 return Ok(JobOutcome::Cancelled("invalid_payload"));
             };
@@ -73,13 +121,20 @@ pub async fn run_in_tx(
             )
             .await
         }
-        Some("spawn") => spawn::run_job(conn, job, subscriber, registry, now, correlation_id).await,
-        Some("spawn_close") => spawn::close_job(conn, job, subscriber, correlation_id).await,
-        Some("cleanup") => {
+        Action::Spawn => spawn::run_job(conn, job, subscriber, registry, now, correlation_id).await,
+        Action::SpawnClose => spawn::close_job(conn, job, subscriber, correlation_id).await,
+        Action::Cleanup => {
             Ok(accept::cleanup_job(conn, job, subscriber, now, correlation_id).await?)
         }
-        Some(_) => Ok(JobOutcome::Cancelled("unsupported")),
-        None => Ok(JobOutcome::Cancelled("invalid_payload")),
+        Action::AlarmDeliver => {
+            crate::session_tools::alarms::deliver_job_in_tx(conn, job, now, correlation_id).await
+        }
+        Action::AlarmProbe => {
+            Ok(
+                crate::session_tools::alarms::probe_job_in_tx(conn, job, now, correlation_id)
+                    .await?,
+            )
+        }
     }
 }
 
@@ -91,7 +146,15 @@ async fn event_message(
 ) -> Result<(String, Value), sqlx::Error> {
     let id = event.target_id;
     let depth = event.chain_depth;
-    let summary = summary::build(conn, owner_id, id, &event.state, event.armed_at).await?;
+    let summary = summary::build_bounded(
+        conn,
+        owner_id,
+        id,
+        &event.state,
+        event.armed_at,
+        event.boundary.as_ref(),
+    )
+    .await?;
     Ok(match summary {
         Some(summary) => {
             let event = summary.hub_event();
@@ -142,27 +205,97 @@ async fn deliver(
 
 /// Задание исчерпало попытки или признано негодным: то, что оно должно было закрыть, закрывается
 /// здесь, в той же транзакции. Остальным видам задания закрывать нечего.
+/// `true` значит, что закрытие отложено чужой блокировкой и задание надо повторить позже.
 pub async fn abandon_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     conversation_id: Option<Uuid>,
     payload: &Value,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let Some(conversation) = conversation_id else {
-        return Ok(());
+        return Ok(false);
     };
     let correlation_id = Uuid::now_v7();
-    match payload.get("action").and_then(Value::as_str) {
-        Some("spawn") => {
-            spawn::abandon_spawn_in_tx(conn, conversation, payload, now, correlation_id).await
+    let Some(name) = payload.get("action").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let Some(action) = Action::parse(name) else {
+        return Ok(false);
+    };
+    match action {
+        Action::Event | Action::Note => Ok(false),
+        Action::Spawn => {
+            spawn::abandon_spawn_in_tx(conn, conversation, payload, now, correlation_id)
+                .await
+                .map(|_| false)
         }
-        Some("spawn_close") => {
-            spawn::abandon_close_in_tx(conn, conversation, payload, correlation_id).await
+        Action::SpawnClose => {
+            spawn::abandon_close_in_tx(conn, conversation, payload, correlation_id)
+                .await
+                .map(|_| false)
         }
-        Some("cleanup") => {
-            accept::abandon_cleanup_in_tx(conn, owner_id, conversation, now, correlation_id).await
+        Action::Cleanup => {
+            accept::abandon_cleanup_in_tx(conn, owner_id, conversation, now, correlation_id)
+                .await
+                .map(|_| false)
         }
-        _ => Ok(()),
+        Action::AlarmDeliver => match crate::session_tools::alarms::abandon_deliver_in_tx(
+            conn,
+            conversation,
+            payload,
+            now,
+        )
+        .await?
+        {
+            crate::session_tools::alarms::Finalization::Finalized => Ok(false),
+            crate::session_tools::alarms::Finalization::Deferred => Ok(true),
+        },
+        // Опрос лимитов ничего не удерживает: срок будильника закроет задание `alarm`.
+        Action::AlarmProbe => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Разбор действия исчерпывающий в `abandon_in_tx`: новое действие без обработчика
+    /// не собирается. Тест перечисляет те же варианты без `_`, чтобы это заметить.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn every_action_kind_has_an_abandon_handler(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let seed = crate::testkit::seed(&pool).await;
+        let mut conn = pool.acquire().await?;
+        for action in Action::ALL {
+            let payload = match action {
+                Action::Event => json!({"action": "event"}),
+                Action::Note => json!({"action": "note"}),
+                Action::Spawn => json!({"action": "spawn", "request_id": Uuid::now_v7()}),
+                Action::SpawnClose => json!({
+                    "action": "spawn_close",
+                    "request_id": Uuid::now_v7(),
+                    "state": "decision_applied",
+                    "reason": "job_failed",
+                }),
+                Action::Cleanup => json!({"action": "cleanup"}),
+                Action::AlarmDeliver => {
+                    json!({"action": "alarm_deliver", "alarm_id": Uuid::now_v7()})
+                }
+                Action::AlarmProbe => {
+                    json!({"action": "alarm_probe", "alarm_id": Uuid::now_v7()})
+                }
+            };
+            abandon_in_tx(
+                &mut conn,
+                seed.owner_id,
+                Some(seed.conversation_id),
+                &payload,
+                Utc::now(),
+            )
+            .await?;
+        }
+        Ok(())
     }
 }

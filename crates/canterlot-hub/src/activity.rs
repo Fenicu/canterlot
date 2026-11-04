@@ -753,19 +753,32 @@ async fn evaluate_subscriptions(
             .as_ref()
             .and_then(|execution| execution.phase_at),
     };
-    subs::evaluate_in_tx(
+    let config = SettleConfig::from(thresholds);
+    let subscriptions = subs::evaluate_in_tx(
         conn,
         conversation_id,
         activity,
         &inputs.queue,
         &facts,
-        &SettleConfig::from(thresholds),
+        &config,
     )
-    .await
+    .await?;
+    let alarms = crate::session_tools::alarms::evaluate_session_in_tx(
+        conn,
+        conversation_id,
+        activity,
+        &inputs.queue,
+        &facts,
+        &config,
+        inputs.now,
+        Uuid::now_v7(),
+    )
+    .await?;
+    Ok(subscriptions || alarms)
 }
 
 async fn sweep(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed')) order by c.id").fetch_all(pool).await
+    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) order by c.id").fetch_all(pool).await
 }
 
 pub async fn run(

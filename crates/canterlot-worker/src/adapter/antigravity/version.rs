@@ -118,6 +118,8 @@ mod tests {
     fn questions_need_1_5_0() {
         assert!(!supports_questions(&CliVersion::Verified("1.4.12".into())));
         assert!(supports_questions(&CliVersion::Verified("1.5.0".into())));
-        assert!(supports_questions(&CliVersion::UntestedNewer("1.5.1".into())));
+        assert!(supports_questions(&CliVersion::UntestedNewer(
+            "1.5.1".into()
+        )));
     }
 }

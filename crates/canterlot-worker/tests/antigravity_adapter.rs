@@ -2399,10 +2399,11 @@ async fn ask_question_holds_the_turn_and_the_answer_prompt_completes_it() {
         finished(&events).is_empty(),
         "the logical turn stays open while the question card is open"
     );
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        AdapterEvent::RequestClosed { .. }
-    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::RequestClosed { .. }))
+    );
     assert!(matches!(
         bench
             .adapter
@@ -2783,10 +2784,11 @@ async fn an_mcp_tool_call_keeps_its_full_name_and_raw_input() {
         event,
         AdapterEvent::BlockFinal { text, .. } if text.contains("pong-7391")
     )));
-    assert!(!events.iter().any(|event| matches!(
-        event,
-        AdapterEvent::Diagnostic { .. }
-    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Diagnostic { .. }))
+    );
     assert_eq!(finished(&events), vec![input.command_id]);
     bench.close().await;
 }

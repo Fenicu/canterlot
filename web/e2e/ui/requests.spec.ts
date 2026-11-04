@@ -11,6 +11,8 @@ async function bootChat(
   opts?: {
     setupApi?: (api: FakeHubApi) => void;
     seed?: (api: FakeHubApi) => string;
+    harnessId?: string;
+    permissionMode?: string;
   }
 ) {
   const hub = new FakeHub();
@@ -46,11 +48,11 @@ async function bootChat(
 
   const detail = api.details.get(id);
   if (detail) {
-    detail.harness = { id: 'claude', title: 'Claude Code', provider: 'claude' };
+    detail.harness = { id: opts?.harnessId ?? 'claude', title: 'Claude Code', provider: 'claude' };
     detail.machine = { id: 'workstation', name: 'workstation' };
     detail.model = 'opus-5.5';
     detail.effort = detail.effort || 'medium';
-    detail.permission_mode = detail.permission_mode || 'owner';
+    detail.permission_mode = opts?.permissionMode ?? (detail.permission_mode || 'owner');
   }
 
   await installChatRoutes(page, hub, api, OWNER);
@@ -817,5 +819,39 @@ test.describe('E2E Requests and Recovery', () => {
     const allowBox = await allowBtn.boundingBox();
     expect(submitBox?.height).toBeGreaterThanOrEqual(36);
     expect(allowBox?.height).toBeGreaterThanOrEqual(36);
+  });
+
+  async function openPermission(page: Page, opts: { harnessId: string; permissionMode: string }) {
+    const { hub, api, id } = await bootChat(page, opts);
+    hub.append(`conversation:${id}`, {
+      kind: 'request_opened',
+      conversation_id: id,
+      payload: {
+        request_id: api.id(),
+        kind: 'permission',
+        payload: { tool_name: 'Bash', input: { command: 'rm -rf /tmp/build' } }
+      }
+    });
+    hub.flush();
+    const card = page.locator('.permission-card');
+    await expect(card).toBeVisible();
+    return card;
+  }
+
+  const BYPASS_NOTE = 'Claude Code спрашивает про удаление, которое не может проверить, даже без подтверждений';
+
+  test('bypass_permission_card_explains_the_unchecked_deletion_of_claude_code', async ({ page }) => {
+    const card = await openPermission(page, { harnessId: 'claude_code', permissionMode: 'bypass' });
+    await expect(card.getByText(BYPASS_NOTE)).toBeVisible();
+  });
+
+  test('permission_card_stays_quiet_for_claude_code_in_ask', async ({ page }) => {
+    const card = await openPermission(page, { harnessId: 'claude_code', permissionMode: 'ask' });
+    await expect(card.getByText(BYPASS_NOTE)).toHaveCount(0);
+  });
+
+  test('permission_card_stays_quiet_for_codex_in_bypass', async ({ page }) => {
+    const card = await openPermission(page, { harnessId: 'codex', permissionMode: 'bypass' });
+    await expect(card.getByText(BYPASS_NOTE)).toHaveCount(0);
   });
 });

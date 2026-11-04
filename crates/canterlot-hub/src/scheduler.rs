@@ -194,7 +194,20 @@ fn validate_refs(
 
 /// Переполненная очередь подписчика не повод потерять итог другой сессии: такое задание
 /// ждёт её разбора, пока срок не выйдет, и в счёт отказов не идёт.
-const SESSION_TASK_QUEUE_PATIENCE: TimeDelta = TimeDelta::hours(24);
+pub(crate) const SESSION_TASK_QUEUE_PATIENCE: TimeDelta = TimeDelta::hours(24);
+
+/// Сколько подряд временных сбоев базы терпим без расхода бюджета отказов.
+/// После суток непрерывных сбоев следующий считается обычным отказом.
+const TRANSIENT_PATIENCE: TimeDelta = TimeDelta::hours(24);
+const TRANSIENT_BACKOFF_MAX: i64 = 60;
+
+/// Пауза перед повтором после временного сбоя: 1 с, удваивается до 60 с.
+fn transient_backoff(count: i64) -> TimeDelta {
+    let shift = u32::try_from(count.saturating_sub(1))
+        .unwrap_or(u32::MAX)
+        .min(6);
+    TimeDelta::seconds((1_i64 << shift).min(TRANSIENT_BACKOFF_MAX))
+}
 
 #[derive(Clone, sqlx::FromRow)]
 struct JobRow {
@@ -208,7 +221,8 @@ struct JobRow {
     attempts: i32,
     failures: i32,
     result: Option<Value>,
-    created_at: DateTime<Utc>,
+    /// Начало терпения переполненной очереди: первая заблокированная попытка.
+    blocked_since: Option<DateTime<Utc>>,
 }
 impl JobRow {
     fn message(&self) -> Result<ScheduledMessage, sqlx::Error> {
@@ -487,7 +501,7 @@ impl Scheduler {
         crunch::expire_pending(&self.pool, now).await?;
         let mut report = TickReport::default();
         loop {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = crate::db::begin(&self.pool).await?;
             let job = sqlx::query_as("select * from scheduled_jobs where state='pending' and run_at<=$1 order by run_at,id for update skip locked limit 1").bind(now).fetch_optional(&mut *tx).await;
             let job: Option<JobRow> = match job {
                 Ok(job) => job,
@@ -507,6 +521,12 @@ impl Scheduler {
                 self.fire_limit_job(tx, job, now, &mut report).await
             };
             if let Err(error) = outcome {
+                // Взаимоблокировка и сбой сериализации не тратят бюджет отказов:
+                // транзакция уже откатана, задание повторяется чуть позже.
+                if crate::db::is_transient(&error) {
+                    self.defer_transient_job(&claimed, now, &mut report).await?;
+                    continue;
+                }
                 log_error(&error);
                 let (reason, permanent) = match error {
                     sqlx::Error::Decode(_)
@@ -515,8 +535,16 @@ impl Scheduler {
                     sqlx::Error::InvalidArgument(_) => ("invalid_job", true),
                     _ => ("job_error", false),
                 };
-                self.record_failure(&claimed, now, reason, permanent, &mut report)
-                    .await?;
+                if let Err(error) = self
+                    .record_failure(&claimed, now, reason, permanent, &mut report)
+                    .await
+                {
+                    if crate::db::is_transient(&error) {
+                        self.defer_transient_job(&claimed, now, &mut report).await?;
+                    } else {
+                        return Err(error);
+                    }
+                }
             }
         }
         report.next_due =
@@ -592,6 +620,13 @@ impl Scheduler {
                 report.fired += 1;
             }
             Err(error) => {
+                if let SubmitError::Db(database) = &error
+                    && crate::db::is_transient(database)
+                {
+                    tx.rollback().await?;
+                    self.defer_transient_job(&job, now, report).await?;
+                    return Ok(());
+                }
                 let (reason, permanent) = submit_failure(&error);
                 if let SubmitError::Db(error) = &error {
                     log_error(error);
@@ -604,6 +639,75 @@ impl Scheduler {
         Ok(())
     }
 
+    async fn defer_transient_job(
+        &self,
+        job: &JobRow,
+        now: DateTime<Utc>,
+        report: &mut TickReport,
+    ) -> Result<(), sqlx::Error> {
+        let previous_count = job
+            .result
+            .as_ref()
+            .and_then(|result| result.get("transient_count"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let previous_since = job
+            .result
+            .as_ref()
+            .and_then(|result| result.get("transient_since"))
+            .and_then(Value::as_str)
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc));
+        let since = previous_since.unwrap_or(now);
+        if now - since >= TRANSIENT_PATIENCE {
+            // Сутки непрерывных сбоев: дальше это уже обычный отказ, который
+            // расходует бюджет и в конце концов закрывает задание.
+            self.record_failure(job, now, "transient_timeout", false, report)
+                .await?;
+            return Ok(());
+        }
+        let count = previous_count.saturating_add(1);
+        if count == 1 || count % 10 == 0 {
+            tracing::warn!(
+                job_id = %job.id,
+                kind = %job.kind,
+                transient_count = count,
+                "scheduled job retries after a transient database error"
+            );
+        }
+        let at = now + transient_backoff(count);
+        sqlx::query(
+            "update scheduled_jobs
+             set run_at=$2,result=coalesce(result,'{}'::jsonb) || $3::jsonb,
+                 updated_at=clock_timestamp()
+             where id=$1 and state='pending'",
+        )
+        .bind(job.id)
+        .bind(at)
+        .bind(json!({"transient_count": count, "transient_since": since}))
+        .execute(&self.pool)
+        .await?;
+        report.retried += 1;
+        Ok(())
+    }
+
+    async fn defer_contended_job(
+        &self,
+        job: &JobRow,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let at = now + TimeDelta::seconds(2);
+        sqlx::query(
+            "update scheduled_jobs set run_at=$2,updated_at=clock_timestamp()
+             where id=$1 and state='pending'",
+        )
+        .bind(job.id)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn record_failure(
         &self,
         job: &JobRow,
@@ -612,7 +716,7 @@ impl Scheduler {
         permanent: bool,
         report: &mut TickReport,
     ) -> Result<(), sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = crate::db::begin(&self.pool).await?;
         let current = sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 and failures=$4 for update")
             .bind(job.id).bind(job.attempts).bind(job.run_at).bind(job.failures).fetch_optional(&mut *tx).await;
         let current: Option<JobRow> = match current {
@@ -624,6 +728,9 @@ impl Scheduler {
         };
         if let Some(mut current) = current {
             let waits_for_queue = current.kind == "session_task" && reason == "queue_full";
+            if waits_for_queue && current.blocked_since.is_none() {
+                current.blocked_since = Some(now);
+            }
             if !waits_for_queue {
                 current.failures = current.failures.saturating_add(1);
             }
@@ -632,7 +739,9 @@ impl Scheduler {
             }
             let release_job = matches!(current.kind.as_str(), "wake" | "limit_check");
             let exhausted = if waits_for_queue {
-                now - current.created_at >= SESSION_TASK_QUEUE_PATIENCE
+                current
+                    .blocked_since
+                    .is_some_and(|since| now - since >= SESSION_TASK_QUEUE_PATIENCE)
             } else {
                 !release_job && current.failures as u32 >= self.service.config.max_attempts
             };
@@ -647,10 +756,11 @@ impl Scheduler {
                     }
                 } else {
                     if let Err(error) =
-                        sqlx::query("update scheduled_jobs set failures=$2,attempts=$3 where id=$1")
+                        sqlx::query("update scheduled_jobs set failures=$2,attempts=$3,blocked_since=$4 where id=$1")
                             .bind(current.id)
                             .bind(current.failures)
                             .bind(current.attempts)
+                            .bind(current.blocked_since)
                             .execute(&mut *tx)
                             .await
                     {
@@ -664,8 +774,10 @@ impl Scheduler {
                         return Err(error);
                     }
                     // Запрос и уборка закрываются вместе с заданием, иначе они зависли бы навсегда.
-                    if current.kind == "session_task"
-                        && let Err(error) = crate::session_tools::jobs::abandon_in_tx(
+                    // Запертая строка будильника не должна держать ни задание, ни очередь:
+                    // откатываем закрытие и повторяем задание позже.
+                    let deferred = if current.kind == "session_task" {
+                        match crate::session_tools::jobs::abandon_in_tx(
                             &mut tx,
                             current.owner_id,
                             current.conversation_id,
@@ -673,9 +785,21 @@ impl Scheduler {
                             now,
                         )
                         .await
-                    {
+                        {
+                            Ok(deferred) => deferred,
+                            Err(error) => {
+                                let _ = tx.rollback().await;
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if deferred {
                         let _ = tx.rollback().await;
-                        return Err(error);
+                        self.defer_contended_job(&current, now).await?;
+                        report.retried += 1;
+                        return Ok(());
                     }
                 }
                 report.failed += 1;
@@ -703,8 +827,22 @@ impl Scheduler {
                         return Err(error);
                     }
                 };
-                let updated = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,failures=$5,updated_at=clock_timestamp() where id=$1 returning *")
-                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).bind(current.failures).fetch_one(&mut *tx).await;
+                // Поля серии временных сбоев переживают только её собственный
+                // переход в обычный отказ: иначе после суток сбоев счётчик
+                // начинался бы заново и задание не дошло бы до отказа. Любой
+                // другой отказ рвёт серию и стирает её поля.
+                let mut result = json!({"error":reason});
+                if reason == "transient_timeout"
+                    && let Some(object) = result.as_object_mut()
+                {
+                    for key in ["transient_count", "transient_since"] {
+                        if let Some(value) = current.result.as_ref().and_then(|r| r.get(key)) {
+                            object.insert(key.into(), value.clone());
+                        }
+                    }
+                }
+                let updated = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,failures=$5,blocked_since=$6,updated_at=clock_timestamp() where id=$1 returning *")
+                    .bind(current.id).bind(current.attempts).bind(at).bind(result).bind(current.failures).bind(current.blocked_since).fetch_one(&mut *tx).await;
                 let updated: JobRow = match updated {
                     Ok(updated) => updated,
                     Err(error) => {
@@ -741,7 +879,7 @@ impl Scheduler {
         if job.kind == "message" && job.message().is_err() {
             sqlx::query("update scheduled_jobs set payload='{\"content\":[],\"attachment_ids\":[]}' where id=$1").bind(job.id).execute(&mut *conn).await?;
         }
-        let updated:JobRow=sqlx::query_as("update scheduled_jobs set state=$2,attempts=$3,result=$4,failures=$5,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1 returning *")
+        let updated:JobRow=sqlx::query_as("update scheduled_jobs set state=$2,attempts=$3,result=$4,failures=$5,blocked_since=case when $2='fired' then null else blocked_since end,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1 returning *")
             .bind(job.id).bind(state).bind(job.attempts).bind(result).bind(job.failures).fetch_one(&mut *conn).await?;
         // После отправки ссылку держит ввод; после отказа файлы отдаются сборщику.
         crate::attachments::unlink_scheduled_in_tx(conn, &[job.id]).await?;
@@ -953,6 +1091,7 @@ impl Scheduler {
             events::purge_older_than(&self.pool, Duration::from_secs(7 * 86400)).await.map(|_| ()),
             sqlx::query("delete from limit_snapshots where observed_at < clock_timestamp() - $1 * interval '1 day'").bind(self.history_days as f64).execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from scheduled_jobs where state in ('fired','cancelled','failed') and updated_at < clock_timestamp() - interval '30 days'").execute(&self.pool).await.map(|_| ()),
+            sqlx::query("delete from alarms where updated_at < clock_timestamp() - interval '30 days' and (state in ('cancelled','expired','failed') or (state='fired' and delivered_input_id is not null))").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from idempotency_keys where created_at < clock_timestamp() - interval '7 days'").execute(&self.pool).await.map(|_| ()),
         ];
         let mut first = None;
@@ -1029,7 +1168,7 @@ async fn finish_limit(
     state: &str,
     result: Value,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("update scheduled_jobs set state=$2,result=$3,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1")
+    sqlx::query("update scheduled_jobs set state=$2,result=$3,blocked_since=case when $2='fired' then null else blocked_since end,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1")
         .bind(id).bind(state).bind(result).execute(conn).await?;
     Ok(())
 }
@@ -1053,6 +1192,76 @@ pub(crate) async fn publish_archive_cancellations(
 
 #[cfg(test)]
 mod tests {
+    /// Терпение очереди считается с первой заблокированной попытки, а не с создания
+    /// задания: давно созданное событие не сгорает на первом `queue_full`.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn queue_full_patience_runs_from_the_first_block(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let seed = crate::testkit::seed(&pool).await;
+        let id = uuid::Uuid::now_v7();
+        let now = chrono::Utc::now();
+        let created_at = now - chrono::TimeDelta::days(2);
+        sqlx::query(
+            "insert into scheduled_jobs (id, owner_id, conversation_id, kind, run_at, payload, attempts, failures, created_at)
+             values ($1, $2, $3, 'session_task', $4, $5, 0, 0, $6)",
+        )
+        .bind(id)
+        .bind(seed.owner_id)
+        .bind(seed.conversation_id)
+        .bind(now - chrono::TimeDelta::seconds(1))
+        .bind(serde_json::json!({"action": "event"}))
+        .bind(created_at)
+        .execute(&pool)
+        .await?;
+        let scheduler = super::Scheduler::new(
+            pool.clone(),
+            crate::dispatcher::Dispatcher::channel().0,
+            crate::config::SchedulerConfig::default(),
+        );
+        let mut report = super::TickReport::default();
+        let attempt: super::JobRow = sqlx::query_as("select * from scheduled_jobs where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await?;
+        scheduler
+            .record_failure(&attempt, now, "queue_full", false, &mut report)
+            .await?;
+        let (state, blocked_since, failures): (String, Option<chrono::DateTime<chrono::Utc>>, i32) =
+            sqlx::query_as("select state,blocked_since,failures from scheduled_jobs where id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(state, "pending", "первый blocked не сжигает задание");
+        assert_eq!(failures, 0, "queue_full не расходует отказы");
+        let blocked_since = blocked_since.expect("first block records its start");
+        assert!(
+            (now - blocked_since).num_seconds().abs() < 5,
+            "blocked_since is the attempt time: {blocked_since}"
+        );
+
+        let attempt: super::JobRow = sqlx::query_as("select * from scheduled_jobs where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await?;
+        let mut report = super::TickReport::default();
+        scheduler
+            .record_failure(
+                &attempt,
+                blocked_since + chrono::TimeDelta::hours(24),
+                "queue_full",
+                false,
+                &mut report,
+            )
+            .await?;
+        let state: String = sqlx::query_scalar("select state from scheduled_jobs where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(state, "failed", "сутки терпения от первого blocked истекли");
+        Ok(())
+    }
+
     /// Повтор с ядовитой нагрузкой: `record_failure` возвращает ошибку и синхронно
     /// откатывает транзакцию, не оставляя блокировки строки задания.
     #[sqlx::test(migrations = "./migrations")]
@@ -1071,7 +1280,7 @@ mod tests {
             attempts: 0,
             failures: 0,
             result: None,
-            created_at: chrono::Utc::now(),
+            blocked_since: None,
         };
         sqlx::query(
             "insert into scheduled_jobs (id, owner_id, conversation_id, kind, run_at, payload, attempts, failures)

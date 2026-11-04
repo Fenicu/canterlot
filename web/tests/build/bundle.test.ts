@@ -59,8 +59,8 @@ function initialJavaScript(route: string): string[] {
 const gzipKiB = (files: string[]): number => files.reduce((sum, file) => sum + gzipSync(readFileSync(file)).length, 0) / KIB;
 const all = (dir: string): string[] => (existsSync(dir) ? readdirSync(dir).filter((file) => file.endsWith('.js')).map((file) => join(dir, file)) : []);
 
-test('bundle_budget_holds', () => {
-  expect(existsSync(build), 'сначала npm run build').toBe(true);
+test('bundle_budget_holds', async (ctx) => {
+  if (!existsSync(build)) ctx.skip('нет build/: production-сборка не запускалась');
   const entry = initialJavaScript('/sessions');
   const size = gzipKiB(entry);
   process.stdout.write(`entry route /sessions: ${entry.length} files, ${size.toFixed(1)} KiB gzip; chat route: ${gzipKiB(initialJavaScript('/c/[id]')).toFixed(1)} KiB gzip\n`);

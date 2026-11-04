@@ -5,6 +5,7 @@ use canterlot_hub::{
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgPool};
 use std::collections::HashMap;
+use std::time::Duration;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -21,6 +22,11 @@ impl From<sqlx::Error> for OpError {
 impl From<idempotency::IdempotencyConflict> for OpError {
     fn from(_: idempotency::IdempotencyConflict) -> Self {
         Self(sqlx::Error::RowNotFound)
+    }
+}
+impl canterlot_hub::db::TransientError for OpError {
+    fn is_transient(&self) -> bool {
+        canterlot_hub::db::is_transient(&self.0)
     }
 }
 
@@ -267,5 +273,56 @@ async fn submit_unready_attachment_rolls_back_share_lock(pool: PgPool) -> TestRe
             "attachment row skipped: submit_message did not roll back synchronously"
         );
     }
+    Ok(())
+}
+
+/// Взаимная блокировка двух транзакций: helper откатывает жертву и повторяет её,
+/// поэтому оба изменения в итоге фиксируются.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_in_tx_retries_a_deadlock_until_both_transactions_commit(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let second = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
+    let first_id = seed.conversation_id;
+    let owner = seed.owner_id;
+    let request = serde_json::json!({});
+
+    let left = idempotency::run_in_tx::<(), OpError, _>(
+        &pool,
+        owner,
+        "deadlock-left",
+        "probe",
+        &request,
+        None,
+        move |conn| {
+            Box::pin(async move {
+                lock_queue(conn, first_id).await?;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                lock_queue(conn, second).await?;
+                Ok(())
+            })
+        },
+    );
+    let right = idempotency::run_in_tx::<(), OpError, _>(
+        &pool,
+        owner,
+        "deadlock-right",
+        "probe",
+        &request,
+        None,
+        move |conn| {
+            Box::pin(async move {
+                lock_queue(conn, second).await?;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                lock_queue(conn, first_id).await?;
+                Ok(())
+            })
+        },
+    );
+    let (left, right) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(left, right) })
+            .await
+            .expect("the helper must resolve the deadlock, not wait forever");
+    left.unwrap();
+    right.unwrap();
     Ok(())
 }

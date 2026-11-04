@@ -8,7 +8,6 @@ import type { InputUiState } from "#lib/stores/inputs.js";
 
 export const TOOL_PAGE_BYTES = 256 * 1024;
 export const TOOL_DOM_CAP = 2 * 1024 * 1024;
-export const REVEAL_LAG_MS = 600;
 const TOOL_MS_BELOW = 100;
 const TOOL_PILL_FROM_MS = 1000;
 /** У Claude Code между началом и финалом вызова только запись в журнал: дольше живут вызовы, которые считают время сами. */
@@ -262,29 +261,6 @@ export function takeToolPage(
   return { text: shown + page, capped: false, saveAsFile: false };
 }
 
-export function revealedText(
-  full: string,
-  elapsedMs: number,
-  motionScale: number,
-): string {
-  if (motionScale === 0 || elapsedMs >= REVEAL_LAG_MS) return full;
-  const parts = full.split(/(\s+)/);
-  const words: number[] = [];
-  parts.forEach((part, index) => {
-    if (part.trim()) words.push(index);
-  });
-  if (words.length === 0) return full;
-  const count = Math.max(
-    1,
-    Math.ceil(
-      (words.length * Math.min(REVEAL_LAG_MS, Math.max(0, elapsedMs))) /
-        REVEAL_LAG_MS,
-    ),
-  );
-  const last = words[Math.min(words.length, count) - 1];
-  if (last === undefined) return "";
-  return parts.slice(0, last + 1).join("");
-}
 
 const SUBAGENT_END = { done: "Готово", error: "Ошибка", stopped: "Прервано" };
 

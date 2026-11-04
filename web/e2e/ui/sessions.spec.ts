@@ -93,6 +93,22 @@ test('sections_collapse_and_remember_state', async ({ page }) => {
   await expect(page.getByRole('button', { name: /bookshelf 4/ })).toHaveAttribute('aria-expanded', 'false');
 });
 
+test('the_last_selected_tab_survives_a_reload_and_a_deleted_group_falls_back_to_all', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
+  await tablist.getByRole('tab', { name: /bookshelf/ }).click();
+  await expect(tablist.getByRole('tab', { name: /bookshelf/ })).toHaveAttribute('aria-selected', 'true');
+  await page.reload();
+  await expect(page.locator('[data-list-ready]')).toBeVisible();
+  await expect(tablist.getByRole('tab', { name: /bookshelf/ })).toHaveAttribute('aria-selected', 'true');
+
+  api.groups = api.groups.filter((group) => group.id !== ids.books);
+  await page.reload();
+  await expect(page.locator('[data-list-ready]')).toBeVisible();
+  await expect(tablist.getByRole('tab', { name: /bookshelf/ })).toHaveCount(0);
+  await expect(tablist.getByRole('tab', { name: /Все/ })).toHaveAttribute('aria-selected', 'true');
+});
+
 test('search_debounces_and_queries_the_server_with_the_typed_text', async ({ page }) => {
   await boot(page);
   const seen: string[] = [];
@@ -747,8 +763,16 @@ test('list_reserves_the_limits_strip_and_hides_zero_counts_until_the_snapshot', 
   // До снимка нули в счёте вкладок не выдают себя за пустой список, а место полосы лимитов занято.
   await expect(page.locator('.strip-slot')).toHaveCount(1);
   await expect(page.locator('.tabs .count')).toHaveCount(0);
+  // Заглушка переезжает из ветки без runtime в ветку списка: меряем только утвердившийся узел.
+  await expect(page.locator('.tabs')).toBeVisible();
   await expect(page.locator('.strip-slot')).toBeVisible();
-  const slot = (await page.locator('.strip-slot').boundingBox())!;
+  let slot = { x: 0, y: 0, width: 0, height: 0 };
+  await expect.poll(async () => {
+    const box = await page.locator('.strip-slot').boundingBox();
+    if (!box) return false;
+    slot = box;
+    return true;
+  }).toBe(true);
   release();
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.strip-slot')).toHaveCount(0);

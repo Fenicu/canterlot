@@ -1356,7 +1356,9 @@ impl Adapter for AntigravityAdapter {
         let open = self.requests.open_ids();
         let had_question = open.iter().any(|request_id| {
             matches!(
-                self.requests.pending(request_id).map(|pending| &pending.kind),
+                self.requests
+                    .pending(request_id)
+                    .map(|pending| &pending.kind),
                 Some(PendingKind::Question { .. })
             )
         });

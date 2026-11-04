@@ -6,7 +6,8 @@
  */
 import { writable } from "svelte/store";
 
-import { entriesSince, type ChangelogEntry } from "#lib/changelog.js";
+import type { ChangelogEntry } from "#lib/changelog.js";
+import { compareVersions } from "#lib/version.js";
 
 export const SEEN_VERSION_KEY = "canterlot.seen-version";
 
@@ -47,12 +48,25 @@ export const whatsNew = {
    * Проверить, что человек пропустил. Первый вход ничего не показывает:
    * окно рассказывает про изменения, а не про весь сервис — но версию
    * запоминает, чтобы следующее обновление он увидел.
+   *
+   * Решение принимается по одной строке версии; текст журнала подгружается
+   * отдельно, чтобы он не тянулся в первый экран.
    */
-  check(): void {
+  check(): Promise<void> {
     const seen = readSeen();
-    const entries = entriesSince(seen, APP_VERSION);
     if (seen !== APP_VERSION) writeSeen(APP_VERSION);
-    _store.set({ entries, open: entries.length > 0 });
+    if (!seen || compareVersions(seen, APP_VERSION) >= 0) {
+      _store.set({ entries: [], open: false });
+      return Promise.resolve();
+    }
+    return import("#lib/changelog.js")
+      .then(({ entriesSince }) => {
+        const entries = entriesSince(seen, APP_VERSION);
+        _store.set({ entries, open: entries.length > 0 });
+      })
+      .catch(() => {
+        // Журнал не подгрузился: окно просто не появится, версию мы уже записали.
+      });
   },
 
   dismiss(): void {

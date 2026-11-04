@@ -148,6 +148,39 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     });
   });
 
+  await page.route(/\/api\/v1\/conversations\/[^/]+\/alarms\/[^/]+$/, async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback();
+    const parts = new URL(route.request().url()).pathname.split('/');
+    const conversation = parts[4] ?? '';
+    const alarmId = parts.at(-1) ?? '';
+    const alarm = {
+      alarm_id: alarmId,
+      conversation_id: conversation,
+      key: null,
+      kind: 'at',
+      condition: '',
+      session_ids: [],
+      states: [],
+      fires_at: null,
+      deadline_at: null,
+      only_on_timeout: false,
+      batch: false,
+      state: 'cancelled',
+      fired_reason: 'cancelled',
+      failure_reason: null,
+      fired_at: null,
+      note: null,
+      note_bytes: 0,
+      created_at: new Date().toISOString()
+    };
+    hub.append(`conversation:${conversation}`, {
+      kind: 'alarm_changed',
+      conversation_id: conversation,
+      payload: alarm
+    });
+    await route.fulfill({ headers: headers(), json: alarm });
+  });
+
   await page.route('**/api/v1/conversations/*/interrupt', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     // Как у хаба: команда прерывания создана для живого исполнения.
@@ -269,6 +302,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         pinned: false,
         archived: false,
         groups: [],
+        group_pins: [],
         parent_id: null,
         spawn_depth: 0,
         machine: { id: body.machine_id ?? api.id(), name: 'workstation' },
@@ -366,6 +400,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         pinned: row.pinned,
         archived: row.archived,
         groups: row.groups,
+        group_pins: row.group_pins,
         machine: row.machine,
         harness: row.harness,
         workdir: row.workdir,
@@ -755,6 +790,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const row = api.list.get(id);
     if (!row) return route.fallback();
     row.groups = body.group_ids ?? [];
+    row.group_pins = row.group_pins.filter((pin) => row.groups.includes(pin.group_id));
     api.counts = recount(api);
     hub.append('conversations', {
       kind: 'conversation_updated',
@@ -767,6 +803,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         pinned: row.pinned,
         archived: row.archived,
         groups: row.groups,
+        group_pins: row.group_pins,
         machine: row.machine,
         harness: row.harness,
         workdir: row.workdir,
@@ -776,6 +813,52 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     });
     hub.flush();
     await route.fulfill({ headers: headers(), json: { group_ids: row.groups } });
+  });
+
+  await page.route('**/api/v1/conversations/*/groups/*/pin', async (route) => {
+    const method = route.request().method();
+    if (method !== 'PUT' && method !== 'DELETE') return route.fallback();
+    const parts = new URL(route.request().url()).pathname.split('/');
+    const id = parts[4] ?? '';
+    const groupId = parts[6] ?? '';
+    const key = route.request().headers()['idempotency-key'];
+    if (!key) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const row = api.list.get(id);
+    if (!row) return route.fulfill(refuse(404, 'not_found', 'Не найдено'));
+    if (!row.groups.includes(groupId)) {
+      return route.fulfill(refuse(404, 'group_not_found', 'Группа не найдена'));
+    }
+    if (method === 'PUT') {
+      if (!row.group_pins.some((pin) => pin.group_id === groupId)) {
+        row.group_pins = [...row.group_pins, { group_id: groupId, pinned_at: new Date().toISOString() }];
+      }
+    } else {
+      row.group_pins = row.group_pins.filter((pin) => pin.group_id !== groupId);
+    }
+    hub.append('conversations', {
+      kind: 'conversation_updated',
+      conversation_id: id,
+      payload: {
+        id: row.id,
+        title: row.title,
+        title_source: row.title_source,
+        color: row.color,
+        pinned: row.pinned,
+        archived: row.archived,
+        groups: row.groups,
+        group_pins: row.group_pins,
+        machine: row.machine,
+        harness: row.harness,
+        workdir: row.workdir,
+        created_at: row.created_at,
+        counts: api.counts
+      }
+    });
+    hub.flush();
+    await route.fulfill({ status: method === 'PUT' ? 200 : 204, headers: headers(), json: method === 'PUT' ? row : undefined });
   });
 
   await page.route('**/api/v1/groups', async (route) => {
@@ -795,6 +878,9 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       api.groups = api.groups.map((group) => group.id === id ? { ...group, name: body.name ?? group.name, position: body.position ?? group.position } : group);
     } else if (route.request().method() === 'DELETE') {
       api.groups = api.groups.filter((group) => group.id !== id);
+      for (const row of api.list.values()) {
+        row.group_pins = row.group_pins.filter((pin) => pin.group_id !== id);
+      }
     } else {
       return route.fallback();
     }

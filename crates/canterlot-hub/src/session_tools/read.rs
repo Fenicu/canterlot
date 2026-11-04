@@ -80,7 +80,7 @@ pub async fn list(
 ) -> Result<Value, ToolError> {
     let args: ListArgs = parse_arguments(arguments)?;
     let limit = bounded(args.limit, DEFAULT_LIMIT, 1, MAX_LIMIT)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     let session = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     let family = access::family_in_tx(&mut tx, &context.config, &session, caller.owner_id).await?;
     let items = conversations::agent_list(
@@ -324,7 +324,7 @@ pub async fn inspect(
     } {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     let session = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     let target = access::target_in_tx(
         &mut tx,

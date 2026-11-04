@@ -406,9 +406,12 @@ fn resolve_workdir(
             (source.to_owned(), Some(branch.to_owned()))
         }
         (None, Some(_)) => {
+            let path = serde_json::to_string(&place.workdir).unwrap_or_default();
             return Err(ToolError::with_message(
                 ToolErrorCode::WorkdirNotAllowed,
-                "This session works in a git worktree: pass isolated or name a workdir",
+                format!(
+                    "This session works in a git worktree: pass \"isolated\": true for a new worktree, or \"workdir\": {path} to share it"
+                ),
             ));
         }
     };
@@ -708,7 +711,7 @@ pub async fn spawn(
 ) -> Result<Value, ToolError> {
     let args: SpawnArgs = parse_arguments(arguments)?;
     check_arguments(&args)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     if let Some(answer) = replayed(&mut tx, caller).await? {
         return Ok(answer);
@@ -889,7 +892,8 @@ async fn allow(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Started, T
     if mode.wider_than_parent && !launch.spec.wider_than_parent {
         return Err(ToolError::new(ToolErrorCode::PermissionModeTooWide));
     }
-    let mut attempt = conn.begin().await?;
+    // Вложенная точка сохранения на уже открытой транзакции, не новое соединение.
+    let mut attempt = conn.begin().await?; // db::begin: savepoint
     match start_child(&mut attempt, launch).await {
         Ok(child) => {
             attempt.commit().await?;

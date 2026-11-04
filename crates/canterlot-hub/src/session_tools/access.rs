@@ -49,6 +49,8 @@ impl Session {
 
 /// Строка держится `for key share`: удаление разговора ждёт конца транзакции,
 /// поэтому ввод с его названием не появится после чистки в `deletion.rs`.
+/// Строки разговоров берутся по возрастанию ID до очереди и подписок:
+/// docs/design/delivery.md, «Порядок блокировок инструментов сессии».
 pub async fn session_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,

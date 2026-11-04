@@ -43,6 +43,8 @@ pub struct ConversationSnapshot {
     pub background: Vec<crate::background_tasks::BackgroundTaskView>,
     /// Последний известный расход контекста; `None` — данных нет, индикатор скрыт.
     pub context: Option<crate::compactions::ContextSnapshot>,
+    /// Взведённые и недавние завершившиеся будильники разговора.
+    pub alarms: Vec<crate::session_tools::alarms::AlarmView>,
 }
 
 pub type ConversationSnapshotView = ConversationSnapshot;
@@ -95,7 +97,7 @@ pub struct MachinesSnapshot {
 }
 
 pub async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin(pool).await?;
     sqlx::query("set transaction isolation level repeatable read read only")
         .execute(&mut *tx)
         .await?;
@@ -221,6 +223,7 @@ pub async fn conversation_with_registry(
     let todos = crate::todos::list(&mut *conn, id).await?;
     let background = crate::background_tasks::list(&mut *conn, id).await?;
     let context = crate::compactions::latest_context(&mut *conn, id).await?;
+    let alarm_rows = crate::session_tools::alarms::snapshot_rows(&mut *conn, id).await?;
     let data = ConversationSnapshot {
         detail,
         queue: QueueView {
@@ -235,6 +238,7 @@ pub async fn conversation_with_registry(
         todos,
         background,
         context,
+        alarms: crate::session_tools::alarms::snapshot_views(&alarm_rows),
     };
     Ok(Some(Snapshot {
         scope: events::wire_scope(&scope),

@@ -21,7 +21,7 @@ use crate::{
     config::HubTimers,
     installation::Installation,
     session::{
-        CAPABILITY_BACKGROUND_V1, CAPABILITY_COMPACT_V1, CAPABILITY_EXEC_V1,
+        CAPABILITY_ALARMS_V1, CAPABILITY_BACKGROUND_V1, CAPABILITY_COMPACT_V1, CAPABILITY_EXEC_V1,
         CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_OWNER_EXIT_V1, CAPABILITY_OWNER_INSTRUCTIONS_V1,
         CAPABILITY_PILOT_V1, CAPABILITY_SEND_NOW_V1, CAPABILITY_SESSION_TOOLS_V1,
         CAPABILITY_TODO_V1, CAPABILITY_WORKDIR_SUGGEST_V1, Registry,
@@ -50,6 +50,7 @@ pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_OWNER_EXIT_V1,
     CAPABILITY_WORKDIR_SUGGEST_V1,
     CAPABILITY_OWNER_INSTRUCTIONS_V1,
+    CAPABILITY_ALARMS_V1,
 ];
 
 #[tonic::async_trait]
@@ -95,6 +96,8 @@ pub struct HubGrpc {
     pub timers: HubTimers,
     pub ingest: Arc<dyn Ingest>,
     pub session_tools: Arc<crate::config::SessionToolsConfig>,
+    pub limits: Arc<crate::config::LimitsConfig>,
+    pub alarms_enabled: bool,
     pub settle: crate::session_tools::settle::SettleConfig,
     pub dispatcher: Option<crate::dispatcher::Dispatcher>,
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
@@ -296,6 +299,8 @@ impl HubGrpc {
             timers,
             ingest,
             session_tools: Default::default(),
+            limits: Default::default(),
+            alarms_enabled: true,
             settle: (&crate::config::ActivityConfig::default()).into(),
             dispatcher: None,
             blobs: None,
@@ -309,6 +314,16 @@ impl HubGrpc {
 
     pub fn with_session_tools(mut self, config: crate::config::SessionToolsConfig) -> Self {
         self.session_tools = Arc::new(config);
+        self
+    }
+
+    pub fn with_limits(mut self, config: crate::config::LimitsConfig) -> Self {
+        self.limits = Arc::new(config);
+        self
+    }
+
+    pub fn with_orchestrator(mut self, config: &crate::config::OrchestratorConfig) -> Self {
+        self.alarms_enabled = config.alarms.enabled;
         self
     }
 
@@ -345,9 +360,7 @@ impl HubGrpc {
         credential: Vec<u8>,
     ) -> Result<Result<(crate::session::ControlLease, mpsc::Receiver<ControlDown>), Rejected>, Status>
     {
-        let mut tx = self
-            .pool
-            .begin()
+        let mut tx = crate::db::begin(&self.pool)
             .await
             .map_err(|_| Status::internal("database"))?;
         let (owner_id, previous): (Uuid, Option<Uuid>) = match sqlx::query_as(

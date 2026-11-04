@@ -724,10 +724,11 @@ mod tests {
             event,
             AdapterEvent::BlockFinal { text, .. } if text.contains("pong-7391")
         )));
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            AdapterEvent::Diagnostic { .. }
-        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AdapterEvent::Diagnostic { .. }))
+        );
     }
 
     #[test]

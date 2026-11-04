@@ -551,6 +551,7 @@ message ModelInfo {
 message MachineMetrics {
   uint64 machine_time_ms = 1;
   uint32 cpu_cores = 2;
+  // Тысячные доли всей машины, 0..1000.
   uint32 cpu_permille = 3;
   uint64 mem_total_bytes = 4;
   uint64 mem_available_bytes = 5;
@@ -570,6 +571,8 @@ message DiskUsage {
 message ExecutionProcess {
   string execution_id = 1;
   bool alive = 2;
+  // Тысячные доли одного ядра, сумма по дереву процессов исполнения:
+  // многопоточный CLI или сборка даёт больше 1000 (2400 = 2,4 ядра).
   uint32 cpu_permille = 3;
   uint64 rss_bytes = 4;
   // Живые потомки CLI без зомби. Нет поля — старый воркер, неизвестно.

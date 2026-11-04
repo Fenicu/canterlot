@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 
 const STACK_INFO_FILE = join(tmpdir(), 'canterlot-stack-info.json');
 const isStackOrPerf = process.argv.some(a => a.includes('e2e/stack') || a.includes('e2e/perf'));
+// Скриншоты тем и README снимаются отдельно: в обычный прогон они не входят.
+const screenshots = process.env.PW_SCREENSHOTS === '1';
 
 let origin = `http://127.0.0.1:${Number(process.env.PORT ?? 4173)}`;
 if (isStackOrPerf && existsSync(STACK_INFO_FILE)) {
@@ -29,7 +31,9 @@ const firefoxLayout = (name: string, width: number, height: number) => ({
 export default defineConfig({
   testDir: './e2e',
   // Проект budget зависит от phone и desktop, поэтому прогон `e2e/ui` тянул бы за собой и сквозные наборы, которым нужен стенд.
-  testIgnore: isStackOrPerf ? LAYOUT_SPEC : ['**/e2e/stack/**', '**/e2e/perf/**', LAYOUT_SPEC],
+  testIgnore: isStackOrPerf
+    ? LAYOUT_SPEC
+    : ['**/e2e/stack/**', '**/e2e/perf/**', ...(screenshots ? [] : ['**/e2e/screenshots/**']), LAYOUT_SPEC],
   // Тесты независимы: пара «проект, тест» занимает воркер сама. Стенд и перф делят одно состояние и идут по одному.
   fullyParallel: !isStackOrPerf,
   workers: isStackOrPerf ? 1 : workers,

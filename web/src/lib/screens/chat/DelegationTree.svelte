@@ -7,7 +7,7 @@
 	import type { Runtime } from '#lib/app/runtime.js';
 	import { getRuntime } from '#lib/app/runtime.js';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
-	import { browserRuntime } from './open.js';
+	import { browserRuntime } from '#lib/app/browser.js';
 	import { activityLine, type Activity } from '#lib/screens/sessions/activityText.js';
 	import type { ListRow } from '#lib/stores/list.svelte.js';
 	import { groupDelegation, latestTurnStart, mergeNodes, subagentVerb, type DelegationNode } from '#lib/stores/delegation.js';

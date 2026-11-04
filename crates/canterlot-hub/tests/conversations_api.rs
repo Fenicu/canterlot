@@ -2048,3 +2048,206 @@ async fn input_switching_preset_on_old_worker_shows_capability_hold(pool: PgPool
         snapshot["data"]["queue"]
     );
 }
+
+// ---------------------------------------------------------------- закрепление в группе
+
+impl Fixture {
+    async fn keyed(
+        &self,
+        method: Method,
+        path: &str,
+        key: &str,
+        body: Option<Value>,
+        status: u16,
+    ) -> Value {
+        let r = self.client.send(method, path, Some(key), body).await;
+        assert_eq!(
+            r.status.as_u16(),
+            status,
+            "{}",
+            String::from_utf8_lossy(&r.body)
+        );
+        if r.body.is_empty() {
+            Value::Null
+        } else {
+            r.json()
+        }
+    }
+    async fn pin(&self, id: Uuid, group: Uuid, pinned: bool, status: u16) -> Value {
+        self.keyed(
+            if pinned { Method::PUT } else { Method::DELETE },
+            &format!("/api/v1/conversations/{id}/groups/{group}/pin"),
+            &Uuid::now_v7().to_string(),
+            None,
+            status,
+        )
+        .await
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn group_pin_is_scoped_ordered_and_idempotent(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let a = f.group("А").await;
+    let b = f.group("Б").await;
+    let first = f.create(json!({"group_ids":[a,b]})).await;
+    let second = f.create(json!({"group_ids":[a]})).await;
+    let key = Uuid::now_v7().to_string();
+    let path = format!("/api/v1/conversations/{first}/groups/{a}/pin");
+    let d = f.keyed(Method::PUT, &path, &key, None, 200).await;
+    let pinned_at = d["group_pins"][0]["pinned_at"].clone();
+    assert_eq!(d["group_pins"][0]["group_id"], a.to_string());
+    assert_eq!(d["pinned"], false, "глобальное закрепление не меняется");
+    let replay = f.keyed(Method::PUT, &path, &key, None, 200).await;
+    assert_eq!(replay["group_pins"], d["group_pins"]);
+    f.pin(first, a, true, 200).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    f.pin(second, a, true, 200).await;
+    assert_eq!(
+        f.get(first).await["group_pins"][0]["pinned_at"],
+        pinned_at,
+        "повторное закрепление не двигает время"
+    );
+    let page = f.list(&format!("?filter=group:{a}")).await;
+    let ids: Vec<String> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, vec![second.to_string(), first.to_string()]);
+    assert_eq!(page["items"][0]["group_pins"][0]["group_id"], a.to_string());
+    assert_eq!(page["items"][0]["pinned"], false);
+    // В «Все» и в другой группе закрепление не видно.
+    let all = f.list("").await;
+    assert!(
+        all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["pinned"] == false)
+    );
+    assert_eq!(
+        f.get(first).await["group_pins"].as_array().unwrap().len(),
+        1
+    );
+    assert!(
+        f.get(first).await["groups"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(b))
+    );
+    let other = f.list(&format!("?filter=group:{b}")).await;
+    assert!(
+        other["items"][0]["group_pins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|pin| pin["group_id"] != json!(b)),
+        "закрепление в А не относится к Б"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn group_pin_survives_archive_and_unpin_is_idempotent(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let a = f.group("А").await;
+    let id = f.create(json!({"group_ids":[a]})).await;
+    f.pin(id, a, true, 200).await;
+    f.patch(id, json!({"archived":true})).await;
+    assert_eq!(f.get(id).await["archived"], true);
+    assert_eq!(f.get(id).await["group_pins"].as_array().unwrap().len(), 1);
+    f.patch(id, json!({"archived":false})).await;
+    f.pin(id, a, false, 204).await;
+    assert_eq!(f.get(id).await["group_pins"], json!([]));
+    f.pin(id, a, false, 204).await;
+    let page = f.list(&format!("?filter=group:{a}")).await;
+    assert_eq!(page["items"][0]["group_pins"], json!([]));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn group_pin_requires_membership_and_emits_list_update(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let a = f.group("А").await;
+    let b = f.group("Б").await;
+    let id = f.create(json!({"group_ids":[a]})).await;
+    let missing = f.pin(id, b, true, 404).await;
+    assert_eq!(missing["error"]["code"], "group_not_found");
+    let stranger = f.pin(Uuid::now_v7(), a, true, 404).await;
+    assert_eq!(stranger["error"]["code"], "not_found");
+    f.pin(id, a, true, 200).await;
+    let events = f.events("conversation_updated").await;
+    let last = events.last().unwrap();
+    assert_eq!(last["id"], id.to_string());
+    assert_eq!(last["group_pins"][0]["group_id"], a.to_string());
+    assert_eq!(last["counts"]["all"], 1);
+    // Снимок списка несёт то же время закрепления.
+    let snapshot = f
+        .request(Method::GET, "/api/v1/snapshot/conversations", None, 200)
+        .await;
+    assert_eq!(
+        snapshot["data"]["items"][0]["group_pins"][0],
+        last["group_pins"][0]
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn leaving_or_deleting_a_group_drops_its_group_pins(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let a = f.group("А").await;
+    let b = f.group("Б").await;
+    let id = f.create(json!({"group_ids":[a,b]})).await;
+    f.pin(id, a, true, 200).await;
+    f.pin(id, b, true, 200).await;
+    let d = f
+        .request(
+            Method::PUT,
+            &format!("/api/v1/conversations/{id}/groups"),
+            Some(json!({"group_ids":[b]})),
+            200,
+        )
+        .await;
+    assert_eq!(d["group_pins"].as_array().unwrap().len(), 1);
+    assert_eq!(d["group_pins"][0]["group_id"], b.to_string());
+    let left: i64 = sqlx::query_scalar(
+        "select count(*) from conversation_group_pins where conversation_id=$1 and group_id=$2",
+    )
+    .bind(id)
+    .bind(a)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0);
+    f.request(Method::DELETE, &format!("/api/v1/groups/{b}"), None, 204)
+        .await;
+    let all: i64 =
+        sqlx::query_scalar("select count(*) from conversation_group_pins where conversation_id=$1")
+            .bind(id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(all, 0);
+    assert_eq!(f.get(id).await["group_pins"], json!([]));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleting_a_conversation_drops_its_group_pins(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let a = f.group("А").await;
+    let id = f.create(json!({"group_ids":[a]})).await;
+    f.pin(id, a, true, 200).await;
+    f.request(
+        Method::DELETE,
+        &format!("/api/v1/conversations/{id}"),
+        None,
+        204,
+    )
+    .await;
+    let left: i64 =
+        sqlx::query_scalar("select count(*) from conversation_group_pins where conversation_id=$1")
+            .bind(id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(left, 0);
+}

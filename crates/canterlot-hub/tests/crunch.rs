@@ -264,6 +264,26 @@ impl Env {
         )
         .await
     }
+    async fn observe_estimated(
+        &self,
+        provider: &str,
+        window: Window,
+        used: u16,
+        resets_at: Option<DateTime<Utc>>,
+        at: DateTime<Utc>,
+    ) -> Recorded {
+        self.observe_full_confidence(
+            provider,
+            window,
+            used,
+            resets_at,
+            at,
+            at,
+            ObservationSource::Session,
+            DataConfidence::Estimated,
+        )
+        .await
+    }
     async fn observe_full(
         &self,
         provider: &str,
@@ -273,6 +293,29 @@ impl Env {
         observed_at: DateTime<Utc>,
         received_at: DateTime<Utc>,
         source: ObservationSource,
+    ) -> Recorded {
+        self.observe_full_confidence(
+            provider,
+            window,
+            used,
+            resets_at,
+            observed_at,
+            received_at,
+            source,
+            DataConfidence::Exact,
+        )
+        .await
+    }
+    async fn observe_full_confidence(
+        &self,
+        provider: &str,
+        window: Window,
+        used: u16,
+        resets_at: Option<DateTime<Utc>>,
+        observed_at: DateTime<Utc>,
+        received_at: DateTime<Utc>,
+        source: ObservationSource,
+        data_confidence: DataConfidence,
     ) -> Recorded {
         let machine = if provider == "codex" {
             self.codex
@@ -290,7 +333,7 @@ impl Env {
                 resets_at,
                 observed_at,
                 source,
-                data_confidence: DataConfidence::Exact,
+                data_confidence,
                 machine_id: machine,
                 execution_id: None,
             },
@@ -553,6 +596,227 @@ async fn five_hour_limit_with_crunch_holds_and_schedules_wake_at_reset_plus_grac
         reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     );
     assert_eq!(events_of(&pool, id, "limit_reached").await.len(), 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_single_estimated_reset_reading_does_not_release_the_hold(pool: PgPool) {
+    let mut env = Env::with_config(&pool, patient_config()).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.observe(
+        "claude",
+        Window::FiveHour,
+        990,
+        Some(reset),
+        now - TimeDelta::minutes(1),
+    )
+    .await;
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    env.observe_estimated(
+        "claude",
+        Window::FiveHour,
+        30,
+        Some(reset + TimeDelta::hours(5)),
+        reset + secs(60),
+    )
+    .await;
+    let report = env.tick(reset + secs(120)).await;
+    assert_eq!((report.fired, report.retried), (0, 1));
+    assert!(has_quota(&holds(&pool, id).await));
+    assert!(resume_pending(&pool, id).await);
+    assert!(wake_texts(&pool, id).await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_early_estimated_reset_reading_does_not_release_the_hold(pool: PgPool) {
+    let mut env = Env::with_config(&pool, patient_config()).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.observe(
+        "claude",
+        Window::FiveHour,
+        990,
+        Some(reset),
+        now - TimeDelta::minutes(1),
+    )
+    .await;
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    // Оценочный отсчёт со сдвинутым сроком снят до срока сброса и сам его не доказывает.
+    env.observe_estimated(
+        "claude",
+        Window::FiveHour,
+        100,
+        Some(reset + TimeDelta::hours(5)),
+        now + TimeDelta::minutes(10),
+    )
+    .await;
+    let report = env.tick(reset + secs(120)).await;
+    assert_eq!((report.fired, report.retried), (0, 1));
+    assert!(has_quota(&holds(&pool, id).await));
+    assert!(resume_pending(&pool, id).await);
+    assert!(wake_texts(&pool, id).await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_second_estimated_reset_reading_after_the_wake_releases_the_hold(pool: PgPool) {
+    let mut env = Env::with_config(&pool, patient_config()).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.observe(
+        "claude",
+        Window::FiveHour,
+        990,
+        Some(reset),
+        now - TimeDelta::minutes(1),
+    )
+    .await;
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    env.observe_estimated(
+        "claude",
+        Window::FiveHour,
+        30,
+        Some(reset + TimeDelta::hours(5)),
+        reset + secs(60),
+    )
+    .await;
+    env.observe_estimated(
+        "claude",
+        Window::FiveHour,
+        20,
+        Some(reset + TimeDelta::hours(6)),
+        reset + secs(90),
+    )
+    .await;
+    let report = env.tick(reset + secs(120)).await;
+    assert_eq!((report.fired, report.retried), (1, 0));
+    assert!(!has_quota(&holds(&pool, id).await));
+    assert_eq!(
+        wake_texts(&pool, id).await,
+        vec![LimitsConfig::default().default_resume_text]
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_not_reset_reading_does_not_confirm_an_estimated_reset(pool: PgPool) {
+    let mut env = Env::with_config(&pool, patient_config()).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.observe(
+        "claude",
+        Window::FiveHour,
+        990,
+        Some(reset),
+        now - TimeDelta::minutes(1),
+    )
+    .await;
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    env.observe(
+        "claude",
+        Window::FiveHour,
+        700,
+        Some(reset),
+        reset + secs(30),
+    )
+    .await;
+    env.observe_estimated(
+        "claude",
+        Window::FiveHour,
+        100,
+        Some(reset + TimeDelta::hours(5)),
+        reset + secs(60),
+    )
+    .await;
+    let report = env.tick(reset + secs(120)).await;
+    assert_eq!((report.fired, report.retried), (0, 1));
+    assert!(has_quota(&holds(&pool, id).await));
+    assert!(resume_pending(&pool, id).await);
+    assert!(wake_texts(&pool, id).await.is_empty());
+    // Второй подтверждающий отсчёт после срока всё-таки снимает удержание.
+    env.observe_estimated(
+        "claude",
+        Window::FiveHour,
+        90,
+        Some(reset + TimeDelta::hours(6)),
+        reset + secs(150),
+    )
+    .await;
+    let report = env.tick(reset + secs(180)).await;
+    assert_eq!((report.fired, report.retried), (1, 0));
+    assert!(!has_quota(&holds(&pool, id).await));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_exact_reset_reading_still_releases_the_hold_on_its_own(pool: PgPool) {
+    let mut env = Env::with_config(&pool, patient_config()).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.observe(
+        "claude",
+        Window::FiveHour,
+        990,
+        Some(reset),
+        now - TimeDelta::minutes(1),
+    )
+    .await;
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    env.observe(
+        "claude",
+        Window::FiveHour,
+        30,
+        Some(reset + TimeDelta::hours(5)),
+        reset + secs(60),
+    )
+    .await;
+    let report = env.tick(reset + secs(120)).await;
+    assert_eq!((report.fired, report.retried), (1, 0));
+    assert!(!has_quota(&holds(&pool, id).await));
+    assert_eq!(
+        wake_texts(&pool, id).await,
+        vec![LimitsConfig::default().default_resume_text]
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_missing_five_hour_window_wakes_after_an_estimated_reading(pool: PgPool) {
+    let mut env = Env::with_config(&pool, patient_config()).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.observe_estimated(
+        "claude",
+        Window::FiveHour,
+        990,
+        Some(reset),
+        now - TimeDelta::minutes(1),
+    )
+    .await;
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    let mut tx = pool.begin().await.unwrap();
+    limits::record_absence_in_tx(
+        &mut tx,
+        env.owner,
+        "claude",
+        Window::FiveHour,
+        reset + secs(60),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let report = env.tick(reset + secs(120)).await;
+    assert_eq!((report.fired, report.retried), (1, 0));
+    assert!(!has_quota(&holds(&pool, id).await));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

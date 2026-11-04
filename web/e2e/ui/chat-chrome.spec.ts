@@ -202,9 +202,9 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 	});
 	hub.flush();
 
-	// 1. Stop
-	await page.getByRole('button', { name: 'Меню сессии' }).click();
-	await page.getByRole('menuitem', { name: 'Остановить', exact: true }).click();
+	// 1. Stop: one tap in the header, the menu does not open.
+	await page.getByRole('button', { name: 'Остановить сессию' }).click();
+	await expect(page.getByRole('menu')).toHaveCount(0);
 
 	await expect.poll(() => calls.find((c) => c.url.endsWith('/stop') && c.body?.force === false)).toBeDefined();
 	const stopCall = calls.find((c) => c.url.endsWith('/stop') && c.body?.force === false);
@@ -251,6 +251,75 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
 	await page.getByRole('menuitem', { name: 'Продолжить очередь' }).click();
 	await expect.poll(() => calls.find((c) => c.url.endsWith('/queue/continue'))).toBeDefined();
+});
+
+test('stop_button_lives_in_the_header_only_while_the_process_is_live_and_the_menu_keeps_only_force_stop', async ({ page }) => {
+	const { hub, id } = await bootChat(page);
+	const stop = page.getByRole('button', { name: 'Остановить сессию' });
+	await expect(stop).toHaveCount(0);
+
+	hub.append(`conversation:${id}`, {
+		kind: 'execution_state_changed',
+		conversation_id: id,
+		payload: { generation: 1, outcome: null, state: 'running' }
+	});
+	hub.flush();
+	await expect(stop).toBeVisible();
+
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await expect(page.getByRole('menuitem', { name: 'Остановить', exact: true })).toHaveCount(0);
+	await expect(page.getByRole('menuitem', { name: 'Принудительно остановить' })).toBeVisible();
+	await page.keyboard.press('Escape');
+
+	hub.append(`conversation:${id}`, {
+		kind: 'execution_state_changed',
+		conversation_id: id,
+		payload: { generation: 1, state: 'stopped', outcome: 'stopped' }
+	});
+	hub.flush();
+	await expect(stop).toHaveCount(0);
+});
+
+test('stop_button_is_disabled_with_a_visible_reason_while_the_stop_is_in_flight', async ({ page }) => {
+	const { hub, id } = await bootChat(page);
+	hub.append(`conversation:${id}`, {
+		kind: 'execution_state_changed',
+		conversation_id: id,
+		payload: { generation: 1, outcome: null, state: 'running' }
+	});
+	hub.flush();
+
+	await page.route('**/api/v1/conversations/*/stop', async (route) => {
+		if (route.request().method() !== 'POST') return route.fallback();
+		await new Promise((done) => setTimeout(done, 750));
+		await route.fallback();
+	});
+
+	const stop = page.getByRole('button', { name: 'Остановить сессию' });
+	await stop.click();
+	await expect(stop).toBeDisabled();
+	await expect(page.getByText('Останавливаю сессию')).toBeVisible();
+	await expect(page.getByText('Останавливаю сессию')).toHaveCount(0, { timeout: 5_000 });
+	await expect(stop).toBeEnabled();
+});
+
+test('live_header_does_not_scroll_sideways_at_320px', async ({ page }) => {
+	test.skip(test.info().project.name !== 'phone', 'проверка телефонной ширины');
+	await page.setViewportSize({ width: 320, height: 740 });
+	const { hub, id } = await bootChat(page);
+	hub.append(`conversation:${id}`, {
+		kind: 'execution_state_changed',
+		conversation_id: id,
+		payload: { generation: 1, outcome: null, state: 'running' }
+	});
+	hub.flush();
+	await expect(page.getByRole('button', { name: 'Остановить сессию' })).toBeVisible();
+
+	const overflow = await page.evaluate(() => ({
+		scrollWidth: document.documentElement.scrollWidth,
+		clientWidth: document.documentElement.clientWidth
+	}));
+	expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth);
 });
 
 test('stuck_session_card_asks_for_compaction_and_shows_its_progress', async ({ page }) => {

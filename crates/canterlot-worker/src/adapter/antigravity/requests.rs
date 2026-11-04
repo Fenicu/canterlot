@@ -538,9 +538,7 @@ mod tests {
         let (request_id, _) = requests
             .open_question("call_1", &raw(json!([{"question": "Q?"}])), "orchestrator")
             .unwrap();
-        requests
-            .answer(&request_id, &single("q0", "x"))
-            .unwrap();
+        requests.answer(&request_id, &single("q0", "x")).unwrap();
         requests.note_tool_frame("call_1", Some("pending"));
         assert!(!requests.take_resolved(&request_id));
         requests.note_tool_frame("call_1", Some("in_progress"));

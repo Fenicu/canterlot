@@ -1,6 +1,15 @@
 export type DurationToken = `--duration-${string}`;
 export function prefersReducedMotion(): boolean {
-  return typeof window === 'undefined' || window.matchMedia('(prefers-reduced-motion: reduce)').matches || getComputedStyle(document.documentElement).getPropertyValue('--motion-scale').trim() === '0';
+  return typeof window === 'undefined' || (typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) || getComputedStyle(document.documentElement).getPropertyValue('--motion-scale').trim() === '0';
+}
+export function motionScale(): number {
+  if (typeof document === 'undefined') return 1;
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue('--motion-scale')
+    .trim();
+  if (raw === '') return 1;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : 1;
 }
 export function durationMs(token: DurationToken): number {
   if (prefersReducedMotion()) return 0;

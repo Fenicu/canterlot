@@ -60,7 +60,7 @@ pub async fn interrupt(
     arguments: Value,
 ) -> Result<Value, ToolError> {
     let args: Args = parse_arguments(arguments)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     let target = owned_in_tx(&mut tx, context, caller, args.session_id).await?;
     access::check_read_only(
         &access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?,
@@ -98,7 +98,7 @@ pub async fn stop(
     arguments: Value,
 ) -> Result<Value, ToolError> {
     let args: Args = parse_arguments(arguments)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     let target = owned_in_tx(&mut tx, context, caller, args.session_id).await?;
     access::check_read_only(
         &access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?,

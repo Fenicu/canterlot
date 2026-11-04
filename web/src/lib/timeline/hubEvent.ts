@@ -1,9 +1,19 @@
 import { failureLabel, providerLabel } from '#lib/format/labels.js';
 import { fmt } from '#lib/format/ru.js';
+import { alarmEventLine, alarmTextCount } from '#lib/timeline/alarm.js';
 import type { InputOrigin } from '#lib/stores/inputs.js';
 
 export type HubEvent = NonNullable<InputOrigin['event']>;
 export type HubFact = { label: string; value: string };
+
+/** Поля сработавшего будильника: хаб кладёт их в origin рядом с общими полями события. */
+type AlarmFacts = {
+  alarm_id?: string | null;
+  alarm_ids?: string[] | null;
+  alarm_key?: string | null;
+  fired_reason?: string | null;
+};
+type AlarmOrigin = InputOrigin & AlarmFacts & { event?: (HubEvent & AlarmFacts) | null };
 
 const SESSION_KINDS = new Set(['session_result', 'asked', 'stalled', 'failed', 'quota_paused']);
 
@@ -18,8 +28,11 @@ const STATUS: Record<string, string> = {
 
 export const LEGACY_LIMIT = 420;
 
+// Вызывается на каждой записи ленты при каждой пересборке окна: вид читается один раз,
+// чтобы поле не подписывало строку дважды.
 export function isEventOrigin(origin: InputOrigin | null | undefined): boolean {
-  return origin?.kind === 'event';
+  const kind = origin?.kind;
+  return kind === 'event' || kind === 'alarm';
 }
 
 export function isSessionEvent(event: HubEvent | null | undefined): boolean {
@@ -148,9 +161,69 @@ export function eventLine(event: HubEvent, title: string): string | null {
       }
     case 'deleted':
       return title ? `${name} удалена` : 'Сессия удалена';
+    case 'alarm':
+      return alarmEventLine(event);
     default:
       return null;
   }
+}
+
+function stringValues(value: unknown): string[] {
+  if (Array.isArray(value))
+    return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+  return typeof value === 'string' && value.trim() !== '' ? [value] : [];
+}
+
+/** Идентификаторы сработавших будильников: новые клиенты получают их списком, старые — по одному. */
+export function alarmIdentifiers(origin: InputOrigin | null | undefined): string[] {
+  const value = origin as AlarmOrigin | null | undefined;
+  return [
+    ...new Set([
+      ...stringValues(value?.alarm_ids),
+      ...stringValues(value?.event?.alarm_ids),
+      ...stringValues(value?.alarm_id),
+      ...stringValues(value?.event?.alarm_id)
+    ])
+  ];
+}
+
+/** Сколько будильников сработало: список в origin или разделы доставленного текста. */
+export function alarmFiredCount(origin: InputOrigin | null | undefined, text: string): number {
+  return Math.max(alarmIdentifiers(origin).length, alarmTextCount(text));
+}
+
+/** Строка на ввод: слабая ссылка не держит ушедшие записи. */
+const alarmLines = new WeakMap<object, { key: string; text: string; line: string }>();
+
+/** Всё, от чего зависит строка: тот же ввод с тем же текстом не разбирается заново. */
+function alarmLineKey(origin: InputOrigin): string {
+  const event = (origin as AlarmOrigin).event;
+  return [...alarmIdentifiers(origin), event?.alarm_key ?? '', event?.fired_reason ?? ''].join(
+    '\u0000'
+  );
+}
+
+/** Тихая строка-заголовок будильника: имя одного или число сработавших. */
+export function alarmEntryLine(origin: InputOrigin | null | undefined, text: string): string | null {
+  if (origin?.kind !== 'alarm') return null;
+  // Текст доставки разбирается один раз на ввод: пересборка окна и снимок не гоняют регулярки заново.
+  const key = alarmLineKey(origin);
+  const known = alarmLines.get(origin);
+  if (known && known.key === key && known.text === text) return known.line;
+  const line = alarmTitleLine(origin, text);
+  alarmLines.set(origin, { key, text, line });
+  return line;
+}
+
+function alarmTitleLine(origin: InputOrigin, text: string): string {
+  const event = (origin as AlarmOrigin).event;
+  const count = alarmFiredCount(origin, text);
+  if (count > 1)
+    return `${fmt.plural(count, ['Сработал', 'Сработали', 'Сработали'])} ${count} ${fmt.plural(
+      count,
+      ['будильник', 'будильника', 'будильников']
+    )}`;
+  return alarmEventLine({ alarm_key: event?.alarm_key, fired_reason: event?.fired_reason });
 }
 
 export function isLongText(text: string): boolean {

@@ -23,6 +23,7 @@ use crate::{
     session::Registry,
 };
 
+pub mod alarms;
 pub mod attachments;
 pub mod auth;
 mod connection;
@@ -136,6 +137,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .merge(health::routes())
         .merge(scheduled::routes())
+        .merge(alarms::routes())
         .merge(conversations::routes())
         .merge(crunch::routes())
         .merge(groups::routes())

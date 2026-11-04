@@ -6,8 +6,13 @@ use canterlot_proto::{
     limits::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_INPUT, MAX_METRICS_EXECUTIONS},
     worker::v1::{MachineMetrics, MachineReport},
 };
+use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
 use sqlx::{PgConnection, PgPool};
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -121,6 +126,8 @@ pub async fn apply_report(
     })
     .await
 }
+/// Машинный `cpu_permille` нормирован на всю машину, поэтому 1000 — его потолок.
+/// Битые счётчики исполнений отбрасываются по одному в `sanitize_executions`.
 fn validate(metrics: &MachineMetrics) -> Option<&'static str> {
     if metrics.cpu_permille > 1000 {
         return Some("cpu_permille");
@@ -161,14 +168,42 @@ fn validate(metrics: &MachineMetrics) -> Option<&'static str> {
     {
         return Some("counter_overflow");
     }
-    if metrics
-        .executions
-        .iter()
-        .any(|e| e.cpu_permille > 1000 || e.rss_bytes > i64::MAX as u64)
-    {
-        return Some("execution_counter");
-    }
     None
+}
+/// `cpu_permille` исполнения — тысячные доли одного ядра, сумма по его дереву
+/// процессов, поэтому многопоточный CLI или сборка даёт больше 1000
+/// (2400 = 2,4 ядра). Принимаем все ядра машины и 5% на дрожание замера.
+fn execution_cpu_limit(cpu_cores: u32) -> u64 {
+    u64::from(cpu_cores.max(1)) * 1000 * 105 / 100
+}
+/// Сломанный счётчик повторяется в каждой выборке; предупреждаем редко.
+const DROPPED_EXECUTIONS_WARN: Duration = Duration::from_secs(300);
+fn warn_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= DROPPED_EXECUTIONS_WARN)
+}
+fn warn_dropped_executions(dropped: usize) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let now = Instant::now();
+    let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if warn_due(*last, now) {
+        *last = Some(now);
+        tracing::warn!(
+            kind = "machine_metrics_execution_dropped",
+            reason = "execution_counter",
+            dropped,
+            "metrics execution dropped"
+        );
+    }
+}
+/// Одна битая запись исполнения не повод выбрасывать машину, память, диски и
+/// остальные исполнения: отбрасываем только её.
+fn sanitize_executions(metrics: &mut MachineMetrics) -> usize {
+    let limit = execution_cpu_limit(metrics.cpu_cores);
+    let before = metrics.executions.len();
+    metrics
+        .executions
+        .retain(|e| u64::from(e.cpu_permille) <= limit && e.rss_bytes <= i64::MAX as u64);
+    before - metrics.executions.len()
 }
 fn ignored(reason: &'static str) -> MetricsOutcome {
     tracing::warn!(kind = "machine_metrics_ignored", reason, "metrics ignored");
@@ -181,9 +216,59 @@ pub async fn apply_metrics(
     m: &MachineMetrics,
     correlation_id: Uuid,
 ) -> Result<MetricsOutcome, sqlx::Error> {
+    apply_metrics_with_registry(pool, owner_id, machine_id, m, None, correlation_id).await
+}
+
+/// Окно правдоподобия часов машины без сверенного смещения: выборка, снятая
+/// заметно раньше приёма или в будущем, не доказывает свежесть условия.
+const SAMPLE_TIME_MAX_AGE: TimeDelta = TimeDelta::hours(24);
+const SAMPLE_TIME_MAX_AHEAD: TimeDelta = TimeDelta::minutes(5);
+const METRICS_STALE_AGE: TimeDelta = TimeDelta::seconds(91);
+
+/// Время выборки в часах хаба: смещение сеанса, если оно известно, иначе
+/// собственные часы выборки в пределах правдоподобия. Нулевая или нелепая
+/// отметка не должна доказывать условие: такая выборка считается устаревшей.
+fn sample_observed_at(
+    registry: Option<&Registry>,
+    machine_id: Uuid,
+    machine_ms: u64,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    if machine_ms == 0 {
+        return now;
+    }
+    let mapped = registry
+        .and_then(|registry| registry.to_hub_time(machine_id, machine_ms))
+        .or_else(|| {
+            i64::try_from(machine_ms)
+                .ok()
+                .and_then(DateTime::from_timestamp_millis)
+        });
+    match mapped {
+        Some(at) if at >= now - SAMPLE_TIME_MAX_AGE && at <= now + SAMPLE_TIME_MAX_AHEAD => at,
+        _ => now - METRICS_STALE_AGE,
+    }
+}
+
+pub(crate) async fn apply_metrics_with_registry(
+    pool: &PgPool,
+    owner_id: Uuid,
+    machine_id: Uuid,
+    m: &MachineMetrics,
+    registry: Option<&Registry>,
+    correlation_id: Uuid,
+) -> Result<MetricsOutcome, sqlx::Error> {
     if let Some(reason) = validate(m) {
         return Ok(ignored(reason));
     }
+    let m = {
+        let mut metrics = m.clone();
+        let dropped = sanitize_executions(&mut metrics);
+        if dropped > 0 {
+            warn_dropped_executions(dropped);
+        }
+        metrics
+    };
     let mut ids = Vec::new();
     for e in &m.executions {
         let Ok(id) = Uuid::parse_str(&e.execution_id) else {
@@ -196,7 +281,10 @@ pub async fn apply_metrics(
     if ids.len() != m.executions.len() {
         return Ok(ignored("duplicate_execution"));
     }
-    let m = m.clone();
+    let now = Utc::now();
+    // Свежесть условия считается по времени выборки, а не по времени приёма:
+    // задержанный отчёт не должен срабатывать старыми показаниями.
+    let observed_at = sample_observed_at(registry, machine_id, m.machine_time_ms, now);
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
     machine(&mut *conn, owner_id, machine_id).await?;
@@ -222,6 +310,17 @@ pub async fn apply_metrics(
         return Ok(ignored("stale_sample"));
     }
     emit(&mut *conn,owner_id,"machine_metrics",json!({"machine_id":machine_id,"machine_time_ms":m.machine_time_ms,"cpu_cores":m.cpu_cores,"cpu_permille":m.cpu_permille,"mem_total_bytes":m.mem_total_bytes,"mem_available_bytes":m.mem_available_bytes,"load1_centi":m.load1_centi,"load5_centi":m.load5_centi,"load15_centi":m.load15_centi,"disks":disks,"executions":executions}),correlation_id).await?;
+    // Сторож машины проверяет взведённые будильники этой машины на каждом свежем отчёте.
+    // Выборка могла быть снята раньше приёма: оба условия сверяются с её временем.
+    crate::session_tools::alarms::evaluate_machine_in_tx(
+        &mut *conn,
+        machine_id,
+        &m,
+        observed_at,
+        now,
+        correlation_id,
+    )
+    .await?;
     Ok(MetricsOutcome::Stored)
         })
     })
@@ -343,4 +442,27 @@ pub async fn run_status_projection(
         }
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn dropped_execution_warning_is_rate_limited() {
+        let now = Instant::now();
+        assert!(warn_due(None, now), "первое предупреждение проходит");
+        assert!(
+            !warn_due(Some(now), now + Duration::from_secs(1)),
+            "следующая выборка не повторяет предупреждение"
+        );
+        assert!(warn_due(Some(now), now + DROPPED_EXECUTIONS_WARN));
+    }
+
+    #[test]
+    fn execution_cpu_limit_allows_all_cores_with_jitter() {
+        assert_eq!(execution_cpu_limit(0), 1050);
+        assert_eq!(execution_cpu_limit(36), 37800);
+    }
 }

@@ -7,12 +7,23 @@
   let {
     request,
     onDecision,
-    disabled = false
+    disabled = false,
+    harnessId = '',
+    permissionMode = ''
   }: {
     request: RequestItem;
     onDecision: (d: DecisionBody) => Promise<void>;
     disabled?: boolean;
+    harnessId?: string;
+    permissionMode?: string;
   } = $props();
+
+  // Claude Code спрашивает про rm, которое не может проверить, даже в режиме без подтверждений.
+  const bypassNote = $derived(
+    harnessId === 'claude_code' && permissionMode === 'bypass'
+      ? 'Claude Code спрашивает про удаление, которое не может проверить, даже без подтверждений'
+      : ''
+  );
 
   const payload = $derived((request.payload ?? {}) as Record<string, unknown>);
   const view = $derived(permissionView(payload));
@@ -88,6 +99,10 @@
       {#if toolName}<span class="tool-tag">{toolName}</span>{/if}
     {/if}
   </div>
+
+  {#if bypassNote}
+    <p class="meta-line">{bypassNote}</p>
+  {/if}
 
   {#if opensLink && elicitationServer}
     <h3 class="title">Сервер {elicitationServer} просит открыть ссылку</h3>

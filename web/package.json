@@ -1,7 +1,7 @@
 {
   "name": "canterlot-web",
   "private": true,
-  "version": "1.2.1",
+  "version": "1.5.1",
   "type": "module",
   "engines": {
     "node": ">=24 <25"
@@ -15,10 +15,12 @@
     "lint:tokens": "node scripts/check-tokens.mjs",
     "gen:api": "node scripts/gen-api.mjs",
     "test:unit": "vitest run",
+    "test:build": "vitest run --config vitest.build.config.ts",
     "test:ui": "playwright test e2e/ui",
     "test:stack": "playwright test e2e/stack",
     "test:perf": "playwright test e2e/perf --project=phone",
     "test:parity": "playwright test e2e/parity",
+    "screenshots": "PW_SCREENSHOTS=1 playwright test e2e/screenshots/readme.spec.ts --project=phone",
     "stack:build": "cargo build -p canterlot-hub -p canterlot-worker --features canterlot-worker/synthetic-adapter"
   },
   "dependencies": {

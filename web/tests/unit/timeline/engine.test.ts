@@ -10,11 +10,9 @@ import {
 } from "#lib/timeline/virtual.js";
 import { buildRows } from "#lib/timeline/rows.js";
 import {
-  REVEAL_LAG_MS,
   TOOL_DOM_CAP,
   TOOL_PAGE_BYTES,
   liveLineText,
-  revealedText,
   takeToolPage,
   toolStatusText,
 } from "#lib/timeline/present.js";
@@ -218,28 +216,6 @@ describe("timeline window", () => {
     expect(liveLineText("working", 138_000)).toBe("Генерирует · 2 мин 18 с");
   });
 
-  it("text_reveal_never_lags_more_than_the_bound", () => {
-    const full = Array.from({ length: 40 }, (_, index) => `слово${index}`).join(
-      " ",
-    );
-    expect(revealedText(full, 0, 1).length).toBeLessThan(full.length);
-    expect(revealedText(full, REVEAL_LAG_MS, 1)).toBe(full);
-    for (let elapsed = 0; elapsed <= REVEAL_LAG_MS; elapsed += 50) {
-      const shown = revealedText(full, elapsed, 1);
-      expect(full.startsWith(shown)).toBe(true);
-      expect(elapsed).toBeLessThanOrEqual(REVEAL_LAG_MS);
-    }
-  });
-
-  it("text_reveal_final_text_is_identical", () => {
-    const full = "Привет, мир.\n\nВторая строка.";
-    expect(revealedText(full, REVEAL_LAG_MS + 1, 1)).toBe(full);
-  });
-
-  it("text_reveal_is_instant_when_motion_is_off", () => {
-    const full = "Раз два три четыре пять";
-    expect(revealedText(full, 0, 0)).toBe(full);
-  });
 });
 
 function mulberry(seed: number): () => number {

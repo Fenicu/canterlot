@@ -170,7 +170,7 @@ pub async fn record_observation_in_tx(
     config: &LimitsConfig,
     correlation_id: Uuid,
 ) -> Result<Recorded, sqlx::Error> {
-    let result = record_in_tx(conn, o, now, config, true).await?;
+    let result = record_in_tx(conn, o, now, config, true, correlation_id).await?;
     if result.provider_changed || result.refreshed {
         emit_changed(conn, owner_id, &o.provider, o.window, correlation_id).await?;
     }
@@ -192,6 +192,7 @@ pub(crate) async fn record_in_tx(
     now: DateTime<Utc>,
     config: &LimitsConfig,
     mapped: bool,
+    correlation_id: Uuid,
 ) -> Result<Recorded, sqlx::Error> {
     if o.used_permille > 1000 || !known_provider(&o.provider) {
         return Err(sqlx::Error::InvalidArgument(
@@ -241,6 +242,19 @@ pub(crate) async fn record_in_tx(
     }
     if newer && o.window == Window::Weekly {
         weekly_stage(conn, o, observed_at, now, config).await?;
+    }
+    // Свежее показание сперва попадает в `provider_limits`, поэтому условие будильника
+    // оценивается уже по новой строке. Строка провайдера заперта выше: порядок блокировок
+    // «провайдер → будильники» соблюдён.
+    if newer {
+        crate::session_tools::alarms::evaluate_limit_in_tx(
+            conn,
+            &o.provider,
+            o.window,
+            now,
+            correlation_id,
+        )
+        .await?;
     }
     // Возвращение окна после отметки об отсутствии и смена точности клиентам тоже нужны.
     let changed = used != Some(i32::from(o.used_permille))
@@ -385,6 +399,15 @@ pub async fn record_absence_in_tx(
     if first {
         emit_changed(conn, owner_id, provider, window, correlation_id).await?;
     }
+    // Исчезнувшее окно — тоже признак сброса: условие будильника проверяется здесь.
+    crate::session_tools::alarms::evaluate_limit_in_tx(
+        conn,
+        provider,
+        window,
+        observed_at,
+        correlation_id,
+    )
+    .await?;
     Ok(first)
 }
 pub async fn on_limit_reached_in_tx(

@@ -1,4 +1,9 @@
 .prose { line-height: var(--lh-body); overflow-wrap: anywhere; }
+.prose .reveal-word { animation: text-reveal var(--duration-text-reveal) var(--ease) both; }
+@keyframes text-reveal {
+  from { opacity: 0; filter: blur(var(--blur-text-reveal)); }
+  to { opacity: 1; filter: blur(0); }
+}
 .prose :is(p, ul, ol, pre, blockquote, table) { margin-block: var(--s6); }
 .prose :is(h1, h2, h3, h4, h5, h6) { margin-block: var(--s8) var(--s4); font-weight: var(--weight-semibold); line-height: var(--lh-tight); letter-spacing: var(--tracking-normal); }
 .prose h1 { font-size: var(--fs-title); }
@@ -14,12 +19,14 @@
 .prose hr { height: var(--hairline); margin-block: var(--s8); border: var(--s0); background: var(--line); }
 .prose code { font-size: var(--fs-meta); }
 .prose :not(pre) > code { padding-inline: var(--s1); border-radius: var(--radius-sm); background: var(--raised); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.prose .code-block { position: relative; margin-block: var(--s6); }
+.prose .code-block > pre { width: 100%; margin-block: var(--s0); }
 .prose pre { max-width: 100%; padding: var(--s5) var(--s6); overflow-x: auto; overflow-wrap: normal; border-radius: var(--radius-sm); background: var(--code); }
 .prose pre code { font-size: inherit; overflow-wrap: normal; }
 .prose pre[data-fade='end'] { mask-image: linear-gradient(to right, var(--text) calc(100% - var(--s9)), var(--transparent)); }
 .prose pre[data-fade='start'] { mask-image: linear-gradient(to left, var(--text) calc(100% - var(--s9)), var(--transparent)); }
 .prose pre[data-fade='both'] { mask-image: linear-gradient(to right, var(--transparent), var(--text) var(--s9), var(--text) calc(100% - var(--s9)), var(--transparent)); }
-.prose blockquote { margin-inline: var(--s0); padding: var(--s4) var(--s6); border-radius: var(--radius-sm); background: var(--raised); color: var(--secondary); }
+.prose blockquote { position: relative; margin-inline: var(--s0); padding: var(--s4) var(--s6); border-radius: var(--radius-sm); background: var(--raised); color: var(--secondary); }
 .prose blockquote > :first-child { margin-top: var(--s0); }
 .prose blockquote > :last-child { margin-bottom: var(--s0); }
 .prose table { display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; border-collapse: separate; border-spacing: var(--s0); font-size: var(--fs-meta); }
@@ -29,7 +36,38 @@
 .prose tbody tr:nth-child(odd) td:first-child { border-radius: var(--radius-sm) var(--s0) var(--s0) var(--radius-sm); }
 .prose tbody tr:nth-child(odd) td:last-child { border-radius: var(--s0) var(--radius-sm) var(--radius-sm) var(--s0); }
 
+.prose .copy-button {
+  position: absolute;
+  top: var(--s2);
+  right: var(--s2);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-height: var(--s12);
+  padding: var(--s1) var(--s2);
+  border: var(--hairline) solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--code);
+  color: var(--secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-tight);
+  opacity: 0;
+  pointer-events: none;
+}
+.prose .copy-button svg { width: var(--icon-small); height: var(--icon-small); fill: none; stroke: currentColor; stroke-width: var(--focus-width); }
+.prose .copy-button[data-copied='done'] { color: var(--accent); }
+.prose .copy-button[data-copied='failed'] { color: var(--danger); }
+.prose .copy-status:empty { display: none; }
+.prose :is(.code-block, blockquote):hover > .copy-button,
+.prose :is(.code-block, blockquote):focus-within > .copy-button,
+.prose .copy-button:focus-visible { opacity: 1; pointer-events: auto; }
+@media (hover: none) {
+  .prose .copy-button { min-width: var(--target); min-height: var(--target); opacity: 1; pointer-events: auto; }
+}
+
 /* На большом экране код и таблицы могут выйти за колонку чтения, но не за панель чата. */
 @container (min-width: 72rem) {
-  .prose :is(pre, table) { width: fit-content; min-width: 100%; max-width: min(var(--prose-wide), calc(50cqw + 50% - var(--gutter))); }
+  .prose .code-block, .prose table { width: fit-content; min-width: 100%; max-width: min(var(--prose-wide), calc(50cqw + 50% - var(--gutter))); }
+  /* Внутри цитаты или пункта списка ширина считается от их полей: выходить за карточку некуда. */
+  .prose :is(blockquote, li) :is(.code-block, table) { width: auto; min-width: 0; max-width: 100%; }
 }

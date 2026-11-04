@@ -74,6 +74,7 @@ pub(super) fn submit_error(error: SubmitError) -> ToolError {
 
 /// Отправки одной сессии идут по очереди: иначе параллельные вызовы вместе прошли бы
 /// и проверку частоты, и поиск такого же текста.
+/// Порядок блокировок: docs/design/delivery.md, «Порядок блокировок инструментов сессии».
 pub(super) async fn lock_sender(conn: &mut PgConnection, sender: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("select pg_advisory_xact_lock(hashtextextended('canterlot:send:'||$1::text,0))")
         .bind(sender)
@@ -82,6 +83,7 @@ pub(super) async fn lock_sender(conn: &mut PgConnection, sender: Uuid) -> Result
     Ok(())
 }
 
+/// Очередь получателя: в порядке блокировок идёт после строк разговора и до подписок.
 pub(super) async fn lock_queue(conn: &mut PgConnection, target: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
         .bind(target)
@@ -241,7 +243,7 @@ pub async fn send(
     if args.text.trim().is_empty() {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     lock_sender(&mut tx, caller.conversation_id).await?;
     let (result, fresh) = send_in_tx(&mut tx, context, caller, &args).await?;
     tx.commit().await?;
@@ -325,7 +327,7 @@ pub async fn subscribe(
     arguments: Value,
 ) -> Result<Value, ToolError> {
     let args: TargetArgs = parse_arguments(arguments)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     let subscriber = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if args.session_id == subscriber.id {
         return Err(ToolError::new(ToolErrorCode::SessionNotFound));
@@ -374,7 +376,7 @@ pub async fn unsubscribe(
     arguments: Value,
 ) -> Result<Value, ToolError> {
     let args: TargetArgs = parse_arguments(arguments)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     let subscriber = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if args.session_id == subscriber.id {
         return Err(ToolError::new(ToolErrorCode::SessionNotFound));

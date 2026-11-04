@@ -3,7 +3,7 @@
   "info": {
     "title": "canterlot hub API",
     "description": "HTTP и WSS контракт хаба. Личность задаёт прокси перед хабом; изменяющим запросам нужны Origin, X-Canterlot-Client: 1 и Idempotency-Key.",
-    "version": "1.2.1"
+    "version": "1.5.1"
   },
   "paths": {
     "/api/v1/attachments": {
@@ -1017,6 +1017,183 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/alarms": {
+      "get": {
+        "tags": [
+          "alarms"
+        ],
+        "operationId": "get__api_v1_conversations__id__alarms",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Разговор",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Будильники разговора",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlarmList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Разговор не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/alarms/{alarm_id}": {
+      "delete": {
+        "tags": [
+          "alarms"
+        ],
+        "operationId": "delete__api_v1_conversations__id__alarms__alarm_id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Разговор",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "alarm_id",
+            "in": "path",
+            "description": "Будильник",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Ключ операции",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Будильник отменён или уже завершён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlarmView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Будильник не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/blocks/{block_id}": {
       "get": {
         "tags": [
@@ -1446,6 +1623,187 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/groups/{group_id}/pin": {
+      "put": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "put__api_v1_conversations__id__groups__group_id__pin",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сессия закреплена в группе",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found или group_not_found",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "delete__api_v1_conversations__id__groups__group_id__pin",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Сессия откреплена в группе",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "404": {
+            "description": "not_found или group_not_found",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             }
@@ -5210,6 +5568,166 @@
           }
         }
       },
+      "AlarmList": {
+        "type": "object",
+        "required": [
+          "alarms"
+        ],
+        "properties": {
+          "alarms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlarmView"
+            }
+          }
+        }
+      },
+      "AlarmView": {
+        "type": "object",
+        "description": "То, что видят PWA и HTTP: без заметки и без внутренних отметок.",
+        "required": [
+          "alarm_id",
+          "conversation_id",
+          "kind",
+          "condition",
+          "session_ids",
+          "states",
+          "only_on_timeout",
+          "batch",
+          "state",
+          "note_bytes",
+          "created_at"
+        ],
+        "properties": {
+          "alarm_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "batch": {
+            "type": "boolean"
+          },
+          "below_percent": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "condition": {
+            "type": "string"
+          },
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "deadline_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fired_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fired_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "free_disk_gb_above": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Разобранное условие `machine` для подписей PWA на русском."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "load_per_core_below": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "mem_available_gb_above": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "only_on_timeout": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Разобранное условие `limit_reset` для подписей PWA на русском."
+          },
+          "session_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "state": {
+            "type": "string"
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "window": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "AppliedPreset": {
         "type": "object",
         "description": "Применённый пресет в эффективных настройках: ссылка, название и версии.\nТекста здесь нет — только снимок запуска везёт текст.",
@@ -5351,6 +5869,7 @@
           "pinned",
           "archived",
           "groups",
+          "group_pins",
           "machine",
           "harness",
           "workdir",
@@ -5368,6 +5887,12 @@
           },
           "created_at": {
             "type": "string"
+          },
+          "group_pins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupPinView"
+            }
           },
           "groups": {
             "type": "array",
@@ -6106,9 +6631,17 @@
           "scheduled",
           "open_requests",
           "todos",
-          "background"
+          "background",
+          "alarms"
         ],
         "properties": {
+          "alarms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlarmView"
+            },
+            "description": "Взведённые и недавние завершившиеся будильники разговора."
+          },
           "background": {
             "type": "array",
             "items": {
@@ -7116,6 +7649,23 @@
         },
         "additionalProperties": false
       },
+      "GroupPinView": {
+        "type": "object",
+        "description": "Закрепление сессии внутри одной группы; глобальное `pinned` живёт отдельно.",
+        "required": [
+          "group_id",
+          "pinned_at"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "pinned_at": {
+            "type": "string"
+          }
+        }
+      },
       "GroupsBody": {
         "type": "object",
         "required": [
@@ -7491,6 +8041,20 @@
           "kind"
         ],
         "properties": {
+          "alarm_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`alarm`: сработавший будильник."
+          },
+          "alarm_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "answer": {
             "type": [
               "string",
@@ -7578,6 +8142,12 @@
               "null"
             ],
             "format": "int64"
+          },
+          "fired_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "kind": {
             "type": "string",
@@ -9986,9 +10556,17 @@
               "scheduled",
               "open_requests",
               "todos",
-              "background"
+              "background",
+              "alarms"
             ],
             "properties": {
+              "alarms": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AlarmView"
+                },
+                "description": "Взведённые и недавние завершившиеся будильники разговора."
+              },
               "background": {
                 "type": "array",
                 "items": {
