@@ -212,6 +212,7 @@ async fn serve(
         machines,
         attachments,
         session_tools,
+        orchestrator,
         ..
     } = config;
     let blobs: std::sync::Arc<dyn canterlot_hub::attachments::BlobStore> = std::sync::Arc::new(
@@ -251,6 +252,8 @@ async fn serve(
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())
             .with_session_tools(session_tools)
+            .with_limits(limits.clone())
+            .with_orchestrator(&orchestrator)
             .with_activity(&activity)
             .with_dispatcher(dispatcher.clone());
     state.ingest = std::sync::Arc::new(

@@ -8,6 +8,7 @@
 	import Composer from '#lib/composer/Composer.svelte';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import PendingStrip from '#lib/timeline/PendingStrip.svelte';
+	import AlarmsStrip from '#lib/timeline/AlarmsStrip.svelte';
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
@@ -217,6 +218,8 @@
 	{/if}
 
 	<PauseCards {chat} {now} />
+
+	<AlarmsStrip {chat} />
 
 	<PendingStrip {chat} />
 

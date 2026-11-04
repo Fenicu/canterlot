@@ -29,9 +29,11 @@ impl Fx {
             context: ToolContext {
                 pool: pool.clone(),
                 config: Arc::new(SessionToolsConfig::default()),
+                limits: Default::default(),
                 settle: SettleConfig {
                     idle_quiet: Duration::from_secs(5),
                 },
+                alarms_enabled: true,
                 dispatcher: None,
                 registry: canterlot_hub::session::Registry::new(Default::default()),
                 shutdown: tokio_util::sync::CancellationToken::new(),

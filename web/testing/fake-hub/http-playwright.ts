@@ -148,6 +148,39 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     });
   });
 
+  await page.route(/\/api\/v1\/conversations\/[^/]+\/alarms\/[^/]+$/, async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback();
+    const parts = new URL(route.request().url()).pathname.split('/');
+    const conversation = parts[4] ?? '';
+    const alarmId = parts.at(-1) ?? '';
+    const alarm = {
+      alarm_id: alarmId,
+      conversation_id: conversation,
+      key: null,
+      kind: 'at',
+      condition: '',
+      session_ids: [],
+      states: [],
+      fires_at: null,
+      deadline_at: null,
+      only_on_timeout: false,
+      batch: false,
+      state: 'cancelled',
+      fired_reason: 'cancelled',
+      failure_reason: null,
+      fired_at: null,
+      note: null,
+      note_bytes: 0,
+      created_at: new Date().toISOString()
+    };
+    hub.append(`conversation:${conversation}`, {
+      kind: 'alarm_changed',
+      conversation_id: conversation,
+      payload: alarm
+    });
+    await route.fulfill({ headers: headers(), json: alarm });
+  });
+
   await page.route('**/api/v1/conversations/*/interrupt', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     // Как у хаба: команда прерывания создана для живого исполнения.

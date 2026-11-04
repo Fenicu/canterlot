@@ -206,6 +206,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[job, owner, conversation],
     )
     .await;
+    exec(
+        pool,
+        "insert into alarms(id,owner_id,conversation_id,created_by,kind,fire_at,call_id)
+         values($1,$2,$3,'agent','at',now()+interval '1 hour',$4)",
+        &[Uuid::now_v7(), owner, conversation, Uuid::now_v7()],
+    )
+    .await;
     // Потомок и подписки в обе стороны: после удаления остаются потомок без родителя и ничего больше.
     let delegate = f.conversation().await;
     exec(
@@ -513,9 +520,11 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
     let context = ToolContext {
         pool: f.pool.clone(),
         config: Default::default(),
+        limits: Default::default(),
         settle: SettleConfig {
             idle_quiet: std::time::Duration::from_secs(5),
         },
+        alarms_enabled: true,
         dispatcher: None,
         registry: canterlot_hub::session::Registry::new(Default::default()),
         shutdown: tokio_util::sync::CancellationToken::new(),

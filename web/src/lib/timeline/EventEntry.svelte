@@ -5,6 +5,7 @@
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import {
     LEGACY_CAPTION,
+    alarmEntryLine,
     collapsedText,
     eventFacts,
     eventLine,
@@ -14,6 +15,7 @@
     isSessionEvent,
     sessionStatus
   } from '#lib/timeline/hubEvent.js';
+  import Icon from '#lib/ui/Icon.svelte';
 
   let { input, open, onToggle }: { input: InputView; open: boolean; onToggle: () => void } = $props();
 
@@ -23,7 +25,8 @@
   const link = $derived(eventSessionId(origin));
   const rawTitle = $derived(origin?.title?.trim() ?? '');
   const session = $derived(isSessionEvent(event));
-  const line = $derived(event && !session ? eventLine(event, rawTitle) : null);
+  const alarm = $derived(origin?.kind === 'alarm' ? alarmEntryLine(origin, input.text) : null);
+  const line = $derived(event && !session && !alarm ? eventLine(event, rawTitle) : null);
   const facts = $derived(event ? eventFacts(event) : []);
   const answer = $derived(event?.answer ?? '');
   const long = $derived(isLongText(input.text));
@@ -60,6 +63,20 @@
       </footer>
     {/if}
   </article>
+{:else if alarm}
+  <div class="alarm" data-role="alarm">
+    <button type="button" class="alarm-head" aria-expanded={open} onclick={onToggle}>
+      <span class="chevron" data-open={open ? '' : undefined}><Icon name="chevron" /></span>
+      <span class="line" data-event-kind="alarm">{alarm}</span>
+    </button>
+    {#if open}
+      <div class="fold">
+        <div class="alarm-body" data-role="alarm-body">
+          <TextBlock block={{ id: input.key, text: input.text, state: 'final' }} />
+        </div>
+      </div>
+    {/if}
+  </div>
 {:else if line}
   <p class="line" data-event-kind={event?.kind}>{line}</p>
 {:else}
@@ -132,6 +149,26 @@
   }
   .answer { min-width: 0; }
   .stamp { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+  .alarm { display: flex; flex-direction: column; min-width: 0; }
+  .alarm-head {
+    display: flex;
+    gap: var(--s3);
+    align-items: center;
+    width: 100%;
+    min-height: var(--target);
+    padding: var(--s0) var(--s6) var(--s0) var(--s4);
+    text-align: left;
+  }
+  .chevron {
+    flex: none;
+    color: var(--muted);
+    transition: transform var(--duration-expand) var(--ease-expand);
+  }
+  .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
+  .chevron[data-open] { transform: rotate(90deg); }
+  .fold { display: grid; grid-template-rows: 1fr; animation: fold var(--duration-expand) var(--ease-expand); }
+  .alarm-body { min-height: 0; overflow: hidden; padding: var(--s2) var(--s6) var(--s4); color: var(--secondary); }
+  @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
   .line {
     margin: 0;
     padding-inline: var(--s6);
@@ -139,6 +176,7 @@
     font-size: var(--fs-sm);
     overflow-wrap: anywhere;
   }
+  .alarm-head .line { padding-inline: 0; }
   .legacy {
     display: flex;
     flex-direction: column;

@@ -7,6 +7,7 @@
 
 pub mod accept;
 pub mod access;
+pub mod alarms;
 pub mod completion;
 pub mod control;
 pub mod jobs;
@@ -29,7 +30,11 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use self::settle::SettleConfig;
-use crate::{config::SessionToolsConfig, dispatcher::Dispatcher, session::Registry};
+use crate::{
+    config::{LimitsConfig, SessionToolsConfig},
+    dispatcher::Dispatcher,
+    session::Registry,
+};
 
 /// Имена хаба для инструментов; на стороне модели к ним добавляются префиксы harness.
 pub const TOOLS: &[&str] = &[
@@ -44,6 +49,9 @@ pub const TOOLS: &[&str] = &[
     "sessions.interrupt",
     "sessions.stop",
     "limits.report",
+    "alarms.set",
+    "alarms.cancel",
+    "alarms.list",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -73,12 +81,15 @@ pub enum ToolErrorCode {
     NotDelegated,
     AttachmentNotAvailable,
     TextTooLarge,
+    TooLarge,
+    TooManyAlarms,
+    AlarmNotFound,
     InvalidArguments,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 25] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -99,6 +110,9 @@ impl ToolErrorCode {
         Self::NotDelegated,
         Self::AttachmentNotAvailable,
         Self::TextTooLarge,
+        Self::TooLarge,
+        Self::TooManyAlarms,
+        Self::AlarmNotFound,
         Self::InvalidArguments,
         Self::Internal,
     ];
@@ -125,6 +139,9 @@ impl ToolErrorCode {
             Self::NotDelegated => "not_delegated",
             Self::AttachmentNotAvailable => "attachment_not_available",
             Self::TextTooLarge => "text_too_large",
+            Self::TooLarge => "too_large",
+            Self::TooManyAlarms => "too_many_alarms",
+            Self::AlarmNotFound => "alarm_not_found",
             Self::InvalidArguments => "invalid_arguments",
             Self::Internal => "internal_error",
         }
@@ -152,6 +169,9 @@ impl ToolErrorCode {
             Self::NotDelegated => "The session was not started by an agent",
             Self::AttachmentNotAvailable => "The attachment is not available in this conversation",
             Self::TextTooLarge => "The text is too large",
+            Self::TooLarge => "The payload is too large",
+            Self::TooManyAlarms => "Too many armed alarms in this session",
+            Self::AlarmNotFound => "No such alarm",
             Self::InvalidArguments => "Invalid arguments",
             Self::Internal => "The hub could not complete the call, try later",
         }
@@ -197,7 +217,9 @@ impl From<sqlx::Error> for ToolError {
 pub struct ToolContext {
     pub pool: PgPool,
     pub config: Arc<SessionToolsConfig>,
+    pub limits: Arc<LimitsConfig>,
     pub settle: SettleConfig,
+    pub alarms_enabled: bool,
     pub dispatcher: Option<Dispatcher>,
     pub registry: Registry,
     /// Останов хаба: долгие вызовы (`sessions.wait`) возвращаются, не дожидаясь срока.
@@ -233,6 +255,9 @@ pub async fn call(
         "sessions.interrupt" => control::interrupt(context, caller, arguments).await,
         "sessions.stop" => control::stop(context, caller, arguments).await,
         "limits.report" => report::report(context, caller, arguments).await,
+        "alarms.set" => alarms::set(context, caller, arguments).await,
+        "alarms.cancel" => alarms::cancel(context, caller, arguments).await,
+        "alarms.list" => alarms::list(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

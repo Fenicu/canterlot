@@ -332,6 +332,223 @@ async fn fire_failure_in_the_same_transaction_leaves_the_job_pending(pool: PgPoo
     );
 }
 
+/// Взаимоблокировка в транзакции задания не тратит бюджет отказов: задание
+/// откатывается, переносится на короткий срок и со второй попытки выполняется.
+#[sqlx::test(migrations = "./migrations")]
+async fn deadlock_in_a_job_keeps_its_failure_budget(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    let now = Utc::now();
+    let sch = scheduler(&pool, Default::default());
+    let m = scheduled(&pool, &s, "job", now).await;
+    sqlx::query("create sequence test_deadlock_once")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"create function test_deadlock_once() returns trigger language plpgsql as $$
+           begin
+             if nextval('test_deadlock_once') = 1 then
+               raise exception 'deadlock detected' using errcode = '40P01';
+             end if;
+             return new;
+           end $$"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger test_deadlock_once before insert on inputs
+         for each row execute function test_deadlock_once()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let due = now + TimeDelta::seconds(3);
+    let report = sch.tick(due).await.unwrap();
+    assert_eq!(report.retried, 1, "the deadlocked transaction is retried");
+    let (state, failures, attempts): (String, i32, i32) =
+        sqlx::query_as("select state,failures,attempts from scheduled_jobs where id=$1")
+            .bind(m.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "pending");
+    assert_eq!(failures, 0, "a transient error is not a failure");
+    assert_eq!(attempts, 0, "a transient error is not an attempt");
+    assert_eq!(count(&pool, "select count(*) from inputs").await, 0);
+
+    let report = sch.tick(due + TimeDelta::seconds(1)).await.unwrap();
+    assert_eq!(report.fired, 1, "the second attempt succeeds");
+    assert_eq!(count(&pool, "select count(*) from inputs").await, 1);
+    let (state, failures): (String, i32) =
+        sqlx::query_as("select state,failures from scheduled_jobs where id=$1")
+            .bind(m.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "fired");
+    assert_eq!(failures, 0);
+}
+
+/// Временный сбой не тратит отказы, но повторяется с растущей паузой: 1, 2, 4,
+/// 8, 16, 32 и дальше не больше 60 секунд.
+#[sqlx::test(migrations = "./migrations")]
+async fn transient_retries_back_off_and_cap(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    let now = Utc::now();
+    let sch = scheduler(&pool, Default::default());
+    let m = scheduled(&pool, &s, "job", now).await;
+    sqlx::query("create function always_deadlock() returns trigger language plpgsql as $$ begin raise exception 'deadlock detected' using errcode = '40P01'; end $$")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "create trigger always_deadlock before insert on inputs
+         for each row execute function always_deadlock()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // PostgreSQL хранит микросекунды: сверяем паузы с той же точностью.
+    let mut at =
+        chrono::DateTime::from_timestamp_micros((now + TimeDelta::seconds(3)).timestamp_micros())
+            .unwrap();
+    for (index, seconds) in [1_i64, 2, 4, 8, 16, 32, 60, 60].into_iter().enumerate() {
+        let report = sch.tick(at).await.unwrap();
+        assert_eq!(report.retried, 1);
+        let (run_at, result): (chrono::DateTime<Utc>, Value) =
+            sqlx::query_as("select run_at,result from scheduled_jobs where id=$1")
+                .bind(m.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            result["transient_count"],
+            json!(index as i64 + 1),
+            "transient retry count is tracked"
+        );
+        assert_eq!(
+            (run_at - at).num_seconds(),
+            seconds,
+            "transient backoff grows and caps at 60 seconds: run_at={run_at} at={at} result={result}"
+        );
+        at = run_at;
+    }
+    let (attempts, failures): (i32, i32) =
+        sqlx::query_as("select attempts,failures from scheduled_jobs where id=$1")
+            .bind(m.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(attempts, 0, "a transient error is not an attempt");
+    assert_eq!(failures, 0, "a transient error is not a failure");
+}
+
+/// Сутки непрерывных временных сбоев: следующий считается обычным отказом и
+/// расходует бюджет, поэтому задание в конце концов бросается.
+#[sqlx::test(migrations = "./migrations")]
+async fn transient_after_a_day_counts_as_a_failure(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    let now = Utc::now();
+    let sch = scheduler(
+        &pool,
+        SchedulerConfig {
+            max_attempts: 1,
+            ..Default::default()
+        },
+    );
+    let m = scheduled(&pool, &s, "job", now).await;
+    sqlx::query("update scheduled_jobs set result=$2 where id=$1")
+        .bind(m.id)
+        .bind(json!({
+            "transient_count": 5,
+            "transient_since": now - TimeDelta::hours(25),
+        }))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("create function always_deadlock() returns trigger language plpgsql as $$ begin raise exception 'deadlock detected' using errcode = '40P01'; end $$")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "create trigger always_deadlock before insert on inputs
+         for each row execute function always_deadlock()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = sch.tick(now + TimeDelta::seconds(3)).await.unwrap();
+    assert_eq!(report.failed, 1);
+    let (state, attempts, failures, result): (String, i32, i32, Value) =
+        sqlx::query_as("select state,attempts,failures,result from scheduled_jobs where id=$1")
+            .bind(m.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "failed", "the job is abandoned after a day");
+    assert_eq!(attempts, 1);
+    assert_eq!(failures, 1, "the ordinary failure consumes the budget");
+    assert_eq!(result, json!({"error": "transient_timeout"}));
+}
+
+/// Успешный запуск заменяет результат задания и стирает счётчик временных сбоев.
+#[sqlx::test(migrations = "./migrations")]
+async fn transient_success_resets_the_counter(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    let now = Utc::now();
+    let sch = scheduler(&pool, Default::default());
+    let m = scheduled(&pool, &s, "job", now).await;
+    sqlx::query("create sequence test_deadlock_once")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"create function test_deadlock_once() returns trigger language plpgsql as $$
+           begin
+             if nextval('test_deadlock_once') = 1 then
+               raise exception 'deadlock detected' using errcode = '40P01';
+             end if;
+             return new;
+           end $$"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger test_deadlock_once before insert on inputs
+         for each row execute function test_deadlock_once()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut at = now + TimeDelta::seconds(3);
+    assert_eq!(sch.tick(at).await.unwrap().retried, 1);
+    let (run_at, result): (chrono::DateTime<Utc>, Value) =
+        sqlx::query_as("select run_at,result from scheduled_jobs where id=$1")
+            .bind(m.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(result["transient_count"], json!(1));
+    at = run_at;
+    assert_eq!(sch.tick(at).await.unwrap().fired, 1);
+    let result: Value = sqlx::query_scalar("select result from scheduled_jobs where id=$1")
+        .bind(m.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        result.get("transient_count").is_none(),
+        "a successful run clears the transient counter: {result}"
+    );
+    assert!(result["input_id"].is_string());
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn queue_full_reschedules_then_fails_after_max_attempts(pool: PgPool) {
     let s = testkit::seed(&pool).await;

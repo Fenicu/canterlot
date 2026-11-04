@@ -969,10 +969,16 @@ impl Ingest {
                         machine_id: machine,
                         execution_id: Some(run.execution_id),
                     };
-                    let result =
-                        limits::record_in_tx(conn, &observation, now, limits, at.is_some())
-                            .await
-                            .map_err(pilot_error)?;
+                    let result = limits::record_in_tx(
+                        conn,
+                        &observation,
+                        now,
+                        limits,
+                        at.is_some(),
+                        correlation,
+                    )
+                    .await
+                    .map_err(pilot_error)?;
                     Ok((
                         at.is_none(),
                         (result.provider_changed || result.refreshed)
@@ -2103,9 +2109,16 @@ impl crate::grpc::Ingest for Ingest {
             .fetch_one(&self.pool)
             .await
             .map_err(|_| tonic::Status::internal("machine_metrics_database"))?;
-        crate::machine_info::apply_metrics(&self.pool, owner, machine_id, &metrics, Uuid::now_v7())
-            .await
-            .map_err(|_| tonic::Status::internal("machine_metrics_database"))?;
+        crate::machine_info::apply_metrics_with_registry(
+            &self.pool,
+            owner,
+            machine_id,
+            &metrics,
+            self.registry.as_ref(),
+            Uuid::now_v7(),
+        )
+        .await
+        .map_err(|_| tonic::Status::internal("machine_metrics_database"))?;
         Ok(())
     }
     async fn limits_report(
@@ -2187,7 +2200,8 @@ impl crate::grpc::Ingest for Ingest {
                         continue;
                     }
                     let recorded =
-                        limits::record_in_tx(&mut *conn, &o, now, &limits, mapped).await?;
+                        limits::record_in_tx(&mut *conn, &o, now, &limits, mapped, Uuid::now_v7())
+                            .await?;
                     if recorded.provider_changed || recorded.refreshed {
                         changed.insert((o.provider, o.window));
                     }

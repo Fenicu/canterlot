@@ -77,7 +77,8 @@ pub async fn subscribe_explicit_in_tx(
 }
 
 /// Отписка забирает и событие, которое уже ждёт в заданиях: подписчик больше о нём не просил.
-/// Сначала подписка: оценка держит её строку, поэтому её задание к этому моменту уже видно.
+/// Первым идёт `update` строки подписки: он держит её блокировку до commit, поэтому
+/// отпускание удержанного итога либо встанет до него, либо увидит закрытую подписку.
 pub async fn unsubscribe_in_tx(
     conn: &mut PgConnection,
     subscriber_id: Uuid,
@@ -235,13 +236,15 @@ pub async fn current_in_tx(
             .and_then(|execution| execution.phase_at),
     };
     let activity = Activity { state, evidence };
-    Ok(
-        settle::settled(&activity, &inputs.queue, &facts, config).map(|state| Current {
+    // Общее решение «устоявшееся состояние — это завершение»: взвод будильника и явная
+    // подписка не должны считать завершением то, что им не считает доставка события.
+    Ok(settle::settled(&activity, &inputs.queue, &facts, config)
+        .filter(|state| completion::is_completion(*state))
+        .map(|state| Current {
             state,
             fingerprint: settle::fingerprint(state, since, inputs.last_turn_at, facts.phase_since),
             closes: state.closes_subscription(inputs.queue.queued),
-        }),
-    )
+        }))
 }
 
 fn event_job(
@@ -251,6 +254,7 @@ fn event_job(
     fingerprint: &str,
     armed_at: DateTime<Utc>,
     chain_depth: i32,
+    boundary: Option<&super::summary::Boundary>,
 ) -> Value {
     json!({
         "action": "event",
@@ -260,6 +264,8 @@ fn event_job(
         "fingerprint": fingerprint,
         "armed_at": armed_at,
         "chain_depth": chain_depth,
+        // Отпущенный пачкой итог несёт свою границу: доставка не подменит его более поздним ходом.
+        "boundary": boundary,
     })
 }
 
@@ -309,14 +315,45 @@ pub async fn evaluate_in_tx(
         "select s.id,s.owner_id,s.subscriber_id,s.chain_depth,s.armed_at
          from session_subscriptions s join conversations c on c.id=s.subscriber_id
          where s.target_id=$1 and s.closed_at is null and s.last_fingerprint is distinct from $2
-         for update of s for key share of c skip locked",
+         for update of s skip locked for key share of c skip locked",
     )
     .bind(target_id)
     .bind(&fingerprint)
     .fetch_all(&mut *conn)
     .await?;
     let closes = state.closes_subscription(queue.queued);
+    // Граница удержанного итога снимается один раз на всех подписчиков: это идентификаторы
+    // хода и последовательность блоков хаба, а не время воркера.
+    let boundary = if matches!(state, Settled::Idle | Settled::Stopped) {
+        super::summary::boundary_in_tx(conn, target_id).await?
+    } else {
+        None
+    };
     for (id, owner_id, subscriber_id, chain_depth, armed_at) in &open {
+        if matches!(state, Settled::Idle | Settled::Stopped)
+            && crate::session_tools::alarms::hold_for_batch_in_tx(
+                conn,
+                *subscriber_id,
+                target_id,
+                state.as_str(),
+                &fingerprint,
+                *id,
+                *armed_at,
+                boundary.as_ref(),
+                *chain_depth,
+                facts.now,
+            )
+            .await?
+        {
+            // Пачка сама сдвигает отпечаток, но подписку не закрывает: отпускание
+            // удержанного проверяет, что она жива и того же поколения.
+            sqlx::query("update session_subscriptions set last_fingerprint=$2 where id=$1")
+                .bind(id)
+                .bind(&fingerprint)
+                .execute(&mut *conn)
+                .await?;
+            continue;
+        }
         sqlx::query(
             "update session_subscriptions set last_fingerprint=$2,
                closed_at=case when $3 then clock_timestamp() end,
@@ -336,10 +373,54 @@ pub async fn evaluate_in_tx(
             &fingerprint,
             *armed_at,
             *chain_depth,
+            None,
         );
         insert_job(conn, *owner_id, *subscriber_id, facts.now, &payload).await?;
     }
     Ok(!open.is_empty())
+}
+
+/// Отпускание итога, удержанного пачкой: подписка должна быть жива и того же поколения.
+/// Устаревший итог отбрасывается, чтобы отписка, приём или переподписка не воскрешали его.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn release_held_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    subscription_id: Uuid,
+    armed_at: DateTime<Utc>,
+    state: &str,
+    fingerprint: &str,
+    chain_depth: i32,
+    boundary: Option<&super::summary::Boundary>,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    let alive: Option<Uuid> = sqlx::query_scalar(
+        "select id from session_subscriptions
+         where id=$1 and subscriber_id=$2 and target_id=$3 and armed_at=$4 and closed_at is null
+         for update",
+    )
+    .bind(subscription_id)
+    .bind(subscriber_id)
+    .bind(target_id)
+    .bind(armed_at)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if alive.is_none() {
+        return Ok(false);
+    }
+    let payload = event_job(
+        subscription_id,
+        target_id,
+        state,
+        fingerprint,
+        armed_at,
+        chain_depth,
+        boundary,
+    );
+    insert_job(conn, owner_id, subscriber_id, now, &payload).await?;
+    Ok(true)
 }
 
 /// Удаление цели: сами подписки уйдут вместе с разговором. В задании только идентификатор,
@@ -349,15 +430,19 @@ pub async fn on_target_deleted_in_tx(
     target_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
+    // Уведомление об удалении одноразовое: строки подписок берутся блокирующе,
+    // чтобы отписка или приём не разошлись с вставкой задания.
     let open: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(
         "select id,owner_id,subscriber_id,chain_depth,armed_at from session_subscriptions
-         where target_id=$1 and subscriber_id<>$1 and closed_at is null",
+         where target_id=$1 and subscriber_id<>$1 and closed_at is null
+         order by id
+         for update",
     )
     .bind(target_id)
     .fetch_all(&mut *conn)
     .await?;
     for (id, owner_id, subscriber_id, chain_depth, armed_at) in open {
-        let payload = event_job(id, target_id, DELETED, DELETED, armed_at, chain_depth);
+        let payload = event_job(id, target_id, DELETED, DELETED, armed_at, chain_depth, None);
         insert_job(conn, owner_id, subscriber_id, now, &payload).await?;
     }
     Ok(())

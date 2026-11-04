@@ -2,6 +2,8 @@ import { expect, test } from 'vitest';
 import { fmt } from '#lib/format/ru.js';
 import {
   LEGACY_LIMIT,
+  alarmEntryLine,
+  alarmFiredCount,
   collapsedText,
   eventFacts,
   eventLine,
@@ -11,6 +13,7 @@ import {
   isSessionEvent,
   sessionStatus
 } from '#lib/timeline/hubEvent.js';
+import type { InputOrigin } from '#lib/stores/inputs.js';
 
 test('session_status_is_a_russian_word', () => {
   expect(sessionStatus({ kind: 'session_result', state: 'idle' })).toBe('завершена');
@@ -199,4 +202,73 @@ test('old_rows_collapse_only_long_text', () => {
   expect(isLongText('x'.repeat(LEGACY_LIMIT + 1))).toBe(true);
   expect(collapsedText('x'.repeat(LEGACY_LIMIT + 20))).toBe(`${'x'.repeat(LEGACY_LIMIT)}…`);
   expect(collapsedText('short')).toBe('short');
+});
+
+const GATE: InputOrigin = {
+  kind: 'alarm',
+  chain_depth: 0,
+  event: { kind: 'alarm', alarm_key: 'gate', fired_reason: 'time' }
+};
+
+test('a_single_alarm_keeps_the_quiet_line_with_its_name', () => {
+  expect(
+    alarmEntryLine(
+      GATE,
+      '[canterlot] Alarm "gate" fired at 14:30 UTC.\n\nThis is canterlot automation, not the owner.'
+    )
+  ).toBe('Будильник «gate»: сработал');
+});
+
+test('a_coalesced_delivery_counts_the_alarms_from_its_text', () => {
+  const text = [
+    '[canterlot] 3 alarms fired.',
+    '',
+    '- [canterlot] Alarm "gate" fired at 14:30 UTC.',
+    '- [canterlot] Alarm "disk" fired at 14:31 UTC.',
+    '- [canterlot] Alarm timed out after 10m: 0/1 sessions settled (batched).'
+  ].join('\n');
+  expect(alarmFiredCount(GATE, text)).toBe(3);
+  expect(alarmEntryLine(GATE, text)).toBe('Сработали 3 будильника');
+});
+
+test('alarm_sections_in_the_text_count_without_the_batch_header', () => {
+  const text =
+    '[canterlot] Alarm "gate" fired at 14:30 UTC.\n\n[canterlot] Alarm "disk" fired at 14:31 UTC.';
+  expect(alarmFiredCount(GATE, text)).toBe(2);
+  expect(alarmEntryLine(GATE, text)).toBe('Сработали 2 будильника');
+});
+
+test('several_alarm_ids_on_the_origin_win_over_a_single_alarm_section', () => {
+  const origin = {
+    ...GATE,
+    alarm_ids: ['a', 'b', 'c', 'c']
+  } as unknown as InputOrigin;
+  expect(alarmFiredCount(origin, '[canterlot] Alarm "gate" fired at 14:30 UTC.')).toBe(3);
+  expect(alarmEntryLine(origin, '[canterlot] Alarm "gate" fired at 14:30 UTC.')).toBe(
+    'Сработали 3 будильника'
+  );
+});
+
+test('a_long_batch_summary_stays_one_alarm_line', () => {
+  const text = [
+    '[canterlot] Alarm "wave" fired: sessions 00000000-0000-4000-8000-0000000000e5, 00000000-0000-4000-8000-0000000000e6 settled (all, batched).',
+    '',
+    '## Итог сессии «Сборка»',
+    '',
+    'Собрал отчёт и оставил заметки. '.repeat(30),
+    '',
+    '[canterlot] Session 00000000-0000-4000-8000-0000000000e7 was deleted.',
+    '',
+    'Note: Гейт для волны C.'
+  ].join('\n');
+  expect(alarmFiredCount(GATE, text)).toBe(1);
+  expect(alarmEntryLine(GATE, text)).toBe('Будильник «gate»: сработал');
+});
+
+test('the_count_phrase_follows_russian_plural_rules', () => {
+  const origin = (count: number) =>
+    ({ ...GATE, alarm_ids: Array.from({ length: count }, (_, index) => `a${index}`) }) as unknown as InputOrigin;
+  expect(alarmEntryLine(origin(2), '')).toBe('Сработали 2 будильника');
+  expect(alarmEntryLine(origin(5), '')).toBe('Сработали 5 будильников');
+  expect(alarmEntryLine(origin(21), '')).toBe('Сработал 21 будильник');
 });

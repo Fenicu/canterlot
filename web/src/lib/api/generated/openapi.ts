@@ -128,6 +128,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/alarms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_conversations__id__alarms"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{id}/alarms/{alarm_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete__api_v1_conversations__id__alarms__alarm_id_"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/blocks/{block_id}": {
         parameters: {
             query?: never;
@@ -943,6 +975,47 @@ export interface components {
             since: string;
             state: components["schemas"]["ActivityState"];
         };
+        AlarmList: {
+            alarms: components["schemas"]["AlarmView"][];
+        };
+        /** @description То, что видят PWA и HTTP: без заметки и без внутренних отметок. */
+        AlarmView: {
+            /** Format: uuid */
+            alarm_id: string;
+            batch: boolean;
+            /** Format: double */
+            below_percent?: number | null;
+            condition: string;
+            /** Format: uuid */
+            conversation_id: string;
+            created_at: string;
+            deadline_at?: string | null;
+            failure_reason?: string | null;
+            fired_at?: string | null;
+            fired_reason?: string | null;
+            fires_at?: string | null;
+            /**
+             * Format: double
+             * @description Разобранное условие `machine` для подписей PWA на русском.
+             */
+            free_disk_gb_above?: number | null;
+            key?: string | null;
+            kind: string;
+            /** Format: double */
+            load_per_core_below?: number | null;
+            /** Format: double */
+            mem_available_gb_above?: number | null;
+            note?: string | null;
+            /** Format: int64 */
+            note_bytes: number;
+            only_on_timeout: boolean;
+            /** @description Разобранное условие `limit_reset` для подписей PWA на русском. */
+            provider?: string | null;
+            session_ids: string[];
+            state: string;
+            states: string[];
+            window?: string | null;
+        };
         /**
          * @description Применённый пресет в эффективных настройках: ссылка, название и версии.
          *     Текста здесь нет — только снимок запуска везёт текст.
@@ -1199,6 +1272,8 @@ export interface components {
             unread_count: number;
         };
         ConversationSnapshot: {
+            /** @description Взведённые и недавние завершившиеся будильники разговора. */
+            alarms: components["schemas"]["AlarmView"][];
             background: components["schemas"]["BackgroundTaskView"][];
             context?: components["schemas"]["ContextSnapshot"] | null;
             detail: components["schemas"]["ConversationDetail"];
@@ -1539,6 +1614,12 @@ export interface components {
          *     владелец видит в ленте.
          */
         HubEvent: {
+            /**
+             * Format: uuid
+             * @description `alarm`: сработавший будильник.
+             */
+            alarm_id?: string | null;
+            alarm_key?: string | null;
             answer?: string | null;
             /** Format: uuid */
             answer_block_id?: string | null;
@@ -1559,6 +1640,7 @@ export interface components {
             detail?: string | null;
             /** Format: int64 */
             duration_ms?: number | null;
+            fired_reason?: string | null;
             /**
              * @description `session_result`, `asked`, `stalled`, `failed`, `quota_paused`, `stopped`,
              *     `accepted`, `approval` или `deleted`.
@@ -2191,6 +2273,8 @@ export interface components {
         Snapshot_ConversationSnapshot: {
             cursor: string;
             data: {
+                /** @description Взведённые и недавние завершившиеся будильники разговора. */
+                alarms: components["schemas"]["AlarmView"][];
                 background: components["schemas"]["BackgroundTaskView"][];
                 context?: components["schemas"]["ContextSnapshot"] | null;
                 detail: components["schemas"]["ConversationDetail"];
@@ -2979,6 +3063,105 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AcceptView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__alarms: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Разговор */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Будильники разговора */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlarmList"];
+                };
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_conversations__id__alarms__alarm_id_: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path: {
+                /** @description Разговор */
+                id: string;
+                /** @description Будильник */
+                alarm_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Будильник отменён или уже завершён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlarmView"];
+                };
+            };
+            /** @description Будильник не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

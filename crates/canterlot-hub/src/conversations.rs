@@ -22,7 +22,7 @@ pub struct CrunchSetting {
     pub enabled: bool,
     pub resume_text: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct NewConversation {
     pub owner_id: Uuid,
     pub machine_id: Uuid,
@@ -772,6 +772,7 @@ pub async fn remember_workdir(
     Ok(())
 }
 
+/// Первая блокировка инструментов сессии: docs/design/delivery.md, «Порядок блокировок».
 pub(crate) async fn lock_owner(conn: &mut PgConnection, owner: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query(
         "select pg_advisory_xact_lock(hashtextextended('canterlot:attributes:'||$1::text,0))",

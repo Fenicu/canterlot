@@ -534,7 +534,7 @@ struct WakePayload {
 
 /// Что говорят показания о сбросе окна после срока `wake_at`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ResetCheck {
+pub(crate) enum ResetCheck {
     Verified,
     /// Показание снято после срока, но сброса не показывает: опрос работает, окно не сбросилось.
     NotReset,
@@ -542,7 +542,7 @@ enum ResetCheck {
     NoReading,
 }
 
-async fn check_reset(
+pub(crate) async fn check_reset(
     conn: &mut PgConnection,
     provider: &str,
     window: Window,

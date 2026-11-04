@@ -860,6 +860,9 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_session_subscribe", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_session_unsubscribe", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_session_wait", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_alarm_set", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_alarm_cancel", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_alarm_list", "resource": "*", "effect": "allow"},
             ]),
         ),
         (
@@ -875,6 +878,9 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_session_subscribe", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_session_unsubscribe", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_session_wait", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_alarm_set", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_alarm_cancel", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_alarm_list", "resource": "*", "effect": "allow"},
             ]),
         ),
     ] {
@@ -4585,7 +4591,10 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "session_wait",
             "session_accept",
             "session_interrupt",
-            "session_stop"
+            "session_stop",
+            "alarm_set",
+            "alarm_cancel",
+            "alarm_list"
         ]
     );
     bench.close(CloseMode::Graceful).await;

@@ -37,6 +37,7 @@ export type ServerOp =
         | DerivedChanged
         | GroupChanged
         | ScheduledChanged
+        | AlarmChanged
         | LimitsChanged
         | LimitReached
         | AttachmentStateChanged
@@ -831,6 +832,45 @@ export interface ScheduledChanged {
     state: "pending" | "fired" | "cancelled" | "failed";
     input_id: Uuid | null;
     attempts: number;
+  };
+}
+export interface AlarmChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "alarm_changed";
+  payload: {
+    alarm_id: Uuid;
+    conversation_id: Uuid;
+    key: string | null;
+    kind: string;
+    condition: string;
+    provider?: string | null;
+    window?: string | null;
+    below_percent?: number | null;
+    free_disk_gb_above?: number | null;
+    load_per_core_below?: number | null;
+    mem_available_gb_above?: number | null;
+    session_ids: Uuid[];
+    states: string[];
+    fires_at: Time | null;
+    deadline_at: Time | null;
+    only_on_timeout: boolean;
+    batch: boolean;
+    state: "armed" | "fired" | "cancelled" | "expired" | "failed";
+    fired_reason: string | null;
+    failure_reason: string | null;
+    fired_at: Time | null;
+    note: string | null;
+    note_bytes: number;
+    created_at: Time;
   };
 }
 export interface LimitsChanged {

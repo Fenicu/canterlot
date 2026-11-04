@@ -19,7 +19,7 @@ const PROVIDERS: [(ToolSet, &str); 3] = [
     (ToolSet::LimitsOnly, "opencode"),
 ];
 
-const SESSION_TOOLS: [(&str, &str); 10] = [
+const SESSION_TOOLS: [(&str, &str); 13] = [
     ("sessions_list", "sessions.list"),
     ("session_inspect", "sessions.inspect"),
     ("session_send", "sessions.send"),
@@ -30,6 +30,9 @@ const SESSION_TOOLS: [(&str, &str); 10] = [
     ("session_accept", "sessions.accept"),
     ("session_interrupt", "sessions.interrupt"),
     ("session_stop", "sessions.stop"),
+    ("alarm_set", "alarms.set"),
+    ("alarm_cancel", "alarms.cancel"),
+    ("alarm_list", "alarms.list"),
 ];
 
 fn tools_of(tool_set: ToolSet, provider: &str) -> Vec<Value> {
@@ -78,9 +81,9 @@ fn session_tools_listed_for_all_three_providers() {
             );
         }
         let expected = if tool_set == ToolSet::ApproveAndLimits {
-            2 + 3 + 10 + 1
+            2 + 3 + 13 + 1
         } else {
-            1 + 3 + 10 + 1
+            1 + 3 + 13 + 1
         };
         assert_eq!(tools.len(), expected, "{provider}");
         for required in [
@@ -198,7 +201,7 @@ fn read_tools_are_read_only() {
         let tools = tools_of(tool_set, provider);
         for (mcp_name, _) in SESSION_TOOLS {
             let tool = tools.iter().find(|tool| tool["name"] == mcp_name).unwrap();
-            let read_only = matches!(mcp_name, "sessions_list" | "session_inspect");
+            let read_only = matches!(mcp_name, "sessions_list" | "session_inspect" | "alarm_list");
             assert_eq!(
                 tool["annotations"]["readOnlyHint"] == json!(true),
                 read_only,
@@ -368,11 +371,13 @@ fn no_tool_touches_the_whitelist() {
     // Все имена агентских инструментов хаба — в пространствах presets и sessions.
     for (_, hub_name) in mcp::AGENT_TOOLS {
         assert!(
-            hub_name.starts_with("presets.") || hub_name.starts_with("sessions."),
+            hub_name.starts_with("presets.")
+                || hub_name.starts_with("sessions.")
+                || hub_name.starts_with("alarms."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 13);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 16);
 }
 
 #[tokio::test]

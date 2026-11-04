@@ -33,6 +33,8 @@ pub struct HubConfig {
     pub machines: MachinesConfig,
     #[serde(default)]
     pub session_tools: SessionToolsConfig,
+    #[serde(default)]
+    pub orchestrator: OrchestratorConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -481,6 +483,25 @@ impl Default for SchedulerConfig {
             max_attempts: 20,
             idle_poll: Duration::from_secs(1),
         }
+    }
+}
+
+/// Инструменты оркестратора: выключатели этапов, откат поведения без отката схемы.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OrchestratorConfig {
+    pub alarms: AlarmsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AlarmsConfig {
+    pub enabled: bool,
+}
+
+impl Default for AlarmsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 

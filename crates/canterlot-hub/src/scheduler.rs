@@ -194,7 +194,20 @@ fn validate_refs(
 
 /// Переполненная очередь подписчика не повод потерять итог другой сессии: такое задание
 /// ждёт её разбора, пока срок не выйдет, и в счёт отказов не идёт.
-const SESSION_TASK_QUEUE_PATIENCE: TimeDelta = TimeDelta::hours(24);
+pub(crate) const SESSION_TASK_QUEUE_PATIENCE: TimeDelta = TimeDelta::hours(24);
+
+/// Сколько подряд временных сбоев базы терпим без расхода бюджета отказов.
+/// После суток непрерывных сбоев следующий считается обычным отказом.
+const TRANSIENT_PATIENCE: TimeDelta = TimeDelta::hours(24);
+const TRANSIENT_BACKOFF_MAX: i64 = 60;
+
+/// Пауза перед повтором после временного сбоя: 1 с, удваивается до 60 с.
+fn transient_backoff(count: i64) -> TimeDelta {
+    let shift = u32::try_from(count.saturating_sub(1))
+        .unwrap_or(u32::MAX)
+        .min(6);
+    TimeDelta::seconds((1_i64 << shift).min(TRANSIENT_BACKOFF_MAX))
+}
 
 #[derive(Clone, sqlx::FromRow)]
 struct JobRow {
@@ -508,6 +521,12 @@ impl Scheduler {
                 self.fire_limit_job(tx, job, now, &mut report).await
             };
             if let Err(error) = outcome {
+                // Взаимоблокировка и сбой сериализации не тратят бюджет отказов:
+                // транзакция уже откатана, задание повторяется чуть позже.
+                if crate::db::is_transient(&error) {
+                    self.defer_transient_job(&claimed, now, &mut report).await?;
+                    continue;
+                }
                 log_error(&error);
                 let (reason, permanent) = match error {
                     sqlx::Error::Decode(_)
@@ -516,8 +535,16 @@ impl Scheduler {
                     sqlx::Error::InvalidArgument(_) => ("invalid_job", true),
                     _ => ("job_error", false),
                 };
-                self.record_failure(&claimed, now, reason, permanent, &mut report)
-                    .await?;
+                if let Err(error) = self
+                    .record_failure(&claimed, now, reason, permanent, &mut report)
+                    .await
+                {
+                    if crate::db::is_transient(&error) {
+                        self.defer_transient_job(&claimed, now, &mut report).await?;
+                    } else {
+                        return Err(error);
+                    }
+                }
             }
         }
         report.next_due =
@@ -593,6 +620,13 @@ impl Scheduler {
                 report.fired += 1;
             }
             Err(error) => {
+                if let SubmitError::Db(database) = &error
+                    && crate::db::is_transient(database)
+                {
+                    tx.rollback().await?;
+                    self.defer_transient_job(&job, now, report).await?;
+                    return Ok(());
+                }
                 let (reason, permanent) = submit_failure(&error);
                 if let SubmitError::Db(error) = &error {
                     log_error(error);
@@ -602,6 +636,75 @@ impl Scheduler {
                     .await?;
             }
         }
+        Ok(())
+    }
+
+    async fn defer_transient_job(
+        &self,
+        job: &JobRow,
+        now: DateTime<Utc>,
+        report: &mut TickReport,
+    ) -> Result<(), sqlx::Error> {
+        let previous_count = job
+            .result
+            .as_ref()
+            .and_then(|result| result.get("transient_count"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let previous_since = job
+            .result
+            .as_ref()
+            .and_then(|result| result.get("transient_since"))
+            .and_then(Value::as_str)
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc));
+        let since = previous_since.unwrap_or(now);
+        if now - since >= TRANSIENT_PATIENCE {
+            // Сутки непрерывных сбоев: дальше это уже обычный отказ, который
+            // расходует бюджет и в конце концов закрывает задание.
+            self.record_failure(job, now, "transient_timeout", false, report)
+                .await?;
+            return Ok(());
+        }
+        let count = previous_count.saturating_add(1);
+        if count == 1 || count % 10 == 0 {
+            tracing::warn!(
+                job_id = %job.id,
+                kind = %job.kind,
+                transient_count = count,
+                "scheduled job retries after a transient database error"
+            );
+        }
+        let at = now + transient_backoff(count);
+        sqlx::query(
+            "update scheduled_jobs
+             set run_at=$2,result=coalesce(result,'{}'::jsonb) || $3::jsonb,
+                 updated_at=clock_timestamp()
+             where id=$1 and state='pending'",
+        )
+        .bind(job.id)
+        .bind(at)
+        .bind(json!({"transient_count": count, "transient_since": since}))
+        .execute(&self.pool)
+        .await?;
+        report.retried += 1;
+        Ok(())
+    }
+
+    async fn defer_contended_job(
+        &self,
+        job: &JobRow,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let at = now + TimeDelta::seconds(2);
+        sqlx::query(
+            "update scheduled_jobs set run_at=$2,updated_at=clock_timestamp()
+             where id=$1 and state='pending'",
+        )
+        .bind(job.id)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -671,8 +774,10 @@ impl Scheduler {
                         return Err(error);
                     }
                     // Запрос и уборка закрываются вместе с заданием, иначе они зависли бы навсегда.
-                    if current.kind == "session_task"
-                        && let Err(error) = crate::session_tools::jobs::abandon_in_tx(
+                    // Запертая строка будильника не должна держать ни задание, ни очередь:
+                    // откатываем закрытие и повторяем задание позже.
+                    let deferred = if current.kind == "session_task" {
+                        match crate::session_tools::jobs::abandon_in_tx(
                             &mut tx,
                             current.owner_id,
                             current.conversation_id,
@@ -680,9 +785,21 @@ impl Scheduler {
                             now,
                         )
                         .await
-                    {
+                        {
+                            Ok(deferred) => deferred,
+                            Err(error) => {
+                                let _ = tx.rollback().await;
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if deferred {
                         let _ = tx.rollback().await;
-                        return Err(error);
+                        self.defer_contended_job(&current, now).await?;
+                        report.retried += 1;
+                        return Ok(());
                     }
                 }
                 report.failed += 1;
@@ -710,8 +827,22 @@ impl Scheduler {
                         return Err(error);
                     }
                 };
+                // Поля серии временных сбоев переживают только её собственный
+                // переход в обычный отказ: иначе после суток сбоев счётчик
+                // начинался бы заново и задание не дошло бы до отказа. Любой
+                // другой отказ рвёт серию и стирает её поля.
+                let mut result = json!({"error":reason});
+                if reason == "transient_timeout"
+                    && let Some(object) = result.as_object_mut()
+                {
+                    for key in ["transient_count", "transient_since"] {
+                        if let Some(value) = current.result.as_ref().and_then(|r| r.get(key)) {
+                            object.insert(key.into(), value.clone());
+                        }
+                    }
+                }
                 let updated = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,failures=$5,blocked_since=$6,updated_at=clock_timestamp() where id=$1 returning *")
-                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).bind(current.failures).bind(current.blocked_since).fetch_one(&mut *tx).await;
+                    .bind(current.id).bind(current.attempts).bind(at).bind(result).bind(current.failures).bind(current.blocked_since).fetch_one(&mut *tx).await;
                 let updated: JobRow = match updated {
                     Ok(updated) => updated,
                     Err(error) => {
@@ -960,6 +1091,7 @@ impl Scheduler {
             events::purge_older_than(&self.pool, Duration::from_secs(7 * 86400)).await.map(|_| ()),
             sqlx::query("delete from limit_snapshots where observed_at < clock_timestamp() - $1 * interval '1 day'").bind(self.history_days as f64).execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from scheduled_jobs where state in ('fired','cancelled','failed') and updated_at < clock_timestamp() - interval '30 days'").execute(&self.pool).await.map(|_| ()),
+            sqlx::query("delete from alarms where updated_at < clock_timestamp() - interval '30 days' and (state in ('cancelled','expired','failed') or (state='fired' and delivered_input_id is not null))").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from idempotency_keys where created_at < clock_timestamp() - interval '7 days'").execute(&self.pool).await.map(|_| ()),
         ];
         let mut first = None;
