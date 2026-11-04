@@ -13,7 +13,7 @@
 	import MenuItem from '#lib/ui/MenuItem.svelte';
 	import { colorVar } from '#lib/screens/sessions/colors.js';
 	import { theme } from '#lib/theme.js';
-	import { stopSession, resumeSession, continueSessionQueue, resolveOwnerLost } from './controls';
+	import { stopSession, resumeSession, continueSessionQueue, resolveOwnerLost, controlBusy } from './controls';
 	import { RESOLVE_WARNING, runLabel } from './pauseCards';
 	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
 	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
@@ -99,6 +99,8 @@
 		? (chat.execution as { live?: boolean; state?: string }).live ?? ['created', 'starting', 'running', 'stopping'].includes((chat.execution as { state?: string }).state ?? '')
 		: false);
 
+	const stopping = $derived(controlBusy(`stop:${chat.id}:false`));
+	const stopState = $derived(stopping ? { 'aria-disabled': true, 'aria-busy': true } : {});
 	const hasUserStop = $derived(chat.queue.pause_reasons.some((p) => (p as { reason?: string })?.reason === 'user_stop'));
 	const ownerLost = $derived((chat.execution as { state?: string } | null)?.state === 'owner_lost');
 
@@ -213,6 +215,18 @@
 					{#if running > 0}<span class="running-count">{running}</span>{/if}
 				</button>
 			{/if}
+			{#if isLive}
+				<button
+					type="button"
+					class="icon-button stop-btn"
+					aria-label="Остановить сессию"
+					title="Остановить сессию"
+					{...stopState}
+					onclick={() => { if (!stopping) void handleStop(false); }}
+				>
+					<Icon name="stop" />
+				</button>
+			{/if}
 			<button
 				bind:this={menuButton}
 				type="button"
@@ -239,6 +253,12 @@
 			{/if}
 		</div>
 	</div>
+
+	{#if stopping}
+		<p class="header-status" role="status">Останавливаю сессию</p>
+	{:else if actionError && !menuOpen}
+		<p class="header-status header-error" role="alert">{actionError}</p>
+	{/if}
 
 	{#if providers.length > 0}
 		<div class="header-limits">
@@ -282,8 +302,6 @@
 				{/if}
 
 				{#if isLive}
-					<MenuItem icon="stop" onclick={() => void handleStop(false)}>Остановить</MenuItem>
-
 					{#if !confirmingForce}
 						<MenuItem icon="warning" danger onclick={() => { confirmingForce = true; }}>Принудительно остановить</MenuItem>
 					{:else}
@@ -436,6 +454,18 @@
 		width: var(--target);
 		height: var(--target);
 		border-radius: var(--radius-round);
+	}
+	.icon-button[aria-disabled='true'] {
+		color: var(--muted);
+		cursor: default;
+	}
+	.header-status {
+		margin: 0 var(--gutter) var(--s2);
+		font-size: var(--fs-meta);
+		color: var(--muted);
+	}
+	.header-error {
+		color: var(--danger);
 	}
 	.delegation-btn {
 		width: auto;
