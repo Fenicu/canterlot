@@ -1580,71 +1580,73 @@ pub async fn deliver_job_in_tx(
             .await?;
         }
     }
-    let parts = render_parts_in_tx(conn, job.owner_id, &rows, now).await?;
-    let multi = parts.len() > 1;
-    let mut input_ids = Vec::with_capacity(parts.len());
-    let mut delivered = Vec::new();
-    for (index, part) in parts.iter().enumerate() {
-        let key = if multi {
-            format!("alarm:{}:{index}", job.id)
-        } else {
-            format!("alarm:{}", job.id)
-        };
-        let existing: Option<Uuid> =
-            sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
-                .bind(job.owner_id)
-                .bind(&key)
-                .fetch_optional(&mut *conn)
-                .await?;
-        let input_id = if let Some(input_id) = existing {
-            input_id
-        } else {
-            let first = &rows[part.start];
-            let submitted = submit_input_in_tx(
-                conn,
-                &SubmitInput {
-                    owner_id: job.owner_id,
-                    conversation_id: conversation,
-                    idempotency_key: key,
-                    content: vec![ContentBlock::Text {
-                        text: part.text.clone(),
-                    }],
-                    received_at: now,
-                    correlation_id,
-                    origin: Some(json!({
-                        "kind": "alarm",
-                        "alarm_id": first.id,
-                        "chain_depth": first.chain_depth,
-                        "event": origin::HubEvent {
-                            kind: "alarm".into(),
-                            alarm_id: Some(first.id),
-                            alarm_key: first.key.clone(),
-                            fired_reason: first.fired_reason.clone(),
-                            ..Default::default()
-                        },
-                    })),
-                },
-            )
+    // Одна часть на один запуск задания. Иначе при одном свободном месте очередь
+    // отвергла бы вторую часть и откатила бы первую: доставка застряла бы навсегда.
+    let mut parts = render_parts_in_tx(conn, job.owner_id, &rows, now).await?;
+    let more = parts.len() > 1;
+    let part = parts.remove(0);
+    let first = &rows[part.start];
+    // Ключ устойчив к повтору: доставленные будильники выпадают из выборки,
+    // поэтому первая часть следующего запуска начинается с другого будильника.
+    let key = format!("alarm:{}:{}", job.id, first.id);
+    let existing: Option<Uuid> =
+        sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
+            .bind(job.owner_id)
+            .bind(&key)
+            .fetch_optional(&mut *conn)
             .await?;
-            submitted.input_id
-        };
-        let ids: Vec<Uuid> = rows[part.start..part.end]
-            .iter()
-            .map(|row| row.id)
-            .collect();
-        sqlx::query(
-            "update alarms set delivered_input_id=$2,delivered_at=$3,updated_at=$3 where id=any($1)",
+    let input_id = if let Some(input_id) = existing {
+        input_id
+    } else {
+        let submitted = submit_input_in_tx(
+            conn,
+            &SubmitInput {
+                owner_id: job.owner_id,
+                conversation_id: conversation,
+                idempotency_key: key,
+                content: vec![ContentBlock::Text {
+                    text: part.text.clone(),
+                }],
+                received_at: now,
+                correlation_id,
+                origin: Some(json!({
+                    "kind": "alarm",
+                    "alarm_id": first.id,
+                    "chain_depth": first.chain_depth,
+                    "event": origin::HubEvent {
+                        kind: "alarm".into(),
+                        alarm_id: Some(first.id),
+                        alarm_key: first.key.clone(),
+                        fired_reason: first.fired_reason.clone(),
+                        ..Default::default()
+                    },
+                })),
+            },
         )
-        .bind(&ids)
-        .bind(input_id)
-        .bind(now)
-        .execute(&mut *conn)
         .await?;
-        input_ids.push(input_id);
-        delivered.extend(ids);
+        submitted.input_id
+    };
+    let delivered: Vec<Uuid> = rows[part.start..part.end]
+        .iter()
+        .map(|row| row.id)
+        .collect();
+    sqlx::query(
+        "update alarms set delivered_input_id=$2,delivered_at=$3,updated_at=$3 where id=any($1)",
+    )
+    .bind(&delivered)
+    .bind(input_id)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    if more {
+        // Остаток выйдет следующим запуском: сначала commit этой части.
+        return Ok(crate::crunch::JobOutcome::Retry {
+            at: now + TimeDelta::seconds(1),
+            poll: false,
+        });
     }
     Ok(crate::crunch::JobOutcome::Done(json!({
-        "input_ids": input_ids,
+        "input_id": input_id,
         "alarms": delivered,
     })))
 }

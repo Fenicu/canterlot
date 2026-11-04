@@ -136,8 +136,23 @@ impl Fx {
         .unwrap()
     }
 
+    async fn alarm_kind_inputs(&self) -> Vec<(String, Value)> {
+        sqlx::query_as(
+            "select content->0->>'text',origin from inputs
+             where conversation_id=$1 and origin->>'kind'='alarm' order by input_seq",
+        )
+        .bind(self.orchestrator)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap()
+    }
+
     async fn fill_queue(&self) {
-        for n in 0..100 {
+        self.fill_queue_n(100).await;
+    }
+
+    async fn fill_queue_n(&self, count: usize) {
+        for n in 0..count {
             conversations::submit_message(
                 &self.pool,
                 SubmitMessage {
@@ -1665,9 +1680,8 @@ async fn settle_after_deadline_keeps_the_timeout(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
-    let f = Fx::new(pool).await;
+/// Двадцать пачек по две цели с ответами по 8 КиБ: их общий текст не влезает в один ввод.
+async fn arm_large_batches(f: &Fx, now: DateTime<Utc>) -> Vec<(Uuid, Uuid)> {
     let mut pairs = Vec::new();
     for n in 0..20 {
         let one = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
@@ -1685,7 +1699,6 @@ async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
         pairs.push((one, two));
     }
     // Блоки ответов должны быть позже взвода подписки, иначе окно итога их не увидит.
-    let now = Utc::now();
     for (one, two) in &pairs {
         for (target, n) in [(one, 1_i64), (two, 2_i64)] {
             let execution = Uuid::now_v7();
@@ -1707,7 +1720,9 @@ async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
             .bind(target)
             .bind("x".repeat(8192))
             .bind(n)
-            .bind(now + TimeDelta::seconds(1))
+            // Ответ должен быть позже взвода подписки: взвод идёт стеной, а `now`
+            // снят до неё, поэтому берём текущие часы, а не сдвиг от `now`.
+            .bind(Utc::now())
             .execute(&f.pool)
             .await
             .unwrap();
@@ -1715,6 +1730,14 @@ async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
         f.refresh_id(*one, now + TimeDelta::seconds(2)).await;
         f.refresh_id(*two, now + TimeDelta::seconds(2)).await;
     }
+    pairs
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    arm_large_batches(&f, now).await;
     assert_eq!(
         count(
             &f.pool,
@@ -1725,15 +1748,26 @@ async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
         20
     );
 
-    assert_eq!(
-        scheduler(&f.pool, Default::default())
-            .tick(now + TimeDelta::seconds(20))
-            .await
-            .unwrap()
-            .fired,
-        1,
-        "one delivery job coalesces all fired alarms"
-    );
+    // Каждый запуск задания доставляет одну часть; остаток — следующим запуском.
+    let sch = scheduler(&f.pool, Default::default());
+    let mut at = now + TimeDelta::seconds(20);
+    for _ in 0..30 {
+        let report = sch.tick(at).await.unwrap();
+        assert!(
+            report.fired + report.retried + report.cancelled > 0,
+            "the tick makes progress"
+        );
+        let delivered = count(
+            &f.pool,
+            "select count(*) from alarms where delivered_input_id is not null",
+            f.orchestrator,
+        )
+        .await;
+        if delivered == 20 {
+            break;
+        }
+        at += TimeDelta::seconds(2);
+    }
     let inputs = f.alarm_inputs().await;
     let total: usize = inputs.iter().map(|(text, _)| text.len()).sum();
     assert!(
@@ -1773,6 +1807,96 @@ async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
     assert_eq!(keys.len(), inputs.len());
     let unique: std::collections::BTreeSet<_> = keys.iter().collect();
     assert_eq!(unique.len(), keys.len(), "each part has its own key");
+}
+
+/// Одно свободное место в очереди и две части: первая доставляется и коммитится,
+/// вторая ждёт освобождения места, повторы не дублируют ввод.
+#[sqlx::test(migrations = "./migrations")]
+async fn one_free_queue_slot_delivers_one_part_and_the_rest_later(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    arm_large_batches(&f, now).await;
+    f.fill_queue_n(99).await;
+
+    let sch = scheduler(&f.pool, Default::default());
+    let at = now + TimeDelta::seconds(20);
+    let report = sch.tick(at).await.unwrap();
+    let first = f.alarm_kind_inputs().await;
+    assert_eq!(first.len(), 1, "the last queue slot takes exactly one part");
+    assert!(
+        first[0].0.len() > 100_000,
+        "the part carries held summaries, not empty shells: {} bytes",
+        first[0].0.len()
+    );
+    let first_delivered = count(
+        &f.pool,
+        "select count(*) from alarms where delivered_input_id is not null",
+        f.orchestrator,
+    )
+    .await;
+    assert!(
+        (1..20).contains(&first_delivered),
+        "only the first part is marked delivered: {first_delivered}"
+    );
+    assert!(report.retried >= 1, "the rest waits for a free slot");
+
+    // Очередь всё ещё полна: повтор ничего не добавляет и не откатывает.
+    let report = sch.tick(at + TimeDelta::seconds(120)).await.unwrap();
+    assert_eq!(f.alarm_kind_inputs().await.len(), 1, "no second part yet");
+    assert!(report.retried >= 1);
+    assert_eq!(
+        count(
+            &f.pool,
+            "select count(*) from alarms where delivered_input_id is not null",
+            f.orchestrator,
+        )
+        .await,
+        first_delivered,
+        "the committed part stays committed"
+    );
+
+    // Место освободилось: остаток доставляется одним вводом.
+    sqlx::query(
+        "update inputs set state='cancelled' where id=(
+           select id from inputs where conversation_id=$1 and state='queued'
+           order by input_seq limit 1)",
+    )
+    .bind(f.orchestrator)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sch.tick(at + TimeDelta::seconds(240)).await.unwrap();
+    assert_eq!(
+        f.alarm_kind_inputs().await.len(),
+        2,
+        "the rest arrives once"
+    );
+    assert_eq!(
+        count(
+            &f.pool,
+            "select count(*) from alarms where delivered_input_id is not null",
+            f.orchestrator,
+        )
+        .await,
+        20,
+        "every alarm is delivered"
+    );
+    sch.tick(at + TimeDelta::seconds(360)).await.unwrap();
+    assert_eq!(
+        f.alarm_kind_inputs().await.len(),
+        2,
+        "no duplicate on retry"
+    );
+    let keys: Vec<String> = sqlx::query_scalar(
+        "select idempotency_key from inputs where conversation_id=$1
+           and origin->>'kind'='alarm' order by idempotency_key",
+    )
+    .bind(f.orchestrator)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    let unique: std::collections::BTreeSet<_> = keys.iter().collect();
+    assert_eq!(unique.len(), keys.len(), "retries keep their keys");
 }
 
 /// Ждём, пока чужая транзакция встанет на блокировке: этого достаточно, чтобы
