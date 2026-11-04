@@ -3,6 +3,10 @@
 //! `agy -p /usage --output-format json` не запускает ход: воркер берёт окна
 //! только группы «Gemini Models», группа Claude/GPT к сессиям canterlot не
 //! относится. Модель одна — провайдер `antigravity`.
+//!
+//! У 1.5.0 нет способа отключить телеметрию у `-p`: `--disable-telemetry`
+//! принимает только `agy acp` (`agy acp --help`), а `agy --help` такого флага
+//! не знает. Поэтому проба `/usage` идёт без него; флаг остаётся у ACP-запуска.
 
 use super::process::{PrepareError, prepare_pinned, process_env};
 use crate::adapter::{LimitFact, LimitWindow};
@@ -241,14 +245,9 @@ impl AntigravityLimitsSource {
         let env = process_env(std::env::vars_os());
         let mut child = crate::adapter::spawn_with_retry_io(|| {
             let mut command = Command::new(&pinned.executable);
+            // Ровно аргументы, принятые 1.5.0: `--disable-telemetry` знает только `acp`.
             command
-                .args([
-                    "-p",
-                    "/usage",
-                    "--output-format",
-                    "json",
-                    "--disable-telemetry",
-                ])
+                .args(["-p", "/usage", "--output-format", "json"])
                 .current_dir(&data_dir)
                 .env_clear()
                 .stdin(Stdio::null())
