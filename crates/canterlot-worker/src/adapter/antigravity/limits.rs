@@ -378,6 +378,30 @@ mod tests {
     }
 
     #[test]
+    fn the_live_usage_frame_has_two_gemini_windows_and_ignores_third_party() {
+        let observations =
+            observations_from_usage(&evidence("p-live-usage-before.json"), 1_793_808_175_000);
+        assert_eq!(observations.len(), 2);
+        let weekly = observations
+            .iter()
+            .find(|o| o.window == ProtoLimitWindow::Weekly as i32)
+            .unwrap();
+        assert_eq!(weekly.used_permille, 0);
+        assert_eq!(weekly.resets_at_ms, 1_794_412_503_000);
+        let five = observations
+            .iter()
+            .find(|o| o.window == ProtoLimitWindow::FiveHour as i32)
+            .unwrap();
+        assert_eq!(five.used_permille, 0);
+        assert_eq!(five.resets_at_ms, 1_793_825_825_000);
+        assert!(
+            observations
+                .iter()
+                .all(|o| o.observed_machine_ms == 1_793_808_175_000)
+        );
+    }
+
+    #[test]
     fn the_claude_group_is_ignored() {
         let mut usage = evidence("usage-before.json");
         usage["command"]["data"]["groups"]
