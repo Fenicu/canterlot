@@ -477,6 +477,13 @@ async fn accept_stops_then_removes_then_archives(pool: PgPool) {
     assert_eq!(worktree["state"], "removed");
     assert_eq!(worktree["branch_kept"], true);
     assert!(fx.archived().await);
+    let accepted_at: Option<chrono::DateTime<Utc>> =
+        sqlx::query_scalar("select accepted_at from conversations where id=$1")
+            .bind(fx.child)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert!(accepted_at.is_some(), "приём оставляет срок хранения");
     let state: String = sqlx::query_scalar("select delivery_state from commands where id=$1")
         .bind(command)
         .fetch_one(&fx.pool)
@@ -523,6 +530,16 @@ async fn accept_without_worktree_stops_and_archives(pool: PgPool) {
     fx.stop_child().await;
     fx.tick_after(TimeDelta::seconds(6)).await;
     assert!(fx.archived().await);
+    let accepted_at: Option<chrono::DateTime<Utc>> =
+        sqlx::query_scalar("select accepted_at from conversations where id=$1")
+            .bind(fx.child)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert!(
+        accepted_at.is_some(),
+        "приём без копии тоже оставляет срок хранения"
+    );
     assert!(fx.commands("remove_worktree").await.is_empty());
     assert_eq!(fx.pending_cleanups().await, 0);
     assert_eq!(fx.open_subscriptions().await, 0);
