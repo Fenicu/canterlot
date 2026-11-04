@@ -117,6 +117,32 @@ describe("TextBlock", () => {
     unmount(view);
   });
 
+  it("finished_reveal_word_unwraps_on_the_reveal_frame_not_on_animationend", () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const block = new BlockModel("b-u", "text");
+    block.text = "первое";
+    const view = mount(TextBlock, { target, props: { block } });
+    flushSync();
+
+    block.text = "первое второе";
+    flushSync();
+    for (let step = 0; step < 10; step++) frames.advance(16);
+    const word = target.querySelector(".reveal-word");
+    expect(word).not.toBeNull();
+
+    word!.dispatchEvent(new Event("animationend"));
+    flushSync();
+    // Событие только отмечает слово: разметка не меняется до кадра проявления.
+    expect(word!.isConnected).toBe(true);
+    expect(target.querySelector(".reveal-word")).toBe(word);
+
+    frames.advance(16);
+    expect(word!.isConnected).toBe(false);
+    expect(target.textContent).toContain("первое второе");
+    unmount(view);
+  });
+
   it("quote_copy_button_appears_only_for_a_final_block", () => {
     const target = document.createElement("div");
     document.body.appendChild(target);

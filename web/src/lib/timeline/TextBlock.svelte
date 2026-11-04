@@ -74,12 +74,31 @@
     return value.match(/\S+/g)?.length ?? 0;
   }
 
+  /** Слова, доигравшие анимацию: снять обёртку можно только в кадре проявления. */
+  const finishedWords: HTMLElement[] = [];
+
+  // Снятие обёрток — такая же правка DOM, как шаг проявления: обе идут в одном кадре,
+  // иначе событие анимации добавляет кадру лишнюю пачку изменений.
+  function unwrapFinished(): void {
+    for (const word of finishedWords.splice(0)) {
+      if (!word.isConnected) continue;
+      const text = document.createTextNode(word.textContent ?? '');
+      word.replaceWith(text);
+      const previous = text.previousSibling;
+      if (previous?.nodeType === Node.TEXT_NODE) {
+        (previous as Text).appendData(text.data);
+        text.remove();
+      }
+    }
+  }
+
   // Дельты не перерисовывают текст сами: один показ на кадр, а не на событие.
   function ensureFrame(): void {
     if (frame) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
       reveal.tick(wallNow());
+      unwrapFinished();
       clock = wallNow();
       if (!reveal.done) ensureFrame();
     });
@@ -122,13 +141,9 @@
         word.addEventListener(
           'animationend',
           () => {
-            const text = document.createTextNode(word.textContent ?? '');
-            word.replaceWith(text);
-            const previous = text.previousSibling;
-            if (previous?.nodeType === Node.TEXT_NODE) {
-              (previous as Text).appendData(text.data);
-              text.remove();
-            }
+            finishedWords.push(word);
+            // Хвост мог доиграть раньше, чем кончился показ: тогда кадр нужно завести самим.
+            ensureFrame();
           },
           { once: true }
         );
