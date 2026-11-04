@@ -1544,6 +1544,9 @@ pub async fn abandon_deliver_in_tx(
     .fetch_optional(&mut *conn)
     .await?;
     if let Some(row) = row {
+        // Удержанные пачкой итоги не должны пропасть вместе с недоставленным будильником:
+        // возвращаем их обычной подписке в этой же транзакции.
+        release_collected_in_tx(conn, &row, now).await?;
         changed_in_tx(conn, &row, Uuid::now_v7()).await?;
     }
     Ok(())

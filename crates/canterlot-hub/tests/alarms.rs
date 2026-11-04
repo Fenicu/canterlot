@@ -1489,3 +1489,55 @@ async fn cancellation_racing_unsubscribe_does_not_resurrect_the_event(pool: PgPo
         "an unsubscribed generation cannot resurrect a held result"
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn abandoned_batch_releases_held_summaries_to_the_subscription(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    assert_eq!(f.event_jobs().await, 0);
+
+    let mut conn = f.pool.acquire().await.unwrap();
+    session_tools::jobs::abandon_in_tx(
+        &mut conn,
+        f.owner,
+        Some(f.orchestrator),
+        &json!({"action": "alarm_deliver", "alarm_id": id}),
+        now,
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    assert_eq!(alarm_state(&f.pool, id).await.0, "failed");
+    assert_eq!(
+        f.event_jobs().await,
+        1,
+        "the held summary returns to the subscription"
+    );
+
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(10))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    let inputs = f.alarm_inputs().await;
+    assert_eq!(inputs.len(), 1);
+    assert!(inputs[0].0.contains(&f.child.to_string()), "{}", inputs[0].0);
+    assert!(inputs[0].0.contains("is now idle"), "{}", inputs[0].0);
+}
