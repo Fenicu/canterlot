@@ -587,6 +587,25 @@ mod tests {
     }
 
     #[test]
+    fn live_context_is_the_last_input_without_cache_double_count() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/stage0/evidence/antigravity/p-live-cache.jsonl");
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut usage = Usage::default();
+        for line in text.lines() {
+            let entry: Value = serde_json::from_str(line).unwrap();
+            let frame: Value = serde_json::from_str(entry["line"].as_str().unwrap()).unwrap();
+            if let Some(result) = frame.get("result") {
+                usage.add(Usage::parse(result));
+            }
+        }
+        assert_eq!(usage.input, 13_718 + 13_829);
+        assert_eq!(usage.last_input, 13_829);
+        assert_eq!(usage.cache_read, 0);
+        assert_eq!(usage.cache_write, 0);
+    }
+
+    #[test]
     fn missing_usage_is_allowed() {
         assert_eq!(Usage::parse(&json!({"stopReason": "end_turn"})), None);
         let usage = Usage::default();
