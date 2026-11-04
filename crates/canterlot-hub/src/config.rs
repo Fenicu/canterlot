@@ -487,18 +487,10 @@ impl Default for SchedulerConfig {
 }
 
 /// Инструменты оркестратора: выключатели этапов, откат поведения без отката схемы.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OrchestratorConfig {
     pub alarms: AlarmsConfig,
-}
-
-impl Default for OrchestratorConfig {
-    fn default() -> Self {
-        Self {
-            alarms: AlarmsConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

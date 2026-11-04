@@ -3091,7 +3091,10 @@ export interface operations {
     delete__api_v1_conversations__id__alarms__alarm_id_: {
         parameters: {
             query?: never;
-            header?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
             path: {
                 /** @description Разговор */
                 id: string;

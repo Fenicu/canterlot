@@ -123,7 +123,11 @@ fn scheduler(pool: &PgPool, config: SchedulerConfig) -> Scheduler {
 }
 
 async fn count(pool: &PgPool, query: &'static str, id: Uuid) -> i64 {
-    sqlx::query_scalar(query).bind(id).fetch_one(pool).await.unwrap()
+    sqlx::query_scalar(query)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -134,8 +138,14 @@ async fn time_alarms_firing_within_five_seconds_coalesce_into_one_input(pool: Pg
     f.arm_at("disk", now + TimeDelta::seconds(33)).await;
     let sch = scheduler(&f.pool, Default::default());
 
-    assert_eq!(sch.tick(now + TimeDelta::seconds(31)).await.unwrap().fired, 0);
-    assert_eq!(sch.tick(now + TimeDelta::seconds(36)).await.unwrap().fired, 1);
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(31)).await.unwrap().fired,
+        0
+    );
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(36)).await.unwrap().fired,
+        1
+    );
 
     assert_eq!(
         count(
@@ -146,13 +156,12 @@ async fn time_alarms_firing_within_five_seconds_coalesce_into_one_input(pool: Pg
         .await,
         1
     );
-    let (content, origin): (Value, Value) = sqlx::query_as(
-        "select content,origin from inputs where conversation_id=$1",
-    )
-    .bind(f.orchestrator)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
+    let (content, origin): (Value, Value) =
+        sqlx::query_as("select content,origin from inputs where conversation_id=$1")
+            .bind(f.orchestrator)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
     let text = content[0]["text"].as_str().unwrap_or_default();
     assert!(text.contains("2 alarms fired"), "{text}");
     assert!(text.contains("\"gate\""), "{text}");
@@ -168,9 +177,16 @@ async fn time_alarms_firing_within_five_seconds_coalesce_into_one_input(pool: Pg
     .await
     .unwrap();
     assert_eq!(delivered.len(), 2);
-    assert!(delivered.iter().all(|(input, state)| input.is_some() && state == "fired"));
+    assert!(
+        delivered
+            .iter()
+            .all(|(input, state)| input.is_some() && state == "fired")
+    );
 
-    assert_eq!(sch.tick(now + TimeDelta::seconds(41)).await.unwrap().fired, 0);
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(41)).await.unwrap().fired,
+        0
+    );
     assert_eq!(
         count(
             &f.pool,
@@ -188,7 +204,14 @@ async fn restart_and_retry_after_commit_do_not_deliver_twice(pool: PgPool) {
     let now = Utc::now();
     f.arm_at("gate", now + TimeDelta::seconds(31)).await;
     let first = scheduler(&f.pool, Default::default());
-    assert_eq!(first.tick(now + TimeDelta::seconds(36)).await.unwrap().fired, 1);
+    assert_eq!(
+        first
+            .tick(now + TimeDelta::seconds(36))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
     assert_eq!(
         count(
             &f.pool,
@@ -210,7 +233,11 @@ async fn restart_and_retry_after_commit_do_not_deliver_twice(pool: PgPool) {
     .unwrap();
     let restarted = scheduler(&f.pool, Default::default());
     assert_eq!(
-        restarted.tick(now + TimeDelta::seconds(37)).await.unwrap().fired,
+        restarted
+            .tick(now + TimeDelta::seconds(37))
+            .await
+            .unwrap()
+            .fired,
         0
     );
     assert_eq!(
@@ -251,7 +278,10 @@ async fn week_ahead_alarm_keeps_queue_patience_from_first_block(pool: PgPool) {
     );
 
     assert_eq!(
-        sch.tick(blocked_at + TimeDelta::hours(23)).await.unwrap().retried,
+        sch.tick(blocked_at + TimeDelta::hours(23))
+            .await
+            .unwrap()
+            .retried,
         1
     );
     let (again, _): (Option<DateTime<Utc>>, DateTime<Utc>) =
@@ -277,13 +307,12 @@ async fn abandon_marks_the_alarm_failed_with_a_visible_reason(pool: PgPool) {
         .unwrap();
     assert_eq!(report.failed, 1);
 
-    let (state, reason): (String, Option<String>) = sqlx::query_as(
-        "select state,failure_reason from alarms where id=$1",
-    )
-    .bind(armed["alarm_id"].as_str().unwrap().parse::<Uuid>().unwrap())
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
+    let (state, reason): (String, Option<String>) =
+        sqlx::query_as("select state,failure_reason from alarms where id=$1")
+            .bind(armed["alarm_id"].as_str().unwrap().parse::<Uuid>().unwrap())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
     assert_eq!(state, "failed");
     assert_eq!(reason.as_deref(), Some("delivery_failed"));
 }
@@ -303,7 +332,10 @@ async fn cancel_by_key_and_id_is_idempotent(pool: PgPool) {
         .unwrap();
     assert_eq!(cancelled["result"], "cancelled");
     assert_eq!(cancelled["alarm"]["state"], "cancelled");
-    let again = f.call("alarms.cancel", json!({"alarm_id": id})).await.unwrap();
+    let again = f
+        .call("alarms.cancel", json!({"alarm_id": id}))
+        .await
+        .unwrap();
     assert_eq!(again["result"], "already_cancelled");
     assert_eq!(
         f.call("alarms.list", json!({})).await.unwrap()["alarms"]

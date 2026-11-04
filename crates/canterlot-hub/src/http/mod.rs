@@ -23,9 +23,9 @@ use crate::{
     session::Registry,
 };
 
+pub mod alarms;
 pub mod attachments;
 pub mod auth;
-pub mod alarms;
 mod connection;
 pub mod conversations;
 pub mod crunch;

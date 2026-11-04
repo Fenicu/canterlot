@@ -188,13 +188,13 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Stop the process of a session you started but keep its worktree and branch, unlike session_accept. Only the direct parent may do this; the owner's root sessions are untouchable. Do not call it on a session you did not start. Idempotent: a second call says already_stopping or nothing_running."
         }
         "alarm_set" => {
-            "Wake yourself later with a [canterlot] message: at a time (`at` or `in_seconds`) or when a session settles (`when.kind=session_state`). Survives restarts of the hub and of your session. Use it instead of sleep commands or polling, then end your turn. You already get a message when a session you started settles: use an alarm for a later time or as a watchdog."
+            "Wake yourself later with a [canterlot] message: at a time (`at` or `in_seconds`) or when a session settles (`when.kind=session_state`). Survives restarts of the hub and of your session. Use it instead of sleep commands or polling, then end your turn. Do not poll. You already get a message when a session you started settles: use an alarm for a later time or as a watchdog."
         }
         "alarm_cancel" => {
-            "Cancel one of your armed alarms by id or key. Idempotent: a finished alarm answers already_fired or already_cancelled."
+            "Cancel one of your armed alarms by id or key. Idempotent: a finished alarm answers already_fired or already_cancelled. Do not pass both id and key."
         }
         "alarm_list" => {
-            "List your armed alarms with their conditions and times; with include_finished, also the last finished ones."
+            "List your armed alarms with their conditions and times; with include_finished, also the last finished ones. Do not call it in a loop to wait: alarms arrive as messages."
         }
         _ => "Session tool.",
     }
@@ -909,12 +909,13 @@ mod tests {
                 .find(|tool| tool["name"] == name)
                 .unwrap_or_else(|| panic!("missing {name}"))
         };
-        assert!(alarm("alarm_set")["inputSchema"]["properties"]["when"]["properties"]
-            ["kind"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "session_state"));
+        assert!(
+            alarm("alarm_set")["inputSchema"]["properties"]["when"]["properties"]["kind"]["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "session_state")
+        );
         assert_eq!(
             alarm("alarm_list")["annotations"]["readOnlyHint"],
             json!(true)

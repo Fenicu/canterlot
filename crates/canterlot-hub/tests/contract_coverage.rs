@@ -220,7 +220,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 27, "screen coverage rows");
+    assert_eq!(rows, 28, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -436,6 +436,18 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
                 .to_owned(),
         );
     }
+    let alarm_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into alarms(id,owner_id,conversation_id,created_by,kind,fire_at,call_id)
+         values($1,$2,$3,'agent','at',now()+interval '1 hour',$4)",
+    )
+    .bind(alarm_id)
+    .bind(owner)
+    .bind(id)
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await
+    .unwrap();
     // «Отправить сейчас»: ход идёт, один ввод принят, второй ждёт в очереди.
     let send_now_conversation = testkit::seed_conversation(&pool, owner, machine).await;
     sqlx::query("update conversations set harness = 'codex' where id = $1")
@@ -755,6 +767,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Method::DELETE,
             "/api/v1/scheduled/{id}",
             format!("/api/v1/scheduled/{}", scheduled[1]),
+            None,
+            None,
+        ),
+        case(
+            Method::DELETE,
+            "/api/v1/conversations/{id}/alarms/{alarm_id}",
+            format!("/api/v1/conversations/{id}/alarms/{alarm_id}"),
             None,
             None,
         ),

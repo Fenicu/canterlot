@@ -124,13 +124,15 @@ pub struct AlarmRow {
 }
 
 /// То, что видят PWA и HTTP: без заметки и без внутренних отметок.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AlarmView {
     pub alarm_id: Uuid,
     pub conversation_id: Uuid,
     pub key: Option<String>,
     pub kind: String,
     pub condition: String,
+    pub session_ids: Vec<Uuid>,
+    pub states: Vec<String>,
     pub fires_at: Option<String>,
     pub deadline_at: Option<String>,
     pub only_on_timeout: bool,
@@ -139,6 +141,7 @@ pub struct AlarmView {
     pub fired_reason: Option<String>,
     pub failure_reason: Option<String>,
     pub fired_at: Option<String>,
+    pub note: Option<String>,
     pub note_bytes: i64,
     pub created_at: String,
 }
@@ -246,13 +249,15 @@ fn validate_key(key: Option<&str>) -> Result<(), ToolError> {
 }
 
 fn view(row: &AlarmRow) -> AlarmView {
-    let condition = row
+    let parsed = row
         .condition
         .as_ref()
-        .and_then(|value| serde_json::from_value::<SessionCondition>(value.clone()).ok())
+        .and_then(|value| serde_json::from_value::<SessionCondition>(value.clone()).ok());
+    let condition = parsed
+        .as_ref()
         .and_then(|condition| {
             row.deadline_at
-                .map(|deadline| condition_text(&condition, deadline, row.only_on_timeout))
+                .map(|deadline| condition_text(condition, deadline, row.only_on_timeout))
         })
         .unwrap_or_else(|| match row.kind.as_str() {
             "at" => row
@@ -267,6 +272,14 @@ fn view(row: &AlarmRow) -> AlarmView {
         key: row.key.clone(),
         kind: row.kind.clone(),
         condition,
+        session_ids: parsed
+            .as_ref()
+            .map(|condition| condition.session_ids.clone())
+            .unwrap_or_default(),
+        states: parsed
+            .as_ref()
+            .map(|condition| condition.states.clone())
+            .unwrap_or_default(),
         fires_at: row.fire_at.map(time),
         deadline_at: row.deadline_at.map(time),
         only_on_timeout: row.only_on_timeout,
@@ -275,6 +288,7 @@ fn view(row: &AlarmRow) -> AlarmView {
         fired_reason: row.fired_reason.clone(),
         failure_reason: row.failure_reason.clone(),
         fired_at: row.fired_at.map(time),
+        note: row.note.clone(),
         note_bytes: row.note.as_deref().map_or(0, |note| note.len() as i64),
         created_at: time(row.created_at),
     }
@@ -302,10 +316,7 @@ async fn changed_in_tx(
     Ok(())
 }
 
-async fn row_in_tx(
-    conn: &mut PgConnection,
-    id: Uuid,
-) -> Result<Option<AlarmRow>, sqlx::Error> {
+async fn row_in_tx(conn: &mut PgConnection, id: Uuid) -> Result<Option<AlarmRow>, sqlx::Error> {
     sqlx::query_as("select * from alarms where id=$1")
         .bind(id)
         .fetch_optional(conn)
@@ -374,6 +385,7 @@ async fn cancel_timeout_job_in_tx(
 
 /// Срабатывание условия: `armed -> fired` один раз, задание доставки и событие в той же
 /// транзакции. Вызывается из проектора цели под блокировкой строки будильника.
+#[allow(clippy::too_many_arguments)]
 pub async fn evaluate_session_in_tx(
     conn: &mut PgConnection,
     target_id: Uuid,
@@ -390,7 +402,8 @@ pub async fn evaluate_session_in_tx(
     if !completion::is_completion(state) {
         return Ok(false);
     }
-    let fingerprint = settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
+    let fingerprint =
+        settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
     let rows: Vec<AlarmRow> = sqlx::query_as(
         "select * from alarms
          where state='armed' and condition->>'kind'='session_state'
@@ -402,13 +415,17 @@ pub async fn evaluate_session_in_tx(
     .await?;
     let mut fired = false;
     for mut row in rows {
-        let Some(mut condition) =
-            serde_json::from_value::<SessionCondition>(row.condition.clone().unwrap_or(Value::Null))
-                .ok()
-        else {
+        let Some(mut condition) = serde_json::from_value::<SessionCondition>(
+            row.condition.clone().unwrap_or(Value::Null),
+        )
+        .ok() else {
             continue;
         };
-        if !condition.states.iter().any(|wanted| wanted == state.as_str()) {
+        if !condition
+            .states
+            .iter()
+            .any(|wanted| wanted == state.as_str())
+        {
             continue;
         }
         if condition
@@ -458,10 +475,10 @@ pub async fn on_target_deleted_in_tx(
     .fetch_all(&mut *conn)
     .await?;
     for mut row in rows {
-        let Some(condition) =
-            serde_json::from_value::<SessionCondition>(row.condition.clone().unwrap_or(Value::Null))
-                .ok()
-        else {
+        let Some(condition) = serde_json::from_value::<SessionCondition>(
+            row.condition.clone().unwrap_or(Value::Null),
+        )
+        .ok() else {
             continue;
         };
         if !condition.states.iter().any(|state| state == "deleted") || row.only_on_timeout {
@@ -584,140 +601,132 @@ pub async fn set(
     } else {
         None
     };
-    let armed: i64 =
-        sqlx::query_scalar("select count(*) from alarms where conversation_id=$1 and state='armed'")
-            .bind(caller.conversation_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let armed: i64 = sqlx::query_scalar(
+        "select count(*) from alarms where conversation_id=$1 and state='armed'",
+    )
+    .bind(caller.conversation_id)
+    .fetch_one(&mut *tx)
+    .await?;
     if armed >= MAX_ARMED {
         return Err(ToolError::new(ToolErrorCode::TooManyAlarms));
     }
 
-    let (kind, fire_at, deadline_at, condition, response, run_at, timeout) =
-        if let Some(at) = args.at.as_deref() {
-            let at = DateTime::parse_from_rfc3339(at)
-                .map_err(|_| ToolError::new(ToolErrorCode::InvalidArguments))?
-                .with_timezone(&Utc);
-            let seconds = (at - now).num_seconds();
-            if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
-                return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    let (kind, fire_at, deadline_at, condition, response, run_at, timeout) = if let Some(at) =
+        args.at.as_deref()
+    {
+        let at = DateTime::parse_from_rfc3339(at)
+            .map_err(|_| ToolError::new(ToolErrorCode::InvalidArguments))?
+            .with_timezone(&Utc);
+        let seconds = (at - now).num_seconds();
+        if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
+            return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+        }
+        let condition = None;
+        let response = json!({
+            "state": "armed",
+            "alarm_id": Uuid::now_v7(),
+            "fires_at": time(at),
+            "condition": format!("at {}", clock(at)),
+            "replaced": replaced,
+            "hint": HINT_ARMED,
+        });
+        (
+            "at",
+            Some(at),
+            None,
+            condition,
+            response,
+            at + COALESCE,
+            false,
+        )
+    } else if let Some(seconds) = args.in_seconds {
+        if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
+            return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+        }
+        let at = now + TimeDelta::seconds(seconds);
+        let response = json!({
+            "state": "armed",
+            "alarm_id": Uuid::now_v7(),
+            "fires_at": time(at),
+            "condition": format!("at {}", clock(at)),
+            "replaced": replaced,
+            "hint": HINT_ARMED,
+        });
+        ("at", Some(at), None, None, response, at + COALESCE, false)
+    } else {
+        let when = args
+            .when
+            .as_ref()
+            .ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
+        let (mut condition, states) = parse_condition(when)?;
+        let deadline_seconds = args.deadline_seconds.unwrap_or(DEFAULT_DEADLINE_SECONDS);
+        if !(MIN_DEADLINE_SECONDS..=MAX_DEADLINE_SECONDS).contains(&deadline_seconds) {
+            return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+        }
+        let deadline = now + TimeDelta::seconds(deadline_seconds);
+        let target = condition.session_ids[0];
+        if target == caller.conversation_id {
+            return Err(ToolError::new(ToolErrorCode::SessionNotFound));
+        }
+        access::target_in_tx(&mut tx, &context.config, &waiter, caller.owner_id, target).await?;
+        if let Some(current) = subs::current_in_tx(&mut tx, target, now, &context.settle).await? {
+            if states.iter().any(|state| state == current.state.as_str()) {
+                // Условие уже истинно: будильник не взводится, но вызов запоминается.
+                let response = json!({
+                    "state": "satisfied",
+                    "current": current.state.as_str(),
+                    "condition": condition_text(&condition, deadline, false),
+                    "hint": HINT_SATISFIED,
+                });
+                let id = Uuid::now_v7();
+                insert_alarm_in_tx(
+                    &mut tx,
+                    id,
+                    caller.owner_id,
+                    caller.conversation_id,
+                    "agent",
+                    args.key.as_deref(),
+                    "condition",
+                    None,
+                    Some(deadline),
+                    false,
+                    false,
+                    Some(condition.as_value()),
+                    args.note.as_deref(),
+                    0,
+                    "cancelled",
+                    Some("satisfied"),
+                    None,
+                    caller.call_id,
+                    &response,
+                    now,
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(response);
             }
-            let condition = None;
-            let response = json!({
-                "state": "armed",
-                "alarm_id": Uuid::now_v7(),
-                "fires_at": time(at),
-                "condition": format!("at {}", clock(at)),
-                "replaced": replaced,
-                "hint": HINT_ARMED,
-            });
-            (
-                "at",
-                Some(at),
-                None,
-                condition,
-                response,
-                at + COALESCE,
-                false,
-            )
-        } else if let Some(seconds) = args.in_seconds {
-            if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
-                return Err(ToolError::new(ToolErrorCode::InvalidArguments));
-            }
-            let at = now + TimeDelta::seconds(seconds);
-            let response = json!({
-                "state": "armed",
-                "alarm_id": Uuid::now_v7(),
-                "fires_at": time(at),
-                "condition": format!("at {}", clock(at)),
-                "replaced": replaced,
-                "hint": HINT_ARMED,
-            });
-            (
-                "at",
-                Some(at),
-                None,
-                None,
-                response,
-                at + COALESCE,
-                false,
-            )
-        } else {
-            let when = args
-                .when
-                .as_ref()
-                .ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
-            let (mut condition, states) = parse_condition(when)?;
-            let deadline_seconds = args.deadline_seconds.unwrap_or(DEFAULT_DEADLINE_SECONDS);
-            if !(MIN_DEADLINE_SECONDS..=MAX_DEADLINE_SECONDS).contains(&deadline_seconds) {
-                return Err(ToolError::new(ToolErrorCode::InvalidArguments));
-            }
-            let deadline = now + TimeDelta::seconds(deadline_seconds);
-            let target = condition.session_ids[0];
-            if target == caller.conversation_id {
-                return Err(ToolError::new(ToolErrorCode::SessionNotFound));
-            }
-            access::target_in_tx(&mut tx, &context.config, &waiter, caller.owner_id, target).await?;
-            if let Some(current) =
-                subs::current_in_tx(&mut tx, target, now, &context.settle).await?
-            {
-                if states.iter().any(|state| state == current.state.as_str()) {
-                    // Условие уже истинно: будильник не взводится, но вызов запоминается.
-                    let response = json!({
-                        "state": "satisfied",
-                        "current": current.state.as_str(),
-                        "condition": condition_text(&condition, deadline, false),
-                        "hint": HINT_SATISFIED,
-                    });
-                    let id = Uuid::now_v7();
-                    insert_alarm_in_tx(
-                        &mut tx,
-                        id,
-                        caller.owner_id,
-                        caller.conversation_id,
-                        "agent",
-                        args.key.as_deref(),
-                        "condition",
-                        None,
-                        Some(deadline),
-                        false,
-                        false,
-                        Some(condition.as_value()),
-                        args.note.as_deref(),
-                        0,
-                        "cancelled",
-                        Some("satisfied"),
-                        None,
-                        caller.call_id,
-                        &response,
-                        now,
-                    )
-                    .await?;
-                    tx.commit().await?;
-                    return Ok(response);
-                }
-                condition
-                    .armed
-                    .insert(target.to_string(), current.fingerprint.clone());
-            }
-            let response = json!({
-                "state": "armed",
-                "alarm_id": Uuid::now_v7(),
-                "deadline_at": time(deadline),
-                "condition": condition_text(&condition, deadline, false),
-                "replaced": replaced,
-                "hint": HINT_ARMED,
-            });
-            (
-                "condition",
-                None,
-                Some(deadline),
-                Some(condition),
-                response,
-                deadline + COALESCE,
-                true,
-            )
-        };
+            condition
+                .armed
+                .insert(target.to_string(), current.fingerprint.clone());
+        }
+        let response = json!({
+            "state": "armed",
+            "alarm_id": Uuid::now_v7(),
+            "deadline_at": time(deadline),
+            "condition": condition_text(&condition, deadline, false),
+            "replaced": replaced,
+            "hint": HINT_ARMED,
+        });
+        (
+            "condition",
+            None,
+            Some(deadline),
+            Some(condition),
+            response,
+            deadline + COALESCE,
+            true,
+        )
+    };
 
     let id = response["alarm_id"]
         .as_str()
@@ -895,30 +904,29 @@ pub async fn cancel(
 }
 
 /// Отмена владельцем из PWA: чужой будильник неотличим от несуществующего.
-pub async fn cancel_owner(
-    pool: &sqlx::PgPool,
+pub async fn cancel_owner_in_tx(
+    conn: &mut PgConnection,
     owner_id: Uuid,
     conversation_id: Uuid,
     alarm_id: Uuid,
+    correlation_id: Uuid,
 ) -> Result<AlarmView, ToolError> {
     let now = Utc::now();
-    let mut tx = pool.begin().await?;
     let row: Option<AlarmRow> = sqlx::query_as(
         "select * from alarms where id=$1 and owner_id=$2 and conversation_id=$3 for update",
     )
     .bind(alarm_id)
     .bind(owner_id)
     .bind(conversation_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
     let Some(row) = row else {
         return Err(ToolError::new(ToolErrorCode::AlarmNotFound));
     };
     if row.state == "armed" {
-        cancel_in_tx(&mut tx, row.id, "cancelled", now, Uuid::now_v7()).await?;
+        cancel_in_tx(conn, row.id, "cancelled", now, correlation_id).await?;
     }
-    let updated = row_in_tx(&mut tx, row.id).await?.unwrap_or(row);
-    tx.commit().await?;
+    let updated = row_in_tx(conn, row.id).await?.unwrap_or(row);
     Ok(view(&updated))
 }
 
@@ -1135,7 +1143,10 @@ fn render(rows: &[AlarmRow], now: DateTime<Utc>) -> String {
     } else {
         text.push_str(&format!("[canterlot] {} alarms fired.\n", rows.len()));
         for row in rows {
-            text.push_str(&format!("\n- {}", render_one(row, now).trim_start_matches("[canterlot] ")));
+            text.push_str(&format!(
+                "\n- {}",
+                render_one(row, now).trim_start_matches("[canterlot] ")
+            ));
         }
     }
     text.push_str("\n\n");
@@ -1178,9 +1189,7 @@ fn render_one(row: &AlarmRow, now: DateTime<Utc>) -> String {
                     coarse(fired_at - row.created_at)
                 )
             } else {
-                format!(
-                    "[canterlot] Alarm {name}fired: session {target} is {state}{late_text}."
-                )
+                format!("[canterlot] Alarm {name}fired: session {target} is {state}{late_text}.")
             }
         }
     };
