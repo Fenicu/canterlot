@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
-	import { browserRuntime } from './open';
+	import { browserRuntime } from '#lib/app/browser.js';
 	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
 	import { loadConfig } from '#lib/api/config.js';
 	import Composer from '#lib/composer/Composer.svelte';
@@ -11,12 +11,8 @@
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
-	import TodoPanel from './TodoPanel.svelte';
 	import RequestCard from '#lib/requests/RequestCard.svelte';
 	import { isDocked } from '#lib/stores/requests.svelte.js';
-	import SessionSettings from './SessionSettings.svelte';
-	import Diagnostics from './Diagnostics.svelte';
-	import InfoSheet from './InfoSheet.svelte';
 	import DelegationSheet from './DelegationSheet.svelte';
 	import WorktreeNotice from './WorktreeNotice.svelte';
 	import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
@@ -29,6 +25,7 @@
 	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import Sheet from '#lib/ui/Sheet.svelte';
+	import type { Component } from 'svelte';
 
 	interface MachineRef {
 		id?: string;
@@ -81,6 +78,27 @@
 	let showDiagnostics = $state(false);
 	let showDelegation = $state(false);
 	let showSheet = $state(false);
+	let infoRunId = $state<string | null>(null);
+	// Редкие панели не входят в маршрут чата: подгружаются, когда их открывают.
+	let TodoPanel = $state<Component<{ chat: ChatStore; lane?: string | null }> | null>(null);
+	let SessionSettings = $state<Component<{ chat: ChatStore; machine?: MachineRecord | null; desktop?: boolean; onclose?: () => void }> | null>(null);
+	let Diagnostics = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
+	let InfoSheet = $state<Component<{ chat: ChatStore; runId: string; onclose: () => void }> | null>(null);
+	const todos = $derived(chat.todos.lane(null));
+
+	$effect(() => {
+		if (showSettings && !SessionSettings) import('./SessionSettings.svelte').then((m) => { SessionSettings = m.default; });
+	});
+	$effect(() => {
+		if (showDiagnostics && !Diagnostics) import('./Diagnostics.svelte').then((m) => { Diagnostics = m.default; });
+	});
+	$effect(() => {
+		if (infoRunId && !InfoSheet) import('./InfoSheet.svelte').then((m) => { InfoSheet = m.default; });
+	});
+	// Список задач показывается не в каждом ходу: панель догружается вместе с ним.
+	$effect(() => {
+		if (todos && todos.items.length > 0 && !TodoPanel) import('./TodoPanel.svelte').then((m) => { TodoPanel = m.default; });
+	});
 	const listRow = $derived(runtime?.list.items.get(chat.id) ?? null);
 	const childSessions = $derived(
 		runtime ? [...runtime.list.items.values()].filter((row) => row.parent_id === chat.id) : []
@@ -107,7 +125,6 @@
 			acceptError = errorText(err, 'Не удалось принять результат');
 		}
 	}
-	let infoRunId = $state<string | null>(null);
 
 	onMount(async () => {
 		try {
@@ -169,7 +186,7 @@
 		{now}
 	/>
 
-	<TodoPanel {chat} />
+	{#if TodoPanel}<TodoPanel {chat} />{/if}
 
 	{#if docked.length > 0}
 		<div class="request-cards-slot">
@@ -219,7 +236,7 @@
 		/>
 	{/if}
 
-	{#if showSettings}
+	{#if showSettings && SessionSettings}
 		<Sheet open title="Настройки сессии" onclose={() => (showSettings = false)}>
 			<SessionSettings
 				{chat}
@@ -240,7 +257,7 @@
 		/>
 	{/if}
 
-	{#if showDiagnostics}
+	{#if showDiagnostics && Diagnostics}
 		<Diagnostics
 			{chat}
 			onclose={() => (showDiagnostics = false)}
@@ -251,7 +268,7 @@
 		<DelegationSheet {chat} onclose={() => (showDelegation = false)} />
 	{/if}
 
-	{#if infoRunId}
+	{#if infoRunId && InfoSheet}
 		<InfoSheet
 			{chat}
 			runId={infoRunId}

@@ -3,7 +3,8 @@
   import { version as appVersion } from '$app/env';
   import { clock } from '#lib/clock.js';
   import { ticker } from '#lib/ticker.svelte.js';
-  import { browserRuntime, leaseChatSession } from '#lib/screens/chat/open.js';
+  import { browserRuntime } from '#lib/app/browser.js';
+  import type { ChatLease } from '#lib/screens/chat/open.js';
   import SessionList from '#lib/screens/sessions/SessionList.svelte';
   import type { Runtime } from '#lib/app/runtime.js';
   import type { Snippet, Component } from 'svelte';
@@ -64,21 +65,23 @@
   $effect(() => {
     const id = chatId;
     currentChat = null;
-    if (onChat && id) {
-      let alive = true;
-      const lease = leaseChatSession(id);
-      lease.chat
-        .then((store) => {
+    if (!onChat || !id) return;
+    let alive = true;
+    let lease: ChatLease | null = null;
+    void import('#lib/screens/chat/open.js')
+      .then((module) => {
+        if (!alive) return;
+        lease = module.leaseChatSession(id);
+        return lease.chat.then((store) => {
           if (alive) currentChat = store;
-        })
-        .catch(() => {});
-      return () => {
-        alive = false;
-        lease.release();
-      };
-    } else {
-      currentChat = null;
-    }
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+      lease?.release();
+      lease = null;
+    };
   });
   const onNew = $derived(path === '/new');
   const harness = $derived(path.startsWith('/__test'));

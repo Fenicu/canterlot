@@ -93,6 +93,8 @@
   });
   let seenRows: string | null = null;
   $effect(() => {
+    // Сборка ключей и метка в DOM нужны только зонду: без него строка не склеивается.
+    if (!probe.enabled) return;
     const next = rows.map((row) => row.key).join('\n');
     const node = host;
     if (!node || seenRows === next) return;

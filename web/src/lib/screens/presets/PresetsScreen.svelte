@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { deletePreset } from '#lib/api/client.js';
   import { fmt } from '#lib/format/ru.js';
@@ -9,9 +9,15 @@
   import Pill from '#lib/ui/Pill.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import PresetEditor from './PresetEditor.svelte';
-  import OwnerSheet from './OwnerSheet.svelte';
   import { formatOrigin, isAgentMarked, sortPresets } from './presetsModel.js';
   import '../secondary.css';
+  import type { Component } from 'svelte';
+
+  type OwnerSheetComponent = Component<{
+    machines: { id: string; name: string }[];
+    initialMachine: string;
+    onclose: () => void;
+  }>;
 
   let runtime = $state<Runtime | null>(null);
   let error = $state('');
@@ -20,6 +26,12 @@
   let deleting = $state<{ id: string; title: string; used_by: number } | null>(null);
   let deleteError = $state('');
   let ownerOpen = $state(false);
+  // Лист владельца тянет markdown-движок: чанк едет только вместе с ним.
+  let OwnerSheet = $state<OwnerSheetComponent | null>(null);
+
+  $effect(() => {
+    if (ownerOpen && !OwnerSheet) import('./OwnerSheet.svelte').then((m) => { OwnerSheet = m.default; });
+  });
 
   const presets = $derived(runtime ? sortPresets([...runtime.list.presets]) : []);
   const ownerMachines = $derived(
@@ -120,7 +132,7 @@
   />
 {/if}
 
-{#if ownerOpen && ownerMachines.length > 0}
+{#if ownerOpen && OwnerSheet && ownerMachines.length > 0}
   <OwnerSheet
     machines={ownerMachines}
     initialMachine={ownerMachines[0]?.id ?? ''}

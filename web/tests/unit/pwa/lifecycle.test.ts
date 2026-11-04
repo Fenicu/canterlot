@@ -54,8 +54,8 @@ test("browser_runtime_rebinds_cleanup_after_an_owner_change_during_startup", asy
     },
   }));
   try {
-    const { browserRuntime, sessionUploads } =
-      await import("../../../src/lib/screens/chat/open");
+    const { browserRuntime } = await import("../../../src/lib/app/browser");
+    const { sessionUploads } = await import("../../../src/lib/screens/chat/open");
     await browserRuntime();
     const before = sessionUploads();
     retireOwner();

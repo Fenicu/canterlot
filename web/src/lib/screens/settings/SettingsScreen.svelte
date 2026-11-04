@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { resolve } from '$app/paths';
-  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { loadConfig } from '#lib/api/config.js';
   import { me } from '#lib/api/client.js';
