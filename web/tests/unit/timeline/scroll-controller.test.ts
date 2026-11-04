@@ -41,12 +41,10 @@ function scroller(content: number, view: number, top = 0) {
   };
 }
 
-const env = { raf: (fn: () => void) => (fn(), 1), cancelRaf: () => undefined };
-
 describe("timeline/ScrollController", () => {
   it("a_scroll_clamped_by_a_taller_window_is_not_the_owner_leaving_the_bottom", () => {
     const view = scroller(1000, 500, 500);
-    const controller = new ScrollController(view.el, env);
+    const controller = new ScrollController(view.el);
     controller.onContentChange("resize");
     view.shrink(400);
     controller.onContentChange("resize");
@@ -60,7 +58,7 @@ describe("timeline/ScrollController", () => {
 
   it("a_clamp_in_the_frame_where_a_new_tail_arrives_is_not_the_owner_either", () => {
     const view = scroller(1000, 500, 500);
-    const controller = new ScrollController(view.el, env);
+    const controller = new ScrollController(view.el);
     view.shrink(400);
     controller.onContentChange("resize");
     view.scroll(600);
@@ -72,8 +70,17 @@ describe("timeline/ScrollController", () => {
 
   it("the_owner_scrolling_up_still_unpins", () => {
     const view = scroller(1000, 500, 500);
-    const controller = new ScrollController(view.el, env);
+    const controller = new ScrollController(view.el);
     view.scroll(200);
     expect(controller.pinned).toBe(false);
+  });
+
+  it("tail_growth_reaches_the_bottom_before_the_next_frame", () => {
+    const view = scroller(1000, 500, 500);
+    const controller = new ScrollController(view.el);
+    (view.el as unknown as { scrollHeight: number }).scrollHeight = 1200;
+    controller.onContentChange("tail-growth");
+    // Следующий кадр ещё не наступил: подвал не должен успеть уехать вверх.
+    expect(view.el.scrollTop).toBe(700);
   });
 });

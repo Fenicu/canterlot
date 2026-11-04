@@ -1,5 +1,15 @@
 .prose { line-height: var(--lh-body); overflow-wrap: anywhere; }
 .prose .reveal-word { animation: text-reveal var(--duration-text-reveal) var(--ease) both; }
+.prose .caret {
+  display: inline-block;
+  width: var(--caret-width);
+  height: var(--caret-height);
+  margin-left: var(--s1);
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: caret var(--duration-caret) alternate infinite;
+}
+@keyframes caret { from { opacity: 1; } to { opacity: 0; } }
 @keyframes text-reveal {
   from { opacity: 0; filter: blur(var(--blur-text-reveal)); }
   to { opacity: 1; filter: blur(0); }
@@ -11,6 +21,9 @@
 .prose :is(h3, h4, h5, h6) { font-size: var(--fs-body); }
 .prose > :first-child > :first-child { margin-top: var(--s0); }
 .prose > :last-child > :last-child { margin-bottom: var(--s0); }
+/* Хвост потока добавляет обёртку: поля его первого и последнего блока те же, что у готовой разметки. */
+.prose > .tail:first-child > div > :first-child { margin-top: var(--s0); }
+.prose > .tail:last-child > div > :last-child { margin-bottom: var(--s0); }
 .prose strong { font-weight: var(--weight-semibold); }
 .prose a { color: var(--accent-link); text-decoration: underline; text-underline-offset: var(--s1); }
 .prose :is(ul, ol) { padding-left: var(--s9); }

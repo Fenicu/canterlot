@@ -2,28 +2,19 @@ import { cell } from "#lib/stores/cell.svelte.js";
 
 const PIN_PX = 48;
 
-export interface ScrollEnv {
-  raf?: (fn: () => void) => number;
-  cancelRaf?: (id: number) => void;
-  reducedMotion?: () => boolean;
-}
-
 export class ScrollController {
   readonly #pinned = cell(true);
   readonly #showJump = cell(false);
   readonly #el: HTMLElement;
-  readonly #env: ScrollEnv;
   #last = 0;
   #lastHeight = 0;
   #lastView = 0;
   #target: number | null = null;
-  #frame = 0;
   #observer: ResizeObserver | null = null;
   #onScroll: () => void;
 
-  constructor(el: HTMLElement, env: ScrollEnv = {}) {
+  constructor(el: HTMLElement) {
     this.#el = el;
-    this.#env = env;
     this.#last = el.scrollTop;
     this.#remember();
     this.#onScroll = () => this.#readScroll();
@@ -62,7 +53,6 @@ export class ScrollController {
   /** Владелец раскрыл строку: окно перестаёт следовать за хвостом до возвращения вниз. */
   release(): void {
     this.#pinned.set(false);
-    this.#cancelFrame();
   }
 
   jumpToBottom(): void {
@@ -74,25 +64,13 @@ export class ScrollController {
   destroy(): void {
     this.#el.removeEventListener("scroll", this.#onScroll);
     this.#observer?.disconnect();
-    if (this.#frame) this.#env.cancelRaf?.(this.#frame);
   }
 
   #toBottom(): void {
-    const run = (): void => {
-      this.#frame = 0;
-      if (!this.pinned) return;
-      this.ownScroll(this.#el.scrollHeight);
-    };
-    if (this.#frame) return;
-    const raf = this.#env.raf ?? requestAnimationFrame;
-    this.#frame = raf(run);
-  }
-
-  #cancelFrame(): void {
-    if (!this.#frame) return;
-    const cancel = this.#env.cancelRaf ?? globalThis.cancelAnimationFrame;
-    cancel?.(this.#frame);
-    this.#frame = 0;
+    // Прокрутка идёт в том же кадре, что и рост текста: иначе кадр рисуется
+    // с подвалом ниже низа, а следующий кадр рывком возвращает его на место.
+    if (!this.pinned) return;
+    this.ownScroll(this.#el.scrollHeight);
   }
 
   /** Геометрия запоминается только вместе с положением: так подгонка scrollTop браузером видна как сжатие, а не как уход владельца. */
@@ -121,7 +99,6 @@ export class ScrollController {
     if (userUp) {
       this.#pinned.set(false);
       this.#showJump.set(false);
-      this.#cancelFrame();
       return;
     }
     if (gap <= PIN_PX) {

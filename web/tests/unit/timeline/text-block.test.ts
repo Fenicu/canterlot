@@ -117,6 +117,19 @@ describe("TextBlock", () => {
     unmount(view);
   });
 
+  it("markdown_tail_keeps_the_caret_inside_the_last_block", () => {
+    const target = document.createElement("div");
+    document.body.appendChild(target);
+    const block = new BlockModel("b-md", "text");
+    block.text = "- первый\n- второй";
+    const view = mount(TextBlock, { target, props: { block } });
+    flushSync();
+    for (let step = 0; step < 20; step++) frames.advance(16);
+    expect(target.querySelector(".tail > div > ul > li:last-child > .caret")).not.toBeNull();
+    expect(target.querySelector(".tail > .caret")).toBeNull();
+    unmount(view);
+  });
+
   it("finished_reveal_word_unwraps_on_the_reveal_frame_not_on_animationend", () => {
     const target = document.createElement("div");
     document.body.appendChild(target);

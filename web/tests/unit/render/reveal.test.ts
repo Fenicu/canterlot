@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TextReveal, markRevealWords } from "#lib/render/reveal.js";
+import { TextReveal, caretInTail, markRevealWords } from "#lib/render/reveal.js";
 
 function words(count: number): string {
   return Array.from({ length: count }, (_, index) => `слово${index}`).join(" ");
@@ -121,5 +121,26 @@ describe("markRevealWords", () => {
   it("returns_the_html_untouched_when_nothing_is_new", () => {
     const html = "<p>готово</p>";
     expect(markRevealWords(html, 0)).toBe(html);
+  });
+});
+
+describe("caretInTail", () => {
+  it("puts_the_caret_inside_the_last_list_item", () => {
+    const html = "<ul>\n<li>первый</li>\n<li>второй</li>\n</ul>\n";
+    const host = new DOMParser().parseFromString(caretInTail(html), "text/html").body;
+    expect(host.querySelectorAll(".caret")).toHaveLength(1);
+    expect(host.querySelector("ul > li:last-child > .caret")).not.toBeNull();
+    expect(host.querySelector("ul")?.nextSibling?.textContent?.trim()).toBe("");
+  });
+
+  it("puts_the_caret_inside_the_last_paragraph_and_pre", () => {
+    const paragraph = new DOMParser().parseFromString(caretInTail("<p>ответ</p>"), "text/html").body;
+    expect(paragraph.querySelector("p > .caret")).not.toBeNull();
+    const code = new DOMParser().parseFromString(caretInTail("<pre><code>код</code></pre>"), "text/html").body;
+    expect(code.querySelector("pre > .caret")).not.toBeNull();
+  });
+
+  it("does_not_mark_up_empty_html", () => {
+    expect(caretInTail("")).toBe("");
   });
 });

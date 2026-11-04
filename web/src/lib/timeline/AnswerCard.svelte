@@ -105,7 +105,7 @@
       {/if}
     </div>
   {/each}
-  {#if streaming && head}
+  {#if live && head}
     <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} />
   {/if}
   {#if head}
