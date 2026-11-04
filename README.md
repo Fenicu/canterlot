@@ -5,6 +5,7 @@
 [![Forgejo](https://shields.fenicu.com/badge/Forgejo-Fenicu%2Fcanterlot-brightgreen?logo=forgejo)](https://git.fenicu.com/Fenicu/canterlot)
 ![версия](https://shields.fenicu.com/badge/%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F-1.7.0-00f4ee)
 [![история](https://shields.fenicu.com/badge/%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F-CHANGES.rst-6c757d)](CHANGES.rst)
+[![лицензия](https://shields.fenicu.com/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-blue)](LICENSE)
 ![агенты](https://shields.fenicu.com/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode%20%C2%B7%20Antigravity-1f5457)
 ![Rust](https://shields.fenicu.com/badge/rust-1.99.1-orange?logo=rust)
 ![SvelteKit](https://shields.fenicu.com/badge/SvelteKit-3-FF3E00?logo=svelte&logoColor=white)
@@ -65,5 +66,7 @@ Canterlot — self-hosted хаб для агентов программиров�
 Текущая версия — 1.7.0. История изменений для человека — [CHANGES.rst](CHANGES.rst), правила бампа — [docs/versioning.md](docs/versioning.md).
 
 ## Лицензии
+
+Canterlot распространяется по лицензии MIT, текст — [LICENSE](LICENSE).
 
 Сторонние зависимости и их лицензии — [docs/licenses/THIRD_PARTY.md](docs/licenses/THIRD_PARTY.md).
