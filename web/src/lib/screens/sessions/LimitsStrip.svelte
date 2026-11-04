@@ -166,7 +166,7 @@
   .status { display: flex; align-items: center; gap: var(--s4); color: var(--secondary); }
   .status a { margin-inline-start: auto; }
   .refresh.pending :global(svg) { animation: spin var(--duration-stage-spin) var(--ease-stage-spin) infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes spin { to { transform: rotate(-360deg); } }
   .note { margin: var(--s0); min-height: var(--s0); color: var(--secondary); }
   a { display: inline-flex; align-items: center; min-height: var(--target); color: var(--accent-link); }
 </style>
