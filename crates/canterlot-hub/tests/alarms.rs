@@ -1094,3 +1094,41 @@ async fn locked_alarm_does_not_miss_target_deletion(pool: PgPool) {
         "deleted"
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn arm_path_uses_completion_for_satisfied_condition(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    f.refresh(now - TimeDelta::hours(1)).await;
+
+    let satisfied = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child], "states": ["idle"]}
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(satisfied["state"], "satisfied");
+    assert_eq!(satisfied["current"], "idle");
+
+    // Первый итог `all` собирается через то же решение о завершении.
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "key": "all"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(armed["state"], "armed");
+    let (_, _, collected) = alarm_state(&f.pool, alarm_id(&armed)).await;
+    assert_eq!(
+        collected["sessions"][f.child.to_string()]["state"], "idle",
+        "the already settled target is part of the initial all collection"
+    );
+    assert!(collected["sessions"].get(f.child2.to_string()).is_none());
+}
