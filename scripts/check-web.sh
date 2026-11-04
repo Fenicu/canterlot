@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Проверка веба.
-#   scripts/check-web.sh                 сверка сгенерированных типов API, svelte-check, eslint, токены, vitest, Playwright e2e/ui и e2e/parity
+#   scripts/check-web.sh                 сверка сгенерированных типов API, svelte-check, eslint, токены, vitest, проверки собранных артефактов, Playwright e2e/ui и e2e/parity
 #   scripts/check-web.sh --fast          то же без Playwright, vitest только по изменённым файлам;
+#                                        проверки собранных артефактов — только если была сборка
 #                                        изменённые спеки e2e запускаются на phone
 #   scripts/check-web.sh --fast --base REF  сравнивать с REF (по умолчанию main)
 #   scripts/check-web.sh --stack         полная плюс сквозные сценарии на настоящем хабе (перед выкаткой)
@@ -11,6 +12,7 @@ cd "$(dirname "$0")/../web"
 
 fast=0
 stack=0
+built=0
 base=main
 while (($#)); do
     case "$1" in
@@ -100,8 +102,18 @@ if ((!fast)) || ((${#specs[@]})); then
     npx --no-install playwright install chromium firefox
     VITE_UI_TESTS=1 npm run build
     VITE_UI_TESTS=1 PWA_BUILD_DIR=build-update PWA_VERSION=ui-update-fixture npm run build
+    built=1
 fi
 join_background
+
+# Проверки, читающие build/, идут только после сборок: иначе сборка удаляет
+# каталог под работающим vitest и тесты падают с ENOENT.
+if ((built)); then
+    printf '\n==> проверки собранных артефактов\n'
+    npx --no-install vitest run --config vitest.build.config.ts
+else
+    printf '\n==> проверки собранных артефактов пропущены: сборка не запускалась\n'
+fi
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
 if ((fast)); then
