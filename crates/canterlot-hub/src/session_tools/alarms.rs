@@ -489,20 +489,24 @@ async fn cancel_jobs_in_tx(
 }
 
 /// Условие сработало раньше срока: задание срока больше не нужно, а задание доставки
-/// этим не трогается.
+/// этим не трогается. Текущее задание доставки не отменяется никогда: именно оно
+/// доводит до конца части, которые уже сработали в этой транзакции.
 async fn cancel_timeout_job_in_tx(
     conn: &mut PgConnection,
     alarm_id: Uuid,
     reason: &str,
+    current_job: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "update scheduled_jobs set state='cancelled',result=$2,updated_at=clock_timestamp()
          where kind='session_task' and state='pending'
            and payload->>'action'='alarm_deliver' and payload->>'alarm_id'=$1
-           and coalesce((payload->>'timeout')::boolean,false)",
+           and coalesce((payload->>'timeout')::boolean,false)
+           and ($3::uuid is null or id <> $3)",
     )
     .bind(alarm_id.to_string())
     .bind(json!({"reason": reason}))
+    .bind(current_job)
     .execute(conn)
     .await?;
     Ok(())
@@ -695,7 +699,7 @@ async fn apply_settled_in_tx(
         return Ok(Applied::Cancelled);
     }
     row.collected = collected.as_value();
-    fire_in_tx(conn, row, "condition", now, now, correlation_id, true).await?;
+    fire_in_tx(conn, row, "condition", now, now, correlation_id, true, None).await?;
     Ok(Applied::Fired)
 }
 
@@ -820,6 +824,7 @@ pub async fn on_target_deleted_in_tx(
 }
 
 /// Переход в `fired`: состояние, причина, задание доставки и событие для PWA.
+#[allow(clippy::too_many_arguments)]
 async fn fire_in_tx(
     conn: &mut PgConnection,
     row: &mut AlarmRow,
@@ -828,6 +833,7 @@ async fn fire_in_tx(
     now: DateTime<Utc>,
     correlation_id: Uuid,
     schedule: bool,
+    current_job: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     let condition = row.condition.clone();
     sqlx::query(
@@ -846,8 +852,9 @@ async fn fire_in_tx(
     row.fired_at = Some(fired_at);
     row.updated_at = now;
     if condition.is_some() {
-        // Условие уже сработало: задание срока больше не нужно.
-        cancel_timeout_job_in_tx(conn, row.id, "alarm_settled").await?;
+        // Условие уже сработало: задание срока больше не нужно. Текущее задание
+        // доставки исключено: оно ещё должно доставить остаток частей.
+        cancel_timeout_job_in_tx(conn, row.id, "alarm_settled", current_job).await?;
     }
     if schedule {
         insert_job_in_tx(
@@ -1600,6 +1607,7 @@ pub async fn deliver_job_in_tx(
                 now,
                 correlation_id,
                 false,
+                Some(job.id),
             )
             .await?;
         } else {
@@ -1612,6 +1620,7 @@ pub async fn deliver_job_in_tx(
                 now,
                 correlation_id,
                 false,
+                Some(job.id),
             )
             .await?;
         }
@@ -1675,11 +1684,18 @@ pub async fn deliver_job_in_tx(
     .execute(&mut *conn)
     .await?;
     if more {
-        // Остаток выйдет следующим запуском: сначала commit этой части.
-        return Ok(crate::crunch::JobOutcome::Retry {
-            at: now + TimeDelta::seconds(1),
-            poll: false,
-        });
+        // Остаток получает собственное задание в этой же транзакции: состояние
+        // текущего задания больше не единственная опора доставки. Оно завершится
+        // как fired, а продолжение придёт следующим запуском.
+        insert_job_in_tx(
+            conn,
+            job.owner_id,
+            conversation,
+            now + TimeDelta::seconds(1),
+            rows[part.end].id,
+            false,
+        )
+        .await?;
     }
     Ok(crate::crunch::JobOutcome::Done(json!({
         "input_id": input_id,

@@ -1948,6 +1948,109 @@ async fn already_settled_target_completes_a_batch_without_the_deadline(pool: PgP
     assert!(batch.0.contains(&f.child2.to_string()), "{}", batch.0);
 }
 
+/// Двадцать сторожевых пачек по две устоявшиеся цели с ответами по 8 КиБ: к сроку
+/// накопленные итоги не влезают в один ввод, а задание срока — одно из срабатывающих.
+async fn arm_timeout_batches(f: &Fx, now: DateTime<Utc>) -> Vec<Uuid> {
+    let still = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let mut alarms = Vec::new();
+    for n in 0..20 {
+        let one = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+        let two = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+        let armed = f
+            .call(
+                "alarms.set",
+                json!({
+                    "when": {
+                        "kind": "session_state",
+                        "session_ids": [one, two, still],
+                        "all": true
+                    },
+                    "batch": true,
+                    "only_on_timeout": true,
+                    "deadline_seconds": 120,
+                    "key": format!("timeout-{n}")
+                }),
+            )
+            .await
+            .unwrap();
+        alarms.push(alarm_id(&armed));
+        for (target, seq) in [(one, 1_i64), (two, 2_i64)] {
+            let execution = Uuid::now_v7();
+            sqlx::query(
+                "insert into executions(id,conversation_id,generation,state,outcome)
+                 values($1,$2,1,'stopped','done')",
+            )
+            .bind(execution)
+            .bind(target)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,parent_block_id,created_seq,created_at)
+                 values($1,$2,$3,'text','final',1,$4,null,$5,$6)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(execution)
+            .bind(target)
+            .bind("y".repeat(8192))
+            .bind(seq)
+            .bind(Utc::now())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+            f.refresh_id(target, now + TimeDelta::seconds(2)).await;
+        }
+    }
+    alarms
+}
+
+/// Две части сторожевой доставки: все задания срока срабатывают вместе, и текущее
+/// задание доставки не отменяет само себя. Остаток приходит своим заданием.
+#[sqlx::test(migrations = "./migrations")]
+async fn timeout_delivery_delivers_every_part(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let alarms = arm_timeout_batches(&f, now).await;
+    assert_eq!(alarms.len(), 20);
+
+    let sch = scheduler(&f.pool, Default::default());
+    let mut at = now + TimeDelta::seconds(130);
+    for _ in 0..10 {
+        sch.tick(at).await.unwrap();
+        let delivered = count(
+            &f.pool,
+            "select count(*) from alarms where delivered_input_id is not null",
+            f.orchestrator,
+        )
+        .await;
+        if delivered == 20 {
+            break;
+        }
+        at += TimeDelta::seconds(2);
+    }
+    let delivered = count(
+        &f.pool,
+        "select count(*) from alarms where delivered_input_id is not null",
+        f.orchestrator,
+    )
+    .await;
+    assert_eq!(delivered, 20, "every timeout alarm must reach the owner");
+
+    let inputs = f.alarm_inputs().await;
+    let total: usize = inputs.iter().map(|(text, _)| text.len()).sum();
+    assert!(
+        total > canterlot_proto::limits::MAX_INPUT_TEXT_BYTES,
+        "the held summaries do not fit one input"
+    );
+    assert!(inputs.len() >= 2, "the remainder arrives as its own part");
+    assert!(
+        inputs
+            .iter()
+            .all(|(text, _)| text.ends_with("This is canterlot automation, not the owner.")),
+        "each part is self-contained"
+    );
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
     let f = Fx::new(pool).await;
