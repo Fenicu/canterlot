@@ -83,4 +83,33 @@ describe("timeline/ScrollController", () => {
     // Следующий кадр ещё не наступил: подвал не должен успеть уехать вверх.
     expect(view.el.scrollTop).toBe(700);
   });
+
+  it("a_move_the_owner_made_before_the_scroll_event_keeps_the_tail_growth_from_yanking_the_feed", () => {
+    const view = scroller(1000, 500, 500);
+    const controller = new ScrollController(view.el);
+    // Владелец уже сдвинул ленту, но событие scroll ещё не дошло.
+    view.el.scrollTop = 200;
+    controller.onContentChange("tail-growth");
+    expect(view.el.scrollTop).toBe(200);
+    expect(controller.pinned).toBe(false);
+    expect(controller.showJump).toBe(true);
+  });
+
+  it("a_move_before_the_resize_does_not_look_like_the_owner_is_still_at_the_bottom", () => {
+    const view = scroller(1000, 500, 500);
+    const controller = new ScrollController(view.el);
+    view.el.scrollTop = 200;
+    controller.onContentChange("resize");
+    expect(view.el.scrollTop).toBe(200);
+    expect(controller.pinned).toBe(false);
+  });
+
+  it("jump_to_bottom_after_an_unreported_move_still_reaches_the_bottom", () => {
+    const view = scroller(1000, 500, 500);
+    const controller = new ScrollController(view.el);
+    view.el.scrollTop = 200;
+    controller.jumpToBottom();
+    expect(view.el.scrollTop).toBe(500);
+    expect(controller.pinned).toBe(true);
+  });
 });

@@ -137,7 +137,34 @@ describe("caretInTail", () => {
     const paragraph = new DOMParser().parseFromString(caretInTail("<p>ответ</p>"), "text/html").body;
     expect(paragraph.querySelector("p > .caret")).not.toBeNull();
     const code = new DOMParser().parseFromString(caretInTail("<pre><code>код</code></pre>"), "text/html").body;
-    expect(code.querySelector("pre > .caret")).not.toBeNull();
+    expect(code.querySelector("pre .caret")).not.toBeNull();
+  });
+
+  it("puts_the_caret_before_the_final_newline_so_it_takes_no_extra_line", () => {
+    const code = new DOMParser().parseFromString(
+      caretInTail("<pre><code>строка 1\nстрока 2\n</code></pre>"),
+      "text/html",
+    ).body;
+    const caret = code.querySelector("pre > code > .caret");
+    expect(caret).not.toBeNull();
+    expect(caret?.nextSibling?.textContent).toBe("\n");
+  });
+
+  it("puts_the_caret_before_a_trailing_break", () => {
+    const paragraph = new DOMParser().parseFromString(caretInTail("<p>ответ<br></p>"), "text/html").body;
+    const caret = paragraph.querySelector("p > .caret");
+    expect(caret).not.toBeNull();
+    expect(caret?.nextSibling?.nodeName).toBe("BR");
+  });
+
+  it("puts_the_caret_inside_a_loose_list_paragraph", () => {
+    const list = new DOMParser().parseFromString(
+      caretInTail("<ul>\n<li><p>первый</p></li>\n<li><p>второй</p></li>\n</ul>\n"),
+      "text/html",
+    ).body;
+    const caret = list.querySelector("li:last-child p > .caret");
+    expect(caret).not.toBeNull();
+    expect(caret?.nextSibling).toBeNull();
   });
 
   it("does_not_mark_up_empty_html", () => {

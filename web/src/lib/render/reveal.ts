@@ -254,6 +254,31 @@ export class TextReveal {
 const WORD = /\S+/g;
 const BLOCK_CLOSE = /<\/(?:p|li|h[1-6]|pre|td|th|dt|dd)>/gi;
 const CARET = '<span class="caret" aria-hidden="true"></span>';
+const INNER_CLOSE = /<\/(?:p|li|h[1-6]|pre|td|th|dt|dd|code)>[ \t]*$/i;
+const LINE_BREAK = /(?:<br\s*\/?>|\r?\n)[ \t]*$/i;
+
+/**
+ * Конец последней строки внутри закрывающего тега: каретка должна стоять до
+ * перевода строки и `<br>`, иначе она занимает новую строку и готовый ответ
+ * при замене хвоста прыгает вверх на её высоту.
+ */
+function lineEnd(html: string, at: number): number {
+  let insert = at;
+  for (;;) {
+    const head = html.slice(0, insert);
+    const close = INNER_CLOSE.exec(head);
+    if (close) {
+      insert = close.index;
+      continue;
+    }
+    const line = LINE_BREAK.exec(head);
+    if (line) {
+      insert = line.index;
+      continue;
+    }
+    return insert;
+  }
+}
 
 /**
  * Ставит мигающую каретку в конец последнего блока markdown-хвоста: отдельный
@@ -264,7 +289,8 @@ export function caretInTail(html: string): string {
   let at = -1;
   for (const match of html.matchAll(BLOCK_CLOSE)) at = match.index ?? at;
   if (at < 0) return html + CARET;
-  return html.slice(0, at) + CARET + html.slice(at);
+  const insert = lineEnd(html, at);
+  return html.slice(0, insert) + CARET + html.slice(insert);
 }
 
 /**

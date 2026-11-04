@@ -38,8 +38,10 @@ export class ScrollController {
   ): void {
     if (kind === "prepend" || kind === "height-above") return;
     if (this.pinned) this.#toBottom();
-    else if (kind !== "tail-growth") return;
-    else if (this.#gap() <= PIN_PX) this.#pinned.set(true);
+    if (this.pinned) return;
+    // Хвост вырос, а окно уже не прижато: показываем кнопку возврата.
+    if (kind !== "tail-growth") return;
+    if (this.#gap() <= PIN_PX) this.#pinned.set(true);
     else this.#showJump.set(true);
   }
 
@@ -58,7 +60,7 @@ export class ScrollController {
   jumpToBottom(): void {
     this.#pinned.set(true);
     this.#showJump.set(false);
-    this.#toBottom();
+    this.#toBottom(true);
   }
 
   destroy(): void {
@@ -66,9 +68,13 @@ export class ScrollController {
     this.#observer?.disconnect();
   }
 
-  #toBottom(): void {
+  #toBottom(explicit = false): void {
     // Прокрутка идёт в том же кадре, что и рост текста: иначе кадр рисуется
     // с подвалом ниже низа, а следующий кадр рывком возвращает его на место.
+    if (!this.pinned) return;
+    // Событие scroll могло ещё не дойти: владелец уже сдвинул ленту, и решение
+    // «прижато» нельзя брать из прошлого кадра, иначе подвал уедет к низу.
+    if (!explicit && this.#el.scrollTop !== this.#last) this.#readScroll();
     if (!this.pinned) return;
     this.ownScroll(this.#el.scrollHeight);
   }

@@ -256,6 +256,44 @@ test('feed_mid_position_holds_while_the_live_card_grows', async ({ page }) => {
 	if (seen.supported) expect(seen.shift).toBeLessThan(0.01);
 });
 
+test('feed_move_in_the_growth_frame_is_not_overridden_by_a_stale_pin', async ({ page, browserName }) => {
+	test.setTimeout(60_000);
+	await boot(page, STEADY);
+	await place(page, 'pinned');
+	// Дроссель расширяет окно между кадром и доставкой события scroll: решение «прижато»
+	// обязано читать свежий scrollTop, а не значение прошлого кадра.
+	const cdp = browserName === 'chromium' ? await page.context().newCDPSession(page) : null;
+	await cdp?.send('Emulation.setCPUThrottlingRate', { rate: 8 });
+	try {
+		const before = await page.evaluate(() => (window as unknown as { __writes: number[] }).__writes.length);
+		const mid = await page.evaluate(() => new Promise<number>((resolve) => {
+			const feed = document.querySelector<HTMLElement>('.feed')!;
+			const target = Math.max(0, feed.scrollHeight - feed.clientHeight - 400);
+			requestAnimationFrame(() => {
+				// Владелец уходит вверх в том же кадре, в котором карточка растёт:
+				// событие scroll ещё не доставлено, но решение уже должно быть верным.
+				feed.scrollTop = target;
+				const row = [...feed.querySelectorAll<HTMLElement>('[data-row]')].at(-1);
+				if (row) {
+					const grow = document.createElement('div');
+					grow.style.height = '40px';
+					row.append(grow);
+				}
+				resolve(target);
+			});
+		}));
+		await page.waitForTimeout(500);
+		const after = await page.evaluate(() => ({
+			top: document.querySelector<HTMLElement>('.feed')!.scrollTop,
+			writes: (window as unknown as { __writes: number[] }).__writes.slice(),
+		}));
+		expect(after.writes.slice(before), 'приложение не двигало ленту').toEqual([mid]);
+		expect(after.top, 'лента осталась на месте владельца').toBe(mid);
+	} finally {
+		await cdp?.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+	}
+});
+
 test('feed_time_pill_only_grows_across_digit_boundaries', async ({ page }) => {
 	test.setTimeout(60_000);
 	await boot(page, CROSSING);
