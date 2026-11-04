@@ -1470,56 +1470,72 @@ pub async fn deliver_job_in_tx(
             .await?;
         }
     }
-    let text = render_in_tx(conn, job.owner_id, &rows, now).await?;
-    let key = format!("alarm:{}", job.id);
-    let existing: Option<Uuid> =
-        sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
-            .bind(job.owner_id)
-            .bind(&key)
-            .fetch_optional(&mut *conn)
+    let parts = render_parts_in_tx(conn, job.owner_id, &rows, now).await?;
+    let multi = parts.len() > 1;
+    let mut input_ids = Vec::with_capacity(parts.len());
+    let mut delivered = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        let key = if multi {
+            format!("alarm:{}:{index}", job.id)
+        } else {
+            format!("alarm:{}", job.id)
+        };
+        let existing: Option<Uuid> =
+            sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
+                .bind(job.owner_id)
+                .bind(&key)
+                .fetch_optional(&mut *conn)
+                .await?;
+        let input_id = if let Some(input_id) = existing {
+            input_id
+        } else {
+            let first = &rows[part.start];
+            let submitted = submit_input_in_tx(
+                conn,
+                &SubmitInput {
+                    owner_id: job.owner_id,
+                    conversation_id: conversation,
+                    idempotency_key: key,
+                    content: vec![ContentBlock::Text {
+                        text: part.text.clone(),
+                    }],
+                    received_at: now,
+                    correlation_id,
+                    origin: Some(json!({
+                        "kind": "alarm",
+                        "alarm_id": first.id,
+                        "chain_depth": first.chain_depth,
+                        "event": origin::HubEvent {
+                            kind: "alarm".into(),
+                            alarm_id: Some(first.id),
+                            alarm_key: first.key.clone(),
+                            fired_reason: first.fired_reason.clone(),
+                            ..Default::default()
+                        },
+                    })),
+                },
+            )
             .await?;
-    let input_id = if let Some(input_id) = existing {
-        input_id
-    } else {
-        let first = &rows[0];
-        let submitted = submit_input_in_tx(
-            conn,
-            &SubmitInput {
-                owner_id: job.owner_id,
-                conversation_id: conversation,
-                idempotency_key: key,
-                content: vec![ContentBlock::Text { text }],
-                received_at: now,
-                correlation_id,
-                origin: Some(json!({
-                    "kind": "alarm",
-                    "alarm_id": first.id,
-                    "chain_depth": first.chain_depth,
-                    "event": origin::HubEvent {
-                        kind: "alarm".into(),
-                        alarm_id: Some(first.id),
-                        alarm_key: first.key.clone(),
-                        fired_reason: first.fired_reason.clone(),
-                        ..Default::default()
-                    },
-                })),
-            },
+            submitted.input_id
+        };
+        let ids: Vec<Uuid> = rows[part.start..part.end]
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        sqlx::query(
+            "update alarms set delivered_input_id=$2,delivered_at=$3,updated_at=$3 where id=any($1)",
         )
+        .bind(&ids)
+        .bind(input_id)
+        .bind(now)
+        .execute(&mut *conn)
         .await?;
-        submitted.input_id
-    };
-    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
-    sqlx::query(
-        "update alarms set delivered_input_id=$2,delivered_at=$3,updated_at=$3 where id=any($1)",
-    )
-    .bind(&ids)
-    .bind(input_id)
-    .bind(now)
-    .execute(conn)
-    .await?;
+        input_ids.push(input_id);
+        delivered.extend(ids);
+    }
     Ok(crate::crunch::JobOutcome::Done(json!({
-        "input_id": input_id,
-        "alarms": ids,
+        "input_ids": input_ids,
+        "alarms": delivered,
     })))
 }
 
@@ -1595,29 +1611,66 @@ async fn fill_timeout_collected(
     Ok(())
 }
 
-async fn render_in_tx(
+/// Одна часть слитной доставки: текст и диапазон строк, которые он покрывает.
+struct DeliveryPart {
+    text: String,
+    start: usize,
+    end: usize,
+}
+
+/// Слитная доставка не должна превышать предел одного ввода: несколько крупных пачек
+/// делятся на части, каждая со своим ключом идемпотентности.
+async fn render_parts_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     rows: &[AlarmRow],
     now: DateTime<Utc>,
-) -> Result<String, sqlx::Error> {
-    let mut text = String::new();
+) -> Result<Vec<DeliveryPart>, sqlx::Error> {
     if rows.len() == 1 {
-        text.push_str(&render_one_in_tx(conn, owner_id, &rows[0], now).await?);
-    } else {
-        text.push_str(&format!("[canterlot] {} alarms fired.\n", rows.len()));
-        for row in rows {
-            text.push_str(&format!(
-                "\n- {}",
-                render_one_in_tx(conn, owner_id, row, now)
-                    .await?
-                    .trim_start_matches("[canterlot] ")
-            ));
+        let mut text = render_one_in_tx(conn, owner_id, &rows[0], now).await?;
+        text.push_str("\n\n");
+        text.push_str(AUTOMATION);
+        return Ok(vec![DeliveryPart {
+            text,
+            start: 0,
+            end: 1,
+        }]);
+    }
+    let header = format!("[canterlot] {} alarms fired.\n", rows.len());
+    let continued = format!("[canterlot] {} alarms fired (continued).\n", rows.len());
+    let budget = canterlot_proto::limits::MAX_INPUT_TEXT_BYTES.saturating_sub(4096);
+    let mut parts = Vec::new();
+    let mut text = header;
+    let mut start = 0;
+    for (index, row) in rows.iter().enumerate() {
+        let chunk = render_one_in_tx(conn, owner_id, row, now)
+            .await?
+            .trim_start_matches("[canterlot] ")
+            .to_string();
+        let bullet = format!("\n- {chunk}");
+        if index > start
+            && text.len() + bullet.len() + AUTOMATION.len() + 4 > budget
+        {
+            text.push_str("\n\n");
+            text.push_str(AUTOMATION);
+            parts.push(DeliveryPart {
+                text,
+                start,
+                end: index,
+            });
+            text = continued.clone();
+            start = index;
         }
+        text.push_str(&bullet);
     }
     text.push_str("\n\n");
     text.push_str(AUTOMATION);
-    Ok(text)
+    parts.push(DeliveryPart {
+        text,
+        start,
+        end: rows.len(),
+    });
+    Ok(parts)
 }
 
 /// Жива ли подписка, удержавшая итог, и то же ли это поколение взвода. Строка берётся

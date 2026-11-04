@@ -1583,3 +1583,107 @@ async fn settle_after_deadline_keeps_the_timeout(pool: PgPool) {
         f.alarm_inputs().await
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let mut pairs = Vec::new();
+    for n in 0..20 {
+        let one = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+        let two = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+        f.call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [one, two], "all": true},
+                "batch": true,
+                "key": format!("wave-{n}")
+            }),
+        )
+        .await
+        .unwrap();
+        pairs.push((one, two));
+    }
+    for (one, two) in &pairs {
+        for (target, n) in [(one, 1_i64), (two, 2_i64)] {
+            let execution = Uuid::now_v7();
+            sqlx::query(
+                "insert into executions(id,conversation_id,generation,state,outcome)
+                 values($1,$2,1,'stopped','done')",
+            )
+            .bind(execution)
+            .bind(target)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,parent_block_id,created_seq,created_at)
+                 values($1,$2,$3,'text','final',1,$4,null,$5,$6)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(execution)
+            .bind(target)
+            .bind("x".repeat(8192))
+            .bind(n)
+            .bind(now + TimeDelta::seconds(1))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        }
+        f.refresh_id(*one, now + TimeDelta::seconds(2)).await;
+        f.refresh_id(*two, now + TimeDelta::seconds(2)).await;
+    }
+    assert_eq!(
+        count(
+            &f.pool,
+            "select count(*) from alarms where state='fired'",
+            f.orchestrator
+        )
+        .await,
+        20
+    );
+
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(20))
+            .await
+            .unwrap()
+            .fired,
+        1,
+        "one delivery job coalesces all fired alarms"
+    );
+    let inputs = f.alarm_inputs().await;
+    assert!(inputs.len() >= 2, "twenty large batches need several parts");
+    assert!(
+        inputs
+            .iter()
+            .all(|(text, _)| text.len() <= canterlot_proto::limits::MAX_INPUT_TEXT_BYTES),
+        "every input stays under the wire limit"
+    );
+    assert!(
+        inputs
+            .iter()
+            .all(|(text, _)| text.ends_with("This is canterlot automation, not the owner.")),
+        "each part is self-contained"
+    );
+    assert_eq!(
+        count(
+            &f.pool,
+            "select count(*) from alarms where delivered_input_id is not null",
+            f.orchestrator
+        )
+        .await,
+        20,
+        "every alarm is marked delivered once"
+    );
+    let keys: Vec<String> = sqlx::query_scalar(
+        "select idempotency_key from inputs where conversation_id=$1 order by idempotency_key",
+    )
+    .bind(f.orchestrator)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(keys.len(), inputs.len());
+    let unique: std::collections::BTreeSet<_> = keys.iter().collect();
+    assert_eq!(unique.len(), keys.len(), "each part has its own key");
+}
