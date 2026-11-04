@@ -723,6 +723,39 @@ async fn insert_job_in_tx(
     Ok(id)
 }
 
+/// Задание-продолжение доставки несёт весь остаток, а не только первый будильник:
+/// отказ обязан закрыть каждый член, иначе остальные останутся `fired` без задания.
+async fn insert_continuation_job_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    run_at: DateTime<Utc>,
+    alarm_ids: &[Uuid],
+) -> Result<Uuid, sqlx::Error> {
+    let first = alarm_ids
+        .first()
+        .copied()
+        .ok_or_else(|| sqlx::Error::InvalidArgument("empty alarm continuation".into()))?;
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
+         values($1,'session_task',$2,$3,$4,$5)",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .bind(conversation_id)
+    .bind(run_at)
+    .bind(json!({
+        "action": "alarm_deliver",
+        "alarm_id": first,
+        "alarm_ids": alarm_ids,
+        "timeout": false,
+    }))
+    .execute(conn)
+    .await?;
+    Ok(id)
+}
+
 async fn cancel_jobs_in_tx(
     conn: &mut PgConnection,
     alarm_id: Uuid,
@@ -2492,14 +2525,15 @@ pub async fn deliver_job_in_tx(
     if more {
         // Остаток получает собственное задание в этой же транзакции: состояние
         // текущего задания больше не единственная опора доставки. Оно завершится
-        // как fired, а продолжение придёт следующим запуском.
-        insert_job_in_tx(
+        // как fired, а продолжение придёт следующим запуском. Список всех членов
+        // нужен отказу: иначе он закроет только первый будильник остатка.
+        let remaining: Vec<Uuid> = rows[part.end..].iter().map(|row| row.id).collect();
+        insert_continuation_job_in_tx(
             conn,
             job.owner_id,
             conversation,
             now + TimeDelta::seconds(1),
-            rows[part.end].id,
-            false,
+            &remaining,
         )
         .await?;
     }
@@ -2537,52 +2571,75 @@ async fn fail_delivery_in_tx(
 ) -> Result<Finalization, sqlx::Error> {
     // Отпускание удержанного берёт строки подписок: очередь получателя идёт первой.
     send::lock_queue(conn, conversation_id).await?;
-    let Some(id) = payload
-        .get("alarm_id")
-        .and_then(Value::as_str)
-        .and_then(|value| value.parse::<Uuid>().ok())
-    else {
-        return Ok(Finalization::Finalized);
-    };
-    let some: bool = sqlx::query_scalar(
-        "select exists(select 1 from alarms
-         where id=$1 and conversation_id=$2 and delivered_input_id is null
-           and state in ('armed','fired'))",
-    )
-    .bind(id)
-    .bind(conversation_id)
-    .fetch_one(&mut *conn)
-    .await?;
-    if !some {
+    // Новое задание-продолжение несёт полный список остатка; старые задания
+    // хранят только один `alarm_id`, и их отказ по-прежнему закрывает его.
+    let mut ids: Vec<Uuid> = payload
+        .get("alarm_ids")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(|value| value.parse::<Uuid>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty()
+        && let Some(id) = payload
+            .get("alarm_id")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<Uuid>().ok())
+    {
+        ids.push(id);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
         return Ok(Finalization::Finalized);
     }
-    let row: Option<AlarmRow> = sqlx::query_as(
-        "select * from alarms
-         where id=$1 and conversation_id=$2 and delivered_input_id is null
-           and state in ('armed','fired')
-         for update skip locked",
+    let eligible: i64 = sqlx::query_scalar(
+        "select count(*) from alarms
+         where id=any($1) and conversation_id=$2 and delivered_input_id is null
+           and state in ('armed','fired')",
     )
-    .bind(id)
+    .bind(&ids)
     .bind(conversation_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some(row) = row else {
-        // Строку держит чужая транзакция: не ждём её и не держим очередь с заданием.
-        return Ok(Finalization::Deferred);
-    };
-    let row: AlarmRow = sqlx::query_as(
-        "update alarms set state='failed',failure_reason=$2,updated_at=$3
-         where id=$1 returning *",
-    )
-    .bind(row.id)
-    .bind(reason)
-    .bind(now)
     .fetch_one(&mut *conn)
     .await?;
-    // Удержанные пачкой итоги не должны пропасть вместе с недоставленным будильником:
-    // возвращаем их обычной подписке в этой же транзакции.
-    release_collected_in_tx(conn, &row, now).await?;
-    changed_in_tx(conn, &row, Uuid::now_v7()).await?;
+    if eligible == 0 {
+        return Ok(Finalization::Finalized);
+    }
+    let rows: Vec<AlarmRow> = sqlx::query_as(
+        "select * from alarms
+         where id=any($1) and conversation_id=$2 and delivered_input_id is null
+           and state in ('armed','fired')
+         order by id
+         for update skip locked",
+    )
+    .bind(&ids)
+    .bind(conversation_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if rows.len() as i64 != eligible {
+        // Хотя бы одну строку держит чужая транзакция: не ждём её и не держим
+        // очередь с заданием. Транзакция откатится, поэтому частичного отказа нет.
+        return Ok(Finalization::Deferred);
+    }
+    for row in rows {
+        let row: AlarmRow = sqlx::query_as(
+            "update alarms set state='failed',failure_reason=$2,updated_at=$3
+             where id=$1 returning *",
+        )
+        .bind(row.id)
+        .bind(reason)
+        .bind(now)
+        .fetch_one(&mut *conn)
+        .await?;
+        // Удержанные пачкой итоги не должны пропасть вместе с недоставленным
+        // будильником: возвращаем их обычной подписке в этой же транзакции.
+        release_collected_in_tx(conn, &row, now).await?;
+        changed_in_tx(conn, &row, Uuid::now_v7()).await?;
+    }
     Ok(Finalization::Finalized)
 }
 

@@ -2163,6 +2163,121 @@ async fn timeout_delivery_delivers_every_part(pool: PgPool) {
     );
 }
 
+/// Первая часть сторожевой доставки закоммичена, а задание-продолжение не влезает
+/// в очередь до истечения терпения. Отказ обязан финализировать все оставшиеся
+/// будильники и отпустить каждый удержанный итог ровно один раз.
+#[sqlx::test(migrations = "./migrations")]
+async fn abandoned_timeout_continuation_finalizes_every_remaining_alarm(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let alarms = arm_timeout_batches(&f, now).await;
+    assert_eq!(alarms.len(), 20);
+
+    let sch = scheduler(&f.pool, Default::default());
+    let first_at = now + TimeDelta::seconds(130);
+    sch.tick(first_at).await.unwrap();
+    let delivered = count(
+        &f.pool,
+        "select count(*) from alarms where delivered_input_id is not null",
+        f.orchestrator,
+    )
+    .await;
+    assert!(
+        (1..20).contains(&delivered),
+        "the first part leaves a continuation: {delivered}"
+    );
+
+    let payload: Value = sqlx::query_scalar(
+        "select payload from scheduled_jobs
+         where kind='session_task' and state='pending'
+           and payload->>'action'='alarm_deliver'
+         order by run_at,id limit 1",
+    )
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    // Старые задания несут только `alarm_id`; новые — полный список остатка.
+    let remaining: Vec<Uuid> = payload
+        .get("alarm_ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .filter_map(|id| id.parse().ok())
+                .collect()
+        })
+        .or_else(|| {
+            payload
+                .get("alarm_id")
+                .and_then(Value::as_str)
+                .and_then(|id| id.parse().ok())
+                .map(|id| vec![id])
+        })
+        .expect("the continuation names its remaining alarms");
+    assert_eq!(
+        remaining.len() as i64,
+        20 - delivered,
+        "the continuation carries every remaining alarm: {payload}"
+    );
+
+    // Очередь заполнена после первой части: продолжение не может закоммититься.
+    f.fill_queue_n(99).await;
+    let blocked_at = first_at + TimeDelta::seconds(2);
+    let report = sch.tick(blocked_at).await.unwrap();
+    assert!(
+        report.retried >= 1,
+        "the continuation waits for a free slot"
+    );
+    let blocked_since: DateTime<Utc> = sqlx::query_scalar(
+        "select blocked_since from scheduled_jobs
+         where kind='session_task' and state='pending'
+           and payload->>'action'='alarm_deliver'
+         order by run_at,id limit 1",
+    )
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+
+    // Сутки терпения истекли: финализируются все члены продолжения.
+    let later = blocked_since + TimeDelta::hours(25);
+    sch.tick(later).await.unwrap();
+    let failed: Vec<(Uuid, Option<String>)> =
+        sqlx::query_as("select id,failure_reason from alarms where id=any($1) order by id")
+            .bind(&remaining)
+            .fetch_all(&f.pool)
+            .await
+            .unwrap();
+    for (id, reason) in failed {
+        assert_eq!(
+            reason.as_deref(),
+            Some("delivery_failed"),
+            "alarm {id} is finalized after the abandoned continuation"
+        );
+    }
+    let undelivered: i64 = count(
+        &f.pool,
+        "select count(*) from alarms
+         where state='fired' and delivered_input_id is null",
+        f.orchestrator,
+    )
+    .await;
+    assert_eq!(undelivered, 0, "no fired alarm is left without a job");
+
+    // Каждая пачка держит по два итога: отпускаем ровно по одному заданию на итог.
+    let released = f.event_jobs().await;
+    assert_eq!(
+        released,
+        remaining.len() as i64 * 2,
+        "every held summary is released once"
+    );
+    sch.tick(later + TimeDelta::seconds(3)).await.unwrap();
+    assert_eq!(
+        f.event_jobs().await,
+        released,
+        "a repeated finalization does not release a summary twice"
+    );
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
     let f = Fx::new(pool).await;
@@ -3302,15 +3417,9 @@ async fn machine_condition_uses_the_sample_timestamp_not_arrival(pool: PgPool) {
         .unwrap();
     let mut delayed = metrics_with(1, 50.0, 0.5, 20.0);
     delayed.machine_time_ms = (armed_at - TimeDelta::minutes(2)).timestamp_millis() as u64;
-    machine_info::apply_metrics(
-        &f.pool,
-        f.owner,
-        f.machine,
-        &delayed,
-        Uuid::now_v7(),
-    )
-    .await
-    .unwrap();
+    machine_info::apply_metrics(&f.pool, f.owner, f.machine, &delayed, Uuid::now_v7())
+        .await
+        .unwrap();
     let state: String = sqlx::query_scalar(
         "select state from alarms where conversation_id=$1 and condition->>'kind'='machine'",
     )
