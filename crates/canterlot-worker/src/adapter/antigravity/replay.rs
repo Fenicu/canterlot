@@ -471,7 +471,10 @@ pub fn main(args: Vec<String>) -> ExitCode {
                 log.entry(json!({"dir": "in", "frame": frame}));
                 let reply = frame.get("method").is_none()
                     && (frame.get("result").is_some() || frame.get("error").is_some());
-                if !reply {
+                // Уведомление клиента (например `session/cancel`) — не запрос:
+                // живой `agy` принимает его в любой момент, сценарий не ломается.
+                let notification = frame.get("method").is_some() && frame.get("id").is_none();
+                if !reply && !notification {
                     log.entry(json!({"dir": "unexpected", "frame": frame}));
                     return ExitCode::from(66);
                 }
