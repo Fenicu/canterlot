@@ -1581,7 +1581,7 @@ pub async fn set(
     }
 
     let now = Utc::now();
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     if let Some(stored) = sqlx::query_scalar::<_, Value>(
         "select response from alarms where owner_id=$1 and call_id=$2",
@@ -2171,7 +2171,7 @@ pub async fn cancel(
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
     let now = Utc::now();
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     let row: Option<AlarmRow> = if let Some(id) = args.alarm_id {
         sqlx::query_as("select * from alarms where id=$1 and conversation_id=$2 for update")

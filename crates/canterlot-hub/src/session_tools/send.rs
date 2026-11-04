@@ -243,7 +243,7 @@ pub async fn send(
     if args.text.trim().is_empty() {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     lock_sender(&mut tx, caller.conversation_id).await?;
     let (result, fresh) = send_in_tx(&mut tx, context, caller, &args).await?;
     tx.commit().await?;
@@ -327,7 +327,7 @@ pub async fn subscribe(
     arguments: Value,
 ) -> Result<Value, ToolError> {
     let args: TargetArgs = parse_arguments(arguments)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     let subscriber = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if args.session_id == subscriber.id {
         return Err(ToolError::new(ToolErrorCode::SessionNotFound));
@@ -376,7 +376,7 @@ pub async fn unsubscribe(
     arguments: Value,
 ) -> Result<Value, ToolError> {
     let args: TargetArgs = parse_arguments(arguments)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     let subscriber = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if args.session_id == subscriber.id {
         return Err(ToolError::new(ToolErrorCode::SessionNotFound));

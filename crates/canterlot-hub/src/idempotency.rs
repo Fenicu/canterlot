@@ -170,7 +170,7 @@ where
             })
             .map_err(|error| E::from(sqlx::Error::Decode(Box::new(error))))
     };
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin(pool).await?;
     let mut lock_hash = Sha256::new();
     lock_hash.update(b"canterlot:idempotency:");
     lock_hash.update(owner_id.as_bytes());

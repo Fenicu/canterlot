@@ -97,7 +97,7 @@ pub struct MachinesSnapshot {
 }
 
 pub async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin(pool).await?;
     sqlx::query("set transaction isolation level repeatable read read only")
         .execute(&mut *tx)
         .await?;

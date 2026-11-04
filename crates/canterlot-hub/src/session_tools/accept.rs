@@ -215,7 +215,7 @@ pub async fn accept(
     arguments: Value,
 ) -> Result<Value, ToolError> {
     let args: AcceptArgs = parse_arguments(arguments)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     // Владелец раньше строк разговоров: тот же порядок у создания, удаления и архивации.
     conversations::lock_owner(&mut tx, caller.owner_id).await?;
     let me = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;

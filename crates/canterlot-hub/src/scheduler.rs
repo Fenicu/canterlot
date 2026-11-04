@@ -501,7 +501,7 @@ impl Scheduler {
         crunch::expire_pending(&self.pool, now).await?;
         let mut report = TickReport::default();
         loop {
-            let mut tx = self.pool.begin().await?;
+            let mut tx = crate::db::begin(&self.pool).await?;
             let job = sqlx::query_as("select * from scheduled_jobs where state='pending' and run_at<=$1 order by run_at,id for update skip locked limit 1").bind(now).fetch_optional(&mut *tx).await;
             let job: Option<JobRow> = match job {
                 Ok(job) => job,
@@ -716,7 +716,7 @@ impl Scheduler {
         permanent: bool,
         report: &mut TickReport,
     ) -> Result<(), sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = crate::db::begin(&self.pool).await?;
         let current = sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 and failures=$4 for update")
             .bind(job.id).bind(job.attempts).bind(job.run_at).bind(job.failures).fetch_optional(&mut *tx).await;
         let current: Option<JobRow> = match current {

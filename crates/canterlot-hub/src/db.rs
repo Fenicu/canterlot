@@ -3,7 +3,7 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
-use sqlx::{PgConnection, PgPool, migrate::MigrateError};
+use sqlx::{PgConnection, PgPool, Postgres, SqlSafeStr as _, Transaction, migrate::MigrateError};
 use uuid::Uuid;
 
 /// Ошибки, которые PostgreSQL считает временными: взаимная блокировка и сбой
@@ -89,6 +89,48 @@ pub fn migration_error_code(error: &MigrateError) -> String {
     }
 }
 
+/// Начинает транзакцию так, чтобы отмена вызывающей задачи не оставила
+/// соединение в открытой транзакции.
+///
+/// `sqlx` увеличивает глубину транзакции только после ответа сервера на
+/// `BEGIN`. Если future отменить между отправкой `BEGIN` и ответом, соединение
+/// вернётся в пул с открытой серверной транзакцией, которую клиент не считает
+/// открытой. Следующий `BEGIN ISOLATION LEVEL ...` или `SET TRANSACTION ...`
+/// на таком соединении падает с «SET TRANSACTION ISOLATION LEVEL must be
+/// called before any query». Поэтому `BEGIN` идёт в отдельной задаче: отмена
+/// вызывающего лишь отцепляет её, а транзакция либо вернётся, либо откатится
+/// при собственном `Drop`. Брошенных транзакций не возникает, если все начала
+/// идут через `begin`/`begin_with` (это проверяет тест ниже).
+async fn start(
+    pool: &PgPool,
+    statement: Option<&'static str>,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        let conn = pool.acquire().await?;
+        let statement = statement.map(|statement| statement.into_sql_str());
+        Transaction::begin(conn, statement).await
+    })
+    .await
+    .map_err(|error| sqlx::Error::Protocol(format!("transaction task failed: {error}")))?
+}
+
+/// Открывает обычную транзакцию, переживая отмену вызывающей задачи.
+pub async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    start(pool, None).await
+}
+
+/// Открывает транзакцию с собственным `BEGIN`, переживая отмену задачи.
+///
+/// Нужен для `BEGIN ISOLATION LEVEL ...`: изоляция задаётся до первого запроса
+/// в одной команде, а не отдельным `SET TRANSACTION` после `BEGIN`.
+pub async fn begin_with(
+    pool: &PgPool,
+    statement: &'static str,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    start(pool, Some(statement)).await
+}
+
 /// Выполняет `op` в одной транзакции: `Ok` фиксируется, `Err` синхронно
 /// откатывается до возврата, не оставляя блокировок строк висеть в пуле.
 pub async fn in_tx<T, E, F>(pool: &PgPool, op: F) -> Result<T, E>
@@ -96,7 +138,7 @@ where
     F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>>,
     E: From<sqlx::Error>,
 {
-    let mut tx = pool.begin().await?;
+    let mut tx = begin(pool).await?;
     match op(&mut tx).await {
         Ok(value) => {
             tx.commit().await?;
@@ -132,7 +174,146 @@ pub async fn connect(url: &str) -> Result<sqlx::PgPool, sqlx::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::postgres::PgListener;
+    use sqlx::{Connection as _, postgres::PgListener};
+
+    /// Пул из одного соединения: так брошенная транзакция достанется следующему
+    /// началу, а не затеряется среди свободных соединений.
+    fn single_connection(pool: &PgPool) -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with((*pool.connect_options()).clone())
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn begin_with_prevents_an_abandoned_transaction(pool: PgPool) {
+        let pool = single_connection(&pool);
+        sqlx::query("select 1").execute(&pool).await.unwrap();
+        // Отменяем начало после того, как пул выдал соединение и BEGIN ушёл на сервер.
+        {
+            let mut begin = Box::pin(begin_with(
+                &pool,
+                "begin isolation level repeatable read read only",
+            ));
+            for _ in 0..3 {
+                if futures_util::poll!(begin.as_mut()).is_ready() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        // Следующее начало должно открыться чисто, без 25001.
+        let mut tx = begin_with(&pool, "begin isolation level repeatable read read only")
+            .await
+            .expect("cancelled begin must not poison the pool");
+        let one: i32 = sqlx::query_scalar("select 1")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(one, 1);
+        tx.rollback().await.unwrap();
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn in_tx_prevents_an_abandoned_transaction(pool: PgPool) {
+        let pool = single_connection(&pool);
+        sqlx::query("select 1").execute(&pool).await.unwrap();
+        // Отменяем начало после того, как пул выдал соединение и BEGIN ушёл на сервер.
+        {
+            let mut cancelled = Box::pin(in_tx(&pool, |conn| {
+                Box::pin(async move {
+                    sqlx::query("select 1").execute(&mut *conn).await?;
+                    Ok::<_, sqlx::Error>(())
+                })
+            }));
+            for _ in 0..3 {
+                if futures_util::poll!(cancelled.as_mut()).is_ready() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        let one: i32 = in_tx(&pool, |conn| {
+            Box::pin(async move {
+                sqlx::query("set transaction isolation level repeatable read read only")
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query_scalar("select 1").fetch_one(&mut *conn).await
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(one, 1);
+    }
+
+    /// Документирует, что именно предотвращает `db::begin`: отменённый сырой
+    /// `conn.begin()` оставляет серверную транзакцию, и `BEGIN ... ISOLATION`
+    /// на этом соединении падает. Тест не должен пережить исправление в sqlx.
+    #[sqlx::test(migrations = false)]
+    async fn raw_cancelled_begin_still_deep_poisons_a_connection(pool: PgPool) {
+        let pool = single_connection(&pool);
+        let mut conn = pool.acquire().await.unwrap();
+        {
+            let mut begin = Box::pin(conn.begin());
+            assert!(futures_util::poll!(begin.as_mut()).is_pending());
+        }
+        // Запрос попадает в брошенную транзакцию.
+        sqlx::query("select 1").execute(&mut *conn).await.unwrap();
+        let error = match conn
+            .begin_with("begin isolation level repeatable read")
+            .await
+        {
+            Ok(_) => panic!("raw cancelled BEGIN must reproduce the PostgreSQL hazard"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(&error, sqlx::Error::Database(db) if db.code().as_deref() == Some("25001")),
+            "unexpected error: {error}"
+        );
+        sqlx::query("rollback").execute(&mut *conn).await.unwrap();
+    }
+
+    /// Начала транзакций в исходниках хаба идут только через `db::begin`;
+    /// иначе отмена задачи снова начнёт оставлять открытые транзакции в пуле.
+    #[test]
+    fn transaction_starts_bypassing_db_begin_are_rejected() {
+        const ALLOW: &str = "db::begin: savepoint";
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let own_file = root.join("db.rs");
+        let mut pending = vec![root];
+        let mut offenders = Vec::new();
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    pending.push(entry.unwrap().path());
+                }
+                continue;
+            }
+            if path == own_file || path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (index, line) in source.lines().enumerate() {
+                // Пометка разрешает вложенную точку сохранения на открытой транзакции.
+                if line.contains(ALLOW) {
+                    continue;
+                }
+                let code = line.split("//").next().unwrap_or("");
+                let trimmed = code.trim_start();
+                if trimmed.starts_with('*') || trimmed.starts_with("/*") {
+                    continue;
+                }
+                if code.contains(".begin(") || code.contains("Transaction::begin(") {
+                    offenders.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "начинайте транзакции хаба через db::begin/db::begin_with;\n\
+             исключение — вложенная точка сохранения с пометкой «{ALLOW}»:\n{}",
+            offenders.join("\n")
+        );
+    }
 
     #[sqlx::test(migrations = false)]
     async fn listeners_do_not_take_query_slots(pool: PgPool) {
