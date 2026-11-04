@@ -763,8 +763,16 @@ test('list_reserves_the_limits_strip_and_hides_zero_counts_until_the_snapshot', 
   // До снимка нули в счёте вкладок не выдают себя за пустой список, а место полосы лимитов занято.
   await expect(page.locator('.strip-slot')).toHaveCount(1);
   await expect(page.locator('.tabs .count')).toHaveCount(0);
+  // Заглушка переезжает из ветки без runtime в ветку списка: меряем только утвердившийся узел.
+  await expect(page.locator('.tabs')).toBeVisible();
   await expect(page.locator('.strip-slot')).toBeVisible();
-  const slot = (await page.locator('.strip-slot').boundingBox())!;
+  let slot = { x: 0, y: 0, width: 0, height: 0 };
+  await expect.poll(async () => {
+    const box = await page.locator('.strip-slot').boundingBox();
+    if (!box) return false;
+    slot = box;
+    return true;
+  }).toBe(true);
   release();
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.strip-slot')).toHaveCount(0);
