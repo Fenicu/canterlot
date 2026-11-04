@@ -12,7 +12,7 @@ use canterlot_proto::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
@@ -607,6 +607,17 @@ async fn submit_attempt(
     .await?.rows_affected();
     if inserted == 0 {
         return Ok(Attempt::LostRace);
+    }
+    // Ввод не от подписчика (будильник, событие о ребёнке, заметка хаба или сообщение
+    // другой сессии) продолжает работу цели: подписку, закрытую её `idle`, надо открыть
+    // снова, иначе родитель примет ожидающего делегата за закончившего. Ввод самого
+    // подписчика сюда не попадает: `session_send` взводит подписку заново сам.
+    if let Some(origin) = &req.origin {
+        let from = origin
+            .get("from")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        crate::session_tools::subs::reopen_for_input_in_tx(conn, req.conversation_id, from).await?;
     }
     // Повтор как новое — решение владельца по неподтверждённому вводу: его
     // пауза больше не держит очередь.
