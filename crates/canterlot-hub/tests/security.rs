@@ -292,6 +292,14 @@ impl From<IdempotencyConflict> for OpError {
         Self::Conflict
     }
 }
+impl canterlot_hub::db::TransientError for OpError {
+    fn is_transient(&self) -> bool {
+        match self {
+            Self::Db(error) => canterlot_hub::db::is_transient(error),
+            _ => false,
+        }
+    }
+}
 
 async fn race(pool: PgPool, create: bool) {
     let owner = Uuid::now_v7();

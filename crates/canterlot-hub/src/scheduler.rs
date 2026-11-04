@@ -508,6 +508,13 @@ impl Scheduler {
                 self.fire_limit_job(tx, job, now, &mut report).await
             };
             if let Err(error) = outcome {
+                // Взаимоблокировка и сбой сериализации не тратят бюджет отказов:
+                // транзакция уже откатана, задание повторяется чуть позже.
+                if crate::db::is_transient(&error) {
+                    self.defer_transient_job(&claimed, now).await?;
+                    report.retried += 1;
+                    continue;
+                }
                 log_error(&error);
                 let (reason, permanent) = match error {
                     sqlx::Error::Decode(_)
@@ -516,8 +523,17 @@ impl Scheduler {
                     sqlx::Error::InvalidArgument(_) => ("invalid_job", true),
                     _ => ("job_error", false),
                 };
-                self.record_failure(&claimed, now, reason, permanent, &mut report)
-                    .await?;
+                if let Err(error) = self
+                    .record_failure(&claimed, now, reason, permanent, &mut report)
+                    .await
+                {
+                    if crate::db::is_transient(&error) {
+                        self.defer_transient_job(&claimed, now).await?;
+                        report.retried += 1;
+                    } else {
+                        return Err(error);
+                    }
+                }
             }
         }
         report.next_due =
@@ -593,6 +609,14 @@ impl Scheduler {
                 report.fired += 1;
             }
             Err(error) => {
+                if let SubmitError::Db(database) = &error
+                    && crate::db::is_transient(database)
+                {
+                    tx.rollback().await?;
+                    self.defer_transient_job(&job, now).await?;
+                    report.retried += 1;
+                    return Ok(());
+                }
                 let (reason, permanent) = submit_failure(&error);
                 if let SubmitError::Db(error) = &error {
                     log_error(error);
@@ -602,6 +626,26 @@ impl Scheduler {
                     .await?;
             }
         }
+        Ok(())
+    }
+
+    async fn defer_transient_job(
+        &self,
+        job: &JobRow,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let delay = crate::db::retry_delay(job.id, u32::try_from(job.attempts).unwrap_or(1).max(1));
+        let at = now
+            + TimeDelta::from_std(delay)
+                .map_err(|_| sqlx::Error::InvalidArgument("retry duration out of range".into()))?;
+        sqlx::query(
+            "update scheduled_jobs set run_at=$2,updated_at=clock_timestamp()
+             where id=$1 and state='pending'",
+        )
+        .bind(job.id)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

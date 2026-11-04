@@ -1,7 +1,76 @@
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+use std::time::Duration;
+
 use futures_util::future::BoxFuture;
 use sqlx::{PgConnection, PgPool, migrate::MigrateError};
+use uuid::Uuid;
+
+/// Ошибки, которые PostgreSQL считает временными: взаимная блокировка и сбой
+/// сериализации. Транзакция после них откатывается целиком и её можно повторить.
+pub fn is_transient(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(db)
+            if matches!(db.code().as_deref(), Some("40P01") | Some("40001"))
+    )
+}
+
+/// Небольшая пауза перед повтором: попытки разводятся, чтобы не столкнуться снова.
+pub fn retry_delay(seed: Uuid, attempt: u32) -> Duration {
+    let bytes = seed.as_bytes();
+    let jitter = u16::from_be_bytes([bytes[14], bytes[15]]) as u64 % 40;
+    Duration::from_millis(20 + jitter + u64::from(attempt) * 40)
+}
+
+/// Доменные ошибки знают, пришла ли она из временного сбоя базы.
+pub trait TransientError {
+    fn is_transient(&self) -> bool;
+}
+
+impl TransientError for sqlx::Error {
+    fn is_transient(&self) -> bool {
+        is_transient(self)
+    }
+}
+
+macro_rules! transient_from_db {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl TransientError for $ty {
+                fn is_transient(&self) -> bool {
+                    match self {
+                        Self::Db(error) => is_transient(error),
+                        _ => false,
+                    }
+                }
+            }
+        )+
+    };
+}
+
+transient_from_db!(
+    crate::attachments::AttachmentError,
+    crate::conversations::CreateError,
+    crate::conversations::SettingsError,
+    crate::conversations::UpdateError,
+    crate::crunch::CrunchError,
+    crate::deletion::DeleteError,
+    crate::executions::ExecutionError,
+    crate::groups::GroupError,
+    crate::presets::PresetError,
+    crate::scheduler::ScheduleError,
+    crate::session_tools::accept::AcceptError,
+);
+
+impl TransientError for crate::http::error::ApiError {
+    fn is_transient(&self) -> bool {
+        matches!(
+            self.code,
+            crate::http::error::ErrorCode::Internal | crate::http::error::ErrorCode::DbUnavailable
+        )
+    }
+}
 
 /// Код выхода при сбое миграции: вид и версия, без текста ошибки базы.
 pub fn migration_error_code(error: &MigrateError) -> String {

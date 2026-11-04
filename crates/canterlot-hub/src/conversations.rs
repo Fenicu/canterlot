@@ -22,7 +22,7 @@ pub struct CrunchSetting {
     pub enabled: bool,
     pub resume_text: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct NewConversation {
     pub owner_id: Uuid,
     pub machine_id: Uuid,

@@ -2023,6 +2023,14 @@ impl From<IdempotencyConflict> for TestError {
         Self::Conflict
     }
 }
+impl canterlot_hub::db::TransientError for TestError {
+    fn is_transient(&self) -> bool {
+        match self {
+            Self::Db(error) => canterlot_hub::db::is_transient(error),
+            _ => false,
+        }
+    }
+}
 
 async fn seed_owner(pool: &PgPool) -> Uuid {
     let owner = Uuid::now_v7();
