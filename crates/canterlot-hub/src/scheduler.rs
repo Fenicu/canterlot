@@ -194,7 +194,7 @@ fn validate_refs(
 
 /// Переполненная очередь подписчика не повод потерять итог другой сессии: такое задание
 /// ждёт её разбора, пока срок не выйдет, и в счёт отказов не идёт.
-const SESSION_TASK_QUEUE_PATIENCE: TimeDelta = TimeDelta::hours(24);
+pub(crate) const SESSION_TASK_QUEUE_PATIENCE: TimeDelta = TimeDelta::hours(24);
 
 #[derive(Clone, sqlx::FromRow)]
 struct JobRow {

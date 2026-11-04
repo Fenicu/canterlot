@@ -1554,6 +1554,31 @@ pub async fn deliver_job_in_tx(
     .fetch_one(&mut *conn)
     .await?;
     if pending as usize > rows.len() {
+        // Строка под чужой блокировкой: терпение считается как у переполненной очереди,
+        // с первой такой попытки. Иначе запертая строка откладывала бы доставку вечно.
+        let blocked_since: Option<Option<DateTime<Utc>>> =
+            sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+                "select blocked_since from scheduled_jobs where id=$1",
+            )
+            .bind(job.id)
+            .fetch_optional(&mut *conn)
+            .await?;
+        let blocked_since = blocked_since.flatten();
+        let since = blocked_since.unwrap_or(now);
+        if now - since >= crate::scheduler::SESSION_TASK_QUEUE_PATIENCE {
+            fail_delivery_in_tx(conn, conversation, &job.payload, "delivery_contended", now)
+                .await?;
+            return Ok(crate::crunch::JobOutcome::Cancelled("delivery_contended"));
+        }
+        if blocked_since.is_none() {
+            sqlx::query(
+                "update scheduled_jobs set blocked_since=$2,updated_at=clock_timestamp() where id=$1",
+            )
+            .bind(job.id)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?;
+        }
         return Ok(crate::crunch::JobOutcome::Retry {
             at: now + TimeDelta::seconds(2),
             poll: false,
@@ -1669,6 +1694,18 @@ pub async fn abandon_deliver_in_tx(
     payload: &Value,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
+    fail_delivery_in_tx(conn, conversation_id, payload, "delivery_failed", now).await?;
+    Ok(())
+}
+
+/// Один обработчик отказа доставки: причина видна в PWA, удержанное возвращается подписке.
+async fn fail_delivery_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    payload: &Value,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
     // Отпускание удержанного берёт строки подписок: очередь получателя идёт первой.
     send::lock_queue(conn, conversation_id).await?;
     let Some(id) = payload
@@ -1676,10 +1713,10 @@ pub async fn abandon_deliver_in_tx(
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<Uuid>().ok())
     else {
-        return Ok(());
+        return Ok(false);
     };
     let row: Option<AlarmRow> = sqlx::query_as(
-        "update alarms set state='failed',failure_reason='delivery_failed',updated_at=$2
+        "update alarms set state='failed',failure_reason=$4,updated_at=$2
          where id=$1 and conversation_id=$3 and delivered_input_id is null
            and state in ('armed','fired')
          returning *",
@@ -1687,15 +1724,17 @@ pub async fn abandon_deliver_in_tx(
     .bind(id)
     .bind(now)
     .bind(conversation_id)
+    .bind(reason)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some(row) = row {
-        // Удержанные пачкой итоги не должны пропасть вместе с недоставленным будильником:
-        // возвращаем их обычной подписке в этой же транзакции.
-        release_collected_in_tx(conn, &row, now).await?;
-        changed_in_tx(conn, &row, Uuid::now_v7()).await?;
-    }
-    Ok(())
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    // Удержанные пачкой итоги не должны пропасть вместе с недоставленным будильником:
+    // возвращаем их обычной подписке в этой же транзакции.
+    release_collected_in_tx(conn, &row, now).await?;
+    changed_in_tx(conn, &row, Uuid::now_v7()).await?;
+    Ok(true)
 }
 
 async fn fill_timeout_collected(

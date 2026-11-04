@@ -1067,6 +1067,68 @@ async fn locked_alarm_does_not_lose_its_deadline_job(pool: PgPool) {
     assert_eq!(f.alarm_inputs().await.len(), 1);
 }
 
+/// Запертая строка будильника не откладывает доставку бесконечно: терпение считается
+/// с первой заблокированной попытки, через сутки будильник уходит в `failed`.
+#[sqlx::test(migrations = "./migrations")]
+async fn contended_delivery_gives_up_after_the_queue_patience(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f.arm_at("gate", now + TimeDelta::seconds(31)).await;
+    let id = alarm_id(&armed);
+
+    // Чужая транзакция держит строку будильника всё время попыток.
+    let mut blocker = f.pool.begin().await.unwrap();
+    sqlx::query("select id from alarms where id=$1 for update")
+        .bind(id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let at = now + TimeDelta::seconds(40);
+    let report = scheduler(&f.pool, Default::default())
+        .tick(at)
+        .await
+        .unwrap();
+    assert_eq!(report.retried, 1, "contention asks for a retry");
+    let blocked_since: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "select blocked_since from scheduled_jobs
+         where kind='session_task' and payload->>'action'='alarm_deliver'
+           and payload->>'alarm_id'=$1",
+    )
+    .bind(id.to_string())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    let blocked_since = blocked_since.expect("the first contended attempt records its start");
+    assert!(
+        (blocked_since - at).num_seconds().abs() < 5,
+        "patience starts at the contended attempt: {blocked_since}"
+    );
+    assert!(f.alarm_inputs().await.is_empty());
+
+    // Сутки спустя задание уходит в обработчик отказа, но ждёт освобождения строки.
+    let later = at + TimeDelta::hours(25);
+    let pool = f.pool.clone();
+    let tick = tokio::spawn(async move { scheduler(&pool, Default::default()).tick(later).await });
+    wait_until_someone_waits(&f.pool).await;
+    assert!(
+        !tick.is_finished(),
+        "abandon waits for the locked alarm row"
+    );
+    blocker.commit().await.unwrap();
+    let report = tick.await.unwrap().unwrap();
+    assert_eq!(report.cancelled, 1);
+    let (state, reason): (String, Option<String>) =
+        sqlx::query_as("select state,failure_reason from alarms where id=$1")
+            .bind(id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "failed");
+    assert_eq!(reason.as_deref(), Some("delivery_contended"));
+    assert!(f.alarm_inputs().await.is_empty());
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn locked_alarm_does_not_miss_target_deletion(pool: PgPool) {
     let f = Fx::new(pool).await;
