@@ -1541,3 +1541,45 @@ async fn abandoned_batch_releases_held_summaries_to_the_subscription(pool: PgPoo
     assert!(inputs[0].0.contains(&f.child.to_string()), "{}", inputs[0].0);
     assert!(inputs[0].0.contains("is now idle"), "{}", inputs[0].0);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn settle_after_deadline_keeps_the_timeout(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child]},
+                "only_on_timeout": true,
+                "deadline_seconds": 120,
+                "key": "watch"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+
+    // Срок истёк, задание срока задержалось, а цель как раз устоялась.
+    f.refresh_id(f.child, now + TimeDelta::seconds(10)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(121)).await;
+    assert_eq!(
+        alarm_state(&f.pool, id).await.0,
+        "armed",
+        "a settle after the cutoff cannot cancel the watchdog"
+    );
+
+    let sch = scheduler(&f.pool, Default::default());
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(126)).await.unwrap().fired,
+        1
+    );
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("timed_out"));
+    assert!(
+        f.alarm_inputs().await[0].0.contains("timed out"),
+        "{:?}",
+        f.alarm_inputs().await
+    );
+}

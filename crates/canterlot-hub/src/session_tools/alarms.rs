@@ -551,6 +551,11 @@ async fn apply_settled_in_tx(
     else {
         return Ok(Applied::Skipped);
     };
+    // Срок уже наступил: задание срока — единственный хозяин исхода. Устоявшаяся цель
+    // после отсечки не отменяет сторож и не заменяет `timed_out` обычным срабатыванием.
+    if row.deadline_at.is_some_and(|deadline| now >= deadline) {
+        return Ok(Applied::Skipped);
+    }
     let matching = condition.states.iter().any(|wanted| wanted == state);
     // Пачка засчитывает и удаление цели, даже если `deleted` не перечислен в `states`:
     // отдельное сообщение об удалении уже ушло обычной подпиской.
