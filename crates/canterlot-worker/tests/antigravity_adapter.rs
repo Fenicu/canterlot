@@ -2297,42 +2297,45 @@ async fn a_subagent_without_payload_is_a_collapsed_tool() {
     bench.close().await;
 }
 
-const QUESTION_PROMPT: &str = "Before doing anything, ask me a clarifying question with options: which banner color should I use — red, green or blue? Use the question tool. Do not run any commands.";
+const QUESTION_PROMPT: &str = "Before doing anything, ask me which of two options I prefer using your question tool: the banner color, red or blue. Offer both options, then wait for my answer and stop.";
 
-fn question_scenario() -> Vec<Step> {
+fn question_live_steps() -> Vec<Step> {
     let mut steps = handshake();
-    steps.extend(from_prompt("t6-question"));
+    steps.extend(from_prompt("p-live-question-prompt"));
     steps
 }
 
-/// Ответ на вопрос: cancel исходного хода, затем служебный prompt и его эхо.
-fn question_answer_steps(cancel_usage: bool, continuation: &str) -> Vec<Step> {
-    let cancel_usage = cancel_usage.then(|| usage(1, 1, 0));
-    vec![
-        Script::notification("session/cancel"),
-        respond(4, cancelled(cancel_usage)),
-        deferred("session/prompt", 9),
-        Script::send(user_chunk(continuation)),
-        respond(9, end_turn(Some(usage(2, 1, 0)))),
-    ]
+fn question_script(steps: Vec<Step>) -> Script {
+    Script {
+        version: "agy 1.5.0".into(),
+        steps,
+        ..Default::default()
+    }
+}
+
+fn second_prompt_index(steps: &[Step]) -> usize {
+    let mut seen = 0;
+    for (index, step) in steps.iter().enumerate() {
+        if matches!(step, Step::Expect { method, .. } if method == "session/prompt") {
+            seen += 1;
+            if seen == 2 {
+                return index;
+            }
+        }
+    }
+    panic!("second session/prompt step");
+}
+
+fn question_without_answer_steps() -> Vec<Step> {
+    let mut steps = question_live_steps();
+    let index = second_prompt_index(&steps);
+    steps.truncate(index);
+    steps
 }
 
 #[tokio::test]
-async fn ask_question_opens_a_normalised_question_and_the_answer_continues_the_turn() {
-    let mut steps = question_scenario();
-    steps.extend(question_answer_steps(
-        true,
-        "Ответ владельца на вопрос \"Which banner color should I use?\": Red",
-    ));
-    let mut bench = Bench::new(
-        Script {
-            steps,
-            ..Default::default()
-        },
-        "",
-        "",
-        "bypass",
-    );
+async fn ask_question_holds_the_turn_and_the_answer_prompt_completes_it() {
+    let mut bench = Bench::new(question_script(question_live_steps()), "", "", "bypass");
     bench.start().await;
     let input = send(QUESTION_PROMPT);
     assert!(matches!(
@@ -2340,18 +2343,18 @@ async fn ask_question_opens_a_normalised_question_and_the_answer_continues_the_t
         TransmitOutcome::Accepted(_)
     ));
     let (request_id, payload, mut events) = wait_request(&mut bench.adapter, "question").await;
-    assert_eq!(request_id, "1:call_913335");
+    events.extend(drain(&mut bench.adapter).await);
+    assert_eq!(request_id, "1:call_402994");
     assert_eq!(payload["questions"][0]["id"], "q0");
     assert_eq!(
         payload["questions"][0]["text"],
-        "Which banner color should I use?"
+        "Which banner color do you prefer?"
     );
     assert_eq!(
         payload["questions"][0]["options"],
         json!([
-            {"label": "(Recommended) Blue", "description": null},
-            {"label": "Red", "description": null},
-            {"label": "Green", "description": null},
+            {"label": "(Recommended) Red", "description": null},
+            {"label": "Blue", "description": null},
         ])
     );
     assert_eq!(payload["questions"][0]["multi_select"], false);
@@ -2363,10 +2366,18 @@ async fn ask_question_opens_a_normalised_question_and_the_answer_continues_the_t
             ..
         }
     )));
+    assert!(
+        finished(&events).is_empty(),
+        "the logical turn stays open while the question card is open"
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::RequestClosed { .. }
+    )));
     assert!(matches!(
         bench
             .adapter
-            .deliver_decision(&request_id, &answer("q0", "Red"))
+            .deliver_decision(&request_id, &answer("q0", "Blue"))
             .await,
         DecisionOutcome::Applied(_)
     ));
@@ -2374,32 +2385,25 @@ async fn ask_question_opens_a_normalised_question_and_the_answer_continues_the_t
     assert_eq!(finished(&events), vec![input.command_id]);
     let requests = bench.fake.requests();
     assert!(
-        requests
-            .iter()
-            .any(|entry| entry["dir"] == "in" && entry["frame"]["method"] == "session/cancel")
+        calls(&requests, "session/cancel").is_empty(),
+        "1.5.0 answers a question without cancel"
     );
     let prompts = session_prompts(&requests);
     assert_eq!(prompts.len(), 2);
     assert_eq!(
         prompts[1]["frame"]["params"]["prompt"][0]["text"],
-        "Ответ владельца на вопрос \"Which banner color should I use?\": Red"
+        "Ответ владельца на вопрос \"Which banner color do you prefer?\": Blue"
     );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::BlockStarted { tool_name: Some(name), .. } if name == "ask_question"
+    )));
     bench.close().await;
 }
 
 #[tokio::test]
-async fn a_question_answered_after_the_turn_ended_is_expired() {
-    let mut steps = question_scenario();
-    steps.push(respond(4, end_turn(Some(usage(1, 1, 0)))));
-    let mut bench = Bench::new(
-        Script {
-            steps,
-            ..Default::default()
-        },
-        "",
-        "",
-        "bypass",
-    );
+async fn a_question_after_end_turn_stays_open_without_an_answer() {
+    let mut bench = Bench::new(question_script(question_live_steps()), "", "", "bypass");
     bench.start().await;
     let input = send(QUESTION_PROMPT);
     assert!(matches!(
@@ -2408,39 +2412,29 @@ async fn a_question_answered_after_the_turn_ended_is_expired() {
     ));
     let (request_id, _, mut events) = wait_request(&mut bench.adapter, "question").await;
     events.extend(drain(&mut bench.adapter).await);
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AdapterEvent::RequestClosed { request_id: closed, .. } if closed == &request_id
-    )));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event())
+            .await
+            .is_err(),
+        "nothing closes the question while the owner is silent"
+    );
+    assert!(finished(&events).is_empty());
+    assert!(matches!(
+        bench
+            .adapter
+            .deliver_decision(&request_id, &answer("q0", "Red"))
+            .await,
+        DecisionOutcome::Applied(_)
+    ));
+    let events = drain(&mut bench.adapter).await;
     assert_eq!(finished(&events), vec![input.command_id]);
-    match bench
-        .adapter
-        .deliver_decision(&request_id, &answer("q0", "Red"))
-        .await
-    {
-        DecisionOutcome::NotApplied(reason) => assert_eq!(reason, "question expired"),
-        other => panic!("expected NotApplied, got {other:?}"),
-    }
-    assert_eq!(session_prompts(&bench.fake.requests()).len(), 1);
     bench.close().await;
 }
 
 #[tokio::test]
 async fn a_second_answer_to_the_same_question_is_not_applied() {
-    let mut steps = question_scenario();
-    steps.extend(question_answer_steps(
-        true,
-        "Ответ владельца на вопрос \"Which banner color should I use?\": Red",
-    ));
-    let mut bench = Bench::new(
-        Script {
-            steps,
-            ..Default::default()
-        },
-        "",
-        "",
-        "bypass",
-    );
+    let mut bench = Bench::new(question_script(question_live_steps()), "", "", "bypass");
     bench.start().await;
     let input = send(QUESTION_PROMPT);
     assert!(matches!(
@@ -2463,42 +2457,34 @@ async fn a_second_answer_to_the_same_question_is_not_applied() {
         DecisionOutcome::NotApplied(_)
     ));
     let requests = bench.fake.requests();
-    let prompts = session_prompts(&requests);
-    assert_eq!(prompts.len(), 2, "the second answer sends nothing");
+    assert_eq!(
+        session_prompts(&requests).len(),
+        2,
+        "the second answer sends nothing"
+    );
     drain(&mut bench.adapter).await;
     bench.close().await;
 }
 
 #[tokio::test]
-async fn refusing_a_question_cancels_and_never_sends_the_continuation_prompt() {
-    let mut steps = question_scenario();
+async fn refusing_a_question_cancels_only_and_closes_the_held_turn() {
+    let mut steps = question_without_answer_steps();
     steps.push(Script::notification("session/cancel"));
-    steps.push(respond(4, cancelled(Some(usage(1, 1, 0)))));
-    let mut bench = Bench::new(
-        Script {
-            steps,
-            ..Default::default()
-        },
-        "",
-        "",
-        "bypass",
-    );
+    let mut bench = Bench::new(question_script(steps), "", "", "bypass");
     bench.start().await;
     let input = send(QUESTION_PROMPT);
     assert!(matches!(
         bench.adapter.transmit(&input, &bench.group).await,
         TransmitOutcome::Accepted(_)
     ));
-    let (request_id, _, _) = wait_request(&mut bench.adapter, "question").await;
+    let (request_id, _, mut events) = wait_request(&mut bench.adapter, "question").await;
+    events.extend(drain(&mut bench.adapter).await);
+    assert!(finished(&events).is_empty());
     bench.adapter.refuse_request(&request_id, "no").await;
     let events = drain(&mut bench.adapter).await;
     assert_eq!(finished(&events), vec![input.command_id]);
     let requests = bench.fake.requests();
-    assert!(
-        requests
-            .iter()
-            .any(|entry| entry["dir"] == "in" && entry["frame"]["method"] == "session/cancel")
-    );
+    assert_eq!(calls(&requests, "session/cancel").len(), 1);
     assert_eq!(
         session_prompts(&requests).len(),
         1,
@@ -2508,23 +2494,43 @@ async fn refusing_a_question_cancels_and_never_sends_the_continuation_prompt() {
 }
 
 #[tokio::test]
-async fn process_death_between_cancel_and_the_continuation_echo_is_undetermined() {
-    let mut steps = question_scenario();
+async fn a_late_answer_after_interrupt_is_expired() {
+    let mut steps = question_without_answer_steps();
     steps.push(Script::notification("session/cancel"));
-    steps.push(respond(4, cancelled(Some(usage(1, 1, 0)))));
+    let mut bench = Bench::new(question_script(steps), "", "", "bypass");
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, _) = wait_request(&mut bench.adapter, "question").await;
+    assert!(matches!(
+        bench.adapter.interrupt().await,
+        InterruptOutcome::Acknowledged
+    ));
+    let events = drain(&mut bench.adapter).await;
+    assert_eq!(finished(&events), vec![input.command_id]);
+    match bench
+        .adapter
+        .deliver_decision(&request_id, &answer("q0", "Red"))
+        .await
+    {
+        DecisionOutcome::NotApplied(reason) => assert_eq!(reason, "question expired"),
+        other => panic!("expected NotApplied, got {other:?}"),
+    }
+    bench.close().await;
+}
+
+#[tokio::test]
+async fn process_death_after_the_answer_prompt_is_undetermined() {
+    let mut steps = question_without_answer_steps();
+    steps.push(deferred("session/prompt", 4));
     steps.push(Step::Die {
         code: 1,
         kill: false,
     });
-    let mut bench = Bench::new(
-        Script {
-            steps,
-            ..Default::default()
-        },
-        "",
-        "",
-        "bypass",
-    );
+    let mut bench = Bench::new(question_script(steps), "", "", "bypass");
     bench.start().await;
     let input = send(QUESTION_PROMPT);
     assert!(matches!(
@@ -2549,6 +2555,38 @@ async fn process_death_between_cancel_and_the_continuation_echo_is_undetermined(
 }
 
 #[tokio::test]
+async fn process_death_with_a_question_open_expires_a_late_answer() {
+    let mut steps = question_without_answer_steps();
+    steps.push(Step::Die {
+        code: 1,
+        kill: false,
+    });
+    let mut bench = Bench::new(question_script(steps), "", "", "bypass");
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, _) = wait_request(&mut bench.adapter, "question").await;
+    let events = drain(&mut bench.adapter).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::ProcessExited { .. }))
+    );
+    match bench
+        .adapter
+        .deliver_decision(&request_id, &answer("q0", "Red"))
+        .await
+    {
+        DecisionOutcome::NotApplied(reason) => assert_eq!(reason, "question expired"),
+        other => panic!("expected NotApplied, got {other:?}"),
+    }
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
 async fn a_malformed_question_is_a_diagnostic_and_a_cancel() {
     let steps = vec![
         init_step(),
@@ -2558,17 +2596,9 @@ async fn a_malformed_question_is_a_diagnostic_and_a_cancel() {
         Script::send(tool_call("call_bad", "ask_question", json!({}))),
         Script::send(tool_update("call_bad", "pending", None)),
         Script::notification("session/cancel"),
-        respond(4, cancelled(Some(usage(1, 1, 0)))),
+        respond(4, end_turn(Some(usage(1, 1, 0)))),
     ];
-    let mut bench = Bench::new(
-        Script {
-            steps,
-            ..Default::default()
-        },
-        "",
-        "",
-        "bypass",
-    );
+    let mut bench = Bench::new(question_script(steps), "", "", "bypass");
     bench.start().await;
     let input = send(QUESTION_PROMPT);
     assert!(matches!(
@@ -2595,18 +2625,15 @@ async fn a_malformed_question_is_a_diagnostic_and_a_cancel() {
             .iter()
             .any(|entry| entry["dir"] == "in" && entry["frame"]["method"] == "session/cancel")
     );
+    assert_eq!(finished(&events), vec![input.command_id]);
     bench.close().await;
 }
 
 #[tokio::test]
 async fn ask_question_is_refused_while_the_capability_is_unavailable() {
-    let mut steps = question_scenario();
+    let mut steps = question_without_answer_steps();
     steps.push(Script::notification("session/cancel"));
-    steps.push(respond(4, cancelled(Some(usage(1, 1, 0)))));
-    let mut bench = Bench::new_without_questions(Script {
-        steps,
-        ..Default::default()
-    });
+    let mut bench = Bench::new_without_questions(question_script(steps));
     bench.start().await;
     let input = send(QUESTION_PROMPT);
     assert!(matches!(

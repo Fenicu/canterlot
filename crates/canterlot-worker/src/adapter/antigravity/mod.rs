@@ -51,9 +51,8 @@ const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 const TURN_STALL: Duration = Duration::from_secs(60);
 const ERROR_TEXT_BYTES: usize = 512;
 
-/// Вопросы реализованы, но включаются после живой проверки cancel + служебный
-/// prompt (§11). Смена этого значения — единственное, что нужно для включения.
-const QUESTIONS_CAPABILITY: Support = Support::Unavailable("stage0");
+/// Вопросы отвечаются обычным prompt внутри логического хода (agy 1.5.0).
+const QUESTIONS_CAPABILITY: Support = Support::Supported;
 
 /// Квота из JSON-RPC ошибки prompt: форма §11 не подтверждена живым кадром, до неё
 /// `Limit(Reached)` приходит только из `/usage` (§8). Смена значения — единственное,
@@ -171,8 +170,7 @@ impl AntigravityAdapter {
         self
     }
 
-    /// Тестовый тумблер: включает путь вопросов, пока константа
-    /// `QUESTIONS_CAPABILITY` остаётся `Unavailable("stage0")`.
+    /// Тестовый тумблер пути вопросов; на 1.4.12 старт всё равно его выключает.
     pub fn with_questions_enabled(mut self, enabled: bool) -> Self {
         self.questions_enabled = enabled;
         self
@@ -461,7 +459,8 @@ impl AntigravityAdapter {
                 .push_back(AdapterEvent::InputAccepted { command_id });
         }
         if let Some(tool_call_id) = update.get("toolCallId").and_then(Value::as_str) {
-            self.requests.note_tool_frame(tool_call_id);
+            let status = update.get("status").and_then(Value::as_str);
+            self.requests.note_tool_frame(tool_call_id, status);
         }
         let fed = match self.translator.as_mut() {
             Some(translator) => translator.feed(update),
@@ -528,6 +527,9 @@ impl AntigravityAdapter {
             .open_question(&call.tool_call_id, &call.raw_input, "orchestrator")
         {
             Ok((request_id, payload)) => {
+                // 1.5.0 отвечает `end_turn` одновременно с вопросом. Ход держим
+                // открытым, пока карточка не закрыта ответом или отказом.
+                self.tracker.expect_continuation(true);
                 self.events.push_back(AdapterEvent::RequestOpened {
                     request_id,
                     kind: "question".into(),
@@ -1026,7 +1028,11 @@ impl Adapter for AntigravityAdapter {
             resume: Support::Supported,
             interrupt: Support::Supported,
             approvals: Support::Supported,
-            questions: QUESTIONS_CAPABILITY.clone(),
+            questions: if self.questions_enabled {
+                QUESTIONS_CAPABILITY.clone()
+            } else {
+                Support::Unavailable("agy_1_4_12")
+            },
             background_work: Support::Unavailable("antigravity: P8"),
             interrupt_keeps_process: true,
         }
@@ -1252,44 +1258,34 @@ impl Adapter for AntigravityAdapter {
                 let Some(command_id) = self.tracker.turn_command() else {
                     return DecisionOutcome::NotApplied("question expired".into());
                 };
-                self.tracker.expect_continuation(true);
-                self.send_cancel().await;
-                let limit = Instant::now() + self.deadline;
-                loop {
-                    if self.eof || self.exited {
-                        return DecisionOutcome::Undetermined;
-                    }
-                    if !self.tracker.has_turn() {
-                        return DecisionOutcome::NotApplied("question expired".into());
-                    }
-                    if self.tracker.outstanding() == 0 {
-                        break;
-                    }
-                    if timeout_at(limit, self.pump_once()).await.is_err() {
-                        return DecisionOutcome::Undetermined;
-                    }
-                }
+                // 1.5.0: ответ уходит обычным prompt без cancel. Эха у него нет,
+                // поэтому приём доказывает следующий кадр `ask_question`.
                 self.tracker.expect_continuation(false);
                 let params = input::prompt_params(&self.session_id(), &text);
                 let (id, message) = self.rpc.request_v2("session/prompt", params);
                 self.tracker.register(id, command_id, PromptKind::Turn);
-                self.tracker.expect_echo(id, command_id, &text);
-                self.tracker.await_echo(command_id);
                 let limit = Instant::now() + self.deadline;
                 if !self.write_message_until(message, limit).await {
                     self.tracker.forget_command(command_id);
                     self.rpc.forget(id);
                     return DecisionOutcome::Undetermined;
                 }
-                match self.wait_echo(command_id, limit).await {
-                    EchoEnd::Accepted => DecisionOutcome::Applied(DecisionProof {
-                        proof_kind: "agy_acp_question_continuation".into(),
-                        payload: json!({"tool_call_id": request_id, "text_bytes": text.len()}),
-                    }),
-                    EchoEnd::Rejected(_) => {
-                        DecisionOutcome::NotApplied("continuation_rejected".into())
+                loop {
+                    if self.requests.take_resolved(request_id) {
+                        return DecisionOutcome::Applied(DecisionProof {
+                            proof_kind: "agy_acp_question_tool_frame".into(),
+                            payload: json!({"tool_call_id": request_id, "text_bytes": text.len()}),
+                        });
                     }
-                    EchoEnd::Undetermined => DecisionOutcome::Undetermined,
+                    if self.eof || self.exited {
+                        return DecisionOutcome::Undetermined;
+                    }
+                    if !self.tracker.has_turn() {
+                        return DecisionOutcome::NotApplied("question_not_applied".into());
+                    }
+                    if timeout_at(limit, self.pump_once()).await.is_err() {
+                        return DecisionOutcome::Undetermined;
+                    }
                 }
             }
         }
@@ -1319,6 +1315,18 @@ impl Adapter for AntigravityAdapter {
                 if self.tracker.has_turn() && !self.eof && !self.exited {
                     self.send_cancel().await;
                 }
+                // 1.5.0 уже ответил `end_turn` на исходный prompt: если других
+                // ответов не ждём, удержанный ход закрываем сами.
+                self.tracker.expect_continuation(false);
+                if let Some(Effect::TurnClosed {
+                    command_id,
+                    usage,
+                    failed,
+                    stop: _,
+                }) = self.tracker.close_if_idle()
+                {
+                    self.close_turn(command_id, usage, failed);
+                }
             }
         }
     }
@@ -1327,7 +1335,14 @@ impl Adapter for AntigravityAdapter {
         let Some(target) = self.tracker.target() else {
             return InterruptOutcome::NotApplicable;
         };
-        for request_id in self.requests.open_ids() {
+        let open = self.requests.open_ids();
+        let had_question = open.iter().any(|request_id| {
+            matches!(
+                self.requests.pending(request_id).map(|pending| &pending.kind),
+                Some(PendingKind::Question { .. })
+            )
+        });
+        for request_id in open {
             self.events.push_back(AdapterEvent::RequestClosed {
                 request_id,
                 reason: "interrupted".into(),
@@ -1338,6 +1353,19 @@ impl Adapter for AntigravityAdapter {
             translator.permission_open = false;
         }
         self.send_cancel().await;
+        // Вопрос 1.5.0 держит ход после уже пришедшего `end_turn`: cancel его
+        // закрывает, а ответа prompt, который закрыл бы ход, не будет.
+        self.tracker.expect_continuation(false);
+        if let Some(Effect::TurnClosed {
+            command_id,
+            usage,
+            failed,
+            stop: _,
+        }) = self.tracker.close_if_idle()
+        {
+            self.close_turn(command_id, usage, failed);
+            return InterruptOutcome::Acknowledged;
+        }
         let limit = Instant::now() + self.interrupt_deadline;
         loop {
             if self.eof || self.exited {
@@ -1349,7 +1377,9 @@ impl Adapter for AntigravityAdapter {
             };
             if done {
                 return match target {
-                    Target::Turn if self.tracker.last_stop() == Some("cancelled") => {
+                    Target::Turn
+                        if had_question || self.tracker.last_stop() == Some("cancelled") =>
+                    {
                         InterruptOutcome::Acknowledged
                     }
                     Target::Compact if self.tracker.last_compact_ok() == Some(false) => {
@@ -1524,7 +1554,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capabilities_reserve_requests_for_task_3() {
+    fn capabilities_expose_the_live_verified_features() {
         let adapter = AntigravityAdapter::new(
             AntigravityConfig::default(),
             PathBuf::from("/tmp"),
@@ -1535,11 +1565,7 @@ mod tests {
         assert_eq!(capabilities.resume, Support::Supported);
         assert_eq!(capabilities.interrupt, Support::Supported);
         assert_eq!(capabilities.approvals, Support::Supported);
-        assert_eq!(
-            capabilities.questions,
-            Support::Unavailable("stage0"),
-            "questions stay behind the live-check capability switch"
-        );
+        assert_eq!(capabilities.questions, Support::Supported);
         assert_eq!(
             capabilities.background_work,
             Support::Unavailable("antigravity: P8")

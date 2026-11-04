@@ -437,6 +437,29 @@ impl Tracker {
         }
     }
 
+    /// Закрыть удержанный ход без ответа prompt: отказ от вопроса после того,
+    /// как исходный prompt уже ответил `end_turn`.
+    pub fn close_if_idle(&mut self) -> Option<Effect> {
+        let turn = self.turn.as_ref()?;
+        if turn.outstanding > 0 || turn.continuation {
+            return None;
+        }
+        let turn = self.turn.take()?;
+        self.echoes
+            .retain(|wait| wait.command_id != turn.command_id);
+        self.unconfirmed.remove(&turn.command_id);
+        self.last_stop = turn.stop.clone();
+        if !turn.accepted {
+            return None;
+        }
+        Some(Effect::TurnClosed {
+            command_id: turn.command_id,
+            usage: turn.usage,
+            failed: turn.failed,
+            stop: turn.stop,
+        })
+    }
+
     /// Смерть процесса: открытый ход закрывает supervisor, сжатие — `Compacted`.
     pub fn on_eof(&mut self) -> Option<Effect> {
         let compact = self.compaction.take();
@@ -808,6 +831,25 @@ mod tests {
         assert_eq!(tracker.outstanding(), 1);
         let (closed, ..) = closed(tracker.on_response(5, &Ok(usage(2, 1, 0))));
         assert_eq!(closed, command);
+        assert!(!tracker.has_turn());
+    }
+
+    #[test]
+    fn a_held_turn_closes_when_the_question_is_refused() {
+        let command = Uuid::now_v7();
+        let mut tracker = Tracker::new();
+        tracker.begin(command);
+        tracker.register(4, command, PromptKind::Turn);
+        tracker.expect_continuation(true);
+        assert!(tracker.on_response(4, &Ok(usage(7, 2, 0))).is_none());
+        assert!(tracker.has_turn());
+        assert!(tracker.close_if_idle().is_none());
+        tracker.expect_continuation(false);
+        let (closed, usage, failed, stop) = closed(tracker.close_if_idle());
+        assert_eq!(closed, command);
+        assert_eq!(usage.input, 7);
+        assert_eq!(failed, None);
+        assert_eq!(stop.as_deref(), Some("end_turn"));
         assert!(!tracker.has_turn());
     }
 

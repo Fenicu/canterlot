@@ -197,16 +197,22 @@ impl Requests {
         Ok(answer)
     }
 
-    /// Любой следующий кадр инструмента после ответа — доказательство `Applied`.
-    pub fn note_tool_frame(&mut self, tool_call_id: &str) {
+    /// Следующий кадр инструмента после ответа — доказательство `Applied`.
+    /// Для вопроса ждём терминальный статус: `pending`/`in_progress`, отправленные
+    /// до ответа, могли прийти после него и ничего не доказывают.
+    pub fn note_tool_frame(&mut self, tool_call_id: &str, status: Option<&str>) {
         let Some(request_id) = self.by_tool.get(tool_call_id) else {
             return;
         };
-        if self
+        let Some(pending) = self
             .pending
             .get(request_id)
-            .is_some_and(|pending| pending.answered)
-        {
+            .filter(|pending| pending.answered)
+        else {
+            return;
+        };
+        let terminal = matches!(status, Some("completed" | "failed"));
+        if terminal || matches!(pending.kind, PendingKind::Permission { .. }) {
             self.resolved.insert(request_id.clone());
         }
     }
@@ -521,9 +527,26 @@ mod tests {
                 },
             )
             .unwrap();
-        requests.note_tool_frame("call_1");
+        requests.note_tool_frame("call_1", Some("in_progress"));
         assert!(requests.take_resolved(&request_id));
         assert!(!requests.take_resolved(&request_id));
+    }
+
+    #[test]
+    fn a_stale_pending_frame_does_not_prove_a_question_answer() {
+        let mut requests = Requests::new(1);
+        let (request_id, _) = requests
+            .open_question("call_1", &raw(json!([{"question": "Q?"}])), "orchestrator")
+            .unwrap();
+        requests
+            .answer(&request_id, &single("q0", "x"))
+            .unwrap();
+        requests.note_tool_frame("call_1", Some("pending"));
+        assert!(!requests.take_resolved(&request_id));
+        requests.note_tool_frame("call_1", Some("in_progress"));
+        assert!(!requests.take_resolved(&request_id));
+        requests.note_tool_frame("call_1", Some("completed"));
+        assert!(requests.take_resolved(&request_id));
     }
 
     #[test]
