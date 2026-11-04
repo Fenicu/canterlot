@@ -240,21 +240,14 @@ pub async fn current_in_tx(
     let activity = Activity { state, evidence };
     // Общее решение «устоявшееся состояние — это завершение»: взвод будильника и явная
     // подписка не должны считать завершением то, что им не считает доставка события.
-    Ok(
-        settle::settled(&activity, &inputs.queue, &facts, config)
-            .filter(|state| completion::is_completion(*state))
-            .map(|state| Current {
-                state,
-                fingerprint: settle::fingerprint(
-                    state,
-                    since,
-                    inputs.last_turn_at,
-                    facts.phase_since,
-                ),
-                closes: state.closes_subscription(inputs.queue.queued),
-                boundary: inputs.last_turn_at.unwrap_or(since),
-            }),
-    )
+    Ok(settle::settled(&activity, &inputs.queue, &facts, config)
+        .filter(|state| completion::is_completion(*state))
+        .map(|state| Current {
+            state,
+            fingerprint: settle::fingerprint(state, since, inputs.last_turn_at, facts.phase_since),
+            closes: state.closes_subscription(inputs.queue.queued),
+            boundary: inputs.last_turn_at.unwrap_or(since),
+        }))
 }
 
 fn event_job(

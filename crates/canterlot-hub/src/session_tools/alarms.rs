@@ -922,7 +922,11 @@ pub async fn set(
                     condition
                         .armed
                         .insert(target.to_string(), current.fingerprint.clone());
-                    current_states.push((target, current.state.as_str().to_string(), current.boundary));
+                    current_states.push((
+                        target,
+                        current.state.as_str().to_string(),
+                        current.boundary,
+                    ));
                 } else {
                     all_met = false;
                 }
@@ -1648,9 +1652,7 @@ async fn render_parts_in_tx(
             .trim_start_matches("[canterlot] ")
             .to_string();
         let bullet = format!("\n- {chunk}");
-        if index > start
-            && text.len() + bullet.len() + AUTOMATION.len() + 4 > budget
-        {
+        if index > start && text.len() + bullet.len() + AUTOMATION.len() + 4 > budget {
             text.push_str("\n\n");
             text.push_str(AUTOMATION);
             parts.push(DeliveryPart {
@@ -1737,9 +1739,15 @@ async fn render_one_in_tx(
     let budget = summary::TEXT_LIMIT.saturating_sub(text.len() + 512) / held.len().max(1);
     for (target, entry) in &held {
         text.push_str("\n\n");
-        if let Some(built) =
-            summary::build_through(conn, owner_id, *target, &entry.state, entry.armed_at, entry.boundary)
-                .await?
+        if let Some(built) = summary::build_through(
+            conn,
+            owner_id,
+            *target,
+            &entry.state,
+            entry.armed_at,
+            entry.boundary,
+        )
+        .await?
         {
             text.push_str(&summary::render_bounded(&built, budget));
         } else {
@@ -1822,11 +1830,7 @@ fn render_condition_text(row: &AlarmRow, now: DateTime<Utc>) -> String {
             let missed = condition
                 .session_ids
                 .iter()
-                .filter(|id| {
-                    collected
-                        .get(**id)
-                        .is_none_or(|entry| !entry.satisfied)
-                })
+                .filter(|id| collected.get(**id).is_none_or(|entry| !entry.satisfied))
                 .map(Uuid::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");

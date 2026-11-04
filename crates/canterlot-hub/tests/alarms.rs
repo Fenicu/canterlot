@@ -1033,7 +1033,10 @@ async fn locked_alarm_does_not_lose_its_deadline_job(pool: PgPool) {
         .unwrap();
     let sch = scheduler(&f.pool, Default::default());
     let report = sch.tick(now + TimeDelta::seconds(126)).await.unwrap();
-    assert_eq!(report.retried, 1, "the delivery job asks for a normal retry");
+    assert_eq!(
+        report.retried, 1,
+        "the delivery job asks for a normal retry"
+    );
     assert_eq!(report.cancelled, 0, "a locked alarm is not settled");
     assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
     assert!(f.alarm_inputs().await.is_empty());
@@ -1128,7 +1131,8 @@ async fn arm_path_uses_completion_for_satisfied_condition(pool: PgPool) {
     assert_eq!(armed["state"], "armed");
     let (_, _, collected) = alarm_state(&f.pool, alarm_id(&armed)).await;
     assert_eq!(
-        collected["sessions"][f.child.to_string()]["state"], "idle",
+        collected["sessions"][f.child.to_string()]["state"],
+        "idle",
         "the already settled target is part of the initial all collection"
     );
     assert!(collected["sessions"].get(f.child2.to_string()).is_none());
@@ -1154,14 +1158,12 @@ async fn deletion_produces_exactly_one_notice(pool: PgPool) {
 
     // Удаление цели: обычная подписка шлёт одно сообщение, пачка только засчитывает.
     let mut tx = f.pool.begin().await.unwrap();
-    subs::on_target_deleted_in_tx(&mut tx, f.child, now).await.unwrap();
-    canterlot_hub::session_tools::alarms::on_target_deleted_in_tx(
-        &mut tx,
-        f.child,
-        now,
-    )
-    .await
-    .unwrap();
+    subs::on_target_deleted_in_tx(&mut tx, f.child, now)
+        .await
+        .unwrap();
+    canterlot_hub::session_tools::alarms::on_target_deleted_in_tx(&mut tx, f.child, now)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     // В настоящем удалении разговор уже убран, поэтому итог события говорит «was deleted».
     sqlx::query("delete from session_subscriptions where target_id=$1 or subscriber_id=$1")
@@ -1233,7 +1235,11 @@ async fn failed_and_idle_complete_an_all_batch_with_the_failure_reported_once(po
     .unwrap();
     f.refresh_id(f.child, now).await;
     assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
-    assert_eq!(f.event_jobs().await, 1, "failed goes out as a normal result");
+    assert_eq!(
+        f.event_jobs().await,
+        1,
+        "failed goes out as a normal result"
+    );
 
     let sch = scheduler(&f.pool, Default::default());
     assert_eq!(
@@ -1341,11 +1347,7 @@ async fn held_summary_dropped_after_unsubscribe_accept_or_resubscribe_on_ordinar
         )
         .await
         .unwrap();
-    for (target, offset) in [
-        (f.child, 1),
-        (f.child2, 2),
-        (f.child3, 3),
-    ] {
+    for (target, offset) in [(f.child, 1), (f.child2, 2), (f.child3, 3)] {
         f.refresh_id(target, now - TimeDelta::hours(1)).await;
         f.refresh_id(target, now + TimeDelta::seconds(offset)).await;
     }
@@ -1466,14 +1468,9 @@ async fn cancellation_racing_unsubscribe_does_not_resurrect_the_event(pool: PgPo
     let caller = f.caller();
     let id = alarm_id(&armed);
     let cancel = tokio::spawn(async move {
-        session_tools::call(
-            &context,
-            &caller,
-            "alarms.cancel",
-            json!({"alarm_id": id}),
-        )
-        .await
-        .unwrap()
+        session_tools::call(&context, &caller, "alarms.cancel", json!({"alarm_id": id}))
+            .await
+            .unwrap()
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
@@ -1538,7 +1535,11 @@ async fn abandoned_batch_releases_held_summaries_to_the_subscription(pool: PgPoo
     );
     let inputs = f.alarm_inputs().await;
     assert_eq!(inputs.len(), 1);
-    assert!(inputs[0].0.contains(&f.child.to_string()), "{}", inputs[0].0);
+    assert!(
+        inputs[0].0.contains(&f.child.to_string()),
+        "{}",
+        inputs[0].0
+    );
     assert!(inputs[0].0.contains("is now idle"), "{}", inputs[0].0);
 }
 
@@ -1700,11 +1701,26 @@ async fn retention_deletes_old_terminal_alarms(pool: PgPool) {
     let now = Utc::now();
     let old = now - TimeDelta::days(31);
     let mut ids = Vec::new();
-    for key in ["fired", "cancelled", "expired", "failed", "armed", "undelivered", "recent"] {
+    for key in [
+        "fired",
+        "cancelled",
+        "expired",
+        "failed",
+        "armed",
+        "undelivered",
+        "recent",
+    ] {
         ids.push(alarm_id(&f.arm_at(key, now + TimeDelta::seconds(60)).await));
     }
-    let [fired, cancelled, expired, failed, armed, undelivered, recent] =
-        <[Uuid; 7]>::try_from(ids).unwrap();
+    let [
+        fired,
+        cancelled,
+        expired,
+        failed,
+        armed,
+        undelivered,
+        recent,
+    ] = <[Uuid; 7]>::try_from(ids).unwrap();
     sqlx::query(
         "update alarms set state='fired',fired_reason='time',fired_at=$2,
            delivered_input_id=$3,delivered_at=$2,updated_at=$2 where id=$1",
@@ -1715,7 +1731,11 @@ async fn retention_deletes_old_terminal_alarms(pool: PgPool) {
     .execute(&f.pool)
     .await
     .unwrap();
-    for (id, state) in [(cancelled, "cancelled"), (expired, "expired"), (failed, "failed")] {
+    for (id, state) in [
+        (cancelled, "cancelled"),
+        (expired, "expired"),
+        (failed, "failed"),
+    ] {
         sqlx::query("update alarms set state=$2,updated_at=$3 where id=$1")
             .bind(id)
             .bind(state)
@@ -1730,12 +1750,14 @@ async fn retention_deletes_old_terminal_alarms(pool: PgPool) {
         .execute(&f.pool)
         .await
         .unwrap();
-    sqlx::query("update alarms set state='fired',fired_reason='time',fired_at=$2,updated_at=$2 where id=$1")
-        .bind(undelivered)
-        .bind(old)
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "update alarms set state='fired',fired_reason='time',fired_at=$2,updated_at=$2 where id=$1",
+    )
+    .bind(undelivered)
+    .bind(old)
+    .execute(&f.pool)
+    .await
+    .unwrap();
     sqlx::query("update alarms set state='cancelled',updated_at=$2 where id=$1")
         .bind(recent)
         .bind(now)
