@@ -94,7 +94,15 @@ pub async fn delete(
         "delete_conversation",
         &json!({"id": id}),
         None,
-        move |conn| Box::pin(delete_in_tx(conn, owner_id, id, correlation_id)),
+        move |conn| {
+            Box::pin(delete_in_tx(
+                conn,
+                owner_id,
+                id,
+                correlation_id,
+                DeleteMode::Manual,
+            ))
+        },
     )
     .await;
     match outcome {
@@ -109,6 +117,34 @@ pub async fn delete(
         Err(error) => return Err(error),
     }
     Ok(())
+}
+
+/// Уборка принятой делегации по сроку хранения: тот же путь, что и ручное удаление, но без
+/// ключа идемпотентности и без уведомлений подписчикам. Приём уже закрыл их и сообщил итог,
+/// поэтому `deleted` в очередь никто не получает.
+pub async fn delete_retained(
+    pool: &PgPool,
+    blobs: Option<&dyn BlobStore>,
+    owner_id: Uuid,
+    id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), DeleteError> {
+    let files = owned_files(pool, owner_id, id).await?;
+    let mut tx = crate::db::begin(pool).await?;
+    match delete_in_tx(&mut tx, owner_id, id, correlation_id, DeleteMode::Retention).await {
+        Ok(_) => {
+            tx.commit().await?;
+            scheduler::notify_pool(pool);
+            if let Some(blobs) = blobs {
+                free_files(blobs, files).await;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
 }
 
 async fn owned_files(pool: &PgPool, owner_id: Uuid, id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
@@ -151,11 +187,20 @@ async fn free_files(blobs: &dyn BlobStore, files: Vec<Uuid>) {
     }
 }
 
+/// Кто просит удаление: ручное удаление уведомляет открытые подписки, уборка по сроку
+/// хранения молчит — приём уже закрыл подписки и сообщил итог.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeleteMode {
+    Manual,
+    Retention,
+}
+
 async fn delete_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     id: Uuid,
     correlation_id: Uuid,
+    mode: DeleteMode,
 ) -> Result<Value, DeleteError> {
     conversations::lock_owner(&mut *conn, owner_id).await?;
     // Порядок ingest: курсор раньше очереди. Встречное исполнение после блокировки очереди
@@ -213,7 +258,9 @@ async fn delete_in_tx(
     .execute(&mut *conn)
     .await?;
     crate::session_tools::alarms::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
-    subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
+    if mode == DeleteMode::Manual {
+        subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
+    }
     origin::scrub_sender_in_tx(conn, id).await?;
     purge_rows(conn, id, &execution_ids).await?;
     purge_events(conn, owner_id, id, &execution_ids).await?;

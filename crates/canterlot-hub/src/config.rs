@@ -447,6 +447,10 @@ pub struct SessionToolsConfig {
     pub parent_spawns: u32,
     #[serde(with = "humantime_serde")]
     pub spawn_window: Duration,
+    /// Срок хранения принятой делегации: через него уборка удаляет её из архива.
+    /// `0` выключает автоматическое удаление.
+    #[serde(with = "humantime_serde")]
+    pub accepted_retention: Duration,
 }
 
 impl Default for SessionToolsConfig {
@@ -460,6 +464,7 @@ impl Default for SessionToolsConfig {
             sender_window: Duration::from_secs(600),
             parent_spawns: 10,
             spawn_window: Duration::from_secs(3600),
+            accepted_retention: Duration::from_secs(3 * 86400),
         }
     }
 }

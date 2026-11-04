@@ -247,7 +247,9 @@ async fn serve(
         dispatcher.clone(),
         scheduler_config,
     )
-    .with_limits(registry.clone(), limits.clone());
+    .with_limits(registry.clone(), limits.clone())
+    .with_session_tools(session_tools.clone())
+    .with_blobs(blobs.clone());
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())

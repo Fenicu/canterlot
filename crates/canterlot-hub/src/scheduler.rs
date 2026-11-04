@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     fmt,
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicI64, Ordering},
+    },
     time::Duration,
 };
 
@@ -13,7 +16,8 @@ use tokio::sync::{Notify, watch};
 use uuid::Uuid;
 
 use crate::{
-    config::{LimitsConfig, SchedulerConfig},
+    attachments::BlobStore,
+    config::{LimitsConfig, SchedulerConfig, SessionToolsConfig},
     conversations::{SubmitMessage, submit_message_in_tx},
     crunch::{self, JobOutcome},
     delivery::{ContentBlock, SubmitError},
@@ -208,6 +212,11 @@ fn transient_backoff(count: i64) -> TimeDelta {
         .min(6);
     TimeDelta::seconds((1_i64 << shift).min(TRANSIENT_BACKOFF_MAX))
 }
+
+/// Уборка принятых делегаций идёт не чаще раза в несколько часов.
+const RETENTION_INTERVAL: TimeDelta = TimeDelta::hours(3);
+/// Сколько сессий убирает один проход: остальные дождутся следующего.
+const RETENTION_BATCH: i64 = 100;
 
 #[derive(Clone, sqlx::FromRow)]
 struct JobRow {
@@ -456,6 +465,10 @@ pub struct Scheduler {
     history_days: u32,
     registry: Option<Registry>,
     limits: Arc<LimitsConfig>,
+    session_tools: SessionToolsConfig,
+    blobs: Option<Arc<dyn BlobStore>>,
+    /// Когда уборке принятых делегаций снова можно работать: не чаще раза в несколько часов.
+    retention_next: Arc<AtomicI64>,
     #[cfg(feature = "fault-injection")]
     pub faults: crate::fault_injection::Faults,
 }
@@ -478,6 +491,9 @@ impl Scheduler {
             history_days: LimitsConfig::default().history_days,
             registry: None,
             limits: Arc::new(LimitsConfig::default()),
+            session_tools: SessionToolsConfig::default(),
+            blobs: None,
+            retention_next: Arc::new(AtomicI64::new(0)),
             #[cfg(feature = "fault-injection")]
             faults: Default::default(),
         }
@@ -491,6 +507,16 @@ impl Scheduler {
         self.history_days = limits.history_days;
         self.registry = Some(registry);
         self.limits = Arc::new(limits);
+        self
+    }
+    /// Срок хранения принятых делегаций и пределы межсессионных инструментов.
+    pub fn with_session_tools(mut self, config: SessionToolsConfig) -> Self {
+        self.session_tools = config;
+        self
+    }
+    /// Хранилище вложений: уборка по сроку освобождает файлы сразу, как ручное удаление.
+    pub fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+        self.blobs = Some(blobs);
         self
     }
     pub fn notify(&self) {
@@ -1086,6 +1112,67 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Уборка принятых делегаций: через срок хранения удаляет их обычным путём, но молча.
+    /// Владелец удерживает сессию закреплением, группой или неразрешённой веткой; живые
+    /// исполнения и собственные дети её тоже сохраняют. `0` выключает уборку.
+    pub async fn purge_accepted_retention(&self, now: DateTime<Utc>) -> Result<usize, sqlx::Error> {
+        let retention = self.session_tools.accepted_retention;
+        if retention.is_zero() {
+            return Ok(0);
+        }
+        let cutoff = now - retention;
+        let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "select c.id,c.owner_id from conversations c
+             where c.accepted_at is not null and c.accepted_at <= $1
+               and c.archived_at is not null and c.spawn_depth > 0
+               and not c.pinned
+               and not exists (select 1 from conversation_group_members gm
+                                where gm.conversation_id=c.id)
+               and not exists (select 1 from conversation_group_pins gp
+                                where gp.conversation_id=c.id)
+               and coalesce(c.worktree->'branch_kept','false'::jsonb) <> 'true'::jsonb
+               and coalesce(c.worktree->>'state','') not in ('active','removing','dirty','failed')
+               and not exists (select 1 from executions e
+                                where e.conversation_id=c.id and e.state not in ('stopped','failed'))
+               and not exists (select 1 from conversations child
+                                where child.parent_conversation_id=c.id)
+             order by c.accepted_at,c.id limit $2",
+        )
+        .bind(cutoff)
+        .bind(RETENTION_BATCH)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut deleted = 0usize;
+        for (id, owner_id) in candidates {
+            match crate::deletion::delete_retained(
+                &self.pool,
+                self.blobs.as_deref(),
+                owner_id,
+                id,
+                Uuid::now_v7(),
+            )
+            .await
+            {
+                Ok(()) => deleted += 1,
+                Err(crate::deletion::DeleteError::Db(error)) => return Err(error),
+                Err(
+                    crate::deletion::DeleteError::NotFound
+                    | crate::deletion::DeleteError::Deleted
+                    | crate::deletion::DeleteError::Live
+                    | crate::deletion::DeleteError::WorktreeNotRemoved
+                    | crate::deletion::DeleteError::Referenced
+                    | crate::deletion::DeleteError::IdempotencyConflict,
+                ) => {}
+            }
+        }
+        tracing::info!(
+            kind = "accepted_retention_purged",
+            deleted,
+            "accepted delegates removed"
+        );
+        Ok(deleted)
+    }
+
     pub async fn maintenance(&self) -> Result<(), sqlx::Error> {
         let results = [
             events::purge_older_than(&self.pool, Duration::from_secs(7 * 86400)).await.map(|_| ()),
@@ -1097,6 +1184,20 @@ impl Scheduler {
         let mut first = None;
         for result in results {
             if let Err(error) = result {
+                log_error(&error);
+                if first.is_none() {
+                    first = Some(error);
+                }
+            }
+        }
+        // Уборка принятых делегаций идёт реже остальной уборки: не чаще раза в несколько часов.
+        let now = Utc::now();
+        if !self.session_tools.accepted_retention.is_zero()
+            && now.timestamp() >= self.retention_next.load(Ordering::Relaxed)
+        {
+            self.retention_next
+                .store((now + RETENTION_INTERVAL).timestamp(), Ordering::Relaxed);
+            if let Err(error) = self.purge_accepted_retention(now).await {
                 log_error(&error);
                 if first.is_none() {
                     first = Some(error);
