@@ -204,6 +204,8 @@ pub struct Current {
     pub state: Settled,
     pub fingerprint: String,
     pub closes: bool,
+    /// Граница завершения на момент чтения: последний законченный ход или начало состояния.
+    pub boundary: DateTime<Utc>,
 }
 
 /// Осевшее состояние по проекции: отпечаток должен совпасть с тем, что посчитает проектор.
@@ -249,6 +251,7 @@ pub async fn current_in_tx(
                     facts.phase_since,
                 ),
                 closes: state.closes_subscription(inputs.queue.queued),
+                boundary: inputs.last_turn_at.unwrap_or(since),
             }),
     )
 }
@@ -335,6 +338,7 @@ pub async fn evaluate_in_tx(
                 &fingerprint,
                 *id,
                 *armed_at,
+                facts.last_turn_at.unwrap_or(facts.since),
                 *chain_depth,
                 facts.now,
             )

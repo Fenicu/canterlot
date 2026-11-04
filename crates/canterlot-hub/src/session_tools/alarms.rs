@@ -85,6 +85,10 @@ struct CollectedSession {
     armed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     chain_depth: i32,
+    /// Граница завершения, которую покрывает удержанный итог: более поздний ход цели
+    /// не должен подменить его при отрисовке.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boundary: Option<DateTime<Utc>>,
 }
 
 impl Collected {
@@ -588,6 +592,7 @@ async fn apply_settled_in_tx(
                         subscription_id: None,
                         armed_at: None,
                         chain_depth: 0,
+                        boundary: None,
                     },
                 );
             }
@@ -623,6 +628,7 @@ pub async fn hold_for_batch_in_tx(
     fingerprint: &str,
     subscription_id: Uuid,
     armed_at: DateTime<Utc>,
+    boundary: DateTime<Utc>,
     chain_depth: i32,
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
@@ -663,6 +669,7 @@ pub async fn hold_for_batch_in_tx(
                 subscription_id: Some(subscription_id),
                 armed_at: Some(armed_at),
                 chain_depth,
+                boundary: Some(boundary),
             },
         );
         persist_collected(conn, &mut row, &collected, now).await?;
@@ -892,7 +899,7 @@ pub async fn set(
                 return Err(ToolError::new(ToolErrorCode::InvalidArguments));
             }
             let deadline = now + TimeDelta::seconds(deadline_seconds);
-            let mut current_states: Vec<(Uuid, String)> = Vec::new();
+            let mut current_states: Vec<(Uuid, String, DateTime<Utc>)> = Vec::new();
             let mut all_met = true;
             let mut any_met = false;
             for target in condition.session_ids.clone() {
@@ -910,7 +917,7 @@ pub async fn set(
                     condition
                         .armed
                         .insert(target.to_string(), current.fingerprint.clone());
-                    current_states.push((target, current.state.as_str().to_string()));
+                    current_states.push((target, current.state.as_str().to_string(), current.boundary));
                 } else {
                     all_met = false;
                 }
@@ -924,7 +931,7 @@ pub async fn set(
                     json!(
                         current_states
                             .iter()
-                            .map(|(id, state)| json!({"session_id": id, "state": state}))
+                            .map(|(id, state, _)| json!({"session_id": id, "state": state}))
                             .collect::<Vec<_>>()
                     )
                 };
@@ -965,7 +972,7 @@ pub async fn set(
             let mut collected = Collected::default();
             if condition.all && !batch {
                 // Цель, уже осевшая до взвода, входит в итог `all`: ждём только остальных.
-                for (target, state) in &current_states {
+                for (target, state, boundary) in &current_states {
                     if !states.iter().any(|wanted| wanted == state) {
                         continue;
                     }
@@ -978,6 +985,7 @@ pub async fn set(
                             subscription_id: None,
                             armed_at: None,
                             chain_depth,
+                            boundary: Some(*boundary),
                         },
                     );
                 }
@@ -1571,6 +1579,7 @@ async fn fill_timeout_collected(
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
+                boundary: None,
             },
         );
     }
@@ -1603,6 +1612,31 @@ async fn render_in_tx(
     Ok(text)
 }
 
+/// Жива ли подписка, удержавшая итог, и то же ли это поколение взвода. Строка берётся
+/// блокирующе, чтобы отписка и отпускание сериализовались.
+async fn subscription_alive_in_tx(
+    conn: &mut PgConnection,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    entry: &CollectedSession,
+) -> Result<bool, sqlx::Error> {
+    let (Some(subscription_id), Some(armed_at)) = (entry.subscription_id, entry.armed_at) else {
+        return Ok(false);
+    };
+    let alive: Option<Uuid> = sqlx::query_scalar(
+        "select id from session_subscriptions
+         where id=$1 and subscriber_id=$2 and target_id=$3 and armed_at=$4 and closed_at is null
+         for update",
+    )
+    .bind(subscription_id)
+    .bind(subscriber_id)
+    .bind(target_id)
+    .bind(armed_at)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(alive.is_some())
+}
+
 async fn render_one_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -1622,32 +1656,29 @@ async fn render_one_in_tx(
     let mut text = render_condition_text(row, now);
     // Итог держат только цели, которые пачка собрала; остальные состояния уже пришли
     // обычной подпиской и упоминаются одной строкой, без повторного уведомления.
-    let held: Vec<(Uuid, CollectedSession)> = condition
-        .session_ids
-        .iter()
-        .filter_map(|id| {
-            collected
-                .get(*id)
-                .filter(|entry| entry.subscription_id.is_some())
-                .map(|entry| (*id, entry.clone()))
-        })
-        .collect();
-    let reported: Vec<(Uuid, String)> = condition
-        .session_ids
-        .iter()
-        .filter_map(|id| {
-            collected
-                .get(*id)
-                .filter(|entry| entry.subscription_id.is_none() && entry.satisfied)
-                .map(|entry| (*id, entry.state.clone()))
-        })
-        .collect();
+    // Владение проверяется на каждой отдаче: отписка, приём или переподписка
+    // с новым поколением выбрасывают удержанный итог.
+    let mut held: Vec<(Uuid, CollectedSession)> = Vec::new();
+    let mut reported: Vec<(Uuid, String)> = Vec::new();
+    for target in &condition.session_ids {
+        let Some(entry) = collected.get(*target).cloned() else {
+            continue;
+        };
+        if entry.subscription_id.is_some() {
+            if subscription_alive_in_tx(conn, row.conversation_id, *target, &entry).await? {
+                held.push((*target, entry));
+            }
+        } else if entry.satisfied {
+            reported.push((*target, entry.state));
+        }
+    }
     // Общий предел сообщения делится между итогами поровну.
     let budget = summary::TEXT_LIMIT.saturating_sub(text.len() + 512) / held.len().max(1);
     for (target, entry) in &held {
         text.push_str("\n\n");
         if let Some(built) =
-            summary::build(conn, owner_id, *target, &entry.state, entry.armed_at).await?
+            summary::build_through(conn, owner_id, *target, &entry.state, entry.armed_at, entry.boundary)
+                .await?
         {
             text.push_str(&summary::render_bounded(&built, budget));
         } else {
@@ -1877,6 +1908,7 @@ mod tests {
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
+                boundary: None,
             },
         );
         assert!(!collected.complete(&condition));
@@ -1889,6 +1921,7 @@ mod tests {
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
+                boundary: None,
             },
         );
         assert!(collected.complete(&condition));

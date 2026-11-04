@@ -194,6 +194,19 @@ pub async fn build(
     state: &str,
     armed_at: Option<DateTime<Utc>>,
 ) -> Result<Option<SessionSummary>, sqlx::Error> {
+    build_through(conn, owner_id, target_id, state, armed_at, None).await
+}
+
+/// Тот же итог, но не позже границы завершения: удержанный пачкой результат не должен
+/// подменяться более поздним ходом цели.
+pub async fn build_through(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    target_id: Uuid,
+    state: &str,
+    armed_at: Option<DateTime<Utc>>,
+    through: Option<DateTime<Utc>>,
+) -> Result<Option<SessionSummary>, sqlx::Error> {
     let conversation: Option<(String, String, String, Option<Value>)> = sqlx::query_as(
         "select title,harness,model,worktree from conversations where id=$1 and owner_id=$2",
     )
@@ -213,14 +226,17 @@ pub async fn build(
          left join run_working w on w.input_command_id=r.input_command_id
          where r.conversation_id=$1
            and ((r.finished_at is not null
-                 and ($2::timestamptz is null or r.finished_at >= $2))
+                 and ($2::timestamptz is null or r.finished_at >= $2)
+                 and ($3::timestamptz is null or r.finished_at <= $3))
                 or (r.finished_at is null
+                    and $3::timestamptz is null
                     and exists(select 1 from executions e where e.id=r.execution_id
                                and e.state in ('created','starting','running','stopping'))))
          order by coalesce(r.finished_at,r.started_at),r.started_at,r.input_command_id",
     )
     .bind(target_id)
     .bind(armed_at)
+    .bind(through)
     .fetch_all(&mut *conn)
     .await?;
     let run_ids: Vec<Uuid> = runs.iter().map(|run| run.0).collect();
@@ -234,9 +250,11 @@ pub async fn build(
     let any_open = runs.iter().any(|run| run.4);
     let active: bool = sqlx::query_scalar(
         "select exists(select 1 from executions where conversation_id=$1
-                       and state in ('created','starting','running','stopping'))",
+                       and state in ('created','starting','running','stopping')
+                       and ($2::timestamptz is null or created_at <= $2))",
     )
     .bind(target_id)
+    .bind(through)
     .fetch_one(&mut *conn)
     .await?;
     // У идущего хода расход ещё не записан: показываем «unknown», а не нули.
@@ -254,9 +272,11 @@ pub async fn build(
         let previous: Option<Value> = sqlx::query_scalar(
             "select git from runs where conversation_id=$1 and git is not null
              and git->>'available' = 'true'
+             and ($2::timestamptz is null or finished_at <= $2)
              order by started_at desc limit 1",
         )
         .bind(target_id)
+        .bind(through)
         .fetch_optional(&mut *conn)
         .await?;
         git = aggregate_git(&[previous]);
@@ -266,12 +286,14 @@ pub async fn build(
          where conversation_id=$1 and kind='text' and parent_block_id is null
            and btrim(content) <> ''
            and (input_command_id = any($2) or ($3::timestamptz is not null and created_at >= $3))
+           and ($5::timestamptz is null or created_at <= $5)
          order by created_seq desc,created_at desc limit 1",
     )
     .bind(target_id)
     .bind(&run_ids)
     .bind(armed_at)
     .bind(ANSWER_LIMIT as i32)
+    .bind(through)
     .fetch_optional(&mut *conn)
     .await?;
     let detail = detail(conn, target_id, state).await?;

@@ -1269,3 +1269,171 @@ async fn failed_and_idle_complete_an_all_batch_with_the_failure_reported_once(po
     assert!(batch.0.contains("reported separately"), "{}", batch.0);
     assert!(batch.0.contains(&f.child.to_string()), "{}", batch.0);
 }
+
+async fn add_answer_run(
+    pool: &PgPool,
+    machine: Uuid,
+    conversation: Uuid,
+    execution: Uuid,
+    finished_at: DateTime<Utc>,
+    seq: i64,
+    answer: &str,
+) -> Uuid {
+    let command = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state)
+         values($1,$2,$3,$4,1,'deliver_input','{}','completed')",
+    )
+    .bind(command)
+    .bind(machine)
+    .bind(conversation)
+    .bind(execution)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into runs(input_command_id,execution_id,conversation_id,started_at,finished_at,duration_ms)
+         values($1,$2,$3,$4-($5::bigint * interval '1 millisecond'),$4,$5)",
+    )
+    .bind(command)
+    .bind(execution)
+    .bind(conversation)
+    .bind(finished_at)
+    .bind(1000_i64)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,input_command_id,parent_block_id,created_seq,created_at)
+         values($1,$2,$3,'text','final',1,$4,$5,null,$6,$7)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution)
+    .bind(conversation)
+    .bind(answer)
+    .bind(command)
+    .bind(seq)
+    .bind(finished_at)
+    .execute(pool)
+    .await
+    .unwrap();
+    command
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn held_summary_dropped_after_unsubscribe_accept_or_resubscribe_on_ordinary_delivery(
+    pool: PgPool,
+) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {
+                    "kind": "session_state",
+                    "session_ids": [f.child, f.child2, f.child3],
+                    "all": true
+                },
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    for (target, offset) in [
+        (f.child, 1),
+        (f.child2, 2),
+        (f.child3, 3),
+    ] {
+        f.refresh_id(target, now - TimeDelta::hours(1)).await;
+        f.refresh_id(target, now + TimeDelta::seconds(offset)).await;
+    }
+    assert_eq!(alarm_state(&f.pool, alarm_id(&armed)).await.0, "fired");
+
+    let mut tx = f.pool.begin().await.unwrap();
+    subs::unsubscribe_in_tx(&mut tx, f.orchestrator, f.child, "unsubscribed")
+        .await
+        .unwrap();
+    subs::close_for_accept_in_tx(&mut tx, f.child2, Some(f.orchestrator), "accepted")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    f.subscribe(f.child3).await;
+
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(10))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    let inputs = f.alarm_inputs().await;
+    assert_eq!(inputs.len(), 1);
+    let text = &inputs[0].0;
+    assert!(text.contains("settled (all, batched)"), "{text}");
+    assert!(
+        !text.contains("is now idle"),
+        "no stale summary is rendered: {text}"
+    );
+    assert!(!text.contains("Final answer"), "{text}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn later_run_does_not_replace_a_held_result(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    let execution = Uuid::now_v7();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state,outcome)
+         values($1,$2,1,'stopped','done')",
+    )
+    .bind(execution)
+    .bind(f.child)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let t1 = now + TimeDelta::seconds(1);
+    add_answer_run(&f.pool, f.machine, f.child, execution, t1, 1, "answer one").await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(2)).await;
+    assert_eq!(alarm_state(&f.pool, alarm_id(&armed)).await.0, "fired");
+
+    // Цель успела сходить ещё раз до отрисовки удержанного итога.
+    add_answer_run(
+        &f.pool,
+        f.machine,
+        f.child,
+        execution,
+        now + TimeDelta::seconds(15),
+        2,
+        "answer two",
+    )
+    .await;
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(20))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    let inputs = f.alarm_inputs().await;
+    let text = &inputs[0].0;
+    assert!(text.contains("answer one"), "{text}");
+    assert!(
+        !text.contains("answer two"),
+        "a later run does not replace the held result: {text}"
+    );
+}
