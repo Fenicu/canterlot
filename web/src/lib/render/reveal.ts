@@ -252,6 +252,20 @@ export class TextReveal {
 }
 
 const WORD = /\S+/g;
+const BLOCK_CLOSE = /<\/(?:p|li|h[1-6]|pre|td|th|dt|dd)>/gi;
+const CARET = '<span class="caret" aria-hidden="true"></span>';
+
+/**
+ * Ставит мигающую каретку в конец последнего блока markdown-хвоста: отдельный
+ * inline-block после списка или кода занимал бы лишнюю строку.
+ */
+export function caretInTail(html: string): string {
+  if (html.length === 0) return html;
+  let at = -1;
+  for (const match of html.matchAll(BLOCK_CLOSE)) at = match.index ?? at;
+  if (at < 0) return html + CARET;
+  return html.slice(0, at) + CARET + html.slice(at);
+}
 
 /**
  * Оборачивает только последние слова готового HTML хвоста: показанное не

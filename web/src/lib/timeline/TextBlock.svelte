@@ -4,7 +4,7 @@
   import { highlightWithin } from '#lib/render/highlight.js';
   import Html from '#lib/render/Html.svelte';
   import { sharedMarkdown } from '#lib/render/markdown.js';
-  import { markRevealWords, TextReveal } from '#lib/render/reveal.js';
+  import { caretInTail, markRevealWords, TextReveal } from '#lib/render/reveal.js';
   import { StreamingMarkdown } from '#lib/render/streamingMarkdown.js';
   import { durationMs, motionScale, prefersReducedMotion } from '#lib/motion.js';
   import type { BlockModel } from '#lib/stores/blocks.js';
@@ -183,7 +183,8 @@
   {#if rendered.tail.plain}
     <div class="tail"><div use:revealTail={{ text: rendered.tail.text ?? '', animate }}></div>{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
   {:else if rendered.tail.html}
-    <div class="tail"><Html html={markRevealWords(rendered.tail.html, animate ? shown.newWords : 0)} copy />{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
+    {@const tail = markRevealWords(rendered.tail.html, animate ? shown.newWords : 0)}
+    <div class="tail"><Html html={streaming ? caretInTail(tail) : tail} copy /></div>
   {:else if streaming}
     <span class="caret" aria-hidden="true"></span>
   {/if}
@@ -192,17 +193,4 @@
 <style>
   .text { min-width: 0; }
   .tail > :global(div), .tail > :global(div > p:last-child) { display: inline; }
-  .caret {
-    display: inline-block;
-    width: var(--caret-width);
-    height: var(--caret-height);
-    margin-left: var(--s1);
-    vertical-align: text-bottom;
-    background: var(--accent);
-    animation-name: caret;
-    animation-duration: var(--duration-caret);
-    animation-iteration-count: infinite;
-    animation-direction: alternate;
-  }
-  @keyframes caret { from { opacity: 1; } to { opacity: 0; } }
 </style>
