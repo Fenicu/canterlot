@@ -196,6 +196,19 @@ fn validate_refs(
 /// ждёт её разбора, пока срок не выйдет, и в счёт отказов не идёт.
 pub(crate) const SESSION_TASK_QUEUE_PATIENCE: TimeDelta = TimeDelta::hours(24);
 
+/// Сколько подряд временных сбоев базы терпим без расхода бюджета отказов.
+/// После суток непрерывных сбоев следующий считается обычным отказом.
+const TRANSIENT_PATIENCE: TimeDelta = TimeDelta::hours(24);
+const TRANSIENT_BACKOFF_MAX: i64 = 60;
+
+/// Пауза перед повтором после временного сбоя: 1 с, удваивается до 60 с.
+fn transient_backoff(count: i64) -> TimeDelta {
+    let shift = u32::try_from(count.saturating_sub(1))
+        .unwrap_or(u32::MAX)
+        .min(6);
+    TimeDelta::seconds((1_i64 << shift).min(TRANSIENT_BACKOFF_MAX))
+}
+
 #[derive(Clone, sqlx::FromRow)]
 struct JobRow {
     id: Uuid,
@@ -511,8 +524,7 @@ impl Scheduler {
                 // Взаимоблокировка и сбой сериализации не тратят бюджет отказов:
                 // транзакция уже откатана, задание повторяется чуть позже.
                 if crate::db::is_transient(&error) {
-                    self.defer_transient_job(&claimed, now).await?;
-                    report.retried += 1;
+                    self.defer_transient_job(&claimed, now, &mut report).await?;
                     continue;
                 }
                 log_error(&error);
@@ -528,8 +540,7 @@ impl Scheduler {
                     .await
                 {
                     if crate::db::is_transient(&error) {
-                        self.defer_transient_job(&claimed, now).await?;
-                        report.retried += 1;
+                        self.defer_transient_job(&claimed, now, &mut report).await?;
                     } else {
                         return Err(error);
                     }
@@ -613,8 +624,7 @@ impl Scheduler {
                     && crate::db::is_transient(database)
                 {
                     tx.rollback().await?;
-                    self.defer_transient_job(&job, now).await?;
-                    report.retried += 1;
+                    self.defer_transient_job(&job, now, report).await?;
                     return Ok(());
                 }
                 let (reason, permanent) = submit_failure(&error);
@@ -633,19 +643,51 @@ impl Scheduler {
         &self,
         job: &JobRow,
         now: DateTime<Utc>,
+        report: &mut TickReport,
     ) -> Result<(), sqlx::Error> {
-        let delay = crate::db::retry_delay(job.id, u32::try_from(job.attempts).unwrap_or(1).max(1));
-        let at = now
-            + TimeDelta::from_std(delay)
-                .map_err(|_| sqlx::Error::InvalidArgument("retry duration out of range".into()))?;
+        let previous_count = job
+            .result
+            .as_ref()
+            .and_then(|result| result.get("transient_count"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let previous_since = job
+            .result
+            .as_ref()
+            .and_then(|result| result.get("transient_since"))
+            .and_then(Value::as_str)
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc));
+        let since = previous_since.unwrap_or(now);
+        if now - since >= TRANSIENT_PATIENCE {
+            // Сутки непрерывных сбоев: дальше это уже обычный отказ, который
+            // расходует бюджет и в конце концов закрывает задание.
+            self.record_failure(job, now, "transient_timeout", false, report)
+                .await?;
+            return Ok(());
+        }
+        let count = previous_count.saturating_add(1);
+        if count == 1 || count % 10 == 0 {
+            tracing::warn!(
+                job_id = %job.id,
+                kind = %job.kind,
+                transient_count = count,
+                "scheduled job retries after a transient database error"
+            );
+        }
+        let at = now + transient_backoff(count);
         sqlx::query(
-            "update scheduled_jobs set run_at=$2,updated_at=clock_timestamp()
+            "update scheduled_jobs
+             set run_at=$2,result=coalesce(result,'{}'::jsonb) || $3::jsonb,
+                 updated_at=clock_timestamp()
              where id=$1 and state='pending'",
         )
         .bind(job.id)
         .bind(at)
+        .bind(json!({"transient_count": count, "transient_since": since}))
         .execute(&self.pool)
         .await?;
+        report.retried += 1;
         Ok(())
     }
 
@@ -785,8 +827,22 @@ impl Scheduler {
                         return Err(error);
                     }
                 };
+                // Поля серии временных сбоев переживают только её собственный
+                // переход в обычный отказ: иначе после суток сбоев счётчик
+                // начинался бы заново и задание не дошло бы до отказа. Любой
+                // другой отказ рвёт серию и стирает её поля.
+                let mut result = json!({"error":reason});
+                if reason == "transient_timeout"
+                    && let Some(object) = result.as_object_mut()
+                {
+                    for key in ["transient_count", "transient_since"] {
+                        if let Some(value) = current.result.as_ref().and_then(|r| r.get(key)) {
+                            object.insert(key.into(), value.clone());
+                        }
+                    }
+                }
                 let updated = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,failures=$5,blocked_since=$6,updated_at=clock_timestamp() where id=$1 returning *")
-                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).bind(current.failures).bind(current.blocked_since).fetch_one(&mut *tx).await;
+                    .bind(current.id).bind(current.attempts).bind(at).bind(result).bind(current.failures).bind(current.blocked_since).fetch_one(&mut *tx).await;
                 let updated: JobRow = match updated {
                     Ok(updated) => updated,
                     Err(error) => {
