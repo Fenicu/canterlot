@@ -7,7 +7,7 @@ use canterlot_hub::{
     delivery::ContentBlock,
     dispatcher::Dispatcher,
     scheduler::Scheduler,
-    session_tools::{self, Caller, ToolContext, settle::SettleConfig},
+    session_tools::{self, Caller, ToolContext, settle::SettleConfig, subs},
     snapshot, testkit,
 };
 use chrono::{DateTime, TimeDelta, Utc};
@@ -23,6 +23,8 @@ struct Fx {
     machine: Uuid,
     orchestrator: Uuid,
     child: Uuid,
+    child2: Uuid,
+    child3: Uuid,
     execution: Uuid,
 }
 
@@ -38,6 +40,8 @@ impl Fx {
     async fn new(pool: PgPool) -> Self {
         let seed = testkit::seed(&pool).await;
         let child = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
+        let child2 = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
+        let child3 = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
         // Без исполнения цель устоялась в idle, когда пройдёт окно тишины.
         let execution = Uuid::now_v7();
         sqlx::query("update machines set availability='available' where id=$1")
@@ -62,6 +66,8 @@ impl Fx {
             machine: seed.machine_id,
             orchestrator: seed.conversation_id,
             child,
+            child2,
+            child3,
             execution,
         }
     }
@@ -90,9 +96,44 @@ impl Fx {
     }
 
     async fn refresh(&self, at: DateTime<Utc>) {
-        activity::refresh(&self.pool, self.child, at, &thresholds(), Uuid::now_v7())
+        self.refresh_id(self.child, at).await;
+    }
+
+    async fn refresh_id(&self, id: Uuid, at: DateTime<Utc>) {
+        activity::refresh(&self.pool, id, at, &thresholds(), Uuid::now_v7())
             .await
             .unwrap();
+    }
+
+    async fn subscribe(&self, target: Uuid) {
+        let mut tx = self.pool.begin().await.unwrap();
+        subs::subscribe_in_tx(&mut tx, self.owner, self.orchestrator, target, 0)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn event_jobs(&self) -> i64 {
+        sqlx::query_scalar(
+            "select count(*) from scheduled_jobs
+             where kind='session_task' and conversation_id=$1
+               and payload->>'action'='event'",
+        )
+        .bind(self.orchestrator)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn alarm_inputs(&self) -> Vec<(String, Value)> {
+        sqlx::query_as(
+            "select content->0->>'text',origin from inputs
+             where conversation_id=$1 order by input_seq",
+        )
+        .bind(self.orchestrator)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap()
     }
 
     async fn fill_queue(&self) {
@@ -465,4 +506,501 @@ async fn abandon_handler_marks_an_armed_alarm_failed(pool: PgPool) {
             .unwrap();
     assert_eq!(state, "failed");
     assert_eq!(reason.as_deref(), Some("delivery_failed"));
+}
+
+async fn alarm_state(pool: &PgPool, id: Uuid) -> (String, Option<String>, Value) {
+    sqlx::query_as("select state,fired_reason,collected from alarms where id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn alarm_id(value: &Value) -> Uuid {
+    value["alarm_id"].as_str().unwrap().parse().unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn all_condition_fires_only_when_every_target_settles(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "key": "all"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(armed["state"], "armed");
+    let id = alarm_id(&armed);
+
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
+    assert_eq!(f.event_jobs().await, 0, "the condition is not met yet");
+
+    f.refresh_id(f.child2, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child2, now + TimeDelta::seconds(1)).await;
+    let (state, reason, collected) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("condition"));
+    assert!(collected["sessions"][f.child.to_string()].is_object());
+    assert!(collected["sessions"][f.child2.to_string()].is_object());
+
+    let sch = scheduler(&f.pool, Default::default());
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(10)).await.unwrap().fired,
+        1
+    );
+    let inputs = f.alarm_inputs().await;
+    assert_eq!(inputs.len(), 1);
+    assert!(
+        inputs[0].0.contains(&f.child.to_string()),
+        "{}",
+        inputs[0].0
+    );
+    assert!(
+        inputs[0].0.contains(&f.child2.to_string()),
+        "{}",
+        inputs[0].0
+    );
+    assert!(inputs[0].0.contains("idle"), "{}", inputs[0].0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn batch_holds_summaries_and_delivers_them_in_one_input(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {
+                    "kind": "session_state",
+                    "session_ids": [f.child, f.child2],
+                    "all": true
+                },
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(armed["state"], "armed");
+    let id = alarm_id(&armed);
+
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    assert_eq!(f.event_jobs().await, 0, "the batch holds the idle result");
+    let (state, _, collected) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "armed");
+    assert!(collected["sessions"][f.child.to_string()].is_object());
+
+    f.refresh_id(f.child2, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child2, now + TimeDelta::seconds(1)).await;
+    assert_eq!(alarm_state(&f.pool, id).await.0, "fired");
+    assert_eq!(f.event_jobs().await, 0, "both results are in the batch");
+
+    let sch = scheduler(&f.pool, Default::default());
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(10)).await.unwrap().fired,
+        1
+    );
+    let inputs = f.alarm_inputs().await;
+    assert_eq!(inputs.len(), 1, "one input for the whole batch");
+    let text = &inputs[0].0;
+    assert!(text.contains(&f.child.to_string()), "{text}");
+    assert!(text.contains(&f.child2.to_string()), "{text}");
+    assert_eq!(text.matches("[canterlot] Session").count(), 2, "{text}");
+    assert_eq!(inputs[0].1["kind"], "alarm");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cancelling_a_batch_releases_held_summaries(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    assert_eq!(f.event_jobs().await, 0);
+
+    let cancelled = f
+        .call("alarms.cancel", json!({"alarm_id": alarm_id(&armed)}))
+        .await
+        .unwrap();
+    assert_eq!(cancelled["result"], "cancelled");
+    assert_eq!(f.event_jobs().await, 1, "the held result is released");
+
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(10))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    let inputs = f.alarm_inputs().await;
+    assert_eq!(inputs.len(), 1);
+    assert!(inputs[0].0.contains(&f.child.to_string()));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn batch_release_drops_a_summary_after_unsubscribe_or_accept(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    f.refresh_id(f.child2, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child2, now + TimeDelta::seconds(1)).await;
+
+    let mut tx = f.pool.begin().await.unwrap();
+    subs::unsubscribe_in_tx(&mut tx, f.orchestrator, f.child, "unsubscribed")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query(
+        "update session_subscriptions set closed_at=clock_timestamp(),closed_reason='accepted'
+         where subscriber_id=$1 and target_id=$2",
+    )
+    .bind(f.orchestrator)
+    .bind(f.child2)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+
+    f.call("alarms.cancel", json!({"alarm_id": alarm_id(&armed)}))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.event_jobs().await,
+        0,
+        "neither summary survives a dead subscription"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn batch_release_drops_a_summary_after_resubscribe_with_a_new_generation(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    let before: DateTime<Utc> = sqlx::query_scalar(
+        "select armed_at from session_subscriptions where subscriber_id=$1 and target_id=$2",
+    )
+    .bind(f.orchestrator)
+    .bind(f.child)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+
+    f.subscribe(f.child).await;
+    let after: DateTime<Utc> = sqlx::query_scalar(
+        "select armed_at from session_subscriptions where subscriber_id=$1 and target_id=$2",
+    )
+    .bind(f.orchestrator)
+    .bind(f.child)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(after > before, "resubscribe starts a new generation");
+
+    f.call("alarms.cancel", json!({"alarm_id": alarm_id(&armed)}))
+        .await
+        .unwrap();
+    assert_eq!(f.event_jobs().await, 0, "the old generation is stale");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn overlapping_batches_keep_each_summary_in_the_first_batch_that_collected_it(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let first = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "first"
+            }),
+        )
+        .await
+        .unwrap();
+    let second = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "second"
+            }),
+        )
+        .await
+        .unwrap();
+
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    let (_, _, first_collected) = alarm_state(&f.pool, alarm_id(&first)).await;
+    let (_, _, second_collected) = alarm_state(&f.pool, alarm_id(&second)).await;
+    assert!(first_collected["sessions"][f.child.to_string()].is_object());
+    assert!(
+        second_collected["sessions"]
+            .get(f.child.to_string())
+            .is_none(),
+        "the first batch owns the summary"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn watchdog_cancels_silently_when_the_condition_holds(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child]},
+                "only_on_timeout": true,
+                "deadline_seconds": 120,
+                "key": "watch"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(armed["state"], "armed");
+
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    let (state, reason, _) = alarm_state(&f.pool, alarm_id(&armed)).await;
+    assert_eq!(state, "cancelled");
+    assert_eq!(reason.as_deref(), Some("condition_met"));
+    assert_eq!(f.event_jobs().await, 0, "the watchdog says nothing");
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::minutes(10))
+            .await
+            .unwrap()
+            .fired,
+        0
+    );
+    assert!(f.alarm_inputs().await.is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn watchdog_fires_on_the_deadline_when_the_targets_never_settle(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child]},
+                "only_on_timeout": true,
+                "deadline_seconds": 120,
+                "key": "watch"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    let sch = scheduler(&f.pool, Default::default());
+
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(126)).await.unwrap().fired,
+        1
+    );
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("timed_out"));
+    let inputs = f.alarm_inputs().await;
+    assert_eq!(inputs.len(), 1);
+    assert!(inputs[0].0.contains("timed out"), "{}", inputs[0].0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn released_batch_summary_is_not_delivered_twice_after_a_restart(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    f.call("alarms.cancel", json!({"alarm_id": alarm_id(&armed)}))
+        .await
+        .unwrap();
+
+    let first = scheduler(&f.pool, Default::default());
+    assert_eq!(
+        first
+            .tick(now + TimeDelta::seconds(10))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    assert_eq!(f.alarm_inputs().await.len(), 1);
+
+    // Ответ потерялся: задание снова ждёт выполнения, новый планировщик его подхватывает.
+    sqlx::query(
+        "update scheduled_jobs set state='pending',run_at=$1
+         where kind='session_task' and payload->>'action'='event'",
+    )
+    .bind(now + TimeDelta::seconds(10))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let restarted = scheduler(&f.pool, Default::default());
+    assert_eq!(
+        restarted
+            .tick(now + TimeDelta::seconds(11))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    assert_eq!(
+        f.alarm_inputs().await.len(),
+        1,
+        "the released summary has one input"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn batch_and_subscription_fire_once_at_the_end(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    f.subscribe(f.child).await;
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child, f.child2], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    // Second target is watched by a watchdog, not batched.
+    let watchdog = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child3]},
+                "only_on_timeout": true,
+                "deadline_seconds": 3600,
+                "key": "watch"
+            }),
+        )
+        .await
+        .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    f.refresh_id(f.child2, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child2, now + TimeDelta::seconds(1)).await;
+    f.refresh_id(f.child3, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child3, now + TimeDelta::seconds(1)).await;
+    assert_eq!(alarm_state(&f.pool, alarm_id(&armed)).await.0, "fired");
+    assert_eq!(
+        alarm_state(&f.pool, alarm_id(&watchdog)).await.0,
+        "cancelled"
+    );
+    assert_eq!(f.event_jobs().await, 0, "no separate subscription result");
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(10))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    assert_eq!(f.alarm_inputs().await.len(), 1);
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::hours(2))
+            .await
+            .unwrap()
+            .fired,
+        0,
+        "the watchdog stays silent at its deadline"
+    );
+    assert_eq!(f.alarm_inputs().await.len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn batch_needs_all_and_conditions_only(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let error = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child]},
+                "batch": true
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, session_tools::ToolErrorCode::InvalidArguments);
+
+    let error = f
+        .call("alarms.set", json!({"in_seconds": 60, "batch": true}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, session_tools::ToolErrorCode::InvalidArguments);
+
+    let error = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child]},
+                "only_on_timeout": true,
+                "deadline_seconds": 30
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, session_tools::ToolErrorCode::InvalidArguments);
 }

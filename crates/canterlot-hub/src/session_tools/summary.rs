@@ -564,6 +564,11 @@ fn footer(state: &str, detail: &Detail) -> Option<&'static str> {
 }
 
 pub fn render(summary: &SessionSummary) -> String {
+    render_bounded(summary, TEXT_LIMIT)
+}
+
+/// Тот же итог, но не длиннее `limit`: пачка делит общий предел поровну между целями.
+pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
     let mut head = format!(
         "[canterlot] Session \"{}\" (id {}, {}, model {}) is now {}.\n",
         summary.title, summary.id, summary.harness, summary.model, summary.state
@@ -603,7 +608,7 @@ pub fn render(summary: &SessionSummary) -> String {
         Some(answer) => {
             // Заголовок ответа и разделитель перед подвалом входят в общий предел.
             let reserved = out.len() + tail.len() + label.len() + 160;
-            let budget = ANSWER_LIMIT.min(TEXT_LIMIT.saturating_sub(reserved));
+            let budget = ANSWER_LIMIT.min(limit.saturating_sub(reserved));
             let kept = truncate_at_boundary(&answer.head, budget);
             if answer.total_bytes > kept.len() {
                 let _ = writeln!(
@@ -622,7 +627,8 @@ pub fn render(summary: &SessionSummary) -> String {
         }
     }
     out.push_str(&tail);
-    out.truncate(out.trim_end().len());
+    let end = truncate_at_boundary(out.trim_end(), limit).len();
+    out.truncate(end);
     out
 }
 

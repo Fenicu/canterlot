@@ -4,7 +4,7 @@
 //! с действием `alarm_deliver`, а доставка забирает все сработавшие будильники получателя
 //! пачкой. Заметки и тексты сообщений — данные уровня сообщения: в журнал и `Debug` не попадают.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{
     Caller, ToolContext, ToolError, ToolErrorCode, access, completion, origin, parse_arguments,
-    send, settle, subs,
+    send, settle, subs, summary,
 };
 use crate::{
     delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
@@ -25,6 +25,7 @@ use crate::{
 /// Сколько сработавших будильников получателя сливаются в одно сообщение.
 const COALESCE: TimeDelta = TimeDelta::seconds(5);
 const MAX_ARMED: i64 = 20;
+const MAX_TARGETS: usize = 20;
 const MAX_NOTE_BYTES: usize = 2 * 1024;
 const MIN_AT_SECONDS: i64 = 30;
 const MAX_AT_SECONDS: i64 = 366 * 86400;
@@ -58,6 +59,63 @@ struct SessionCondition {
     /// Отпечаток каждой цели на момент взвода. Условие, уже истинное, не взводится.
     #[serde(default)]
     armed: BTreeMap<String, String>,
+}
+
+/// Что уже собрано по целям: для `all` — состояния, для пачки — удержанные итоги.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct Collected {
+    #[serde(default)]
+    sessions: BTreeMap<String, CollectedSession>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CollectedSession {
+    state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
+    /// Пачка хранит, из какой подписки и какого поколения взят итог.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subscription_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    armed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    chain_depth: i32,
+}
+
+impl Collected {
+    fn parse(value: &Value) -> Self {
+        serde_json::from_value(value.clone()).unwrap_or_default()
+    }
+
+    fn as_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|_| json!({"sessions": {}}))
+    }
+
+    fn get(&self, id: Uuid) -> Option<&CollectedSession> {
+        self.sessions.get(&id.to_string())
+    }
+
+    fn has(&self, id: Uuid) -> bool {
+        self.get(id).is_some()
+    }
+
+    fn insert(&mut self, id: Uuid, entry: CollectedSession) {
+        self.sessions.insert(id.to_string(), entry);
+    }
+
+    /// Все цели условия собраны и в подходящем состоянии.
+    fn complete(&self, condition: &SessionCondition) -> bool {
+        condition.session_ids.iter().all(|id| {
+            self.get(*id)
+                .is_some_and(|entry| condition.states.contains(&entry.state))
+        })
+    }
+
+    fn any_matching(&self, condition: &SessionCondition) -> bool {
+        self.sessions
+            .values()
+            .any(|entry| condition.states.contains(&entry.state))
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -179,6 +237,7 @@ fn condition_text(
     condition: &SessionCondition,
     deadline: DateTime<Utc>,
     only_on_timeout: bool,
+    batch: bool,
 ) -> String {
     let ids = condition
         .session_ids
@@ -186,9 +245,15 @@ fn condition_text(
         .map(Uuid::to_string)
         .collect::<Vec<_>>()
         .join(", ");
+    let scope = match (condition.all, batch) {
+        (true, true) => ", all, batched",
+        (true, false) => ", all",
+        (false, true) => ", batched",
+        (false, false) => "",
+    };
     let watchdog = if only_on_timeout { "; watchdog" } else { "" };
     format!(
-        "sessions {ids} settle in {} (deadline {}){watchdog}",
+        "sessions {ids} settle in {}{scope}; deadline {}{watchdog}",
         states_text(&condition.states),
         clock(deadline)
     )
@@ -203,19 +268,15 @@ fn parse_condition(when: &WhenArgs) -> Result<(SessionCondition, Vec<String>), T
             "Only the session_state condition is supported yet",
         ));
     }
-    if when.all == Some(true) {
-        return Err(ToolError::with_message(
-            ToolErrorCode::InvalidArguments,
-            "all is not supported yet",
-        ));
-    }
     let ids = when.session_ids.clone().unwrap_or_default();
-    if ids.len() != 1 {
+    if ids.is_empty() || ids.len() > MAX_TARGETS {
         return Err(ToolError::with_message(
             ToolErrorCode::InvalidArguments,
-            "session_state needs exactly one session id",
+            "session_state needs one to twenty session ids",
         ));
     }
+    let mut seen = BTreeSet::new();
+    let ids: Vec<Uuid> = ids.into_iter().filter(|id| seen.insert(*id)).collect();
     let states = when
         .states
         .clone()
@@ -232,7 +293,7 @@ fn parse_condition(when: &WhenArgs) -> Result<(SessionCondition, Vec<String>), T
             kind: "session_state".into(),
             session_ids: ids,
             states: states.clone(),
-            all: false,
+            all: when.all.unwrap_or(false),
             armed: BTreeMap::new(),
         },
         states,
@@ -257,7 +318,7 @@ fn view(row: &AlarmRow) -> AlarmView {
         .as_ref()
         .and_then(|condition| {
             row.deadline_at
-                .map(|deadline| condition_text(condition, deadline, row.only_on_timeout))
+                .map(|deadline| condition_text(condition, deadline, row.only_on_timeout, row.batch))
         })
         .unwrap_or_else(|| match row.kind.as_str() {
             "at" => row
@@ -413,53 +474,191 @@ pub async fn evaluate_session_in_tx(
     .bind(target_id.to_string())
     .fetch_all(&mut *conn)
     .await?;
-    let mut fired = false;
+    let mut changed = false;
     for mut row in rows {
-        let Some(mut condition) = serde_json::from_value::<SessionCondition>(
+        match apply_settled_in_tx(
+            conn,
+            &mut row,
+            target_id,
+            state.as_str(),
+            &fingerprint,
+            now,
+            correlation_id,
+        )
+        .await?
+        {
+            Applied::Fired | Applied::Cancelled => changed = true,
+            Applied::Held | Applied::Skipped => {}
+        }
+    }
+    Ok(changed)
+}
+
+enum Applied {
+    Skipped,
+    Held,
+    Fired,
+    Cancelled,
+}
+
+async fn persist_collected(
+    conn: &mut PgConnection,
+    row: &mut AlarmRow,
+    collected: &Collected,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    row.collected = collected.as_value();
+    row.updated_at = now;
+    sqlx::query("update alarms set collected=$2,updated_at=$3 where id=$1")
+        .bind(row.id)
+        .bind(&row.collected)
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_settled_in_tx(
+    conn: &mut PgConnection,
+    row: &mut AlarmRow,
+    target_id: Uuid,
+    state: &str,
+    fingerprint: &str,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<Applied, sqlx::Error> {
+    let Some(condition) =
+        serde_json::from_value::<SessionCondition>(row.condition.clone().unwrap_or(Value::Null))
+            .ok()
+    else {
+        return Ok(Applied::Skipped);
+    };
+    let matching = condition.states.iter().any(|wanted| wanted == state);
+    if !matching && !(row.batch && state == "deleted") {
+        return Ok(Applied::Skipped);
+    }
+    if condition
+        .armed
+        .get(&target_id.to_string())
+        .is_some_and(|seen| seen == fingerprint)
+    {
+        return Ok(Applied::Skipped);
+    }
+    let mut collected = Collected::parse(&row.collected);
+    let already = collected
+        .get(target_id)
+        .is_some_and(|entry| entry.fingerprint.as_deref() == Some(fingerprint));
+    if row.batch {
+        // Пачку наполняет подписка, удерживая итог вместе с его поколением. Удаление
+        // цели известно только здесь, поэтому оно добавляется напрямую.
+        if !already && state != "deleted" {
+            return Ok(Applied::Skipped);
+        }
+        if !already {
+            collected.insert(
+                target_id,
+                CollectedSession {
+                    state: state.into(),
+                    fingerprint: Some(fingerprint.into()),
+                    subscription_id: None,
+                    armed_at: None,
+                    chain_depth: 0,
+                },
+            );
+            persist_collected(conn, row, &collected, now).await?;
+        }
+    } else if !already {
+        collected.insert(
+            target_id,
+            CollectedSession {
+                state: state.into(),
+                fingerprint: Some(fingerprint.into()),
+                subscription_id: None,
+                armed_at: None,
+                chain_depth: 0,
+            },
+        );
+        persist_collected(conn, row, &collected, now).await?;
+    }
+    let met = if condition.all {
+        collected.complete(&condition)
+    } else {
+        collected.any_matching(&condition)
+    };
+    if !met {
+        return Ok(Applied::Held);
+    }
+    if row.only_on_timeout {
+        // Сторож: условие, наступившее раньше срока, отменяет будильник молча.
+        cancel_in_tx(conn, row.id, "condition_met", now, correlation_id).await?;
+        return Ok(Applied::Cancelled);
+    }
+    row.collected = collected.as_value();
+    fire_in_tx(conn, row, "condition", now, now, correlation_id, true).await?;
+    Ok(Applied::Fired)
+}
+
+/// Удержание итога пачкой: первая взведённая пачка, у которой этой цели ещё нет,
+/// забирает отпечаток и запоминает подписку с поколением взвода.
+#[allow(clippy::too_many_arguments)]
+pub async fn hold_for_batch_in_tx(
+    conn: &mut PgConnection,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    state: &str,
+    fingerprint: &str,
+    subscription_id: Uuid,
+    armed_at: DateTime<Utc>,
+    chain_depth: i32,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    if !matches!(state, "idle" | "stopped") {
+        return Ok(false);
+    }
+    let rows: Vec<AlarmRow> = sqlx::query_as(
+        "select * from alarms
+         where state='armed' and batch and condition->>'kind'='session_state'
+           and conversation_id=$1 and condition->'session_ids' ? $2
+         order by created_at,id
+         for update skip locked",
+    )
+    .bind(subscriber_id)
+    .bind(target_id.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    for mut row in rows {
+        let Some(condition) = serde_json::from_value::<SessionCondition>(
             row.condition.clone().unwrap_or(Value::Null),
         )
         .ok() else {
             continue;
         };
-        if !condition
-            .states
-            .iter()
-            .any(|wanted| wanted == state.as_str())
-        {
+        if !condition.all || !condition.states.iter().any(|wanted| wanted == state) {
             continue;
         }
-        if condition
-            .armed
-            .get(&target_id.to_string())
-            .is_some_and(|seen| seen == &fingerprint)
-        {
+        let mut collected = Collected::parse(&row.collected);
+        if collected.has(target_id) {
             continue;
         }
-        if row.only_on_timeout {
-            // Сторож: условие, наступившее раньше срока, отменяет будильник молча.
-            row.state = "cancelled".into();
-            row.fired_reason = Some("condition_met".into());
-            row.updated_at = now;
-            sqlx::query("update alarms set state='cancelled',fired_reason='condition_met',updated_at=$2 where id=$1")
-                .bind(row.id)
-                .bind(now)
-                .execute(&mut *conn)
-                .await?;
-            changed_in_tx(conn, &row, correlation_id).await?;
-            continue;
-        }
-        condition
-            .armed
-            .insert(target_id.to_string(), fingerprint.clone());
-        row.condition = Some(serde_json::to_value(&condition).unwrap_or(Value::Null));
-        row.collected = json!({"state": state.as_str(), "session_id": target_id});
-        fire_in_tx(conn, &mut row, "condition", now, now, correlation_id, true).await?;
-        fired = true;
+        collected.insert(
+            target_id,
+            CollectedSession {
+                state: state.into(),
+                fingerprint: Some(fingerprint.into()),
+                subscription_id: Some(subscription_id),
+                armed_at: Some(armed_at),
+                chain_depth,
+            },
+        );
+        persist_collected(conn, &mut row, &collected, now).await?;
+        return Ok(true);
     }
-    Ok(fired)
+    Ok(false)
 }
 
-/// Цель удалена: условие с `deleted` срабатывает, остальные ждут срока.
+/// Цель удалена: условие с `deleted` срабатывает, пачка считает её собранной,
+/// сторож молчит, если условие выполнено.
 pub async fn on_target_deleted_in_tx(
     conn: &mut PgConnection,
     target_id: Uuid,
@@ -475,17 +674,16 @@ pub async fn on_target_deleted_in_tx(
     .fetch_all(&mut *conn)
     .await?;
     for mut row in rows {
-        let Some(condition) = serde_json::from_value::<SessionCondition>(
-            row.condition.clone().unwrap_or(Value::Null),
+        let _ = apply_settled_in_tx(
+            conn,
+            &mut row,
+            target_id,
+            "deleted",
+            "deleted",
+            now,
+            Uuid::now_v7(),
         )
-        .ok() else {
-            continue;
-        };
-        if !condition.states.iter().any(|state| state == "deleted") || row.only_on_timeout {
-            continue;
-        }
-        row.collected = json!({"state": "deleted", "session_id": target_id});
-        fire_in_tx(conn, &mut row, "condition", now, now, Uuid::now_v7(), true).await?;
+        .await?;
     }
     Ok(())
 }
@@ -556,16 +754,14 @@ pub async fn set(
     {
         return Err(ToolError::new(ToolErrorCode::TooLarge));
     }
-    if args.only_on_timeout == Some(true) || args.batch == Some(true) {
-        return Err(ToolError::with_message(
-            ToolErrorCode::InvalidArguments,
-            "Watchdog and batch alarms are not supported yet",
-        ));
-    }
+    let only_on_timeout = args.only_on_timeout.unwrap_or(false);
+    let batch = args.batch.unwrap_or(false);
     let time_sources = usize::from(args.at.is_some())
         + usize::from(args.in_seconds.is_some())
         + usize::from(args.when.is_some());
-    if time_sources != 1 || (args.when.is_none() && args.deadline_seconds.is_some()) {
+    if time_sources != 1
+        || (args.when.is_none() && (args.deadline_seconds.is_some() || only_on_timeout || batch))
+    {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
 
@@ -610,72 +806,116 @@ pub async fn set(
     if armed >= MAX_ARMED {
         return Err(ToolError::new(ToolErrorCode::TooManyAlarms));
     }
+    let chain_depth = access::current_depth(&mut tx, caller.conversation_id).await?;
 
-    let (kind, fire_at, deadline_at, condition, response, run_at, timeout) = if let Some(at) =
-        args.at.as_deref()
-    {
-        let at = DateTime::parse_from_rfc3339(at)
-            .map_err(|_| ToolError::new(ToolErrorCode::InvalidArguments))?
-            .with_timezone(&Utc);
-        let seconds = (at - now).num_seconds();
-        if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
-            return Err(ToolError::new(ToolErrorCode::InvalidArguments));
-        }
-        let condition = None;
-        let response = json!({
-            "state": "armed",
-            "alarm_id": Uuid::now_v7(),
-            "fires_at": time(at),
-            "condition": format!("at {}", clock(at)),
-            "replaced": replaced,
-            "hint": HINT_ARMED,
-        });
-        (
-            "at",
-            Some(at),
-            None,
-            condition,
-            response,
-            at + COALESCE,
-            false,
-        )
-    } else if let Some(seconds) = args.in_seconds {
-        if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
-            return Err(ToolError::new(ToolErrorCode::InvalidArguments));
-        }
-        let at = now + TimeDelta::seconds(seconds);
-        let response = json!({
-            "state": "armed",
-            "alarm_id": Uuid::now_v7(),
-            "fires_at": time(at),
-            "condition": format!("at {}", clock(at)),
-            "replaced": replaced,
-            "hint": HINT_ARMED,
-        });
-        ("at", Some(at), None, None, response, at + COALESCE, false)
-    } else {
-        let when = args
-            .when
-            .as_ref()
-            .ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
-        let (mut condition, states) = parse_condition(when)?;
-        let deadline_seconds = args.deadline_seconds.unwrap_or(DEFAULT_DEADLINE_SECONDS);
-        if !(MIN_DEADLINE_SECONDS..=MAX_DEADLINE_SECONDS).contains(&deadline_seconds) {
-            return Err(ToolError::new(ToolErrorCode::InvalidArguments));
-        }
-        let deadline = now + TimeDelta::seconds(deadline_seconds);
-        let target = condition.session_ids[0];
-        if target == caller.conversation_id {
-            return Err(ToolError::new(ToolErrorCode::SessionNotFound));
-        }
-        access::target_in_tx(&mut tx, &context.config, &waiter, caller.owner_id, target).await?;
-        if let Some(current) = subs::current_in_tx(&mut tx, target, now, &context.settle).await? {
-            if states.iter().any(|state| state == current.state.as_str()) {
+    let (kind, fire_at, deadline_at, condition, collected, response, run_at, timeout) =
+        if let Some(at) = args.at.as_deref() {
+            let at = DateTime::parse_from_rfc3339(at)
+                .map_err(|_| ToolError::new(ToolErrorCode::InvalidArguments))?
+                .with_timezone(&Utc);
+            let seconds = (at - now).num_seconds();
+            if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
+                return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+            }
+            let condition = None;
+            let response = json!({
+                "state": "armed",
+                "alarm_id": Uuid::now_v7(),
+                "fires_at": time(at),
+                "condition": format!("at {}", clock(at)),
+                "replaced": replaced,
+                "hint": HINT_ARMED,
+            });
+            (
+                "at",
+                Some(at),
+                None,
+                condition,
+                Collected::default(),
+                response,
+                at + COALESCE,
+                false,
+            )
+        } else if let Some(seconds) = args.in_seconds {
+            if !(MIN_AT_SECONDS..=MAX_AT_SECONDS).contains(&seconds) {
+                return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+            }
+            let at = now + TimeDelta::seconds(seconds);
+            let response = json!({
+                "state": "armed",
+                "alarm_id": Uuid::now_v7(),
+                "fires_at": time(at),
+                "condition": format!("at {}", clock(at)),
+                "replaced": replaced,
+                "hint": HINT_ARMED,
+            });
+            (
+                "at",
+                Some(at),
+                None,
+                None,
+                Collected::default(),
+                response,
+                at + COALESCE,
+                false,
+            )
+        } else {
+            let when = args
+                .when
+                .as_ref()
+                .ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
+            let (mut condition, states) = parse_condition(when)?;
+            if batch && !condition.all {
+                return Err(ToolError::with_message(
+                    ToolErrorCode::InvalidArguments,
+                    "batch needs session_state with all=true",
+                ));
+            }
+            let deadline_seconds = args.deadline_seconds.unwrap_or(DEFAULT_DEADLINE_SECONDS);
+            if !(MIN_DEADLINE_SECONDS..=MAX_DEADLINE_SECONDS).contains(&deadline_seconds) {
+                return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+            }
+            let deadline = now + TimeDelta::seconds(deadline_seconds);
+            let mut current_states: Vec<(Uuid, String)> = Vec::new();
+            let mut all_met = true;
+            let mut any_met = false;
+            for target in condition.session_ids.clone() {
+                if target == caller.conversation_id {
+                    return Err(ToolError::new(ToolErrorCode::SessionNotFound));
+                }
+                access::target_in_tx(&mut tx, &context.config, &waiter, caller.owner_id, target)
+                    .await?;
+                if let Some(current) =
+                    subs::current_in_tx(&mut tx, target, now, &context.settle).await?
+                {
+                    let met = states.iter().any(|state| state == current.state.as_str());
+                    any_met |= met;
+                    all_met &= met;
+                    condition
+                        .armed
+                        .insert(target.to_string(), current.fingerprint.clone());
+                    current_states.push((target, current.state.as_str().to_string()));
+                } else {
+                    all_met = false;
+                }
+            }
+            let satisfied = if condition.all { all_met } else { any_met };
+            if satisfied {
                 // Условие уже истинно: будильник не взводится, но вызов запоминается.
+                let current = if condition.session_ids.len() == 1 {
+                    json!(current_states[0].1)
+                } else {
+                    json!(
+                        current_states
+                            .iter()
+                            .map(|(id, state)| json!({"session_id": id, "state": state}))
+                            .collect::<Vec<_>>()
+                    )
+                };
                 let response = json!({
                     "state": "satisfied",
-                    "current": current.state.as_str(),
-                    "condition": condition_text(&condition, deadline, false),
+                    "current": current,
+                    "condition": condition_text(&condition, deadline, only_on_timeout, batch),
                     "hint": HINT_SATISFIED,
                 });
                 let id = Uuid::now_v7();
@@ -689,11 +929,12 @@ pub async fn set(
                     "condition",
                     None,
                     Some(deadline),
-                    false,
-                    false,
+                    only_on_timeout,
+                    batch,
                     Some(condition.as_value()),
+                    Collected::default(),
                     args.note.as_deref(),
-                    0,
+                    chain_depth,
                     "cancelled",
                     Some("satisfied"),
                     None,
@@ -705,34 +946,63 @@ pub async fn set(
                 tx.commit().await?;
                 return Ok(response);
             }
-            condition
-                .armed
-                .insert(target.to_string(), current.fingerprint.clone());
-        }
-        let response = json!({
-            "state": "armed",
-            "alarm_id": Uuid::now_v7(),
-            "deadline_at": time(deadline),
-            "condition": condition_text(&condition, deadline, false),
-            "replaced": replaced,
-            "hint": HINT_ARMED,
-        });
-        (
-            "condition",
-            None,
-            Some(deadline),
-            Some(condition),
-            response,
-            deadline + COALESCE,
-            true,
-        )
-    };
+            let mut collected = Collected::default();
+            if condition.all && !batch {
+                // Цель, уже осевшая до взвода, входит в итог `all`: ждём только остальных.
+                for (target, state) in &current_states {
+                    if !states.iter().any(|wanted| wanted == state) {
+                        continue;
+                    }
+                    collected.insert(
+                        *target,
+                        CollectedSession {
+                            state: state.clone(),
+                            fingerprint: condition.armed.get(&target.to_string()).cloned(),
+                            subscription_id: None,
+                            armed_at: None,
+                            chain_depth,
+                        },
+                    );
+                }
+            }
+            if batch {
+                for target in condition.session_ids.clone() {
+                    ensure_subscription_in_tx(
+                        &mut tx,
+                        caller.owner_id,
+                        caller.conversation_id,
+                        target,
+                        chain_depth,
+                        now,
+                        &context.settle,
+                    )
+                    .await?;
+                }
+            }
+            let response = json!({
+                "state": "armed",
+                "alarm_id": Uuid::now_v7(),
+                "deadline_at": time(deadline),
+                "condition": condition_text(&condition, deadline, only_on_timeout, batch),
+                "replaced": replaced,
+                "hint": HINT_ARMED,
+            });
+            (
+                "condition",
+                None,
+                Some(deadline),
+                Some(condition),
+                collected,
+                response,
+                deadline + COALESCE,
+                true,
+            )
+        };
 
     let id = response["alarm_id"]
         .as_str()
         .and_then(|value| value.parse::<Uuid>().ok())
         .unwrap_or_else(Uuid::now_v7);
-    let chain_depth = access::current_depth(&mut tx, caller.conversation_id).await?;
     insert_alarm_in_tx(
         &mut tx,
         id,
@@ -743,9 +1013,10 @@ pub async fn set(
         kind,
         fire_at,
         deadline_at,
-        args.only_on_timeout.unwrap_or(false),
-        args.batch.unwrap_or(false),
+        only_on_timeout,
+        batch,
         condition.as_ref().map(SessionCondition::as_value),
+        collected,
         args.note.as_deref(),
         chain_depth,
         "armed",
@@ -780,6 +1051,39 @@ impl SessionCondition {
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn ensure_subscription_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    chain_depth: i32,
+    now: DateTime<Utc>,
+    config: &settle::SettleConfig,
+) -> Result<(), sqlx::Error> {
+    let open: Option<Uuid> = sqlx::query_scalar(
+        "select id from session_subscriptions
+         where subscriber_id=$1 and target_id=$2 and closed_at is null",
+    )
+    .bind(subscriber_id)
+    .bind(target_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if open.is_none() {
+        subs::subscribe_explicit_in_tx(
+            conn,
+            owner_id,
+            subscriber_id,
+            target_id,
+            chain_depth,
+            now,
+            config,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn insert_alarm_in_tx(
     conn: &mut PgConnection,
     id: Uuid,
@@ -793,6 +1097,7 @@ async fn insert_alarm_in_tx(
     only_on_timeout: bool,
     batch: bool,
     condition: Option<Value>,
+    collected: Collected,
     note: Option<&str>,
     chain_depth: i32,
     state: &str,
@@ -804,9 +1109,9 @@ async fn insert_alarm_in_tx(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "insert into alarms(id,owner_id,conversation_id,created_by,key,kind,condition,fire_at,
-           deadline_at,only_on_timeout,batch,note,chain_depth,state,fired_reason,failure_reason,
-           call_id,response,created_at,updated_at)
-         values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$19)",
+           deadline_at,only_on_timeout,batch,collected,note,chain_depth,state,fired_reason,
+           failure_reason,call_id,response,created_at,updated_at)
+         values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$20)",
     )
     .bind(id)
     .bind(owner_id)
@@ -819,6 +1124,7 @@ async fn insert_alarm_in_tx(
     .bind(deadline_at)
     .bind(only_on_timeout)
     .bind(batch)
+    .bind(collected.as_value())
     .bind(note)
     .bind(chain_depth)
     .bind(state)
@@ -829,6 +1135,45 @@ async fn insert_alarm_in_tx(
     .bind(now)
     .execute(conn)
     .await?;
+    Ok(())
+}
+
+/// Отпускание удержанного пачкой: итог возвращается подписке, только если она жива
+/// и того же поколения взвода. Иначе он устарел и отбрасывается.
+async fn release_collected_in_tx(
+    conn: &mut PgConnection,
+    row: &AlarmRow,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    if !row.batch {
+        return Ok(());
+    }
+    let collected = Collected::parse(&row.collected);
+    for (target, entry) in &collected.sessions {
+        let Ok(target_id) = target.parse::<Uuid>() else {
+            continue;
+        };
+        let (Some(subscription_id), Some(armed_at), Some(fingerprint)) = (
+            entry.subscription_id,
+            entry.armed_at,
+            entry.fingerprint.as_deref(),
+        ) else {
+            continue;
+        };
+        subs::release_held_in_tx(
+            conn,
+            row.owner_id,
+            row.conversation_id,
+            target_id,
+            subscription_id,
+            armed_at,
+            &entry.state,
+            fingerprint,
+            entry.chain_depth,
+            now,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -850,6 +1195,7 @@ async fn cancel_in_tx(
     .await?;
     cancel_jobs_in_tx(conn, id, "alarm_cancelled").await?;
     if let Some(row) = row {
+        release_collected_in_tx(conn, &row, now).await?;
         changed_in_tx(conn, &row, correlation_id).await?;
     }
     Ok(())
@@ -1050,23 +1396,32 @@ pub async fn deliver_job_in_tx(
         if row.state != "armed" {
             continue;
         }
-        let (reason, fired_at, state) = if row.kind == "at" {
-            ("time", row.fire_at.unwrap_or(now), None)
-        } else {
-            let state: Option<String> = sqlx::query_scalar(
-                "select activity_state from conversation_derived where conversation_id=$1",
+        if row.kind == "at" {
+            fire_in_tx(
+                conn,
+                row,
+                "time",
+                row.fire_at.unwrap_or(now),
+                now,
+                correlation_id,
+                false,
             )
-            .bind(conversation)
-            .fetch_optional(&mut *conn)
             .await?;
-            ("timed_out", row.deadline_at.unwrap_or(now), state)
-        };
-        if let Some(state) = state {
-            row.collected = json!({"state": state});
+        } else {
+            fill_timeout_collected(conn, row).await?;
+            fire_in_tx(
+                conn,
+                row,
+                "timed_out",
+                row.deadline_at.unwrap_or(now),
+                now,
+                correlation_id,
+                false,
+            )
+            .await?;
         }
-        fire_in_tx(conn, row, reason, fired_at, now, correlation_id, false).await?;
     }
-    let text = render(&rows, now);
+    let text = render_in_tx(conn, job.owner_id, &rows, now).await?;
     let key = format!("alarm:{}", job.id);
     let existing: Option<Uuid> =
         sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
@@ -1150,6 +1505,129 @@ pub async fn abandon_deliver_in_tx(
     Ok(())
 }
 
+async fn fill_timeout_collected(
+    conn: &mut PgConnection,
+    row: &mut AlarmRow,
+) -> Result<(), sqlx::Error> {
+    let Some(condition) =
+        serde_json::from_value::<SessionCondition>(row.condition.clone().unwrap_or(Value::Null))
+            .ok()
+    else {
+        return Ok(());
+    };
+    let mut collected = Collected::parse(&row.collected);
+    for target in &condition.session_ids {
+        if collected.has(*target) {
+            continue;
+        }
+        let state: Option<String> = sqlx::query_scalar(
+            "select activity_state from conversation_derived where conversation_id=$1",
+        )
+        .bind(target)
+        .fetch_optional(&mut *conn)
+        .await?;
+        collected.insert(
+            *target,
+            CollectedSession {
+                state: state.unwrap_or_else(|| "unknown".into()),
+                fingerprint: None,
+                subscription_id: None,
+                armed_at: None,
+                chain_depth: 0,
+            },
+        );
+    }
+    row.collected = collected.as_value();
+    Ok(())
+}
+
+async fn render_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    rows: &[AlarmRow],
+    now: DateTime<Utc>,
+) -> Result<String, sqlx::Error> {
+    let mut text = String::new();
+    if rows.len() == 1 {
+        text.push_str(&render_one_in_tx(conn, owner_id, &rows[0], now).await?);
+    } else {
+        text.push_str(&format!("[canterlot] {} alarms fired.\n", rows.len()));
+        for row in rows {
+            text.push_str(&format!(
+                "\n- {}",
+                render_one_in_tx(conn, owner_id, row, now)
+                    .await?
+                    .trim_start_matches("[canterlot] ")
+            ));
+        }
+    }
+    text.push_str("\n\n");
+    text.push_str(AUTOMATION);
+    Ok(text)
+}
+
+async fn render_one_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    row: &AlarmRow,
+    now: DateTime<Utc>,
+) -> Result<String, sqlx::Error> {
+    if !(row.batch && row.kind == "condition") {
+        return Ok(render_one(row, now));
+    }
+    let Some(condition) =
+        serde_json::from_value::<SessionCondition>(row.condition.clone().unwrap_or(Value::Null))
+            .ok()
+    else {
+        return Ok(render_one(row, now));
+    };
+    let collected = Collected::parse(&row.collected);
+    let mut text = render_condition_text(row, now);
+    let entries = condition
+        .session_ids
+        .iter()
+        .filter(|id| {
+            collected
+                .get(**id)
+                .is_some_and(|entry| entry.subscription_id.is_some() || entry.state == "deleted")
+        })
+        .count()
+        .max(1);
+    // Общий предел сообщения делится между итогами поровну.
+    let budget = summary::TEXT_LIMIT.saturating_sub(text.len() + 512) / entries;
+    for target in &condition.session_ids {
+        let Some(entry) = collected.get(*target) else {
+            continue;
+        };
+        if entry.state == "deleted" {
+            text.push_str("\n\n");
+            text.push_str(&format!("[canterlot] Session {target} was deleted."));
+            continue;
+        }
+        if entry.subscription_id.is_none() {
+            // Цель не собралась до срока: она перечислена в строке «Not settled».
+            continue;
+        }
+        text.push_str("\n\n");
+        if let Some(built) =
+            summary::build(conn, owner_id, *target, &entry.state, entry.armed_at).await?
+        {
+            text.push_str(&summary::render_bounded(&built, budget));
+        } else {
+            text.push_str(&format!(
+                "[canterlot] Session {target} is now {}; its summary is gone.",
+                entry.state
+            ));
+        }
+    }
+    if let Some(note) = row.note.as_deref().filter(|note| !note.is_empty()) {
+        text.push_str("\nNote: ");
+        text.push_str(note);
+    }
+    Ok(text)
+}
+
+#[cfg(test)]
 fn render(rows: &[AlarmRow], now: DateTime<Utc>) -> String {
     let mut text = String::new();
     if rows.len() == 1 {
@@ -1168,44 +1646,110 @@ fn render(rows: &[AlarmRow], now: DateTime<Utc>) -> String {
     text
 }
 
-fn render_one(row: &AlarmRow, now: DateTime<Utc>) -> String {
-    let name = name_of(row.key.as_deref());
-    let fired_at = row.fired_at.unwrap_or(now);
-    let late = now - fired_at;
-    let late_text = if late >= TimeDelta::minutes(1) {
+fn late_text(row: &AlarmRow, now: DateTime<Utc>) -> String {
+    let late = now - row.fired_at.unwrap_or(now);
+    if late >= TimeDelta::minutes(1) {
         format!(", late by {}", coarse(late))
     } else {
         String::new()
+    }
+}
+
+fn state_list(condition: &SessionCondition, collected: &Collected) -> String {
+    condition
+        .session_ids
+        .iter()
+        .map(|id| {
+            let state = collected
+                .get(*id)
+                .map(|entry| entry.state.as_str())
+                .unwrap_or("unknown");
+            format!("{id} {state}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_condition_text(row: &AlarmRow, now: DateTime<Utc>) -> String {
+    let name = name_of(row.key.as_deref());
+    let condition: Option<SessionCondition> =
+        serde_json::from_value(row.condition.clone().unwrap_or(Value::Null)).ok();
+    let collected = Collected::parse(&row.collected);
+    let Some(condition) = condition else {
+        return format!("[canterlot] Alarm {name}fired{}", late_text(row, now));
     };
+    let timed_out = row.fired_reason.as_deref() == Some("timed_out");
+    let late = late_text(row, now);
+    let age = coarse(row.fired_at.unwrap_or(now) - row.created_at);
+    let states = state_list(&condition, &collected);
+    if row.batch {
+        if timed_out {
+            let missed = condition
+                .session_ids
+                .iter()
+                .filter(|id| {
+                    collected.get(**id).is_some_and(|entry| {
+                        entry.subscription_id.is_none() && entry.state != "deleted"
+                    })
+                })
+                .map(Uuid::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let settled = condition
+                .session_ids
+                .iter()
+                .filter(|id| {
+                    collected.get(**id).is_some_and(|entry| {
+                        entry.subscription_id.is_some() || entry.state == "deleted"
+                    })
+                })
+                .count();
+            return format!(
+                "[canterlot] Alarm {name}timed out after {age}: {settled}/{} sessions settled (batched){late}. Not settled: {missed}.",
+                condition.session_ids.len()
+            );
+        }
+        return format!(
+            "[canterlot] Alarm {name}fired: sessions {} settled (all, batched){late}.",
+            condition
+                .session_ids
+                .iter()
+                .map(Uuid::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if condition.session_ids.len() == 1 {
+        let target = condition.session_ids[0];
+        let state = collected
+            .get(target)
+            .map(|entry| entry.state.as_str())
+            .unwrap_or("unknown");
+        if timed_out {
+            format!(
+                "[canterlot] Alarm {name}timed out after {age}: session {target} is still {state}{late}."
+            )
+        } else {
+            format!("[canterlot] Alarm {name}fired: session {target} is {state}{late}.")
+        }
+    } else if timed_out {
+        format!("[canterlot] Alarm {name}timed out after {age}: sessions {states}{late}.")
+    } else {
+        format!("[canterlot] Alarm {name}fired: sessions {states}{late}.")
+    }
+}
+
+fn render_one(row: &AlarmRow, now: DateTime<Utc>) -> String {
+    let name = name_of(row.key.as_deref());
+    let fired_at = row.fired_at.unwrap_or(now);
     let mut text = match row.kind.as_str() {
         "at" => format!(
-            "[canterlot] Alarm {name}fired at {}{late_text} (set {} ago).",
+            "[canterlot] Alarm {name}fired at {}{} (set {} ago).",
             clock(fired_at),
+            late_text(row, now),
             coarse(fired_at - row.created_at)
         ),
-        _ => {
-            let state = row
-                .collected
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let target = row
-                .condition
-                .as_ref()
-                .and_then(|value| value.get("session_ids"))
-                .and_then(Value::as_array)
-                .and_then(|ids| ids.first())
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if row.fired_reason.as_deref() == Some("timed_out") {
-                format!(
-                    "[canterlot] Alarm {name}timed out after {}: session {target} is still {state}{late_text}.",
-                    coarse(fired_at - row.created_at)
-                )
-            } else {
-                format!("[canterlot] Alarm {name}fired: session {target} is {state}{late_text}.")
-            }
-        }
+        _ => render_condition_text(row, now),
     };
     if let Some(note) = row.note.as_deref().filter(|note| !note.is_empty()) {
         text.push_str("\nNote: ");
@@ -1236,10 +1780,77 @@ mod tests {
             all: false,
             armed: BTreeMap::new(),
         };
-        let text = condition_text(&condition, Utc::now(), false);
+        let text = condition_text(&condition, Utc::now(), false, false);
         assert!(text.contains(&id.to_string()));
         assert!(text.contains("idle, failed"));
         assert!(text.contains("deadline"));
+    }
+
+    #[test]
+    fn condition_text_marks_all_batch_and_watchdog() {
+        let id = Uuid::now_v7();
+        let condition = SessionCondition {
+            kind: "session_state".into(),
+            session_ids: vec![id],
+            states: vec!["idle".into()],
+            all: true,
+            armed: BTreeMap::new(),
+        };
+        let text = condition_text(&condition, Utc::now(), true, true);
+        assert!(text.contains("all, batched"), "{text}");
+        assert!(text.contains("watchdog"), "{text}");
+    }
+
+    #[test]
+    fn parse_condition_takes_several_targets_and_all() {
+        let one = Uuid::now_v7();
+        let two = Uuid::now_v7();
+        let when = WhenArgs {
+            kind: "session_state".into(),
+            session_ids: Some(vec![one, two, one]),
+            states: None,
+            all: Some(true),
+        };
+        let (condition, states) = parse_condition(&when).unwrap();
+        assert_eq!(condition.session_ids, vec![one, two], "duplicates collapse");
+        assert!(condition.all);
+        assert_eq!(states.len(), DEFAULT_STATES.len());
+    }
+
+    #[test]
+    fn collected_complete_requires_every_target() {
+        let one = Uuid::now_v7();
+        let two = Uuid::now_v7();
+        let condition = SessionCondition {
+            kind: "session_state".into(),
+            session_ids: vec![one, two],
+            states: vec!["idle".into()],
+            all: true,
+            armed: BTreeMap::new(),
+        };
+        let mut collected = Collected::default();
+        collected.insert(
+            one,
+            CollectedSession {
+                state: "idle".into(),
+                fingerprint: Some("a".into()),
+                subscription_id: None,
+                armed_at: None,
+                chain_depth: 0,
+            },
+        );
+        assert!(!collected.complete(&condition));
+        collected.insert(
+            two,
+            CollectedSession {
+                state: "idle".into(),
+                fingerprint: Some("b".into()),
+                subscription_id: None,
+                armed_at: None,
+                chain_depth: 0,
+            },
+        );
+        assert!(collected.complete(&condition));
     }
 
     #[test]

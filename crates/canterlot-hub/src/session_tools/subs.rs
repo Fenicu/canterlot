@@ -317,6 +317,29 @@ pub async fn evaluate_in_tx(
     .await?;
     let closes = state.closes_subscription(queue.queued);
     for (id, owner_id, subscriber_id, chain_depth, armed_at) in &open {
+        if matches!(state, Settled::Idle | Settled::Stopped)
+            && crate::session_tools::alarms::hold_for_batch_in_tx(
+                conn,
+                *subscriber_id,
+                target_id,
+                state.as_str(),
+                &fingerprint,
+                *id,
+                *armed_at,
+                *chain_depth,
+                facts.now,
+            )
+            .await?
+        {
+            // Пачка сама сдвигает отпечаток, но подписку не закрывает: отпускание
+            // удержанного проверяет, что она жива и того же поколения.
+            sqlx::query("update session_subscriptions set last_fingerprint=$2 where id=$1")
+                .bind(id)
+                .bind(&fingerprint)
+                .execute(&mut *conn)
+                .await?;
+            continue;
+        }
         sqlx::query(
             "update session_subscriptions set last_fingerprint=$2,
                closed_at=case when $3 then clock_timestamp() end,
@@ -340,6 +363,46 @@ pub async fn evaluate_in_tx(
         insert_job(conn, *owner_id, *subscriber_id, facts.now, &payload).await?;
     }
     Ok(!open.is_empty())
+}
+
+/// Отпускание итога, удержанного пачкой: подписка должна быть жива и того же поколения.
+/// Устаревший итог отбрасывается, чтобы отписка, приём или переподписка не воскрешали его.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn release_held_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    subscription_id: Uuid,
+    armed_at: DateTime<Utc>,
+    state: &str,
+    fingerprint: &str,
+    chain_depth: i32,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    let alive: Option<Uuid> = sqlx::query_scalar(
+        "select id from session_subscriptions
+         where id=$1 and subscriber_id=$2 and target_id=$3 and armed_at=$4 and closed_at is null",
+    )
+    .bind(subscription_id)
+    .bind(subscriber_id)
+    .bind(target_id)
+    .bind(armed_at)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if alive.is_none() {
+        return Ok(false);
+    }
+    let payload = event_job(
+        subscription_id,
+        target_id,
+        state,
+        fingerprint,
+        armed_at,
+        chain_depth,
+    );
+    insert_job(conn, owner_id, subscriber_id, now, &payload).await?;
+    Ok(true)
 }
 
 /// Удаление цели: сами подписки уйдут вместе с разговором. В задании только идентификатор,
