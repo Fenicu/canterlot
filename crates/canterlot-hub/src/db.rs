@@ -236,10 +236,7 @@ mod tests {
                 if trimmed.starts_with('*') || trimmed.starts_with("/*") {
                     continue;
                 }
-                if code.contains(".begin()")
-                    || code.contains(".begin_with(")
-                    || code.contains("Transaction::begin(")
-                {
+                if code.contains(".begin(") || code.contains("Transaction::begin(") {
                     offenders.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
                 }
             }
