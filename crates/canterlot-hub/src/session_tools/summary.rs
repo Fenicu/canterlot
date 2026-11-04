@@ -273,17 +273,20 @@ pub async fn build_bounded(
          from runs r
          left join run_working w on w.input_command_id=r.input_command_id
          where r.conversation_id=$1
-           and ($3::uuid is null or r.input_command_id <= $3)
+           and (($3::uuid[] is not null and r.input_command_id = any($3))
+                or ($3::uuid[] is null
+                    and ($4::uuid is null or r.input_command_id <= $4)))
            and ((r.finished_at is not null
                  and ($2::timestamptz is null or r.finished_at >= $2))
                 or (r.finished_at is null
-                    and $3::uuid is null
+                    and $4::uuid is null
                     and exists(select 1 from executions e where e.id=r.execution_id
                                and e.state in ('created','starting','running','stopping'))))
          order by coalesce(r.finished_at,r.started_at),r.started_at,r.input_command_id",
     )
     .bind(target_id)
     .bind(armed_at)
+    .bind(boundary.map(|boundary| boundary.command_ids.as_slice()))
     .bind(boundary.map(|boundary| boundary.last_command_id))
     .fetch_all(&mut *conn)
     .await?;
@@ -323,11 +326,11 @@ pub async fn build_bounded(
         let previous: Option<Value> = sqlx::query_scalar(
             "select git from runs where conversation_id=$1 and git is not null
              and git->>'available' = 'true'
-             and ($2::uuid is null or input_command_id <= $2)
+             and ($2::uuid[] is null or input_command_id = any($2))
              order by started_at desc limit 1",
         )
         .bind(target_id)
-        .bind(boundary.map(|boundary| boundary.last_command_id))
+        .bind(boundary.map(|boundary| boundary.command_ids.as_slice()))
         .fetch_optional(&mut *conn)
         .await?;
         git = aggregate_git(&[previous]);
@@ -339,8 +342,9 @@ pub async fn build_bounded(
             "select block_id,left(content,$5::int),octet_length(content)::bigint from blocks
                  where conversation_id=$1 and kind='text' and parent_block_id is null
                    and btrim(content) <> ''
-                   and ($2::timestamptz is null or created_at >= $2)
-                   and (input_command_id = any($3) or coalesce(created_seq,0) <= $4)
+                   and (input_command_id = any($3)
+                        or (coalesce(created_seq,0) <= $4
+                            and ($2::timestamptz is null or created_at >= $2)))
                  order by created_seq desc,created_at desc limit 1",
         )
         .bind(target_id)

@@ -281,6 +281,111 @@ async fn summary_aggregates_several_turns(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn boundary_keeps_an_answer_that_started_before_arming(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let now = Utc::now();
+    let armed = now;
+    let command = add_run(
+        &pool,
+        &f,
+        Run {
+            finished_at: now + TimeDelta::minutes(1),
+            duration_ms: 120_000,
+            git: None,
+            tokens: (10, 2),
+        },
+    )
+    .await;
+    let block = add_text(&pool, &f, 1, Some(command), None, "Streamed before arming").await;
+    // Блок начался до взвода подписки, а ход закончился после.
+    sqlx::query("update blocks set created_at=$2 where block_id=$1")
+        .bind(block)
+        .bind(armed - TimeDelta::minutes(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let boundary = summary::Boundary {
+        last_command_id: command,
+        command_ids: vec![command],
+        block_seq: 0,
+    };
+    let mut conn = pool.acquire().await.unwrap();
+    let built = summary::build_bounded(
+        &mut conn,
+        f.owner,
+        f.target,
+        "idle",
+        Some(armed),
+        Some(&boundary),
+    )
+    .await
+    .unwrap()
+    .expect("target exists");
+    let text = summary::render_bounded(&built, summary::TEXT_LIMIT);
+    assert!(
+        text.contains("Final answer:\nStreamed before arming\n"),
+        "the captured command still carries its answer: {text}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn boundary_selects_turns_by_captured_ids_not_uuid_order(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let now = Utc::now();
+    let armed = now - TimeDelta::hours(1);
+    let first = add_run(
+        &pool,
+        &f,
+        Run {
+            finished_at: now - TimeDelta::minutes(10),
+            duration_ms: 60_000,
+            git: None,
+            tokens: (1, 1),
+        },
+    )
+    .await;
+    let second = add_run(
+        &pool,
+        &f,
+        Run {
+            finished_at: now - TimeDelta::minutes(5),
+            duration_ms: 60_000,
+            git: None,
+            tokens: (1, 1),
+        },
+    )
+    .await;
+    // Граница берёт меньший идентификатор: порядок UUID не совпадает с порядком ходов.
+    let (last, other) = if first < second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let boundary = summary::Boundary {
+        last_command_id: last,
+        command_ids: vec![first, second],
+        block_seq: i64::MAX,
+    };
+    let mut conn = pool.acquire().await.unwrap();
+    let built = summary::build_bounded(
+        &mut conn,
+        f.owner,
+        f.target,
+        "idle",
+        Some(armed),
+        Some(&boundary),
+    )
+    .await
+    .unwrap()
+    .expect("target exists");
+    let text = summary::render_bounded(&built, summary::TEXT_LIMIT);
+    assert!(
+        text.contains("Turns: 2,"),
+        "both captured turns count regardless of UUID order (other {other}): {text}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn summary_working_time_skips_gaps_between_turns(pool: PgPool) {
     let f = fixture(&pool).await;
     let now = Utc::now();
