@@ -77,6 +77,19 @@ where
     Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
+/// Кому принадлежит итог цели: пачке (`held`), обычной подписке (`separate`) или
+/// пока никому (`pending`, счёт есть, но уведомление ещё не доставлено).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Ownership {
+    /// Состояние засчитано, но владение не разрешено: строку подписки держит чужая
+    /// транзакция. Пачка не срабатывает, пока цель не станет `held` или `separate`.
+    #[default]
+    Pending,
+    Held,
+    Separate,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CollectedSession {
     state: String,
@@ -87,6 +100,9 @@ struct CollectedSession {
     /// обычной подпиской и здесь только засчитываются.
     #[serde(default)]
     satisfied: bool,
+    /// Владение итогом. У старых записей поля нет: выводим из подписки и `satisfied`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ownership: Option<Ownership>,
     /// Пачка хранит, из какой подписки и какого поколения взят итог.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subscription_id: Option<Uuid>,
@@ -103,6 +119,20 @@ struct CollectedSession {
         skip_serializing_if = "Option::is_none"
     )]
     boundary: Option<summary::Boundary>,
+}
+
+impl CollectedSession {
+    fn owned(&self) -> Ownership {
+        self.ownership.unwrap_or_else(|| {
+            if self.subscription_id.is_some() {
+                Ownership::Held
+            } else if self.satisfied {
+                Ownership::Separate
+            } else {
+                Ownership::Pending
+            }
+        })
+    }
 }
 
 impl Collected {
@@ -133,15 +163,18 @@ impl Collected {
         condition.session_ids.iter().all(|id| {
             self.get(*id).is_some_and(|entry| {
                 entry.satisfied
+                    && entry.owned() != Ownership::Pending
                     && (condition.states.contains(&entry.state) || entry.state == "deleted")
             })
         })
     }
 
     fn any_matching(&self, condition: &SessionCondition) -> bool {
-        self.sessions
-            .values()
-            .any(|entry| entry.satisfied && condition.states.contains(&entry.state))
+        self.sessions.values().any(|entry| {
+            entry.satisfied
+                && entry.owned() != Ownership::Pending
+                && condition.states.contains(&entry.state)
+        })
     }
 }
 
@@ -584,38 +617,62 @@ async fn apply_settled_in_tx(
         return Ok(Applied::Skipped);
     }
     let mut collected = Collected::parse(&row.collected);
-    let already = collected
-        .get(target_id)
-        .is_some_and(|entry| entry.satisfied);
-    if !already {
-        // Удержанный пачкой итог заводит подписка; здесь он только получает отметку
-        // «условие выполнено». Иначе отметка и владение итогом расходятся.
-        match collected.get(target_id).cloned() {
-            Some(mut entry) if entry.subscription_id.is_some() => {
-                entry.satisfied = true;
-                collected.insert(target_id, entry);
-            }
-            Some(mut entry) => {
-                entry.state = state.into();
-                entry.fingerprint = Some(fingerprint.into());
-                entry.satisfied = true;
-                collected.insert(target_id, entry);
-            }
-            None => {
+    let existing = collected.get(target_id).cloned();
+    let owned = existing.as_ref().map(CollectedSession::owned);
+    let resolved = existing
+        .as_ref()
+        .is_some_and(|entry| entry.satisfied && entry.owned() != Ownership::Pending);
+    if !resolved {
+        // `idle` и `stopped` пачка удерживает: пока владение итогом не разрешено
+        // (подписка удержала его или уже отдала обычным событием), условие не засчитывается.
+        // Иначе пачка сработала бы с пометкой «reported separately» о недоставленном итоге.
+        let held_or_reported = if row.batch && matches!(state, "idle" | "stopped") {
+            owned == Some(Ownership::Held)
+                || subscription_reported_in_tx(conn, row.conversation_id, target_id, fingerprint)
+                    .await?
+        } else {
+            true
+        };
+        if !held_or_reported {
+            if existing.is_none() {
                 collected.insert(
                     target_id,
                     CollectedSession {
                         state: state.into(),
                         fingerprint: Some(fingerprint.into()),
-                        satisfied: true,
+                        satisfied: false,
+                        ownership: Some(Ownership::Pending),
                         subscription_id: None,
                         armed_at: None,
                         chain_depth: 0,
                         boundary: None,
                     },
                 );
+                persist_collected(conn, row, &collected, now).await?;
             }
+            return Ok(Applied::Held);
         }
+        let mut entry = existing.unwrap_or(CollectedSession {
+            state: state.into(),
+            fingerprint: None,
+            satisfied: false,
+            ownership: None,
+            subscription_id: None,
+            armed_at: None,
+            chain_depth: 0,
+            boundary: None,
+        });
+        // Владение разрешено: удержание пачки (`held`) остаётся за ней, иначе итог
+        // уходит или уже ушёл обычной подпиской (`separate`).
+        entry.ownership = Some(if entry.owned() == Ownership::Held {
+            Ownership::Held
+        } else {
+            Ownership::Separate
+        });
+        entry.state = state.into();
+        entry.fingerprint = Some(fingerprint.into());
+        entry.satisfied = true;
+        collected.insert(target_id, entry);
         persist_collected(conn, row, &collected, now).await?;
     }
     let met = if condition.all {
@@ -636,8 +693,29 @@ async fn apply_settled_in_tx(
     Ok(Applied::Fired)
 }
 
+/// Подписка уже отдала это устоявшееся состояние обычным событием: отпечаток совпал.
+async fn subscription_reported_in_tx(
+    conn: &mut PgConnection,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    fingerprint: &str,
+) -> Result<bool, sqlx::Error> {
+    let reported: Option<bool> = sqlx::query_scalar(
+        "select last_fingerprint is not distinct from $3 from session_subscriptions
+         where subscriber_id=$1 and target_id=$2 and closed_at is null
+         order by armed_at desc limit 1",
+    )
+    .bind(subscriber_id)
+    .bind(target_id)
+    .bind(fingerprint)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(reported.unwrap_or(false))
+}
+
 /// Удержание итога пачкой: первая взведённая пачка, у которой этой цели ещё нет,
-/// забирает отпечаток и запоминает подписку с поколением взвода.
+/// забирает отпечаток и запоминает подписку с поколением взвода. Ожидающая цель
+/// (`pending`) получает владение здесь, когда строка подписки освободилась.
 #[allow(clippy::too_many_arguments)]
 pub async fn hold_for_batch_in_tx(
     conn: &mut PgConnection,
@@ -676,7 +754,10 @@ pub async fn hold_for_batch_in_tx(
             continue;
         }
         let mut collected = Collected::parse(&row.collected);
-        if collected.has(target_id) {
+        if collected
+            .get(target_id)
+            .is_some_and(|entry| entry.owned() != Ownership::Pending)
+        {
             continue;
         }
         collected.insert(
@@ -685,6 +766,7 @@ pub async fn hold_for_batch_in_tx(
                 state: state.into(),
                 fingerprint: Some(fingerprint.into()),
                 satisfied: true,
+                ownership: Some(Ownership::Held),
                 subscription_id: Some(subscription_id),
                 armed_at: Some(armed_at),
                 chain_depth,
@@ -1011,6 +1093,7 @@ pub async fn set(
                             state: state.clone(),
                             fingerprint: condition.armed.get(&target.to_string()).cloned(),
                             satisfied: true,
+                            ownership: Some(Ownership::Separate),
                             subscription_id: None,
                             armed_at: None,
                             chain_depth,
@@ -1629,6 +1712,7 @@ async fn fill_timeout_collected(
                 state: state.unwrap_or_else(|| "unknown".into()),
                 fingerprint: None,
                 satisfied: false,
+                ownership: None,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
@@ -1756,7 +1840,7 @@ async fn render_one_in_tx(
             if subscription_alive_in_tx(conn, row.conversation_id, *target, &entry).await? {
                 held.push((*target, entry));
             }
-        } else if entry.satisfied {
+        } else if entry.satisfied && entry.owned() == Ownership::Separate {
             reported.push((*target, entry.state));
         }
     }
@@ -1995,6 +2079,7 @@ mod tests {
                 state: "idle".into(),
                 fingerprint: Some("a".into()),
                 satisfied: true,
+                ownership: None,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,
@@ -2008,6 +2093,7 @@ mod tests {
                 state: "idle".into(),
                 fingerprint: Some("b".into()),
                 satisfied: true,
+                ownership: None,
                 subscription_id: None,
                 armed_at: None,
                 chain_depth: 0,

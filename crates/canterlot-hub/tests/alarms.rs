@@ -1926,6 +1926,76 @@ async fn replacement_takes_target_conversations_before_the_old_alarm(pool: PgPoo
     assert_eq!(replaced["state"], "armed");
 }
 
+/// Строку подписки держит чужая транзакция: `idle` нельзя ни удержать, ни отдать
+/// обычным событием. Пачка ждёт, а на следующем обходе забирает итог себе.
+#[sqlx::test(migrations = "./migrations")]
+async fn locked_subscription_keeps_batch_ownership_pending_until_the_next_sweep(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({
+                "when": {"kind": "session_state", "session_ids": [f.child], "all": true},
+                "batch": true,
+                "key": "wave"
+            }),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+
+    // Чужая транзакция держит строку подписки, когда цель успокаивается.
+    let mut blocker = f.pool.begin().await.unwrap();
+    sqlx::query(
+        "select id from session_subscriptions where subscriber_id=$1 and target_id=$2
+         for update",
+    )
+    .bind(f.orchestrator)
+    .bind(f.child)
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    assert_eq!(
+        alarm_state(&f.pool, id).await.0,
+        "armed",
+        "an unresolved result does not satisfy the batch"
+    );
+    assert_eq!(f.event_jobs().await, 0, "the subscription was skipped");
+    let collected = alarm_state(&f.pool, id).await.2;
+    assert_eq!(
+        collected["sessions"][f.child.to_string()]["ownership"],
+        "pending"
+    );
+    assert!(f.alarm_inputs().await.is_empty());
+
+    blocker.commit().await.unwrap();
+    f.refresh_id(f.child, now + TimeDelta::seconds(10)).await;
+    assert_eq!(
+        alarm_state(&f.pool, id).await.0,
+        "fired",
+        "the next sweep gives the batch the summary"
+    );
+    assert_eq!(f.event_jobs().await, 0, "the batch owns the result");
+    assert_eq!(
+        scheduler(&f.pool, Default::default())
+            .tick(now + TimeDelta::seconds(20))
+            .await
+            .unwrap()
+            .fired,
+        1
+    );
+    let inputs = f.alarm_inputs().await;
+    assert_eq!(inputs.len(), 1, "delivered once");
+    assert!(
+        inputs[0].0.contains(&f.child.to_string()),
+        "{}",
+        inputs[0].0
+    );
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn retention_deletes_old_terminal_alarms(pool: PgPool) {
     let f = Fx::new(pool).await;

@@ -312,7 +312,7 @@ pub async fn evaluate_in_tx(
         "select s.id,s.owner_id,s.subscriber_id,s.chain_depth,s.armed_at
          from session_subscriptions s join conversations c on c.id=s.subscriber_id
          where s.target_id=$1 and s.closed_at is null and s.last_fingerprint is distinct from $2
-         for update of s for key share of c skip locked",
+         for update of s skip locked for key share of c skip locked",
     )
     .bind(target_id)
     .bind(&fingerprint)
