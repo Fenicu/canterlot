@@ -3,7 +3,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { FakeHub, FakeHubApi, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, test } from './fixtures';
+import { expect, fillWorkdir, test } from './fixtures';
 
 async function boot(page: Page, options: { solo?: boolean; home?: string | null; models?: { id: string; title: string; efforts: string[] }[] } = {}) {
   const hub = new FakeHub();
@@ -41,8 +41,7 @@ test('new_session_sheet_follows_mockup_07_and_creates_a_started_session', async 
   await page.getByRole('link', { name: 'Новая сессия' }).click();
   await expect(page.getByRole('option', { name: /Машина недоступна: связь нестабильна/ })).toHaveAttribute('disabled', '');
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
-  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
-  await pathField(page).press('Escape');
+  await fillWorkdir(page, '/srv/canterlot');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
@@ -64,8 +63,7 @@ test('new_session_defaults_to_bypass_and_lets_the_owner_pick_a_labelled_mode', a
   });
   await page.goto('/new');
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
-  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
-  await pathField(page).press('Escape');
+  await fillWorkdir(page, '/srv/canterlot');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
@@ -92,8 +90,7 @@ test('new_session_offers_recent_workdirs_and_submits_a_typed_path', async ({ pag
   await expect(page.getByRole('button', { name: '/srv/notes' })).toBeVisible();
   await page.getByRole('button', { name: '/srv/canterlot' }).click();
   await expect(page.getByRole('textbox', { name: 'Рабочая папка' })).toHaveValue('/srv/canterlot');
-  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/tmp/typed-by-hand');
-  await pathField(page).press('Escape');
+  await fillWorkdir(page, '/tmp/typed-by-hand');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
@@ -163,7 +160,7 @@ test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({
   await field.selectOption('haiku');
   await expect(field).toHaveValue('haiku');
   await field.selectOption('opus[1m]');
-  await pathField(page).fill('/srv/canterlot');
+  await fillWorkdir(page, '/srv/canterlot');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
   await page.getByRole('button', { name: 'Создать' }).click();
   await expect(page).toHaveURL(/\/c\//);
@@ -265,8 +262,7 @@ test('new_session_choices_survive_a_machine_list_refresh', async ({ page }) => {
     if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/conversations') bodies.push({ ...(request.postDataJSON() as object) });
   });
   await openWithMachine(page);
-  await pathField(page).fill('/srv/canterlot');
-  await pathField(page).press('Escape');
+  await fillWorkdir(page, '/srv/canterlot');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');

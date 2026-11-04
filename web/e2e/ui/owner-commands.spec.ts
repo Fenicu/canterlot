@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, test } from './fixtures';
+import { expect, fillWorkdir, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 
@@ -40,7 +40,7 @@ test('double_tap_on_create_makes_one_session', async ({ page }) => {
   });
   await page.goto('/new');
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
-  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
+  await fillWorkdir(page, '/srv/canterlot');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');

@@ -22,6 +22,17 @@ export const test = base.extend({
 
 export { expect };
 
+/**
+ * Заполняет рабочую папку и гасит список подсказок: он лежит поверх формы,
+ * и без Escape следующее нажатие попадает в вариант списка, а не в контрол.
+ */
+export async function fillWorkdir(page: import('@playwright/test').Page, path: string) {
+  const field = page.getByRole('textbox', { name: 'Рабочая папка' });
+  await field.fill(path);
+  await field.press('Escape');
+  await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toBeHidden();
+}
+
 /** Сменить тему из чата: на телефоне переключатель живёт в меню сессии, на рабочем столе в шапке. */
 export async function toggleChatTheme(page: import('@playwright/test').Page) {
   const button = page.locator('.chat-header [data-theme-toggle]');

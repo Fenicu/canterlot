@@ -13,5 +13,3 @@ web/test-results/
 web/playwright-report/
 web/e2e/.stack/
 web/e2e/.contact/
-# Маршруты проверок собираются из web/src/test-routes только для UI-тестов.
-web/src/routes/__test/
