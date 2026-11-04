@@ -108,6 +108,8 @@ pub struct SessionSummary {
     tokens: Option<(i64, i64)>,
     git: Option<Git>,
     worktree: Option<(String, String)>,
+    /// Взведённые будильники: сколько и когда ближайший. Заметки остаются у владельца.
+    alarms: Option<(i64, DateTime<Utc>)>,
     detail: Detail,
     answer: Option<Answer>,
 }
@@ -370,6 +372,13 @@ pub async fn build_bounded(
         .fetch_optional(&mut *conn)
         .await?
     };
+    let (alarm_count, alarm_next): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
+        "select count(*)::bigint,min(coalesce(fire_at,deadline_at))
+         from alarms where conversation_id=$1 and state='armed'",
+    )
+    .bind(target_id)
+    .fetch_one(&mut *conn)
+    .await?;
     let detail = detail(conn, target_id, state).await?;
     let worktree = worktree.and_then(|value| {
         if matches!(
@@ -402,6 +411,7 @@ pub async fn build_bounded(
         tokens,
         git,
         worktree,
+        alarms: alarm_next.map(|next| (alarm_count, next)),
         detail,
         answer: answer.map(|(block_id, head, total)| Answer {
             block_id,
@@ -684,6 +694,13 @@ pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
         head,
         "Turns: {turns}, duration {duration}, tokens in/out {tokens}."
     );
+    if let Some((count, next)) = summary.alarms {
+        let _ = writeln!(
+            head,
+            "Alarms: {count} armed, next at {}.",
+            next.format("%Y-%m-%d %H:%M UTC")
+        );
+    }
     head.push_str(&git_section(
         summary.git.as_ref(),
         summary.worktree.as_ref(),

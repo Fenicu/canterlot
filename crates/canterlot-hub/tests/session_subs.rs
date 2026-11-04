@@ -18,7 +18,7 @@ use canterlot_hub::{
     scheduler::Scheduler,
     session_tools::{
         settle::{self, SettleConfig, SettleFacts, Settled},
-        subs,
+        subs, summary,
     },
     testkit,
 };
@@ -1353,6 +1353,55 @@ async fn automation_input_does_not_reopen_unsubscribed_or_accepted(pool: PgPool)
     );
     assert_eq!(pending_jobs(&pool, a.subscriber).await, 0);
     assert_eq!(pending_jobs(&pool, b.subscriber).await, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn idle_summary_names_armed_alarms_without_their_notes(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    let first = now + TimeDelta::hours(2);
+    let second = now + TimeDelta::hours(5);
+    for (key, fire_at) in [("gate", first), ("disk", second)] {
+        sqlx::query(
+            "insert into alarms(id,owner_id,conversation_id,created_by,key,kind,fire_at,note,call_id)
+             values($1,$2,$3,'agent',$4,'at',$5,'secret alarm note',$6)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(p.owner)
+        .bind(p.target)
+        .bind(key)
+        .bind(fire_at)
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let mut conn = pool.acquire().await.unwrap();
+    let summary = summary::build(&mut conn, p.owner, p.target, "idle", Some(now))
+        .await
+        .unwrap()
+        .unwrap();
+    let text = summary::render(&summary);
+    assert!(
+        text.contains(&format!(
+            "Alarms: 2 armed, next at {}",
+            first.format("%Y-%m-%d %H:%M UTC")
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("secret alarm note"), "{text}");
+
+    sqlx::query("update alarms set state='cancelled' where conversation_id=$1")
+        .bind(p.target)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let summary = summary::build(&mut conn, p.owner, p.target, "idle", Some(now))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!summary::render(&summary).contains("Alarms:"));
 }
 
 async fn delete(pool: &PgPool, p: &Pair, id: Uuid, key: &str) -> Result<(), deletion::DeleteError> {
