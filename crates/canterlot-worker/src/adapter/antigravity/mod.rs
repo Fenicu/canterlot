@@ -96,6 +96,8 @@ pub struct AntigravityAdapter {
     generation: u64,
     questions_enabled: bool,
     limit_reported: bool,
+    /// Срок, к которому отменённый prompt должен ответить, иначе — сторож хода.
+    cancel_at: Option<Instant>,
     stall_at: Option<Instant>,
     eof: bool,
     exited: bool,
@@ -142,6 +144,7 @@ impl AntigravityAdapter {
             generation: 0,
             questions_enabled: questions_enabled_by_default(),
             limit_reported: false,
+            cancel_at: None,
             stall_at: None,
             eof: false,
             exited: false,
@@ -347,6 +350,7 @@ impl AntigravityAdapter {
         use std::os::unix::process::ExitStatusExt;
         self.exited = true;
         self.exit_reported = true;
+        self.cancel_at = None;
         self.stall_at = None;
         self.requests.drop_open();
         if let Some(Effect::CompactDone { ok }) = self.tracker.on_eof() {
@@ -478,9 +482,14 @@ impl AntigravityAdapter {
         }
     }
 
-    async fn send_cancel(&mut self) {
+    /// Единый путь отмены: срок ответа тот же, что у `interrupt`; если prompt
+    /// не ответил, `next_event` закрывает процесс сторожем хода.
+    async fn cancel_with_watch(&mut self) {
         let notification = input::cancel_notification(&self.session_id());
-        let _ = self.write_message(notification).await;
+        let sent = self.write_message(notification).await;
+        if sent && !self.eof && !self.exited {
+            self.cancel_at = Some(Instant::now() + self.interrupt_deadline);
+        }
     }
 
     async fn handle_server_request(&mut self, id: &RpcId, method: &str, params: &Value) {
@@ -522,7 +531,7 @@ impl AntigravityAdapter {
         if !self.questions_enabled {
             // До живой проверки cancel + служебный prompt вопрос не показывается.
             self.diagnostic("antigravity_questions_unavailable", false);
-            self.send_cancel().await;
+            self.cancel_with_watch().await;
             return;
         }
         match self
@@ -548,7 +557,7 @@ impl AntigravityAdapter {
                 // Пустой или неразбираемый questions[]: карточка не открывается,
                 // ход прерывается, чтобы не висеть без stopReason.
                 self.diagnostic("antigravity_question_invalid", false);
-                self.send_cancel().await;
+                self.cancel_with_watch().await;
             }
         }
     }
@@ -576,8 +585,11 @@ impl AntigravityAdapter {
             }
             _ => {}
         }
-        // Страж снимается только когда ответили все RPC отменённого хода: ответ
-        // одного prompt не отвечает за молчащий второй.
+        // Сторож отмены снимается только когда ответили все prompt-ы хода:
+        // ответ одного RPC не отвечает за молчащий второй.
+        if self.cancel_at.is_some() && self.tracker.outstanding() == 0 {
+            self.cancel_at = None;
+        }
         if stalled && self.tracker.target().is_none() {
             self.stall_at = None;
         }
@@ -662,7 +674,24 @@ impl AntigravityAdapter {
         self.finish_process(status);
     }
 
+    /// Отмена не дождалась ответа prompt до срока: включается тот же сторож,
+    /// что у `interrupt`, и `next_event` закрывает процесс.
+    fn check_cancel_watch(&mut self) {
+        let Some(at) = self.cancel_at else {
+            return;
+        };
+        if self.tracker.outstanding() == 0 {
+            self.cancel_at = None;
+            return;
+        }
+        if Instant::now() >= at {
+            self.cancel_at = None;
+            self.stall_at = Some(Instant::now() + self.turn_stall_deadline);
+        }
+    }
+
     async fn check_stall(&mut self) {
+        self.check_cancel_watch();
         if !self.stall_at.is_some_and(|at| Instant::now() >= at) {
             return;
         }
@@ -857,6 +886,7 @@ impl AntigravityAdapter {
         self.eof = false;
         self.exited = false;
         self.exit_reported = false;
+        self.cancel_at = None;
         self.stall_at = None;
         self.limit_reported = false;
     }
@@ -937,8 +967,10 @@ impl AntigravityAdapter {
         if !self.tracker.has_compaction() {
             return;
         }
-        self.send_cancel().await;
-        let limit = Instant::now() + self.interrupt_deadline;
+        self.cancel_with_watch().await;
+        let limit = self
+            .cancel_at
+            .unwrap_or_else(|| Instant::now() + self.interrupt_deadline);
         loop {
             if self.eof || self.exited {
                 return;
@@ -1327,7 +1359,7 @@ impl Adapter for AntigravityAdapter {
                 self.requests.remove(request_id);
                 // Отказ вопроса только отменяет живой ход; prompt не отправляется.
                 if self.tracker.has_turn() && !self.eof && !self.exited {
-                    self.send_cancel().await;
+                    self.cancel_with_watch().await;
                 }
                 // 1.5.0 уже ответил `end_turn` на исходный prompt: если других
                 // ответов не ждём, удержанный ход закрываем сами.
@@ -1368,7 +1400,7 @@ impl Adapter for AntigravityAdapter {
         if let Some(translator) = self.translator.as_mut() {
             translator.permission_open = false;
         }
-        self.send_cancel().await;
+        self.cancel_with_watch().await;
         // Вопрос 1.5.0 держит ход после уже пришедшего `end_turn`: cancel его
         // закрывает, а ответа prompt, который закрыл бы ход, не будет.
         self.tracker.expect_continuation(false);
@@ -1379,10 +1411,13 @@ impl Adapter for AntigravityAdapter {
             stop: _,
         }) = self.tracker.close_if_idle()
         {
+            self.cancel_at = None;
             self.close_turn(command_id, usage, failed);
             return InterruptOutcome::Acknowledged;
         }
-        let limit = Instant::now() + self.interrupt_deadline;
+        let limit = self
+            .cancel_at
+            .unwrap_or_else(|| Instant::now() + self.interrupt_deadline);
         loop {
             if self.eof || self.exited {
                 return InterruptOutcome::Undetermined;
@@ -1392,6 +1427,7 @@ impl Adapter for AntigravityAdapter {
                 Target::Compact => !self.tracker.has_compaction(),
             };
             if done {
+                self.cancel_at = None;
                 return match target {
                     Target::Turn
                         if had_question || self.tracker.last_stop() == Some("cancelled") =>
@@ -1405,6 +1441,7 @@ impl Adapter for AntigravityAdapter {
                 };
             }
             if timeout_at(limit, self.pump_once()).await.is_err() {
+                self.cancel_at = None;
                 self.stall_at = Some(Instant::now() + self.turn_stall_deadline);
                 return InterruptOutcome::Undetermined;
             }
@@ -1507,7 +1544,10 @@ impl Adapter for AntigravityAdapter {
             if self.exit_reported {
                 return std::future::pending().await;
             }
-            match self.stall_at {
+            // Будимся по ближайшему сроку: отмена ждёт ответа, затем сторож хода
+            // получает свой срок в `check_cancel_watch`.
+            let deadline = self.stall_at.into_iter().chain(self.cancel_at).min();
+            match deadline {
                 Some(at) => {
                     let _ = timeout_at(at, self.pump_once()).await;
                 }
@@ -1527,6 +1567,7 @@ impl Adapter for AntigravityAdapter {
         mode: CloseMode,
         group: &dyn Containment,
     ) -> Result<(), AdapterError> {
+        self.cancel_at = None;
         self.stall_at = None;
         self.requests.drop_open();
         if let Some(mut broker) = self.broker.take() {

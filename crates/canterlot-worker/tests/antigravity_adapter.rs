@@ -2659,6 +2659,145 @@ async fn a_malformed_question_is_a_diagnostic_and_a_cancel() {
     bench.close().await;
 }
 
+fn question_call() -> Step {
+    Script::send(tool_call(
+        "call_q",
+        "ask_question",
+        json!({"questions": [{"question": "Which?", "options": ["A", "B"]}]}),
+    ))
+}
+
+fn watch_timings() -> (Duration, Duration, Duration) {
+    (WAIT, Duration::from_millis(100), Duration::from_millis(150))
+}
+
+async fn wait_process_exit(adapter: &mut AntigravityAdapter) -> Vec<AdapterEvent> {
+    let mut events = Vec::new();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let event = tokio::time::timeout_at(deadline, adapter.next_event())
+            .await
+            .expect("the cancel watchdog never closed the process");
+        let exited = matches!(event, AdapterEvent::ProcessExited { .. });
+        events.push(event);
+        if exited {
+            return events;
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_unavailable_question_cancel_that_is_ignored_is_forced_closed() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 4),
+        Script::send(user_chunk(QUESTION_PROMPT)),
+        question_call(),
+        Script::notification("session/cancel"),
+        Step::Hang,
+    ];
+    let (deadline, interrupt, stall) = watch_timings();
+    let mut bench = Bench::with_questions(
+        question_script(steps),
+        "",
+        "",
+        "bypass",
+        deadline,
+        interrupt,
+        stall,
+        false,
+    );
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let events = wait_process_exit(&mut bench.adapter).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic {
+            kind: "antigravity_questions_unavailable",
+            ..
+        }
+    )));
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
+async fn a_malformed_question_cancel_that_is_ignored_is_forced_closed() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 4),
+        Script::send(user_chunk(QUESTION_PROMPT)),
+        Script::send(tool_call("call_bad", "ask_question", json!({}))),
+        Script::notification("session/cancel"),
+        Step::Hang,
+    ];
+    let (deadline, interrupt, stall) = watch_timings();
+    let mut bench = Bench::with_questions(
+        question_script(steps),
+        "",
+        "",
+        "bypass",
+        deadline,
+        interrupt,
+        stall,
+        true,
+    );
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let events = wait_process_exit(&mut bench.adapter).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic {
+            kind: "antigravity_question_invalid",
+            ..
+        }
+    )));
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
+async fn a_refused_question_cancel_that_is_ignored_is_forced_closed() {
+    let steps = vec![
+        init_step(),
+        new_step(),
+        deferred("session/prompt", 4),
+        Script::send(user_chunk(QUESTION_PROMPT)),
+        question_call(),
+        Script::notification("session/cancel"),
+        Step::Hang,
+    ];
+    let (deadline, interrupt, stall) = watch_timings();
+    let mut bench = Bench::with_questions(
+        question_script(steps),
+        "",
+        "",
+        "bypass",
+        deadline,
+        interrupt,
+        stall,
+        true,
+    );
+    bench.start().await;
+    let input = send(QUESTION_PROMPT);
+    assert!(matches!(
+        bench.adapter.transmit(&input, &bench.group).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let (request_id, _, _) = wait_request(&mut bench.adapter, "question").await;
+    bench.adapter.refuse_request(&request_id, "no").await;
+    wait_process_exit(&mut bench.adapter).await;
+    bench.fake.wait_gone().await;
+}
+
 #[tokio::test]
 async fn ask_question_is_refused_while_the_capability_is_unavailable() {
     let mut steps = question_without_answer_steps();
