@@ -1687,3 +1687,75 @@ async fn twenty_large_batches_split_into_bounded_inputs(pool: PgPool) {
     let unique: std::collections::BTreeSet<_> = keys.iter().collect();
     assert_eq!(unique.len(), keys.len(), "each part has its own key");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn retention_deletes_old_terminal_alarms(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let old = now - TimeDelta::days(31);
+    let mut ids = Vec::new();
+    for key in ["fired", "cancelled", "expired", "failed", "armed", "undelivered", "recent"] {
+        ids.push(alarm_id(&f.arm_at(key, now + TimeDelta::seconds(60)).await));
+    }
+    let [fired, cancelled, expired, failed, armed, undelivered, recent] =
+        <[Uuid; 7]>::try_from(ids).unwrap();
+    sqlx::query(
+        "update alarms set state='fired',fired_reason='time',fired_at=$2,
+           delivered_input_id=$3,delivered_at=$2,updated_at=$2 where id=$1",
+    )
+    .bind(fired)
+    .bind(old)
+    .bind(Uuid::now_v7())
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    for (id, state) in [(cancelled, "cancelled"), (expired, "expired"), (failed, "failed")] {
+        sqlx::query("update alarms set state=$2,updated_at=$3 where id=$1")
+            .bind(id)
+            .bind(state)
+            .bind(old)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("update alarms set updated_at=$2 where id=any($1)")
+        .bind(&[armed, undelivered])
+        .bind(old)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("update alarms set state='fired',fired_reason='time',fired_at=$2,updated_at=$2 where id=$1")
+        .bind(undelivered)
+        .bind(old)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("update alarms set state='cancelled',updated_at=$2 where id=$1")
+        .bind(recent)
+        .bind(now)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+
+    scheduler(&f.pool, Default::default())
+        .maintenance()
+        .await
+        .unwrap();
+
+    for id in [fired, cancelled, expired, failed] {
+        let found: Option<String> = sqlx::query_scalar("select state from alarms where id=$1")
+            .bind(id)
+            .fetch_optional(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(found, None, "old terminal alarm {id} is gone");
+    }
+    for id in [armed, undelivered, recent] {
+        let found: Option<String> = sqlx::query_scalar("select state from alarms where id=$1")
+            .bind(id)
+            .fetch_optional(&f.pool)
+            .await
+            .unwrap();
+        assert!(found.is_some(), "alarm {id} is kept");
+    }
+}
