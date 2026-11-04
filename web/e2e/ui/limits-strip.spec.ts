@@ -299,10 +299,9 @@ test('chat_header_and_limits_tab_hide_the_missing_five_hour_window', async ({ pa
   await seedSecondaryScreens(page, api, ids, null);
   await page.goto('/limits');
   await expect(page.locator('[data-layout]')).toBeVisible();
-  const card = page.locator('main .current section').filter({ hasText: 'Claude сейчас' });
-  await expect(card).toContainText('/ нед');
-  await expect(card).not.toContainText('/ 5ч');
-  await expect(page.locator('main .current section').filter({ hasText: 'Codex сейчас' })).toContainText('/ 5ч');
+  const card = page.getByRole('region', { name: 'Claude, текущие лимиты' });
+  await expect(card.locator('.label')).toHaveText(['неделя']);
+  await expect(page.getByRole('region', { name: 'Codex, текущие лимиты' }).locator('.label')).toHaveText(['5 часов', 'неделя']);
   await shot(page, 'limits-tab-one-meter');
 });
 

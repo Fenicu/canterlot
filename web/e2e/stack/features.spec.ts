@@ -231,15 +231,15 @@ test.describe('stack: features and security', () => {
 
     await page.goto(`${stack.baseUrl}/limits`);
     const main = page.locator('main');
-    await expect(main.getByText('Claude сейчас')).toBeVisible({ timeout: 20_000 });
-    await expect(main.getByRole('img', { name: /Дневные снимки лимитов/ })).toBeVisible();
-    const table = main.getByRole('table', { name: 'Дневные снимки лимитов' });
+    const current = main.getByRole('region', { name: 'Claude, текущие лимиты' });
+    await expect(current).toBeVisible({ timeout: 20_000 });
+    await expect(current.locator('.value')).toHaveText(['осталось 88%', 'осталось 55%']);
+    await expect(main.getByRole('img', { name: /^Недельный остаток по дням\. Claude/ })).toBeVisible();
+    const table = main.getByRole('table', { name: 'Недельный остаток по дням' });
     await expect(table).toHaveCount(1);
     const today = table.getByRole('row').filter({ hasText: 'Claude' }).last();
-    await expect(today).toContainText('88%');
     await expect(today).toContainText('55%');
-    await expect(main.locator('[data-series="five"]:not(.missing)').first()).toBeVisible();
-    await expect(main.locator('[data-series="weekly"]:not(.missing)').first()).toBeVisible();
+    await expect(main.locator('[data-series="weekly"]').first()).toBeVisible();
     await expect(main.getByText(/synthetic-large/).first()).toBeVisible();
   });
 

@@ -62,10 +62,10 @@ test('limits_page_lists_median_speed_per_model_for_today_and_the_week', async ({
   await expect(rows.nth(0)).toContainText('OpenCode');
   await expect(rows.nth(0).locator('td').nth(1)).toHaveText('нет ходов');
   await expect(rows.nth(0).locator('td').nth(2)).toContainText('1 240 ток/с');
-  await expect(rows.nth(0).locator('td').nth(2)).toContainText('первый токен 0,4 с');
+  await expect(rows.nth(0).locator('td').nth(2)).toContainText('старт 0,4 с');
   await expect(rows.nth(1)).toContainText('Opus 5.5');
   await expect(rows.nth(1).locator('td').nth(1)).toContainText('68 ток/с');
-  await expect(rows.nth(1).locator('td').nth(1)).toContainText('первый токен 2,1 с');
+  await expect(rows.nth(1).locator('td').nth(1)).toContainText('старт 2,1 с');
   await expect(rows.nth(1).locator('td').nth(2)).toContainText('71 ток/с');
   await expect(page.getByText(/Codex не передаёт время рассуждений/)).toBeVisible();
   // Сводка стоит рядом с расходом по сессиям, ниже него.

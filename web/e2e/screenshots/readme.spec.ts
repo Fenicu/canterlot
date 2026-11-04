@@ -444,6 +444,23 @@ test.describe('скриншоты README для телефона', () => {
     const hub = new FakeHub();
     const api = new FakeHubApi(hub);
     const ids = seedReadmeSessions(api);
+    // На экране лимитов видны все четыре провайдера: у Antigravity два окна, у OpenCode ещё и месяц.
+    api.limits.push(
+      {
+        provider: 'antigravity',
+        weekly_reserve_active: false,
+        five_hour: { used_permille: 180, resets_at: stamp(3 * 60 + 12), observed_at: stamp(-1) },
+        weekly: { used_permille: 470, resets_at: stamp(5 * 24 * 60), observed_at: stamp(-1) }
+      },
+      {
+        provider: 'opencode',
+        weekly_reserve_active: false,
+        data_confidence: 'estimated',
+        five_hour: { used_permille: 90, resets_at: stamp(4 * 60), observed_at: stamp(-1) },
+        weekly: { used_permille: 260, resets_at: stamp(6 * 24 * 60), observed_at: stamp(-1) },
+        monthly: { used_permille: 120, resets_at: stamp(20 * 24 * 60), observed_at: stamp(-1) }
+      }
+    );
     await prepare(page, 'standard', 'light');
     await installChatRoutes(page, hub, api, OWNER);
     await seedSecondaryScreens(page, api, { machine: ids.machine, pinned: ids.themes }, null);
@@ -505,11 +522,11 @@ test.describe('скриншоты README для телефона', () => {
         : [{
             provider,
             five_hour: [],
-            weekly: days.map((day, index) => ({
-              observed_at: day.toISOString(),
-              used_permille: 310 + index * 18,
-              used_pct: (310 + index * 18) / 10
-            }))
+            weekly: days.map((day, index) => {
+              // У Antigravity неделя сбросилась посреди периода: столбики снова высокие.
+              const used = provider === 'antigravity' ? [620, 780, 910, 40, 210, 350, 470][index]! : 310 + index * 18;
+              return { observed_at: day.toISOString(), used_permille: used, used_pct: used / 10 };
+            })
           }];
       const usage = provider === 'claude'
         ? [

@@ -1,51 +1,39 @@
 <script lang="ts">
-  import type { components } from '#lib/api/generated/openapi.js';
-  import { chartModel, providerName } from './model.js';
   import { styleProperty } from '#lib/ui/style-property.js';
-  let { series, days, zone, noFiveHour = [] }: { series: components['schemas']['ProviderSeries'][]; days: string[]; zone: string; noFiveHour?: string[] } = $props();
-  // У провайдера без пятичасового окна 5ч рисуется только пока в показанных днях есть снимки этого окна.
-  const model = $derived(chartModel(series, days, zone).map(p => ({ ...p, showFive: p.hasFive || !noFiveHour.includes(p.provider) })));
-  const summary = $derived(`Дневные снимки лимитов, осталось. ${model.map(p => {
-    const range = (values: (number | null)[]) => {
-      const known = values.filter((v): v is number => v !== null);
-      return known.length ? `от ${Math.min(...known).toLocaleString('ru-RU')} до ${Math.max(...known).toLocaleString('ru-RU')}%` : 'нет данных';
-    };
-    return `${providerName(p.provider)}: ${p.showFive ? `5 часов ${range(p.days.map(d => d.five))}, ` : ''}неделя ${range(p.days.map(d => d.weekly))}`;
-  }).join('. ')}`);
+  import type { historyCharts } from './model.js';
+  let { charts }: { charts: ReturnType<typeof historyCharts> } = $props();
 </script>
-<div class="chart" role="img" aria-label={summary}>
-  <div class="legend" aria-hidden="true">
-    {#each model as provider (provider.provider)}<span class="group" data-legend={provider.provider}>{providerName(provider.provider)}:{#if provider.showFive}<span><i class:codex={provider.provider === 'codex'}></i>5ч</span>{/if}<span><i class="week" class:codex={provider.provider === 'codex'}></i>неделя</span></span>{/each}
-  </div>
-  <div class="chart-wrap" aria-hidden="true"><div class="axis"><span>100%</span><span>50%</span><span>0%</span></div><div class="plot">
-    {#each days as day, index (day)}<div class="day"><div class="bars">
-      {#each model as provider (provider.provider)}
-        {@const point = provider.days[index]!}
-        {#if provider.showFive}<span class="bar" class:codex={provider.provider === 'codex'} class:missing={point.five === null} data-series="five" use:styleProperty={{ name: '--fill', value: `${point.five ?? 0}%` }}></span>{/if}
-        <span class="bar week" class:codex={provider.provider === 'codex'} class:missing={point.weekly === null} data-series="weekly" use:styleProperty={{ name: '--fill', value: `${point.weekly ?? 0}%` }}></span>
-      {/each}
-    </div><small>{Number(day.slice(-2))}</small></div>{/each}
-  </div></div>
+<div class="charts">
+  {#each charts as chart (chart.provider)}
+    <figure class="chart" data-provider={chart.provider} role="img" aria-label="Недельный остаток по дням. {chart.summary}">
+      <figcaption aria-hidden="true"><span class="name">{chart.label}</span>{#if chart.today}<span class="today">сегодня <b>{chart.today}</b></span>{/if}</figcaption>
+      <div class="plot" aria-hidden="true">
+        {#each chart.days as day (day.day)}
+          <div class="day" data-missing={day.value === null || undefined}>
+            <span class="track"><span class="num">{day.text || '–'}</span><span class="bar" data-series="weekly" use:styleProperty={{ name: '--fill', value: `${(day.value ?? 0) / 100}` }}></span></span>
+            <small>{day.mark}</small>
+          </div>
+        {/each}
+      </div>
+    </figure>
+  {/each}
 </div>
-<div class="sr-only"><table aria-label="Дневные снимки лимитов"><thead><tr><th>День</th><th>Провайдер</th><th>5 часов, осталось</th><th>Неделя, осталось</th></tr></thead><tbody>
-  {#each model as provider (provider.provider)}{#each provider.days as day (day.day)}<tr><th>{day.day}</th><td>{providerName(provider.provider)}</td><td>{day.five === null ? 'Нет данных' : `${day.five.toLocaleString('ru-RU')}%`}</td><td>{day.weekly === null ? 'Нет данных' : `${day.weekly.toLocaleString('ru-RU')}%`}</td></tr>{/each}{/each}
+<div class="sr-only"><table aria-label="Недельный остаток по дням"><thead><tr><th>День</th><th>Провайдер</th><th>Неделя, осталось</th></tr></thead><tbody>
+  {#each charts as chart (chart.provider)}{#each chart.days as day (day.day)}<tr><th>{day.day}</th><td>{chart.label}</td><td>{day.text || 'Нет данных'}</td></tr>{/each}{/each}
 </tbody></table></div>
 <style>
-  .chart { background: var(--surface); padding: var(--s8); border-radius: var(--radius-card); }
-  .legend { display: flex; flex-wrap: wrap; gap: var(--s4) var(--s8); font-size: var(--fs-meta); margin-bottom: var(--s10); }
-  /* Пара «5ч, неделя» не расходится по строкам с названием своего провайдера. */
-  .legend .group { display: inline-flex; align-items: center; gap: var(--s5); white-space: nowrap; }
-  .legend .group > span { display: inline-flex; align-items: center; gap: var(--s3); }
-  i { display: inline-block; width: var(--s6); height: var(--s6); background: var(--accent); border: var(--hairline) solid var(--accent); }
-  i.codex { background: var(--chart-secondary); border-color: var(--chart-secondary); }
-  .chart-wrap { display: flex; gap: var(--s4); }
-  .axis { height: var(--chart-height); display: flex; flex-direction: column; justify-content: space-between; color: var(--muted); font-size: var(--fs-xs); }
-  .plot { display: flex; flex: 1; min-width: 0; gap: var(--s4); }
-  .day { flex: 1; min-width: 0; text-align: center; }
-  .bars { height: var(--chart-height); display: flex; align-items: end; gap: var(--s1); }
-  .bar { flex: 1; min-width: 0; height: var(--fill); background: var(--accent); border: var(--hairline) solid var(--accent); border-radius: var(--s2) var(--s2) 0 0; }
-  .codex { background: var(--chart-secondary); border-color: var(--chart-secondary); }
-  .week, i.week { background: var(--transparent); }
-  .missing { visibility: hidden; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--gauge-width) * 3)), 1fr)); align-items: start; gap: var(--s4); }
+  .chart { min-width: 0; margin: var(--s0); padding: var(--s6) var(--s8); background: var(--surface); border-radius: var(--radius-card); }
+  figcaption { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s4); margin-bottom: var(--s4); }
+  .name { font-size: var(--fs-body); font-weight: var(--weight-semibold); }
+  .today { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; }
+  .today b { color: var(--text); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
+  .plot { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: var(--s3); }
+  .day { display: flex; flex-direction: column; align-items: center; gap: var(--s1); min-width: 0; }
+  .num { font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--secondary); }
+  [data-missing] .num { color: var(--muted); }
+  /* Подпись стоит прямо над столбиком: шкала 0–100% занимает высоту дорожки без строки подписи. */
+  .track { display: flex; flex-direction: column; justify-content: end; align-items: center; gap: var(--s1); width: 100%; height: calc(var(--chart-height) * .6); border-bottom: var(--hairline) solid var(--line); }
+  .bar { flex: none; display: block; width: 100%; height: calc((100% - var(--s8)) * var(--fill)); background: var(--accent); border-radius: var(--s2) var(--s2) var(--s0) var(--s0); }
   small { font-size: var(--fs-xs); color: var(--muted); }
 </style>

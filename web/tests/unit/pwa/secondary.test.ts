@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { machineStatus, machineWarnings, diskView } from '#lib/screens/machines/model.js';
-import { chartModel, usageRows, historyRange } from '#lib/screens/limits/model.js';
+import { historyCharts, usageRows, historyRange } from '#lib/screens/limits/model.js';
 import { applyShare } from '#lib/screens/share/model.js';
 import { MachinesStore } from '#lib/stores/machines.svelte.js';
 import { FakeHub } from '../../../testing/fake-hub/index.js';
@@ -19,12 +19,12 @@ describe('Task 9b', () => {
     expect(diskView({ label: 'root_0', free_bytes: 150, total_bytes: 1000 }, ['/srv'], 85)).toMatchObject({ warn: true, label: '/srv', pct: 85 });
     expect(diskView({ label: 'data', free_bytes: 0, total_bytes: 0 }, [], 85).pct).toBeNull();
   });
-  it('limits_chart_model_shows_the_remaining_share_of_both_series', () => {
+  it('limits_history_shows_the_remaining_weekly_share_and_ignores_five_hours', () => {
     const days = ['2026-10-28', '2026-10-29'];
     const series = [{ provider: 'claude', five_hour: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 340, used_pct: 34 }], weekly: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 960, used_pct: 96 }] }];
-    const model = chartModel(series, days, 'UTC');
-    expect(model[0]?.days[0]).toMatchObject({ five: null, weekly: null });
-    expect(model[0]?.days[1]).toMatchObject({ five: 66, weekly: 4 });
+    const model = historyCharts(series, days, 'UTC');
+    expect(model[0]?.days[0]).toMatchObject({ value: null, text: '' });
+    expect(model[0]?.days[1]).toMatchObject({ value: 4, text: '4%' });
   });
   it('usage_table_orders_by_weekly_delta_and_marks_estimates_and_agent_rows', () => {
     const rows = usageRows([usage({ weekly_delta_permille: 2, agent: 'agent-1', model: 'haiku', overlapped_runs: 1 }), usage({ weekly_delta_permille: 32 }), usage({ day: '2026-10-28' })], '2026-10-29', new Map([['abcdef12-0000', { title: 'Поток' }]]));
@@ -60,11 +60,11 @@ it('share_does_not_consume_the_record_when_draft_persistence_fails', async () =>
 });
 
 it('limits_calendar_and_snapshots_use_local_days_and_the_latest_point', () => {
-  const series = [{ provider: 'codex', five_hour: [
+  const series = [{ provider: 'codex', five_hour: [], weekly: [
     { observed_at: '2026-10-28T23:30:00Z', used_permille: 500, used_pct: 50 },
     { observed_at: '2026-10-28T21:30:00Z', used_permille: 200, used_pct: 20 }
-  ], weekly: [] }];
-  expect(chartModel(series, ['2026-10-29'], 'Europe/Moscow')[0]?.days[0]).toMatchObject({ five: 50, weekly: null });
+  ] }];
+  expect(historyCharts(series, ['2026-10-29'], 'Europe/Moscow')[0]?.days[0]).toMatchObject({ value: 50, text: '50%' });
 });
 
 

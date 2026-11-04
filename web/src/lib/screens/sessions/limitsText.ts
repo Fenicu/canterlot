@@ -40,7 +40,7 @@ export function limitStrip(
   opts: { prefer?: string } = {},
 ): LimitStrip {
   const ordered = [...providers].sort(
-    (a, b) => rank(a.provider, opts.prefer) - rank(b.provider, opts.prefer),
+    (a, b) => providerRank(a.provider, opts.prefer) - providerRank(b.provider, opts.prefer),
   );
   const views = ordered.map((provider) => ({
     provider,
@@ -71,7 +71,8 @@ export function limitStrip(
   };
 }
 
-function rank(provider: string, prefer?: string): number {
+/** Порядок провайдеров: выбранный, затем Claude, Codex и остальные. */
+export function providerRank(provider: string, prefer?: string): number {
   if (prefer && provider === prefer) return 0;
   if (provider === "claude") return 1;
   if (provider === "codex") return 2;

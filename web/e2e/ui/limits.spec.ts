@@ -13,24 +13,25 @@ async function shot(page: Page, name: string): Promise<void> {
   await page.screenshot({ path: join(SHOTS, `${name}-${test.info().project.name}-${theme ?? 'dark'}.png`), fullPage: false });
 }
 
-test('limits_history_follows_mockup_10_with_an_accessible_data_table', async ({ page }) => {
+test('limits_page_puts_current_first_and_draws_one_weekly_chart_per_provider', async ({ page }) => {
   const { historyRequests } = await bootSecondary(page, '/limits');
   const main = page.locator('main');
-  await expect(main.getByRole('img', { name: /Дневные снимки лимитов/ })).toBeVisible();
-  await expect(main.locator('[data-series="five"]').first()).toHaveCSS('height', /.+/);
-  await expect(main.locator('[data-series="weekly"]')).toHaveCount(14);
-  const table = main.getByRole('table', { name: 'Дневные снимки лимитов' });
+  // Порядок: сейчас, история, расход по сессиям, скорость.
+  await expect(main.getByRole('heading', { level: 2 })).toHaveText(['Сейчас', 'История лимитов', 'Сегодня по сессиям', 'Скорость моделей']);
+  await expect(main.getByRole('region', { name: 'Claude, текущие лимиты' })).toBeVisible();
+  await expect(main.getByRole('region', { name: 'Codex, текущие лимиты' })).toBeVisible();
+  // Отдельный график на провайдера с недельными снимками: пятичасовых столбиков нет.
+  const charts = main.getByRole('img', { name: /^Недельный остаток по дням\./ });
+  await expect(charts).toHaveCount(3);
+  await expect(charts.first()).toHaveAccessibleName(/Claude: от \d+ до \d+%, сегодня \d+%/);
+  await expect(main.locator('[data-series="five"]')).toHaveCount(0);
+  await expect(main.locator('[data-series="weekly"]')).toHaveCount(21);
+  // Значение читается без наведения: подпись над каждым столбиком.
+  await expect(charts.first().locator('.num')).toHaveCount(7);
+  await expect(charts.first().locator('.num').last()).toHaveText(/^\d+%$/);
+  const table = main.getByRole('table', { name: 'Недельный остаток по дням' });
   await expect(table).toHaveCount(1);
-  await expect(table.getByRole('row')).toHaveCount(15);
-  await expect(main.getByText('Claude сейчас')).toBeVisible();
-  await expect(main.getByText('Codex сейчас')).toBeVisible();
-  // Легенда держит окна рядом с провайдером: каждая группа в одну строку.
-  for (const group of await main.locator('.legend .group').all()) {
-    const box = (await group.boundingBox())!;
-    expect(box.height).toBeLessThanOrEqual(30);
-  }
-  await expect(main.locator('.legend .group').first()).toHaveText(/^Claude:.*неделя$/);
-  await expect(main.locator('.axis span').last()).toHaveText('0%');
+  await expect(table.getByRole('row')).toHaveCount(22);
   await expect(main.getByText('Субагент · haiku').first()).toBeVisible();
   // Приблизительность сказана один раз заголовком «≈» и примечанием, а не в каждой строке.
   await expect(main.getByText('приблизительно', { exact: true })).toHaveCount(0);
@@ -40,7 +41,10 @@ test('limits_history_follows_mockup_10_with_an_accessible_data_table', async ({ 
   await expect(usage.locator('.count').first()).toHaveText(/^вх\. [\d ]+$/);
   for (const link of await usage.getByRole('link').all()) expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   await expect(main.getByText(/Кэш включён во входные токены/)).toBeVisible();
-  // OpenCode и Antigravity нужны сводке скорости; график и расход остаются у Claude и Codex.
+  // Скорость и время до первого токена — каждое число с единицей в одну строку.
+  const speed = main.getByRole('table', { name: 'Скорость моделей' });
+  await expect(speed.getByText('старт 0,4 с')).toBeVisible();
+  for (const value of await speed.locator('.num').all()) expect(await value.evaluate((node) => node.getClientRects().length)).toBe(1);
   expect(historyRequests.map(query => query.get('provider')).sort()).toEqual(['antigravity', 'claude', 'codex', 'opencode']);
   for (const query of historyRequests) { expect(query.get('tz')).toBeTruthy(); expect(query.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}T/); expect(query.get('to')).toMatch(/^\d{4}-\d{2}-\d{2}T/); }
 });
@@ -57,10 +61,11 @@ test('antigravity_is_one_named_provider_on_the_limits_page', async ({ page }) =>
     });
   });
   await expect(page.locator('header.topbar p')).toHaveText('Claude, Codex и Antigravity');
-  const card = page.locator('main .current section').filter({ hasText: 'Antigravity сейчас' });
+  const card = page.getByRole('region', { name: 'Antigravity, текущие лимиты' });
   await expect(card).toHaveCount(1);
-  await expect(card.locator('.value')).toContainText('74%');
-  await expect(card.locator('.value')).toContainText('5ч');
+  await expect(card.locator('.row .value')).toHaveText(['осталось 74%', 'осталось 59%']);
+  await expect(card.locator('.row .label')).toHaveText(['5 часов', 'неделя']);
+  await expect(card.locator('.row .reset').first()).toHaveText(/^сброс \S/);
 });
 
 test('estimated_reading_is_called_out_on_the_limits_page', async ({ page }) => {
@@ -69,12 +74,12 @@ test('estimated_reading_is_called_out_on_the_limits_page', async ({ page }) => {
     if (claude) claude.data_confidence = 'estimated';
   });
   const card = page.locator('main .current section').first();
-  await expect(card).toContainText('оценка');
+  await expect(card.locator('h3')).toContainText('оценка');
 });
 
-test('subtitle_names_the_shown_providers_and_cards_keep_their_shape', async ({ page }) => {
+test('current_limits_show_only_existing_windows_in_compact_one_line_rows', async ({ page }) => {
   const phone = test.info().project.name === 'phone';
-  if (phone) await page.setViewportSize({ width: 384, height: 900 });
+  if (phone) await page.setViewportSize({ width: 390, height: 900 });
   await bootSecondary(page, '/limits', null, (api) => {
     const claude = api.limits.find((item) => item.provider === 'claude')!;
     claude.weekly!.used_permille = 790;
@@ -93,20 +98,23 @@ test('subtitle_names_the_shown_providers_and_cards_keep_their_shape', async ({ p
   await expect(page.locator('header.topbar p')).toHaveText('Claude, Codex и OpenCode');
   const cards = page.locator('main .current section');
   await expect(cards).toHaveCount(3);
-  await expect(cards.nth(0).locator('.value')).toHaveText('21% / нед');
-  await expect(cards.nth(2).locator('.other').last()).toHaveText(/^мес · 91% · \S/);
-  // Одинаковая структура: крупное значение с окном в одну строку, сброс — отдельной.
-  for (let index = 0; index < 3; index += 1) {
-    const card = cards.nth(index);
-    const value = card.locator('strong');
-    const reset = card.locator('small');
-    await expect(value).toHaveCSS('white-space', 'nowrap');
-    await expect(reset).toHaveCSS('display', 'block');
-    const valueBox = await value.boundingBox();
-    const resetBox = await reset.boundingBox();
-    expect(resetBox!.y).toBeGreaterThanOrEqual(valueBox!.y + valueBox!.height - 1);
+  // Окна, которого у провайдера нет, на экране нет вовсе.
+  await expect(cards.nth(0).locator('.row')).toHaveCount(1);
+  await expect(cards.nth(0).locator('.row')).toContainText('неделя');
+  await expect(cards.nth(0).locator('.value')).toHaveText('осталось 21%');
+  await expect(cards.nth(2).locator('.label')).toHaveText(['5 часов', 'неделя', 'месяц']);
+  await expect(cards.nth(2).locator('.value').last()).toHaveText('осталось 91%');
+  // Подпись окна, полоска, остаток и сброс — одна строка, без переносов внутри значений.
+  for (const row of await page.locator('main .current .row').all()) {
+    const parts = await Promise.all(['.label', '.value', '.reset'].map((part) => row.locator(part).boundingBox()));
+    for (const box of parts) {
+      expect(Math.abs(box!.y + box!.height / 2 - (parts[1]!.y + parts[1]!.height / 2))).toBeLessThanOrEqual(2);
+      expect(box!.height).toBeLessThanOrEqual(24);
+    }
   }
-  // На ширине телефона карточки встают друг под друга, на настольной — в один ряд.
+  // Плотно: на телефоне три провайдера помещаются в первый экран.
+  const third = (await cards.nth(2).boundingBox())!;
+  if (phone) expect(third.y + third.height).toBeLessThanOrEqual(844);
   const boxes = await Promise.all([0, 1, 2].map((index) => cards.nth(index).boundingBox()));
   if (phone) {
     expect(boxes[1]!.y).toBeGreaterThanOrEqual(boxes[0]!.y + boxes[0]!.height);
@@ -114,9 +122,7 @@ test('subtitle_names_the_shown_providers_and_cards_keep_their_shape', async ({ p
   } else {
     expect(Math.abs(boxes[1]!.y - boxes[0]!.y)).toBeLessThanOrEqual(1);
     expect(boxes[1]!.x).toBeGreaterThan(boxes[0]!.x);
-    expect(boxes[2]!.x).toBeGreaterThan(boxes[1]!.x);
   }
-  expect(await cards.nth(0).innerText()).not.toMatch(/недсброс|5чсброс/);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'limits-cards');
@@ -133,8 +139,8 @@ test('history_error_keeps_the_current_limits_and_names_the_cause', async ({ page
   const main = page.locator('main');
   await expect(main.getByRole('alert')).toHaveText('История недоступна: База данных временно недоступна');
   await expect(main.getByRole('button', { name: 'Повторить' })).toBeVisible();
-  await expect(main.getByText('Claude сейчас')).toBeVisible();
-  await expect(main.getByText('Codex сейчас')).toBeVisible();
+  await expect(main.getByRole('region', { name: 'Claude, текущие лимиты' })).toBeVisible();
+  await expect(main.getByRole('region', { name: 'Codex, текущие лимиты' })).toBeVisible();
 });
 
 test('without_snapshots_the_page_says_so_instead_of_empty_axes', async ({ page }) => {
@@ -144,7 +150,7 @@ test('without_snapshots_the_page_says_so_instead_of_empty_axes', async ({ page }
   await page.reload();
   const main = page.locator('main');
   await expect(main.locator('[data-history-empty]')).toHaveText('Снимков лимитов за эти дни ещё нет');
-  await expect(main.getByRole('img', { name: /Дневные снимки лимитов/ })).toHaveCount(0);
+  await expect(main.getByRole('img', { name: /Недельный остаток по дням/ })).toHaveCount(0);
   await expect(main.getByRole('table', { name: 'Сегодня по сессиям' })).toHaveCount(0);
   await expect(main.getByText('Сегодня завершённых запусков ещё нет')).toBeVisible();
 });
