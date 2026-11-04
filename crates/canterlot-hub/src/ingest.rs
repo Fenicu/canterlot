@@ -479,7 +479,7 @@ impl Ingest {
             if record.seq == up_to_seq && (last_digest.is_none() || last_digest == digest) {
                 continue;
             }
-            let mut tx = self.pool.begin().await?;
+            let mut tx = crate::db::begin(&self.pool).await?;
             if let Err(error) = require_active(&mut tx, machine_id, credential).await {
                 let _ = tx.rollback().await;
                 return Err(error);

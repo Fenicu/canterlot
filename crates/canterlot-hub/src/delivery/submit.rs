@@ -407,7 +407,7 @@ async fn resolve_race(
 pub async fn submit_input(pool: &PgPool, req: SubmitInput) -> Result<SubmittedInput, SubmitError> {
     validate_content(&req, false)?;
     let hash = request_hash(&req, &[], None);
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::db::begin(pool).await?;
     match submit_attempt(&mut tx, &req, &hash, None, &[], None, false).await {
         Ok(Attempt::Submitted(submitted)) => {
             tx.commit().await?;

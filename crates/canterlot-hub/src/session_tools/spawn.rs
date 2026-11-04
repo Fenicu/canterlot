@@ -708,7 +708,7 @@ pub async fn spawn(
 ) -> Result<Value, ToolError> {
     let args: SpawnArgs = parse_arguments(arguments)?;
     check_arguments(&args)?;
-    let mut tx = context.pool.begin().await?;
+    let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     if let Some(answer) = replayed(&mut tx, caller).await? {
         return Ok(answer);

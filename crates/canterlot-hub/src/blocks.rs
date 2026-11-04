@@ -362,7 +362,7 @@ pub async fn purge_sealed_chunks(pool: &sqlx::PgPool, batch: i64) -> Result<u64,
     let mut after = Uuid::nil();
     let mut purged = 0;
     loop {
-        let mut tx = pool.begin().await?;
+        let mut tx = crate::db::begin(pool).await?;
         let ids: Vec<Uuid> = sqlx::query_scalar(
             "select b.block_id from blocks b
              where b.block_id > $1 and b.state <> 'streaming'

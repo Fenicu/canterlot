@@ -483,7 +483,9 @@ pub async fn seed(pool: &PgPool) -> Seed {
 
 pub async fn seed_conversation(pool: &PgPool, owner_id: Uuid, machine_id: Uuid) -> Uuid {
     let conversation_id = Uuid::now_v7();
-    let mut transaction = pool.begin().await.expect("begin seed conversation");
+    let mut transaction = crate::db::begin(pool)
+        .await
+        .expect("begin seed conversation");
     sqlx::query(
         "insert into conversations (id, owner_id, machine_id, harness, workdir)
          values ($1, $2, $3, 'synthetic', '/tmp/w')",
