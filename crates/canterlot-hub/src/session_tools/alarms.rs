@@ -565,7 +565,7 @@ pub async fn set(
     let time_sources = usize::from(args.at.is_some())
         + usize::from(args.in_seconds.is_some())
         + usize::from(args.when.is_some());
-    if time_sources != 1 {
+    if time_sources != 1 || (args.when.is_none() && args.deadline_seconds.is_some()) {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
 
@@ -875,14 +875,28 @@ pub async fn cancel(
             .fetch_optional(&mut *tx)
             .await?
     } else {
-        sqlx::query_as(
+        let key = args.key.as_deref();
+        let armed: Option<AlarmRow> = sqlx::query_as(
             "select * from alarms where conversation_id=$1 and key=$2 and state='armed'
              for update",
         )
         .bind(caller.conversation_id)
-        .bind(args.key.as_deref())
+        .bind(key)
         .fetch_optional(&mut *tx)
-        .await?
+        .await?;
+        match armed {
+            Some(row) => Some(row),
+            None => {
+                sqlx::query_as(
+                    "select * from alarms where conversation_id=$1 and key=$2
+                     order by created_at desc limit 1 for update",
+                )
+                .bind(caller.conversation_id)
+                .bind(key)
+                .fetch_optional(&mut *tx)
+                .await?
+            }
+        }
     };
     let Some(row) = row else {
         return Err(ToolError::new(ToolErrorCode::AlarmNotFound));
