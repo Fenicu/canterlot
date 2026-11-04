@@ -814,6 +814,23 @@ impl AntigravityAdapter {
         let next_model = change.model.clone().unwrap_or_else(|| previous.2.clone());
         let next_effort = change.effort.clone().unwrap_or_else(|| previous.3.clone());
         self.stop_for_restart().await;
+        // Дети ушедшего CLI (инструменты) не должны пережить замену: второй CLI
+        // рядом с живыми инструментами не запускается.
+        if !matches!(
+            group.terminate(self.stop_grace).await,
+            Ok(crate::containment::Termination::Empty)
+        ) {
+            tracing::warn!(
+                kind = "antigravity_restart_descendants",
+                "the retiring CLI left live descendants; the execution stops"
+            );
+            if let Some(mut broker) = self.broker.take() {
+                broker.shutdown().await;
+            }
+            self.reset_connection();
+            self.diagnostic("restart_failed", true);
+            return Err("settings_restart_failed");
+        }
         self.reset_connection();
         // Новый процесс получает новый relay со своим секретом.
         if let Some(mut broker) = self.broker.take() {

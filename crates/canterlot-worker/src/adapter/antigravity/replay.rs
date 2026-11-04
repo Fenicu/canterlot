@@ -82,6 +82,10 @@ pub enum Step {
         #[serde(default)]
         result: Option<Value>,
     },
+    /// Дочерний процесс инструмента: переживает CLI и виден группе исполнения.
+    Spawn {
+        argv: Vec<String>,
+    },
     /// Процесс перестаёт читать stdin и висит до убийства: проверка срока записи.
     Hang,
     Die {
@@ -413,6 +417,26 @@ pub fn main(args: Vec<String>) -> ExitCode {
                     return ExitCode::from(70);
                 }
                 let _ = output.flush();
+            }
+            Step::Spawn { argv } => {
+                let Some((program, args)) = argv.split_first() else {
+                    log.entry(json!({"dir": "invalid_spawn", "argv": argv}));
+                    return ExitCode::from(66);
+                };
+                let child = std::process::Command::new(program)
+                    .args(args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                match child {
+                    Ok(child) => log.entry(json!({
+                        "dir": "child",
+                        "pid": child.id(),
+                        "argv": argv,
+                    })),
+                    Err(_) => return ExitCode::from(70),
+                }
             }
             Step::Delay { ms } => std::thread::sleep(Duration::from_millis(*ms)),
             Step::Hang => loop {

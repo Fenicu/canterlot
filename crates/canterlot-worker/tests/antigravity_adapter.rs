@@ -3279,6 +3279,84 @@ fn replace_system_binary(fake: &antigravity::Fake, version: &str) -> PathBuf {
     log
 }
 
+fn process_alive(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some(end) = stat.rfind(')') else {
+        return false;
+    };
+    !matches!(stat[end + 1..].trim_start().chars().next(), Some('Z' | 'X'))
+}
+
+struct KillChild(u32);
+
+impl Drop for KillChild {
+    fn drop(&mut self) {
+        if let Some(pid) = i32::try_from(self.0)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+        {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+#[tokio::test]
+async fn restart_terminates_tool_children_before_the_replacement_cli() {
+    let mut bench = Bench::new(
+        Script {
+            steps: vec![
+                init_step(),
+                new_step(),
+                Step::Spawn {
+                    argv: vec!["sh".into(), "-c".into(), "trap '' TERM; sleep 5".into()],
+                },
+            ],
+            ..Default::default()
+        },
+        "",
+        "",
+        "owner",
+    );
+    let started = bench.start().await;
+    let child = loop {
+        if let Some(entry) = bench
+            .fake
+            .entries()
+            .into_iter()
+            .find(|entry| entry["dir"] == "child")
+        {
+            break u32::try_from(entry["pid"].as_u64().unwrap()).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let _guard = KillChild(child);
+    assert!(process_alive(child), "the fake tool child did not start");
+    bench.adapter.set_stop_grace(Duration::from_millis(200));
+    bench
+        .fake
+        .rewrite(restart_script(&started.native_conversation_id));
+
+    let mut input = send("after restart");
+    input.settings = Some(SettingsChange {
+        permission_mode: Some("bypass".into()),
+        ..Default::default()
+    });
+    let outcome = bench.adapter.transmit(&input, &bench.group).await;
+    assert!(
+        matches!(outcome, TransmitOutcome::Accepted(_)),
+        "restart failed; boots={:?}",
+        boots(&bench.fake)
+    );
+    assert!(
+        !process_alive(child),
+        "the retiring CLI's tool child survived the restart"
+    );
+    assert_eq!(boots(&bench.fake).len(), 2, "the replacement CLI started");
+    bench.close().await;
+}
+
 #[tokio::test]
 async fn restart_reuses_the_pinned_copy_and_capabilities_after_a_system_change() {
     let mut bench = Bench::new(
