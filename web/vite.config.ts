@@ -1,6 +1,4 @@
 import adapter from "@sveltejs/adapter-static";
-import { cpSync, rmSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 import { removeKitAnnouncer } from "./scripts/kit-announcer.mjs";
 import { directives } from "./csp.mjs";
@@ -11,17 +9,6 @@ import { workspaceVersion } from "./scripts/workspace-version.mjs";
 
 const appVersion = workspaceVersion();
 const version = (process.env.PWA_VERSION ??= String(Date.now()));
-
-// Маршруты проверок живут вне src/routes и попадают в сборку только для UI-тестов:
-// обычной сборке они не нужны, а лист весит ровно столько, сколько весит.
-const testRoutes = fileURLToPath(new URL("./src/routes/__test", import.meta.url));
-const testRoutesSource = fileURLToPath(new URL("./src/test-routes/__test", import.meta.url));
-if (process.env.VITE_UI_TESTS === "1") {
-  rmSync(testRoutes, { recursive: true, force: true });
-  cpSync(testRoutesSource, testRoutes, { recursive: true });
-} else {
-  rmSync(testRoutes, { recursive: true, force: true });
-}
 
 export default defineConfig({
   define: {
