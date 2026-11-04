@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use canterlot_hub::{
     config::SessionToolsConfig,
+    conversations::{self, ListFilter, ListQuery},
     dispatcher::Dispatcher,
     scheduler::Scheduler,
-    testkit,
+    snapshot, testkit,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::PgPool;
@@ -304,4 +305,54 @@ async fn maintenance_runs_retention_at_most_every_few_hours(pool: PgPool) {
         exists(&pool, second).await,
         "повторная уборка ждёт своего окна"
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn archive_list_excludes_accepted_delegate_but_tree_and_detail_keep_it(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    let now = Utc::now();
+    let accepted = child(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
+    accept_at(&pool, accepted, now - TimeDelta::days(1)).await;
+    let archived_owner = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
+    sqlx::query("update conversations set archived_at=clock_timestamp() where id=$1")
+        .bind(archived_owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut conn = pool.acquire().await.unwrap();
+    let page = conversations::list(
+        &mut conn,
+        &ListQuery {
+            owner_id: seed.owner_id,
+            filter: ListFilter::Archived,
+            q: None,
+            cursor: None,
+            limit: 50,
+        },
+    )
+    .await
+    .unwrap();
+    let ids: Vec<Uuid> = page.items.iter().map(|item| item.attributes.id).collect();
+    assert_eq!(
+        ids,
+        vec![archived_owner],
+        "принятая делегация скрыта из архива"
+    );
+    assert_eq!(page.counts.archived, 1, "счётчик архива её не считает");
+
+    let tree = snapshot::conversations(&pool, seed.owner_id).await.unwrap();
+    assert!(
+        tree.data
+            .items
+            .iter()
+            .any(|item| item.attributes.id == accepted),
+        "снимок списка несёт делегацию для дерева"
+    );
+    let detail = conversations::detail(&mut conn, seed.owner_id, accepted)
+        .await
+        .unwrap()
+        .expect("принятая делегация открывается по ссылке");
+    assert!(detail.attributes.archived);
+    assert!(detail.attributes.accepted);
 }

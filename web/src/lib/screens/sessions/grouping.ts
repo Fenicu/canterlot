@@ -69,7 +69,7 @@ export function buildSections(
   );
   const active = items.filter((item) => !item.archived);
   if (tab.kind === "archive") {
-    const archived = items.filter((item) => item.archived);
+    const archived = items.filter((item) => item.archived && !item.accepted);
     return [
       section(
         "archive",

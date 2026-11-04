@@ -274,6 +274,34 @@ test('orphan_archive_and_search', async ({ page }) => {
   await expect(page.locator(`[data-session="${child}"]`)).toBeVisible();
 });
 
+test('accepted_delegate_is_hidden_from_the_archive_tab_and_its_counter', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const parent = seedConversation(api, { title: 'Оркестратор', activity: IDLE as never });
+  const accepted = seedConversation(api, {
+    title: 'Принятая делегация',
+    parent_id: parent,
+    spawn_depth: 1,
+    archived: true,
+    accepted: true,
+    activity: STOPPED as never,
+  });
+  const kept = seedConversation(api, {
+    title: 'Обычный архив',
+    archived: true,
+    activity: STOPPED as never,
+  });
+  api.counts = { all: 1, pinned: 0, archived: 1, groups: [] };
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto('/sessions');
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+
+  await expect(page.getByRole('tab', { name: /Архив 1/ })).toBeVisible();
+  await page.getByRole('tab', { name: /Архив/ }).click();
+  await expect(page.locator(`[data-session="${kept}"]`)).toBeVisible();
+  await expect(page.locator(`[data-session="${accepted}"]`)).toHaveCount(0);
+});
+
 test('long_titles_keep_working_at_384px', async ({ page }) => {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);

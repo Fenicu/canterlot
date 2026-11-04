@@ -500,6 +500,7 @@ async fn accept_stops_then_removes_then_archives(pool: PgPool) {
     .unwrap();
     assert_eq!(updated["worktree"]["state"], "removed");
     assert!(updated["archived"].as_bool().unwrap_or(false), "{updated}");
+    assert!(updated["accepted"].as_bool().unwrap_or(false), "{updated}");
 
     fx.tick().await;
     let note = fx.last_note().await;

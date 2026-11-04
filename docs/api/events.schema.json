@@ -329,6 +329,9 @@
         "archived": {
           "type": "boolean"
         },
+        "accepted": {
+          "type": "boolean"
+        },
         "groups": {
           "type": "array",
           "items": {
@@ -2324,6 +2327,9 @@
             "archived": {
               "type": "boolean"
             },
+            "accepted": {
+              "type": "boolean"
+            },
             "groups": {
               "type": "array",
               "items": {
@@ -2588,6 +2594,9 @@
               "type": "boolean"
             },
             "archived": {
+              "type": "boolean"
+            },
+            "accepted": {
               "type": "boolean"
             },
             "groups": {
