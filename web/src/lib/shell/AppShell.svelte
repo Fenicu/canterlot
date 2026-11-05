@@ -15,6 +15,7 @@
   import Nav from './Nav.svelte';
   import SessionExpired from './SessionExpired.svelte';
   import { applyMotion } from '#lib/screens/settings/preferences.js';
+  import { trackViewport } from './viewport';
   import { installation, register } from '#lib/pwa/register.js';
   import type { UpdateController } from '#lib/pwa/update.js';
   import { announce } from '#lib/a11y/announce.js';
@@ -154,6 +155,7 @@
     laidOut = true;
     window.addEventListener('resize', read);
     const releaseTicker = ticker.retain();
+    const stopViewport = trackViewport();
     loadRuntime();
     return () => {
       alive = false;
@@ -169,6 +171,7 @@
       window.removeEventListener('online', checkUpdate);
       document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('resize', read);
+      stopViewport();
       releaseTicker();
     };
   });
@@ -246,7 +249,7 @@
 <style>
   .shell {
     position: fixed;
-    inset: var(--s0);
+    inset: var(--s0) var(--s0) var(--keyboard-inset) var(--s0);
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -255,7 +258,7 @@
 
   .shell[data-harness] {
     position: static;
-    height: 100dvh;
+    height: var(--app-height);
   }
 
   .page {

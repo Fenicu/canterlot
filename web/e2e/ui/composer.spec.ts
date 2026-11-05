@@ -736,3 +736,61 @@ test('the_bubble_does_not_animate_under_reduced_motion', async ({ page }) => {
   await boot(page);
   expect(await sendWatchingMotion(page)).toBe(0);
 });
+
+test('keyboard_sized_viewport_keeps_the_attachment_text_and_caret_above_the_keyboard', async ({ page }, info) => {
+  test.skip(info.project.name !== 'phone', 'экранная клавиатура телефона');
+  await boot(page);
+  await page.setInputFiles('input[type=file]', {
+    name: 'Screenshot_20261105_161407_Chrome.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from('screenshot')
+  });
+  const tray = page.locator('[data-composer] .tray');
+  await expect(tray.getByText('Загружено')).toBeVisible({ timeout: 30_000 });
+
+  const area = page.getByRole('textbox', { name: 'Сообщение' });
+  await area.fill(
+    Array.from(
+      { length: 14 },
+      (_, index) => `строка ${index + 1}: длинный текст, который должен остаться над клавиатурой`
+    ).join('\n')
+  );
+  await area.focus();
+  await area.press('End');
+
+  const height = 520;
+  await page.setViewportSize({ width: 412, height });
+  await expect(page.locator('html')).toHaveAttribute('data-compact', '');
+  await expect.poll(() => page.locator('[data-composer]').evaluate((node) => node.getBoundingClientRect().bottom)).toBeLessThanOrEqual(height + 1);
+
+  const box = (await page.locator('[data-composer]').boundingBox())!;
+  expect(box.y + box.height).toBeLessThanOrEqual(height + 1);
+  const cap = await page.locator('[data-composer]').evaluate((node) => parseFloat(getComputedStyle(node).maxHeight));
+  expect(box.height).toBeLessThanOrEqual(cap + 1);
+  expect((await area.boundingBox())!.y + (await area.boundingBox())!.height).toBeLessThanOrEqual(height + 1);
+
+  // Поле прокручивается внутри, поэтому последняя строка с курсором видна.
+  await expect
+    .poll(() =>
+      area.evaluate((node) => node.scrollTop + node.clientHeight >= node.scrollHeight - 2)
+    )
+    .toBe(true);
+  const field = await area.evaluate((node) => ({
+    scrollTop: node.scrollTop,
+    scrollHeight: node.scrollHeight,
+    clientHeight: node.clientHeight
+  }));
+  expect(field.scrollTop).toBeGreaterThan(0);
+  expect(field.scrollTop + field.clientHeight).toBeGreaterThanOrEqual(field.scrollHeight - 2);
+
+  // Вложения в компактном виде едут одной строкой вбок.
+  const trayLayout = await tray.evaluate((node) => ({
+    height: node.getBoundingClientRect().height,
+    direction: getComputedStyle(node.querySelector('ul')!).flexDirection,
+    overflow: getComputedStyle(node.querySelector('ul')!).overflowX
+  }));
+  expect(trayLayout.height).toBeLessThanOrEqual(80);
+  expect(trayLayout.direction).toBe('row');
+  expect(trayLayout.overflow).toBe('auto');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
