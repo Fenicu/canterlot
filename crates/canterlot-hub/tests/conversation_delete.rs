@@ -274,6 +274,16 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     )
     .await;
     sqlx::query(
+        "insert into composer_drafts(conversation_id,owner_id,text,revision,device_id)
+         values($1,$2,$3,1,'seed')",
+    )
+    .bind(conversation)
+    .bind(owner)
+    .bind(format!("черновик {conversation}"))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
         "insert into idempotency_keys(owner_id,key,operation,request_hash,response,conversation_id)
          values($1,$2,'seed',''::bytea,'{}',$3)",
     )

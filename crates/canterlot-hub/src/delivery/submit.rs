@@ -511,6 +511,7 @@ async fn submit_message_input_scoped_in_tx(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn submit_attempt(
     conn: &mut PgConnection,
     req: &SubmitInput,
