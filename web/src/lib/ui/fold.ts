@@ -36,13 +36,11 @@ export function branchGrow(node: HTMLElement): TransitionConfig {
  * Ключевые кадры считаются здесь, поэтому движение плавное и там, где браузер не интерполирует
  * строки сетки сам. Переход локальный: строка, вернувшаяся в окно ленты раскрытой, не раскрывается заново.
  */
-export function blockFold(_node: HTMLElement): TransitionConfig {
-  return {
-    duration: durationMs('--duration-expand'),
-    easing: easing('--ease-expand'),
-    css: (t) => `grid-template-rows: ${t.toFixed(4)}fr; opacity: ${Math.min(1, t * 2).toFixed(3)};`
-  };
-}
+export const blockFold: (node: HTMLElement) => TransitionConfig = () => ({
+  duration: durationMs('--duration-expand'),
+  easing: easing('--ease-expand'),
+  css: (t) => `grid-template-rows: ${t.toFixed(4)}fr; opacity: ${Math.min(1, t * 2).toFixed(3)};`
+});
 
 const IDENTITY = ['data-session', 'data-slot', 'data-section-slot'];
 const watched = new WeakSet<HTMLElement>();
