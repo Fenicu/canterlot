@@ -158,6 +158,9 @@
     },
     {
       "$ref": "#/$defs/context_changed"
+    },
+    {
+      "$ref": "#/$defs/routing_policy_changed"
     }
   ],
   "$defs": {
@@ -4057,6 +4060,39 @@
             "total": { "type": "integer" },
             "held": { "type": "boolean" },
             "detail": { "type": "string" }
+          }
+        }
+      },
+      "required": [
+        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
+        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
+        "kind", "payload"
+      ],
+      "additionalProperties": false
+    },
+    "routing_policy_changed": {
+      "type": "object",
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/Uuid" },
+        "scope": { "$ref": "#/$defs/Scope" },
+        "scope_seq": { "$ref": "#/$defs/Seq" },
+        "scope_seq_from": { "$ref": "#/$defs/Seq" },
+        "committed_at": { "$ref": "#/$defs/Time" },
+        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "conversation_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "execution_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "correlation_id": { "$ref": "#/$defs/Uuid" },
+        "kind": { "const": "routing_policy_changed" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "revision": { "type": "integer", "minimum": 0 }
           }
         }
       },
