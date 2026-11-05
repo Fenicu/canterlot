@@ -1264,7 +1264,7 @@ pub async fn preview(
     }
 }
 
-fn no_executor_message(considered: &[Considered], reset: Option<DateTime<Utc>>) -> String {
+pub(crate) fn no_executor_message(considered: &[Considered], reset: Option<DateTime<Utc>>) -> String {
     let mut message = String::from("No executor available for this task type:");
     for entry in considered {
         message.push_str(&format!(" {}: {}; ", entry.harness, entry.reason));
@@ -1280,4 +1280,681 @@ fn no_executor_message(considered: &[Considered], reset: Option<DateTime<Utc>>) 
 
 pub fn description() -> &'static str {
     preview_description()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn catalog(models: &[(&str, &[&str])], modes: &[&str]) -> HarnessCatalog {
+        HarnessCatalog {
+            models: models
+                .iter()
+                .map(|(id, efforts)| CatalogModel {
+                    id: id.to_string(),
+                    efforts: efforts.iter().map(|effort| effort.to_string()).collect(),
+                })
+                .collect(),
+            modes: modes.iter().map(|mode| mode.to_string()).collect(),
+        }
+    }
+
+    fn catalogs() -> HashMap<String, HarnessCatalog> {
+        HashMap::from([
+            (
+                "opencode".to_owned(),
+                catalog(
+                    &[
+                        ("opencode-go/deepseek-v4.1-flash", &["low", "medium", "high"]),
+                        ("opencode-go/muse-spark-1.3-contributor", &["low", "medium", "high"]),
+                        ("opencode-go/beam-free", &["low", "medium"]),
+                    ],
+                    &["owner", "ask", "bypass", "read_only"],
+                ),
+            ),
+            (
+                "claude_code".to_owned(),
+                catalog(
+                    &[("opus[1m]", &["low", "medium", "high"])],
+                    &["owner", "ask", "bypass", "read_only"],
+                ),
+            ),
+            (
+                "codex".to_owned(),
+                catalog(
+                    &[("gpt-6.1-sol", &["low", "medium", "high"])],
+                    &["owner", "ask", "bypass", "read_only"],
+                ),
+            ),
+        ])
+    }
+
+    fn entries() -> Vec<WhitelistEntry> {
+        ["opencode/opencode-go/deepseek-v4.1-flash", "opencode/opencode-go/muse-spark-1.3-contributor", "opencode/opencode-go/beam-free", "claude_code/opus[1m]", "codex/gpt-6.1-sol"]
+            .iter()
+            .map(|pair| {
+                let (harness, model) = pair.split_once('/').unwrap();
+                WhitelistEntry {
+                    harness: harness.to_owned(),
+                    model: model.to_owned(),
+                }
+            })
+            .collect()
+    }
+
+    fn policy() -> Policy {
+        let mut policy = builtin();
+        // Тестовый белый список короче встроенного: первый кандидат каталога.
+        policy.unlimited_models = vec!["opencode-go/beam-free".to_owned()];
+        policy
+    }
+
+    fn request(task_type: &str) -> RouteRequest {
+        RouteRequest {
+            task_type: task_type.to_owned(),
+            level: None,
+            parent_harness: "opencode".to_owned(),
+            parent_mode: "bypass".to_owned(),
+            explicit_mode: None,
+            workdir: "/tmp/w".to_owned(),
+        }
+    }
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn reading(percent: f64, age_minutes: i64) -> WindowReading {
+        WindowReading {
+            used_percent: percent,
+            observed_at: now() - chrono::TimeDelta::minutes(age_minutes),
+            resets_at: Some(now() + chrono::TimeDelta::hours(4)),
+        }
+    }
+
+    fn limits_with(weekly: f64) -> HashMap<String, ProviderView> {
+        HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(reading(weekly, 5)),
+                ..ProviderView::default()
+            },
+        )])
+    }
+
+    #[test]
+    fn builtin_policy_passes_validation() {
+        assert!(validate(&builtin()).is_ok());
+    }
+
+    #[test]
+    fn first_passing_candidate_wins() {
+        let decision = route(
+            &policy(),
+            3,
+            &entries(),
+            &catalogs(),
+            &HashMap::new(),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("bugfix"),
+        )
+        .unwrap();
+        assert_eq!(decision.harness, "opencode");
+        assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
+        assert_eq!(decision.effort, "high");
+        assert_eq!(decision.policy_revision, 3);
+        assert_eq!(decision.watchdog_minutes, Some(90));
+        assert_eq!(decision.considered.len(), 1);
+        assert_eq!(decision.considered[0].verdict, "chosen");
+    }
+
+    #[test]
+    fn level_filters_and_sets_effort() {
+        let mut policy = policy();
+        let task = policy.task_types.get_mut("mechanical").unwrap();
+        task.candidates[0].levels = Some(vec!["low".to_owned()]);
+        let mut with_level = request("mechanical");
+        with_level.level = Some("high".to_owned());
+        let decision = route(
+            &policy,
+            0,
+            &entries(),
+            &catalogs(),
+            &HashMap::new(),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &with_level,
+        )
+        .unwrap();
+        // Beam пропущен по уровню; DeepSeek без effort берёт уровень как усилие.
+        assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
+        assert_eq!(decision.effort, "high");
+        assert!(decision.considered[0].reason.contains("high"));
+    }
+
+    #[test]
+    fn whitelist_skip_is_explained() {
+        let decision = route(
+            &policy(),
+            0,
+            &[],
+            &catalogs(),
+            &HashMap::new(),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("bugfix"),
+        );
+        let error = decision.unwrap_err();
+        let RouteError::NoExecutor { considered, .. } = error else {
+            panic!("expected no executor");
+        };
+        assert!(considered.iter().all(|entry| entry.verdict == "skipped"));
+        assert!(
+            considered
+                .iter()
+                .all(|entry| entry.reason == "not in the owner's list")
+        );
+    }
+
+    #[test]
+    fn missing_harness_is_not_available() {
+        let mut catalogs = catalogs();
+        catalogs.remove("claude_code");
+        let decision = route(
+            &policy(),
+            0,
+            &entries(),
+            &catalogs,
+            &HashMap::new(),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("review"),
+        )
+        .unwrap();
+        // claude_code нет в каталоге: выбран codex, а не отсутствующий opus.
+        assert_eq!(decision.harness, "codex");
+        assert_eq!(decision.model, "gpt-6.1-sol");
+    }
+
+    #[test]
+    fn default_model_resolves_to_first() {
+        let mut policy = Policy::default();
+        policy.task_types.insert(
+            "probe".to_owned(),
+            TaskType {
+                title: "Проба".to_owned(),
+                candidates: vec![Candidate {
+                    harness: "opencode".to_owned(),
+                    model: "default".to_owned(),
+                    effort: None,
+                    levels: None,
+                    preset: None,
+                    nudge: None,
+                    exclude_workdirs: vec![],
+                    watchdog_minutes: None,
+                }],
+                preset: None,
+                isolated: None,
+            },
+        );
+        let decision = route(
+            &policy,
+            0,
+            &entries(),
+            &catalogs(),
+            &HashMap::new(),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("probe"),
+        )
+        .unwrap();
+        assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
+    }
+
+    #[test]
+    fn alias_resolves_both_ways() {
+        let mut policy = Policy::default();
+        policy.task_types.insert(
+            "probe".to_owned(),
+            TaskType {
+                title: "Проба".to_owned(),
+                candidates: vec![Candidate {
+                    harness: "claude_code".to_owned(),
+                    model: "opus".to_owned(),
+                    effort: None,
+                    levels: None,
+                    preset: None,
+                    nudge: None,
+                    exclude_workdirs: vec![],
+                    watchdog_minutes: None,
+                }],
+                preset: None,
+                isolated: None,
+            },
+        );
+        let decision = route(
+            &policy,
+            0,
+            &entries(),
+            &catalogs(),
+            &HashMap::new(),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("probe"),
+        )
+        .unwrap();
+        assert_eq!(decision.model, "opus[1m]");
+    }
+
+    #[test]
+    fn unknown_effort_skips_candidate() {
+        let mut policy = Policy::default();
+        policy.task_types.insert(
+            "probe".to_owned(),
+            TaskType {
+                title: "Проба".to_owned(),
+                candidates: vec![Candidate {
+                    harness: "opencode".to_owned(),
+                    model: "opencode-go/beam-free".to_owned(),
+                    effort: Some("high".to_owned()),
+                    levels: None,
+                    preset: None,
+                    nudge: None,
+                    exclude_workdirs: vec![],
+                    watchdog_minutes: None,
+                }],
+                preset: None,
+                isolated: None,
+            },
+        );
+        // Beam свободен от лимитов, но усилие `high` он не знает.
+        let error = route(
+            &policy,
+            0,
+            &entries(),
+            &catalogs(),
+            &HashMap::new(),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("probe"),
+        )
+        .unwrap_err();
+        let RouteError::NoExecutor { considered, .. } = error else {
+            panic!("expected no executor");
+        };
+        assert!(considered[0].reason.contains("high"));
+    }
+
+    #[test]
+    fn over_threshold_skips_with_numbers() {
+        let decision = route(
+            &policy(),
+            0,
+            &entries(),
+            &catalogs(),
+            &limits_with(97.0),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("bugfix"),
+        )
+        .unwrap();
+        // DeepSeek и Muse упёрлись в лимит opencode; у claude показаний нет —
+        // unknown allow, поэтому выбран opus, а сброс недели известен.
+        assert_eq!(decision.harness, "claude_code");
+        assert_eq!(decision.considered.len(), 3);
+        assert!(
+            decision
+                .considered
+                .iter()
+                .any(|entry| entry.reason == "opencode weekly 97% > 95%")
+        );
+    }
+
+    #[test]
+    fn all_filtered_reports_reasons_and_reset() {
+        let limits: HashMap<String, ProviderView> = HashMap::from([
+            (
+                "opencode".to_owned(),
+                ProviderView {
+                    weekly: Some(reading(99.0, 5)),
+                    five_hour: Some(reading(99.0, 5)),
+                    monthly: Some(reading(99.0, 5)),
+                    ..ProviderView::default()
+                },
+            ),
+            (
+                "claude".to_owned(),
+                ProviderView {
+                    weekly: Some(reading(99.0, 5)),
+                    five_hour: Some(reading(99.0, 5)),
+                    monthly: None,
+                    ..ProviderView::default()
+                },
+            ),
+        ]);
+        let error = route(
+            &policy(),
+            0,
+            &entries(),
+            &catalogs(),
+            &limits,
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("bugfix"),
+        )
+        .unwrap_err();
+        let RouteError::NoExecutor { considered, reset } = error else {
+            panic!("expected no executor");
+        };
+        assert_eq!(considered.len(), 3);
+        assert!(
+            considered
+                .iter()
+                .any(|entry| entry.reason.contains("weekly"))
+        );
+        assert!(reset.is_some());
+        let message = no_executor_message(&considered, reset);
+        assert!(message.contains("No executor available"));
+    }
+
+    #[test]
+    fn unlimited_models_skip_limits() {
+        let mut policy = Policy::default();
+        policy.task_types.insert(
+            "fast".to_owned(),
+            TaskType {
+                title: "Быстро".to_owned(),
+                candidates: vec![Candidate {
+                    harness: "opencode".to_owned(),
+                    model: "opencode-go/beam-free".to_owned(),
+                    effort: None,
+                    levels: None,
+                    preset: None,
+                    nudge: None,
+                    exclude_workdirs: vec![],
+                    watchdog_minutes: None,
+                }],
+                preset: None,
+                isolated: None,
+            },
+        );
+        policy.unlimited_models = vec!["opencode-go/beam-free".to_owned()];
+        let decision = route(
+            &policy,
+            0,
+            &entries(),
+            &catalogs(),
+            &limits_with(99.0),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("fast"),
+        )
+        .unwrap();
+        assert_eq!(decision.model, "opencode-go/beam-free");
+    }
+
+    #[test]
+    fn stale_limits_allow_and_skip() {
+        let mut limits = HashMap::new();
+        limits.insert(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(reading(10.0, 120)),
+                ..ProviderView::default()
+            },
+        );
+        // allow: кандидат проходит с пометкой (пустой отчёт: он первый и выбран).
+        let decision = route(
+            &policy(),
+            0,
+            &entries(),
+            &catalogs(),
+            &limits,
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("bugfix"),
+        )
+        .unwrap();
+        assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
+        // skip: несвежий кандидат отсекается, выбирается следующий свежий.
+        let mut strict = policy();
+        strict.unknown_limits = UnknownLimits::Skip;
+        let mut fresh = limits.clone();
+        fresh.insert(
+            "claude".to_owned(),
+            ProviderView {
+                weekly: Some(reading(10.0, 5)),
+                five_hour: Some(reading(10.0, 5)),
+                monthly: None,
+                ..ProviderView::default()
+            },
+        );
+        let error_or_next = route(
+            &strict,
+            0,
+            &entries(),
+            &catalogs(),
+            &fresh,
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("bugfix"),
+        );
+        let decision = error_or_next.unwrap();
+        assert_ne!(decision.model, "opencode-go/deepseek-v4.1-flash");
+        assert!(
+            decision
+                .considered
+                .iter()
+                .any(|entry| entry.reason.contains("observed"))
+        );
+    }
+
+    #[test]
+    fn reserve_pauses_with_time() {
+        let limits: HashMap<String, ProviderView> = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                reserve_active: true,
+                reserve_resets_at: Some(now() + chrono::TimeDelta::hours(2)),
+                ..ProviderView::default()
+            },
+        )]);
+        let decision = route(
+            &policy(),
+            0,
+            &entries(),
+            &catalogs(),
+            &limits,
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("bugfix"),
+        )
+        .unwrap();
+        // Первый два кандидата на паузе; выбран opus.
+        assert_eq!(decision.harness, "claude_code");
+        assert!(
+            decision
+                .considered
+                .iter()
+                .any(|entry| entry.reason.contains("quota paused"))
+        );
+    }
+
+    #[test]
+    fn parallelism_counts_matching_pairs() {
+        let live: HashMap<(String, String), i64> = HashMap::from([(
+            ("opencode".to_owned(), "opencode-go/deepseek-v4.1-flash".to_owned()),
+            4,
+        )]);
+        let decision = route(
+            &policy(),
+            0,
+            &entries(),
+            &catalogs(),
+            &HashMap::new(),
+            &live,
+            Duration::from_secs(1800),
+            now(),
+            &request("bugfix"),
+        )
+        .unwrap();
+        // DeepSeek занят 4 из 4; Muse исключён workdir? Нет: workdir /tmp/w.
+        assert_eq!(decision.model, "opencode-go/muse-spark-1.3-contributor");
+        assert!(
+            decision
+                .considered
+                .iter()
+                .any(|entry| entry.reason.contains("sessions busy"))
+        );
+    }
+
+    #[test]
+    fn exclude_workdirs_matches_components() {
+        let mut with_home = request("bugfix");
+        with_home.workdir = "/home/fenicu/work/project".to_owned();
+        let decision = route(
+            &policy(),
+            0,
+            &entries(),
+            &catalogs(),
+            &HashMap::new(),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &with_home,
+        )
+        .unwrap();
+        // Muse исключён каталогом; DeepSeek первый и проходит.
+        assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
+        assert!(decision.considered.len() == 1);
+        // А под workshops-префиксом Muse проходит: не тот компонент.
+        let mut shop = request("feature");
+        shop.workdir = "/home/fenicu/workshop".to_owned();
+        let live: HashMap<(String, String), i64> = HashMap::from([(
+            ("opencode".to_owned(), "opencode-go/deepseek-v4.1-flash".to_owned()),
+            4,
+        )]);
+        let decision = route(
+            &policy(),
+            0,
+            &entries(),
+            &catalogs(),
+            &HashMap::new(),
+            &live,
+            Duration::from_secs(1800),
+            now(),
+            &shop,
+        )
+        .unwrap();
+        assert_eq!(decision.model, "opencode-go/muse-spark-1.3-contributor");
+    }
+
+    #[test]
+    fn trailing_slash_and_dots_canonicalize() {
+        assert_eq!(normalize_workdir("/home/fenicu/work/"), "/home/fenicu/work");
+        assert_eq!(
+            normalize_workdir("/home/fenicu/work/../work/x"),
+            "/home/fenicu/work/x"
+        );
+        assert!(excluded_prefix(&["/home/fenicu/work".to_owned()], "/home/fenicu/work/").is_some());
+        assert!(excluded_prefix(&["/home/fenicu/work/".to_owned()], "/home/fenicu/work").is_some());
+        assert!(excluded_prefix(&["/home/fenicu/work".to_owned()], "/home/fenicu/workshop").is_none());
+    }
+
+    #[test]
+    fn queue_seam_marks_concurrency_and_limits() {
+        let busy = vec![Considered {
+            harness: "codex".to_owned(),
+            model: "gpt-6.1-sol".to_owned(),
+            verdict: "parallel_busy".to_owned(),
+            reason: "1 of 1 sessions busy".to_owned(),
+        }];
+        assert_eq!(
+            queue_reason(&busy, now(), Duration::from_secs(6 * 3600)),
+            Some("concurrency")
+        );
+        let limited = vec![Considered {
+            harness: "codex".to_owned(),
+            model: "gpt-6.1-sol".to_owned(),
+            verdict: "limits_over".to_owned(),
+            reason: "codex weekly 83% > 80%".to_owned(),
+        }];
+        assert_eq!(
+            queue_reason(&limited, now(), Duration::from_secs(6 * 3600)),
+            Some("limits")
+        );
+        let skipped = vec![Considered {
+            harness: "codex".to_owned(),
+            model: "gpt-6.1-sol".to_owned(),
+            verdict: "skipped".to_owned(),
+            reason: "not in the owner's list".to_owned(),
+        }];
+        assert_eq!(queue_reason(&skipped, now(), Duration::from_secs(6 * 3600)), None);
+    }
+
+    #[test]
+    fn unknown_task_lists_available() {
+        let error = route(
+            &policy(),
+            0,
+            &entries(),
+            &catalogs(),
+            &HashMap::new(),
+            &HashMap::new(),
+            Duration::from_secs(1800),
+            now(),
+            &request("nope"),
+        )
+        .unwrap_err();
+        let RouteError::UnknownTask { available } = error else {
+            panic!("expected unknown task");
+        };
+        assert!(available.contains(&"bugfix".to_owned()));
+    }
+
+    #[test]
+    fn validate_rejects_bad_policy() {
+        let mut policy = builtin();
+        policy.task_types.insert(
+            "Bad Key".to_owned(),
+            TaskType {
+                title: "".to_owned(),
+                candidates: vec![],
+                preset: None,
+                isolated: None,
+            },
+        );
+        assert!(validate(&policy).is_err());
+        let mut policy = builtin();
+        let task = policy.task_types.get_mut("bugfix").unwrap();
+        task.candidates[0].harness = "nope".to_owned();
+        assert!(validate(&policy).is_err());
+        let mut policy = builtin();
+        let task = policy.task_types.get_mut("bugfix").unwrap();
+        task.candidates[0].watchdog_minutes = Some(4);
+        assert!(validate(&policy).is_err());
+        let mut policy = builtin();
+        let task = policy.task_types.get_mut("bugfix").unwrap();
+        task.candidates[0].exclude_workdirs = vec!["relative".to_owned()];
+        assert!(validate(&policy).is_err());
+        assert!(validate(&builtin()).is_ok());
+        let _ = json!(null);
+    }
 }
