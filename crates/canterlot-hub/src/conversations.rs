@@ -1973,17 +1973,50 @@ pub async fn submit_message(
     req: SubmitMessage,
     correlation_id: Uuid,
 ) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
+    submit_message_with_device(pool, req, correlation_id, None).await
+}
+
+/// Ввод из композера удаляет общий черновик в той же транзакции, что и приём.
+/// `device_id` уходит в событие, чтобы отправившее устройство не применило свой же
+/// очищающий `draft_changed` к тексту, набранному после нажатия.
+pub async fn submit_message_with_device(
+    pool: &PgPool,
+    req: SubmitMessage,
+    correlation_id: Uuid,
+    device_id: Option<String>,
+) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
     // Гонка за ключ: первая попытка фиксирует или откатывает, вторая идёт в новой транзакции.
     let retry = req.clone();
-    match crate::db::in_tx(pool, |conn| {
-        Box::pin(async move { submit_message_in_tx(conn, &req, correlation_id).await })
+    let retry_device = device_id.clone();
+    match crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let value = submit_message_in_tx(conn, &req, correlation_id).await?;
+            crate::drafts::clear_in_tx(
+                conn,
+                req.conversation_id,
+                device_id.as_deref(),
+                correlation_id,
+            )
+            .await?;
+            Ok(value)
+        })
     })
     .await
     {
         Ok(value) => Ok(value),
         Err(crate::delivery::SubmitError::KeyRaceLost) => {
             crate::db::in_tx(pool, move |conn| {
-                Box::pin(async move { submit_message_in_tx(conn, &retry, correlation_id).await })
+                Box::pin(async move {
+                    let value = submit_message_in_tx(conn, &retry, correlation_id).await?;
+                    crate::drafts::clear_in_tx(
+                        conn,
+                        retry.conversation_id,
+                        retry_device.as_deref(),
+                        correlation_id,
+                    )
+                    .await?;
+                    Ok(value)
+                })
             })
             .await
         }

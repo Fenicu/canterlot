@@ -18,6 +18,7 @@ pub mod dberr;
 pub mod deletion;
 pub mod delivery;
 pub mod dispatcher;
+pub mod drafts;
 pub mod events;
 pub mod executions;
 #[cfg(feature = "fault-injection")]
