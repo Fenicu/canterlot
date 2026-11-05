@@ -173,6 +173,11 @@ pub struct AttributeView {
     /// Сессия принята родителем через `session_accept`: живёт в архиве до срока хранения.
     #[serde(default)]
     pub accepted: bool,
+    /// Сессия в корзине владельца: видна только на своей странице и во вкладке «Корзина».
+    #[serde(default)]
+    pub trashed: bool,
+    #[serde(default)]
+    pub trashed_at: Option<String>,
     pub groups: Vec<Uuid>,
     pub group_pins: Vec<GroupPinView>,
     pub machine: MachineRef,
@@ -278,6 +283,7 @@ pub struct Counts {
     pub all: i64,
     pub pinned: i64,
     pub archived: i64,
+    pub trashed: i64,
     pub groups: Vec<GroupCount>,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -357,6 +363,10 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
             accepted: row
                 .try_get::<Option<DateTime<Utc>>, _>("accepted_at")?
                 .is_some(),
+            trashed: row
+                .try_get::<Option<DateTime<Utc>>, _>("trashed_at")?
+                .is_some(),
+            trashed_at: optional_time(row, "trashed_at")?,
             groups: row.try_get("groups")?,
             group_pins: serde_json::from_value(row.try_get("group_pins")?)
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
@@ -403,12 +413,13 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
     })
 }
 pub async fn counts(conn: &mut PgConnection, owner_id: Uuid) -> Result<Counts, sqlx::Error> {
-    let (all,pinned,archived)=sqlx::query_as("select count(*) filter(where archived_at is null),count(*) filter(where archived_at is null and pinned),count(*) filter(where archived_at is not null and accepted_at is null) from conversations where owner_id=$1").bind(owner_id).fetch_one(&mut *conn).await?;
-    let groups=sqlx::query_as::<_,(Uuid,i64)>("select g.id,count(c.id) from conversation_groups g left join conversation_group_members gm on gm.group_id=g.id left join conversations c on c.id=gm.conversation_id and c.owner_id=$1 and c.archived_at is null where g.owner_id=$1 group by g.id order by g.position,g.id").bind(owner_id).fetch_all(conn).await?.into_iter().map(|(id,count)|GroupCount{id,count}).collect();
+    let (all,pinned,archived,trashed)=sqlx::query_as("select count(*) filter(where archived_at is null and trashed_at is null),count(*) filter(where archived_at is null and trashed_at is null and pinned),count(*) filter(where archived_at is not null and accepted_at is null and trashed_at is null),count(*) filter(where trashed_at is not null) from conversations where owner_id=$1").bind(owner_id).fetch_one(&mut *conn).await?;
+    let groups=sqlx::query_as::<_,(Uuid,i64)>("select g.id,count(c.id) from conversation_groups g left join conversation_group_members gm on gm.group_id=g.id left join conversations c on c.id=gm.conversation_id and c.owner_id=$1 and c.archived_at is null and c.trashed_at is null where g.owner_id=$1 group by g.id order by g.position,g.id").bind(owner_id).fetch_all(conn).await?.into_iter().map(|(id,count)|GroupCount{id,count}).collect();
     Ok(Counts {
         all,
         pinned,
         archived,
+        trashed,
         groups,
     })
 }
@@ -423,7 +434,9 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
         return Err(invalid());
     }
     let mut sql = sqlx::QueryBuilder::new(SELECT);
-    sql.push(" where c.owner_id=").push_bind(q.owner_id);
+    sql.push(" where c.owner_id=")
+        .push_bind(q.owner_id)
+        .push(" and c.trashed_at is null");
     let group_filter = match q.filter {
         ListFilter::Group(id) => Some(id),
         _ => None,
@@ -553,7 +566,9 @@ pub(crate) async fn agent_list(
     q: &AgentListQuery,
 ) -> Result<Vec<ListItem>, sqlx::Error> {
     let mut sql = sqlx::QueryBuilder::new(SELECT);
-    sql.push(" where c.owner_id=").push_bind(q.owner_id);
+    sql.push(" where c.owner_id=")
+        .push_bind(q.owner_id)
+        .push(" and c.trashed_at is null");
     if let Some(family) = &q.family {
         sql.push(" and c.id=any(")
             .push_bind(family.clone())
@@ -1997,7 +2012,8 @@ pub async fn submit_message_in_tx(
     correlation_id: Uuid,
 ) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
     let owned: bool = sqlx::query_scalar(
-        "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
+        "select exists(select 1 from conversations
+                       where id=$1 and owner_id=$2 and trashed_at is null)",
     )
     .bind(req.conversation_id)
     .bind(req.owner_id)

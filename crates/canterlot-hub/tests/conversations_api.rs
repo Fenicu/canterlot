@@ -2243,6 +2243,21 @@ async fn deleting_a_conversation_drops_its_group_pins(pool: PgPool) {
         204,
     )
     .await;
+    // Корзина сохраняет группу и закрепление для возврата.
+    let saved: i64 =
+        sqlx::query_scalar("select count(*) from conversation_group_pins where conversation_id=$1")
+            .bind(id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(saved, 1);
+    f.request(
+        Method::DELETE,
+        &format!("/api/v1/conversations/{id}/trash"),
+        None,
+        204,
+    )
+    .await;
     let left: i64 =
         sqlx::query_scalar("select count(*) from conversation_group_pins where conversation_id=$1")
             .bind(id)

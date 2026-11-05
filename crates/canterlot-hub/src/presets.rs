@@ -295,7 +295,7 @@ async fn used_by(
     reference: &str,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
-        "select count(*) from conversations where owner_id=$1 and archived_at is null
+        "select count(*) from conversations where owner_id=$1 and archived_at is null and trashed_at is null
          and (instruction_profile=$2 or pending_settings->>'instruction_profile'=$2)",
     )
     .bind(owner)

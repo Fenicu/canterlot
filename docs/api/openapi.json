@@ -2793,6 +2793,92 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/restore": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "post__api_v1_conversations__id__restore",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сессия возвращена из корзины",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found или conversation_deleted",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/resume": {
       "post": {
         "tags": [
@@ -3399,6 +3485,104 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/StopExecutionOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/trash": {
+      "delete": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "delete__api_v1_conversations__id__trash",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Сессия удалена окончательно",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "404": {
+            "description": "not_found или conversation_deleted",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "invalid_state: сессия не в корзине",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             }
@@ -6191,6 +6375,16 @@
           "title_source": {
             "type": "string"
           },
+          "trashed": {
+            "type": "boolean",
+            "description": "Сессия в корзине владельца: видна только на своей странице и во вкладке «Корзина»."
+          },
+          "trashed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "workdir": {
             "type": "string"
           },
@@ -6649,7 +6843,8 @@
           "machines",
           "limit_thresholds",
           "defaults",
-          "auth"
+          "auth",
+          "sessions"
         ],
         "properties": {
           "activity": {
@@ -6674,6 +6869,9 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "sessions": {
+            "$ref": "#/components/schemas/SessionsView"
           },
           "version": {
             "type": "string"
@@ -6974,6 +7172,7 @@
           "all",
           "pinned",
           "archived",
+          "trashed",
           "groups"
         ],
         "properties": {
@@ -6992,6 +7191,10 @@
             }
           },
           "pinned": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "trashed": {
             "type": "integer",
             "format": "int64"
           }
@@ -11049,6 +11252,20 @@
           },
           "title": {
             "type": "string"
+          }
+        }
+      },
+      "SessionsView": {
+        "type": "object",
+        "required": [
+          "trash_retention_secs"
+        ],
+        "properties": {
+          "trash_retention_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько сессия лежит в корзине до окончательной уборки; `0` — уборка выключена.",
+            "minimum": 0
           }
         }
       },

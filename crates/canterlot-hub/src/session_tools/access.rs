@@ -60,7 +60,7 @@ pub async fn session_in_tx(
         "select id,title,harness,model,permission_mode,
                 pending_settings->>'permission_mode' pending_mode,spawn_depth,
                 archived_at is not null archived
-         from conversations where id=$1 and owner_id=$2 for key share",
+         from conversations where id=$1 and owner_id=$2 and trashed_at is null for key share",
     )
     .bind(id)
     .bind(owner_id)

@@ -496,7 +496,9 @@ impl From<crate::deletion::DeleteError> for ApiError {
             DeleteError::Deleted => ApiError::new(ErrorCode::ConversationDeleted),
             DeleteError::Live => ApiError::new(ErrorCode::ConversationLive),
             DeleteError::WorktreeNotRemoved => ApiError::new(ErrorCode::WorktreeNotRemoved),
-            DeleteError::Referenced => ApiError::new(ErrorCode::InvalidState),
+            DeleteError::Referenced | DeleteError::NotTrashed => {
+                ApiError::new(ErrorCode::InvalidState)
+            }
             DeleteError::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
             DeleteError::Db(error) => error.into(),
         }

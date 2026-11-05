@@ -54,7 +54,7 @@ pub async fn start_with_key(
 ) -> Result<StartedExecution, ExecutionError> {
     let (resume, continue_queue) = options;
     let owned: bool = sqlx::query_scalar(
-        "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
+        "select exists(select 1 from conversations where id=$1 and owner_id=$2 and trashed_at is null)",
     )
     .bind(id)
     .bind(owner)
@@ -137,12 +137,13 @@ pub async fn start_in_tx(
     conversation_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<StartedExecution, ExecutionError> {
-    let harness: Option<String> =
-        sqlx::query_scalar("select harness from conversations where id=$1 and owner_id=$2")
-            .bind(conversation_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let harness: Option<String> = sqlx::query_scalar(
+        "select harness from conversations where id=$1 and owner_id=$2 and trashed_at is null",
+    )
+    .bind(conversation_id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?;
     // Строка провайдера раньше очереди: возобновление и вход в резерв сериализуются.
     let provider = harness
         .as_deref()
@@ -158,12 +159,14 @@ pub async fn start_in_tx(
     .fetch_optional(&mut *conn)
     .await?
     .ok_or(ExecutionError::ConversationNotFound)?;
-    let row = sqlx::query("select * from conversations where id=$1 and owner_id=$2")
-        .bind(conversation_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *conn)
-        .await?
-        .ok_or(ExecutionError::ConversationNotFound)?;
+    let row = sqlx::query(
+        "select * from conversations where id=$1 and owner_id=$2 and trashed_at is null",
+    )
+    .bind(conversation_id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or(ExecutionError::ConversationNotFound)?;
     use sqlx::Row;
     let machine_id: Uuid = row.try_get("machine_id")?;
     let preset_ref: String = row.try_get("instruction_profile")?;

@@ -519,7 +519,7 @@ async fn submit_attempt(
         return Ok(Attempt::Submitted(submitted));
     }
     let (input_seq, closed, machine_id): (i64, bool, Uuid) = sqlx::query_as(
-        "select q.next_input_seq, q.closed, c.machine_id from queue_state q join conversations c on c.id = q.conversation_id where q.conversation_id = $1 and c.owner_id = $2 for update of q")
+        "select q.next_input_seq, q.closed, c.machine_id from queue_state q join conversations c on c.id = q.conversation_id where q.conversation_id = $1 and c.owner_id = $2 and c.trashed_at is null for update of q")
         .bind(req.conversation_id).bind(req.owner_id).fetch_optional(&mut *conn).await?.ok_or(SubmitError::ConversationNotFound)?;
     match idempotency::lookup(conn, req.owner_id, &req.idempotency_key, OPERATION, hash).await? {
         Begin::Replay(response) => return replay(response).map(Attempt::Submitted),

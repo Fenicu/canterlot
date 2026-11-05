@@ -466,6 +466,8 @@ pub struct Scheduler {
     registry: Option<Registry>,
     limits: Arc<LimitsConfig>,
     session_tools: SessionToolsConfig,
+    /// Срок хранения корзины: через него уборка удаляет сессию окончательно.
+    trash_retention: Duration,
     /// Пороги устоявшегося состояния для перепроверки задания `nudge`.
     settle: crate::session_tools::settle::SettleConfig,
     /// Пороги активности: задание не верит устаревшей проекции цели.
@@ -496,6 +498,7 @@ impl Scheduler {
             registry: None,
             limits: Arc::new(LimitsConfig::default()),
             session_tools: SessionToolsConfig::default(),
+            trash_retention: Duration::from_secs(24 * 3600),
             settle: crate::session_tools::settle::SettleConfig::default(),
             thresholds: crate::activity::Thresholds::from(&crate::config::ActivityConfig::default()),
             blobs: None,
@@ -519,6 +522,13 @@ impl Scheduler {
     pub fn with_session_tools(mut self, config: SessionToolsConfig) -> Self {
         self.session_tools = config;
         self
+    }
+    pub fn with_trash_retention(mut self, retention: Duration) -> Self {
+        self.trash_retention = retention;
+        self
+    }
+    pub fn trash_retention(&self) -> Duration {
+        self.trash_retention
     }
     /// Пороги и выключатель автопинка для перепроверки отложенного толчка.
     pub fn with_settle(mut self, settle: crate::session_tools::settle::SettleConfig) -> Self {
@@ -1179,6 +1189,7 @@ impl Scheduler {
                     | crate::deletion::DeleteError::Live
                     | crate::deletion::DeleteError::WorktreeNotRemoved
                     | crate::deletion::DeleteError::Referenced
+                    | crate::deletion::DeleteError::NotTrashed
                     | crate::deletion::DeleteError::IdempotencyConflict,
                 ) => {}
             }
@@ -1188,6 +1199,52 @@ impl Scheduler {
             deleted,
             "accepted delegates removed"
         );
+        Ok(deleted)
+    }
+
+    /// Уборка корзины: сессии, пролежавшие дольше `[sessions].trash_retention`,
+    /// удаляются прежним окончательным путём, пачками.
+    pub async fn purge_trashed(&self, now: DateTime<Utc>) -> Result<usize, sqlx::Error> {
+        let retention = self.trash_retention;
+        if retention.is_zero() {
+            return Ok(0);
+        }
+        let cutoff = now - retention;
+        let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "select c.id,c.owner_id from conversations c
+             where c.trashed_at is not null and c.trashed_at <= $1
+             order by c.trashed_at,c.id limit $2",
+        )
+        .bind(cutoff)
+        .bind(RETENTION_BATCH)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut deleted = 0usize;
+        for (id, owner_id) in candidates {
+            match crate::deletion::purge_retained(
+                &self.pool,
+                self.blobs.as_deref(),
+                owner_id,
+                id,
+                cutoff,
+                Uuid::now_v7(),
+            )
+            .await
+            {
+                Ok(()) => deleted += 1,
+                Err(crate::deletion::DeleteError::Db(error)) => return Err(error),
+                Err(
+                    crate::deletion::DeleteError::NotFound
+                    | crate::deletion::DeleteError::Deleted
+                    | crate::deletion::DeleteError::Live
+                    | crate::deletion::DeleteError::WorktreeNotRemoved
+                    | crate::deletion::DeleteError::Referenced
+                    | crate::deletion::DeleteError::NotTrashed
+                    | crate::deletion::DeleteError::IdempotencyConflict,
+                ) => {}
+            }
+        }
+        tracing::info!(kind = "trash_purged", deleted, "trashed sessions removed");
         Ok(deleted)
     }
 
@@ -1210,8 +1267,17 @@ impl Scheduler {
                 }
             }
         }
-        // Уборка принятых делегаций идёт реже остальной уборки: не чаще раза в несколько часов.
+        // Корзина проверяется каждый час: срок меряется часами, а частичный индекс дешёв.
         let now = Utc::now();
+        if !self.trash_retention.is_zero()
+            && let Err(error) = self.purge_trashed(now).await
+        {
+            log_error(&error);
+            if first.is_none() {
+                first = Some(error);
+            }
+        }
+        // Уборка принятых делегаций идёт реже остальной уборки: не чаще раза в несколько часов.
         if !self.session_tools.accepted_retention.is_zero()
             && now.timestamp() >= self.retention_next.load(Ordering::Relaxed)
         {
