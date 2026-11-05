@@ -493,6 +493,10 @@
   --motion-base-row-fold: 280ms;
   --duration-row-fold: calc(var(--motion-base-row-fold) * var(--motion-scale));
   --ease-row-fold: cubic-bezier(.25, 1, .5, 1);
+  /* Шкала доезжает до нового показания: видно, куда сдвинулся остаток. */
+  --motion-base-gauge: 640ms;
+  --duration-gauge: calc(var(--motion-base-gauge) * var(--motion-scale));
+  --ease-gauge: cubic-bezier(.25, 1, .5, 1);
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -519,6 +523,7 @@
     --duration-todo-strike: 0ms;
     --duration-work-write: 0ms;
     --duration-row-fold: 0ms;
+    --duration-gauge: 0ms;
   }
 }
 
