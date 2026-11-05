@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fs,
     future::Future,
     path::{Path, PathBuf},
@@ -55,6 +55,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "session_tools_v1",
     "owner_exit_v1",
     "owner_instructions_v1",
+    "claude_histories_v1",
     "send_now_v1",
     "alarms_v1",
     "nudge_v1",
@@ -1149,6 +1150,10 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "owner_instructions_v1");
+        let histories_enabled = accepted
+            .capabilities
+            .iter()
+            .any(|cap| cap == "claude_histories_v1");
         self.manager
             .as_ref()
             .unwrap()
@@ -1249,6 +1254,11 @@ impl Worker {
         let mut suggest_outbound = None;
         type SuggestFuture = Pin<Box<dyn Future<Output = WorkdirSuggestions> + Send>>;
         let mut suggest_operation: Option<SuggestFuture> = None;
+        // История Claude Code: тоже только последний запрос.
+        let mut histories_next: Option<ListClaudeHistories> = None;
+        let mut histories_outbound = None;
+        type HistoriesFuture = Pin<Box<dyn Future<Output = ClaudeHistories> + Send>>;
+        let mut histories_operation: Option<HistoriesFuture> = None;
         // Чтение инструкций владельца: тоже только последний запрос.
         let mut owner_next: Option<ReadOwnerInstructions> = None;
         let mut owner_outbound: Option<ControlUp> = None;
@@ -1314,6 +1324,40 @@ impl Worker {
                     WorkdirSuggestions {
                         directories: workdirs.suggest(request.path).await,
                         request_id: request.request_id,
+                    }
+                }));
+            }
+            if histories_operation.is_none()
+                && histories_outbound.is_none()
+                && let Some(request) = histories_next.take()
+            {
+                let excluded: HashSet<String> = manager.live_native_ids().into_iter().collect();
+                let home = std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+                let config_dir = crate::config::claude_config_dir(
+                    &home,
+                    std::env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
+                );
+                histories_operation = Some(Box::pin(async move {
+                    let items = tokio::task::spawn_blocking(move || {
+                        crate::machine::claude_history::list_histories(
+                            &request.workdir,
+                            &config_dir,
+                            &excluded,
+                        )
+                    })
+                    .await
+                    .unwrap_or_default();
+                    ClaudeHistories {
+                        request_id: request.request_id,
+                        items: items
+                            .into_iter()
+                            .map(|item| ClaudeHistory {
+                                id: item.id,
+                                modified_at_ms: item.modified_at_ms,
+                                size: item.size,
+                                preview: item.preview,
+                            })
+                            .collect(),
                     }
                 }));
             }
@@ -1468,6 +1512,7 @@ impl Worker {
                 || machine_outbound.is_some()
                 || limits_outbound.is_some()
                 || suggest_outbound.is_some()
+                || histories_outbound.is_some()
                 || owner_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
@@ -1489,6 +1534,7 @@ impl Worker {
                         }
                         Some(control_down::Msg::LimitsSnapshot(snapshot)) if pilot => {self.limits_cache.update(snapshot);}
                         Some(control_down::Msg::SuggestWorkdirs(request)) if suggest_enabled => {suggest_next = Some(request);}
+                        Some(control_down::Msg::ListClaudeHistories(request)) if histories_enabled => {histories_next = Some(request);}
                         Some(control_down::Msg::ReadOwner(request)) if owner_enabled => {owner_next = Some(request);}
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
                         Some(control_down::Msg::CjAck(ack)) => {
@@ -1554,6 +1600,7 @@ impl Worker {
                     else if let Some(message)=machine_outbound.take() {message}
                     else if let Some(message)=limits_outbound.take() {message}
                     else if let Some(message)=suggest_outbound.take() {message}
+                    else if let Some(message)=histories_outbound.take() {message}
                     else if let Some(message)=owner_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
@@ -1605,6 +1652,9 @@ impl Worker {
                 }
                 reply=async{suggest_operation.as_mut().unwrap().await}, if suggest_operation.is_some()=>{
                     suggest_operation=None;suggest_outbound=Some(ControlUp{msg:Some(control_up::Msg::WorkdirSuggestions(reply))});
+                }
+                reply=async{histories_operation.as_mut().unwrap().await}, if histories_operation.is_some()=>{
+                    histories_operation=None;histories_outbound=Some(ControlUp{msg:Some(control_up::Msg::ClaudeHistories(reply))});
                 }
                 owned=async{owner_operation.as_mut().unwrap().await}, if owner_operation.is_some()=>{
                     owner_operation=None;owner_outbound=Some(owned);
