@@ -239,7 +239,7 @@ test.describe('stack: features and security', () => {
     await expect(table).toHaveCount(1);
     const today = table.getByRole('row').filter({ hasText: 'Claude' }).last();
     await expect(today).toContainText('55%');
-    await expect(main.locator('[data-series="weekly"]').first()).toBeVisible();
+    await expect(main.locator('.day:not([data-missing]) [data-series="weekly"]').first()).toBeVisible();
     await expect(main.getByText(/synthetic-large/).first()).toBeVisible();
   });
 
