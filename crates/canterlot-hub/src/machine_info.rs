@@ -61,6 +61,27 @@ pub async fn apply_report(
     report: &MachineReport,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    apply_report_with_capabilities(pool, owner_id, machine_id, report, &[], correlation_id).await
+}
+
+/// `negotiated` — необязательные возможности живого соединения: PWA читает их из строки машины.
+pub async fn apply_report_with_capabilities(
+    pool: &PgPool,
+    owner_id: Uuid,
+    machine_id: Uuid,
+    report: &MachineReport,
+    negotiated: &[String],
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut capabilities = vec!["pilot_v1".to_owned()];
+    let mut extra: Vec<String> = negotiated
+        .iter()
+        .filter(|c| *c != "pilot_v1")
+        .cloned()
+        .collect();
+    extra.sort();
+    extra.dedup();
+    capabilities.extend(extra);
     let mut report = report.clone();
     replace_nul(&mut report);
     crate::db::in_tx(pool, move |conn| {
@@ -72,8 +93,8 @@ pub async fn apply_report(
          from conversations c left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness
          where c.machine_id=$1 and c.owner_id=$2 order by c.id",
     ).bind(machine_id).bind(owner_id).fetch_all(&mut *conn).await?;
-    sqlx::query("update machines set capabilities=array['pilot_v1'],worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,''),worktree_root=nullif($8,'') where id=$1")
- .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).bind(&report.worktree_root).execute(&mut *conn).await?;
+    sqlx::query("update machines set capabilities=$9,worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,''),worktree_root=nullif($8,'') where id=$1")
+ .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).bind(&report.worktree_root).bind(&capabilities).execute(&mut *conn).await?;
     sqlx::query("delete from machine_harnesses where machine_id=$1")
         .bind(machine_id)
         .execute(&mut *conn)
@@ -120,7 +141,7 @@ pub async fn apply_report(
         )
         .await?;
     }
-    emit(&mut *conn,owner_id,"machine_report_updated",json!({"machine_id":machine_id,"worker_version":report.worker_version,"capabilities":["pilot_v1"],"limits_ok":report.max_attachment_bytes==MAX_ATTACHMENT_BYTES&&report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT,"home_dir":(!report.home_dir.is_empty()).then_some(&report.home_dir)}),correlation_id).await?;
+    emit(&mut *conn,owner_id,"machine_report_updated",json!({"machine_id":machine_id,"worker_version":report.worker_version,"capabilities":capabilities,"limits_ok":report.max_attachment_bytes==MAX_ATTACHMENT_BYTES&&report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT,"home_dir":(!report.home_dir.is_empty()).then_some(&report.home_dir)}),correlation_id).await?;
     Ok(())
         })
     })

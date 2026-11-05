@@ -688,3 +688,31 @@ async fn report_and_metrics_reach_the_hub_over_the_control_stream(pool: PgPool) 
     hub.join.await??;
     Ok(())
 }
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machine_row_keeps_the_negotiated_capabilities(pool: PgPool) -> TestResult {
+    let s = wire_seed(&pool).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let client = connect_with(
+        &hub,
+        &s,
+        Uuid::now_v7(),
+        &["pilot_v1", "claude_histories_v1"],
+        1000,
+    )
+    .await;
+    client
+        .tx
+        .send(ControlUp {
+            msg: Some(control_up::Msg::MachineReport(report())),
+        })
+        .await?;
+    // PWA показывает продолжение истории по строке машины, а не по живому соединению.
+    wait_until(
+        &pool,
+        "select count(*) from machines where 'claude_histories_v1' = any(capabilities) and 'pilot_v1' = any(capabilities)",
+    )
+    .await;
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}

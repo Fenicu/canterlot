@@ -2100,9 +2100,21 @@ impl crate::grpc::Ingest for Ingest {
             .fetch_one(&self.pool)
             .await
             .map_err(|_| tonic::Status::internal("machine_report_database"))?;
-        crate::machine_info::apply_report(&self.pool, owner, machine_id, &report, Uuid::now_v7())
-            .await
-            .map_err(|_| tonic::Status::internal("machine_report_database"))?;
+        let negotiated = self
+            .registry
+            .as_ref()
+            .map(|registry| registry.capabilities(machine_id))
+            .unwrap_or_default();
+        crate::machine_info::apply_report_with_capabilities(
+            &self.pool,
+            owner,
+            machine_id,
+            &report,
+            &negotiated,
+            Uuid::now_v7(),
+        )
+        .await
+        .map_err(|_| tonic::Status::internal("machine_report_database"))?;
         if let Some(registry) = &self.registry {
             crate::limits::push_machine_snapshot(&self.pool, registry, machine_id)
                 .await
