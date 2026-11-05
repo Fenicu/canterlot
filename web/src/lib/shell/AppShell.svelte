@@ -40,6 +40,7 @@
   let currentChat = $state<ChatStore | null>(null);
   let DelegationPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
   let MessagesPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
+  let AlarmsPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
   let SettingsPanelComponent = $state<Component<{ chat: ChatStore; machine?: MachineRecord | null; desktop?: boolean; onclose?: () => void }> | null>(null);
   const paneMachine = $derived.by(() => {
     const id = (currentChat?.detail?.machine as { id?: string } | undefined)?.id;
@@ -65,6 +66,11 @@
     if (pane.view === 'messages' && !MessagesPanelComponent) {
       import('#lib/screens/chat/OwnerMessagesPanel.svelte').then((m) => {
         MessagesPanelComponent = m.default;
+      });
+    }
+    if (pane.view === 'alarms' && !AlarmsPanelComponent) {
+      import('#lib/screens/chat/AlarmsPanel.svelte').then((m) => {
+        AlarmsPanelComponent = m.default;
       });
     }
   });
@@ -239,6 +245,8 @@
             <SettingsPanelComponent chat={currentChat} machine={paneMachine} desktop onclose={() => pane.close()} />
           {:else if currentChat && pane.view === 'messages' && MessagesPanelComponent}
             <MessagesPanelComponent chat={currentChat} onclose={() => pane.close()} />
+          {:else if currentChat && pane.view === 'alarms' && AlarmsPanelComponent}
+            <AlarmsPanelComponent chat={currentChat} onclose={() => pane.close()} />
           {/if}
         </aside>
       {/if}

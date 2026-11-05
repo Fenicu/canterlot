@@ -89,28 +89,6 @@ export function alarmChip(alarm: AlarmView): string {
   return `Будильник · ${name}когда ${targets(alarm.session_ids)} ${verbs(alarm.states)} · до ${moment(alarm.deadline_at)}`;
 }
 
-function nearestMoment(alarm: AlarmView): number | null {
-  const times = [alarm.fires_at, alarm.deadline_at]
-    .map((value) => (value ? Date.parse(value) : NaN))
-    .filter((value): value is number => Number.isFinite(value));
-  return times.length ? Math.min(...times) : null;
-}
-
-/**
- * Свёрнутая полоса: сколько будильников и когда ближайший из них. Сторожа
- * считаются будильниками, потому что для владельца это одно и то же действие.
- */
-export function alarmSummary(alarms: AlarmView[]): string {
-  const count = alarms.length;
-  // «Будильники · 4» — заголовок строки, поэтому форма зависит от числа.
-  const label = fmt.plural(count, ['Будильник', 'Будильники', 'Будильники']);
-  const nearest = alarms
-    .map(nearestMoment)
-    .filter((value): value is number => value !== null)
-    .sort((a, b) => a - b)[0];
-  return nearest === undefined ? `${label} · ${count}` : `${label} · ${count} · ближайший ${fmt.clock(nearest)}`;
-}
-
 /** Что показывает раскрытая плашка: условие, заметку и причину сбоя. */
 export function alarmDetail(alarm: AlarmView): string[] {
   const lines: string[] = [];
