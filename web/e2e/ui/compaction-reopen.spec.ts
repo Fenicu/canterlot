@@ -153,3 +153,34 @@ test('requested_compaction_settles_when_a_fresh_snapshot_already_has_its_result'
 	await expect(page.locator(RUNNING)).toHaveCount(0);
 	await expect(indicator(page)).not.toHaveAttribute('data-compacting', 'true');
 });
+
+test('running_row_settles_into_the_finished_line_without_changing_its_height', async ({ page }) => {
+	const { hub, api, ids: [id] } = seed(['Сессия Альфа']);
+	await installChatRoutes(page, hub, api, OWNER);
+	await page.goto(`/c/${id}`);
+	await ready(page);
+	const started = api.pushCompaction(id!);
+	hub.flush();
+	const row = page.locator('.compact').last();
+	await expect(row).toHaveAttribute('data-running', 'true');
+	await expect(row.locator('.fold i')).toHaveCount(3);
+	const running = (await row.boundingBox())!;
+	// Строки свёртки двигаются только трансформацией: раскладка не меняется.
+	const moving = await row.locator('.fold i').first().evaluate((el) => getComputedStyle(el).animationName);
+	expect(moving).not.toBe('none');
+
+	api.finishCompaction(id!, (started.payload as { id: string }).id);
+	hub.flush();
+	await expect(row).toContainText('Контекст сжат автоматически');
+	await expect(row).not.toHaveAttribute('data-running', 'true');
+	const settled = (await row.boundingBox())!;
+	expect(Math.abs(settled.height - running.height)).toBeLessThanOrEqual(0.5);
+	// Итог оседает и убирает свёртку: подпись встаёт на отступ текста карточек.
+	await expect(row).not.toHaveAttribute('data-settling', 'true');
+	await expect(row.locator('.fold')).toHaveCount(0);
+	const inset = await row.evaluate((node) => {
+		const text = node.querySelector('.text')!.getBoundingClientRect().left;
+		return text - node.getBoundingClientRect().left - parseFloat(getComputedStyle(node).paddingLeft);
+	});
+	expect(Math.abs(inset)).toBeLessThanOrEqual(0.5);
+});

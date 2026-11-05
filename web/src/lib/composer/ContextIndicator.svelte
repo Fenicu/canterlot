@@ -133,6 +133,22 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	/* Пока идёт сжатие, заполнение шкалы сжимается к началу и возвращается в такт строке ленты. */
+	.ctx[data-compacting='true'] .track :global([role='meter'] > span) {
+		transform-origin: left center;
+		animation: ctx-squeeze var(--duration-compact-fold) var(--ease-compact-fold) infinite;
+	}
+	@keyframes ctx-squeeze {
+		0%,
+		25%,
+		100% {
+			transform: scaleX(1);
+		}
+		50%,
+		65% {
+			transform: scaleX(.55);
+		}
+	}
 	.ctx-details {
 		grid-area: details;
 		display: flex;

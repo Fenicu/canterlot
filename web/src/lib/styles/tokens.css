@@ -459,6 +459,15 @@
   --motion-base-text-reveal: 180ms;
   --duration-text-reveal: calc(var(--motion-base-text-reveal) * var(--motion-scale));
   --blur-text-reveal: 2px;
+  /* Идущее сжатие: строки текста сходятся в одну и расходятся; итог оседает в подпись. */
+  --motion-base-compact-fold: 2400ms;
+  --duration-compact-fold: calc(var(--motion-base-compact-fold) * var(--motion-scale));
+  --motion-base-compact-settle: 560ms;
+  --duration-compact-settle: calc(var(--motion-base-compact-settle) * var(--motion-scale));
+  --ease-compact-fold: cubic-bezier(.65, 0, .35, 1);
+  --compact-fold-width: var(--icon-small);
+  --compact-fold-height: var(--s5);
+  --compact-fold-line: var(--s1);
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -477,6 +486,8 @@
     --duration-enter: 0ms;
     --duration-press: 0ms;
     --duration-text-reveal: 0ms;
+    --duration-compact-fold: 0ms;
+    --duration-compact-settle: 0ms;
   }
 }
 
