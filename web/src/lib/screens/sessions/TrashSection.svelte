@@ -6,7 +6,19 @@
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
   import type { ListRow } from '#lib/stores/list.svelte.js';
 
-  let { items, now = Date.now() }: { items: ListRow[]; now?: number } = $props();
+  let {
+    items,
+    now = Date.now(),
+    more = false,
+    loading = false,
+    onmore
+  }: {
+    items: ListRow[];
+    now?: number;
+    more?: boolean;
+    loading?: boolean;
+    onmore?: () => void;
+  } = $props();
 
   let busy = $state('');
   let error = $state('');
@@ -62,6 +74,11 @@
       </div>
     </article>
   {/each}
+  {#if more}
+    <button type="button" class="more" aria-busy={loading} onclick={() => { if (!loading) onmore?.(); }}>
+      {loading ? 'Загружаю' : 'Показать ещё'}
+    </button>
+  {/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
 </section>
 
@@ -112,5 +129,6 @@
     color: var(--chip-text);
   }
   button.danger { background: var(--danger-soft); color: var(--danger); }
+  button.more { display: flex; margin: var(--s3) auto 0; }
   .error { margin: var(--s2) var(--gutter); color: var(--danger); font-size: var(--fs-sm); }
 </style>

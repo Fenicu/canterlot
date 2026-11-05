@@ -296,7 +296,15 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     if (url.pathname !== '/api/v1/conversations') return route.fallback();
     if (route.request().method() === 'GET') {
       const q = url.searchParams.get('q') ?? '';
-      const items = [...api.list.values()].filter((item) => !item.trashed_at && item.title.includes(q));
+      const filter = url.searchParams.get('filter') ?? 'all';
+      const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') ?? 50) || 50));
+      const rows = [...api.list.values()].filter((item) => item.title.includes(q));
+      const items = (filter === 'trashed'
+        ? rows
+            .filter((item) => item.trashed_at)
+            .sort((a, b) => (b.trashed_at ?? '').localeCompare(a.trashed_at ?? '') || a.id.localeCompare(b.id))
+        : rows.filter((item) => !item.trashed_at)
+      ).slice(0, limit);
       await route.fulfill({ headers: headers(), json: { counts: api.counts, items, next_cursor: null } });
       return;
     }

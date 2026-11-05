@@ -98,3 +98,27 @@ test('a_trashed_session_disappears_from_search', async ({ page }) => {
   await expect(page.getByText('Ничего не найдено')).toBeVisible();
   await expect(page.locator(`[data-session="${id}"]`)).toHaveCount(0);
 });
+
+test('a_search_result_disappears_when_the_session_is_trashed_elsewhere', async ({ page }) => {
+  const { api, id } = await boot(page);
+  await page.getByRole('button', { name: 'Поиск', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Поиск сессий' }).fill('Сессия для корзины');
+  await expect(page.locator(`[data-session="${id}"]`)).toBeVisible();
+  api.trashConversation(id);
+  await expect(page.locator(`[data-session="${id}"]`)).toHaveCount(0);
+});
+
+test('trash_tab_loads_its_own_paginated_listing', async ({ page }) => {
+  const { api, id } = await boot(page);
+  api.trashConversation(id);
+  const calls: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === '/api/v1/conversations' && url.searchParams.get('filter') === 'trashed') {
+      calls.push(url.search);
+    }
+  });
+  await page.getByRole('tab', { name: /Корзина/ }).click();
+  await expect(page.locator(`[data-session="${id}"]`)).toContainText('удалится через');
+  expect(calls.length).toBeGreaterThan(0);
+});

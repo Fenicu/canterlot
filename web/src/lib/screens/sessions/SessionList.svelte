@@ -72,6 +72,12 @@
   let diskNotice = $state<DiskNotice | null>(null);
   let trashToast = $state<{ id: string; key: string } | null>(null);
   let trashError = $state('');
+  let trashRows = $state<ListRow[]>([]);
+  let trashCursor = $state<string | null>(null);
+  let trashMore = $state(false);
+  let trashLoading = $state(false);
+  let trashLoadError = $state('');
+  let trashRequest = 0;
   const now = $derived.by(() => {
     void ticker.second;
     return clock.serverNow();
@@ -139,11 +145,6 @@
 
   const showTrash = $derived(tab.kind === 'trash');
   const rows = $derived(runtime ? [...runtime.list.items.values()] : []);
-  const trashItems = $derived(
-    rows
-      .filter((item) => item.trashed_at)
-      .sort((a, b) => (b.trashed_at ?? '').localeCompare(a.trashed_at ?? '') || a.id.localeCompare(b.id))
-  );
   const groups = $derived(runtime?.list.groups ?? []);
   const tabs = $derived(runtime ? tabCounts(runtime.list.counts, groups) : []);
   // Ответ поиска живёт дольше строки списка: удалённая сессия не должна в нём оставаться.
@@ -153,7 +154,7 @@
     if (!results || !store) return null;
     const deleted = store.list.deleted;
     return results
-      .filter((item) => !deleted.has(item.id))
+      .filter((item) => !deleted.has(item.id) && !store.list.items.get(item.id)?.trashed_at)
       .map((item) => ({ item, depth: 0, open: true, running: 0, waiting: 0, children: [] }));
   });
   const kids = $derived({ collapsed: collapsedSet(kidsCollapsed), expanded: collapsedSet(kidsExpanded) });
@@ -292,6 +293,38 @@
     results = null;
   }
 
+  async function loadTrash(reset: boolean) {
+    const request = ++trashRequest;
+    trashLoading = true;
+    trashLoadError = '';
+    try {
+      const response = await listConversations({
+        filter: 'trashed',
+        limit: 50,
+        cursor: reset ? undefined : (trashCursor ?? undefined)
+      });
+      if (request !== trashRequest) return;
+      const page = response.data;
+      const pageRows = page.items as unknown as ListRow[];
+      trashRows = reset ? pageRows : [...trashRows, ...pageRows];
+      trashCursor = page.next_cursor ?? null;
+      trashMore = Boolean(page.next_cursor);
+    } catch (err) {
+      if (request === trashRequest) trashLoadError = errorText(err, 'Не удалось открыть корзину');
+    } finally {
+      if (request === trashRequest) trashLoading = false;
+    }
+  }
+
+  $effect(() => {
+    const store = runtime;
+    if (!store || tab.kind !== 'trash' || results) return;
+    // Живые события меняют счётчик корзины — перечитываем страницу с сервера.
+    const stamp = store.list.counts.trashed;
+    void stamp;
+    untrack(() => { void loadTrash(true); });
+  });
+
   function ontrashed(id: string) {
     sheetId = '';
     trashToast = { id, key: crypto.randomUUID() };
@@ -402,10 +435,19 @@
         {/each}
       </div>
     {:else if showTrash && !results}
-      {#if trashItems.length === 0}
+      {#if trashLoadError}<p class="search-error" role="alert">{trashLoadError}</p>{/if}
+      {#if trashLoading && trashRows.length === 0}
+        <p class="trash-loading" role="status">Загружаю корзину</p>
+      {:else if trashRows.length === 0}
         <EmptyState kind="tab" text="В корзине пусто" />
       {:else}
-        <TrashSection items={trashItems} {now} />
+        <TrashSection
+          items={trashRows}
+          {now}
+          more={trashMore}
+          loading={trashLoading}
+          onmore={() => void loadTrash(false)}
+        />
       {/if}
     {:else if emptyTab}
       <EmptyState kind="tab" text={emptyTab} />
@@ -453,6 +495,7 @@
   .disk-notice { margin: var(--s0) var(--gutter) var(--s2); color: var(--warning); font-size: var(--fs-sm); }
   .disk-notice[data-tone='danger'] { color: var(--danger); }
   .trash-error { position: fixed; z-index: 6; left: 50%; bottom: calc(var(--target) + var(--s6)); transform: translateX(-50%); margin: 0; color: var(--danger); font-size: var(--fs-sm); }
+  .trash-loading { margin: var(--s4) var(--gutter); color: var(--secondary); font-size: var(--fs-sm); }
   .list { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
   .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding-block: var(--s2); }
   .brand { flex: 1 0 auto; margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }
