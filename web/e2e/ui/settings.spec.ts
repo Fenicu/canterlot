@@ -32,7 +32,7 @@ test('settings_screen_shows_login_connection_theme_enter_install_and_signout', a
   await expect(main.getByText(/Authelia.*собственной странице/)).toBeVisible();
 });
 
-test('segmented_choice_stands_out_in_all_palettes_and_modes', async ({ page }) => {
+test('chosen_palette_and_mode_stand_out_in_every_palette_and_mode', async ({ page }) => {
   await bootSecondary(page, '/settings');
   const main = page.locator('main');
   const palettes = main.getByRole('radiogroup', { name: 'Тема' });
@@ -41,7 +41,18 @@ test('segmented_choice_stands_out_in_all_palettes_and_modes', async ({ page }) =
     await palettes.getByRole('radio', { name, exact: true }).check();
     for (const mode of ['Тёмный', 'Светлый']) {
       await modes.getByRole('radio', { name: mode, exact: true }).check();
-      expect(await fillContrast(palettes.locator('input:checked + span')), `${name} ${mode}`).toBeGreaterThanOrEqual(3);
+      // Кольцо и метка выбранной карточки отличимы от её фона и от фона страницы на 3:1.
+      const ring = await palettes.locator('label:has(input:checked)').evaluate((node) => {
+        const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
+        const lum = (value: string) => { const [r, g, b] = rgb(value); return [r!, g!, b!].map((c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }).reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i]!, 0); };
+        const ratio = (x: string, y: string) => { const [a, b] = [lum(x), lum(y)].sort((p, q) => q - p); return (a! + 0.05) / (b! + 0.05); };
+        const card = getComputedStyle(node).backgroundColor;
+        const page = getComputedStyle(document.body).backgroundColor;
+        const outline = getComputedStyle(node).outlineColor;
+        const mark = getComputedStyle(node.querySelector('.mark')!).backgroundColor;
+        return Math.min(ratio(outline, card), ratio(outline, page), ratio(mark, card));
+      });
+      expect(ring, `${name} ${mode}`).toBeGreaterThanOrEqual(3);
       expect(await fillContrast(modes.locator('input:checked + span')), `${name} ${mode}`).toBeGreaterThanOrEqual(3);
     }
   }

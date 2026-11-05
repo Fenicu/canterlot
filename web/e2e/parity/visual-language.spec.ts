@@ -147,7 +147,21 @@ for (const screen of SCREENS) {
         probe.style.width = '100px';
         const allowedRadii = new Set(['--radius-sm', '--radius', '--radius-card', '--radius-sheet', '--radius-composer', '--radius-pill', '--radius-round'].map(radius));
         allowedRadii.add('0px');
-        const colorSet = new Set(colorTokens.map((token) => { probe.style.color = `var(${token})`; return getComputedStyle(probe).color; }));
+        // Цвет текста сверяется с токенами своей палитры: предпросмотр темы задаёт data-palette на своём узле.
+        const colorSets = new Map<Element, Set<string>>();
+        const colorSet = (el: Element) => {
+          const scope = el.closest('[data-palette]') ?? root;
+          let found = colorSets.get(scope);
+          if (!found) {
+            const swatch = document.createElement('span');
+            swatch.hidden = true;
+            scope.append(swatch);
+            found = new Set(colorTokens.map((token) => { swatch.style.color = `var(${token})`; return getComputedStyle(swatch).color; }));
+            swatch.remove();
+            colorSets.set(scope, found);
+          }
+          return found;
+        };
         const visible = (el: Element) => {
           const rect = el.getBoundingClientRect();
           if (rect.width === 0 || rect.height === 0) return false;
@@ -209,7 +223,7 @@ for (const screen of SCREENS) {
             if (rect.width < target - 0.5 || rect.height < target - 0.5) note(`interactive target >= --target (${target}px)`, el, `${Math.round(rect.width)}x${Math.round(rect.height)} «${(el.textContent ?? '').trim().slice(0, 30)}»`);
           }
           if ([...el.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && (node.textContent ?? '').trim() !== '')) {
-            if (!colorSet.has(style.color)) note('text colour must be a token', el, style.color);
+            if (!colorSet(el).has(style.color)) note('text colour must be a token', el, style.color);
           }
         }
         probe.remove();
