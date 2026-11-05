@@ -1863,6 +1863,15 @@
             }
           },
           {
+            "name": "around",
+            "in": "query",
+            "description": "Место в ленте: окно вокруг него вместо страницы от края.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "required": false,
@@ -1915,6 +1924,80 @@
       }
     },
     "/api/v1/conversations/{id}/inputs": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "get__api_v1_conversations__id__inputs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сообщения владельца в порядке ленты",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerInputsPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "conversations"
@@ -9537,6 +9620,69 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "OwnerInputView": {
+        "type": "object",
+        "description": "Одно сообщение владельца для списка перехода по своим сообщениям.",
+        "required": [
+          "id",
+          "seq",
+          "created_at",
+          "preview",
+          "attachments_count"
+        ],
+        "properties": {
+          "attachments_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "origin": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/InputOrigin",
+                "description": "От какой сессии или службы пришёл ввод; у ввода владельца пусто."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "preview": {
+            "type": "string",
+            "description": "Первая часть текста без разбора: строку списка выбирает клиент."
+          },
+          "seq": {
+            "type": "string",
+            "description": "Место ввода в ленте (`feed_seq`): по нему клиент прыгает к сообщению."
+          }
+        }
+      },
+      "OwnerInputsPage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnerInputView"
+            }
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

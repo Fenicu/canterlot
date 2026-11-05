@@ -25,6 +25,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(decision))
         .routes(routes!(interrupt))
         .routes(routes!(usage))
+        .routes(routes!(owner_inputs))
         .routes(routes!(compact))
         .routes(routes!(stop))
         .routes(routes!(continue_queue))
@@ -229,6 +230,43 @@ async fn usage(
     )
     .await?;
     Ok(Json(view))
+}
+
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct OwnerInputsParams {
+    pub before: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[utoipa::path(get,path="/api/v1/conversations/{id}/inputs",tag="conversations",params(("id"=Uuid,Path),OwnerInputsParams),responses((status=200,description="Сообщения владельца в порядке ленты",body=crate::history::OwnerInputsPage)))]
+async fn owner_inputs(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiQuery(p): ApiQuery<OwnerInputsParams>,
+) -> Result<Json<crate::history::OwnerInputsPage>, ApiError> {
+    let limit = p.limit.unwrap_or(500);
+    if !(1..=2000).contains(&limit) {
+        return Err(ApiError::new(ErrorCode::InvalidRequest));
+    }
+    let before = p
+        .before
+        .as_deref()
+        .map(super::history::history_key)
+        .transpose()?;
+    let result = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            crate::history::owner_inputs(&mut *conn, o.owner_id, id, before, limit).await
+        })
+    })
+    .await?;
+    let page = result.ok_or_else(|| ApiError::new(ErrorCode::NotFound))?;
+    Ok(Json(page))
 }
 
 #[utoipa::path(post,path="/api/v1/conversations/{id}/compact",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Сжатие контекста запрошено",body=crate::delivery::control::CompactOutcome),(status=409,description="Конфликт состояния, причина в details.reason",body=super::error::ErrorEnvelope)))]

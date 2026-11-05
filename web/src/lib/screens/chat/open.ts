@@ -1,6 +1,7 @@
 import {
   conversationBlock,
   conversationHistory,
+  conversationInputs,
   conversationLane,
   conversationSnapshot,
   eventsRange,
@@ -140,6 +141,10 @@ async function createChatSession(id: string): Promise<ChatStore> {
       async history(conversationId, query) {
         const response = await conversationHistory(conversationId, query);
         return response.data as HistoryPage;
+      },
+      async inputs(conversationId, query) {
+        const response = await conversationInputs(conversationId, query);
+        return response.data;
       },
       async lane(conversationId, blockId, query) {
         const response = await conversationLane(conversationId, blockId, query);

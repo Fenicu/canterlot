@@ -1,6 +1,6 @@
 import type { LayoutMode } from './layout';
 
-export type PaneView = 'delegation' | 'settings';
+export type PaneView = 'delegation' | 'settings' | 'messages';
 
 /** Третья панель стола: шапка чата её открывает, оболочка рисует. */
 class Pane {

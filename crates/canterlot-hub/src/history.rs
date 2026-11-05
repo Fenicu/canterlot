@@ -132,11 +132,32 @@ pub struct HistoryPage {
     pub next_before: Option<String>,
     pub next_after: Option<String>,
 }
+/// Одно сообщение владельца для списка перехода по своим сообщениям.
+#[derive(Serialize, ToSchema)]
+pub struct OwnerInputView {
+    pub id: Uuid,
+    /// Место ввода в ленте (`feed_seq`): по нему клиент прыгает к сообщению.
+    pub seq: String,
+    pub created_at: String,
+    /// Первая часть текста без разбора: строку списка выбирает клиент.
+    pub preview: String,
+    pub attachments_count: i64,
+    /// От какой сессии или службы пришёл ввод; у ввода владельца пусто.
+    #[schema(value_type = Option<crate::session_tools::origin::InputOrigin>)]
+    pub origin: Option<Value>,
+}
+#[derive(Serialize, ToSchema)]
+pub struct OwnerInputsPage {
+    pub items: Vec<OwnerInputView>,
+    pub next_before: Option<String>,
+}
 #[derive(Clone, Copy)]
 pub enum HistoryCursor {
     Tail,
     Before(i64),
     After(i64),
+    /// Окно вокруг места в ленте: цель и соседи с обеих сторон.
+    Around(i64),
 }
 
 pub(crate) async fn owned(
@@ -298,10 +319,14 @@ pub async fn page(
     if !owned(conn, owner_id, conversation_id).await? {
         return Ok(None);
     }
+    if let HistoryCursor::Around(center) = cursor {
+        return around(conn, owner_id, conversation_id, center, limit).await;
+    }
     let (key, after, before) = match cursor {
         HistoryCursor::Tail => (0, false, false),
         HistoryCursor::Before(n) => (n, false, true),
         HistoryCursor::After(n) => (n, true, false),
+        HistoryCursor::Around(_) => unreachable!("handled above"),
     };
     let sql = if after {
         FORWARD_KEYS_SQL
@@ -386,6 +411,110 @@ pub async fn page(
             None
         },
     }))
+}
+/// Окно вокруг одного места ленты: немного старше цели и остальное новее.
+/// Прыжок в старое сообщение подгружает только этот кусок, а не всю историю.
+async fn around(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    center: i64,
+    limit: i64,
+) -> Result<Option<HistoryPage>, sqlx::Error> {
+    let older_limit = if limit <= 2 { 1 } else { (limit / 4).max(1) };
+    let newer_limit = (limit - older_limit).max(1);
+    let before = Box::pin(page(
+        conn,
+        owner_id,
+        conversation_id,
+        HistoryCursor::Before(center.saturating_add(1)),
+        older_limit,
+    ))
+    .await?;
+    let Some(before) = before else {
+        return Ok(None);
+    };
+    let after = Box::pin(page(
+        conn,
+        owner_id,
+        conversation_id,
+        HistoryCursor::After(center),
+        newer_limit,
+    ))
+    .await?;
+    let Some(after) = after else {
+        return Ok(None);
+    };
+    let mut items = before.items;
+    items.extend(after.items);
+    Ok(Some(HistoryPage {
+        items,
+        next_before: before.next_before,
+        next_after: after.next_after,
+    }))
+}
+/// Сколько символов текста попадает в превью списка сообщений.
+const PREVIEW_CHARS: usize = 200;
+fn preview(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+/// Доставленные вводы разговора от имени владельца, страницами от новых к старым.
+/// Ожидающие доставки вводы (`feed_seq is null`) в список не попадают.
+pub async fn owner_inputs(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<Option<OwnerInputsPage>, sqlx::Error> {
+    if !(1..=2000).contains(&limit) {
+        return Err(sqlx::Error::InvalidArgument("invalid inputs limit".into()));
+    }
+    if !owned(conn, owner_id, conversation_id).await? {
+        return Ok(None);
+    }
+    let mut rows = sqlx::query(
+        "select i.id,i.feed_seq,i.created_at,i.origin,
+         coalesce((select string_agg(b->>'text','' order by ordinality)
+                   from jsonb_array_elements(i.content) with ordinality as e(b,ordinality)
+                   where b->>'type'='text'),'') preview,
+         (select count(*) from jsonb_array_elements(i.content) as e(b) where b->>'type'='attachment') attachments_count
+         from inputs i join conversations c on c.id=i.conversation_id
+         where i.conversation_id=$1 and c.owner_id=$2 and i.feed_seq is not null
+           and (not $3 or i.feed_seq<$4)
+         order by i.feed_seq desc limit $5",
+    )
+    .bind(conversation_id)
+    .bind(owner_id)
+    .bind(before.is_some())
+    .bind(before.unwrap_or_default())
+    .bind(limit + 1)
+    .fetch_all(&mut *conn)
+    .await?;
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    rows.reverse();
+    let next_before = if more {
+        rows.first()
+            .map(|row| row.get::<i64, _>("feed_seq").to_string())
+    } else {
+        None
+    };
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            let text: String = row.try_get("preview")?;
+            Ok(OwnerInputView {
+                id: row.try_get("id")?,
+                seq: row.try_get::<i64, _>("feed_seq")?.to_string(),
+                created_at: time(row.try_get("created_at")?),
+                preview: preview(&text, PREVIEW_CHARS),
+                attachments_count: row.try_get("attachments_count")?,
+                origin: row.try_get("origin")?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    Ok(Some(OwnerInputsPage { items, next_before }))
 }
 #[derive(Serialize, ToSchema)]
 pub struct BlockPage {

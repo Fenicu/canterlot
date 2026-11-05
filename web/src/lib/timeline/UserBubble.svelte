@@ -21,7 +21,7 @@
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { originLabel } from '#lib/timeline/origin.js';
 
-  let { input, chat, agentWorking = false }: { input: InputView; chat: ChatStore; agentWorking?: boolean } = $props();
+  let { input, chat, agentWorking = false, highlight = false }: { input: InputView; chat: ChatStore; agentWorking?: boolean; highlight?: boolean } = $props();
   let ask = $state<string | null>(null);
   let decided = $state<((ok: boolean) => void) | null>(null);
 
@@ -160,7 +160,9 @@
   }
 </script>
 
-<article class="bubble" data-state={input.state} data-origin={input.origin?.kind} data-optimistic={input.optimistic ? '' : undefined} use:enter>
+<!-- Программный фокус после прыжка: сообщение получает -1, чтобы экранный диктор прочитал его. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<article class="bubble" data-state={input.state} data-origin={input.origin?.kind} data-optimistic={input.optimistic ? '' : undefined} data-jump={highlight ? '' : undefined} tabindex={highlight ? -1 : undefined} use:enter>
   {#if from}<p class="origin">{from}</p>{/if}
   {#if editing}
     <div data-unsaved-edit><Textarea label="Текст сообщения" id="edit-{input.key}" bind:value={editText} /></div>
@@ -259,6 +261,7 @@
 <style>
   .bubble {
     --st-surface: var(--accent-soft);
+    --jump-rest: var(--accent-soft);
     width: fit-content;
     min-width: 0;
     max-width: var(--bubble-max);
@@ -270,7 +273,18 @@
     flex-direction: column;
     gap: var(--s3);
   }
-  .bubble[data-origin] { --st-surface: var(--raised); background: var(--raised); }
+  .bubble[data-origin] { --st-surface: var(--raised); --jump-rest: var(--raised); background: var(--raised); }
+  .bubble[data-jump] {
+    animation: jump-pulse var(--duration-caret) var(--ease) 1;
+  }
+  .bubble[data-jump]:focus {
+    outline: var(--focus-width) solid var(--accent);
+    outline-offset: var(--s1);
+  }
+  @keyframes jump-pulse {
+    0%, 100% { background-color: var(--jump-rest); }
+    30%, 60% { background-color: var(--selected); }
+  }
   .origin { color: var(--secondary); font-size: var(--fs-sm); font-weight: var(--weight-medium); }
   .bubble[data-state='rejected'] { background: var(--danger-soft); }
   p { margin: 0; overflow-wrap: anywhere; }
