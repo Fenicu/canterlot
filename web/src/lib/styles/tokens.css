@@ -479,6 +479,10 @@
   --motion-base-request-accent: 1100ms;
   --duration-request-accent: calc(var(--motion-base-request-accent) * var(--motion-scale));
   --request-accent-share: 18%;
+  /* Готовый пункт плана: черта проходит по тексту слева направо, точка перекрашивается тем же шагом. */
+  --motion-base-todo-strike: 480ms;
+  --duration-todo-strike: calc(var(--motion-base-todo-strike) * var(--motion-scale));
+  --ease-todo-strike: cubic-bezier(.65, 0, .35, 1);
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -502,6 +506,7 @@
     --duration-jump-glow: 0ms;
     --duration-request-arrive: 0ms;
     --duration-request-accent: 0ms;
+    --duration-todo-strike: 0ms;
   }
 }
 

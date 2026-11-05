@@ -233,3 +233,50 @@ test('collapsed_panel_stays_one_row_on_the_phone', async ({ page }) => {
 	const row = await panel(page).locator('.head').boundingBox();
 	expect(track!.width).toBeLessThan(row!.width / 2);
 });
+
+for (const motion of ['full', 'reduced'] as const) {
+	test(`completed_item_draws_its_line_and_recolours_the_point_${motion}`, async ({ page }) => {
+		if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
+		const { api, id } = await boot(page);
+		api.details.get(id)!.activity = { state: 'working', evidence: {} };
+		api.pushTodo(id, PLAN);
+		await page.goto(`/c/${id}`);
+		await expect(panel(page)).toBeVisible();
+		if ((await toggle(page).getAttribute('aria-expanded')) === 'false') await toggle(page).click();
+		const first = panel(page).locator('.item').nth(0);
+		const second = panel(page).locator('.item').nth(1);
+		await expect(second).toContainText('в работе');
+		// Готовый с открытия пункт зачёркнут сразу, без движения.
+		const ready = first.locator('.strike');
+		await expect(ready).toHaveAttribute('aria-hidden', 'true');
+		expect(await ready.evaluate((node) => node.getAnimations().length)).toBe(0);
+		expect(await ready.evaluate((node) => getComputedStyle(node).clipPath)).toMatch(/inset\(0(px)?\)/);
+		await expect(panel(page).locator('.items')).toHaveAttribute('data-settled', '');
+
+		api.pushTodo(id, [
+			{ text: 'Собрать требования', status: 'completed' },
+			{ text: 'Написать падающий тест', status: 'completed' },
+			{ text: 'Реализовать панель', status: 'in_progress' }
+		]);
+		await expect(second).toContainText('готово');
+		const strike = second.locator('.strike');
+		await expect(strike).toHaveCount(1);
+		const running = await strike.evaluate((node) => node.getAnimations().map((animation) => (animation as CSSTransition).transitionProperty));
+		if (motion === 'reduced') expect(running).toEqual([]);
+		else expect(running).toContain('clip-path');
+		// Черта видна для глаза, но не для диктора: текст пункта читается один раз.
+		expect(await second.evaluate((node) => {
+			const copy = node.querySelector('.strike')!;
+			return copy.closest('[aria-hidden="true"]') === copy;
+		})).toBe(true);
+		const ink = await strike.evaluate((node) => ({ fill: getComputedStyle(node).webkitTextFillColor, line: getComputedStyle(node).textDecorationLine }));
+		expect(ink.line).toBe('line-through');
+		expect(ink.fill).toBe('rgba(0, 0, 0, 0)');
+		await expect.poll(() => strike.evaluate((node) => getComputedStyle(node).clipPath), { timeout: 3_000 }).toMatch(/inset\(0(px)?\)/);
+		const colours = await panel(page).evaluate((root) => {
+			const point = (status: string) => getComputedStyle(root.querySelector(`.item[data-status="${status}"] .mark`)!, '::after').backgroundColor;
+			return { done: point('completed'), active: point('in_progress') };
+		});
+		expect(colours.done).not.toBe(colours.active);
+	});
+}

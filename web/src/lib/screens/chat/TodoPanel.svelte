@@ -24,6 +24,12 @@
 	let chosen = $state<boolean | null>(readTodoOpen());
 	const expanded = $derived(chosen ?? false);
 
+	// Черта проводится только у пункта, который закрылся на глазах: открытый список показывает готовые сразу зачёркнутыми.
+	function settle(node: HTMLElement) {
+		const frame = requestAnimationFrame(() => node.setAttribute('data-settled', ''));
+		return { destroy: () => cancelAnimationFrame(frame) };
+	}
+
 	function toggle() {
 		chosen = !expanded;
 		writeTodoOpen(chosen);
@@ -57,11 +63,11 @@
 				<div transition:slide={{ duration: durationMs('--duration-expand') }}>
 					<!-- Длинный список прокручивается: без фокуса клавиатуре до него не добраться. -->
 					<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-					<ol class="items" id={listId} tabindex="0" data-live={working ? '' : undefined}>
+					<ol class="items" id={listId} tabindex="0" data-live={working ? '' : undefined} use:settle>
 						{#each shown.items as item, position (position)}
 							<li class="item" data-status={item.status}>
 								<span class="mark" aria-hidden="true"></span>
-								<span class="text">{item.text}</span>
+								<span class="text">{item.text}{#if item.status === 'completed'}<span class="strike" aria-hidden="true">{item.text}</span>{/if}</span>
 								<span class="word" data-status={item.status}>{TODO_STATUS_LABEL[item.status]}</span>
 							</li>
 						{/each}
@@ -135,7 +141,7 @@
 		flex: none;
 		font-size: var(--fs-sm);
 		color: var(--muted);
-		transition: color var(--duration-fast) var(--ease);
+		transition: color var(--duration-todo-strike) var(--ease-todo-strike);
 	}
 
 	.word[data-status='in_progress'] {
@@ -193,7 +199,7 @@
 		gap: var(--s4);
 		font-size: var(--fs-sm);
 		color: var(--text);
-		transition: color var(--duration-fast) var(--ease);
+		transition: color var(--duration-todo-strike) var(--ease-todo-strike);
 	}
 
 	.item:is([data-status='completed'], [data-status='cancelled']) {
@@ -201,13 +207,36 @@
 	}
 
 	.text {
+		position: relative;
 		overflow-wrap: anywhere;
 	}
 
-	/* Пустая строка текста даёт ячейке базовую линию: точка стоит у первой строки пункта. */
+	/* Черта лежит поверх текста его же копией: перенос строк совпадает, буквы копии не рисуются, видна только линия. */
+	.strike {
+		position: absolute;
+		inset: var(--s0);
+		-webkit-text-fill-color: var(--transparent);
+		text-decoration-line: line-through;
+		text-decoration-color: var(--secondary);
+		text-decoration-thickness: var(--hairline);
+		clip-path: inset(var(--s0));
+		pointer-events: none;
+		user-select: none;
+		transition: clip-path var(--duration-todo-strike) var(--ease-todo-strike);
+	}
+
+	@starting-style {
+		.items:global([data-settled]) .strike {
+			clip-path: inset(var(--s0) 100% var(--s0) var(--s0));
+		}
+	}
+
+	/* Пустая строка текста даёт ячейке базовую линию: точка стоит у первой строки пункта.
+	   Пульс снимается плавно: точка возвращает полную яркость, а не вспыхивает. */
 	.mark {
 		display: flex;
 		align-items: center;
+		transition: opacity var(--duration-todo-strike) var(--ease-todo-strike);
 	}
 
 	.mark::before {
@@ -221,11 +250,16 @@
 		height: var(--mark);
 		border-radius: var(--radius-round);
 		background: var(--badge);
-		transition: background-color var(--duration-fast) var(--ease);
+		transition: background-color var(--duration-todo-strike) var(--ease-todo-strike);
 	}
 
-	.item:is([data-status='in_progress'], [data-status='completed']) .mark::after {
+	.item[data-status='in_progress'] .mark::after {
 		background: var(--accent);
+	}
+
+	/* Готовая точка берёт цвет слова «готово»: смена тона видна и без подписи. */
+	.item[data-status='completed'] .mark::after {
+		background: var(--success);
 	}
 
 	.items[data-live] .item[data-status='in_progress'] .mark {
