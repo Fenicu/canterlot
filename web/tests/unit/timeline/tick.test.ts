@@ -48,6 +48,8 @@ test("clock_ticks_do_not_rebuild_rows_until_the_day_changes", () => {
     blocks: new SvelteMap(),
     deltaMarks: [],
     deltaSerial: 0,
+    jumpRequest: null,
+    takeJumpRequest: () => null,
   } as unknown as ChatStore;
   const noon = new Date(2026, 9, 28, 12, 0, 0).getTime();
   const now = ticking(noon);

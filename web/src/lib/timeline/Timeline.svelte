@@ -342,7 +342,9 @@
   }
 
   $effect(() => {
-    const request = chat.jumpRequest;
+    // Чтение держит эффект подписанным, а забор обнуляет просьбу: она одноразовая.
+    void chat.jumpRequest;
+    const request = untrack(() => chat.takeJumpRequest());
     if (!request) return;
     untrack(() => {
       void jumpTo(request);
@@ -431,7 +433,8 @@
     untrack(() => {
       const keys = list.map((row) => row.key);
       // Низ оторванного окна не хвост: следовать за ним значило бы перепрыгнуть пришедшую страницу.
-      if (!feed && chat.timeline.tailDetached && controller?.pinned) {
+      // Первый расклад открытого разговора сюда не входит: хвост возвращает монтирование.
+      if (previous.length > 0 && !feed && chat.timeline.tailDetached && controller?.pinned) {
         controller.release();
         hold();
       }
@@ -478,6 +481,9 @@
     controller = new ScrollController(scroller);
     layout(rows, scroller.scrollTop, scroller.clientHeight || 1);
     controller.jumpToBottom();
+    // Тёплый разговор оставили у якоря или с обрезанным окном: открытие возвращает
+    // к последним сообщениям, а не к низу прежнего окна.
+    if (!feed && !laneRoot && chat.timeline.tailDetached) void jumpToLatest();
     const onScroll = () => {
       if (!host) return;
       const top = host.scrollTop;

@@ -356,6 +356,16 @@ export class ChatStore {
     };
   }
 
+  /**
+   * Лента забирает просьбу о прыжке один раз: тёплый разговор переживает экран,
+   * и повторный монтаж не должен возвращать владельца к якорю прошлого визита.
+   */
+  takeJumpRequest(): { inputId: string; seq: string; nonce: number } | null {
+    const request = this.jumpRequest;
+    if (request) this.jumpRequest = null;
+    return request;
+  }
+
 
   readonly #sync: BlockSync;
   #sub: {
@@ -501,9 +511,12 @@ export class ChatStore {
   }
 
   async loadOlder(): Promise<void> {
+    const version = this.timeline.windowVersion;
     const page = await this.deps.api.history(this.id, {
       before: this.timeline.oldestSeq() ?? undefined,
     });
+    // Прежнее окно заменили, пока страница была в пути: её место уже не здесь.
+    if (version !== this.timeline.windowVersion) return;
     this.#ingest(page.items, "older");
     this.timeline.hasOlder = Boolean(page.next_before);
   }
@@ -567,12 +580,13 @@ export class ChatStore {
 
   async loadNewer(): Promise<void> {
     const epoch = this.#epoch;
+    const version = this.timeline.windowVersion;
     this.#holds += 1;
     try {
       const page = await this.deps.api.history(this.id, {
         after: this.timeline.newestSeq() ?? undefined,
       });
-      if (epoch !== this.#epoch) return;
+      if (epoch !== this.#epoch || version !== this.timeline.windowVersion) return;
       this.#ingest(page.items, "newer");
       if (page.next_after) return;
       this.timeline.tailDetached = false;
@@ -590,6 +604,7 @@ export class ChatStore {
       if (epoch !== this.#epoch) return;
       if (this.timeline.tailDetached) {
         // Окно далеко от хвоста: склеенные, они дали бы ленту с дырой посередине.
+        this.timeline.markReplaced();
         this.timeline.applyHistoryPage([], "tail");
         this.timeline.hasOlder = Boolean(page.next_before);
       }
@@ -1360,7 +1375,10 @@ export class ChatStore {
     // Оторванное окно с хвостом снимка не стыкуется: между ними дыра.
     const keepOlder =
       !this.timeline.tailDetached && older.every((entry) => terminalEntry(entry));
-    if (!keepOlder) this.timeline.applyHistoryPage([], "tail");
+    if (!keepOlder) {
+      this.timeline.markReplaced();
+      this.timeline.applyHistoryPage([], "tail");
+    }
     this.#ingest(items, "tail");
     if (!keepOlder) {
       const keptSeq = new SvelteSet(
