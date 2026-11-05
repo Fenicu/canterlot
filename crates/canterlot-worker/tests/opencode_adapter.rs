@@ -2639,6 +2639,226 @@ async fn refused_input_returns_the_previous_mode_at_once() {
 }
 
 #[tokio::test]
+async fn a_locked_turn_resumes_and_finishes_without_an_error_block() {
+    let mut script = ready();
+    script_with_locked_runs(&mut script, 1);
+    let mut bench = Bench::new(script);
+    bench
+        .adapter
+        .set_db_lock_delays(vec![Duration::from_millis(20), Duration::from_millis(40)]);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(
+        text_of(&events, "Error").is_empty(),
+        "a transient lock must not become an error block"
+    );
+    let notices = text_of(&events, "Warning");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].contains("база занята"), "{}", notices[0]);
+    let prompts: Vec<_> = bench
+        .fake
+        .requests()
+        .into_iter()
+        .filter(|request| path_of(request).ends_with("/prompt"))
+        .collect();
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    assert_eq!(prompts[1]["body"]["text"], json!("continue"));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn a_locked_turn_is_retried_no_more_than_twice() {
+    let mut script = ready();
+    script_with_locked_runs(&mut script, 3);
+    let mut bench = Bench::new(script);
+    bench
+        .adapter
+        .set_db_lock_delays(vec![Duration::from_millis(20), Duration::from_millis(40)]);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let errors = text_of(&events, "Error");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("Failed to execute statement"));
+    let prompts = bench
+        .fake
+        .requests()
+        .into_iter()
+        .filter(|request| path_of(request).ends_with("/prompt"))
+        .count();
+    assert_eq!(prompts, 3, "first prompt and two resumes");
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn a_locked_session_create_is_retried_until_the_server_answers() {
+    let mut script = ready();
+    let locked = Reply {
+        status: 500,
+        body: Some(json!({"_tag": "UnknownError", "message": "Failed to execute statement"})),
+        ..Default::default()
+    };
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            matches!(step, Step::Expect { method, path, .. }
+                if method == "POST" && path == "/api/session")
+        })
+        .unwrap();
+    for _ in 0..2 {
+        script.steps.insert(
+            position,
+            Step::Expect {
+                method: "POST".into(),
+                path: "/api/session".into(),
+                reply: locked.clone(),
+                bind: Default::default(),
+            },
+        );
+    }
+    let mut bench = Bench::new(script);
+    bench
+        .adapter
+        .set_db_lock_delays(vec![Duration::from_millis(20), Duration::from_millis(40)]);
+    bench.start_ok().await;
+    let creates = bench
+        .fake
+        .requests()
+        .into_iter()
+        .filter(|request| request["method"] == "POST" && path_of(request) == "/api/session")
+        .count();
+    assert_eq!(creates, 3, "two refusals and the real create");
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn a_locked_session_create_stops_after_three_attempts() {
+    let mut script = ready();
+    let locked = Reply {
+        status: 500,
+        body: Some(json!({"_tag": "UnknownError", "message": "Failed to execute statement"})),
+        ..Default::default()
+    };
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            matches!(step, Step::Expect { method, path, .. }
+                if method == "POST" && path == "/api/session")
+        })
+        .unwrap();
+    for _ in 0..3 {
+        script.steps.insert(
+            position,
+            Step::Expect {
+                method: "POST".into(),
+                path: "/api/session".into(),
+                reply: locked.clone(),
+                bind: Default::default(),
+            },
+        );
+    }
+    let mut bench = Bench::new(script);
+    bench
+        .adapter
+        .set_db_lock_delays(vec![Duration::from_millis(20), Duration::from_millis(40)]);
+    assert_eq!(bench.fail_reason().await, "session_create_failed");
+    let creates = bench
+        .fake
+        .requests()
+        .into_iter()
+        .filter(|request| request["method"] == "POST" && path_of(request) == "/api/session")
+        .count();
+    assert_eq!(creates, 3);
+}
+
+/// Переписывает первый ход: `runs - 1` падений на замке базы, между ними `continue`,
+/// и успешный конец. Хвост последнего отказа ошибкой становится только после всех повторов.
+fn script_with_locked_runs(script: &mut Script, runs: usize) {
+    let (started, succeeded) = script
+        .steps
+        .iter()
+        .find_map(|step| {
+            let Step::Emit { events } = step else {
+                return None;
+            };
+            let started = events
+                .iter()
+                .find(|event| event["type"] == "session.execution.started")?
+                .clone();
+            let succeeded = events
+                .iter()
+                .find(|event| event["type"] == "session.execution.succeeded")?
+                .clone();
+            Some((started, succeeded))
+        })
+        .expect("recorded started and succeeded");
+    let mut failed = succeeded.clone();
+    failed["type"] = json!("session.execution.failed");
+    failed["data"]["error"] = json!({"type": "unknown", "message": "Failed to execute statement"});
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            let Step::Emit { events } = step else {
+                return false;
+            };
+            events
+                .iter()
+                .any(|event| event["type"] == "session.execution.succeeded")
+        })
+        .unwrap();
+    let Step::Emit { events } = &mut script.steps[position] else {
+        unreachable!();
+    };
+    for event in events {
+        if event["type"] == "session.execution.succeeded" {
+            *event = failed.clone();
+        }
+    }
+    let session = started["data"]["sessionID"].as_str().unwrap().to_owned();
+    let mut insert_at = position + 1;
+    for _ in 1..runs {
+        script
+            .steps
+            .insert(insert_at, locked_prompt_expect(&session, "msg_retry"));
+        script.steps.insert(
+            insert_at + 1,
+            Step::Emit {
+                events: vec![started.clone(), failed.clone()],
+            },
+        );
+        insert_at += 2;
+    }
+    script
+        .steps
+        .insert(insert_at, locked_prompt_expect(&session, "msg_done"));
+    script.steps.insert(
+        insert_at + 1,
+        Step::Emit {
+            events: vec![started, succeeded],
+        },
+    );
+}
+
+fn locked_prompt_expect(session: &str, id: &str) -> Step {
+    Step::Expect {
+        method: "POST".into(),
+        path: format!("/api/session/{session}/prompt"),
+        reply: Reply {
+            status: 200,
+            body: Some(json!({"data": {"id": id}})),
+            ..Default::default()
+        },
+        bind: [(id.to_owned(), "/id".to_owned())].into_iter().collect(),
+    }
+}
+
+#[tokio::test]
 async fn failed_run_shows_an_error_block_and_still_finishes() {
     let mut script = ready();
     for step in &mut script.steps {
@@ -2667,6 +2887,13 @@ async fn failed_run_shows_an_error_block_and_still_finishes() {
         AdapterEvent::BlockStarted { kind: BlockKind::Error, input_command_id, .. }
             if *input_command_id == Some(input.command_id)
     )));
+    let prompts = bench
+        .fake
+        .requests()
+        .into_iter()
+        .filter(|request| path_of(request).ends_with("/prompt"))
+        .count();
+    assert_eq!(prompts, 1, "only the lock failure is retried");
     bench.close(CloseMode::Graceful).await;
 }
 

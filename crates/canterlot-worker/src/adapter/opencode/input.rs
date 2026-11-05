@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 pub const PROOF_KIND: &str = "opencode_inbox_admitted";
 pub const PROOF_KIND_HISTORY: &str = "opencode_history";
+/// Продолжение хода после временного отказа базы: тот же механизм, что у владельца.
+pub const CONTINUE_PROMPT: &str = "continue";
 /// Сервер отвергает вложение крупнее.
 const MAX_NATIVE_FILE_BYTES: u64 = 20 * 1024 * 1024;
 const LOOKUP_WAIT: Duration = Duration::from_secs(5);
@@ -92,6 +94,27 @@ pub fn add_note(body: &mut Value, note: &str) {
 
 pub fn accepted_id(reply: &Value) -> Option<&str> {
     reply.pointer("/data/id").and_then(Value::as_str)
+}
+
+/// `POST` с повтором только на замке общей базы SQLite. Замок снимается сам, а отказ
+/// записи доказывает, что ввод не применён; повтор с тем же `id` идемпотентен.
+pub async fn post_with_lock_retry(
+    http: &Http,
+    path: &str,
+    body: &Value,
+    limit: Duration,
+    delays: &[Duration],
+) -> Result<Value, HttpError> {
+    let mut attempt = 0;
+    loop {
+        match http.post(path, body, limit).await {
+            Err(HttpError::Status { locked: true, .. }) if attempt < delays.len() => {
+                tokio::time::sleep(delays[attempt]).await;
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Ввод виден в очереди или в истории; чтение ничего не меняет на сервере.

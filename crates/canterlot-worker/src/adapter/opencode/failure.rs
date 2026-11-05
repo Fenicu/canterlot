@@ -63,6 +63,19 @@ pub fn limit_fact(failure: &RunFailure, now_ms: u64) -> Option<LimitFact> {
     })
 }
 
+/// Отказ общей базы SQLite: писатель ждал `busy_timeout` и не дождался. OpenCode отдаёт его
+/// как `Session.StructuredError` без типа, только с текстом `effect/sql/SqlError`. Это
+/// временный отказ: тот же ход проходит после паузы, история и ввод уже записаны.
+pub fn is_transient_db_lock(failure: &RunFailure) -> bool {
+    if failure.kind != "unknown" && !failure.kind.is_empty() {
+        return false;
+    }
+    let message = failure.message.trim().to_lowercase();
+    message == "failed to execute statement"
+        || message.contains("locktimeouterror")
+        || message.contains("database is locked")
+}
+
 /// Один и тот же отказ подряд: история не меняется, следующий ввод получит то же самое.
 /// Причина отказа у провайдера не установлена, поэтому здесь сверяется только текст, и
 /// хранится только его сумма.
@@ -169,6 +182,44 @@ mod tests {
         assert!(!watch.on_failure(&failure(INVALID_REQUEST, "two", None)));
         watch.reset();
         assert!(!watch.on_failure(&failure(INVALID_REQUEST, "two", None)));
+    }
+
+    #[test]
+    fn a_locked_shared_database_is_transient() {
+        assert!(is_transient_db_lock(&failure(
+            "unknown",
+            "Failed to execute statement",
+            None
+        )));
+        assert!(is_transient_db_lock(&failure(
+            "unknown",
+            "effect/sql/SqlError/LockTimeoutError: database is locked",
+            None
+        )));
+        assert!(is_transient_db_lock(&failure(
+            "",
+            "database is locked",
+            None
+        )));
+    }
+
+    #[test]
+    fn other_failures_are_not_retried_as_a_lock() {
+        assert!(!is_transient_db_lock(&failure(
+            "provider.internal",
+            "Failed to execute statement",
+            None
+        )));
+        assert!(!is_transient_db_lock(&failure(
+            "unknown",
+            "упал провайдер",
+            None
+        )));
+        assert!(!is_transient_db_lock(&failure(
+            "provider.invalid-request",
+            "database is locked",
+            None
+        )));
     }
 
     #[test]

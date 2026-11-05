@@ -69,6 +69,10 @@ const MCP_SETTLE: Duration = Duration::from_millis(250);
 /// Замер: 100 мс после записи мало, 200 мс хватает. Промах виден только на первом шаге.
 const INSTRUCTIONS_SETTLE: Duration = Duration::from_millis(400);
 const INSTRUCTIONS_FAILED: &str = "instructions_change_failed";
+/// Паузы перед повтором хода, упавшего на замке общей базы SQLite. Замок живёт секунды:
+/// первый повтор снимает почти все случаи, второй оставлен на тяжёлую загрузку.
+const DB_LOCK_DELAYS: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(20)];
+const DB_LOCK_NOTICE: &str = "OpenCode: общая база занята другим процессом, продолжаю ход";
 const ABORTED: &str = "aborted";
 const TERM_GRACE: Duration = Duration::from_secs(2);
 const KILL_WAIT: Duration = Duration::from_secs(2);
@@ -352,6 +356,32 @@ async fn lookup_done(lookup: &mut Option<Lookup>) -> bool {
     }
 }
 
+/// Продолжение хода после замка базы: пауза и `prompt` отдельной задачей, чтобы
+/// `next_event` не стоял и не терял события.
+struct DbRetry {
+    command: Uuid,
+    failure: RunFailure,
+    id: String,
+    task: tokio::task::JoinHandle<Result<Value, HttpError>>,
+}
+
+impl Drop for DbRetry {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn retry_done(retry: &mut Option<DbRetry>) -> (String, Result<Value, HttpError>) {
+    match retry {
+        Some(pending) => {
+            let id = pending.id.clone();
+            let result = (&mut pending.task).await.unwrap_or(Err(HttpError::Lost));
+            (id, result)
+        }
+        None => std::future::pending().await,
+    }
+}
+
 async fn steers_done(lookups: &mut JoinSet<(Uuid, bool)>) -> Option<(Uuid, bool)> {
     if lookups.is_empty() {
         return std::future::pending().await;
@@ -484,6 +514,12 @@ pub struct OpenCodeAdapter {
     translator: Option<Translator>,
     delivery: Delivery,
     lookup: Option<Lookup>,
+    /// Продолжение хода после временного отказа общей базы.
+    db_retry: Option<DbRetry>,
+    /// Сколько продолжений уже истрачено в этом ходе.
+    db_resumes: usize,
+    /// Паузы повтора на замке базы: сроки меняются только тестом.
+    db_lock_delays: Vec<Duration>,
     /// Сверки влитых вводов после `Undetermined`: у каждой команды своя задача,
     /// чужой ход они не трогают.
     steer_lookups: JoinSet<(Uuid, bool)>,
@@ -553,6 +589,9 @@ impl OpenCodeAdapter {
             translator: None,
             delivery: Delivery::default(),
             lookup: None,
+            db_retry: None,
+            db_resumes: 0,
+            db_lock_delays: DB_LOCK_DELAYS.to_vec(),
             steer_lookups: JoinSet::new(),
             steer_pending: HashSet::new(),
             shells: None,
@@ -595,6 +634,12 @@ impl OpenCodeAdapter {
     /// Срок строки готовности и каждого ожидания на старте.
     pub fn set_ready_wait(&mut self, wait: Duration) {
         self.ready_wait = wait;
+    }
+
+    /// Паузы повтора на замке базы: тест не должен ждать настоящие секунды.
+    #[cfg(feature = "synthetic-adapter")]
+    pub fn set_db_lock_delays(&mut self, delays: Vec<Duration>) {
+        self.db_lock_delays = delays;
     }
 
     fn diagnostic(&mut self, kind: &'static str, required: bool) {
@@ -697,11 +742,15 @@ impl OpenCodeAdapter {
         if let Some(rules) = self.mode.ruleset() {
             body["permissions"] = rules;
         }
-        let created = self
-            .http()?
-            .post("/api/session", &body, REQUEST_WAIT)
-            .await
-            .map_err(|_| AdapterError::StartFailed("session_create_failed"))?;
+        let created = input::post_with_lock_retry(
+            self.http()?,
+            "/api/session",
+            &body,
+            REQUEST_WAIT,
+            &self.db_lock_delays,
+        )
+        .await
+        .map_err(|_| AdapterError::StartFailed("session_create_failed"))?;
         if created.pointer("/data/id").and_then(Value::as_str) != Some(id.as_str()) {
             return Err(AdapterError::StartFailed("session_create_failed"));
         }
@@ -1191,8 +1240,21 @@ impl OpenCodeAdapter {
         self.held.release_all(&mut self.events);
         self.asked.clear();
         self.requests.drop_session(&self.session);
+        if matches!(outcome, RunOutcome::Succeeded) {
+            self.db_resumes = 0;
+            self.db_retry = None;
+        }
+        let command = self.delivery.active.or(self.delivery.adopted);
+        // Отказ общей базы — не конец хода: история цела, тот же `continue` продолжит работу.
+        if let (RunOutcome::Failed(failure), Some(command)) = (&outcome, command)
+            && self.db_resumes < self.db_lock_delays.len()
+            && failure::is_transient_db_lock(failure)
+        {
+            self.schedule_db_resume(command, failure.clone());
+            return;
+        }
         let follow = self.judge(&outcome);
-        let Some(command) = self.delivery.active.or(self.delivery.adopted) else {
+        let Some(command) = command else {
             // Запуск без единой команды: приписать некому, блоков хода нет.
             self.awaiting_input();
             self.events.extend(follow);
@@ -1227,6 +1289,85 @@ impl OpenCodeAdapter {
         if interrupted {
             self.list_shells(command);
         }
+    }
+
+    // Замок общей базы: тихая метка в ленте и `continue` тем же вводом через паузу.
+    // Ход не закрывается, поэтому расход и блоки остаются за прежней командой.
+    fn schedule_db_resume(&mut self, command: Uuid, failure: RunFailure) {
+        let attempt = self.db_resumes + 1;
+        let delay = self.db_lock_delays[self.db_resumes];
+        self.db_resumes = attempt;
+        let id = input::message_id(Uuid::now_v7());
+        let body = json!({
+            "id": id,
+            "text": input::CONTINUE_PROMPT,
+            "delivery": "queue",
+        });
+        let path = format!("/api/session/{}/prompt", self.session);
+        let http = self.http.clone();
+        let limit = self.deadline;
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let http = http.ok_or(HttpError::Lost)?;
+            input::post_with_lock_retry(&http, &path, &body, limit, &[]).await
+        });
+        self.text_block(
+            BlockKind::Warning,
+            None,
+            format!(
+                "{DB_LOCK_NOTICE} ({attempt}/{}).",
+                self.db_lock_delays.len()
+            ),
+        );
+        self.db_retry = Some(DbRetry {
+            command,
+            failure,
+            id,
+            task,
+        });
+    }
+
+    fn on_db_retry(&mut self, done: (String, Result<Value, HttpError>)) {
+        let (id, reply) = done;
+        if self.db_retry.as_ref().is_none_or(|retry| retry.id != id) {
+            // Пока задача спала, ход упал снова и назначил другое продолжение.
+            return;
+        }
+        let Some(retry) = self.db_retry.take() else {
+            return;
+        };
+        let accepted = reply
+            .as_ref()
+            .ok()
+            .and_then(input::accepted_id)
+            .is_some_and(|accepted| accepted == retry.id);
+        if accepted {
+            // Продолжение идёт по тому же вводу: он уже был доставлен серверу до отказа.
+            self.delivery.enqueued = true;
+            self.delivery.delivered = true;
+            self.delivery.foreign = false;
+            self.delivery.last = Some(retry.command);
+            return;
+        }
+        // Продолжение не принято: ход кончается прежним отказом, второго шанса у него нет.
+        self.finish_failed_run(retry.command, retry.failure.clone());
+    }
+
+    fn finish_failed_run(&mut self, command: Uuid, failure: RunFailure) {
+        self.error_block(&failure, Some(command));
+        self.delivery.active = None;
+        self.delivery.adopted = None;
+        self.delivery.foreign = false;
+        if self.delivery.unconfirmed == Some(command) {
+            self.delivery.unconfirmed = None;
+            self.lookup = None;
+        }
+        if let Some(translator) = self.translator.as_mut() {
+            self.events.push_back(translator.finish_run(command));
+        }
+        self.awaiting_input();
+        let follow = self.judge(&RunOutcome::Failed(failure));
+        self.events.extend(follow);
     }
 
     // После терминала: команды прерванного хода к этому моменту уже сняты сервером.
@@ -1803,6 +1944,7 @@ impl OpenCodeAdapter {
         if self.delivery.active.is_some() {
             return TransmitOutcome::Rejected("turn_active".into());
         }
+        self.db_resumes = 0;
         if let Some(reason) = input
             .settings
             .as_ref()
@@ -1888,7 +2030,9 @@ impl OpenCodeAdapter {
             translator.begin_run(Some(command));
         }
         let path = format!("/api/session/{}/prompt", self.session);
-        match http.post(&path, &body, self.deadline).await {
+        match input::post_with_lock_retry(&http, &path, &body, self.deadline, &self.db_lock_delays)
+            .await
+        {
             Ok(reply) if input::accepted_id(&reply) == Some(id.as_str()) => {
                 self.exit_note = false;
                 self.delivery.last = Some(command);
@@ -1898,7 +2042,7 @@ impl OpenCodeAdapter {
                 })
             }
             // Хаб новых настроек не применил: сервер возвращается к прежним.
-            Err(HttpError::Status { status, tag }) if input::is_rejection(status) => {
+            Err(HttpError::Status { status, tag, .. }) if input::is_rejection(status) => {
                 self.delivery.active = None;
                 self.delivery.adopted = adopted;
                 self.delivery.foreign = false;
@@ -1978,6 +2122,7 @@ impl OpenCodeAdapter {
     fn finish_exit(&mut self, status: Option<ExitStatus>) {
         use std::os::unix::process::ExitStatusExt as _;
         self.exited = true;
+        self.db_retry = None;
         self.events.push_back(AdapterEvent::ProcessExited {
             code: status.and_then(|status| status.code()),
             signal: status.and_then(|status| status.signal()),
@@ -2049,6 +2194,7 @@ impl OpenCodeAdapter {
         let steer_lookups = &mut self.steer_lookups;
         let shells = &mut self.shells;
         let resync = &mut self.resync;
+        let db_retry = &mut self.db_retry;
         let kill_at = self.kill_at;
         let escalate = async {
             match kill_at {
@@ -2064,6 +2210,7 @@ impl OpenCodeAdapter {
             found = steers_done(steer_lookups) => self.on_steer_lookup(found),
             list = shells_done(shells) => self.on_shells(list),
             done = resync_done(resync) => self.on_resynced(done),
+            reply = retry_done(db_retry) => self.on_db_retry(reply),
             () = escalate => {
                 self.kill_at = None;
                 proc.signal(rustix::process::Signal::KILL);
@@ -2234,14 +2381,16 @@ impl Adapter for OpenCodeAdapter {
         };
         let id = input::message_id(command);
         let path = format!("/api/session/{}/prompt", self.session);
-        match http.post(&path, &body, self.deadline).await {
+        match input::post_with_lock_retry(&http, &path, &body, self.deadline, &self.db_lock_delays)
+            .await
+        {
             Ok(reply) if input::accepted_id(&reply) == Some(id.as_str()) => {
                 SteerOutcome::Accepted(Proof {
                     command_id: command,
                     kind: input::PROOF_KIND,
                 })
             }
-            Err(HttpError::Status { status, tag }) if input::is_rejection(status) => {
+            Err(HttpError::Status { status, tag, .. }) if input::is_rejection(status) => {
                 SteerOutcome::Rejected(tag)
             }
             _ => {
