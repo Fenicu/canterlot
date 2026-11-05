@@ -12,6 +12,7 @@ pub mod completion;
 pub mod control;
 pub mod jobs;
 pub mod origin;
+pub mod outage;
 pub mod read;
 pub mod report;
 pub mod send;

@@ -6,6 +6,7 @@
 	import StateChip from './StateChip.svelte';
 	import { chatStateLine } from './stateLine';
 	import { modelLabel } from '#lib/format/labels.js';
+	import { fmt } from '#lib/format/ru.js';
 	import Icon from '#lib/ui/Icon.svelte';
 	import { dismissable, type DismissReason } from '#lib/ui/dismiss.js';
 	import { pane } from '#lib/shell/pane.svelte.js';
@@ -36,10 +37,17 @@
 		pending?: { model?: string };
 	}
 
+	/** Только то, что нужно тихому уведомлению о простое машины. */
+	interface MachineLike {
+		availability?: string;
+		availability_since?: string | null;
+	}
+
 	let {
 		chat,
 		providers = [],
 		now = Date.now(),
+		machine = null,
 		onOpenSheet,
 		onOpenSettings,
 		onOpenDiagnostics,
@@ -53,6 +61,7 @@
 		chat: ChatStore;
 		providers?: ProviderLimits[];
 		now?: number;
+		machine?: MachineLike | null;
 		onOpenSheet?: () => void;
 		onOpenSettings?: () => void;
 		onOpenDiagnostics?: () => void;
@@ -95,6 +104,15 @@
 			? `${harnessTitle} · ${effectiveModel} → ${pendingModel} со следующего хода · ${machineName}`
 			: `${harnessTitle} · ${effectiveModel} · ${machineName}`
 	);
+
+	// Тихая строка вместо погашенного состояния: сколько машина уже не на связи.
+	const machineDown = $derived.by(() => {
+		if (machine?.availability !== 'unavailable') return '';
+		const since = machine.availability_since ? Date.parse(machine.availability_since) : Number.NaN;
+		if (!Number.isFinite(since)) return 'Машина недоступна';
+		const down = Math.max(0, now - since);
+		return down >= 60_000 ? `Машина недоступна ${fmt.durationCoarse(down)}` : 'Машина недоступна';
+	});
 
 	const isLive = $derived(chat.execution
 		? (chat.execution as { live?: boolean; state?: string }).live ?? ['created', 'starting', 'running', 'stopping'].includes((chat.execution as { state?: string }).state ?? '')
@@ -271,6 +289,8 @@
 		<p class="header-status" role="status">Останавливаю сессию</p>
 	{:else if actionError && !menuOpen}
 		<p class="header-status header-error" role="alert">{actionError}</p>
+	{:else if machineDown}
+		<p class="header-status machine-down" data-machine-down>{machineDown}</p>
 	{/if}
 
 	{#if providers.length > 0}

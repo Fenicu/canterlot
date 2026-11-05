@@ -12,6 +12,7 @@ pub struct BackgroundDeps {
     pub scheduler: crate::scheduler::Scheduler,
     pub activity: crate::config::ActivityConfig,
     pub machines: crate::config::MachinesConfig,
+    pub session_tools: crate::config::SessionToolsConfig,
     pub multi_process: bool,
     /// Сборщик вложений; `None` у служебных стендов без хранилища.
     pub attachments: Option<(
@@ -41,6 +42,7 @@ impl Background {
             scheduler,
             activity,
             machines,
+            session_tools,
             multi_process,
             attachments,
         } = deps;
@@ -78,6 +80,14 @@ impl Background {
                 tokio::spawn(machine_info::run_status_projection(
                     pool.clone(),
                     registry.clone(),
+                    stopped.clone(),
+                )),
+            ),
+            (
+                "machine_outage_task_error",
+                tokio::spawn(crate::session_tools::outage::run(
+                    pool.clone(),
+                    session_tools,
                     stopped.clone(),
                 )),
             ),
