@@ -41,9 +41,47 @@ async function boot(page: Page) {
   return { hub, api, id };
 }
 
-const strip = (page: Page) => page.getByRole('region', { name: 'Будильники' });
+const alarmsList = (page: Page) => page.locator('[data-alarms-list]');
+const alarmsPanel = (page: Page) => page.locator('[data-alarms-panel]');
+const alarmMenuItem = (page: Page) => page.getByRole('menuitem', { name: /^Будильники · \d+$/ });
 
-test('armed_alarm_plaque_shows_the_note_and_can_be_cancelled', async ({ page }) => {
+async function openMenu(page: Page) {
+  await page.getByRole('button', { name: 'Меню сессии' }).click();
+}
+
+async function openAlarms(page: Page) {
+  await openMenu(page);
+  await alarmMenuItem(page).click();
+}
+
+async function closeAlarms(page: Page) {
+  if (test.info().project.name === 'phone') {
+    await page.getByRole('dialog', { name: 'Будильники' }).getByRole('button', { name: 'Закрыть' }).click();
+  } else {
+    await alarmsPanel(page).getByRole('button', { name: 'Закрыть боковую панель' }).click();
+  }
+}
+
+function alarmAt(index: number, patch: Record<string, unknown> = {}) {
+  return alarm({
+    alarm_id: `00000000-0000-4000-8000-0000000000b${index}`,
+    key: `alarm-${index}`,
+    fires_at: `2026-11-04T1${index}:30:00.000Z`,
+    ...patch
+  });
+}
+
+function seedAlarms(hub: FakeHub, id: string, alarms: ReturnType<typeof alarmAt>[]) {
+  for (const item of alarms) {
+    hub.append(`conversation:${id}`, {
+      kind: 'alarm_changed',
+      conversation_id: id,
+      payload: { ...item, conversation_id: id }
+    });
+  }
+}
+
+test('alarm_menu_item_opens_the_list_and_cancel_works', async ({ page }) => {
   const { hub, id } = await boot(page);
   hub.append(`conversation:${id}`, {
     kind: 'alarm_changed',
@@ -53,16 +91,24 @@ test('armed_alarm_plaque_shows_the_note_and_can_be_cancelled', async ({ page }) 
   await page.goto(`/c/${id}`);
   await expect(page.locator('.screen[data-ready]')).toBeVisible();
 
-  await expect(strip(page)).toContainText('Будильник');
-  await strip(page).locator('.chip').click();
-  await expect(strip(page)).toContainText('Гейт для волны C');
+  await expect(alarmsList(page)).toHaveCount(0);
+  await openMenu(page);
+  await expect(alarmMenuItem(page)).toHaveText('Будильники · 1');
+  await alarmMenuItem(page).click();
+  await expect(alarmsList(page)).toBeVisible();
+  await alarmsList(page).locator('.chip').click();
+  await expect(alarmsList(page)).toContainText('Гейт для волны C');
 
-  await strip(page).getByRole('button', { name: /Отменить/ }).click();
+  await alarmsList(page).getByRole('button', { name: /Отменить/ }).click();
   await page.getByRole('button', { name: 'Отменить', exact: true }).click();
-  await expect(strip(page)).toHaveCount(0);
+  await expect(alarmsList(page).locator('.pill')).toHaveCount(0);
+
+  await closeAlarms(page);
+  await openMenu(page);
+  await expect(alarmMenuItem(page)).toHaveCount(0);
 });
 
-test('machine_alarm_plaque_describes_its_thresholds_in_russian', async ({ page }) => {
+test('machine_alarm_describes_its_thresholds_in_russian_in_the_list', async ({ page }) => {
   const { hub, id } = await boot(page);
   hub.append(`conversation:${id}`, {
     kind: 'alarm_changed',
@@ -83,12 +129,13 @@ test('machine_alarm_plaque_describes_its_thresholds_in_russian', async ({ page }
   await page.goto(`/c/${id}`);
   await expect(page.locator('.screen[data-ready]')).toBeVisible();
 
-  await expect(strip(page)).toContainText(
+  await openAlarms(page);
+  await expect(alarmsList(page)).toContainText(
     'Машина: свободно на диске больше 50 ГБ, нагрузка на ядро ниже 0,5, память больше 8 ГБ'
   );
 });
 
-test('alarm_event_is_a_quiet_feed_line_and_a_live_change_adds_a_plaque', async ({ page }) => {
+test('alarm_event_is_a_quiet_feed_line_and_a_live_change_adds_a_menu_item', async ({ page }) => {
   const { hub, api, id } = await boot(page);
   seedInput(api, id, {
     kind: 'input',
@@ -109,6 +156,9 @@ test('alarm_event_is_a_quiet_feed_line_and_a_live_change_adds_a_plaque', async (
   await page.goto(`/c/${id}`);
   await expect(page.locator('.screen[data-ready]')).toBeVisible();
   await expect(page.locator('.line[data-event-kind="alarm"]')).toContainText('Будильник «gate»');
+  await openMenu(page);
+  await expect(alarmMenuItem(page)).toHaveCount(0);
+  await page.keyboard.press('Escape');
 
   hub.append(`conversation:${id}`, {
     kind: 'alarm_changed',
@@ -119,7 +169,8 @@ test('alarm_event_is_a_quiet_feed_line_and_a_live_change_adds_a_plaque', async (
       key: 'disk'
     })
   });
-  await expect(strip(page)).toContainText('Будильник');
+  await openMenu(page);
+  await expect(alarmMenuItem(page)).toHaveText('Будильники · 1');
 });
 
 test('alarm_entry_is_collapsed_and_expands_to_the_full_batch_text', async ({ page }) => {
@@ -232,4 +283,56 @@ test('coalesced_alarm_entry_counts_the_fired_alarms_in_the_header', async ({ pag
   const body = entry.locator('[data-role="alarm-body"]');
   await expect(body).toContainText('Alarm "disk"');
   await expect(body).toContainText('Not settled');
+});
+
+test('several_alarms_live_in_the_menu_and_count_updates_after_cancel', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  seedAlarms(hub, id, [alarmAt(1), alarmAt(2), alarmAt(3), alarmAt(4)]);
+  api.pushTodo(id, [
+    { text: 'Проверить полосы', status: 'in_progress' },
+    { text: 'Снять скриншоты', status: 'pending' }
+  ]);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+  // Над композером полосы больше нет: будильники живут только в меню.
+  await expect(page.locator('.screen > [data-alarms-list]')).toHaveCount(0);
+  await openAlarms(page);
+  await expect(alarmsList(page).locator('.pill')).toHaveCount(4);
+  await expect(alarmsList(page).getByRole('button', { name: /Отменить:/ })).toHaveCount(4);
+
+  await alarmsList(page).getByRole('button', { name: /Отменить:/ }).first().click();
+  await page.getByRole('button', { name: 'Отменить', exact: true }).click();
+  await expect(alarmsList(page).locator('.pill')).toHaveCount(3);
+
+  await closeAlarms(page);
+  await openMenu(page);
+  await expect(alarmMenuItem(page)).toHaveText('Будильники · 3');
+});
+
+test('alarm_menu_item_is_absent_without_alarms', async ({ page }) => {
+  const { id } = await boot(page);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+  await expect(alarmsList(page)).toHaveCount(0);
+  await openMenu(page);
+  await expect(alarmMenuItem(page)).toHaveCount(0);
+  await expect(page.getByRole('menuitem', { name: /Будильники/ })).toHaveCount(0);
+});
+
+test('todo_keeps_the_vertical_rhythm_with_the_next_strip', async ({ page }) => {
+  const { api, id } = await boot(page);
+  api.pushTodo(id, [{ text: 'Проверить отступы', status: 'in_progress' }]);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+  await expect(page.locator('.todo .panel')).toBeVisible();
+
+  const gap = await page.evaluate(() => {
+    const todo = document.querySelector('.todo .panel')!.getBoundingClientRect();
+    const next = document.querySelector('.screen > .strip')!.getBoundingClientRect();
+    const s2 = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--s2'));
+    return { value: next.top - todo.bottom, token: s2 };
+  });
+  expect(gap.value).toBeGreaterThanOrEqual(gap.token);
 });

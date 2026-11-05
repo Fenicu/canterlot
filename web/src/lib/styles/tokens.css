@@ -100,6 +100,10 @@
   --toggle-height: 24px;
   --toggle-knob: 16px;
   --composer-height: 42px;
+  /* VisualViewport подставляет реальную высоту над клавиатурой; до первого кадра — экран. */
+  --app-height: 100dvh;
+  --keyboard-inset: 0px;
+  --composer-limit: min(48dvh, calc(var(--app-height) * .62));
   --fab-size: 52px;
   --phone-max: 480px;
   --reading-max: 720px;

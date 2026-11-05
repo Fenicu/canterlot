@@ -11,13 +11,13 @@
   const visible = $derived(
     chat.alarms.filter((alarm) => alarm.state === 'armed' || alarm.state === 'failed')
   );
-  let expanded = $state<string | null>(null);
+  let detail = $state<string | null>(null);
   let busy = $state<string | null>(null);
   let error = $state('');
   let asking = $state<AlarmView | null>(null);
 
   function toggle(id: string) {
-    expanded = expanded === id ? null : id;
+    detail = detail === id ? null : id;
   }
 
   async function cancel(alarm: AlarmView) {
@@ -49,40 +49,38 @@
   />
 {/if}
 
-{#if visible.length > 0}
-  <div class="strip" role="region" aria-label="Будильники">
-    {#each visible as alarm (alarm.alarm_id)}
-      <div class="item">
-        <div class="pill" class:failed={alarm.state === 'failed'} data-alarm-state={alarm.state}>
-          <button
-            type="button"
-            class="chip"
-            aria-expanded={expanded === alarm.alarm_id}
-            onclick={() => toggle(alarm.alarm_id)}
-          >{alarmChip(alarm)}</button>
-          {#if alarm.state === 'armed'}
-            <IconButton
-              icon="close"
-              label="Отменить: {alarmChip(alarm)}"
-              inert={busy === alarm.alarm_id}
-              onclick={() => (asking = alarm)}
-            />
-          {/if}
-        </div>
-        {#if expanded === alarm.alarm_id}
-          {#each alarmDetail(alarm) as line, index (index)}
-            <p class="note">{line}</p>
-          {/each}
+<div class="alarms" data-alarms-list role="region" aria-label="Список будильников">
+  {#each visible as alarm (alarm.alarm_id)}
+    <div class="item">
+      <div class="pill" class:failed={alarm.state === 'failed'} data-alarm-state={alarm.state}>
+        <button
+          type="button"
+          class="chip"
+          aria-expanded={detail === alarm.alarm_id}
+          onclick={() => toggle(alarm.alarm_id)}
+        >{alarmChip(alarm)}</button>
+        {#if alarm.state === 'armed'}
+          <IconButton
+            icon="close"
+            label="Отменить: {alarmChip(alarm)}"
+            inert={busy === alarm.alarm_id}
+            onclick={() => (asking = alarm)}
+          />
         {/if}
       </div>
-    {/each}
-    {#if error}<p class="note" role="alert">{error}</p>{/if}
-  </div>
-{/if}
+      {#if detail === alarm.alarm_id}
+        {#each alarmDetail(alarm) as line, index (index)}
+          <p class="note">{line}</p>
+        {/each}
+      {/if}
+    </div>
+  {/each}
+  {#if error}<p class="note" role="alert">{error}</p>{/if}
+</div>
 
 <style>
-  .strip { display: flex; flex-direction: column; gap: var(--s2); padding-inline: var(--gutter); }
-  .item { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+  .alarms { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+  .item { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
   .pill {
     display: flex;
     align-items: center;
@@ -91,7 +89,7 @@
     min-height: var(--target);
     padding: var(--s0) var(--s1) var(--s0) var(--s6);
     border-radius: var(--radius-pill);
-    background: var(--surface);
+    background: var(--raised);
     font-size: var(--fs-sm);
   }
   .failed { background: var(--danger-soft); }

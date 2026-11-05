@@ -53,6 +53,7 @@
 		onOpenDiagnostics,
 		onOpenDelegation,
 		onOpenMessages,
+		onOpenAlarms,
 		onAccept,
 		parentTitle = null,
 		childRunning = 0,
@@ -67,6 +68,7 @@
 		onOpenDiagnostics?: () => void;
 		onOpenDelegation?: () => void;
 		onOpenMessages?: () => void;
+		onOpenAlarms?: () => void;
 		onAccept?: () => void;
 		/** Название сессии, запустившей эту; пусто, пока список её не знает. */
 		parentTitle?: string | null;
@@ -78,6 +80,9 @@
 
 	let menuOpen = $state(false);
 	const delegated = $derived(hasChildren || chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
+	const alarmCount = $derived(
+		chat.alarms.filter((alarm) => alarm.state === 'armed' || alarm.state === 'failed').length
+	);
 	const running = $derived(delegated ? runningCount(liveNodes(chat)) + childRunning : 0);
 	let confirmingForce = $state(false);
 	let actionError = $state<string | null>(null);
@@ -322,6 +327,17 @@
 
 				{#if onOpenDiagnostics}
 					<MenuItem icon="info" onclick={() => { menuOpen = false; onOpenDiagnostics(); }}>Диагностика</MenuItem>
+				{/if}
+
+				{#if alarmCount > 0 && onOpenAlarms}
+					<MenuItem
+						icon="clock"
+						onclick={() => {
+							menuOpen = false;
+							if (pane.desktop) pane.toggle('alarms');
+							else onOpenAlarms();
+						}}
+					>Будильники · {alarmCount}</MenuItem>
 				{/if}
 
 				{#if !pane.desktop}

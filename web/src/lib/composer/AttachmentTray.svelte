@@ -66,7 +66,7 @@
 {/if}
 
 <style>
-  .tray { grid-area: tray; display: flex; flex-direction: column; gap: var(--s3); min-width: 0; max-height: 40dvh; overflow-y: auto; padding: var(--s1) var(--s3) var(--s3); }
+  .tray { grid-area: tray; display: flex; flex-direction: column; gap: var(--s3); min-width: 0; max-height: calc(var(--composer-limit) * .36); overflow-y: auto; padding: var(--s1) var(--s3) var(--s3); }
   header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4); padding-inline: var(--s3); font-size: var(--fs-meta); }
   strong { font-weight: var(--weight-semibold); }
   header span { color: var(--secondary); font-size: var(--fs-sm); }
@@ -86,4 +86,12 @@
   [data-phase='failed'] .fill { background: var(--danger); }
   .error { margin: 0; font-size: var(--fs-sm); }
   .retry { display: flex; }
+  /* Клавиатура открыта: вложения едут одной строкой вбок, чтобы поле ввода осталось видно. */
+  :global(html[data-compact]) .tray { max-height: none; gap: var(--s2); padding: var(--s0) var(--s3) var(--s2); overflow: visible; }
+  :global(html[data-compact]) header { display: none; }
+  :global(html[data-compact]) ul { flex-direction: row; overflow-x: auto; padding-bottom: var(--s1); }
+  :global(html[data-compact]) li { flex: 0 0 auto; max-width: calc(var(--target) * 5); min-height: var(--target); padding: var(--s2) var(--s3); }
+  :global(html[data-compact]) .tile { width: var(--s10); height: var(--s10); }
+  :global(html[data-compact]) .meta,
+  :global(html[data-compact]) .bar { display: none; }
 </style>

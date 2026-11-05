@@ -15,6 +15,7 @@
   import Nav from './Nav.svelte';
   import SessionExpired from './SessionExpired.svelte';
   import { applyMotion } from '#lib/screens/settings/preferences.js';
+  import { trackViewport } from './viewport';
   import { installation, register } from '#lib/pwa/register.js';
   import type { UpdateController } from '#lib/pwa/update.js';
   import { announce } from '#lib/a11y/announce.js';
@@ -39,6 +40,7 @@
   let currentChat = $state<ChatStore | null>(null);
   let DelegationPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
   let MessagesPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
+  let AlarmsPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
   let SettingsPanelComponent = $state<Component<{ chat: ChatStore; machine?: MachineRecord | null; desktop?: boolean; onclose?: () => void }> | null>(null);
   const paneMachine = $derived.by(() => {
     const id = (currentChat?.detail?.machine as { id?: string } | undefined)?.id;
@@ -64,6 +66,11 @@
     if (pane.view === 'messages' && !MessagesPanelComponent) {
       import('#lib/screens/chat/OwnerMessagesPanel.svelte').then((m) => {
         MessagesPanelComponent = m.default;
+      });
+    }
+    if (pane.view === 'alarms' && !AlarmsPanelComponent) {
+      import('#lib/screens/chat/AlarmsPanel.svelte').then((m) => {
+        AlarmsPanelComponent = m.default;
       });
     }
   });
@@ -154,6 +161,7 @@
     laidOut = true;
     window.addEventListener('resize', read);
     const releaseTicker = ticker.retain();
+    const stopViewport = trackViewport();
     loadRuntime();
     return () => {
       alive = false;
@@ -169,6 +177,7 @@
       window.removeEventListener('online', checkUpdate);
       document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('resize', read);
+      stopViewport();
       releaseTicker();
     };
   });
@@ -236,6 +245,8 @@
             <SettingsPanelComponent chat={currentChat} machine={paneMachine} desktop onclose={() => pane.close()} />
           {:else if currentChat && pane.view === 'messages' && MessagesPanelComponent}
             <MessagesPanelComponent chat={currentChat} onclose={() => pane.close()} />
+          {:else if currentChat && pane.view === 'alarms' && AlarmsPanelComponent}
+            <AlarmsPanelComponent chat={currentChat} onclose={() => pane.close()} />
           {/if}
         </aside>
       {/if}
@@ -246,7 +257,7 @@
 <style>
   .shell {
     position: fixed;
-    inset: var(--s0);
+    inset: var(--s0) var(--s0) var(--keyboard-inset) var(--s0);
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -255,7 +266,7 @@
 
   .shell[data-harness] {
     position: static;
-    height: 100dvh;
+    height: var(--app-height);
   }
 
   .page {

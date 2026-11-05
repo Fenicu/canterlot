@@ -223,6 +223,47 @@
     });
   }
 
+  // Клавиатура и рост вложений меняют высоту поля: курсор в конце текста остаётся виден.
+  function keepCaret(el: HTMLTextAreaElement) {
+    let frame = 0;
+    const atEnd = () => document.activeElement === el && (el.selectionEnd ?? 0) >= el.value.length;
+    const settle = () => {
+      frame = 0;
+      if (atEnd()) el.scrollTop = el.scrollHeight;
+    };
+    const reveal = () => {
+      frame = 0;
+      if (!atEnd()) return;
+      // Поле сначала меняет высоту, и только следующим кадром появляется новый предел прокрутки.
+      el.scrollTop = el.scrollHeight;
+      frame = requestAnimationFrame(settle);
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(reveal);
+    };
+    el.addEventListener('focus', schedule);
+    el.addEventListener('input', schedule);
+    el.addEventListener('keyup', schedule);
+    window.addEventListener('resize', schedule);
+    const observer = new ResizeObserver(schedule);
+    observer.observe(el);
+    const view = window.visualViewport;
+    view?.addEventListener('resize', schedule);
+    view?.addEventListener('scroll', schedule);
+    return {
+      destroy() {
+        if (frame) cancelAnimationFrame(frame);
+        observer.disconnect();
+        el.removeEventListener('focus', schedule);
+        el.removeEventListener('input', schedule);
+        el.removeEventListener('keyup', schedule);
+        window.removeEventListener('resize', schedule);
+        view?.removeEventListener('resize', schedule);
+        view?.removeEventListener('scroll', schedule);
+      }
+    };
+  }
+
   function dropped(event: DragEvent) {
     const files = filesFromPayload(event.dataTransfer);
     dropDepth = 0;
@@ -255,6 +296,7 @@
     <textarea
       bind:this={node}
       bind:value={model.text}
+      use:keepCaret
       use:bindDraft={{
         drafts: runtime.drafts,
         conversationId: chat.id,
@@ -329,7 +371,7 @@
 </section>
 
 <style>
-  .composer { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
+  .composer { display: flex; flex-direction: column; gap: var(--s2); max-height: var(--composer-limit); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
   .capsule {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto auto auto;
@@ -337,6 +379,7 @@
     align-items: center;
     gap: var(--s2);
     min-width: 0;
+    min-height: 0;
     padding: var(--s1) var(--s3) var(--s3);
     border-radius: var(--radius-composer);
     background: var(--surface);
@@ -354,7 +397,7 @@
     min-width: 0;
     width: 100%;
     min-height: var(--target);
-    max-height: calc(var(--fs-input) * var(--lh-body) * 6 + var(--s5) * 2);
+    max-height: min(calc(var(--fs-input) * var(--lh-body) * 6 + var(--s5) * 2), calc(var(--composer-limit) * .5));
     padding: var(--s5);
     overflow: auto;
     resize: none;
@@ -363,6 +406,10 @@
     color: var(--text);
     font: inherit;
     font-size: var(--fs-input);
+  }
+  /* Клавиатура забрала высоту: поле показывает три строки и прокручивается внутри. */
+  :global(html[data-compact]) textarea {
+    max-height: calc(var(--fs-input) * var(--lh-body) * 3 + var(--s5) * 2);
   }
   textarea:focus-visible { outline: none; }
   .attach { grid-area: attach; display: inline-flex; }
