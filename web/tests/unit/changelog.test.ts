@@ -156,4 +156,24 @@ describe("changelog_date", () => {
     expect(changelogDate("10.09.2025", now)).toBe("10 сентября 2025");
     expect(changelogDate("скоро", now)).toBe("скоро");
   });
+
+  it("every_text_line_of_each_release_reaches_the_screen", () => {
+    const text = readFileSync("../CHANGES.rst", "utf8");
+    const entries = parseChangelog(text);
+    const blocks = text.split(/^\.\. _v/m).slice(1);
+    expect(blocks.length).toBe(entries.length);
+    const norm = (value: string): string => value.replace(/\s+/g, " ").trim();
+    for (const [index, block] of blocks.entries()) {
+      const entry = entries[index]!;
+      const shown = norm([...entry.preamble, ...entry.sections.flatMap((s) => [s.title, ...s.items])].join(" "));
+      const lines = block.split("\n").slice(1);
+      const lost = lines
+        .map((line, i) => ({ line: line.trim(), next: lines[i + 1]?.trim() ?? "" }))
+        .filter(({ line, next }) => line && !/^([-~=])\1{2,}$/.test(line) && !/^([-~=])\1{2,}$/.test(next))
+        .map(({ line }) => norm(line.replace(/^- /, "")))
+        .filter((line) => !shown.includes(line));
+      expect(lost, `${entry.version}: text that the screen drops`).toEqual([]);
+    }
+  });
 });
+
