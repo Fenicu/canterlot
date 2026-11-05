@@ -140,8 +140,16 @@ test('open_block_returning_to_the_window_does_not_unfold_again', async ({ page }
 	const away = await feed.evaluate((el) => el.clientHeight * 4);
 	await feed.evaluate((el, away) => el.scrollBy(0, -away), away);
 	await expect(page.locator(`[data-row][data-key="${key}"]`)).toHaveCount(0);
-	await feed.evaluate((el, away) => el.scrollBy(0, away), away);
-	await page.locator(`[data-row][data-key="${key}"]`).waitFor();
+	// Подгрузка старых страниц сдвигает позицию: назад идём шагами, пока строка не вернётся в окно.
+	const row = page.locator(`[data-row][data-key="${key}"]`);
+	await expect
+		.poll(async () => {
+			if ((await row.count()) > 0) return true;
+			await feed.evaluate((el) => el.scrollBy(0, el.clientHeight / 2));
+			return false;
+		}, { timeout: 30_000, intervals: [100] })
+		.toBe(true);
+	await row.waitFor();
 	const fold = page.locator(`[data-row][data-key="${key}"] .fold`);
 	await expect(fold).toBeVisible();
 	expect(await fold.evaluate((el) => el.getAnimations().length)).toBe(0);
