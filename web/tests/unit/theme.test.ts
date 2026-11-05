@@ -1,4 +1,7 @@
 import { test, expect, vi, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import { PALETTES, DEFAULT_PALETTE } from '../../src/lib/palettes';
 
 function match(query: string) {
   return { media: query, matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(), onchange: null, dispatchEvent: vi.fn(), addListener: vi.fn(), removeListener: vi.fn() };
@@ -31,28 +34,28 @@ afterEach(() => {
   document.documentElement.removeAttribute('data-theme-switching');
 });
 
-test('stored_mode_keeps_working_and_defaults_to_aquamarine', async () => {
+test('stored_mode_keeps_working_and_defaults_to_standard', async () => {
   setup();
   localStorage.setItem('canterlot.theme', 'light');
   const { theme, release } = await load();
   expect(theme.pref).toBe('light');
   expect(theme.effective).toBe('light');
-  expect(theme.palette).toBe('aquamarine');
+  expect(theme.palette).toBe('standard');
   expect(document.documentElement.dataset.theme).toBe('light');
-  expect(document.documentElement.dataset.palette).toBe('aquamarine');
+  expect(document.documentElement.dataset.palette).toBe('standard');
   expect(localStorage.getItem('canterlot.theme')).toBe('light');
   release();
 });
 
-test('unknown_stored_values_fall_back_to_dark_aquamarine', async () => {
+test('unknown_stored_values_fall_back_to_dark_standard', async () => {
   setup();
   localStorage.setItem('canterlot.theme', 'sepia');
-  localStorage.setItem('canterlot.palette', 'solarized');
+  localStorage.setItem('canterlot.palette', 'solarized-x');
   const { theme, release } = await load();
   expect(theme.pref).toBe('dark');
-  expect(theme.palette).toBe('aquamarine');
+  expect(theme.palette).toBe('standard');
   expect(document.documentElement.dataset.theme).toBe('dark');
-  expect(document.documentElement.dataset.palette).toBe('aquamarine');
+  expect(document.documentElement.dataset.palette).toBe('standard');
   release();
 });
 
@@ -114,7 +117,47 @@ test('storage_events_sync_both_mode_and_palette', async () => {
   expect(document.documentElement.dataset.theme).toBe('light');
   expect(document.documentElement.dataset.palette).toBe('vscode');
   window.dispatchEvent(new StorageEvent('storage', { key: 'canterlot.palette', newValue: 'unknown' }));
+  expect(theme.palette).toBe('standard');
+  expect(document.documentElement.dataset.palette).toBe('standard');
+  release();
+});
+
+test('existing_stored_palette_is_kept', async () => {
+  setup();
+  localStorage.setItem('canterlot.palette', 'aquamarine');
+  const { theme, release } = await load();
   expect(theme.palette).toBe('aquamarine');
   expect(document.documentElement.dataset.palette).toBe('aquamarine');
   release();
+});
+
+test('every_palette_is_accepted_and_the_default_is_standard', async () => {
+  setup();
+  expect(DEFAULT_PALETTE).toBe('standard');
+  const { theme, release } = await load();
+  for (const { key } of PALETTES) {
+    theme.setPalette(key);
+    expect(document.documentElement.dataset.palette).toBe(key);
+    expect(localStorage.getItem('canterlot.palette')).toBe(key);
+  }
+  release();
+});
+
+function prepaint(stored: Record<string, string>) {
+  const html = { dataset: {} as Record<string, string> };
+  runInNewContext(readFileSync('static/theme-init.js', 'utf8'), {
+    localStorage: { getItem: (key: string) => stored[key] ?? null },
+    matchMedia: () => ({ matches: false }),
+    document: { documentElement: html }
+  });
+  return html.dataset;
+}
+
+test('prepaint_script_knows_every_palette_and_the_same_default', () => {
+  const source = readFileSync('static/theme-init.js', 'utf8');
+  const list = JSON.parse(source.match(/const palettes = (\[[^\]]*\])/)![1]!.replaceAll("'", '"')) as string[];
+  expect(list).toEqual(PALETTES.map(p => p.key));
+  expect(prepaint({})).toEqual({ palette: DEFAULT_PALETTE, theme: 'dark' });
+  expect(prepaint({ 'canterlot.palette': 'unknown' }).palette).toBe(DEFAULT_PALETTE);
+  for (const { key } of PALETTES) expect(prepaint({ 'canterlot.palette': key, 'canterlot.theme': 'light' })).toEqual({ palette: key, theme: 'light' });
 });

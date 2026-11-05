@@ -79,7 +79,7 @@ test('theme_toggle_persists_and_theme_script_runs_before_first_paint', async ({ 
   await page.getByRole('button', { name: 'Сменить тему' }).click(); await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   expect(await page.evaluate(() => localStorage.getItem('canterlot.theme'))).toBe('light');
   await page.reload(); await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(231, 242, 238)');
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(246, 247, 248)');
   await page.getByRole('button', { name: 'Сменить тему' }).click(); await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 });
 test('built_shell_has_no_inline_event_handlers', () => expect(readFileSync('build/200.html', 'utf8')).not.toMatch(/\son\w+\s*=/i));

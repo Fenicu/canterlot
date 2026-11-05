@@ -14,6 +14,17 @@ export interface Variant { palette: string; theme: ThemeMode; tokens: Record<str
 
 const variantSelector = /^\[data-palette=([a-z-]+)\]\[data-theme=(dark|light)\]$/;
 
+/** Палитра, чей тёмный вариант стоит в `:root` вместе со своим селектором. */
+export function rootPalette(text: string): string | undefined {
+  let found: string | undefined;
+  postcss.parse(text).walkRules(rule => {
+    if (rule.parent?.type !== 'root' || !rule.selectors.some(s => s.trim() === ':root')) return;
+    const match = rule.selectors.map(s => s.trim().match(variantSelector)).find(m => m?.[2] === 'dark');
+    if (match) found = match[1];
+  });
+  return found;
+}
+
 export function variants(text: string): Variant[] {
   const found = new Map<string, Variant>();
   const add = (palette: string, theme: ThemeMode, tokens: Record<string, string>) => {
@@ -24,19 +35,12 @@ export function variants(text: string): Variant[] {
   };
   postcss.parse(text).walkRules(rule => {
     if (rule.parent?.type !== 'root') return;
-    const selector = rule.selector.trim();
-    let palette: string;
-    let theme: ThemeMode;
-    if (selector === ':root') { palette = 'aquamarine'; theme = 'dark'; }
-    else {
-      const match = selector.match(variantSelector);
-      if (!match) return;
-      palette = match[1]!;
-      theme = match[2] as ThemeMode;
-    }
+    // `:root` в списке селекторов — запасной вариант той же палитры; голый `:root` держит нецветовые токены.
+    const matched = rule.selectors.map(selector => selector.trim().match(variantSelector)).filter(match => match !== null);
+    if (!matched.length) return;
     const tokens: Record<string, string> = {};
     rule.walkDecls(d => { if (d.prop.startsWith('--')) tokens[d.prop] = d.value; });
-    add(palette, theme, tokens);
+    for (const match of matched) add(match[1]!, match[2] as ThemeMode, tokens);
   });
   return [...found.values()];
 }

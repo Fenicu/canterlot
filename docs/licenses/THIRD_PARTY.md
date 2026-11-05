@@ -742,3 +742,10 @@
 - `yargs-parser` (21.1.1) — `ISC`
 - `yocto-queue` (0.1.0) — `MIT`
 
+## Цветовые схемы
+
+Палитры `web/src/lib/styles/tokens.css`, взятые из сторонних схем; значения подогнаны под проверки контраста. Остальные палитры оригинальные.
+
+| Палитра | Схема | Лицензия | Источник |
+| --- | --- | --- | --- |
+| «Норд» (`nord`) | Nord, Sven Greb (Arctic Ice Studio) | `MIT` | [github.com/nordtheme/nord](https://github.com/nordtheme/nord) |

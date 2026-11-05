@@ -1,6 +1,8 @@
 import { test, expect } from 'vitest';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { variants, contrast, COLOR_TOKENS } from './contrast';
+import postcss from 'postcss';
+import { variants, contrast, rootPalette, COLOR_TOKENS } from './contrast';
+import { PALETTES, DEFAULT_PALETTE } from '../../src/lib/palettes';
 const text = readFileSync('src/lib/styles/tokens.css', 'utf8');
 const palettes = variants(text);
 const byName = (palette: string, theme: 'dark' | 'light') => palettes.find(v => v.palette === palette && v.theme === theme)!;
@@ -68,19 +70,25 @@ test('aquamarine_syntax_tokens_keep_the_old_highlight_colors', () => {
   expect(light['--syn-symbol']).toBe(light['--accent-link']);
 });
 
-test('all_theme_variants_define_the_same_color_tokens', () => {
-  expect(palettes.map(v => `${v.palette}/${v.theme}`)).toEqual([
-    'aquamarine/dark', 'aquamarine/light',
-    'standard/dark', 'standard/light',
-    'vscode/dark', 'vscode/light'
-  ]);
-  const expected = new Set(COLOR_TOKENS.map(name => `--${name}`));
+test('every_palette_defines_the_full_color_token_set_in_both_modes', () => {
+  // Набор задаёт аквамарин, исходная палитра: у каждой новой ровно те же цветовые токены и ничего лишнего.
+  const reference = Object.keys(byName('aquamarine', 'dark').tokens).sort();
+  expect(new Set(reference)).toEqual(new Set(COLOR_TOKENS.map(name => `--${name}`)));
+  expect(palettes.map(v => `${v.palette}/${v.theme}`).sort()).toEqual(PALETTES.flatMap(p => [`${p.key}/dark`, `${p.key}/light`]).sort());
   for (const variant of palettes) {
-    const actual = new Set(Object.entries(variant.tokens)
-      .filter(([, value]) => /^#[\da-f]{3,8}$/i.test(value) || value === 'transparent')
-      .map(([name]) => name));
-    expect(actual, `${variant.palette}/${variant.theme}`).toEqual(expected);
+    const label = `${variant.palette}/${variant.theme}`;
+    expect(Object.keys(variant.tokens).sort(), label).toEqual(reference);
+    for (const [name, value] of Object.entries(variant.tokens)) expect(/^#[\da-f]{6}$/i.test(value) || value === 'transparent', `${label} ${name}`).toBe(true);
   }
+});
+
+test('root_fallback_is_the_default_palette', () => {
+  expect(rootPalette(text)).toBe(DEFAULT_PALETTE);
+  // Голый `:root` держит только нецветовые токены: иначе он перебил бы палитру без атрибутов.
+  postcss.parse(text).walkRules(rule => {
+    if (rule.parent?.type !== 'root' || rule.selector.trim() !== ':root') return;
+    rule.walkDecls(d => expect(COLOR_TOKENS.map(name => `--${name}`), d.prop).not.toContain(d.prop));
+  });
 });
 
 const textPairs: [string, string[]][] = [
@@ -96,7 +104,7 @@ const textPairs: [string, string[]][] = [
   ])
 ];
 
-test('text_pairs_meet_wcag_aa_in_all_six_variants', () => {
+test('text_pairs_meet_wcag_aa_in_every_palette_and_mode', () => {
   for (const variant of palettes) {
     const label = `${variant.palette}/${variant.theme}`;
     for (const [fg, backgrounds] of textPairs) for (const bg of backgrounds) {
@@ -111,10 +119,22 @@ test('text_pairs_meet_wcag_aa_in_all_six_variants', () => {
   }
 });
 
+test('high_contrast_palette_keeps_text_at_seven_to_one', () => {
+  for (const theme of ['dark', 'light'] as const) {
+    const tokens = byName('high-contrast', theme).tokens;
+    for (const [fg, backgrounds] of textPairs) for (const bg of backgrounds) {
+      expect(contrast(tokens[`--${fg}`]!, tokens[`--${bg}`]!), `${theme} ${fg}/${bg}`).toBeGreaterThanOrEqual(7);
+    }
+  }
+});
+
 test('reduced_motion_zeroes_all_duration_tokens', () => {
   const reduced = text.slice(text.lastIndexOf('@media (prefers-reduced-motion: reduce)'));
-  for (const name of Object.keys(palettes[0]!.tokens).filter(n => n.startsWith('--duration-'))) {
-    expect(palettes[0]!.tokens[name]).toContain('var(--motion-scale)');
+  const root: Record<string, string> = {};
+  postcss.parse(text).walkRules(rule => { if (rule.parent?.type === 'root' && rule.selector.trim() === ':root') rule.walkDecls(d => { root[d.prop] = d.value; }); });
+  const durations = Object.keys(root).filter(n => n.startsWith('--duration-'));
+  for (const name of durations) {
+    expect(root[name]).toContain('var(--motion-scale)');
     expect(reduced).toContain(`${name}: 0ms`);
   }
 });

@@ -1,8 +1,8 @@
+import { DEFAULT_PALETTE, paletteOrDefault, type PalettePref } from './palettes';
 export type ThemePref = 'dark' | 'light' | 'system';
-export type PalettePref = 'aquamarine' | 'standard' | 'vscode';
-const PALETTES: PalettePref[] = ['aquamarine', 'standard', 'vscode'];
+export type { PalettePref } from './palettes';
 let pref = $state<ThemePref>('dark');
-let palette = $state<PalettePref>('aquamarine');
+let palette = $state<PalettePref>(DEFAULT_PALETTE);
 let effective = $state<'dark' | 'light'>('dark');
 let release: (() => void) | undefined;
 function apply(): void {
@@ -27,7 +27,7 @@ export const theme = {
     apply();
   },
   setPalette(value: PalettePref) {
-    palette = PALETTES.includes(value) ? value : 'aquamarine';
+    palette = paletteOrDefault(value);
     try { localStorage.setItem('canterlot.palette', palette); } catch { /* Палитра остаётся доступной без хранилища. */ }
     apply();
   },
@@ -38,11 +38,10 @@ export function initTheme(): () => void {
   try {
     const value = localStorage.getItem('canterlot.theme');
     pref = value === 'light' || value === 'system' ? value : 'dark';
-    const storedPalette = localStorage.getItem('canterlot.palette');
-    palette = PALETTES.includes(storedPalette as PalettePref) ? storedPalette as PalettePref : 'aquamarine';
+    palette = paletteOrDefault(localStorage.getItem('canterlot.palette'));
   } catch {
     pref = 'dark';
-    palette = 'aquamarine';
+    palette = DEFAULT_PALETTE;
   }
   const media = window.matchMedia('(prefers-color-scheme: light)');
   const update = () => { if (pref === 'system') apply(); };
@@ -50,7 +49,7 @@ export function initTheme(): () => void {
     if (event.key === 'canterlot.theme') {
       pref = event.newValue === 'system' || event.newValue === 'light' ? event.newValue : 'dark';
     } else if (event.key === 'canterlot.palette') {
-      palette = PALETTES.includes(event.newValue as PalettePref) ? event.newValue as PalettePref : 'aquamarine';
+      palette = paletteOrDefault(event.newValue);
     } else return;
     apply();
   };
