@@ -693,6 +693,67 @@ test('diagnostics_sheet_lists_state_cursors_and_diagnostic_events', async ({ pag
 	await expect(page.getByRole('button', { name: 'Отчёт скопирован' })).toBeVisible();
 });
 
+test('session_usage_block_shows_totals_and_delegates_with_model_breakdown', async ({ page }) => {
+	const { api, id } = await bootChat(page);
+	api.usage.set(id, {
+		session: {
+			turns: 7,
+			input_tokens: 1_200_000,
+			output_tokens: 345_000,
+			cache_read_tokens: 12_000_000,
+			cache_write_tokens: 1_500,
+			models: [
+				{
+					model: 'opus-5.5',
+					input_tokens: 1_200_000,
+					output_tokens: 345_000,
+					cache_read_tokens: 12_000_000,
+					cache_write_tokens: 1_500
+				},
+				{
+					model: 'haiku',
+					input_tokens: 12_000,
+					output_tokens: 3_400,
+					cache_read_tokens: 0,
+					cache_write_tokens: 0
+				}
+			]
+		},
+		delegates: {
+			turns: 4,
+			input_tokens: 900_000,
+			output_tokens: 50_000,
+			cache_read_tokens: 0,
+			cache_write_tokens: 0,
+			models: [
+				{
+					model: 'sonnet-5',
+					input_tokens: 900_000,
+					output_tokens: 50_000,
+					cache_read_tokens: 0,
+					cache_write_tokens: 0
+				}
+			]
+		}
+	});
+
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Диагностика' }).click();
+	const dialog = page.getByRole('dialog', { name: 'Диагностика' });
+	await expect(dialog.getByRole('heading', { name: 'Токены за сессию' })).toBeVisible();
+
+	const session = dialog.locator('[data-role="usage-session"]');
+	await expect(session.getByText('1,2 млн').first()).toBeVisible();
+	await expect(session.getByTitle('1 200 000').first()).toBeVisible();
+	await expect(session.getByText('opus-5.5')).toBeVisible();
+	await expect(session.getByText('haiku')).toBeVisible();
+
+	const delegates = dialog.locator('[data-role="usage-delegates"]');
+	await expect(delegates.getByRole('heading', { name: 'Делегаты' })).toBeVisible();
+	await expect(delegates.getByText('900 тыс.').first()).toBeVisible();
+	await expect(delegates.getByText('sonnet-5')).toBeVisible();
+});
+
 test('reconnect_mid_run_updates_header_and_cards_without_reload', async ({ page }) => {
 	const { hub, id } = await bootChat(page);
 

@@ -34,6 +34,10 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       await route.fulfill({ json: hub.snapshot(`conversation:${id}`), headers });
       return;
     }
+    if (route.request().method() === 'GET' && kind === 'usage') {
+      await route.fulfill({ json: await api.sessionUsage(id), headers });
+      return;
+    }
     if (route.request().method() === 'GET' && kind === 'history') {
       const limit = url.searchParams.get('limit');
       await route.fulfill({

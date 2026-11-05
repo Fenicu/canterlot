@@ -24,6 +24,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(read))
         .routes(routes!(decision))
         .routes(routes!(interrupt))
+        .routes(routes!(usage))
         .routes(routes!(compact))
         .routes(routes!(stop))
         .routes(routes!(continue_queue))
@@ -209,6 +210,25 @@ async fn interrupt(
     let result = deleted_or(&s, o.owner_id, id, result).await?;
     s.dispatcher.trigger(id);
     Ok(Json(result))
+}
+
+#[utoipa::path(get,path="/api/v1/conversations/{id}/usage",tag="conversations",params(("id"=Uuid,Path)),responses((status=200,description="Токены за сессию и её делегатов",body=crate::session_usage::SessionUsageView)))]
+async fn usage(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<crate::session_usage::SessionUsageView>, ApiError> {
+    let result = crate::session_usage::for_conversation(&s.pool, o.owner_id, id)
+        .await
+        .map_err(ApiError::from);
+    let view = deleted_or(
+        &s,
+        o.owner_id,
+        id,
+        result.and_then(|view| view.ok_or_else(|| ApiError::new(ErrorCode::NotFound))),
+    )
+    .await?;
+    Ok(Json(view))
 }
 
 #[utoipa::path(post,path="/api/v1/conversations/{id}/compact",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Сжатие контекста запрошено",body=crate::delivery::control::CompactOutcome),(status=409,description="Конфликт состояния, причина в details.reason",body=super::error::ErrorEnvelope)))]

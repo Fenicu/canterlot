@@ -56,6 +56,7 @@ export class FakeHubApi {
 	readonly list = new Map<string, ListRow>();
 	readonly delegations = new Map<string, DelegationNode[]>();
 	readonly runs = new Map<string, RunInfo>();
+	readonly usage = new Map<string, components['schemas']['SessionUsageView']>();
 	readonly machines = new Map<string, MachineRecord>();
 	directories = ['/home/owner', '/home/owner/projects', '/srv/canterlot', '/srv/canterlot/web', '/srv/canterlot/.git', '/srv/notes'];
 	readonly reads: { id: string; seq: string }[] = [];
@@ -586,6 +587,18 @@ export class FakeHubApi {
 		const info = this.runs.get(runId);
 		if (!info) throw new Error('not_found');
 		return info;
+	}
+
+	async sessionUsage(id: string): Promise<components['schemas']['SessionUsageView']> {
+		const empty = {
+			turns: 0,
+			input_tokens: 0,
+			output_tokens: 0,
+			cache_read_tokens: 0,
+			cache_write_tokens: 0,
+			models: []
+		};
+		return this.usage.get(id) ?? { session: empty, delegates: { ...empty } };
 	}
 }
 

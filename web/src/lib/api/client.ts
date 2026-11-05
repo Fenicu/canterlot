@@ -468,6 +468,20 @@ export function getRun(
   );
 }
 
+export function conversationUsage(
+  conversationId: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_conversations__id__usage"]>>
+> {
+  return http(
+    "GET",
+    `/api/v1/conversations/${id(conversationId)}/usage`,
+    undefined,
+    opts,
+  );
+}
+
 export function delegation(
   conversationId: string,
   opts?: RequestOptions,

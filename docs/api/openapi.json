@@ -3342,6 +3342,65 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/usage": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "get__api_v1_conversations__id__usage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Токены за сессию и её делегатов",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionUsageView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -9082,16 +9141,12 @@
         "type": "object",
         "required": [
           "model",
-          "agent",
           "input_tokens",
           "output_tokens",
           "cache_read_tokens",
           "cache_write_tokens"
         ],
         "properties": {
-          "agent": {
-            "type": "string"
-          },
           "cache_read_tokens": {
             "type": "integer",
             "format": "int64"
@@ -10440,6 +10495,23 @@
           }
         ]
       },
+      "SessionUsageView": {
+        "type": "object",
+        "required": [
+          "session",
+          "delegates"
+        ],
+        "properties": {
+          "delegates": {
+            "$ref": "#/components/schemas/UsageTotalsView",
+            "description": "Все делегаты в поддереве: живые потомки и свёрнутые после удаления."
+          },
+          "session": {
+            "$ref": "#/components/schemas/UsageTotalsView",
+            "description": "Собственный расход сессии: субагенты внутри CLI уже входят в её ходы."
+          }
+        }
+      },
       "SessionView": {
         "type": "object",
         "required": [
@@ -11167,6 +11239,45 @@
             "format": "int64"
           },
           "weekly_delta_permille": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "UsageTotalsView": {
+        "type": "object",
+        "required": [
+          "turns",
+          "input_tokens",
+          "output_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "models"
+        ],
+        "properties": {
+          "cache_read_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cache_write_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelUsageView"
+            }
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "turns": {
             "type": "integer",
             "format": "int64"
           }

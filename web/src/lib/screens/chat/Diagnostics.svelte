@@ -1,6 +1,11 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import type { components } from '#lib/api/generated/openapi.js';
+	import { errorText } from '#lib/api/errors.js';
+	import { conversationUsage } from '#lib/api/client.js';
 	import { buildDiagnosticsReport, type DiagnosticsData } from './diagnostics';
+	import { summarizeUsage } from './usage';
 	import {
 		diagnosticEventLabel,
 		diagnosticKindLabel,
@@ -39,6 +44,28 @@
 	} = $props();
 
 	let copied = $state(false);
+	let usage = $state<components['schemas']['SessionUsageView'] | null>(null);
+	let usageLoading = $state(true);
+	let usageError = $state<string | null>(null);
+
+	onMount(() => {
+		let alive = true;
+		void (async () => {
+			try {
+				const response = await conversationUsage(chat.id);
+				if (alive) usage = response.data;
+			} catch (error) {
+				if (alive) usageError = errorText(error, 'Не удалось загрузить расход токенов');
+			} finally {
+				if (alive) usageLoading = false;
+			}
+		})();
+		return () => {
+			alive = false;
+		};
+	});
+
+	const usageSummary = $derived(usage ? summarizeUsage(usage) : null);
 
 	const detail = $derived(chat.detail as DetailLike | null);
 	const execution = $derived(chat.execution);
@@ -102,6 +129,92 @@
 	<div class="diagnostics">
 		<p class="note">Метаданные доставки, без текста сообщений.</p>
 
+		<section data-role="session-usage">
+			<h3>Токены за сессию</h3>
+			{#if usageLoading && !usage}
+				<p class="note">Загрузка…</p>
+			{:else if usageError}
+				<p class="note">{usageError}</p>
+			{:else if usageSummary}
+				<div class="usage">
+					<div class="usage-group" data-role="usage-session">
+						<div class="rows">
+							{#each usageSummary.session.rows as row (row.label)}
+								<div class="key-value">
+									<span>{row.label}</span>
+									<strong title={row.value.exact}>{row.value.compact}</strong>
+								</div>
+							{/each}
+						</div>
+						{#if usageSummary.session.models.length > 0}
+							<table class="usage-table">
+								<thead>
+									<tr>
+										<th>Модель</th>
+										<th>Вход</th>
+										<th>Выход</th>
+										{#if usageSummary.session.showCacheRead}<th>Кэш-чтение</th>{/if}
+										{#if usageSummary.session.showCacheWrite}<th>Кэш-запись</th>{/if}
+									</tr>
+								</thead>
+								<tbody>
+									{#each usageSummary.session.models as row (row.model)}
+										<tr>
+											<td><code>{row.model}</code></td>
+											<td title={row.input.exact}>{row.input.compact}</td>
+											<td title={row.output.exact}>{row.output.compact}</td>
+											{#if usageSummary.session.showCacheRead}<td title={row.cacheRead.exact}>{row.cacheRead.compact}</td>{/if}
+											{#if usageSummary.session.showCacheWrite}<td title={row.cacheWrite.exact}>{row.cacheWrite.compact}</td>{/if}
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						{/if}
+					</div>
+
+					<div class="usage-group" data-role="usage-delegates">
+						<h4>Делегаты</h4>
+						{#if !usageSummary.hasDelegates}
+							<p class="note">Делегированных сессий нет.</p>
+						{:else}
+							<div class="rows">
+								{#each usageSummary.delegates.rows as row (row.label)}
+									<div class="key-value">
+										<span>{row.label}</span>
+										<strong title={row.value.exact}>{row.value.compact}</strong>
+									</div>
+								{/each}
+							</div>
+							{#if usageSummary.delegates.models.length > 0}
+								<table class="usage-table">
+									<thead>
+										<tr>
+											<th>Модель</th>
+											<th>Вход</th>
+											<th>Выход</th>
+											{#if usageSummary.delegates.showCacheRead}<th>Кэш-чтение</th>{/if}
+											{#if usageSummary.delegates.showCacheWrite}<th>Кэш-запись</th>{/if}
+										</tr>
+									</thead>
+									<tbody>
+										{#each usageSummary.delegates.models as row (row.model)}
+											<tr>
+												<td><code>{row.model}</code></td>
+												<td title={row.input.exact}>{row.input.compact}</td>
+												<td title={row.output.exact}>{row.output.compact}</td>
+												{#if usageSummary.delegates.showCacheRead}<td title={row.cacheRead.exact}>{row.cacheRead.compact}</td>{/if}
+												{#if usageSummary.delegates.showCacheWrite}<td title={row.cacheWrite.exact}>{row.cacheWrite.compact}</td>{/if}
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							{/if}
+						{/if}
+					</div>
+				</div>
+			{/if}
+		</section>
+
 		<section>
 			<h3>Исполнение</h3>
 			<div class="rows">
@@ -161,6 +274,44 @@
 		margin: 0 0 var(--s3);
 		font-size: var(--fs-body);
 		font-weight: var(--weight-semibold);
+	}
+	h4 {
+		margin: var(--s3) 0;
+		font-size: var(--fs-meta);
+		font-weight: var(--weight-semibold);
+		color: var(--secondary);
+	}
+	.usage {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s4);
+	}
+	.usage-group {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s2);
+	}
+	.usage-table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: var(--fs-meta);
+		font-variant-numeric: tabular-nums;
+	}
+	.usage-table th,
+	.usage-table td {
+		padding: var(--s1) 0;
+		text-align: right;
+		white-space: nowrap;
+	}
+	.usage-table th:first-child,
+	.usage-table td:first-child {
+		text-align: left;
+		padding-right: var(--s3);
+		white-space: normal;
+	}
+	.usage-table th {
+		color: var(--muted);
+		font-weight: normal;
 	}
 	.rows {
 		display: flex;
