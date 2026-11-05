@@ -4,12 +4,13 @@ use canterlot_hub::{
     activity::{self, Thresholds},
     config::{SchedulerConfig, SessionToolsConfig},
     dispatcher::Dispatcher,
-    executions,
+    executions, machine_info,
     model::ExecutionState,
     scheduler::Scheduler,
     session_tools::{self, Caller, ToolContext, ToolErrorCode, nudge, settle::SettleConfig, subs},
     testkit,
 };
+use canterlot_proto::worker::v1::{ExecutionProcess, MachineMetrics};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -1365,6 +1366,57 @@ async fn release_waits_for_a_locked_subscription_instead_of_a_fallback_note(pool
     let jobs = jobs(&pool, f.parent).await;
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0]["action"], "event", "no fallback note");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn two_busy_cpu_samples_after_the_turn_mark_background_work(pool: PgPool) {
+    let f = fx(&pool).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 2, 10).await;
+    let command = answer(&pool, &f, "Started the long build.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "cpu1",
+        false,
+        &[],
+    )
+    .await;
+
+    let execution_id = f.execution.execution_id.to_string();
+    for step in 0..2 {
+        let metrics = MachineMetrics {
+            machine_time_ms: now.timestamp_millis() as u64 + step + 1,
+            cpu_cores: 4,
+            executions: vec![ExecutionProcess {
+                execution_id: execution_id.clone(),
+                alive: true,
+                cpu_permille: 200,
+                rss_bytes: 1,
+                descendants: Some(1),
+            }],
+            ..Default::default()
+        };
+        machine_info::apply_metrics(&pool, f.owner, f.machine, &metrics, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let (streak, first): (i32, Option<DateTime<Utc>>) =
+        sqlx::query_as("select cpu_busy_streak,cpu_busy_first_at from executions where id=$1")
+            .bind(f.execution.execution_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(streak, 2);
+    assert!(first.is_some());
+
+    refresh_at(&pool, f.child, now).await;
+    let held = jobs(&pool, f.child).await;
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0]["signals"]["background_suspected"], true);
 }
 
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.

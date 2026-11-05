@@ -418,7 +418,7 @@ async fn facts_in_tx(
     let mut background_suspected = background_in_commands(&commands);
     if !background_suspected
         && let Some(finished) = query_last_turn_at(conn, target_id).await?
-        && machine_busy_after(conn, target_id, run_id, finished).await?
+        && machine_busy_after(conn, run_id, finished).await?
     {
         background_suspected = true;
     }
@@ -470,35 +470,22 @@ async fn query_last_turn_at(
 /// Две свежие метрики подряд после конца хода: процесс исполнения всё ещё занят.
 async fn machine_busy_after(
     conn: &mut PgConnection,
-    target_id: Uuid,
     run_id: Option<Uuid>,
     after: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     let Some(run_id) = run_id else {
         return Ok(false);
     };
-    let samples: Vec<Value> = sqlx::query_scalar(
-        "select mm.executions from machine_metrics mm
-         join conversations c on c.machine_id=mm.machine_id
-         where c.id=$1 and mm.observed_at>$2
-         order by mm.observed_at desc limit 2",
+    let busy: Option<bool> = sqlx::query_scalar(
+        "select coalesce(e.cpu_busy_streak>=2 and e.cpu_busy_first_at>$2,false)
+         from runs r join executions e on e.id=r.execution_id
+         where r.input_command_id=$1",
     )
-    .bind(target_id)
+    .bind(run_id)
     .bind(after)
-    .fetch_all(&mut *conn)
+    .fetch_optional(&mut *conn)
     .await?;
-    if samples.len() < 2 {
-        return Ok(false);
-    }
-    Ok(samples.iter().all(|sample| {
-        sample.as_array().is_some_and(|items| {
-            items.iter().any(|item| {
-                item["execution_id"].as_str() == Some(run_id.to_string().as_str())
-                    && item["alive"].as_bool().unwrap_or(false)
-                    && item["cpu_permille"].as_u64().unwrap_or(0) >= 150
-            })
-        })
-    }))
+    Ok(busy.unwrap_or(false))
 }
 
 fn still_progress(baseline: Option<&Value>, current: &Baseline) -> bool {

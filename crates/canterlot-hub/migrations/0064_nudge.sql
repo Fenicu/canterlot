@@ -60,3 +60,8 @@ create index nudge_rules_notify on nudge_rules (notify_conversation_id)
     where notify_conversation_id is not null;
 create index nudge_events_input on nudge_events (input_id)
     where input_id is not null;
+
+-- Занятость CPU после конца хода: две выборки подряд выше порога. Считается при
+-- приёме метрик машины, ключ — настоящее исполнение, а не идентификатор хода.
+alter table executions add column cpu_busy_streak integer not null default 0;
+alter table executions add column cpu_busy_first_at timestamptz;
