@@ -24,6 +24,7 @@
 	import { childLive } from '#lib/screens/sessions/grouping.js';
 	import { pane } from '#lib/shell/pane.svelte.js';
 	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
+	import { DEFAULT_LIMIT_THRESHOLDS } from '#lib/stores/limits.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import Sheet from '#lib/ui/Sheet.svelte';
 	import type { Component } from 'svelte';
@@ -41,7 +42,7 @@
 		onInfo,
 		now = Date.now(),
 		providers = [],
-		thresholds = { warn_pcts: [80, 90], weekly_reserve_pct: 95, stale_after_secs: 1800 },
+		thresholds = DEFAULT_LIMIT_THRESHOLDS,
 		machine = null
 	}: {
 		chat: ChatStore;

@@ -6,6 +6,7 @@
   import { limitsHistory } from '#lib/api/client.js';
   import { ApiError } from '#lib/api/http.js';
   import { loadConfig } from '#lib/api/config.js';
+  import { DEFAULT_LIMIT_THRESHOLDS } from '#lib/stores/limits.js';
   import type { components } from '#lib/api/generated/openapi.js';
   import { clock } from '#lib/clock.js';
   import { ticker } from '#lib/ticker.svelte.js';
@@ -23,7 +24,7 @@
   let speed = $state<components['schemas']['ModelSpeedSummary'][]>([]);
   let days = $state<string[]>([]); let zone = $state(''); let error = $state(''); let loading = $state(true);
   const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
-  let thresholds = $state({ stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 });
+  let thresholds = $state(DEFAULT_LIMIT_THRESHOLDS);
   const weekly = $derived(providersWithWeekly(runtime?.list.limits ?? []));
   const rows = $derived(usageRows(usage, days.at(-1) ?? '', runtime?.list.items ?? new Map(), weekly));
   const subtitle = $derived(limitsSubtitle(runtime?.list.limits ?? []));

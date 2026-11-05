@@ -3,6 +3,7 @@ import type { components } from "#lib/api/generated/openapi.js";
 import { notifyIncompatible } from "#lib/pwa/update.js";
 
 export type LimitsView = components["schemas"]["LimitsView"];
+export type ConfigView = components["schemas"]["ConfigView"];
 
 const DEFAULTS = {
   maxBytes: 104_857_600,
@@ -11,17 +12,29 @@ const DEFAULTS = {
 };
 
 let limits: LimitsView | null = null;
+let config: ConfigView | null = null;
+
 export function resetConfig(): void {
   limits = null;
+  config = null;
 }
 
-export async function loadConfig(): Promise<
-  components["schemas"]["ConfigView"]
-> {
+/** Последний загруженный конфиг: экраны читают его без повторного запроса. */
+export function cachedConfig(): ConfigView | null {
+  return config;
+}
+
+export async function loadConfig(): Promise<ConfigView> {
   const response = await getConfig();
   limits = response.data.limits;
+  config = response.data;
   if (response.data.schema_version !== 1) notifyIncompatible();
   return response.data;
+}
+
+/** После смены порогов владельцем: кэш обновляется, чтобы другие экраны увидели новые значения. */
+export async function refreshConfig(): Promise<ConfigView> {
+  return loadConfig();
 }
 
 export function uploadLimits(): {

@@ -80,7 +80,7 @@ import type { ProviderLimits } from "#lib/stores/limits.js";
 
 describe("screens/limits current blocks", () => {
   const NOW = new Date(2026, 9, 29, 12, 0).getTime();
-  const cfg = { stale_after_secs: 35 * 60, warn_pcts: [80, 95], weekly_reserve_pct: 95 };
+  const cfg = { stale_after_secs: 35 * 60, warn_pcts: [80, 95], weekly_reserve_pct: 95, warn_remaining_pct: 20, danger_remaining_pct: 5, reserve_remaining_pct: 5 };
   const observed = new Date(NOW - 60_000).toISOString();
   const win = (used: number, reset = new Date(2026, 9, 30, 18, 34).toISOString(), at = observed) => ({ used_permille: used, resets_at: reset, observed_at: at });
 

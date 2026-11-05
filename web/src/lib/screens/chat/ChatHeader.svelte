@@ -17,6 +17,7 @@
 	import { RESOLVE_WARNING, runLabel } from './pauseCards';
 	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
 	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
+	import { DEFAULT_LIMIT_THRESHOLDS } from '#lib/stores/limits.js';
 	import { runningCount } from '#lib/stores/delegation.js';
 	import { liveNodes } from './delegationNodes';
 	import { isSubagentCall } from '#lib/timeline/rows.js';
@@ -38,7 +39,7 @@
 	let {
 		chat,
 		providers = [],
-		thresholds = { warn_pcts: [80, 90], weekly_reserve_pct: 95, stale_after_secs: 1800 },
+		thresholds = DEFAULT_LIMIT_THRESHOLDS,
 		now = Date.now(),
 		onOpenSheet,
 		onOpenSettings,

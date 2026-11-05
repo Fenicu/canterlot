@@ -28,6 +28,7 @@
   import { theme } from '#lib/theme.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import type { LimitThresholds } from '#lib/stores/limits.js';
+  import { DEFAULT_LIMIT_THRESHOLDS } from '#lib/stores/limits.js';
   import { beforeNavigate, goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
@@ -63,7 +64,7 @@
   let menu = $state(false);
   let canInstall = $state(false);
   let scroller = $state<HTMLElement | null>(null);
-  let thresholds = $state<LimitThresholds>({ stale_after_secs: 35 * 60, warn_pcts: [80], weekly_reserve_pct: 95 });
+  let thresholds = $state<LimitThresholds>(DEFAULT_LIMIT_THRESHOLDS);
   let restore = true;
   const now = $derived.by(() => {
     void ticker.second;

@@ -252,6 +252,10 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Некорректный белый список",
   },
+  limit_settings_invalid: {
+    action: "none",
+    message: "Некорректные пороги лимитов",
+  },
   not_delegated: {
     action: "none",
     message: "Сессия не запущена агентом",
