@@ -1153,6 +1153,60 @@ async fn a_concurrent_settings_change_is_seen_before_the_nudge(pool: PgPool) {
     assert_eq!(jobs(&pool, f.parent).await.len(), 1);
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn input_cancellation_does_not_wait_for_a_claimed_job(pool: PgPool) {
+    let f = fx(&pool).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "lock1",
+        false,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+
+    // Планировщик уже выбрал задание и держит его строку.
+    let mut claimed = pool.begin().await.unwrap();
+    sqlx::query(
+        "select id from scheduled_jobs where state='pending' and conversation_id=$1
+           and payload->>'action'='nudge' for update",
+    )
+    .bind(f.child)
+    .execute(&mut *claimed)
+    .await
+    .unwrap();
+
+    // Ввод владельца берёт очередь и отменяет ожидающие задания, не дожидаясь выбранного.
+    let pooled = pool.clone();
+    let child = f.child;
+    let input = tokio::spawn(async move {
+        let mut tx = pooled.begin().await.unwrap();
+        sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+            .bind(child)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        nudge::on_input_in_tx(&mut tx, child, Utc::now())
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    });
+    tokio::time::timeout(Duration::from_secs(2), input)
+        .await
+        .expect("input must not wait for a claimed job")
+        .unwrap();
+    claimed.commit().await.unwrap();
+
+    assert_eq!(rule_row(&pool, f.child).await.0, "watching");
+}
+
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.
 async fn deliver_owner_input(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fx, text: &str) {
     canterlot_hub::delivery::submit_input_in_tx(
