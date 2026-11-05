@@ -59,6 +59,11 @@ export class FakeHubApi {
 	readonly usage = new Map<string, components['schemas']['SessionUsageView']>();
 	readonly machines = new Map<string, MachineRecord>();
 	directories = ['/home/owner', '/home/owner/projects', '/srv/canterlot', '/srv/canterlot/web', '/srv/canterlot/.git', '/srv/notes'];
+	readonly historyCalls: { machine: string; workdir: string }[] = [];
+	claudeHistoryItems: components['schemas']['ClaudeHistoryView'][] = [
+		{ id: '01a1a7af-6e9b-7517-8b6e-92d714b66fc3', modified_at_ms: Date.UTC(2026, 10, 4, 18, 30), size: 184_320, preview: 'Почини удалённую сессию: нужен список её истории' },
+		{ id: '01a1b001-0000-7000-8000-000000000002', modified_at_ms: Date.UTC(2026, 10, 1, 9, 5), size: 2048, preview: 'Короткая беседа' }
+	];
 	readonly reads: { id: string; seq: string }[] = [];
 	readonly decisions = new Map<string, { winnerId: string; decision: unknown; key: string }>();
 	readonly deleted = new Set<string>();

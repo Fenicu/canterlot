@@ -241,6 +241,23 @@ export function suggestWorkdirs(
   );
 }
 
+export function claudeHistories(
+  machineId: string,
+  workdir: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_machines__id__claude_histories"]>>
+> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/machines/${id(machineId)}/claude-histories`, {
+      workdir,
+    }),
+    undefined,
+    opts,
+  );
+}
+
 export function recentWorkdirs(
   machineId: string,
   opts?: RequestOptions,

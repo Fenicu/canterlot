@@ -306,7 +306,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         await route.fulfill({ status: 201, headers: headers(), json: prior });
         return;
       }
-      const body = route.request().postDataJSON() as { machine_id?: string; workdir?: string; harness?: string; model?: string; effort?: string; permission_mode?: string };
+      const body = route.request().postDataJSON() as { machine_id?: string; workdir?: string; harness?: string; model?: string; effort?: string; permission_mode?: string; resume_native_id?: string };
       const id = api.id();
       const created = { conversation_id: id };
       if (key) keys.set(key, created);
@@ -335,7 +335,10 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         last_activity_at: null
       };
       api.list.set(id, row);
-      api.details.set(id, { ...row });
+      api.details.set(id, {
+        ...row,
+        ...(body.resume_native_id ? { continued_from_at: new Date().toISOString() } : {})
+      });
       api.bindConversation(id);
       await route.fulfill({ status: 201, headers: headers(), json: created });
       return;
@@ -1082,6 +1085,13 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
 
   await page.route('**/api/v1/machines/*/workdirs/recent', async (route) => {
     await route.fulfill({ headers: headers(), json: { workdirs: ['/srv/canterlot', '/srv/notes'] } });
+  });
+
+  await page.route('**/api/v1/machines/*/claude-histories?*', async (route) => {
+    const url = new URL(route.request().url());
+    const parts = url.pathname.split('/');
+    api.historyCalls.push({ machine: parts[4] ?? '', workdir: url.searchParams.get('workdir') ?? '' });
+    await route.fulfill({ headers: headers(), json: { histories: api.claudeHistoryItems } });
   });
 
   await page.route('**/api/v1/machines/*/workdirs/suggest?*', async (route) => {

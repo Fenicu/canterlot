@@ -89,6 +89,20 @@ export function soleEffort(efforts: string[], current: string): string {
   return efforts.length === 1 ? (efforts[0] ?? current) : current;
 }
 
+/** Размер истории для списка: байты, килобайты, мегабайты. */
+export function historySize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) {
+    const value = bytes / 1024;
+    const text = (value < 10 ? value.toFixed(1) : value.toFixed(0)).replace(
+      ".",
+      ",",
+    );
+    return `${text} КБ`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1).replace(".", ",")} МБ`;
+}
+
 function submittedWorkdir(path: string): string {
   return path.trim().replace(/(?<=.)\/+$/, "");
 }
@@ -116,6 +130,7 @@ export class NewSessionModel {
   effort = "";
   permission = "";
   profile = "clean";
+  resumeNativeId = "";
   crunch = false;
   resumeText: string;
   recent: string[] = [];
@@ -142,6 +157,7 @@ export class NewSessionModel {
       this.effort,
       this.permission,
       this.profile,
+      this.resumeNativeId,
     ]);
   }
 
@@ -181,6 +197,15 @@ export class NewSessionModel {
     return modes.includes(DEFAULT_PERMISSION_MODE)
       ? DEFAULT_PERMISSION_MODE
       : (modes[0] ?? "");
+  }
+
+  /** Продолжение готовой истории: только Claude Code на машине с новой возможностью. */
+  get canResumeHistory(): boolean {
+    const machine = this.machines.items.get(this.machineId);
+    if (!(machine?.capabilities ?? []).includes("claude_histories_v1"))
+      return false;
+    const harness = machine?.harnesses.find((item) => item.id === this.harness);
+    return harness?.id === "claude_code" || harness?.provider === "claude";
   }
 
   get canSubmit(): SendGate {
@@ -234,6 +259,9 @@ export class NewSessionModel {
         effort: this.effort,
         ...(this.permissionMode ? { permission_mode: this.permissionMode } : {}),
         instruction_profile: this.profile || "clean",
+        ...(this.canResumeHistory && this.resumeNativeId
+          ? { resume_native_id: this.resumeNativeId }
+          : {}),
         crunch: {
           enabled: this.crunch,
           resume_text: this.crunch ? this.resumeText : null,
