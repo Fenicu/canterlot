@@ -153,3 +153,112 @@ async fn stalled_store_does_not_delay_inbound_or_heartbeat_timers() {
     stop.send_replace(true);
     join.await.unwrap().unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_enospc_store_write_ends_the_attempt_and_the_worker_reopens_and_continues() {
+    use tracing::instrument::WithSubscriber;
+
+    let (mut hub, mut store) = support::ProtocolHub::start(support::Behavior::default()).await;
+    initialize_generation(&mut store, hub.config.restore_generation).unwrap();
+    store.fail_next_write_with_disk_full();
+    hub.config.timers.backoff_min = Duration::from_secs(2);
+    hub.config.timers.backoff_max = Duration::from_secs(2);
+    let worker = Worker::new(hub.config.clone(), store);
+    let client = worker.store.client();
+    let mut state = worker.state();
+    let logs = Logs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown).with_subscriber(subscriber));
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if *state.borrow_and_update() == SessionState::Live {
+                break;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::Command(Command {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            execution_id: Uuid::now_v7().to_string(),
+            execution_generation: 1,
+            kind: Some(command::Kind::CancelInput(CancelInput::default())),
+        })),
+    })
+    .await;
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(*state.borrow_and_update(), SessionState::Backoff { .. }) {
+                break;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+
+    let closed = client
+        .call(|slot| {
+            crate::session_store::store_mut(slot)?.cj_cursor()?;
+            Ok(())
+        })
+        .await;
+    assert!(
+        matches!(closed, Err(WorkerError::Store(StoreError::NeedsReopen))),
+        "{closed:?}"
+    );
+
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if *state.borrow_and_update() == SessionState::Live {
+                break;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+
+    let second = Uuid::now_v7();
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::Command(Command {
+            command_id: second.to_string(),
+            dispatch_attempt: 1,
+            execution_id: Uuid::now_v7().to_string(),
+            execution_generation: 1,
+            kind: Some(command::Kind::CancelInput(CancelInput::default())),
+        })),
+    })
+    .await;
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let id = second.to_string();
+            let stored = client
+                .call(move |slot| Ok(crate::session_store::store_mut(slot)?.command_state(&id)?))
+                .await
+                .unwrap();
+            if stored.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    drop(client);
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(logs.matches("kind=\"disk_full\"").count(), 1, "{logs}");
+    assert_eq!(logs.matches("kind=\"disk_recovered\"").count(), 1, "{logs}");
+}

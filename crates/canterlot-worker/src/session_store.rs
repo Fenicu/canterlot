@@ -19,6 +19,11 @@ pub struct StoreClient {
     sender: mpsc::Sender<Job>,
 }
 
+pub(crate) fn store_mut(slot: &mut Option<WorkerStore>) -> Result<&mut WorkerStore, WorkerError> {
+    slot.as_mut()
+        .ok_or(WorkerError::Store(StoreError::NeedsReopen))
+}
+
 async fn submit<T: Send + 'static>(
     sender: mpsc::Sender<Job>,
     operation: impl FnOnce(&mut Option<WorkerStore>) -> Result<T, WorkerError> + Send + 'static,
@@ -79,5 +84,44 @@ impl StoreThread {
             .await
             .map_err(|_| WorkerError::StoreThread)?
             .map_err(|_| WorkerError::StoreThread)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_job_on_a_closed_slot_returns_an_error_instead_of_panicking() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = WorkerStore::open(directory.path()).unwrap();
+        let thread = StoreThread::new(store);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            thread
+                .call(|slot| {
+                    slot.take();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let result = thread
+                .call(|slot| {
+                    store_mut(slot)?.cj_cursor()?;
+                    Ok(())
+                })
+                .await;
+            assert!(matches!(
+                result,
+                Err(WorkerError::Store(StoreError::NeedsReopen))
+            ));
+            thread.close().await.unwrap();
+        });
     }
 }

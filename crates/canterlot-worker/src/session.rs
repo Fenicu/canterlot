@@ -33,7 +33,7 @@ use crate::{
     config::{ConfigError, ConfigErrorCategory, WorkerConfig, read_token},
     exec::{ExecutionManager, SjRelay},
     media::{MediaSink, PutError},
-    session_store::StoreThread,
+    session_store::{StoreThread, store_mut},
     store::{Accept, StoreError, WorkerStore},
 };
 
@@ -406,6 +406,7 @@ pub struct Worker {
     probe: crate::fault_injection::SessionProbe,
     config: WorkerConfig,
     store: StoreThread,
+    disk_full_notified: bool,
     state: watch::Sender<SessionState>,
     runtime_dir: Option<PathBuf>,
     manager: Option<ExecutionManager>,
@@ -576,6 +577,7 @@ impl Worker {
             probe: Default::default(),
             config,
             store: StoreThread::new(store),
+            disk_full_notified: false,
             state: watch::channel(SessionState::Disconnected).0,
             runtime_dir,
             manager: None,
@@ -658,7 +660,7 @@ impl Worker {
             cfg.data_dir = Some(data_dir);
         }
         self.store
-            .call(move |store| initialize_generation(store.as_mut().unwrap(), configured))
+            .call(move |slot| initialize_generation(store_mut(slot)?, configured))
             .await?;
         let (sender, relay) = mpsc::channel(8);
         let mut catalogs = catalog::CatalogState::default();
@@ -778,6 +780,13 @@ impl Worker {
             self.manager.as_ref().unwrap().set_media_sink(None);
             self.manager.as_ref().unwrap().set_agent_caller(None);
             let error = result.err().unwrap_or(WorkerError::Transport);
+            if let WorkerError::Store(source) | WorkerError::Reopen(source) = &error
+                && store_is_disk_full(source)
+                && !self.disk_full_notified
+            {
+                self.disk_full_notified = true;
+                tracing::warn!(kind = "disk_full", "worker data store is out of space");
+            }
             let last_error = error.kind();
             if live_since.is_some() {
                 refusal = None;
@@ -885,17 +894,29 @@ impl Worker {
         let connection_id = Uuid::now_v7();
         let configured = self.config.restore_generation;
         let data_dir = self.config.data_dir.clone();
-        let (cursor, generation) = self
+        let (cursor, generation, reopened) = self
             .store
             .call(move |slot| {
-                if slot.is_none() {
+                let reopened = slot.is_none();
+                if reopened {
                     *slot = Some(WorkerStore::open(&data_dir).map_err(WorkerError::Reopen)?);
                 }
-                let store = slot.as_mut().unwrap();
+                let store = store_mut(slot)?;
                 initialize_generation(store, configured)?;
-                Ok((store.cj_cursor()?, store.restore_generation()?.unwrap()))
+                Ok((
+                    store.cj_cursor()?,
+                    store.restore_generation()?.ok_or(WorkerError::Protocol)?,
+                    reopened,
+                ))
             })
             .await?;
+        if reopened && self.disk_full_notified {
+            self.disk_full_notified = false;
+            tracing::warn!(
+                kind = "disk_recovered",
+                "worker data store writes recovered"
+            );
+        }
         let token_file = self.config.token_file.clone();
         let ca_cert = self.config.ca_cert.clone();
         let (token, ca) = tokio::task::spawn_blocking(move || {
@@ -935,7 +956,7 @@ impl Worker {
         let cj_pilot = self
             .store
             .call(|slot| {
-                let store = slot.as_ref().unwrap();
+                let store = store_mut(slot)?;
                 Ok(store.journal_next_requires_pilot(store.cj_journal_id()?)?)
             })
             .await?;
@@ -1124,8 +1145,8 @@ impl Worker {
             return Err(WorkerError::StateDivergence);
         }
         self.store
-            .call(move |store| {
-                store.as_mut().unwrap().on_cj_ack(committed)?;
+            .call(move |slot| {
+                store_mut(slot)?.on_cj_ack(committed)?;
                 Ok(())
             })
             .await?;
@@ -1354,14 +1375,14 @@ impl Worker {
             }
             if operation.is_none() {
                 if let Some(up_to) = store_ack.take() {
-                    operation = Some(Box::pin(self.store.call(move |store| {
-                        store.as_mut().unwrap().on_cj_ack(up_to)?;
+                    operation = Some(Box::pin(self.store.call(move |slot| {
+                        store_mut(slot)?.on_cj_ack(up_to)?;
                         Ok(StoreReply::Ack(up_to))
                     })));
                 } else if dirty && ready_batch.is_none() && pending_batches.len() < 8 {
                     let from = next_seq;
-                    operation = Some(Box::pin(self.store.call(move |store| {
-                        let store = store.as_ref().unwrap();
+                    operation = Some(Box::pin(self.store.call(move |slot| {
+                        let store = store_mut(slot)?;
                         let withheld = !pilot
                             && store
                                 .cj_records_from(from, 0)?
@@ -1600,6 +1621,16 @@ fn check_generation(generation: Uuid, accepted: &Accepted) -> Result<(), WorkerE
         return Err(WorkerError::RestoreGenerationChanged);
     }
     Ok(())
+}
+
+fn store_is_disk_full(error: &StoreError) -> bool {
+    match error {
+        StoreError::Io(error) => crate::exec::is_no_space(error),
+        StoreError::Journal(canterlot_journal::JournalError::Io(error)) => {
+            crate::exec::is_no_space(error)
+        }
+        _ => false,
+    }
 }
 
 fn transient_store_error(error: &StoreError) -> bool {
