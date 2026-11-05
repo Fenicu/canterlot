@@ -1593,6 +1593,48 @@ async fn check_text_preset_in_tx(
     }
 }
 
+/// Строка про маркер готовности для брифа запуска. `None`, если автопинок выключен:
+/// правило шлёт толчки только по маркерам, поэтому исполнитель должен знать их заранее.
+pub fn marker_instruction(nudge: &Value) -> Option<String> {
+    let markers: Vec<String> = match nudge {
+        Value::Bool(true) => vec!["STATUS: DONE".to_owned(), "STATUS: BLOCKED".to_owned()],
+        Value::Object(object) => object
+            .get("done_markers")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .filter(|items: &Vec<String>| !items.is_empty())
+            .unwrap_or_else(|| vec!["STATUS: DONE".to_owned(), "STATUS: BLOCKED".to_owned()]),
+        _ => return None,
+    };
+    let done = markers.first()?;
+    Some(match markers.get(1) {
+        Some(blocked) => format!(
+            "When you are completely finished, end your final message with a line `{done}` \
+             (or `{blocked}: <reason>` if you cannot continue)."
+        ),
+        None => format!(
+            "When you are completely finished, end your final message with a line `{done}`."
+        ),
+    })
+}
+
+/// Бриф с одной строкой маркера в конце. Повтор не добавляет вторую.
+pub fn brief_with_marker(brief: &str, nudge: &Value) -> String {
+    let Some(line) = marker_instruction(nudge) else {
+        return brief.to_owned();
+    };
+    if brief.contains(&line) {
+        return brief.to_owned();
+    }
+    format!("{brief}\n\n{line}")
+}
+
 fn hint() -> &'static str {
     "canterlot now nudges this session itself. Your subscription stays: you get one message when it is done, asks, fails, or the nudges run out. End your turn."
 }
