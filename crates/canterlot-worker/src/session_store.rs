@@ -1,4 +1,11 @@
-use std::{future::Future, thread};
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -12,11 +19,17 @@ type Job = Box<dyn FnOnce(&mut Option<WorkerStore>) + Send>;
 pub struct StoreThread {
     sender: mpsc::Sender<Job>,
     thread: thread::JoinHandle<()>,
+    failed: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
 pub struct StoreClient {
     sender: mpsc::Sender<Job>,
+}
+
+pub(crate) fn store_mut(slot: &mut Option<WorkerStore>) -> Result<&mut WorkerStore, WorkerError> {
+    slot.as_mut()
+        .ok_or(WorkerError::Store(StoreError::NeedsReopen))
 }
 
 async fn submit<T: Send + 'static>(
@@ -45,6 +58,8 @@ impl StoreClient {
 impl StoreThread {
     pub fn new(store: WorkerStore) -> Self {
         let (sender, mut receiver) = mpsc::channel::<Job>(8);
+        let failed = Arc::new(AtomicBool::new(false));
+        let thread_failed = failed.clone();
         let thread = thread::spawn(move || {
             let mut store = Some(store);
             while let Some(job) = receiver.blocking_recv() {
@@ -54,10 +69,19 @@ impl StoreThread {
                     .is_some_and(|s| matches!(s.cj_cursor(), Err(StoreError::NeedsReopen)))
                 {
                     store.take();
+                    thread_failed.store(true, Ordering::Relaxed);
                 }
             }
         });
-        Self { sender, thread }
+        Self {
+            sender,
+            thread,
+            failed,
+        }
+    }
+
+    pub(crate) fn take_failed(&self) -> bool {
+        self.failed.swap(false, Ordering::Relaxed)
     }
 
     pub fn client(&self) -> StoreClient {
@@ -79,5 +103,44 @@ impl StoreThread {
             .await
             .map_err(|_| WorkerError::StoreThread)?
             .map_err(|_| WorkerError::StoreThread)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_job_on_a_closed_slot_returns_an_error_instead_of_panicking() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = WorkerStore::open(directory.path()).unwrap();
+        let thread = StoreThread::new(store);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            thread
+                .call(|slot| {
+                    slot.take();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let result = thread
+                .call(|slot| {
+                    store_mut(slot)?.cj_cursor()?;
+                    Ok(())
+                })
+                .await;
+            assert!(matches!(
+                result,
+                Err(WorkerError::Store(StoreError::NeedsReopen))
+            ));
+            thread.close().await.unwrap();
+        });
     }
 }

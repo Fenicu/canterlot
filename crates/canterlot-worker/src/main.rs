@@ -2,7 +2,11 @@
 
 use std::{path::PathBuf, process::ExitCode};
 
-use canterlot_worker::{config, session::Worker, store::WorkerStore};
+use canterlot_worker::{
+    config,
+    session::{Worker, WorkerError},
+    store::WorkerStore,
+};
 use clap::{Parser, Subcommand};
 use tokio::sync::watch;
 
@@ -67,6 +71,12 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            if let Some(code) = error
+                .downcast_ref::<WorkerError>()
+                .and_then(WorkerError::exit_code)
+            {
+                return ExitCode::from(code);
+            }
             eprintln!("{error}");
             ExitCode::FAILURE
         }

@@ -1245,6 +1245,10 @@ impl Actor {
             self.cancel_start().await?;
             return Ok(false);
         }
+        let data_dir = self.shared.data_dir().await?.clone();
+        if let Err(rejection) = super::storage_preflight(&data_dir) {
+            return self.spawn_failed(&command, false, rejection.reason()).await;
+        }
         if let (Some(spec), Some(source)) = (&start.worktree, &source) {
             // Подготовка идёт в акторе: медленная распаковка не задерживает остальные команды.
             if let Err(reason) = crate::worktree::prepare(&workdir, source, spec).await {
@@ -1261,7 +1265,6 @@ impl Actor {
         }
         let id = self.id;
         let timers = self.shared.config.supervisor.clone();
-        let data_dir = self.shared.data_dir().await?.clone();
         let generation = self.generation;
         let runtime_dir = self.shared.runtime_dir.clone();
         let adapters = self
@@ -3418,6 +3421,72 @@ mod tests {
             actor.uploads.is_empty(),
             "the worker upload task is cancelled"
         );
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_start_on_an_unwritable_data_dir_is_rejected_before_creating_anything() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        let data = root.path().join("data");
+        fs::create_dir(&data).unwrap();
+        manager.shared.data_dir.set(data.clone()).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o500)).unwrap();
+        let id = Uuid::now_v7();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        let start = StartExecution::default();
+        let spawned = actor
+            .spawn_sequence(SpawnRequest {
+                command: Command {
+                    command_id: Uuid::now_v7().to_string(),
+                    dispatch_attempt: 1,
+                    execution_id: id.to_string(),
+                    execution_generation: 1,
+                    kind: Some(Kind::StartExecution(start.clone())),
+                },
+                start,
+                workdir: root.path().join("workdir"),
+                source: None,
+                conversation_id: Uuid::now_v7(),
+            })
+            .await
+            .unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!spawned);
+        assert!(!data.join("executions").exists());
+        assert!(fs::read_dir(&data).unwrap().flatten().all(|entry| {
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".storage-probe-")
+        }));
+        let rejected = thread
+            .client()
+            .call(move |slot| {
+                let store = open(slot)?;
+                Ok(store.cj_records_from(1, usize::MAX)?.into_iter().find_map(
+                    |record| match record.body.and_then(|body| body.body) {
+                        Some(Body::CommandRejected(fact)) => Some(fact.reason),
+                        _ => None,
+                    },
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(rejected.as_deref(), Some("storage_unavailable"));
         drop(actor);
         manager.shutdown().await;
         thread.close().await.unwrap();

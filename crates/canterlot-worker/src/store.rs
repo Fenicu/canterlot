@@ -98,6 +98,8 @@ pub struct WorkerStore {
     poisoned: bool,
     #[cfg(test)]
     fail_after: Option<tests::AppendPoint>,
+    #[cfg(test)]
+    fail_disk_full: bool,
     data_dir: PathBuf,
     cj: Journal,
     inbox: Journal,
@@ -111,6 +113,12 @@ pub struct WorkerStore {
 }
 
 impl WorkerStore {
+    #[cfg(test)]
+    pub(crate) fn fail_next_write_with_disk_full(&mut self) {
+        self.fail_after = Some(tests::AppendPoint::Inbox);
+        self.fail_disk_full = true;
+    }
+
     #[cfg(feature = "fault-injection")]
     pub fn with_probe(mut self, probe: crate::fault_injection::StoreProbe) -> Self {
         self.ownership.set_probe(Some(probe.clone()));
@@ -211,6 +219,8 @@ impl WorkerStore {
             poisoned: false,
             #[cfg(test)]
             fail_after: None,
+            #[cfg(test)]
+            fail_disk_full: false,
             data_dir: data_dir.to_path_buf(),
             cj,
             inbox,
@@ -797,7 +807,12 @@ impl WorkerStore {
             };
             self.after_append(test_point);
             if self.fail_after == Some(test_point) {
-                return Err(io::Error::other("injected write failure").into());
+                let error = if self.fail_disk_full {
+                    io::Error::from_raw_os_error(rustix::io::Errno::NOSPC.raw_os_error())
+                } else {
+                    io::Error::other("injected write failure")
+                };
+                return Err(error.into());
             }
         }
         #[cfg(feature = "fault-injection")]

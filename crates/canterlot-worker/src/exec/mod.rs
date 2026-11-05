@@ -278,6 +278,104 @@ pub(crate) fn open(store: &mut Option<WorkerStore>) -> Result<&mut WorkerStore, 
         .ok_or(WorkerError::Store(StoreError::NeedsReopen))
 }
 
+pub(crate) const STORAGE_MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StorageRejection {
+    DiskFull,
+    Unavailable,
+}
+
+impl StorageRejection {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::DiskFull => "disk_full",
+            Self::Unavailable => "storage_unavailable",
+        }
+    }
+}
+
+pub(crate) fn is_no_space(error: &io::Error) -> bool {
+    error.raw_os_error().is_some_and(is_no_space_code)
+}
+
+fn is_no_space_code(code: i32) -> bool {
+    code == rustix::io::Errno::NOSPC.raw_os_error()
+        || code == rustix::io::Errno::DQUOT.raw_os_error()
+}
+
+pub(crate) fn storage_preflight(data_dir: &std::path::Path) -> Result<(), StorageRejection> {
+    storage_preflight_with_min_free(data_dir, STORAGE_MIN_FREE_BYTES)
+}
+
+fn storage_preflight_with_min_free(
+    data_dir: &std::path::Path,
+    min_free: u64,
+) -> Result<(), StorageRejection> {
+    let stat = rustix::fs::statvfs(data_dir)
+        .map_err(|error| rejection(is_no_space_code(error.raw_os_error())))?;
+    if stat.f_bavail.saturating_mul(stat.f_frsize) < min_free {
+        return Err(StorageRejection::DiskFull);
+    }
+    storage_probe(data_dir)
+}
+
+/// Проверяет, что каталог данных переживает запись: файл, fsync файла и каталога,
+/// удаление и ещё один fsync каталога. Неудалённый пробник не считается успехом.
+pub(crate) fn storage_probe(data_dir: &std::path::Path) -> Result<(), StorageRejection> {
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write,
+        os::unix::fs::OpenOptionsExt,
+    };
+
+    let probe = data_dir.join(format!(".storage-probe-{}", Uuid::now_v7()));
+    let written = (|| -> io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&probe)?;
+        file.write_all(b"canterlot")?;
+        file.sync_all()?;
+        fs::File::open(data_dir)?.sync_all()
+    })();
+    let outcome = match written {
+        Ok(()) => Ok(()),
+        Err(error) => Err(rejection(is_no_space(&error))),
+    };
+    match fs::remove_file(&probe) {
+        Ok(()) => {
+            if let Err(error) = fs::File::open(data_dir).and_then(|dir| dir.sync_all()) {
+                tracing::warn!(
+                    kind = "storage_probe_cleanup_failed",
+                    %error,
+                    "cannot sync the data directory after removing the storage probe"
+                );
+                return Err(StorageRejection::Unavailable);
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(
+                kind = "storage_probe_cleanup_failed",
+                %error,
+                "cannot remove the storage probe"
+            );
+            return Err(StorageRejection::Unavailable);
+        }
+    }
+    outcome
+}
+
+fn rejection(no_space: bool) -> StorageRejection {
+    if no_space {
+        StorageRejection::DiskFull
+    } else {
+        StorageRejection::Unavailable
+    }
+}
+
 impl Shared {
     pub(crate) fn remember_ownership(&self, record: &canterlot_proto::worker::ipc::Ownership) {
         let Ok(id) = Uuid::parse_str(&record.execution_id) else {
@@ -1070,5 +1168,47 @@ impl ExecutionManager {
 
     fn spawn_actor(&self, id: Uuid, start: Start) {
         manager::spawn_actor(&self.shared, id, start);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probes(path: &std::path::Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(path)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".storage-probe-")
+            })
+            .map(|entry| entry.file_name())
+            .collect()
+    }
+
+    #[test]
+    fn storage_preflight_rejects_full_and_unwritable_and_removes_the_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        assert_eq!(storage_preflight(&data), Ok(()));
+        assert!(probes(&data).is_empty(), "the probe must be removed");
+
+        assert_eq!(
+            storage_preflight_with_min_free(&data, u64::MAX),
+            Err(StorageRejection::DiskFull)
+        );
+        assert!(probes(&data).is_empty());
+
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let rejection = storage_preflight(&data);
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(rejection, Err(StorageRejection::Unavailable));
+        assert!(probes(&data).is_empty(), "a failed probe must not remain");
     }
 }

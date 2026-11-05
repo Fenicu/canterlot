@@ -8,7 +8,7 @@ use canterlot_hub::{
 use canterlot_proto::worker::v1::{CancelInput, Command, ControlDown, command, control_down};
 use canterlot_worker::{
     config::{WorkerConfig, WorkerTimers},
-    session::{SessionState, Worker, WorkerError},
+    session::{SessionState, StoreErrorKind, Worker, WorkerError},
     store::WorkerStore,
 };
 use sqlx::PgPool;
@@ -386,7 +386,7 @@ fn segment(path: &Path) -> std::path::PathBuf {
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn poisoned_store_is_reopened_and_reconciled_before_reconnect(pool: PgPool) {
+async fn poisoned_store_waits_for_storage_then_requests_a_restart(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
@@ -395,7 +395,6 @@ async fn poisoned_store_is_reopened_and_reconciled_before_reconnect(pool: PgPool
     let backup = path.join("receipt-backup");
     let (stop, mut state, join) = start(config, store);
     wait_state(&mut state, SessionState::Live).await;
-    let connection = hub.registry.session_info(machine).unwrap().connection_id;
     fs::rename(&receipt, &backup).unwrap();
     let cmd = Command {
         command_id: Uuid::now_v7().to_string(),
@@ -413,35 +412,16 @@ async fn poisoned_store_is_reopened_and_reconciled_before_reconnect(pool: PgPool
         .unwrap();
     wait_backoff(&mut state).await;
     fs::rename(backup, receipt).unwrap();
-    wait_state(&mut state, SessionState::Live).await;
-    assert_ne!(
-        hub.registry.session_info(machine).unwrap().connection_id,
-        connection
-    );
-    timeout(Duration::from_secs(3), async {
-        loop {
-            let committed: Option<i64> = sqlx::query_scalar(
-                "select committed_seq from journal_cursors where machine_id = $1",
-            )
-            .bind(machine)
-            .fetch_optional(&pool)
-            .await
-            .unwrap();
-            if committed == Some(1) {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    stop_worker(stop, join).await;
-    let mut store = WorkerStore::open(&path).unwrap();
-    assert_eq!(store.cj_cursor().unwrap().last_seq, 1);
-    assert_eq!(
-        store.accept_command(&cmd).unwrap(),
-        canterlot_worker::store::Accept::Duplicate
-    );
+    let error = timeout(Duration::from_secs(3), join)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, WorkerError::StorageRestart), "{error}");
+    // Следующий запуск службы открывает то же хранилище и доигрывает сохранённое.
+    let store = WorkerStore::open(&path).unwrap();
+    assert!(store.cj_cursor().unwrap().last_seq >= 1);
+    drop(stop);
     stop_hub(hub).await;
 }
 
@@ -1105,7 +1085,7 @@ async fn hub_status_codes_are_visible_during_backoff_and_unauthenticated_is_term
 }
 
 #[tokio::test]
-async fn sealed_or_corrupt_store_discovered_on_reopen_is_fatal() {
+async fn sealed_or_corrupt_store_is_fatal_when_the_restarted_worker_reopens_it() {
     use std::io::Write;
     for kind in ["cj", "inbox", "metadata"] {
         let (hub, store) = ProtocolHub::start(Behavior::default()).await;
@@ -1120,10 +1100,9 @@ async fn sealed_or_corrupt_store_discovered_on_reopen_is_fatal() {
         })
         .await;
         wait_backoff(&mut state).await;
-        fs::rename(&backup, &receipt).unwrap();
         let expected = if kind == "metadata" {
             fs::write(path.join("hub.toml"), "not valid metadata\n").unwrap();
-            "Metadata"
+            StoreErrorKind::Metadata
         } else {
             let mut file = fs::OpenOptions::new()
                 .append(true)
@@ -1132,9 +1111,9 @@ async fn sealed_or_corrupt_store_discovered_on_reopen_is_fatal() {
             file.write_all(b"torn tail").unwrap();
             file.sync_all().unwrap();
             if kind == "cj" {
-                "CjSealed"
+                StoreErrorKind::CjSealed
             } else {
-                "LocalSealed"
+                StoreErrorKind::LocalSealed
             }
         };
         let error = timeout(Duration::from_secs(2), join)
@@ -1142,7 +1121,13 @@ async fn sealed_or_corrupt_store_discovered_on_reopen_is_fatal() {
             .unwrap()
             .unwrap()
             .unwrap_err();
-        assert!(error.to_string().contains(expected), "{error}");
+        assert!(matches!(error, WorkerError::StorageRestart), "{error}");
+        fs::rename(&backup, &receipt).unwrap();
+        let reopened = match WorkerStore::open(&path) {
+            Ok(_) => panic!("a restarted worker must not reopen a sealed or corrupt store"),
+            Err(error) => error,
+        };
+        assert_eq!(reopened.kind(), expected, "{reopened}");
         drop(stop);
     }
 }

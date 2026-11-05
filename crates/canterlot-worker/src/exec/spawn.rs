@@ -174,17 +174,24 @@ pub(super) fn spawn_supervisor(
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(dir.join("supervisor.log"))?;
+        .open(dir.join("supervisor.log"));
     // Повтор при ETXTBSY: обёртка супервизора пишется тестом прямо перед запуском.
     let child = crate::adapter::spawn_with_retry_sync(|| {
+        let (stdout, stderr) = match &log {
+            Ok(file) => (
+                Stdio::from(file.try_clone()?),
+                Stdio::from(file.try_clone()?),
+            ),
+            Err(_) => (Stdio::null(), Stdio::null()),
+        };
         let mut command = tokio::process::Command::new(exe);
         command
             .arg("supervise")
             .arg("--exec-dir")
             .arg(dir)
             .stdin(Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log.try_clone()?)
+            .stdout(stdout)
+            .stderr(stderr)
             .kill_on_drop(false);
         if let Some(value) = &build_jobs {
             command.env("CARGO_BUILD_JOBS", value);
@@ -252,11 +259,20 @@ pub(super) async fn connect_attach(
 
 #[cfg(test)]
 mod tests {
-    use super::build_jobs_env;
+    use super::{build_jobs_env, spawn_supervisor};
 
     #[test]
     fn cargo_build_jobs_defaults_but_never_overrides_the_parent() {
         assert_eq!(build_jobs_env(6, None).as_deref(), Some("6"));
         assert_eq!(build_jobs_env(6, Some("12".as_ref())), None);
+    }
+
+    #[tokio::test]
+    async fn spawn_proceeds_with_null_stdio_when_supervisor_log_cannot_be_opened() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("supervisor.log")).unwrap();
+        let child = spawn_supervisor(std::path::Path::new("/bin/true"), directory.path(), 1);
+        assert!(child.is_ok(), "{:?}", child.err());
+        drop(child);
     }
 }

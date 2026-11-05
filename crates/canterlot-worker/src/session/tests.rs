@@ -153,3 +153,232 @@ async fn stalled_store_does_not_delay_inbound_or_heartbeat_timers() {
     stop.send_replace(true);
     join.await.unwrap().unwrap();
 }
+
+#[allow(dead_code)]
+#[path = "../../tests/support/frozen_clock.rs"]
+mod frozen_clock;
+
+struct WaitingWorker {
+    hub: support::ProtocolHub,
+    state: watch::Receiver<SessionState>,
+    stop: watch::Sender<bool>,
+    join: tokio::task::JoinHandle<Result<(), WorkerError>>,
+    client: Option<crate::session_store::StoreClient>,
+    logs: Logs,
+}
+
+impl WaitingWorker {
+    async fn start(backoff: Duration, fail: bool) -> Self {
+        use tracing::instrument::WithSubscriber;
+
+        let (hub, mut store) = support::ProtocolHub::start(support::Behavior::default()).await;
+        let mut hub = hub;
+        initialize_generation(&mut store, hub.config.restore_generation).unwrap();
+        if fail {
+            store.fail_next_write_with_disk_full();
+        }
+        hub.config.timers.backoff_min = backoff;
+        hub.config.timers.backoff_max = backoff;
+        let worker = Worker::new(hub.config.clone(), store);
+        let state = worker.state();
+        let client = worker.store.client();
+        let logs = Logs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let (stop, shutdown) = watch::channel(false);
+        let join = tokio::spawn(worker.run(shutdown).with_subscriber(subscriber));
+        Self {
+            hub,
+            state,
+            stop,
+            join,
+            client: Some(client),
+            logs,
+        }
+    }
+
+    async fn wait(&mut self, wanted: impl Fn(&SessionState) -> bool) {
+        loop {
+            {
+                let state = self.state.borrow_and_update();
+                if wanted(&state) {
+                    return;
+                }
+            }
+            self.state.changed().await.unwrap();
+        }
+    }
+
+    async fn wait_live(&mut self) {
+        self.wait(|state| *state == SessionState::Live).await;
+    }
+
+    async fn wait_storage_wait(&mut self) {
+        self.wait(|state| matches!(state, SessionState::Backoff { .. }))
+            .await;
+    }
+
+    fn log_text(&self) -> String {
+        String::from_utf8(self.logs.0.lock().unwrap().clone()).unwrap()
+    }
+
+    fn data_dir(&self) -> std::path::PathBuf {
+        self.hub.config.data_dir.clone()
+    }
+
+    async fn finish(mut self) -> Result<(), WorkerError> {
+        self.client.take();
+        self.stop.send_replace(true);
+        self.join.await.unwrap()
+    }
+
+    async fn finish_restart(mut self) -> (Result<(), WorkerError>, String) {
+        let logs = self.logs.clone();
+        self.client.take();
+        let result = self.join.await.unwrap();
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        (result, text)
+    }
+}
+
+async fn send_cancel(hub: &support::ProtocolHub) {
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::Command(Command {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            execution_id: Uuid::now_v7().to_string(),
+            execution_generation: 1,
+            kind: Some(command::Kind::CancelInput(CancelInput::default())),
+        })),
+    })
+    .await;
+}
+
+fn make_unwritable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500)).unwrap();
+}
+
+fn make_writable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_enospc_store_write_waits_for_storage_without_reconnecting() {
+    frozen_clock::run(async {
+        let mut worker = WaitingWorker::start(Duration::from_millis(100), true).await;
+        worker.wait_live().await;
+        let data_dir = worker.data_dir();
+        make_unwritable(&data_dir);
+        send_cancel(&worker.hub).await;
+        worker.wait_storage_wait().await;
+        assert_eq!(
+            worker.log_text().matches("kind=\"disk_full\"").count(),
+            1,
+            "{}",
+            worker.log_text()
+        );
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            *worker.state.borrow(),
+            SessionState::Backoff { .. }
+        ));
+        assert!(!worker.join.is_finished());
+        make_writable(&data_dir);
+        worker.finish().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn storage_wait_keeps_waiting_while_probes_keep_failing() {
+    frozen_clock::run(async {
+        let mut worker = WaitingWorker::start(Duration::from_millis(100), true).await;
+        worker.wait_live().await;
+        let data_dir = worker.data_dir();
+        make_unwritable(&data_dir);
+        send_cancel(&worker.hub).await;
+        worker.wait_storage_wait().await;
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            assert!(matches!(
+                *worker.state.borrow(),
+                SessionState::Backoff { .. }
+            ));
+            assert!(!worker.join.is_finished());
+        }
+        make_writable(&data_dir);
+        worker.finish().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn storage_recovery_returns_the_restart_exit() {
+    frozen_clock::run(async {
+        let mut worker = WaitingWorker::start(Duration::from_millis(100), true).await;
+        worker.wait_live().await;
+        send_cancel(&worker.hub).await;
+        worker.wait_storage_wait().await;
+        assert_eq!(
+            worker.log_text().matches("kind=\"disk_full\"").count(),
+            1,
+            "{}",
+            worker.log_text()
+        );
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let (result, logs) = worker.finish_restart().await;
+        let error = result.unwrap_err();
+        assert!(matches!(error, WorkerError::StorageRestart));
+        assert_eq!(error.exit_code(), Some(STORAGE_RESTART_EXIT_CODE));
+        assert_eq!(logs.matches("kind=\"disk_recovered\"").count(), 1, "{logs}");
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_the_storage_wait_exits_normally() {
+    frozen_clock::run(async {
+        let mut worker = WaitingWorker::start(Duration::from_millis(100), true).await;
+        worker.wait_live().await;
+        let data_dir = worker.data_dir();
+        make_unwritable(&data_dir);
+        send_cancel(&worker.hub).await;
+        worker.wait_storage_wait().await;
+        make_writable(&data_dir);
+        worker.finish().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_command_against_a_closed_store_slot_enters_storage_wait_without_panicking() {
+    frozen_clock::run(async {
+        let mut worker = WaitingWorker::start(Duration::from_millis(100), false).await;
+        worker.wait_live().await;
+        worker
+            .client
+            .as_ref()
+            .unwrap()
+            .call(|slot| {
+                slot.take();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        send_cancel(&worker.hub).await;
+        worker.wait_storage_wait().await;
+        assert!(matches!(
+            *worker.state.borrow(),
+            SessionState::Backoff { .. }
+        ));
+        worker.finish().await.unwrap();
+    })
+    .await;
+}
