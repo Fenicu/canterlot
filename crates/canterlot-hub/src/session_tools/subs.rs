@@ -541,5 +541,17 @@ pub async fn on_target_deleted_in_tx(
         let payload = event_job(id, target_id, DELETED, DELETED, armed_at, chain_depth, None);
         insert_job(conn, owner_id, subscriber_id, now, &payload).await?;
     }
+    // Корзина не удаляет строки подписки: закрываем их сразу, чтобы возврат сессии
+    // не воскресил ожидание, о котором подписчику уже сказали.
+    sqlx::query(
+        "update session_subscriptions
+         set closed_at=coalesce(closed_at,$2),closed_reason=coalesce(closed_reason,$3)
+         where target_id=$1 and subscriber_id<>$1",
+    )
+    .bind(target_id)
+    .bind(now)
+    .bind(DELETED)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }

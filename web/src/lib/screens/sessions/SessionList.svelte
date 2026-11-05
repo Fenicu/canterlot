@@ -14,7 +14,7 @@
 </script>
 
 <script lang="ts">
-  import { listConversations } from '#lib/api/client.js';
+  import { listConversations, restoreConversation } from '#lib/api/client.js';
   import { errorText } from '#lib/api/errors.js';
   import { loadConfig } from '#lib/api/config.js';
   import type { Runtime } from '#lib/app/runtime.js';
@@ -44,6 +44,8 @@
   import SearchBar from './SearchBar.svelte';
   import Section from './Section.svelte';
   import SessionSheet from './SessionSheet.svelte';
+  import TrashSection from './TrashSection.svelte';
+  import TrashToast from './TrashToast.svelte';
   import { installation } from '#lib/pwa/register.js';
 
   let { main = false, create = false }: { main?: boolean; create?: boolean } = $props();
@@ -68,6 +70,14 @@
   let diskConfig = $state({ disk_warn_free_gb: 30, disk_critical_free_gb: 10 });
   let lowDiskActive = $state<string[]>([]);
   let diskNotice = $state<DiskNotice | null>(null);
+  let trashToast = $state<{ id: string; key: string } | null>(null);
+  let trashError = $state('');
+  let trashRows = $state<ListRow[]>([]);
+  let trashCursor = $state<string | null>(null);
+  let trashMore = $state(false);
+  let trashLoading = $state(false);
+  let trashLoadError = $state('');
+  let trashRequest = 0;
   const now = $derived.by(() => {
     void ticker.second;
     return clock.serverNow();
@@ -84,6 +94,17 @@
     changed();
     install.addEventListener('change', changed);
     collapsed = readCollapsed();
+    const showTrashToast = (id: string) => {
+      sessionStorage.removeItem('canterlot.trash-toast');
+      trashToast = { id, key: crypto.randomUUID() };
+    };
+    const onTrash = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      if (id) showTrashToast(id);
+    };
+    window.addEventListener('canterlot:trash', onTrash);
+    const pendingTrash = sessionStorage.getItem('canterlot.trash-toast');
+    if (pendingTrash) showTrashToast(pendingTrash);
     const kids = readKidsChoice();
     kidsCollapsed = kids.collapsed;
     kidsExpanded = kids.expanded;
@@ -97,6 +118,7 @@
     const releaseTicker = ticker.retain();
     return () => {
       install.removeEventListener('change', changed);
+      window.removeEventListener('canterlot:trash', onTrash);
       alive = false;
       releaseTicker();
     };
@@ -121,6 +143,7 @@
     return () => window.clearTimeout(timer);
   });
 
+  const showTrash = $derived(tab.kind === 'trash');
   const rows = $derived(runtime ? [...runtime.list.items.values()] : []);
   const groups = $derived(runtime?.list.groups ?? []);
   const tabs = $derived(runtime ? tabCounts(runtime.list.counts, groups) : []);
@@ -131,7 +154,7 @@
     if (!results || !store) return null;
     const deleted = store.list.deleted;
     return results
-      .filter((item) => !deleted.has(item.id))
+      .filter((item) => !deleted.has(item.id) && !store.list.items.get(item.id)?.trashed_at)
       .map((item) => ({ item, depth: 0, open: true, running: 0, waiting: 0, children: [] }));
   });
   const kids = $derived({ collapsed: collapsedSet(kidsCollapsed), expanded: collapsedSet(kidsExpanded) });
@@ -143,6 +166,7 @@
   const emptyTab = $derived.by(() => {
     if (results || !ready || rows.length === 0 || sections.some((section) => section.items.length > 0)) return '';
     if (tab.kind === 'archive') return 'В архиве пока пусто';
+    if (tab.kind === 'trash') return 'В корзине пусто';
     if (tab.kind === 'pinned') return 'Закреплённых сессий нет';
     return 'В этой группе пока нет сессий';
   });
@@ -269,6 +293,57 @@
     results = null;
   }
 
+  async function loadTrash(reset: boolean) {
+    const request = ++trashRequest;
+    trashLoading = true;
+    trashLoadError = '';
+    try {
+      const response = await listConversations({
+        filter: 'trashed',
+        limit: 50,
+        cursor: reset ? undefined : (trashCursor ?? undefined)
+      });
+      if (request !== trashRequest) return;
+      const page = response.data;
+      const pageRows = page.items as unknown as ListRow[];
+      trashRows = reset ? pageRows : [...trashRows, ...pageRows];
+      trashCursor = page.next_cursor ?? null;
+      trashMore = Boolean(page.next_cursor);
+    } catch (err) {
+      if (request === trashRequest) trashLoadError = errorText(err, 'Не удалось открыть корзину');
+    } finally {
+      if (request === trashRequest) trashLoading = false;
+    }
+  }
+
+  $effect(() => {
+    const store = runtime;
+    if (!store || tab.kind !== 'trash' || results) return;
+    // Живые события меняют счётчик корзины — перечитываем страницу с сервера.
+    const stamp = store.list.counts.trashed;
+    void stamp;
+    untrack(() => { void loadTrash(true); });
+  });
+
+  function ontrashed(id: string) {
+    sheetId = '';
+    trashToast = { id, key: crypto.randomUUID() };
+    trashError = '';
+    if (page.params.id === id) void goto(resolve('sessions'));
+  }
+
+  async function undoTrash() {
+    const pending = trashToast;
+    if (!pending) return;
+    trashToast = null;
+    trashError = '';
+    try {
+      await restoreConversation(pending.id, pending.key);
+    } catch (err) {
+      trashError = errorText(err, 'Не удалось вернуть сессию');
+    }
+  }
+
   function remember(event: Event) {
     if (restore) return;
     const target = event.currentTarget;
@@ -281,7 +356,7 @@
   });
 </script>
 
-<svelte:element this={main ? 'main' : 'div'} bind:this={listNode} id={main ? 'main' : undefined} class="list" data-list-ready={ready ? '' : undefined}>
+<svelte:element this={main ? 'main' : 'div'} bind:this={listNode} id={main ? 'main' : undefined} class="list" data-list-ready={ready ? '' : undefined} >
   <div class="bar">
     <p class="brand">Canterlot</p>
 
@@ -359,6 +434,21 @@
           <div class="ghost"><span class="skeleton" style:width={`var(--bar-${width})`}></span><span class="skeleton" style:width="var(--bar-81)"></span></div>
         {/each}
       </div>
+    {:else if showTrash && !results}
+      {#if trashLoadError}<p class="search-error" role="alert">{trashLoadError}</p>{/if}
+      {#if trashLoading && trashRows.length === 0}
+        <p class="trash-loading" role="status">Загружаю корзину</p>
+      {:else if trashRows.length === 0}
+        <EmptyState kind="tab" text="В корзине пусто" />
+      {:else}
+        <TrashSection
+          items={trashRows}
+          {now}
+          more={trashMore}
+          loading={trashLoading}
+          onmore={() => void loadTrash(false)}
+        />
+      {/if}
     {:else if emptyTab}
       <EmptyState kind="tab" text={emptyTab} />
     {:else}
@@ -385,11 +475,17 @@
       anchorTop={sheetRow.top}
       ongroups={() => { sheetId = ''; groupsOpen = true; }}
       onclose={() => sheetId = ''}
-      ondeleted={(id) => { if (page.params.id === id) void goto(resolve('sessions')); }}
+      ontrashed={ontrashed}
     />{/key}
   {/if}
   {#if groupsOpen}
     <GroupManager groups={groups} counts={groupCounts} onclose={() => groupsOpen = false} />
+  {/if}
+  {#if trashToast}
+    <TrashToast onundo={() => void undoTrash()} onclose={() => (trashToast = null)} />
+  {/if}
+  {#if trashError}
+    <p class="trash-error" role="alert">{trashError}</p>
   {/if}
 </svelte:element>
 
@@ -398,6 +494,8 @@
   /* Тихая строка в семействе прочих уведомлений: цветом, без эмодзи и заливки. */
   .disk-notice { margin: var(--s0) var(--gutter) var(--s2); color: var(--warning); font-size: var(--fs-sm); }
   .disk-notice[data-tone='danger'] { color: var(--danger); }
+  .trash-error { position: fixed; z-index: 6; left: 50%; bottom: calc(var(--target) + var(--s6)); transform: translateX(-50%); margin: 0; color: var(--danger); font-size: var(--fs-sm); }
+  .trash-loading { margin: var(--s4) var(--gutter); color: var(--secondary); font-size: var(--fs-sm); }
   .list { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
   .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding-block: var(--s2); }
   .brand { flex: 1 0 auto; margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }

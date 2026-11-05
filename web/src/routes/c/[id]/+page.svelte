@@ -4,6 +4,7 @@
   import { clock } from '#lib/clock.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import ChatGone from '#lib/screens/chat/ChatGone.svelte';
+  import ChatTrashed from '#lib/screens/chat/ChatTrashed.svelte';
   import ChatScreen from '#lib/screens/chat/ChatScreen.svelte';
   import { leaseChatSession } from '#lib/screens/chat/open.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -44,6 +45,8 @@
   {#key id}
     {#if chat && chat.id === id && chat.gone}
       <ChatGone reason={chat.gone} />
+    {:else if chat && chat.id === id && chat.trashed}
+      <ChatTrashed id={chat.id} />
     {:else if chat && chat.id === id}
       <ChatScreen {chat} {now} />
     {:else if error}

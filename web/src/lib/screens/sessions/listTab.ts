@@ -2,7 +2,7 @@ import type { Tab } from "./grouping";
 
 export const LIST_TAB_KEY = "canterlot.list-tab";
 
-const KINDS = new Set<Tab["kind"]>(["all", "pinned", "group", "archive"]);
+const KINDS = new Set<Tab["kind"]>(["all", "pinned", "group", "archive", "trash"]);
 
 function parse(raw: string | null): Tab | null {
   if (!raw) return null;

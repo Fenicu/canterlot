@@ -553,6 +553,8 @@ export interface ConversationCreated {
     pinned: boolean;
     archived: boolean;
     accepted?: boolean;
+    trashed?: boolean;
+    trashed_at?: Time | null;
     groups: Uuid[];
     group_pins?: GroupPin[];
     machine: {
@@ -605,6 +607,7 @@ export interface Counts {
   all: number;
   pinned: number;
   archived: number;
+  trashed: number;
   groups: {
     id: Uuid;
     count: number;
@@ -630,6 +633,8 @@ export interface ConversationUpdated {
     pinned: boolean;
     archived: boolean;
     accepted?: boolean;
+    trashed?: boolean;
+    trashed_at?: Time | null;
     groups: Uuid[];
     group_pins?: GroupPin[];
     machine: {

@@ -167,7 +167,7 @@ pub(crate) async fn load_stored(
             })
             .collect::<Result<_, _>>()?;
 
-    let sessions=sqlx::query("select c.id,c.title,coalesce(d.activity_state,'idle') activity_state from conversations c left join conversation_derived d on d.conversation_id=c.id where c.machine_id=$1 and c.owner_id=$2 order by c.id").bind(id).bind(owner).fetch_all(&mut *conn).await?.into_iter().map(|p|->Result<SessionView,sqlx::Error>{Ok(SessionView{conversation_id:p.try_get("id")?,title:p.try_get("title")?,activity_state:p.try_get("activity_state")?})}).collect::<Result<_,_>>()?;
+    let sessions=sqlx::query("select c.id,c.title,coalesce(d.activity_state,'idle') activity_state from conversations c left join conversation_derived d on d.conversation_id=c.id where c.machine_id=$1 and c.owner_id=$2 and c.trashed_at is null order by c.id").bind(id).bind(owner).fetch_all(&mut *conn).await?.into_iter().map(|p|->Result<SessionView,sqlx::Error>{Ok(SessionView{conversation_id:p.try_get("id")?,title:p.try_get("title")?,activity_state:p.try_get("activity_state")?})}).collect::<Result<_,_>>()?;
     let metrics=sqlx::query("select to_jsonb(mm)-'machine_id' value, observed_at from machine_metrics mm where machine_id=$1").bind(id).fetch_optional(&mut *conn).await?;
     let mut warnings = Vec::new();
     let metrics = if let Some(m) = metrics {

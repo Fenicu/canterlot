@@ -18,6 +18,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(create, list))
         .routes(routes!(get, update, remove))
+        .routes(routes!(restore))
+        .routes(routes!(purge_trash))
         .routes(routes!(set_groups))
         .routes(routes!(pin_in_group, unpin_in_group))
         .routes(routes!(set_crunch))
@@ -48,7 +50,8 @@ pub(super) async fn deleted_or<T>(
     match result {
         Err(error)
             if error.code == ErrorCode::NotFound
-                && crate::deletion::tombstoned(&s.pool, owner, id).await? =>
+                && (crate::deletion::tombstoned(&s.pool, owner, id).await?
+                    || crate::deletion::trashed(&s.pool, owner, id).await?) =>
         {
             Err(ApiError::new(ErrorCode::ConversationDeleted))
         }
@@ -838,6 +841,7 @@ async fn list(
         "all" => ListFilter::All,
         "pinned" => ListFilter::Pinned,
         "archived" => ListFilter::Archived,
+        "trashed" => ListFilter::Trashed,
         other => ListFilter::Group(
             other
                 .strip_prefix("group:")
@@ -962,7 +966,39 @@ async fn remove(
     IdempotencyKey(key): IdempotencyKey,
     Correlation(c): Correlation,
 ) -> Result<StatusCode, ApiError> {
-    crate::deletion::delete(&s.pool, &*s.blobs, o.owner_id, id, &key, c).await?;
+    crate::deletion::trash(&s.pool, o.owner_id, id, &key, c).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+#[utoipa::path(post,path="/api/v1/conversations/{id}/restore",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Сессия возвращена из корзины",body=ConversationDetail),(status=404,description="not_found или conversation_deleted",body=super::error::ErrorEnvelope)))]
+async fn restore(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<ConversationDetail>, ApiError> {
+    Ok(Json(
+        crate::deletion::restore(&s.pool, o.owner_id, id, &key, c).await?,
+    ))
+}
+#[utoipa::path(delete,path="/api/v1/conversations/{id}/trash",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=204,description="Сессия удалена окончательно"),(status=404,description="not_found или conversation_deleted",body=super::error::ErrorEnvelope),(status=409,description="invalid_state: сессия не в корзине",body=super::error::ErrorEnvelope)))]
+async fn purge_trash(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<StatusCode, ApiError> {
+    crate::deletion::purge(
+        &s.pool,
+        &*s.blobs,
+        o.owner_id,
+        id,
+        chrono::DateTime::<chrono::Utc>::MAX_UTC,
+        &key,
+        c,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 #[utoipa::path(put,path="/api/v1/conversations/{id}/groups",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=GroupsBody,responses((status=200,description="Группы изменены",body=ConversationDetail)))]

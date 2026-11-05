@@ -37,6 +37,8 @@ export interface ListRow {
   archived: boolean;
   /** Сессия принята родителем: архив скрывает её до срока хранения. */
   accepted?: boolean;
+  /** Сессия в корзине владельца; время окончательной уборки. */
+  trashed_at?: string | null;
   groups: string[];
   group_pins: GroupPin[];
   parent_id: string | null;
@@ -66,6 +68,7 @@ export interface Counts {
   all: number;
   pinned: number;
   archived: number;
+  trashed: number;
   groups: GroupCount[];
 }
 
@@ -89,6 +92,8 @@ const ATTRIBUTES = [
   "pinned",
   "archived",
   "accepted",
+  "trashed",
+  "trashed_at",
   "groups",
   "group_pins",
   "parent_id",
@@ -104,7 +109,7 @@ export class ListStore {
   /** Сессии, удалённые на глазах у этого клиента: поиск и экраны держат их копии. */
   readonly deleted = new SvelteSet<string>();
   groups = $state<ListSnapshot["groups"]>([]);
-  counts = $state<Counts>({ all: 0, pinned: 0, archived: 0, groups: [] });
+  counts = $state<Counts>({ all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] });
   limits = $state<ProviderLimits[]>([]);
   presets = $state<PresetSummary[]>([]);
   truncated = $state(false);
@@ -168,6 +173,8 @@ export class ListStore {
     const needle = q.trim().toLowerCase();
     return [...this.items.values()].filter((item) => {
       if (needle && !item.title.toLowerCase().includes(needle)) return false;
+      // Корзина живёт отдельной вкладкой и в обычный поиск не попадает.
+      if (item.trashed_at) return false;
       if (filter === "archived") return item.archived && !item.accepted;
       if (filter === "pinned") return item.pinned && !item.archived;
       if (typeof filter === "object")
@@ -299,6 +306,8 @@ function rowFromCreated(payload: {
   pinned: boolean;
   archived: boolean;
   accepted?: boolean;
+  trashed?: boolean;
+  trashed_at?: string | null;
   groups: string[];
   group_pins?: GroupPin[];
   parent_id?: string | null;
@@ -333,6 +342,8 @@ function rowFromUpdated(payload: {
   pinned: boolean;
   archived: boolean;
   accepted?: boolean;
+  trashed?: boolean;
+  trashed_at?: string | null;
   groups: string[];
   group_pins?: GroupPin[];
   machine: ListRow["machine"];

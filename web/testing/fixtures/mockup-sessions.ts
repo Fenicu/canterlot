@@ -100,6 +100,7 @@ export function seedMockupSessions(api: FakeHubApi): MockupSessions {
 		all: 10,
 		pinned: 2,
 		archived: 0,
+		trashed: 0,
 		groups: [
 			{ id: canterlot, count: 3 },
 			{ id: review, count: 1 },

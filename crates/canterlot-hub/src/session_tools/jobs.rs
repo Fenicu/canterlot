@@ -211,6 +211,13 @@ async fn event_message(
 ) -> Result<(String, Value), sqlx::Error> {
     let id = event.target_id;
     let depth = event.chain_depth;
+    // Удалённая и убранная в корзину цель не отдаёт ни названия, ни итога: только id.
+    if event.state == "deleted" {
+        return Ok((
+            format!("[canterlot] Session {id} was deleted."),
+            json!({"kind":"event","from":id,"chain_depth":depth,"event":origin::HubEvent::deleted(id)}),
+        ));
+    }
     let summary = summary::build_bounded(
         conn,
         owner_id,

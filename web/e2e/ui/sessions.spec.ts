@@ -267,17 +267,17 @@ test('delete_asks_for_confirmation_naming_the_session_and_removes_it_only_after_
     await route.fallback();
   });
   await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
-  await page.getByRole('button', { name: /^Удалить/ }).click();
-  const dialog = page.getByRole('dialog', { name: 'Удалить сессию?' });
+  await page.getByRole('button', { name: /^Переместить в корзину/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Переместить сессию в корзину?' });
   await expect(dialog).toContainText('Повторная доставка ввода');
-  await expect(dialog).toContainText('Это нельзя отменить');
+  await expect(dialog).toContainText('можно вернуть');
   await expect(dialog).toContainText('История CLI');
   await dialog.getByRole('button', { name: 'Отмена' }).click();
   await expect(row).toBeVisible();
   expect(keys).toEqual([]);
 
-  await page.getByRole('button', { name: /^Удалить/ }).click();
-  await page.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+  await page.getByRole('button', { name: /^Переместить в корзину/ }).click();
+  await page.getByRole('dialog', { name: 'Переместить сессию в корзину?' }).getByRole('button', { name: 'В корзину', exact: true }).click();
   await expect.poll(() => keys.length).toBe(1);
   await expect(row).toBeVisible();
   release();
@@ -308,12 +308,12 @@ function turnRunning(api: FakeHubApi, id: string): void {
 test('delete_of_a_session_refused_by_the_hub_shows_the_refusal_and_keeps_it', async ({ page }) => {
   const { api, ids } = await boot(page);
   await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
-  await page.getByRole('button', { name: /^Удалить/ }).click();
-  const dialog = page.getByRole('dialog', { name: 'Удалить сессию?' });
+  await page.getByRole('button', { name: /^Переместить в корзину/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Переместить сессию в корзину?' });
   await expect(dialog).toBeVisible();
   const detail = api.details.get(ids.plain);
   if (detail) detail.execution = { state: 'running', generation: 1 };
-  await dialog.getByRole('button', { name: 'Удалить', exact: true }).click();
+  await dialog.getByRole('button', { name: 'В корзину', exact: true }).click();
   await expect(page.getByRole('alert').filter({ hasText: 'Сначала остановите сессию' })).toBeVisible();
   await expect(page.locator(`[data-session="${ids.plain}"]`)).toBeVisible();
 });
@@ -328,11 +328,11 @@ test('delete_of_an_idle_session_stops_its_process_first_and_says_so', async ({ p
     if (request.method() === 'DELETE') calls.push('delete');
   });
   await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
-  await page.getByRole('button', { name: /^Удалить/ }).click();
-  const dialog = page.getByRole('dialog', { name: 'Остановить и удалить сессию?' });
+  await page.getByRole('button', { name: /^Переместить в корзину/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Остановить и убрать в корзину?' });
   await expect(dialog).toContainText('Процесс агента на машине workstation будет остановлен');
-  await expect(dialog).toContainText('Это нельзя отменить');
-  await dialog.getByRole('button', { name: 'Остановить и удалить' }).click();
+  await expect(dialog).toContainText('можно вернуть');
+  await dialog.getByRole('button', { name: 'Остановить и убрать' }).click();
   await expect(page.locator(`[data-session="${ids.plain}"]`)).toHaveCount(0);
   expect(calls).toHaveLength(2);
   expect(calls[0]).toMatch(/^stop:.+/);
@@ -347,7 +347,7 @@ test('delete_during_a_turn_is_blocked_and_names_what_is_running', async ({ page 
     if (request.url().includes(ids.plain) && (request.url().endsWith('/stop') || request.method() === 'DELETE')) calls.push(request.url());
   });
   await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
-  await page.getByRole('button', { name: /^Удалить/ }).click();
+  await page.getByRole('button', { name: /^Переместить в корзину/ }).click();
   await expect(page.getByRole('alert').filter({ hasText: 'Сначала остановите работу: выполняет cargo test' })).toBeVisible();
   await expect(page.getByRole('dialog', { name: /сессию\?/ })).toHaveCount(0);
   expect(calls).toEqual([]);
@@ -454,13 +454,13 @@ test('clicks_inside_the_session_menu_and_its_confirmation_keep_it_open', async (
   await menu.getByRole('switch', { name: 'Закрепить' }).click();
   await menu.getByText('Настройки сессии').click();
   await expect(menu).toBeVisible();
-  await menu.getByRole('button', { name: /^Удалить/ }).click();
-  const confirm = page.getByRole('dialog', { name: 'Удалить сессию?' });
+  await menu.getByRole('button', { name: /^Переместить в корзину/ }).click();
+  const confirm = page.getByRole('dialog', { name: 'Переместить сессию в корзину?' });
   await confirm.locator('p').first().click();
   await page.keyboard.press('Escape');
   await expect(confirm).toHaveCount(0);
   await expect(menu).toBeVisible();
-  await menu.getByRole('button', { name: /^Удалить/ }).click();
+  await menu.getByRole('button', { name: /^Переместить в корзину/ }).click();
   await page.mouse.click(4, 4);
   await expect(confirm).toHaveCount(0);
   await expect(menu).toBeVisible();
@@ -576,10 +576,11 @@ test('delete_from_the_open_chat_returns_to_the_list', async ({ page }) => {
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: 'Меню сессии' }).click();
   await page.getByRole('menuitem', { name: 'Название, цвет и группы' }).click();
-  await page.getByRole('button', { name: /^Удалить/ }).click();
-  await page.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+  await page.getByRole('button', { name: /^Переместить в корзину/ }).click();
+  await page.getByRole('dialog', { name: 'Переместить сессию в корзину?' }).getByRole('button', { name: 'В корзину', exact: true }).click();
   await expect(page).toHaveURL(/\/sessions$/);
   await expect(page.locator(`[data-session="${ids.plain}"]`)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Вернуть' })).toBeVisible();
 });
 
 test('unread_dot_and_counts_update_from_events', async ({ page }) => {

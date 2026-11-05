@@ -271,7 +271,7 @@
 			machine={resolvedMachine}
 			touch
 			onclose={() => (showSheet = false)}
-			ondeleted={() => void goto(resolve('sessions'))}
+			ontrashed={(id) => { sessionStorage.setItem('canterlot.trash-toast', id); window.dispatchEvent(new CustomEvent('canterlot:trash', { detail: id })); void goto(resolve('sessions')); }}
 		/>
 	{/if}
 

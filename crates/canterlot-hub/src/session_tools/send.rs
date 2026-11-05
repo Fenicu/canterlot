@@ -332,6 +332,27 @@ pub async fn subscribe(
     if args.session_id == subscriber.id {
         return Err(ToolError::new(ToolErrorCode::SessionNotFound));
     }
+    // Очередь берётся раньше строки цели, как в остальных путях хаба. Сначала
+    // отсеиваем чужую, отсутствующую или уже убранную в корзину цель, чтобы не
+    // запирать чужую очередь; затем очередь, и только потом `FOR KEY SHARE`.
+    if let Some(family) =
+        access::family_in_tx(&mut tx, &context.config, &subscriber, caller.owner_id).await?
+        && !family.contains(&args.session_id)
+    {
+        return Err(ToolError::new(ToolErrorCode::SessionNotFound));
+    }
+    let visible: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations
+                       where id=$1 and owner_id=$2 and trashed_at is null)",
+    )
+    .bind(args.session_id)
+    .bind(caller.owner_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !visible {
+        return Err(ToolError::new(ToolErrorCode::SessionNotFound));
+    }
+    lock_queue(&mut tx, args.session_id).await?;
     let target = access::target_in_tx(
         &mut tx,
         &context.config,
@@ -340,7 +361,6 @@ pub async fn subscribe(
         args.session_id,
     )
     .await?;
-    lock_queue(&mut tx, target.id).await?;
     let depth = access::current_depth(&mut tx, subscriber.id).await?;
     let settled = subs::subscribe_explicit_in_tx(
         &mut tx,

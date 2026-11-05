@@ -148,6 +148,20 @@ export const SCREENS: Screen[] = [
     await page.getByRole('button', { name: /^Действия:/ }).first().click();
     await expect(page.getByRole('dialog').first()).toBeVisible();
   }),
+  screen('trash', false, PHONE, 'dark', async (page) => {
+    const { hub, api } = fresh();
+    const ids = seedMockupSessions(api);
+    api.trashConversation(ids.plain);
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.addInitScript(() => localStorage.setItem('canterlot.list-tab', JSON.stringify({ kind: 'trash' })));
+    await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: /Корзина/ })).toBeVisible();
+  }),
+  screen('chat-trashed', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, _hub, api, id) => {
+    api.trashConversation(id);
+    await expect(opened.getByRole('heading', { name: 'Сессия в корзине' })).toBeVisible();
+  })),
   screen('group-manager', false, PHONE, 'dark', async (page) => {
     await sessions(page, '/sessions', '[data-list-ready]');
     await page.getByRole('button', { name: 'Ещё' }).click();

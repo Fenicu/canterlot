@@ -211,6 +211,12 @@ pub struct AuthView {
 }
 
 #[derive(Serialize, ToSchema)]
+pub struct SessionsView {
+    /// Сколько сессия лежит в корзине до окончательной уборки; `0` — уборка выключена.
+    pub trash_retention_secs: u64,
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct ConfigView {
     pub version: String,
     pub schema_version: u32,
@@ -221,6 +227,7 @@ pub struct ConfigView {
     pub limit_thresholds: LimitThresholdsView,
     pub defaults: DefaultsView,
     pub auth: AuthView,
+    pub sessions: SessionsView,
 }
 
 /// Лимиты и пороги, которыми клиент проверяет ввод до отправки.
@@ -275,6 +282,9 @@ async fn config(o: Owner, State(state): State<AppState>) -> Result<Json<ConfigVi
         },
         auth: AuthView {
             logout_url: state.http.logout_url.clone(),
+        },
+        sessions: SessionsView {
+            trash_retention_secs: state.scheduler.trash_retention().as_secs(),
         },
     }))
 }

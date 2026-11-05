@@ -212,6 +212,7 @@ async fn serve(
         machines,
         attachments,
         session_tools,
+        sessions,
         orchestrator,
         ..
     } = config;
@@ -249,6 +250,7 @@ async fn serve(
     )
     .with_limits(registry.clone(), limits.clone())
     .with_session_tools(session_tools.clone())
+    .with_trash_retention(sessions.trash_retention)
     .with_settle(canterlot_hub::session_tools::settle::SettleConfig {
         nudge_enabled: orchestrator.nudge.enabled,
         ..(&activity).into()

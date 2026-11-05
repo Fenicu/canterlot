@@ -311,16 +311,16 @@ test.describe('stack: features and security', () => {
     expect(((await refused.json()) as { error: { code: string } }).error.code).toBe('conversation_live');
 
     await list.getByRole('button', { name: `Действия: ${title}` }).click();
-    await list.getByRole('button', { name: /^Удалить/ }).click();
-    const confirm = list.getByRole('dialog', { name: 'Остановить и удалить сессию?' });
+    await list.getByRole('button', { name: /^Переместить в корзину/ }).click();
+    const confirm = list.getByRole('dialog', { name: 'Остановить и убрать в корзину?' });
     await expect(confirm).toContainText('будет остановлен');
-    await confirm.getByRole('button', { name: 'Остановить и удалить' }).click();
+    await confirm.getByRole('button', { name: 'Остановить и убрать' }).click();
     await expect(list.locator(`[data-session="${id}"]`)).toHaveCount(0, { timeout: 30_000 });
-    await expect(chat.getByRole('heading', { name: 'Сессия удалена' })).toBeVisible({ timeout: 20_000 });
+    await expect(chat.getByRole('heading', { name: 'Сессия в корзине' })).toBeVisible({ timeout: 20_000 });
 
-    const gone = await hub.fetch(`/api/v1/conversations/${id}`);
-    expect(gone.status).toBe(404);
-    expect(((await gone.json()) as { error: { code: string } }).error.code).toBe('conversation_deleted');
+    const trashed = await hub.fetch(`/api/v1/conversations/${id}`);
+    expect(trashed.status).toBe(200);
+    expect(((await trashed.json()) as { trashed_at: string | null }).trashed_at).not.toBeNull();
     await context.close();
   });
 

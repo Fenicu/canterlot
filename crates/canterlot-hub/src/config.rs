@@ -34,6 +34,8 @@ pub struct HubConfig {
     #[serde(default)]
     pub session_tools: SessionToolsConfig,
     #[serde(default)]
+    pub sessions: SessionsConfig,
+    #[serde(default)]
     pub orchestrator: OrchestratorConfig,
 }
 
@@ -432,6 +434,23 @@ impl Default for ActivityConfig {
             tick: Duration::from_secs(15),
             debounce: Duration::from_millis(250),
             idle_quiet: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Повседневные настройки сессий владельца.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionsConfig {
+    /// Сколько сессия лежит в корзине до окончательной уборки. `0` выключает уборку.
+    #[serde(with = "humantime_serde")]
+    pub trash_retention: Duration,
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            trash_retention: Duration::from_secs(24 * 3600),
         }
     }
 }

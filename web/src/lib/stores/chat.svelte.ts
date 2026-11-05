@@ -445,6 +445,13 @@ export class ChatStore {
     return this.status === "forbidden" ? "unavailable" : null;
   }
 
+  /** Сессия в корзине: страница показывает возврат вместо ленты и поля ввода. */
+  get trashed(): boolean {
+    return Boolean(
+      (this.detail as { trashed_at?: string | null } | null)?.trashed_at,
+    );
+  }
+
   markDeleted(): void {
     this.deleted = true;
     this.close();
