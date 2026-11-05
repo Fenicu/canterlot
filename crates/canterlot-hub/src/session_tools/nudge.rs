@@ -639,6 +639,21 @@ pub async fn gate_in_tx(
         return Ok(false);
     };
     if !enabled || !rule.enabled {
+        // Выключатель: удержание снимается здесь же, до обычной доставки. Иначе
+        // уборка на старте увидела бы уже закрытую подписку и добавила заметку-дубль.
+        if rule.held_fingerprint.is_some() || rule.state == "pending" {
+            let row: RuleRow = sqlx::query_as(
+                "update nudge_rules set held_fingerprint=null,
+                     state=case when state='pending' then 'watching' else state end,
+                     updated_at=$2
+                 where conversation_id=$1 returning *",
+            )
+            .bind(target_id)
+            .bind(now)
+            .fetch_one(&mut *conn)
+            .await?;
+            changed_in_tx(conn, &row, Uuid::now_v7(), Some("disabled")).await?;
+        }
         return Ok(false);
     }
     if state == Settled::Stopped {

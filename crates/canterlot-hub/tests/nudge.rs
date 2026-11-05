@@ -1722,6 +1722,69 @@ async fn release_and_subscriber_deletion_complete_with_one_outcome(pool: PgPool)
     assert_eq!(jobs[0]["action"], "event");
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn disabled_refresh_before_cleanup_reports_once(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "dis3",
+        true,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    assert_eq!(rule_row(&pool, f.child).await.0, "pending");
+
+    // HTTP-обновление с выключателем успевает раньше уборки на старте.
+    activity::refresh_with_metrics(
+        &pool,
+        f.child,
+        now + TimeDelta::seconds(1),
+        &thresholds(),
+        Duration::from_secs(60),
+        false,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let held: Option<String> =
+        sqlx::query_scalar("select held_fingerprint from nudge_rules where conversation_id=$1")
+            .bind(f.child)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(held.is_none(), "the gate consumes the hold when disabled");
+    assert_eq!(jobs(&pool, f.parent).await.len(), 1);
+
+    nudge::disable_all_on_startup(&pool, now + TimeDelta::minutes(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        jobs(&pool, f.parent).await.len(),
+        1,
+        "cleanup must not add a fallback note"
+    );
+
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(2))
+        .await
+        .unwrap();
+    let reports: i64 = sqlx::query_scalar("select count(*) from inputs where conversation_id=$1")
+        .bind(f.parent)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reports, 1, "exactly one report");
+}
+
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.
 async fn deliver_owner_input(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fx, text: &str) {
     canterlot_hub::delivery::submit_input_in_tx(
