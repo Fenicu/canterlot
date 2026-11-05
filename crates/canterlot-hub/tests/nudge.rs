@@ -943,7 +943,17 @@ async fn permission_recheck_blocks_widened_modes_and_open_owner_requests(pool: P
         .tick(now + TimeDelta::minutes(4))
         .await
         .unwrap();
-    assert_eq!(rule_row(&pool, f2.child).await.0, "exhausted");
+    assert_eq!(rule_row(&pool, f2.child).await.0, "watching");
+    let nudges: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1 and origin->>'kind'='nudge'",
+    )
+    .bind(f2.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(nudges, 0, "an owner request blocks the nudge");
+    // Проектор видит открытый запрос и отдаёт подписчику waiting_for_user один раз.
+    refresh_at(&pool, f2.child, now + TimeDelta::minutes(5)).await;
     assert_eq!(jobs(&pool, f2.parent).await.len(), 1);
 }
 
