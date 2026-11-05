@@ -22,6 +22,8 @@ pub enum HttpError {
     Status {
         status: u16,
         tag: String,
+        /// Отказ общей базы SQLite: замок снят по сроку, а не по ошибке запроса.
+        locked: bool,
     },
     TooLarge,
     Decode,
@@ -51,6 +53,14 @@ fn error_tag(body: &[u8]) -> String {
                 && tag.bytes().all(|byte| byte.is_ascii_alphanumeric())
         })
         .unwrap_or_else(|| "UnknownError".to_owned())
+}
+
+// Признак замка общей базы: текст нужен только для решения о повторе и наружу не идёт.
+fn locked_error(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    text.contains("locktimeouterror")
+        || text.contains("database is locked")
+        || text.contains("failed to execute statement")
 }
 
 fn surrogate_at(json: &[u8], at: usize) -> Option<u16> {
@@ -156,6 +166,7 @@ impl Http {
             Err(HttpError::Status {
                 status: status.as_u16(),
                 tag: error_tag(&body),
+                locked: locked_error(&body),
             })
         };
         tokio::time::timeout(limit, exchange)
@@ -245,6 +256,7 @@ impl Http {
             return Err(HttpError::Status {
                 status: response.status().as_u16(),
                 tag: "UnknownError".to_owned(),
+                locked: false,
             });
         }
         Ok(response)
@@ -274,6 +286,21 @@ mod tests {
             .await
             .unwrap();
         assert!(!format!("{http:?}").contains("пароль"));
+    }
+
+    #[test]
+    fn a_locked_database_is_recognized_without_exposing_the_body() {
+        assert!(locked_error(
+            br#"{"_tag":"UnknownError","message":"Failed to execute statement"}"#
+        ));
+        assert!(locked_error(
+            br#"{"message":"effect/sql/SqlError/LockTimeoutError"}"#
+        ));
+        assert!(locked_error(
+            br#"{"cause":"SQLiteError: database is locked"}"#
+        ));
+        assert!(!locked_error(br#"{"message":"invalid request"}"#));
+        assert!(!locked_error(b"not json"));
     }
 
     fn text(json: &str) -> String {

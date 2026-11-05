@@ -70,6 +70,7 @@ pub fn block_id(session: &str, message: &str, kind: &str, part: &str) -> Uuid {
     )
 }
 
+#[derive(Clone)]
 pub struct RunFailure {
     pub kind: String,
     pub message: String,
