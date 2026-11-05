@@ -44,6 +44,18 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         json: await api.history(id, {
           before: url.searchParams.get('before') ?? undefined,
           after: url.searchParams.get('after') ?? undefined,
+          around: url.searchParams.get('around') ?? undefined,
+          limit: limit ? Number(limit) : undefined
+        }),
+        headers
+      });
+      return;
+    }
+    if (route.request().method() === 'GET' && kind === 'inputs') {
+      const limit = url.searchParams.get('limit');
+      await route.fulfill({
+        json: await api.inputs(id, {
+          before: url.searchParams.get('before') ?? undefined,
           limit: limit ? Number(limit) : undefined
         }),
         headers

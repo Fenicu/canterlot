@@ -295,7 +295,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        get: operations["get__api_v1_conversations__id__inputs"];
         put?: never;
         post: operations["post__api_v1_conversations__id__inputs"];
         delete?: never;
@@ -1967,6 +1967,23 @@ export interface components {
             /** Format: int64 */
             size: number;
         };
+        /** @description Одно сообщение владельца для списка перехода по своим сообщениям. */
+        OwnerInputView: {
+            /** Format: int64 */
+            attachments_count: number;
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            origin?: components["schemas"]["InputOrigin"] | null;
+            /** @description Первая часть текста без разбора: строку списка выбирает клиент. */
+            preview: string;
+            /** @description Место ввода в ленте (`feed_seq`): по нему клиент прыгает к сообщению. */
+            seq: string;
+        };
+        OwnerInputsPage: {
+            items: components["schemas"]["OwnerInputView"][];
+            next_before?: string | null;
+        };
         OwnerMemoryFileView: {
             mtime?: string | null;
             name: string;
@@ -3555,6 +3572,8 @@ export interface operations {
             query?: {
                 before?: string;
                 after?: string;
+                /** @description Место в ленте: окно вокруг него вместо страницы от края. */
+                around?: string;
                 limit?: number;
             };
             header?: never;
@@ -3574,6 +3593,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HistoryPage"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__inputs: {
+        parameters: {
+            query?: {
+                before?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сообщения владельца в порядке ленты */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OwnerInputsPage"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

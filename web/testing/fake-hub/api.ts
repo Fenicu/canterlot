@@ -1,5 +1,5 @@
 import { utf8Length, utf8Slice, type BlockPage } from '../../src/lib/stores/blocks';
-import type { AlarmView, HistoryBlock, HistoryItem, HistoryPage, LanePage, SnapshotData } from '../../src/lib/stores/chat.svelte';
+import type { AlarmView, HistoryBlock, HistoryInput, HistoryItem, HistoryPage, LanePage, SnapshotData } from '../../src/lib/stores/chat.svelte';
 import type { DelegationNode } from '../../src/lib/stores/delegation';
 import type { Counts, ListRow, ListSnapshot } from '../../src/lib/stores/list.svelte';
 import type { ProviderLimits } from '../../src/lib/stores/limits';
@@ -457,11 +457,36 @@ export class FakeHubApi {
 		return { cursor: snap.cursor, data: (snap.data as SnapshotData | null) ?? this.conversationData(id) };
 	}
 
-	async history(id: string, query: { before?: string; after?: string; limit?: number } = {}): Promise<HistoryPage> {
+	async history(id: string, query: { before?: string; after?: string; around?: string; limit?: number } = {}): Promise<HistoryPage> {
 		return this.page(id, query);
 	}
 
-	page(id: string, query: { before?: string; after?: string; limit?: number }): HistoryPage {
+	async inputs(id: string, query: { before?: string; limit?: number } = {}): Promise<components['schemas']['OwnerInputsPage']> {
+		const all = (this.histories.get(id) ?? [])
+			.filter((item): item is HistoryInput => item.kind === 'input' && Boolean(item.feed_seq) && !waiting(item))
+			.sort((a, b) => cmp(seqOf(a), seqOf(b)));
+		const limit = query.limit ?? 500;
+		const older = query.before ? all.filter((item) => cmp(seqOf(item), query.before!) < 0) : all;
+		const slice = older.slice(-limit);
+		const oldest = slice[0];
+		const items = slice.map((item) => {
+			const text = item.content.filter((block) => block.type === 'text').map((block) => block.text ?? '').join('');
+			return {
+				id: item.id,
+				seq: seqOf(item),
+				created_at: item.created_at,
+				preview: [...text].slice(0, 200).join(''),
+				attachments_count: item.content.filter((block) => block.type === 'attachment').length,
+				origin: item.origin ?? null
+			};
+		});
+		return {
+			items,
+			next_before: oldest && older.length > slice.length ? seqOf(oldest) : null
+		};
+	}
+
+	page(id: string, query: { before?: string; after?: string; around?: string; limit?: number }): HistoryPage {
 		const placed = [...this.requestRows(id).values()].flatMap((row): HistoryItem[] =>
 			row.created_seq
 				? [
@@ -487,6 +512,20 @@ export class FakeHubApi {
 		if (query.before) filtered = filtered.filter((item) => cmp(seqOf(item), query.before!) < 0);
 		if (query.after) filtered = filtered.filter((item) => cmp(seqOf(item), query.after!) > 0);
 		const limit = query.limit ?? 100;
+		if (query.around) {
+			const older = all.filter((item) => cmp(seqOf(item), query.around!) <= 0);
+			const newer = all.filter((item) => cmp(seqOf(item), query.around!) > 0);
+			const olderLimit = limit <= 2 ? 1 : Math.max(1, Math.floor(limit / 4));
+			const keptOlder = older.slice(-olderLimit);
+			const keptNewer = newer.slice(0, Math.max(1, limit - keptOlder.length));
+			const oldest = keptOlder[0];
+			const newest = keptNewer[keptNewer.length - 1];
+			return {
+				items: [...keptOlder, ...keptNewer],
+				next_before: oldest && older.length > keptOlder.length ? seqOf(oldest) : null,
+				next_after: newest && newer.length > keptNewer.length ? seqOf(newest) : null
+			};
+		}
 		const slice = query.after ? filtered.slice(0, limit) : filtered.slice(-limit);
 		const oldest = slice[0];
 		const newest = slice[slice.length - 1];

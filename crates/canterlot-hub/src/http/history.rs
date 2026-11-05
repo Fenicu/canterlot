@@ -31,6 +31,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
 pub struct HistoryParams {
     pub before: Option<String>,
     pub after: Option<String>,
+    /// Место в ленте: окно вокруг него вместо страницы от края.
+    pub around: Option<String>,
     pub limit: Option<i64>,
 }
 #[derive(Deserialize, IntoParams)]
@@ -64,7 +66,7 @@ pub(crate) fn decimal(value: &str) -> Result<i64, ApiError> {
     }
     value.parse().map_err(|_| invalid())
 }
-fn history_key(value: &str) -> Result<i64, ApiError> {
+pub(crate) fn history_key(value: &str) -> Result<i64, ApiError> {
     let digits = value.strip_prefix('-').unwrap_or(value);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(invalid());
@@ -82,12 +84,17 @@ async fn page(
     ApiQuery(p): ApiQuery<HistoryParams>,
 ) -> Result<Json<HistoryPage>, ApiError> {
     let limit = p.limit.unwrap_or(100);
-    if !(1..=200).contains(&limit) || p.before.is_some() && p.after.is_some() {
+    let directions = [p.before.is_some(), p.after.is_some(), p.around.is_some()]
+        .into_iter()
+        .filter(|set| *set)
+        .count();
+    if !(1..=200).contains(&limit) || directions > 1 {
         return Err(invalid());
     }
-    let cursor = match (p.before, p.after) {
-        (Some(n), None) => HistoryCursor::Before(history_key(&n)?),
-        (None, Some(n)) => HistoryCursor::After(history_key(&n)?),
+    let cursor = match (p.before, p.after, p.around) {
+        (Some(n), None, None) => HistoryCursor::Before(history_key(&n)?),
+        (None, Some(n), None) => HistoryCursor::After(history_key(&n)?),
+        (None, None, Some(n)) => HistoryCursor::Around(history_key(&n)?),
         _ => HistoryCursor::Tail,
     };
     let result = crate::db::in_tx(&s.pool, move |conn| {

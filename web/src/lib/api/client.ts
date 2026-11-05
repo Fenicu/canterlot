@@ -432,8 +432,22 @@ export function conversationHistory(
   );
 }
 
-export function conversationBlock(
+export function conversationInputs(
   conversationId: string,
+  query?: Query,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_conversations__id__inputs"]>>
+> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/conversations/${id(conversationId)}/inputs`, query),
+    undefined,
+    opts,
+  );
+}
+
+export function conversationBlock(  conversationId: string,
   blockId: string,
   query?: Query,
   opts?: RequestOptions,
