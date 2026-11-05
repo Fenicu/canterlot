@@ -473,6 +473,12 @@
   --duration-jump-glow: calc(var(--motion-base-jump-glow) * var(--motion-scale));
   --ease-jump-glow: cubic-bezier(.33, 0, .2, 1);
   --jump-glow-share: 22%;
+  /* Новый запрос агента: карточка поднимается из-под поля ввода и коротко теплится тоном акцента. */
+  --motion-base-request-arrive: 320ms;
+  --duration-request-arrive: calc(var(--motion-base-request-arrive) * var(--motion-scale));
+  --motion-base-request-accent: 1100ms;
+  --duration-request-accent: calc(var(--motion-base-request-accent) * var(--motion-scale));
+  --request-accent-share: 18%;
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -494,6 +500,8 @@
     --duration-compact-fold: 0ms;
     --duration-compact-settle: 0ms;
     --duration-jump-glow: 0ms;
+    --duration-request-arrive: 0ms;
+    --duration-request-accent: 0ms;
   }
 }
 

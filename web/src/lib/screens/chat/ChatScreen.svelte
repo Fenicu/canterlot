@@ -211,6 +211,7 @@
 			{#each docked as req (req.id)}
 				<RequestCard
 					request={req}
+					arrive
 					harnessId={sessionHarnessId}
 					permissionMode={sessionPermissionMode}
 					onDecision={async (decision) => {
