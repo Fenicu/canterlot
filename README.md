@@ -70,6 +70,8 @@ Canterlot — self-hosted хаб для агентов программиров�
 
 Текущая версия — 1.11.0. История изменений для человека — [CHANGES.rst](CHANGES.rst), правила бампа — [docs/versioning.md](docs/versioning.md).
 
+Готовые архивы хаба, воркера (x86_64, glibc 2.41 и новее) и PWA с контрольными суммами лежат в [выпусках на Forgejo](https://git.fenicu.com/Fenicu/canterlot/releases). Их публикует `scripts/publish-release.sh vX.Y.Z` из сборки, сделанной при выкатке, без повторной компиляции.
+
 ## Лицензии
 
 Canterlot распространяется по лицензии MIT, текст — [LICENSE](LICENSE).
