@@ -1238,6 +1238,8 @@ impl Worker {
         // Провайдер и источник запроса: `true` — тикер простоя, `false` — запрос хаба.
         let mut polls: VecDeque<(String, PollKind)> = VecDeque::new();
         let mut limits_outbound = None;
+        // Провайдер текущего опроса: по нему назначается свой повтор после сбоя.
+        let mut limits_provider: Option<String> = None;
         type LimitsFuture =
             Pin<Box<dyn Future<Output = crate::machine::limits::LimitsFetch> + Send>>;
         let mut limits_operation: Option<LimitsFuture> = None;
@@ -1281,6 +1283,7 @@ impl Worker {
         );
         tokio::pin!(data_loop);
         let idle_ticker = &mut self.idle_ticker;
+        let limits_source = self.limits_source.clone();
         type StoreFuture = Pin<Box<dyn Future<Output = Result<StoreReply, WorkerError>> + Send>>;
         let mut operation: Option<StoreFuture> = None;
         type ExecutionFuture<'a> =
@@ -1291,7 +1294,8 @@ impl Worker {
                 && limits_outbound.is_none()
                 && let Some((provider, kind)) = polls.pop_front()
             {
-                let source = self.limits_source.clone();
+                let source = limits_source.clone();
+                limits_provider = Some(provider.clone());
                 limits_operation = Some(Box::pin(async move {
                     match kind {
                         PollKind::Idle => source.poll_report(&provider, true).await,
@@ -1592,6 +1596,9 @@ impl Worker {
                 }
                 fetched=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
                     limits_operation=None;
+                    let provider=limits_provider.take().unwrap_or_default();
+                    // Временный сбой не ждёт следующего тика: воркер сам назначает ранний повтор.
+                    if let Some(delay)=limits_source.retry_in(&provider) { idle_ticker.reschedule(&provider, delay); }
                     // Хаб держит один необработанный отчёт: пустой вытеснил бы настоящий.
                     if !fetched.observations.is_empty() || !fetched.absent.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations:fetched.observations,absent:fetched.absent}))});}
                 }

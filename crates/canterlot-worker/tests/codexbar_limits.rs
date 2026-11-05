@@ -158,6 +158,53 @@ fn percent_above_the_scale_is_clamped() {
     assert_eq!(observed[0].used_permille, 1000);
 }
 
+/// Заглушка выбирает ответ по `--provider`; OpenCode падает, пока в `mode` нет `ok`.
+fn per_provider(dir: &Path) -> PathBuf {
+    for (name, fixture) in [
+        ("claude.json", CLAUDE_WEEKLY_ONLY),
+        ("codex.json", CODEX),
+        ("opencode.json", OPENCODEGO),
+    ] {
+        fs::write(dir.join(name), fixture).unwrap();
+    }
+    executable(
+        dir,
+        &format!(
+            r#"provider=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--provider" ]; then shift; provider="$1"; fi
+  shift
+done
+echo "$provider" >> '{runs}'
+case "$provider" in
+  claude) cat '{claude}' ;;
+  codex) cat '{codex}' ;;
+  opencodego)
+    if [ "$(cat '{mode}' 2>/dev/null)" = "ok" ]; then cat '{opencode}'; else exit 3; fi ;;
+  *) exit 3 ;;
+esac
+"#,
+            runs = dir.join("runs").display(),
+            mode = dir.join("mode").display(),
+            claude = dir.join("claude.json").display(),
+            codex = dir.join("codex.json").display(),
+            opencode = dir.join("opencode.json").display(),
+        ),
+    )
+}
+
+fn runs_of(dir: &Path, provider: &str) -> usize {
+    fs::read_to_string(dir.join("runs"))
+        .map(|text| text.lines().filter(|line| *line == provider).count())
+        .unwrap_or_default()
+}
+
+fn run_count(dir: &Path) -> usize {
+    fs::read_to_string(dir.join("runs"))
+        .map(|text| text.lines().count())
+        .unwrap_or_default()
+}
+
 #[derive(Clone)]
 struct TestClock(Arc<Mutex<Instant>>);
 
@@ -589,6 +636,126 @@ fn opencode_monthly_window_is_read_even_when_other_windows_are_missing() {
     assert_eq!(
         reading.absent.iter().map(|a| a.window).collect::<Vec<_>>(),
         vec![FIVE]
+    );
+}
+
+#[tokio::test]
+async fn opencode_failure_does_not_delay_claude_or_codex() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::new();
+    let source = source(per_provider(dir.path()), &clock, None);
+
+    assert_eq!(source.poll_idle("claude").await.len(), 1);
+    assert_eq!(source.poll_idle("codex").await.len(), 2);
+    assert!(source.poll_idle("opencode").await.is_empty());
+    assert_eq!(runs_of(dir.path(), "claude"), 1);
+    assert_eq!(runs_of(dir.path(), "codex"), 1);
+    assert_eq!(runs_of(dir.path(), "opencodego"), 1);
+
+    // Пауза OpenCode после сбоя не должна останавливать других провайдеров.
+    clock.advance(Duration::from_secs(300));
+    assert_eq!(source.poll_idle("claude").await.len(), 1);
+    assert_eq!(source.poll_idle("codex").await.len(), 2);
+    assert_eq!(
+        runs_of(dir.path(), "claude"),
+        2,
+        "claude keeps its own interval"
+    );
+    assert_eq!(
+        runs_of(dir.path(), "codex"),
+        2,
+        "codex keeps its own interval"
+    );
+    assert!(
+        source.poll_idle("opencode").await.is_empty(),
+        "opencode is still in its own backoff"
+    );
+    assert_eq!(
+        runs_of(dir.path(), "opencodego"),
+        1,
+        "opencode waits for its own backoff"
+    );
+}
+
+fn invalid_output(dir: &Path) -> PathBuf {
+    executable(
+        dir,
+        &format!(
+            "echo run >> '{}'\necho not-json\n",
+            dir.join("runs").display()
+        ),
+    )
+}
+
+#[tokio::test]
+async fn transient_failures_retry_after_a_minute_then_two_then_the_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::new();
+    let source = poll_source(invalid_output(dir.path()), &clock, 900);
+
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(run_count(dir.path()), 1, "first failed run");
+    clock.advance(Duration::from_secs(59));
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(run_count(dir.path()), 1, "not a minute yet");
+    clock.advance(Duration::from_secs(1));
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(run_count(dir.path()), 2, "first retry after a minute");
+
+    clock.advance(Duration::from_secs(119));
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(run_count(dir.path()), 2, "second retry waits two minutes");
+    clock.advance(Duration::from_secs(1));
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(run_count(dir.path()), 3, "second retry after two minutes");
+
+    clock.advance(Duration::from_secs(899));
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(run_count(dir.path()), 3, "then the normal interval");
+    clock.advance(Duration::from_secs(1));
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(run_count(dir.path()), 4, "third retry after the interval");
+
+    clock.advance(Duration::from_secs(899));
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(
+        run_count(dir.path()),
+        4,
+        "transient retries never grow past it"
+    );
+    clock.advance(Duration::from_secs(1));
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(run_count(dir.path()), 5, "still the plain interval");
+}
+
+fn nice_of(pid: u32) -> i32 {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let fields = &stat[stat.rfind(')').unwrap() + 1..];
+    fields.split_whitespace().nth(16).unwrap().parse().unwrap()
+}
+
+#[tokio::test]
+async fn codexbar_runs_at_a_lower_cpu_priority() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::new();
+    let marker = dir.path().join("nice");
+    let output = dir.path().join("out.json");
+    fs::write(&output, CLAUDE_WEEKLY_ONLY).unwrap();
+    let exe = executable(
+        dir.path(),
+        &format!(
+            "awk '{{print $19}}' /proc/self/stat > '{}'\ncat '{}'\n",
+            marker.display(),
+            output.display()
+        ),
+    );
+    let source = source(exe, &clock, None);
+    assert_eq!(source.poll("claude").await.len(), 1);
+    let child: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+    assert_eq!(
+        child,
+        (nice_of(std::process::id()) + 10).min(19),
+        "codexbar runs 10 nice levels lower than the worker"
     );
 }
 

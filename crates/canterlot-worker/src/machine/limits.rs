@@ -46,6 +46,10 @@ pub trait LimitsSource: Send + Sync {
     async fn poll_refresh(&self, provider: &str) -> LimitsFetch {
         self.poll_report(provider, false).await
     }
+    /// Через сколько источник сам ждёт повторного опроса после сбоя; `None` — обычный интервал.
+    fn retry_in(&self, _provider: &str) -> Option<Duration> {
+        None
+    }
 }
 pub struct NoLimitsSource;
 #[async_trait::async_trait]
@@ -176,6 +180,18 @@ impl IdleTicker {
                 provider.clone()
             })
             .collect()
+    }
+
+    /// Назначить провайдеру более ранний срок: повтор после временного сбоя. Позже не сдвигает.
+    pub fn reschedule(&mut self, provider: &str, after: Duration) {
+        let due = Instant::now() + after;
+        if let Some((_, _, slot)) = self
+            .entries
+            .iter_mut()
+            .find(|(name, _, _)| name == provider)
+        {
+            *slot = (*slot).min(due);
+        }
     }
 }
 
@@ -363,5 +379,49 @@ impl LimitsSource for RoutedLimitsSource {
     async fn poll_refresh(&self, provider: &str) -> LimitsFetch {
         let source = self.routes.get(provider).unwrap_or(&self.default).clone();
         source.poll_refresh(provider).await
+    }
+
+    fn retry_in(&self, provider: &str) -> Option<Duration> {
+        self.routes
+            .get(provider)
+            .unwrap_or(&self.default)
+            .retry_in(provider)
+    }
+}
+
+#[cfg(test)]
+mod idle_ticker_tests {
+    use super::IdleTicker;
+    use std::time::Duration;
+
+    impl IdleTicker {
+        fn due_in(&self, provider: &str) -> Option<Duration> {
+            let now = tokio::time::Instant::now();
+            self.entries
+                .iter()
+                .find(|(name, _, _)| name == provider)
+                .map(|(_, _, due)| due.saturating_duration_since(now))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_moves_the_provider_tick_earlier_but_never_later() {
+        let mut ticker = IdleTicker::default();
+        ticker.register("claude", Duration::from_secs(900));
+        assert_eq!(ticker.due_in("claude"), Some(Duration::from_secs(60)));
+
+        tokio::time::advance(Duration::from_secs(50)).await;
+        ticker.reschedule("claude", Duration::from_secs(5));
+        assert_eq!(ticker.due_in("claude"), Some(Duration::from_secs(5)));
+
+        ticker.reschedule("claude", Duration::from_secs(30));
+        assert_eq!(
+            ticker.due_in("claude"),
+            Some(Duration::from_secs(5)),
+            "a later retry does not postpone the tick"
+        );
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(ticker.tick().await, vec!["claude".to_owned()]);
     }
 }
