@@ -830,7 +830,7 @@ async fn deleted_event_after_trash_has_only_the_minimal_notice(pool: PgPool) {
     assert!(!origin.to_string().contains("секретное"));
     assert!(
         canterlot_hub::session_tools::summary::build(
-            &mut *f.pool.acquire().await.unwrap(),
+            &mut f.pool.acquire().await.unwrap(),
             f.owner,
             target,
             "deleted",
