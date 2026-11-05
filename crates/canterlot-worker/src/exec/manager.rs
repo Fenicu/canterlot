@@ -733,6 +733,17 @@ pub(super) async fn remove_worktree(
         .await
 }
 
+/// Отказ запуска виден в журнале воркера: `supervisor.log` удаляется вместе с каталогом
+/// исполнения, а `start_failed` без причины владелец не разберёт.
+fn log_start_failure(execution_id: Uuid, reason: &str) {
+    tracing::warn!(
+        execution_id = %execution_id,
+        kind = "start_failed",
+        reason,
+        "execution start failed"
+    );
+}
+
 pub(super) async fn reject(
     shared: &Shared,
     command: &Command,
@@ -757,6 +768,7 @@ pub(super) async fn reject(
     if let Some(id) = id
         && matches!(command.kind, Some(Kind::StartExecution(_)))
     {
+        log_start_failure(id, reason);
         shared.with_info(id, |info| {
             info.state = "failed".into();
             info.outcome = "start_rejected".into();
@@ -1431,13 +1443,7 @@ impl Actor {
         owned: bool,
         reason: &str,
     ) -> Result<bool, ExecError> {
-        // Причина отказа — короткий код; пути и содержимое сюда не попадают.
-        tracing::warn!(
-            execution_id = %self.id,
-            kind = "start_failed",
-            reason,
-            "execution start failed"
-        );
+        // Причина отказа — короткий код; строку журнала пишет `reject` вместе с CJ.
         reject(&self.shared, command, reason).await?;
         if owned {
             ownership_update(&self.shared, self.id, |record| {
@@ -2034,6 +2040,10 @@ impl Actor {
                     });
                 }
                 Body::JournalClosed(_) => self.closed_seq = Some(record.seq),
+                // Причина отказа запуска приходит из журнала сопровождения с коротким кодом.
+                Body::AdapterDiagnostic(fact) if fact.kind == "start_failed" => {
+                    log_start_failure(self.id, &fact.event_type);
+                }
                 _ => {}
             }
         }
@@ -2656,7 +2666,106 @@ mod tests {
         config::ExecutionConfig, exec::ExecutionManager, session_store::StoreThread,
         store::WorkerStore,
     };
-    use canterlot_proto::worker::v1::{DeliverInput, InputCancelLost, JournalRecord, RecordBody};
+    use canterlot_proto::worker::v1::{
+        AdapterDiagnostic, DeliverInput, InputCancelLost, JournalRecord, RecordBody,
+    };
+
+    #[test]
+    fn a_start_failure_reason_reaches_the_worker_log() {
+        #[derive(Clone, Default)]
+        struct Output(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = Output::default();
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let id = Uuid::now_v7();
+        tracing::subscriber::with_default(subscriber, || log_start_failure(id, "unknown_profile"));
+        let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("start_failed"), "{log}");
+        assert!(log.contains("unknown_profile"), "{log}");
+        assert!(log.contains(&id.to_string()), "{log}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_start_failed_diagnostic_is_logged_with_its_reason() {
+        #[derive(Clone, Default)]
+        struct Output(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        let id = Uuid::now_v7();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        let journal = Uuid::now_v7();
+        actor.journal_id = Some(journal);
+        let output = Output::default();
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        actor
+            .on_batch(SjBatch {
+                journal_id: journal.to_string(),
+                records: vec![JournalRecord {
+                    seq: 1,
+                    body: Some(RecordBody {
+                        body: Some(Body::AdapterDiagnostic(AdapterDiagnostic {
+                            execution_id: id.to_string(),
+                            kind: "start_failed".into(),
+                            event_type: "session_create_failed".into(),
+                            ..Default::default()
+                        })),
+                    }),
+                }],
+            })
+            .await
+            .unwrap();
+        drop(guard);
+        let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("start_failed"), "{log}");
+        assert!(log.contains("session_create_failed"), "{log}");
+        assert!(log.contains(&id.to_string()), "{log}");
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
 
     #[tokio::test]
     async fn closed_journal_decision_ack_is_persisted_in_cj() {
