@@ -643,6 +643,7 @@ async fn singleton_activity_recreates_projection_after_lock_loss(pool: PgPool) {
             ..Default::default()
         },
         MachinesConfig::default(),
+        true,
         rx,
     ));
     let pid = lock_pid(&pool, "activity", 0).await;
@@ -829,6 +830,7 @@ async fn mark_read_preserves_configured_metrics_freshness(pool: PgPool) {
         Utc::now(),
         &activity::Thresholds::from(&deps.activity),
         deps.machines.metrics_stale_after,
+        true,
         Uuid::now_v7(),
     )
     .await

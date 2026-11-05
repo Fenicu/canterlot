@@ -71,6 +71,8 @@ struct SpawnArgs {
     subscribe: bool,
     #[serde(default)]
     attachment_ids: Vec<Uuid>,
+    /// `true`, `false` или поля `nudge_set` без `session_id`.
+    nudge: Option<Value>,
 }
 
 /// Проверенный запуск с уже выбранным режимом: `request_payload` карточки.
@@ -89,6 +91,9 @@ pub struct SpawnSpec {
     subscribe: bool,
     #[serde(default)]
     attachment_ids: Vec<Uuid>,
+    /// Правило автопинка для потомка; `false` — без правила.
+    #[serde(default)]
+    nudge: Value,
     /// Глубина хода родителя: с неё подписка и бриф считают цепочку.
     chain_depth: i32,
     /// Режим у CLI потомка сильнее, чем у родителя: запуск только через карточку.
@@ -232,6 +237,7 @@ fn check_arguments(args: &SpawnArgs) -> Result<(), ToolError> {
         .permission_mode
         .as_deref()
         .is_some_and(|mode| !MODES.contains(&mode));
+    crate::session_tools::nudge::validate_spawn_arg(&args.nudge)?;
     if args.brief.trim().is_empty()
         || args.brief.contains('\0')
         || bad_base
@@ -479,6 +485,7 @@ async fn validate(
             brief: args.brief,
             subscribe: args.subscribe,
             attachment_ids: args.attachment_ids,
+            nudge: args.nudge.unwrap_or(Value::Bool(false)),
             chain_depth,
             wider_than_parent,
         },
@@ -580,6 +587,15 @@ async fn start_child(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Star
     if spec.subscribe {
         subs::subscribe_in_tx(conn, owner, parent.id, child, spec.chain_depth).await?;
     }
+    crate::session_tools::nudge::set_for_child_in_tx(
+        conn,
+        owner,
+        parent,
+        child,
+        &spec.nudge,
+        Utc::now(),
+    )
+    .await?;
     Ok(Started {
         session_id: child,
         title,

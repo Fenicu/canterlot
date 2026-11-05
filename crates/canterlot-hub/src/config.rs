@@ -505,6 +505,19 @@ impl Default for SchedulerConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct OrchestratorConfig {
     pub alarms: AlarmsConfig,
+    pub nudge: NudgeConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NudgeConfig {
+    pub enabled: bool,
+}
+
+impl Default for NudgeConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

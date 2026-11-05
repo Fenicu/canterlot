@@ -25,6 +25,15 @@ struct EventJob {
     /// Граница отпущенного пачкой итога: у старых заданий её нет.
     #[serde(default)]
     boundary: Option<summary::Boundary>,
+    /// Отпущенный после исчерпания автопинка итог.
+    #[serde(default)]
+    nudge_exhausted: bool,
+    #[serde(default)]
+    nudges: i64,
+    #[serde(default)]
+    signals_text: String,
+    #[serde(default)]
+    asks_in_text: bool,
 }
 
 #[derive(Deserialize)]
@@ -63,11 +72,12 @@ enum Action {
     Cleanup,
     AlarmDeliver,
     AlarmProbe,
+    Nudge,
 }
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Event,
         Self::MachineEvent,
         Self::Note,
@@ -76,6 +86,7 @@ impl Action {
         Self::Cleanup,
         Self::AlarmDeliver,
         Self::AlarmProbe,
+        Self::Nudge,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -88,6 +99,7 @@ impl Action {
             "cleanup" => Some(Self::Cleanup),
             "alarm_deliver" => Some(Self::AlarmDeliver),
             "alarm_probe" => Some(Self::AlarmProbe),
+            "nudge" => Some(Self::Nudge),
             _ => None,
         }
     }
@@ -99,6 +111,7 @@ pub async fn run_in_tx(
     now: DateTime<Utc>,
     correlation_id: Uuid,
     registry: Option<&Registry>,
+    settle: &crate::session_tools::settle::SettleConfig,
 ) -> Result<JobOutcome, SubmitError> {
     let Some(subscriber) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -177,6 +190,9 @@ pub async fn run_in_tx(
                     .await?,
             )
         }
+        Action::Nudge => {
+            crate::session_tools::nudge::run_job_in_tx(conn, job, now, correlation_id, settle).await
+        }
     }
 }
 
@@ -199,14 +215,47 @@ async fn event_message(
     .await?;
     Ok(match summary {
         Some(summary) => {
-            let event = summary.hub_event();
-            let origin = json!({"kind":"event","from":id,"title":summary.title,"harness":summary.harness,"model":summary.model,"chain_depth":depth,"event":event});
-            (summary::render(&summary), origin)
+            let mut facts = summary.hub_event();
+            if event.nudges > 0 {
+                facts.nudges = Some(event.nudges);
+            }
+            if event.nudge_exhausted {
+                facts.nudge_exhausted = Some(true);
+            }
+            if event.asks_in_text {
+                facts.asks_in_text = Some(true);
+            }
+            let mut text = summary::render(&summary);
+            if let Some(prefix) = nudge_prefix(event) {
+                text = format!("{prefix}\n{text}");
+            }
+            let origin = json!({"kind":"event","from":id,"title":summary.title,"harness":summary.harness,"model":summary.model,"chain_depth":depth,"event":facts});
+            (text, origin)
         }
         None => (
             format!("[canterlot] Session {id} was deleted."),
             json!({"kind":"event","from":id,"chain_depth":depth,"event":origin::HubEvent::deleted(id)}),
         ),
+    })
+}
+
+/// Итог после автопинка: исчерпание называет число толчков и последние сигналы.
+fn nudge_prefix(event: &EventJob) -> Option<String> {
+    if event.nudge_exhausted {
+        let mut line = format!(
+            "[canterlot] Auto-nudge gave up after {} nudges without progress.",
+            event.nudges
+        );
+        if !event.signals_text.is_empty() {
+            line.push_str(&format!(" Last signals: {}.", event.signals_text));
+        }
+        return Some(line);
+    }
+    (event.nudges > 0).then(|| {
+        format!(
+            "[canterlot] This result follows {} automatic nudges.",
+            event.nudges
+        )
     })
 }
 
@@ -390,6 +439,9 @@ pub async fn abandon_in_tx(
         },
         // Опрос лимитов ничего не удерживает: срок будильника закроет задание `alarm`.
         Action::AlarmProbe => Ok(false),
+        Action::Nudge => {
+            crate::session_tools::nudge::abandon_in_tx(conn, conversation, payload, now).await
+        }
     }
 }
 
@@ -429,6 +481,7 @@ mod tests {
                 Action::AlarmProbe => {
                     json!({"action": "alarm_probe", "alarm_id": Uuid::now_v7()})
                 }
+                Action::Nudge => json!({"action": "nudge", "fingerprint": "f"}),
             };
             abandon_in_tx(
                 &mut conn,

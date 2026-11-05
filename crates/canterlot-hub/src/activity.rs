@@ -614,6 +614,7 @@ pub async fn refresh(
         now,
         thresholds,
         MachinesConfig::default().metrics_stale_after,
+        true,
         correlation_id,
     )
     .await
@@ -625,6 +626,7 @@ pub async fn refresh_with_metrics(
     now: DateTime<Utc>,
     thresholds: &Thresholds,
     stale_after: Duration,
+    nudge_enabled: bool,
     correlation_id: Uuid,
 ) -> Result<Refresh, sqlx::Error> {
     let thresholds = *thresholds;
@@ -685,7 +687,7 @@ pub async fn refresh_with_metrics(
         {
             sqlx::query("update conversation_derived d set updated_at=clock_timestamp() where d.conversation_id=$1 and d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||d.conversation_id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed'))")
                 .bind(conversation_id).execute(&mut *conn).await?;
-            let fired = evaluate_subscriptions(&mut *conn, conversation_id, &activity, &inputs, since, &thresholds).await?;
+            let fired = evaluate_subscriptions(&mut *conn, conversation_id, &activity, &inputs, since, &thresholds, nudge_enabled).await?;
             return Ok((Refresh::Unchanged, fired));
         }
     }
@@ -716,7 +718,7 @@ pub async fn refresh_with_metrics(
         )
         .await?;
     }
-    let fired = evaluate_subscriptions(&mut *conn, conversation_id, &activity, &inputs, since, &thresholds).await?;
+    let fired = evaluate_subscriptions(&mut *conn, conversation_id, &activity, &inputs, since, &thresholds, nudge_enabled).await?;
     Ok((Refresh::Changed, fired))
         })
     })
@@ -734,6 +736,7 @@ async fn evaluate_subscriptions(
     inputs: &ActivityInputs,
     since: DateTime<Utc>,
     thresholds: &Thresholds,
+    nudge_enabled: bool,
 ) -> Result<bool, sqlx::Error> {
     if inputs.wake_turn
         && matches!(
@@ -753,7 +756,10 @@ async fn evaluate_subscriptions(
             .as_ref()
             .and_then(|execution| execution.phase_at),
     };
-    let config = SettleConfig::from(thresholds);
+    let config = SettleConfig {
+        nudge_enabled,
+        ..SettleConfig::from(thresholds)
+    };
     let subscriptions = subs::evaluate_in_tx(
         conn,
         conversation_id,
@@ -778,7 +784,7 @@ async fn evaluate_subscriptions(
 }
 
 async fn sweep(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) order by c.id").fetch_all(pool).await
+    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from nudge_rules nr where nr.conversation_id=c.id and nr.state in ('watching','pending')) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) order by c.id").fetch_all(pool).await
 }
 
 pub async fn run(
@@ -786,6 +792,7 @@ pub async fn run(
     bus: EventBus,
     config: ActivityConfig,
     machines: MachinesConfig,
+    nudge_enabled: bool,
     shutdown: watch::Receiver<bool>,
 ) {
     crate::singleton::supervise(&pool, "activity", shutdown, || async {
@@ -877,6 +884,7 @@ pub async fn run(
                     Utc::now(),
                     &thresholds,
                     machines.metrics_stale_after,
+                    nudge_enabled,
                     Uuid::now_v7(),
                 )
                 .await

@@ -120,6 +120,15 @@ pub struct HubEvent {
     pub alarm_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fired_reason: Option<String>,
+    /// Сколько автоматических толчков получила цель до этого итога.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nudges: Option<i64>,
+    /// `true`: толчки кончились без маркера, итог отпущен правилом.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nudge_exhausted: Option<bool>,
+    /// Ответ кончается вопросом в тексте, а не карточкой.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asks_in_text: Option<bool>,
 }
 
 impl HubEvent {

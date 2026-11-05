@@ -39,6 +39,7 @@ fn thresholds() -> Thresholds {
 fn config() -> SettleConfig {
     SettleConfig {
         idle_quiet: Duration::from_secs(5),
+        nudge_enabled: true,
     }
 }
 
@@ -1807,6 +1808,7 @@ async fn projector_sweep_fires_after_the_quiet_window(pool: PgPool) {
         bus,
         config,
         MachinesConfig::default(),
+        true,
         shutdown,
     ));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

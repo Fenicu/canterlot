@@ -229,6 +229,30 @@ pub async fn current_in_tx(
     now: DateTime<Utc>,
     config: &SettleConfig,
 ) -> Result<Option<Current>, sqlx::Error> {
+    let Some(current) = settled_in_tx(conn, target_id, now, config).await? else {
+        return Ok(None);
+    };
+    // Общее решение «устоявшееся состояние — это завершение»: взвод будильника и явная
+    // подписка не должны считать завершением то, что им не считает доставка события.
+    // Удержанный автопинком `idle` здесь не создаёт заданий: это чтение.
+    if !completion::is_completion(current.state) {
+        return Ok(None);
+    }
+    if current.state == Settled::Idle
+        && super::nudge::would_hold_in_tx(conn, target_id, now, config.nudge_enabled).await?
+    {
+        return Ok(None);
+    }
+    Ok(Some(current))
+}
+
+/// Сырое осевшее состояние без решения о завершении: нужно автопинку для перепроверки.
+pub async fn settled_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+    now: DateTime<Utc>,
+    config: &SettleConfig,
+) -> Result<Option<Current>, sqlx::Error> {
     let derived: Option<(Json<ActivityState>, Json<Evidence>, DateTime<Utc>)> = sqlx::query_as(
         "select to_jsonb(activity_state),activity_evidence,activity_since
          from conversation_derived where conversation_id=$1",
@@ -251,15 +275,13 @@ pub async fn current_in_tx(
             .and_then(|execution| execution.phase_at),
     };
     let activity = Activity { state, evidence };
-    // Общее решение «устоявшееся состояние — это завершение»: взвод будильника и явная
-    // подписка не должны считать завершением то, что им не считает доставка события.
-    Ok(settle::settled(&activity, &inputs.queue, &facts, config)
-        .filter(|state| completion::is_completion(*state))
-        .map(|state| Current {
+    Ok(
+        settle::settled(&activity, &inputs.queue, &facts, config).map(|state| Current {
             state,
             fingerprint: settle::fingerprint(state, since, inputs.last_turn_at, facts.phase_since),
             closes: state.closes_subscription(inputs.queue.queued),
-        }))
+        }),
+    )
 }
 
 fn event_job(
@@ -324,6 +346,21 @@ pub async fn evaluate_in_tx(
     }
     let fingerprint =
         settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
+    // Шлюз автопинка: `idle` без маркера не завершение, пока правило не исчерпано.
+    // Он же ставит единственное задание толчка на отпечаток.
+    if state == Settled::Idle
+        && completion::gate_in_tx(
+            conn,
+            target_id,
+            state,
+            &fingerprint,
+            facts.now,
+            config.nudge_enabled,
+        )
+        .await?
+    {
+        return Ok(false);
+    }
     // Удаление подписчика держит его строку и потом удаляет подписку: без блокировки строки
     // разговора здесь вставка задания ждала бы его, а оно ждало бы подписку.
     let open: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(
@@ -344,6 +381,8 @@ pub async fn evaluate_in_tx(
     } else {
         None
     };
+    // «Спрашивает текстом» — не толчок, но итог должен это назвать.
+    let asks = state == Settled::Idle && super::nudge::asks_in_text_in_tx(conn, target_id).await?;
     for (id, owner_id, subscriber_id, chain_depth, armed_at) in &open {
         if matches!(state, Settled::Idle | Settled::Stopped)
             && crate::session_tools::alarms::hold_for_batch_in_tx(
@@ -381,7 +420,7 @@ pub async fn evaluate_in_tx(
         .bind(state.as_str())
         .execute(&mut *conn)
         .await?;
-        let payload = event_job(
+        let mut payload = event_job(
             *id,
             target_id,
             state.as_str(),
@@ -390,6 +429,9 @@ pub async fn evaluate_in_tx(
             *chain_depth,
             None,
         );
+        if asks {
+            payload["asks_in_text"] = json!(true);
+        }
         insert_job(conn, *owner_id, *subscriber_id, facts.now, &payload).await?;
     }
     Ok(!open.is_empty())

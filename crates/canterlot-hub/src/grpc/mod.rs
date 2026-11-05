@@ -22,9 +22,9 @@ use crate::{
     installation::Installation,
     session::{
         CAPABILITY_ALARMS_V1, CAPABILITY_BACKGROUND_V1, CAPABILITY_COMPACT_V1, CAPABILITY_EXEC_V1,
-        CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_OWNER_EXIT_V1, CAPABILITY_OWNER_INSTRUCTIONS_V1,
-        CAPABILITY_PILOT_V1, CAPABILITY_SEND_NOW_V1, CAPABILITY_SESSION_TOOLS_V1,
-        CAPABILITY_TODO_V1, CAPABILITY_WORKDIR_SUGGEST_V1, Registry,
+        CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_NUDGE_V1, CAPABILITY_OWNER_EXIT_V1,
+        CAPABILITY_OWNER_INSTRUCTIONS_V1, CAPABILITY_PILOT_V1, CAPABILITY_SEND_NOW_V1,
+        CAPABILITY_SESSION_TOOLS_V1, CAPABILITY_TODO_V1, CAPABILITY_WORKDIR_SUGGEST_V1, Registry,
     },
 };
 
@@ -51,6 +51,7 @@ pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_WORKDIR_SUGGEST_V1,
     CAPABILITY_OWNER_INSTRUCTIONS_V1,
     CAPABILITY_ALARMS_V1,
+    CAPABILITY_NUDGE_V1,
 ];
 
 #[tonic::async_trait]
@@ -98,6 +99,7 @@ pub struct HubGrpc {
     pub session_tools: Arc<crate::config::SessionToolsConfig>,
     pub limits: Arc<crate::config::LimitsConfig>,
     pub alarms_enabled: bool,
+    pub nudge_enabled: bool,
     pub settle: crate::session_tools::settle::SettleConfig,
     pub dispatcher: Option<crate::dispatcher::Dispatcher>,
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
@@ -301,6 +303,7 @@ impl HubGrpc {
             session_tools: Default::default(),
             limits: Default::default(),
             alarms_enabled: true,
+            nudge_enabled: true,
             settle: (&crate::config::ActivityConfig::default()).into(),
             dispatcher: None,
             blobs: None,
@@ -324,11 +327,15 @@ impl HubGrpc {
 
     pub fn with_orchestrator(mut self, config: &crate::config::OrchestratorConfig) -> Self {
         self.alarms_enabled = config.alarms.enabled;
+        self.nudge_enabled = config.nudge.enabled;
         self
     }
 
     pub fn with_activity(mut self, config: &crate::config::ActivityConfig) -> Self {
-        self.settle = config.into();
+        self.settle = crate::session_tools::settle::SettleConfig {
+            nudge_enabled: self.nudge_enabled,
+            ..config.into()
+        };
         self
     }
 

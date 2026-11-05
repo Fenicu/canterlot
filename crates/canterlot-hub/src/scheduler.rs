@@ -466,6 +466,8 @@ pub struct Scheduler {
     registry: Option<Registry>,
     limits: Arc<LimitsConfig>,
     session_tools: SessionToolsConfig,
+    /// Пороги устоявшегося состояния для перепроверки задания `nudge`.
+    settle: crate::session_tools::settle::SettleConfig,
     blobs: Option<Arc<dyn BlobStore>>,
     /// Когда уборке принятых делегаций снова можно работать: не чаще раза в несколько часов.
     retention_next: Arc<AtomicI64>,
@@ -492,6 +494,7 @@ impl Scheduler {
             registry: None,
             limits: Arc::new(LimitsConfig::default()),
             session_tools: SessionToolsConfig::default(),
+            settle: crate::session_tools::settle::SettleConfig::default(),
             blobs: None,
             retention_next: Arc::new(AtomicI64::new(0)),
             #[cfg(feature = "fault-injection")]
@@ -512,6 +515,11 @@ impl Scheduler {
     /// Срок хранения принятых делегаций и пределы межсессионных инструментов.
     pub fn with_session_tools(mut self, config: SessionToolsConfig) -> Self {
         self.session_tools = config;
+        self
+    }
+    /// Пороги и выключатель автопинка для перепроверки отложенного толчка.
+    pub fn with_settle(mut self, settle: crate::session_tools::settle::SettleConfig) -> Self {
+        self.settle = settle;
         self
     }
     /// Хранилище вложений: уборка по сроку освобождает файлы сразу, как ручное удаление.
@@ -1005,6 +1013,7 @@ impl Scheduler {
                     now,
                     correlation,
                     self.registry.as_ref(),
+                    &self.settle,
                 )
                 .await
                 {
@@ -1180,6 +1189,7 @@ impl Scheduler {
             sqlx::query("delete from scheduled_jobs where state in ('fired','cancelled','failed') and updated_at < clock_timestamp() - interval '30 days'").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from alarms where updated_at < clock_timestamp() - interval '30 days' and (state in ('cancelled','expired','failed') or (state='fired' and delivered_input_id is not null))").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from machine_outages where ended_at is not null and ended_at < clock_timestamp() - interval '90 days'").execute(&self.pool).await.map(|_| ()),
+            sqlx::query("delete from nudge_events where at < clock_timestamp() - interval '30 days'").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from idempotency_keys where created_at < clock_timestamp() - interval '7 days'").execute(&self.pool).await.map(|_| ()),
         ];
         let mut first = None;

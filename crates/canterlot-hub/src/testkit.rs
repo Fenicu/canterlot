@@ -292,6 +292,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         activity: activity.clone(),
         machines: machines.clone(),
         session_tools,
+        nudge_enabled: true,
         multi_process: http.as_ref().is_some_and(|config| config.multi_process),
         attachments: Some((blobs.clone(), attachments.clone())),
     });
