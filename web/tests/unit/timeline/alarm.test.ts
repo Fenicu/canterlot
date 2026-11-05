@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { alarmChip, alarmDetail, alarmEventLine } from '#lib/timeline/alarm.js';
+import { fmt } from '#lib/format/ru.js';
+import { alarmChip, alarmDetail, alarmEventLine, alarmSummary } from '#lib/timeline/alarm.js';
 import type { AlarmView } from '#lib/stores/chat.svelte.js';
 
 const base: AlarmView = {
@@ -114,5 +115,26 @@ describe('alarm plaques', () => {
     expect(alarmEventLine({ alarm_key: 'gate', fired_reason: 'by_clock' })).toBe(
       'Будильник «gate»: лимит, вероятно, сброшен (по часам, без подтверждения)'
     );
+  });
+
+  it('summarises several alarms with the nearest moment and Russian word forms', () => {
+    const second = {
+      ...base,
+      alarm_id: '00000000-0000-4000-8000-0000000000a2',
+      fires_at: '2026-11-04T14:00:00.000Z'
+    };
+    const watchdog = {
+      ...base,
+      alarm_id: '00000000-0000-4000-8000-0000000000a3',
+      kind: 'condition' as const,
+      only_on_timeout: true,
+      fires_at: null,
+      deadline_at: '2026-11-04T15:00:00.000Z'
+    };
+    expect(alarmSummary([base, second, watchdog])).toBe(
+      `Будильники · 3 · ближайший ${fmt.clock(Date.parse(second.fires_at!))}`
+    );
+    expect(alarmSummary([base])).toMatch(/^Будильник · 1 · ближайший \d{2}:\d{2}$/);
+    expect(alarmSummary([{ ...base, fires_at: null }])).toBe('Будильник · 1');
   });
 });

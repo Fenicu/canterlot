@@ -43,6 +43,25 @@ async function boot(page: Page) {
 
 const strip = (page: Page) => page.getByRole('region', { name: 'Будильники' });
 
+function alarmAt(index: number, patch: Record<string, unknown> = {}) {
+  return alarm({
+    alarm_id: `00000000-0000-4000-8000-0000000000b${index}`,
+    key: `alarm-${index}`,
+    fires_at: `2026-11-04T1${index}:30:00.000Z`,
+    ...patch
+  });
+}
+
+function seedAlarms(hub: FakeHub, id: string, alarms: ReturnType<typeof alarmAt>[]) {
+  for (const item of alarms) {
+    hub.append(`conversation:${id}`, {
+      kind: 'alarm_changed',
+      conversation_id: id,
+      payload: { ...item, conversation_id: id }
+    });
+  }
+}
+
 test('armed_alarm_plaque_shows_the_note_and_can_be_cancelled', async ({ page }) => {
   const { hub, id } = await boot(page);
   hub.append(`conversation:${id}`, {
@@ -232,4 +251,83 @@ test('coalesced_alarm_entry_counts_the_fired_alarms_in_the_header', async ({ pag
   const body = entry.locator('[data-role="alarm-body"]');
   await expect(body).toContainText('Alarm "disk"');
   await expect(body).toContainText('Not settled');
+});
+
+test('several_alarms_collapse_to_one_summary_and_remember_the_choice', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  seedAlarms(hub, id, [alarmAt(1), alarmAt(2), alarmAt(3), alarmAt(4)]);
+  api.pushTodo(id, [
+    { text: 'Проверить полосы', status: 'in_progress' },
+    { text: 'Снять скриншоты', status: 'pending' }
+  ]);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+  const summary = strip(page).locator('.summary');
+  await expect(summary).toHaveAttribute('aria-expanded', 'false');
+  await expect(summary).toContainText(/Будильники · 4 · ближайший \d{2}:\d{2}/);
+  await expect(strip(page).locator('.pill')).toHaveCount(0);
+
+  await summary.click();
+  await expect(summary).toHaveAttribute('aria-expanded', 'true');
+  await expect(strip(page).locator('.pill')).toHaveCount(4);
+  await expect(strip(page).getByRole('button', { name: /Отменить:/ })).toHaveCount(4);
+
+  // Отмена внутри раскрытой полосы не схлопывает её принудительно.
+  await strip(page).getByRole('button', { name: /Отменить:/ }).first().click();
+  await page.getByRole('button', { name: 'Отменить', exact: true }).click();
+  await expect(strip(page).locator('.pill')).toHaveCount(3);
+  await expect(summary).toBeVisible();
+
+  await page.reload();
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+  await expect(strip(page).locator('.summary')).toHaveAttribute('aria-expanded', 'true');
+
+  await strip(page).locator('.summary').press('Space');
+  await expect(strip(page).locator('.summary')).toHaveAttribute('aria-expanded', 'false');
+  await expect(strip(page).locator('.pill')).toHaveCount(0);
+
+  // Новое событие обновляет счётчик, но не раскрывает полосу за владельца.
+  seedAlarms(hub, id, [alarmAt(5, { alarm_id: '00000000-0000-4000-8000-0000000000b5' })]);
+  hub.flush();
+  await expect(strip(page).locator('.summary')).toContainText('Будильники · 4');
+  await expect(strip(page).locator('.summary')).toHaveAttribute('aria-expanded', 'false');
+  await expect(strip(page).locator('.pill')).toHaveCount(0);
+});
+
+test('one_alarm_stays_direct_and_has_no_summary_row', async ({ page }) => {
+  const { hub, id } = await boot(page);
+  seedAlarms(hub, id, [alarmAt(1)]);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+  await expect(strip(page).locator('.summary')).toHaveCount(0);
+  await expect(strip(page).locator('.pill')).toHaveCount(1);
+  await expect(strip(page)).toContainText('Будильник ·');
+});
+
+test('todo_and_alarm_strips_keep_the_vertical_rhythm', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  seedAlarms(hub, id, [alarmAt(1), alarmAt(2)]);
+  api.pushTodo(id, [{ text: 'Проверить отступы', status: 'in_progress' }]);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+  await expect(strip(page).locator('.summary')).toBeVisible();
+
+  const gap = await page.evaluate(() => {
+    const todo = document.querySelector('.todo .panel')!.getBoundingClientRect();
+    const summary = document.querySelector('[aria-label="Будильники"] .summary')!.getBoundingClientRect();
+    const s2 = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--s2'));
+    return { value: summary.top - todo.bottom, token: s2 };
+  });
+  expect(gap.value).toBeGreaterThanOrEqual(gap.token);
+
+  await strip(page).locator('.summary').click();
+  const rows = await strip(page).locator('.pill').evaluateAll((nodes) =>
+    nodes.map((node) => node.getBoundingClientRect()).map(({ top, bottom }) => ({ top, bottom }))
+  );
+  const s2 = await page.evaluate(() =>
+    parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--s2'))
+  );
+  expect(rows[1]!.top - rows[0]!.bottom).toBeGreaterThanOrEqual(s2);
 });
