@@ -493,6 +493,7 @@ export class FakeHubApi {
 	async inputs(id: string, query: { before?: string; limit?: number } = {}): Promise<components['schemas']['OwnerInputsPage']> {
 		const all = (this.histories.get(id) ?? [])
 			.filter((item): item is HistoryInput => item.kind === 'input' && Boolean(item.feed_seq) && !waiting(item))
+			.filter((item) => !['event', 'alarm'].includes((item.origin as { kind?: string } | null | undefined)?.kind ?? ''))
 			.sort((a, b) => cmp(seqOf(a), seqOf(b)));
 		const limit = query.limit ?? 500;
 		const older = query.before ? all.filter((item) => cmp(seqOf(item), query.before!) < 0) : all;

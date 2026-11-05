@@ -68,7 +68,8 @@ async fn owner_messages_truncate_the_preview_and_keep_origin_and_attachments(poo
         { "type": "text", "text": text },
         { "type": "attachment", "attachment_id": Uuid::now_v7(), "name": "a.png", "mime": "image/png", "size": 10, "sha256": "x", "image": true }
     ]);
-    let origin = json!({"kind":"alarm","alarm_id":Uuid::now_v7(),"chain_depth":0});
+    let origin =
+        json!({"kind":"message","from":Uuid::now_v7(),"title":"Оркестратор","chain_depth":1});
     sqlx::query("update inputs set feed_seq=7,state='accepted',content=$2,origin=$3 where id=$1")
         .bind(input.input_id)
         .bind(content)
@@ -83,6 +84,55 @@ async fn owner_messages_truncate_the_preview_and_keep_origin_and_attachments(poo
     assert!(preview.chars().all(|c| c == 'я'));
     assert_eq!(item["attachments_count"], 1);
     assert_eq!(item["origin"], origin);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_messages_skip_hub_events_and_alarms(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    delivered(&f, "own", 10, "моё", None).await;
+    delivered(
+        &f,
+        "event",
+        20,
+        "[canterlot] Session finished",
+        Some(json!({"kind":"event","chain_depth":0})),
+    )
+    .await;
+    delivered(
+        &f,
+        "alarm",
+        30,
+        "будильник",
+        Some(json!({"kind":"alarm","alarm_id":Uuid::now_v7(),"chain_depth":0})),
+    )
+    .await;
+    delivered(
+        &f,
+        "message",
+        40,
+        "от сессии",
+        Some(json!({"kind":"message","from":Uuid::now_v7(),"chain_depth":1})),
+    )
+    .await;
+    delivered(
+        &f,
+        "spawn",
+        50,
+        "задание",
+        Some(json!({"kind":"spawn","from":Uuid::now_v7(),"chain_depth":1})),
+    )
+    .await;
+
+    let page = f.get(&f.path("/inputs")).await;
+    assert_eq!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["seq"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["10", "40", "50"]
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
