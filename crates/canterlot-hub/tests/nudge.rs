@@ -1650,6 +1650,78 @@ async fn a_concurrent_author_read_only_change_blocks_the_nudge(pool: PgPool) {
     assert_eq!(rule_row(&pool, f.child).await.0, "exhausted");
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn release_and_subscriber_deletion_complete_with_one_outcome(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let other = testkit::seed_conversation(&pool, f.owner, f.machine).await;
+    let mut tx = pool.begin().await.unwrap();
+    subs::subscribe_in_tx(&mut tx, f.owner, other, f.child, 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "del1",
+        true,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    let fingerprint: String =
+        sqlx::query_scalar("select held_fingerprint from nudge_rules where conversation_id=$1")
+            .bind(f.child)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Удаление второго подписчика держит его строку разговора и затем удаляет подписку.
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("select id from conversations where id=$1 for update")
+        .bind(other)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let pooled = pool.clone();
+    let child = f.child;
+    let release = tokio::spawn(async move {
+        let mut tx = pooled.begin().await.unwrap();
+        session_tools::jobs::abandon_in_tx(
+            &mut tx,
+            Uuid::nil(),
+            Some(child),
+            &json!({"action":"nudge","fingerprint":fingerprint}),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    sqlx::query("delete from session_subscriptions where subscriber_id=$1 and target_id=$2")
+        .bind(other)
+        .bind(f.child)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    blocker.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), release)
+        .await
+        .expect("release waits, not deadlocks")
+        .unwrap();
+
+    let jobs = jobs(&pool, f.parent).await;
+    assert_eq!(jobs.len(), 1, "one outcome for the live subscriber");
+    assert_eq!(jobs[0]["action"], "event");
+}
+
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.
 async fn deliver_owner_input(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fx, text: &str) {
     canterlot_hub::delivery::submit_input_in_tx(

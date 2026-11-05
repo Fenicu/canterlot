@@ -1101,27 +1101,78 @@ async fn disable_locked_in_tx(
     Ok(())
 }
 
+/// Ошибка снятия удержаний на старте: нужен тип помощника повторов,
+/// который умеет отличать временный сбой базы.
+#[derive(Debug)]
+enum DisableError {
+    Db(sqlx::Error),
+    Conflict(crate::idempotency::IdempotencyConflict),
+}
+
+impl From<sqlx::Error> for DisableError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Db(error)
+    }
+}
+
+impl From<crate::idempotency::IdempotencyConflict> for DisableError {
+    fn from(error: crate::idempotency::IdempotencyConflict) -> Self {
+        Self::Conflict(error)
+    }
+}
+
+impl crate::db::TransientError for DisableError {
+    fn is_transient(&self) -> bool {
+        match self {
+            Self::Db(error) => crate::db::is_transient(error),
+            Self::Conflict(_) => false,
+        }
+    }
+}
+
 /// Запуск хаба с выключенным автопинком: снимаем удержания и ожидающие задания
 /// до первого тика планировщика. Каждое правило — своя транзакция с очередью цели.
 pub async fn disable_all_on_startup(
     pool: &sqlx::PgPool,
     now: DateTime<Utc>,
 ) -> Result<usize, sqlx::Error> {
-    let targets: Vec<Uuid> = sqlx::query_scalar(
-        "select conversation_id from nudge_rules
+    let targets: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "select conversation_id,owner_id from nudge_rules
          where state='pending' or held_fingerprint is not null order by conversation_id",
     )
     .fetch_all(pool)
     .await?;
     let mut done = 0;
-    for target in targets {
-        let mut tx = crate::db::begin(pool).await?;
-        send::lock_queue(&mut tx, target).await?;
-        if let Some(mut rule) = rule_locked_in_tx(&mut tx, target).await? {
-            disable_locked_in_tx(&mut tx, &mut rule, None, now, Uuid::now_v7()).await?;
-            done += 1;
-        }
-        tx.commit().await?;
+    for (target, owner) in targets {
+        // Тот же помощник повторов, что у инструментов: снятие удержания может
+        // столкнуться с удалением подписчика или очередью и не должно теряться.
+        let key = format!("nudge-disable:{target}:{}", now.timestamp_millis());
+        let outcome = crate::idempotency::run_in_tx::<usize, DisableError, _>(
+            pool,
+            owner,
+            &key,
+            "nudge_disable",
+            &json!({"target":target}),
+            Some(target),
+            move |conn| {
+                Box::pin(async move {
+                    send::lock_queue(conn, target).await?;
+                    if let Some(mut rule) = rule_locked_in_tx(conn, target).await? {
+                        disable_locked_in_tx(conn, &mut rule, None, now, Uuid::now_v7()).await?;
+                        return Ok(1);
+                    }
+                    Ok(0)
+                })
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            DisableError::Db(error) => error,
+            DisableError::Conflict(_) => {
+                sqlx::Error::Protocol("nudge_disable_idempotency_conflict".into())
+            }
+        })?;
+        done += outcome.value;
     }
     Ok(done)
 }
@@ -1241,8 +1292,25 @@ async fn release_held_in_tx(
     let Some(fingerprint) = held else {
         return Ok(());
     };
-    // Ждём строки подписок, а не пропускаем запертые: иначе отпускание решило бы,
+    // Порядок блокировок: разговоры подписчиков по возрастанию ID, затем подписки,
+    // затем задания. Удаление разговора держит строку разговора и удаляет подписку;
+    // обратный порядок давал цикл. Ждём, а не пропускаем: иначе отпускание решило бы,
     // что подписчиков нет, и поставило заметку, а затем пришёл бы ещё и обычный итог.
+    let subscribers: Vec<Uuid> = sqlx::query_scalar(
+        "select distinct subscriber_id from session_subscriptions
+         where target_id=$1 and closed_at is null and last_fingerprint is distinct from $2
+         order by subscriber_id",
+    )
+    .bind(rule.conversation_id)
+    .bind(fingerprint)
+    .fetch_all(&mut *conn)
+    .await?;
+    if !subscribers.is_empty() {
+        sqlx::query("select id from conversations where id=any($1) order by id for key share")
+            .bind(&subscribers)
+            .fetch_all(&mut *conn)
+            .await?;
+    }
     let rows: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(
         "select id,owner_id,subscriber_id,chain_depth,armed_at
          from session_subscriptions
@@ -1255,6 +1323,19 @@ async fn release_held_in_tx(
     .fetch_all(&mut *conn)
     .await?;
     if rows.is_empty() {
+        // Отпечаток уже ушёл подписке и она закрылась: это не «нет подписчиков»,
+        // а уже доставленный итог, повторная заметка была бы дублем.
+        let reported: bool = sqlx::query_scalar(
+            "select exists(select 1 from session_subscriptions
+                           where target_id=$1 and last_fingerprint=$2 and closed_at is not null)",
+        )
+        .bind(rule.conversation_id)
+        .bind(fingerprint)
+        .fetch_one(&mut *conn)
+        .await?;
+        if reported {
+            return Ok(());
+        }
         if let Some(notify) = rule.notify_conversation_id.or(rule.set_by_conversation) {
             let mut event = origin::HubEvent {
                 kind: "nudge_exhausted".to_owned(),
