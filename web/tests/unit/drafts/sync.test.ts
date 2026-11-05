@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DraftSync, type DraftRecord } from "#lib/drafts/sync.js";
+import { DraftSync, stopDraftSyncs, type DraftRecord } from "#lib/drafts/sync.js";
 
 interface Timer {
   at: number;
@@ -279,5 +279,18 @@ describe("drafts/sync", () => {
     expect(h.puts).toEqual([]);
     expect(h.sync.dirty).toBe(false);
     expect(h.local()).toBeNull();
+  });
+
+  it("stopped_sync_never_sends_the_emptied_field_to_the_hub", async () => {
+    const h = harness();
+    await h.sync.start({ text: "общий черновик", revision: 3 });
+    h.setText("общий черновик и правка");
+    h.sync.typed();
+    stopDraftSyncs();
+    h.setText("");
+    h.sync.typed();
+    await h.sync.leave();
+    await h.advance(5_000);
+    expect(h.puts).toEqual([]);
   });
 });

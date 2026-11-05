@@ -38,6 +38,16 @@ export interface DraftSyncOptions {
   idleMs?: number;
 }
 
+const live = new Set<DraftSync>();
+
+/**
+ * Выход или очистка устройства: поле ввода сейчас опустеет, но общий черновик на хабе
+ * принадлежит всем устройствам и стираться не должен.
+ */
+export function stopDraftSyncs(): void {
+  for (const sync of [...live]) sync.stop();
+}
+
 /**
  * Общий черновик поля ввода. Сервер хранит текст и ревизию; локальная копия
  * (DraftStore) остаётся буфером на случай офлайна. Эхо собственной записи
@@ -59,11 +69,22 @@ export class DraftSync {
   #pending: DraftRecord | null = null;
   #saving = false;
   #queued = false;
+  #stopped = false;
 
   constructor(options: DraftSyncOptions) {
     this.#options = options;
     this.#debounceMs = options.debounceMs ?? 500;
     this.#idleMs = options.idleMs ?? 2_000;
+    live.add(this);
+  }
+
+  /** Больше ничего не писать на хаб: ни отложенную запись, ни уход с экрана. */
+  stop(): void {
+    this.#stopped = true;
+    this.#cancelSave();
+    this.#cancelIdle();
+    this.#pending = null;
+    live.delete(this);
   }
 
   get revision(): number {
@@ -82,6 +103,7 @@ export class DraftSync {
   }[]> {
     if (this.#started) return [];
     this.#started = true;
+    if (!this.#stopped) live.add(this);
     this.#revision = server?.revision ?? 0;
     this.#savedText = server?.text ?? "";
     const local = await this.#options.local.load();
@@ -154,7 +176,7 @@ export class DraftSync {
   /** Немедленная запись: потеря фокуса, скрытие вкладки, уход с экрана, возврат сети. */
   async flush(): Promise<void> {
     this.#cancelSave();
-    if (!this.#dirty || !this.#options.online()) return;
+    if (this.#stopped || !this.#dirty || !this.#options.online()) return;
     if (this.#saving) {
       this.#queued = true;
       return;
@@ -191,6 +213,7 @@ export class DraftSync {
     this.#cancelIdle();
     this.#pending = null;
     await this.flush();
+    live.delete(this);
   }
 
   /** Ввод ушёл в очередь: локальная копия и отложенная запись больше не нужны. */
@@ -227,6 +250,7 @@ export class DraftSync {
 
   #scheduleSave(): void {
     this.#cancelSave();
+    if (this.#stopped) return;
     this.#saveTimer = this.#options.schedule(() => {
       this.#saveTimer = null;
       void this.flush();

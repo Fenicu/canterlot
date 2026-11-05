@@ -123,7 +123,7 @@ test('sign_out_navigates_to_the_logout_url_from_config', async ({ page }) => {
   await expect(page).toHaveURL(/\/logout-fixture$/);
 });
 
-test('clearing_data_in_one_window_reloads_the_other_without_restoring_its_draft', async ({ page, context }) => {
+test('clearing_data_in_one_window_reloads_the_other_and_keeps_only_the_shared_draft', async ({ page, context }) => {
   const { hub, api, ids } = await bootSecondary(page, '/settings');
   const other = await context.newPage();
   await installChatRoutes(other, hub, api, ids.pinned);
@@ -133,14 +133,16 @@ test('clearing_data_in_one_window_reloads_the_other_without_restoring_its_draft'
   await input.fill('Черновик второго окна');
   await expect.poll(() => other.evaluate(() => Object.keys(localStorage).some(k => k.startsWith('canterlot.draft-tail.'))
     || new Promise<boolean>(resolve => { const r = indexedDB.open('canterlot', 1); r.onsuccess = () => { const q = r.result.transaction('drafts').objectStore('drafts').count(); q.onsuccess = () => { r.result.close(); resolve(q.result > 0); }; }; }))).toBe(true);
+  // Общий черновик живёт на хабе: очистка устройства убирает только локальную копию.
+  await expect.poll(() => api.draft(ids.pinned).text, { timeout: 10_000 }).toBe('Черновик второго окна');
   await other.evaluate(() => { (window as unknown as { __before?: boolean }).__before = true; });
   await page.locator('main').getByRole('button', { name: 'Очистить данные на устройстве', exact: true }).click();
   await expect(page.getByText('Данные на устройстве удалены', { exact: true })).toBeVisible();
   // Пока окно перезагружается, evaluate теряет контекст: такой опрос считаем ещё не завершённым.
   await expect.poll(() => other.evaluate(() => (window as unknown as { __before?: boolean }).__before === true).catch(() => true), { timeout: 10_000 }).toBe(false);
   await expect(other.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
-  await expect(input).toHaveValue('');
   expect(await other.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('canterlot.draft-tail.')))).toEqual([]);
+  await expect(input).toHaveValue('Черновик второго окна');
   await other.close();
 });
 
