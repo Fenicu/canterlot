@@ -872,16 +872,15 @@ pub async fn evaluate_session_in_tx(
         settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
     // Общий шлюз завершения: удержанный автопинком `idle` не засчитывает условие
     // будильника и не отменяет сторож до исчерпания правила или маркера.
-    if state == settle::Settled::Idle
-        && completion::gate_in_tx(
-            conn,
-            target_id,
-            state,
-            &fingerprint,
-            now,
-            config.nudge_enabled,
-        )
-        .await?
+    if completion::gate_in_tx(
+        conn,
+        target_id,
+        state,
+        &fingerprint,
+        now,
+        config.nudge_enabled,
+    )
+    .await?
     {
         return Ok(false);
     }

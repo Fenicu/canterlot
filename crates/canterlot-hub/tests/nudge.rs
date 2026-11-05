@@ -1207,6 +1207,105 @@ async fn input_cancellation_does_not_wait_for_a_claimed_job(pool: PgPool) {
     assert_eq!(rule_row(&pool, f.child).await.0, "watching");
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stop_between_hold_and_job_cancels_the_nudge_and_releases_once(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "stop1",
+        true,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    assert_eq!(rule_row(&pool, f.child).await.0, "pending");
+
+    sqlx::query("update executions set state='stopped',outcome='user_stop' where id=$1")
+        .bind(f.execution.execution_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    refresh_at(&pool, f.child, now + TimeDelta::minutes(1)).await;
+
+    assert_eq!(rule_row(&pool, f.child).await.0, "paused");
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from scheduled_jobs where state='pending'
+           and conversation_id=$1 and payload->>'action'='nudge'",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0);
+    let events = jobs(&pool, f.parent).await;
+    assert_eq!(events.len(), 1, "one completion, not idle plus stopped");
+    assert_eq!(events[0]["state"], "stopped");
+
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(4))
+        .await
+        .unwrap();
+    let nudges: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1 and origin->>'kind'='nudge'",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(nudges, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn accept_removes_the_rule_and_pending_nudges(pool: PgPool) {
+    let f = fx(&pool).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "acc1",
+        true,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    session_tools::accept::begin_in_tx(&mut tx, f.owner, f.child, false, Uuid::now_v7())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let rules: i64 =
+        sqlx::query_scalar("select count(*) from nudge_rules where conversation_id=$1")
+            .bind(f.child)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rules, 0);
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from scheduled_jobs where state='pending'
+           and conversation_id=$1 and payload->>'action'='nudge'",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0);
+}
+
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.
 async fn deliver_owner_input(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fx, text: &str) {
     canterlot_hub::delivery::submit_input_in_tx(

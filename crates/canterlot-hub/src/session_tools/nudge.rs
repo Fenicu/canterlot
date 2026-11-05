@@ -651,8 +651,9 @@ pub async fn gate_in_tx(
         return Ok(false);
     }
     if state == Settled::Stopped {
-        // Остановка — решение владельца: правило ждёт возобновления.
-        if rule.state != "paused" {
+        // Остановка — решение владельца: правило ждёт возобновления, а удержанный
+        // `idle` заменяется одним событием `stopped`, которое уходит обычной подпиской.
+        if rule.state != "paused" || rule.held_fingerprint.is_some() {
             let row: RuleRow = sqlx::query_as(
                 "update nudge_rules set state='paused',held_fingerprint=null,updated_at=$2
                  where conversation_id=$1 returning *",
@@ -661,6 +662,7 @@ pub async fn gate_in_tx(
             .bind(now)
             .fetch_one(&mut *conn)
             .await?;
+            cancel_pending_jobs_in_tx(conn, target_id, None, "stopped").await?;
             changed_in_tx(conn, &row, Uuid::now_v7(), Some("paused")).await?;
             rule = row;
         }
@@ -838,6 +840,7 @@ pub async fn run_job_in_tx(
     now: DateTime<Utc>,
     correlation_id: Uuid,
     settle_config: &SettleConfig,
+    thresholds: &crate::activity::Thresholds,
 ) -> Result<JobOutcome, SubmitError> {
     let Some(target) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -894,7 +897,7 @@ pub async fn run_job_in_tx(
         cancel_hold_in_tx(conn, target, &payload.fingerprint, now).await?;
         return Ok(JobOutcome::Cancelled("state_changed"));
     }
-    let current = subs::settled_in_tx(conn, target, now, settle_config).await?;
+    let current = subs::settled_live_in_tx(conn, target, now, settle_config, thresholds).await?;
     let Some(current) = current else {
         record_event_in_tx(
             conn,
@@ -1336,6 +1339,29 @@ async fn release_held_in_tx(
         .execute(&mut *conn)
         .await?;
     }
+    Ok(())
+}
+
+/// Приём результата: правило больше не нужно, ожидающие толчки отменяются.
+/// Очередь цели уже взята вызывающим (accept/delete), удержанный итог закрыт подписками.
+pub async fn remove_rule_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    cancel_pending_jobs_in_tx(conn, target_id, None, "accepted").await?;
+    let Some(mut rule) = rule_locked_in_tx(conn, target_id).await? else {
+        return Ok(());
+    };
+    sqlx::query("delete from nudge_rules where conversation_id=$1")
+        .bind(target_id)
+        .execute(&mut *conn)
+        .await?;
+    rule.held_fingerprint = None;
+    rule.state = "exhausted".to_owned();
+    rule.updated_at = now;
+    changed_in_tx(conn, &rule, correlation_id, Some("accepted")).await?;
     Ok(())
 }
 

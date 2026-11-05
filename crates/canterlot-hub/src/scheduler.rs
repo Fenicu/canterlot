@@ -468,6 +468,8 @@ pub struct Scheduler {
     session_tools: SessionToolsConfig,
     /// Пороги устоявшегося состояния для перепроверки задания `nudge`.
     settle: crate::session_tools::settle::SettleConfig,
+    /// Пороги активности: задание не верит устаревшей проекции цели.
+    thresholds: crate::activity::Thresholds,
     blobs: Option<Arc<dyn BlobStore>>,
     /// Когда уборке принятых делегаций снова можно работать: не чаще раза в несколько часов.
     retention_next: Arc<AtomicI64>,
@@ -495,6 +497,7 @@ impl Scheduler {
             limits: Arc::new(LimitsConfig::default()),
             session_tools: SessionToolsConfig::default(),
             settle: crate::session_tools::settle::SettleConfig::default(),
+            thresholds: crate::activity::Thresholds::from(&crate::config::ActivityConfig::default()),
             blobs: None,
             retention_next: Arc::new(AtomicI64::new(0)),
             #[cfg(feature = "fault-injection")]
@@ -520,6 +523,11 @@ impl Scheduler {
     /// Пороги и выключатель автопинка для перепроверки отложенного толчка.
     pub fn with_settle(mut self, settle: crate::session_tools::settle::SettleConfig) -> Self {
         self.settle = settle;
+        self
+    }
+    /// Пороги активности для перепроверки текущего состояния цели.
+    pub fn with_thresholds(mut self, thresholds: crate::activity::Thresholds) -> Self {
+        self.thresholds = thresholds;
         self
     }
     /// Хранилище вложений: уборка по сроку освобождает файлы сразу, как ручное удаление.
@@ -1014,6 +1022,7 @@ impl Scheduler {
                     correlation,
                     self.registry.as_ref(),
                     &self.settle,
+                    &self.thresholds,
                 )
                 .await
                 {

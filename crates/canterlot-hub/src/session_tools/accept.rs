@@ -312,6 +312,7 @@ pub async fn begin_in_tx(
     }
     let others = subs::close_for_accept_in_tx(conn, id, child.parent, CLOSED_BY_ACCEPT).await?;
     let now = Utc::now();
+    super::nudge::remove_rule_in_tx(conn, id, now, correlation_id).await?;
     for other in others {
         let origin = origin::started_note_origin(&child.sender(), other.chain_depth);
         subs::insert_job(

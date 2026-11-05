@@ -1022,6 +1022,9 @@ async fn deliver_event(
         Uuid::now_v7(),
         None,
         &Default::default(),
+        &canterlot_hub::activity::Thresholds::from(
+            &canterlot_hub::config::ActivityConfig::default(),
+        ),
     )
     .await
     .unwrap();

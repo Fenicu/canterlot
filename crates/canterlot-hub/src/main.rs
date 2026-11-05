@@ -253,6 +253,7 @@ async fn serve(
         nudge_enabled: orchestrator.nudge.enabled,
         ..(&activity).into()
     })
+    .with_thresholds(canterlot_hub::activity::Thresholds::from(&activity))
     .with_blobs(blobs.clone());
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())

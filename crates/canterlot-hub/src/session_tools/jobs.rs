@@ -112,6 +112,7 @@ pub async fn run_in_tx(
     correlation_id: Uuid,
     registry: Option<&Registry>,
     settle: &crate::session_tools::settle::SettleConfig,
+    thresholds: &crate::activity::Thresholds,
 ) -> Result<JobOutcome, SubmitError> {
     let Some(subscriber) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -191,7 +192,15 @@ pub async fn run_in_tx(
             )
         }
         Action::Nudge => {
-            crate::session_tools::nudge::run_job_in_tx(conn, job, now, correlation_id, settle).await
+            crate::session_tools::nudge::run_job_in_tx(
+                conn,
+                job,
+                now,
+                correlation_id,
+                settle,
+                thresholds,
+            )
+            .await
         }
     }
 }

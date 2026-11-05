@@ -246,6 +246,46 @@ pub async fn current_in_tx(
     Ok(Some(current))
 }
 
+/// Осевшее состояние по текущим фактам исполнения, а не по проекции: отложенный
+/// толчок не должен верить устаревшему `conversation_derived`. Проекция даёт только
+/// `since` для отпечатка; состояние считается заново под очередью цели.
+pub async fn settled_live_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+    now: DateTime<Utc>,
+    config: &SettleConfig,
+    thresholds: &crate::activity::Thresholds,
+) -> Result<Option<Current>, sqlx::Error> {
+    let derived: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "select activity_since from conversation_derived where conversation_id=$1",
+    )
+    .bind(target_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(since) = derived else {
+        return Ok(None);
+    };
+    let inputs = activity::load_inputs(conn, target_id, now, Duration::ZERO).await?;
+    let live = activity::compute(&inputs, thresholds);
+    let facts = SettleFacts {
+        now,
+        since,
+        last_turn_at: inputs.last_turn_at,
+        last_event_at: inputs.last_event_at,
+        phase_since: inputs
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.phase_at),
+    };
+    Ok(
+        settle::settled(&live, &inputs.queue, &facts, config).map(|state| Current {
+            state,
+            fingerprint: settle::fingerprint(state, since, inputs.last_turn_at, facts.phase_since),
+            closes: state.closes_subscription(inputs.queue.queued),
+        }),
+    )
+}
+
 /// Сырое осевшее состояние без решения о завершении: нужно автопинку для перепроверки.
 pub async fn settled_in_tx(
     conn: &mut PgConnection,
@@ -348,16 +388,15 @@ pub async fn evaluate_in_tx(
         settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
     // Шлюз автопинка: `idle` без маркера не завершение, пока правило не исчерпано.
     // Он же ставит единственное задание толчка на отпечаток.
-    if state == Settled::Idle
-        && completion::gate_in_tx(
-            conn,
-            target_id,
-            state,
-            &fingerprint,
-            facts.now,
-            config.nudge_enabled,
-        )
-        .await?
+    if completion::gate_in_tx(
+        conn,
+        target_id,
+        state,
+        &fingerprint,
+        facts.now,
+        config.nudge_enabled,
+    )
+    .await?
     {
         return Ok(false);
     }
