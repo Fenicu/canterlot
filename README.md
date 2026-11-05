@@ -55,6 +55,83 @@ Canterlot — self-hosted хаб для агентов программиров�
   </tr>
 </table>
 
+## Развёртывание из готовых архивов
+
+В [выпусках на Forgejo](https://git.fenicu.com/Fenicu/canterlot/releases) лежат собранные хаб, воркер и PWA. Хаб и воркер собраны для x86_64 под glibc 2.41 и новее (Debian 13, Ubuntu 25.04 и новее). Подробности каждого шага — в [docs/deploy/pilot.md](docs/deploy/pilot.md), ключи конфигурации — в [docs/configuration.md](docs/configuration.md). Собрать всё из исходников можно по [docs/development.md](docs/development.md).
+
+Понадобятся:
+
+- PostgreSQL 18 с базой в UTF-8;
+- Caddy и SSO с forward-auth, который передаёт логин в заголовке `Remote-User` (например, Authelia);
+- на рабочих машинах — systemd и CLI агентов, которыми будете пользоваться: `claude`, `codex`, `opencode`, `agy`.
+
+**1. Скачать и проверить.**
+
+```bash
+VER=$(curl -fsS https://git.fenicu.com/api/v1/repos/Fenicu/canterlot/releases/latest | jq -r .tag_name | sed 's/^v//')
+base=https://git.fenicu.com/Fenicu/canterlot/releases/download/v$VER
+for f in SHA256SUMS canterlot-hub-$VER-x86_64-linux-gnu.tar.gz \
+         canterlot-worker-$VER-x86_64-linux-gnu.tar.gz \
+         canterlot-web-$VER.tar.gz canterlot-csp-$VER.txt; do
+    curl -fLO "$base/$f"
+done
+sha256sum -c SHA256SUMS
+```
+
+**2. Хаб.** Установите бинарник и создайте системного пользователя:
+
+```bash
+sudo tar -xzf canterlot-hub-$VER-x86_64-linux-gnu.tar.gz -C /usr/local/bin
+sudo useradd --system --home-dir /var/lib/canterlot --shell /usr/sbin/nologin canterlot
+```
+
+Дальше по [docs/deploy/pilot.md](docs/deploy/pilot.md):
+
+- роль и база PostgreSQL, строка подключения в `/etc/canterlot/db.url` (§2.2);
+- `/etc/canterlot/hub.toml` с таблицей `[http]`: `trusted_proxies` — адрес Caddy, `owner_login` — ваш логин в SSO, `allowed_origins` — адрес PWA (§2.4);
+- секрет прокси, общий для хаба и Caddy (§2.5);
+- сертификат gRPC от своего УЦ, имя хоста хаба в SAN (§3).
+
+Затем создайте каталоги из §2.6, один раз инициализируйте хаб и включите службу из §2.7:
+
+```bash
+sudo -u canterlot canterlot-hub init --config /etc/canterlot/hub.toml
+sudo systemctl enable --now canterlot-hub
+```
+
+`init` применяет миграции и создаёт владельца. При обновлении хаб сам применяет новые миграции на старте.
+
+**3. PWA и Caddy.** Разверните статику и подставьте свой адрес PWA в CSP:
+
+```bash
+sudo mkdir -p /var/www/canterlot/build
+sudo tar -xzf canterlot-web-$VER.tar.gz -C /var/www/canterlot/build
+sed 's/chat\.example\.com/chat.your.domain/' canterlot-csp-$VER.txt
+```
+
+Строку передайте Caddy в переменной окружения `CANTERLOT_CSP`. Блок сайта возьмите из §4.2: порядок директив внутри `route` важен, он не даёт подделать заголовки входа. Хэши скриптов в CSP привязаны к версии, поэтому при обновлении PWA строку CSP тоже обновляйте.
+
+**4. Машина с воркером.** На хабе выпустите параметры машины:
+
+```bash
+sudo -u canterlot canterlot-hub machine add --config /etc/canterlot/hub.toml --name workstation
+```
+
+Команда печатает `machine_id`, `installation_id`, `restore_generation` и `token`. Токен показывается один раз: сохраните его на машине в `~/.config/canterlot/token` с правами `0600`, туда же положите `ca.pem` своего УЦ. Затем на машине воркера:
+
+```bash
+sudo tar -xzf canterlot-worker-$VER-x86_64-linux-gnu.tar.gz -C /usr/local/bin
+```
+
+`~/.config/canterlot/worker.toml` заполните по §6.2 и [docs/configuration.md](docs/configuration.md): адрес хаба `https://<хаб>:7443`, три UUID, `allowed_workdir_roots` и таблицы нужных агентов. Пользовательская служба — из §6.4, в ней обязателен `KillMode=process`: с ним идущие сессии переживают перезапуск воркера.
+
+```bash
+loginctl enable-linger "$USER"
+systemctl --user enable --now canterlot-worker
+```
+
+**Обновление.** Скачайте новую версию тем же способом. Сначала замените бинарник хаба и перезапустите его, затем PWA с новым CSP, затем бинарник воркера: `systemctl --user restart canterlot-worker`. Идущие сессии при этом не прерываются. Откатить хаб на версию со старой схемой базы нельзя, поэтому перед обновлением сделайте дамп.
+
 ## Документация
 
 - [Разработка](docs/development.md) — тулчейн, структура репозитория, проверки, тесты и обновление контракта.
@@ -70,7 +147,7 @@ Canterlot — self-hosted хаб для агентов программиров�
 
 Текущая версия — 1.11.0. История изменений для человека — [CHANGES.rst](CHANGES.rst), правила бампа — [docs/versioning.md](docs/versioning.md).
 
-Готовые архивы хаба, воркера (x86_64, glibc 2.41 и новее) и PWA с контрольными суммами лежат в [выпусках на Forgejo](https://git.fenicu.com/Fenicu/canterlot/releases). Их публикует `scripts/publish-release.sh vX.Y.Z` из сборки, сделанной при выкатке, без повторной компиляции.
+Архивы выпуска публикует `scripts/publish-release.sh vX.Y.Z` из сборки, сделанной при выкатке, без повторной компиляции.
 
 ## Лицензии
 
