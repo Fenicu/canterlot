@@ -2,6 +2,7 @@ import { SvelteDate } from "svelte/reactivity";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { OpJournal, Op } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
+import { DraftSync, type DraftRecord } from "#lib/drafts/sync.js";
 import type { Returned } from "#lib/composer/returned.js";
 import type { Upload, UploadManager } from "#lib/uploads/manager.js";
 import type { ConnectionStatus } from "#lib/sync/connection.js";
@@ -41,6 +42,25 @@ export interface ComposerDeps {
   serverNow?(): number;
   /** Возвращает ответ хаба `StopOutcome`. */
   interruptApi?(conversationId: string, key: string): Promise<unknown>;
+  /** Общий черновик на хабе; без него остаётся только локальный буфер. */
+  serverDrafts?: {
+    put(
+      text: string,
+      attachmentIds: string[],
+      baseRevision: number,
+    ): Promise<DraftRecord>;
+  };
+  /** Идентификатор установки для отбрасывания эха своей записи. */
+  deviceId?: string;
+  /** Метаданные готового вложения для лотка на другом устройстве. */
+  attachmentInfo?(id: string): Promise<{
+    id: string;
+    name: string;
+    size: number;
+  }>;
+  now?(): number;
+  schedule?(fn: () => void, ms: number): () => void;
+  online?(): boolean;
 }
 
 /** Сколько ждать итога прерывания от машины, прежде чем вернуть кнопку владельцу. */
@@ -61,10 +81,128 @@ export class ComposerModel {
   interruptRunning = $state(false);
   /** Нажатие в работе: повторное во время проверки сети не создаёт второе сообщение. */
   sending = $state(false);
+  /** Номер применённого чужого черновика: по нему экран ставит курсор в конец. */
+  draftApplied = $state(0);
   #interruptTimer: ReturnType<typeof setTimeout> | null = null;
+  #draft: DraftSync | null = null;
+  #attachmentsInFlight = 0;
 
   constructor(deps: ComposerDeps) {
     this.deps = deps;
+    if (deps.serverDrafts) {
+      this.#draft = new DraftSync({
+        deviceId: deps.deviceId ?? "local",
+        api: deps.serverDrafts,
+        current: () => this.text,
+        currentAttachments: () => this.draftAttachmentIds(),
+        apply: (text, attachmentIds) => {
+          this.text = text;
+          this.draftApplied += 1;
+          void this.#reconcileAttachments(attachmentIds);
+        },
+        local: {
+          load: () => deps.drafts.load(deps.conversationId),
+          set: (text) => deps.drafts.set(deps.conversationId, { text }),
+          clear: () => deps.drafts.clear(deps.conversationId),
+        },
+        now: deps.now ?? (() => Date.now()),
+        schedule:
+          deps.schedule ??
+          ((fn, ms) => {
+            const timer = setTimeout(fn, ms);
+            return () => clearTimeout(timer);
+          }),
+        online: deps.online ?? (() => true),
+      });
+    }
+  }
+
+  /** Готовые вложения лотка в порядке показа: только они входят в общий черновик. */
+  draftAttachmentIds(): string[] {
+    return this.deps.uploads
+      .list(this.deps.conversationId)
+      .filter((item) => item.phase === "ready" && item.attachmentId)
+      .map((item) => item.attachmentId!);
+  }
+
+  /** Загружает общий черновик и локальный буфер; возвращённые вложения встают в лоток. */
+  async startDraft(server: DraftRecord | null): Promise<void> {
+    if (!this.#draft) return;
+    const attachments = await this.#draft.start(server);
+    if (attachments.length > 0) {
+      this.deps.uploads.restore(this.deps.conversationId, attachments);
+      this.deps.drafts.set(this.deps.conversationId, { attachments: [] });
+    }
+  }
+
+  typed(): void {
+    this.#draft?.typed();
+  }
+
+  remoteDraft(record: DraftRecord | null): void {
+    this.#draft?.remote(record);
+  }
+
+  flushDraft(): Promise<void> {
+    return this.#draft?.flush() ?? Promise.resolve();
+  }
+
+  leaveDraft(): Promise<void> {
+    return this.#draft?.leave() ?? Promise.resolve();
+  }
+
+  /** Смена лотка: готовые вложения и удаление должны попасть в общий черновик. */
+  attachmentsChanged(): void {
+    if (this.#attachmentsInFlight > 0) return;
+    this.typed();
+  }
+
+  async #reconcileAttachments(ids: string[]): Promise<void> {
+    this.#attachmentsInFlight += 1;
+    try {
+      const wanted = new Set(ids);
+      const ready = this.deps.uploads
+        .list(this.deps.conversationId)
+        .filter((item) => item.phase === "ready" && item.attachmentId);
+      for (const item of ready) {
+        if (!wanted.has(item.attachmentId!)) {
+          await this.deps.uploads.cancel(item.id).catch(() => undefined);
+        }
+      }
+      const known = new Set(
+        this.deps.uploads
+          .list(this.deps.conversationId)
+          .filter((item) => item.phase === "ready" && item.attachmentId)
+          .map((item) => item.attachmentId!),
+      );
+      const missing = ids.filter((id) => !known.has(id));
+      if (missing.length > 0 && this.deps.attachmentInfo) {
+        const found = await Promise.all(
+          missing.map((id) =>
+            this.deps.attachmentInfo!(id).catch(() => null),
+          ),
+        );
+        this.deps.uploads.restore(
+          this.deps.conversationId,
+          found.filter(
+            (item): item is { id: string; name: string; size: number } =>
+              item !== null,
+          ),
+        );
+      }
+      this.deps.drafts.set(this.deps.conversationId, {
+        attachments: this.deps.uploads
+          .list(this.deps.conversationId)
+          .filter((item) => item.phase === "ready" && item.attachmentId)
+          .map((item) => ({
+            id: item.attachmentId!,
+            name: item.name,
+            size: item.size,
+          })),
+      });
+    } finally {
+      this.#attachmentsInFlight -= 1;
+    }
   }
 
   get gate(): SendGate {
@@ -174,6 +312,7 @@ export class ComposerModel {
       const body = {
         content: [{ type: "text" as const, text: sendText }],
         attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
+        device_id: this.deps.deviceId,
       };
       op = await this.deps.ops.begin("input", body, {
         conversationId: this.deps.conversationId,
@@ -191,7 +330,10 @@ export class ComposerModel {
     // Текст, набранный после нажатия, живёт в черновике, поэтому его не трогаем.
     const detached = this.deps.uploads.detach(readyUploads.map((u) => u.id));
     if (!this.text) {
+      this.#draft?.sent();
       void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
+    } else {
+      this.typed();
     }
     return { op, key, text: sendText, detached };
   }
@@ -212,17 +354,20 @@ export class ComposerModel {
       this.errorMessage =
         "Нет связи: сообщение сохранено как черновик и не отправлено";
       this.deps.drafts.set(this.deps.conversationId, { text: this.text });
+      this.typed();
     }
     return false;
   }
 
   #giveBack(text: string): void {
     this.text = this.text ? `${text}\n${this.text}` : text;
+    this.typed();
   }
 
   #restore(key: string, text: string, detached: Upload[]): void {
     this.#giveBack(text);
     this.deps.drafts.set(this.deps.conversationId, { text: this.text });
+    this.typed();
     this.deps.chat.discardLocal(key);
     this.deps.uploads.reattach(detached);
   }
@@ -231,6 +376,7 @@ export class ComposerModel {
   takeBack({ text, attachments, notice }: Returned): void {
     this.#giveBack(text);
     this.deps.drafts.set(this.deps.conversationId, { text: this.text });
+    this.typed();
     this.deps.uploads.restore(this.deps.conversationId, attachments);
     if (notice) this.errorMessage = notice;
   }
@@ -273,6 +419,7 @@ export class ComposerModel {
           content: [{ type: "text" as const, text: sendText }],
           attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
           run_at: new SvelteDate(at).toISOString(),
+          device_id: this.deps.deviceId,
         },
         { conversationId: this.deps.conversationId, persist: true, key },
       );
@@ -285,7 +432,10 @@ export class ComposerModel {
     const detached = this.deps.uploads.detach(readyUploads.map((u) => u.id));
     this.errorMessage = null;
     if (!this.text) {
+      this.#draft?.sent();
       void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
+    } else {
+      this.typed();
     }
     return { op, key, text: sendText, detached };
   }

@@ -7,6 +7,7 @@ import {
 import { AuthRequired, NetworkError, authProbeResult, session } from "#lib/api/http.js";
 import { returnRefused } from "#lib/composer/returned.js";
 import { DraftStore } from "#lib/drafts/store.js";
+import { getDeviceId } from "#lib/drafts/device.js";
 import { OpJournal } from "#lib/ops/journal.js";
 import { sendOp } from "#lib/ops/request.js";
 import { openDb, type Idb } from "#lib/storage/idb.js";
@@ -35,6 +36,7 @@ export interface RuntimeDeps {
 export interface Runtime {
   dispose(): void;
   ownerId: string;
+  deviceId: string;
   db: Idb;
   journal: OpJournal;
   drafts: DraftStore;
@@ -83,6 +85,7 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
         authExpired: () => session.state === "expired",
       },
     );
+    const deviceId = getDeviceId();
     const drafts = new DraftStore(ownerId, db);
     journal.onOrphanRefused((op) => void returnRefused(op, drafts));
     await journal.recover();
@@ -185,6 +188,7 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
     let disposed = false;
     const runtime: Runtime = {
       ownerId,
+      deviceId,
       db,
       journal,
       drafts,

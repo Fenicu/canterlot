@@ -1,5 +1,6 @@
 export interface DraftRecord {
   text: string;
+  attachment_ids?: string[];
   revision: number;
   updated_at?: string | null;
   device_id?: string | null;
@@ -16,7 +17,11 @@ export interface DraftSyncLocal {
 }
 
 export interface DraftSyncApi {
-  put(text: string, baseRevision: number): Promise<DraftRecord>;
+  put(
+    text: string,
+    attachmentIds: string[],
+    baseRevision: number,
+  ): Promise<DraftRecord>;
 }
 
 export interface DraftSyncOptions {
@@ -24,7 +29,8 @@ export interface DraftSyncOptions {
   api: DraftSyncApi;
   local: DraftSyncLocal;
   current(): string;
-  apply(text: string): void;
+  currentAttachments(): string[];
+  apply(text: string, attachmentIds: string[]): void;
   now(): number;
   schedule(fn: () => void, ms: number): () => void;
   online(): boolean;
@@ -44,6 +50,7 @@ export class DraftSync {
   readonly #idleMs: number;
   #revision = 0;
   #savedText = "";
+  #savedAttachments: string[] = [];
   #dirty = false;
   #started = false;
   #lastEditAt = 0;
@@ -79,21 +86,29 @@ export class DraftSync {
     this.#savedText = server?.text ?? "";
     const local = await this.#options.local.load();
     const attachments = local?.attachments ?? [];
+    const localIds = attachments.map((item) => item.id);
     const serverText = server?.text ?? "";
+    const serverIds = server?.attachment_ids ?? [];
+    this.#savedAttachments = serverIds;
     const serverTime = server?.updated_at ? Date.parse(server.updated_at) : 0;
     const localTime = local?.updatedAt ?? 0;
     const localText = local?.text ?? "";
+    const localDiffers =
+      localText !== serverText || !sameIds(localIds, serverIds);
 
-    if (local && localText !== serverText && localTime > serverTime) {
-      this.#applyLocal(localText);
-    } else if (server) {
-      this.#options.apply(serverText);
+    if (local && localDiffers && localTime > serverTime) {
+      this.#applyLocal(localText, localIds);
+      return attachments;
+    }
+    if (server) {
+      this.#options.apply(serverText, serverIds);
       this.#savedText = serverText;
+      this.#savedAttachments = serverIds;
       this.#dirty = false;
       this.#options.local.set(serverText);
-    } else if (localText) {
-      this.#applyLocal(localText);
+      return attachments.filter((item) => serverIds.includes(item.id));
     }
+    if (localText || localIds.length > 0) this.#applyLocal(localText, localIds);
     return attachments;
   }
 
@@ -101,7 +116,9 @@ export class DraftSync {
   typed(): void {
     this.#lastEditAt = this.#options.now();
     const text = this.#options.current();
-    this.#dirty = text !== this.#savedText;
+    const attachmentIds = this.#options.currentAttachments();
+    this.#dirty =
+      text !== this.#savedText || !sameIds(attachmentIds, this.#savedAttachments);
     this.#options.local.set(text);
     if (this.#dirty) this.#scheduleSave();
     if (this.#pending) this.#scheduleIdle();
@@ -109,13 +126,17 @@ export class DraftSync {
 
   /** Чужое событие: эхо своего устройства и старые ревизии отбрасываются. */
   remote(record: DraftRecord | null): void {
-    if (!record) return;
+    if (!record || !this.#started) return;
     if (record.device_id && record.device_id === this.#options.deviceId) return;
     if (record.revision <= this.#revision) return;
     this.#revision = record.revision;
     this.#savedText = record.text;
+    this.#savedAttachments = record.attachment_ids ?? [];
 
-    if (this.#options.current() === record.text) {
+    if (
+      this.#options.current() === record.text &&
+      sameIds(this.#options.currentAttachments(), this.#savedAttachments)
+    ) {
       this.#dirty = false;
       this.#pending = null;
       this.#cancelIdle();
@@ -140,11 +161,19 @@ export class DraftSync {
     }
     this.#saving = true;
     const text = this.#options.current();
+    const attachmentIds = this.#options.currentAttachments();
     try {
-      const record = await this.#options.api.put(text, this.#revision);
+      const record = await this.#options.api.put(
+        text,
+        attachmentIds,
+        this.#revision,
+      );
       this.#revision = Math.max(this.#revision, record.revision);
       this.#savedText = record.text;
-      this.#dirty = this.#options.current() !== record.text;
+      this.#savedAttachments = record.attachment_ids ?? attachmentIds;
+      this.#dirty =
+        this.#options.current() !== record.text ||
+        !sameIds(this.#options.currentAttachments(), this.#savedAttachments);
       if (this.#dirty) this.#scheduleSave();
       else this.#options.local.set(record.text);
     } catch {
@@ -171,13 +200,16 @@ export class DraftSync {
     this.#pending = null;
     this.#dirty = false;
     this.#savedText = "";
+    this.#savedAttachments = [];
     this.#options.local.clear();
   }
 
-  #applyLocal(text: string): void {
-    this.#options.apply(text);
+  #applyLocal(text: string, attachmentIds: string[]): void {
+    this.#options.apply(text, attachmentIds);
     this.#options.local.set(text);
-    this.#dirty = text !== this.#savedText;
+    this.#dirty =
+      text !== this.#savedText ||
+      !sameIds(attachmentIds, this.#savedAttachments);
     if (this.#dirty) this.#scheduleSave();
   }
 
@@ -187,8 +219,9 @@ export class DraftSync {
     this.#pending = null;
     this.#dirty = false;
     this.#savedText = record.text;
+    this.#savedAttachments = record.attachment_ids ?? [];
     this.#revision = Math.max(this.#revision, record.revision);
-    this.#options.apply(record.text);
+    this.#options.apply(record.text, this.#savedAttachments);
     this.#options.local.set(record.text);
   }
 
@@ -223,4 +256,11 @@ export class DraftSync {
     this.#idleTimer?.();
     this.#idleTimer = null;
   }
+}
+
+function sameIds(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((id, index) => id === right[index])
+  );
 }

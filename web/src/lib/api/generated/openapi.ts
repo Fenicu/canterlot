@@ -224,6 +224,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_conversations__id__draft"];
+        put: operations["put__api_v1_conversations__id__draft"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/executions": {
         parameters: {
             query?: never;
@@ -1311,6 +1327,7 @@ export interface components {
             background: components["schemas"]["BackgroundTaskView"][];
             context?: components["schemas"]["ContextSnapshot"] | null;
             detail: components["schemas"]["ConversationDetail"];
+            draft?: components["schemas"]["DraftView"] | null;
             history: components["schemas"]["HistoryPage"];
             nudge?: components["schemas"]["NudgeRuleView"] | null;
             nudge_events: components["schemas"]["NudgeEventView"][];
@@ -1418,6 +1435,13 @@ export interface components {
             label: string;
             /** Format: int64 */
             total_bytes: number;
+        };
+        DraftView: {
+            attachment_ids: string[];
+            /** Format: int64 */
+            revision: number;
+            text: string;
+            updated_at?: string | null;
         };
         EditInputBody: {
             attachment_ids?: string[];
@@ -2249,6 +2273,13 @@ export interface components {
             /** @description Сброс недели, в окне которой включился резерв. */
             weekly_reserve_resets_at?: string | null;
         };
+        PutDraft: {
+            attachment_ids?: string[];
+            /** Format: int64 */
+            base_revision?: number;
+            device_id?: string | null;
+            text: string;
+        };
         QueueView: {
             hold_reasons: components["schemas"]["HoldView"][];
             pause_reasons: components["schemas"]["PauseReason"][];
@@ -2367,6 +2398,8 @@ export interface components {
         ScheduleBody: {
             attachment_ids?: string[];
             content: components["schemas"]["ContentBlock"][];
+            /** @description Устройство, отправившее текст из композера: свой `draft_changed` оно игнорирует. */
+            device_id?: string | null;
             /** Format: date-time */
             run_at: string;
         };
@@ -2434,6 +2467,7 @@ export interface components {
                 background: components["schemas"]["BackgroundTaskView"][];
                 context?: components["schemas"]["ContextSnapshot"] | null;
                 detail: components["schemas"]["ConversationDetail"];
+                draft?: components["schemas"]["DraftView"] | null;
                 history: components["schemas"]["HistoryPage"];
                 nudge?: components["schemas"]["NudgeRuleView"] | null;
                 nudge_events: components["schemas"]["NudgeEventView"][];
@@ -2522,6 +2556,8 @@ export interface components {
         SubmitBody: {
             attachment_ids?: string[];
             content: components["schemas"]["ContentBlock"][];
+            /** @description Устройство, отправившее текст из композера: свой `draft_changed` оно игнорирует. */
+            device_id?: string | null;
             /** Format: uuid */
             retry_of?: string | null;
         };
@@ -3496,6 +3532,104 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DelegationNode"][];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Разговор */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Черновик поля ввода; пустой текст значит, что черновика нет */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_conversations__id__draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Разговор */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutDraft"];
+            };
+        };
+        responses: {
+            /** @description Черновик сохранён; пустой текст удаляет его */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftView"];
+                };
+            };
+            /** @description Текст длиннее 64 КиБ или вложение не готово/чужое */
+            400: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

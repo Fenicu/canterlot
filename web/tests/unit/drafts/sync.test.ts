@@ -13,10 +13,11 @@ function harness(options: {
 } = {}) {
   let now = 0;
   let current = "";
+  let currentAttachments: string[] = [];
   let revision = 1;
   const timers: Timer[] = [];
-  const puts: Array<{ text: string; base: number }> = [];
-  const applied: string[] = [];
+  const puts: Array<{ text: string; attachments: string[]; base: number }> = [];
+  const applied: Array<{ text: string; attachments: string[] }> = [];
   const localSets: string[] = [];
   let local = options.local ?? null;
   let online = options.online ?? true;
@@ -33,9 +34,11 @@ function harness(options: {
     },
     online: () => online,
     current: () => current,
-    apply: (text) => {
+    currentAttachments: () => currentAttachments,
+    apply: (text, attachments) => {
       current = text;
-      applied.push(text);
+      currentAttachments = attachments;
+      applied.push({ text, attachments });
     },
     local: {
       load: async () => local,
@@ -48,10 +51,11 @@ function harness(options: {
       },
     },
     api: {
-      put: async (text, base) => {
-        puts.push({ text, base });
+      put: async (text, attachments, base) => {
+        puts.push({ text, attachments, base });
         const record: DraftRecord = {
           text,
+          attachment_ids: attachments,
           revision: revision++,
           updated_at: new Date(now).toISOString(),
           device_id: "device-a",
@@ -87,7 +91,11 @@ function harness(options: {
     setText(text: string) {
       current = text;
     },
+    setAttachments(ids: string[]) {
+      currentAttachments = ids;
+    },
     text: () => current,
+    attachments: () => currentAttachments,
     setOnline(value: boolean) {
       online = value;
     },
@@ -104,7 +112,7 @@ describe("drafts/sync", () => {
     await h.advance(499);
     expect(h.puts).toEqual([]);
     await h.advance(1);
-    expect(h.puts).toEqual([{ text: "привет", base: 0 }]);
+    expect(h.puts).toEqual([{ text: "привет", attachments: [], base: 0 }]);
   });
 
   it("does_not_send_when_the_text_did_not_change", async () => {
@@ -177,7 +185,7 @@ describe("drafts/sync", () => {
 
     h.setOnline(true);
     await h.sync.flush();
-    expect(h.puts).toEqual([{ text: "без сети", base: 0 }]);
+    expect(h.puts).toEqual([{ text: "без сети", attachments: [], base: 0 }]);
     expect(h.sync.dirty).toBe(false);
   });
 
@@ -192,7 +200,7 @@ describe("drafts/sync", () => {
     });
     expect(h.text()).toBe("локальное");
     await h.advance(500);
-    expect(h.puts).toEqual([{ text: "локальное", base: 7 }]);
+    expect(h.puts).toEqual([{ text: "локальное", attachments: [], base: 7 }]);
   });
 
   it("takes_the_server_draft_when_it_is_newer_than_the_local_buffer", async () => {
@@ -216,7 +224,49 @@ describe("drafts/sync", () => {
     h.setText("");
     h.sync.typed();
     await h.advance(500);
-    expect(h.puts).toEqual([{ text: "", base: 3 }]);
+    expect(h.puts).toEqual([{ text: "", attachments: [], base: 3 }]);
+  });
+
+  it("saves_attachment_ids_with_the_text", async () => {
+    const h = harness();
+    await h.sync.start({ text: "", attachment_ids: [], revision: 2 });
+    h.setText("с файлом");
+    h.setAttachments(["a1", "a2"]);
+    h.sync.typed();
+    await h.advance(500);
+    expect(h.puts).toEqual([
+      { text: "с файлом", attachments: ["a1", "a2"], base: 2 },
+    ]);
+  });
+
+  it("applies_remote_attachment_ids_and_clears_them_when_removed", async () => {
+    const h = harness();
+    await h.sync.start({ text: "было", attachment_ids: [], revision: 1 });
+    h.sync.remote({
+      text: "было",
+      attachment_ids: ["a1"],
+      revision: 2,
+      device_id: "device-b",
+    });
+    expect(h.attachments()).toEqual(["a1"]);
+    h.sync.remote({
+      text: "было",
+      attachment_ids: [],
+      revision: 3,
+      device_id: "device-b",
+    });
+    expect(h.attachments()).toEqual([]);
+  });
+
+  it("an_empty_draft_with_attachments_is_still_a_draft", async () => {
+    const h = harness();
+    await h.sync.start({ text: "", attachment_ids: [], revision: 1 });
+    h.setAttachments(["a1"]);
+    h.sync.typed();
+    await h.advance(500);
+    expect(h.puts).toEqual([
+      { text: "", attachments: ["a1"], base: 1 },
+    ]);
   });
 
   it("sent_stops_pending_saves_and_clears_the_local_buffer", async () => {

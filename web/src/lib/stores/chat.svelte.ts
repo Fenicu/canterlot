@@ -2,6 +2,7 @@ import { untrack } from "svelte";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type { OpJournal } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
+import type { DraftRecord } from "#lib/drafts/sync.js";
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import type {
   AppliedEvent,
@@ -190,6 +191,7 @@ export interface SnapshotData {
   queue?: Partial<QueueSnapshot>;
   history?: HistoryPage;
   scheduled?: ScheduledMessage[];
+  draft?: DraftRecord | null;
   alarms?: AlarmView[];
   open_requests?: unknown[];
   todos?: TodoList[];
@@ -333,6 +335,9 @@ export class ChatStore {
     resume_pending: false,
   });
   scheduled = $state<ScheduledMessage[]>([]);
+  draft = $state<DraftRecord | null>(null);
+  /** Номер изменения черновика: экран применяет каждое новое значение один раз. */
+  draftSerial = $state(0);
   alarms = $state<AlarmView[]>([]);
   phase = $state<Record<string, unknown> | null>(null);
   interrupt = $state<Record<string, unknown> | null>(null);
@@ -953,6 +958,18 @@ export class ChatStore {
           if (!sameAlarms(this.alarms, next)) this.alarms = next;
         }
         return;
+      case "draft_changed":
+        if (event.kind === "draft_changed") {
+          this.draft = {
+            text: event.payload.text,
+            attachment_ids: event.payload.attachment_ids,
+            revision: event.payload.revision,
+            updated_at: null,
+            device_id: event.payload.device_id,
+          };
+          this.draftSerial += 1;
+        }
+        return;
       case "scheduled_changed":
         if (event.kind === "scheduled_changed") {
           const next = this.scheduled.filter(
@@ -1338,6 +1355,8 @@ export class ChatStore {
       if (data.queue.run_slot) this.queue.run_slot = data.queue.run_slot;
     }
     if (data.scheduled) this.scheduled = data.scheduled;
+    this.draft = data.draft ?? null;
+    this.draftSerial += 1;
     if (data.alarms && !sameAlarms(this.alarms, data.alarms))
       this.alarms = data.alarms;
     if (data.open_requests) this.requests.reconcileSnapshot(data.open_requests);

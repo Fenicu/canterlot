@@ -2,12 +2,12 @@
   import { onMount, untrack } from 'svelte';
   import { canSendNow } from '#lib/api/gate.js';
   import { loadConfig } from '#lib/api/config.js';
+  import { getAttachment, putConversationDraft } from '#lib/api/client.js';
   import { clock } from '#lib/clock.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import AttachmentTray from '#lib/composer/AttachmentTray.svelte';
   import ContextIndicator from '#lib/composer/ContextIndicator.svelte';
   import InterruptButton from '#lib/composer/InterruptButton.svelte';
-  import { bindDraft } from '#lib/composer/draftBinding.js';
   import { filesFromPayload, hasFileDrag } from '#lib/composer/intake.js';
   import { ComposerModel, EMPTY_DRAFT_REASON, type Limits } from '#lib/composer/model.svelte.js';
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
@@ -44,7 +44,28 @@
         canSend: () => canSendNow(),
         connection: () => runtime.connection.status,
         probe,
-        serverNow: () => clock.serverNow()
+        serverNow: () => clock.serverNow(),
+        deviceId: runtime.deviceId,
+        serverDrafts: {
+          put: async (text, attachmentIds, baseRevision) => {
+            const response = await putConversationDraft(chat.id, {
+              text,
+              attachment_ids: attachmentIds,
+              base_revision: baseRevision,
+              device_id: runtime.deviceId
+            });
+            return response.data;
+          }
+        },
+        attachmentInfo: async (id) => {
+          const response = await getAttachment(id);
+          return {
+            id: response.data.id,
+            name: response.data.name,
+            size: response.data.size
+          };
+        },
+        online: () => navigator.onLine
       })
   );
 
@@ -107,10 +128,13 @@
     }
   });
 
+  let readySignature = '';
+
   onMount(() => {
     const stop = bindComposerRestore((text) => {
       model.text = text;
       if (node) node.value = text;
+      model.typed();
     });
     const stopReturned = bindReturned(chat.id, (returned) => model.takeBack(returned));
     // Файл, брошенный мимо композера, не должен уводить приложение на этот файл.
@@ -130,15 +154,52 @@
       })
       .catch(() => undefined);
     const releaseTicker = ticker.retain();
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') void model.flushDraft();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    void model.startDraft(chat.draft ?? null).then(() => model.remoteDraft(chat.draft));
     return () => {
       stop();
       stopReturned();
+      document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('dragover', blockDrop);
       window.removeEventListener('drop', blockDrop);
       window.removeEventListener('dragend', endDrop);
       releaseTicker();
       window.clearTimeout(timer);
+      void model.leaveDraft();
     };
+  });
+
+  $effect(() => {
+    void chat.draftSerial;
+    if (chat.draftSerial === 0) return;
+    model.remoteDraft(chat.draft);
+  });
+
+  $effect(() => {
+    if (model.draftApplied === 0 || !node) return;
+    if (document.activeElement === node) {
+      const end = node.value.length;
+      node.setSelectionRange(end, end);
+    }
+  });
+
+  $effect(() => {
+    if (runtime.connection.status.phase === 'live') void model.flushDraft();
+  });
+
+  $effect(() => {
+    void ticker.now;
+    const signature = uploads
+      .list(chat.id)
+      .filter((item) => item.phase === 'ready' && item.attachmentId)
+      .map((item) => item.attachmentId)
+      .join('|');
+    if (signature === readySignature) return;
+    readySignature = signature;
+    model.attachmentsChanged();
   });
 
   function onKey(event: KeyboardEvent) {
@@ -297,20 +358,8 @@
       bind:this={node}
       bind:value={model.text}
       use:keepCaret
-      use:bindDraft={{
-        drafts: runtime.drafts,
-        conversationId: chat.id,
-        onRestore: (text) => {
-          model.text = text;
-        },
-        onChange: (text) => {
-          model.text = text;
-        },
-        onAttachments: (list) => {
-          uploads.restore(chat.id, list);
-          runtime.drafts.set(chat.id, { attachments: [] });
-        }
-      }}
+      oninput={() => model.typed()}
+      onblur={() => void model.flushDraft()}
       rows="1"
       enterkeyhint="enter"
       placeholder="Сообщение агенту…"
