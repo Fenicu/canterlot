@@ -37,7 +37,7 @@
     anchorTop = 0,
     ongroups,
     onclose,
-    ondeleted
+    ontrashed
   }: {
     item: ListRow;
     groups: { id: string; name: string }[];
@@ -49,7 +49,7 @@
     anchorTop?: number;
     ongroups?: () => void;
     onclose: () => void;
-    ondeleted?: (id: string) => void;
+    ontrashed?: (id: string) => void;
   } = $props();
 
   const STOP_POLLS = 60;
@@ -354,7 +354,7 @@
       if (stopFirst && !(await stopProcess(id))) return;
       await deleteConversation(id, deleteKey);
       onclose();
-      ondeleted?.(id);
+      ontrashed?.(id);
     } catch (err) {
       deleteError = errorText(err, 'Не удалось удалить сессию');
     } finally {
@@ -439,7 +439,7 @@
       <Button onclick={() => void archive(true)}>Всё равно архивировать</Button>
     {/if}
     <button type="button" class="archive remove" onclick={() => void askDelete()}>
-      <Icon name="trash" /><span>Удалить</span><small>Без возможности вернуть</small>
+      <Icon name="trash" /><span>Переместить в корзину</span><small>Можно вернуть в течение 24 часов</small>
     </button>
     {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
     {#if stopping}<p class="note" role="status">Останавливаю процесс</p>{/if}
@@ -449,9 +449,9 @@
 
 {#if confirmingDelete}
   <ConfirmDialog
-    title={stopFirst ? 'Остановить и удалить сессию?' : 'Удалить сессию?'}
-    body={`${stopFirst ? `Процесс агента на машине ${item.machine.name} будет остановлен. ` : ''}Сессия «${item.title}» будет удалена вместе с историей и вложениями. Это нельзя отменить. История CLI на машине останется: её удаляют средствами самого агента.`}
-    confirmLabel={stopFirst ? 'Остановить и удалить' : 'Удалить'}
+    title={stopFirst ? 'Остановить и убрать в корзину?' : 'Переместить сессию в корзину?'}
+    body={`${stopFirst ? `Процесс агента на машине ${item.machine.name} будет остановлен. ` : ''}Сессия «${item.title}» переместится в корзину. Её можно вернуть в течение 24 часов; История CLI на машине останется.`}
+    confirmLabel={stopFirst ? 'Остановить и убрать' : 'В корзину'}
     danger
     onconfirm={() => { confirmingDelete = false; void remove(); }}
     onclose={() => { confirmingDelete = false; }}

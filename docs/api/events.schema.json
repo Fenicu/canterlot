@@ -248,6 +248,10 @@
           "type": "integer",
           "minimum": 0
         },
+        "trashed": {
+          "type": "integer",
+          "minimum": 0
+        },
         "groups": {
           "type": "array",
           "items": {
@@ -273,6 +277,7 @@
         "all",
         "pinned",
         "archived",
+        "trashed",
         "groups"
       ],
       "additionalProperties": false
@@ -2333,6 +2338,19 @@
             "accepted": {
               "type": "boolean"
             },
+            "trashed": {
+              "type": "boolean"
+            },
+            "trashed_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "groups": {
               "type": "array",
               "items": {
@@ -2601,6 +2619,19 @@
             },
             "accepted": {
               "type": "boolean"
+            },
+            "trashed": {
+              "type": "boolean"
+            },
+            "trashed_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "groups": {
               "type": "array",

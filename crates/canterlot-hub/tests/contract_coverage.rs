@@ -314,6 +314,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
     let resume_id = testkit::seed_conversation(&pool, owner, machine).await;
     let stuck = testkit::seed_conversation(&pool, owner, machine).await;
     let delegated = testkit::seed_conversation(&pool, owner, machine).await;
+    let trashed = testkit::seed_conversation(&pool, owner, machine).await;
+    let restore_me = testkit::seed_conversation(&pool, owner, machine).await;
+    sqlx::query("update conversations set trashed_at=clock_timestamp() where id=any($1)")
+        .bind(&[trashed, restore_me][..])
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("update conversations set parent_conversation_id=$2,spawn_depth=1 where id=$1")
         .bind(delegated)
         .bind(id)
@@ -843,6 +850,20 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             None,
         ),
         case(
+            Method::DELETE,
+            "/api/v1/conversations/{id}/trash",
+            format!("/api/v1/conversations/{trashed}/trash"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/conversations/{id}/restore",
+            format!("/api/v1/conversations/{restore_me}/restore"),
+            None,
+            None,
+        ),
+        case(
             Method::POST,
             "/api/v1/conversations/{id}/requests/{request_id}/decision",
             format!(
@@ -914,7 +935,7 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
                 client.send(Method::POST, &other, Some(&key), None).await
             }
         };
-        assert_eq!(conflict.status, 409, "{route}");
+        assert_eq!(conflict.status, 409, "{route}: {:?}", conflict.body);
         assert_eq!(error_code(&conflict), "idempotency_conflict", "{route}");
         assert_eq!(keys(&key).await, 1, "{route}: key after the conflict");
         checked.insert(route, first.status.as_u16());

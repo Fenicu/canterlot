@@ -192,6 +192,7 @@ function seedReadmeSessions(api: FakeHubApi): { pinned: string; themes: string; 
     all: 4,
     pinned: 1,
     archived: 0,
+    trashed: 0,
     groups: [
       { id: canterlot, count: 3 },
       { id: review, count: 1 }

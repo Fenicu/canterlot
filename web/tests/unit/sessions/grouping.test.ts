@@ -173,16 +173,18 @@ describe("sessions/grouping", () => {
         all: 10,
         pinned: 2,
         archived: 4,
+        trashed: 0,
         groups: [{ id: "canterlot", count: 3 }],
       },
       [{ id: "canterlot", name: "canterlot" }],
     );
-    expect(tabs.map((tab) => tab.count)).toEqual([10, 2, 3, 4]);
+    expect(tabs.map((tab) => tab.count)).toEqual([10, 2, 3, 4, 0]);
     expect(tabs.map((tab) => tab.label)).toEqual([
       "Все",
       "Закреплённые",
       "canterlot",
       "Архив",
+      "Корзина",
     ]);
     const visible = buildSections(
       [row({ id: "only", title: "одна" })],

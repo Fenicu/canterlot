@@ -2459,6 +2459,7 @@ function emptyCounts() {
     all: 0,
     pinned: 0,
     archived: 0,
+    trashed: 0,
     groups: [] as { id: string; count: number }[],
   };
 }

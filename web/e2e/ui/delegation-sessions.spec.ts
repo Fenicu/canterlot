@@ -51,6 +51,7 @@ function seedFamily(api: FakeHubApi) {
     all: 4,
     pinned: 0,
     archived: 0,
+    trashed: 0,
     groups: [{ id: group, count: 1 }],
   };
   return { group, parent, child, done, plain };
@@ -213,7 +214,7 @@ test('orphan_archive_and_search', async ({ page }) => {
     harness,
     activity: WORKING as never,
   });
-  api.counts = { all: 2, pinned: 0, archived: 0, groups: [{ id: group, count: 1 }] };
+  api.counts = { all: 2, pinned: 0, archived: 0, trashed: 0, groups: [{ id: group, count: 1 }] };
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
@@ -240,6 +241,7 @@ test('orphan_archive_and_search', async ({ page }) => {
     all: 1,
     pinned: 0,
     archived: 1,
+    trashed: 0,
     groups: api.groups.map((item) => ({ id: item.id, count: 0 })),
   };
   hub.append('conversations', {
@@ -291,7 +293,7 @@ test('accepted_delegate_is_hidden_from_the_archive_tab_and_its_counter', async (
     archived: true,
     activity: STOPPED as never,
   });
-  api.counts = { all: 1, pinned: 0, archived: 1, groups: [] };
+  api.counts = { all: 1, pinned: 0, archived: 1, trashed: 0, groups: [] };
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });

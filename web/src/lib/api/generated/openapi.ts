@@ -464,6 +464,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_conversations__id__restore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/resume": {
         parameters: {
             query?: never;
@@ -572,6 +588,22 @@ export interface paths {
         put?: never;
         post: operations["post__api_v1_conversations__id__stop"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{id}/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete__api_v1_conversations__id__trash"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1156,6 +1188,9 @@ export interface components {
             spawn_depth?: number;
             title: string;
             title_source: string;
+            /** @description Сессия в корзине владельца: видна только на своей странице и во вкладке «Корзина». */
+            trashed?: boolean;
+            trashed_at?: string | null;
             workdir: string;
             worktree?: components["schemas"]["WorktreeView"] | null;
         };
@@ -1305,6 +1340,7 @@ export interface components {
             machines: components["schemas"]["MachinesView"];
             /** Format: int32 */
             schema_version: number;
+            sessions: components["schemas"]["SessionsView"];
             version: string;
             ws: components["schemas"]["WsView"];
         };
@@ -1390,6 +1426,8 @@ export interface components {
             groups: components["schemas"]["GroupCount"][];
             /** Format: int64 */
             pinned: number;
+            /** Format: int64 */
+            trashed: number;
         };
         CreateBody: {
             color?: string | null;
@@ -2501,6 +2539,13 @@ export interface components {
             /** Format: uuid */
             conversation_id: string;
             title: string;
+        };
+        SessionsView: {
+            /**
+             * Format: int64
+             * @description Сколько сессия лежит в корзине до окончательной уборки; `0` — уборка выключена.
+             */
+            trash_retention_secs: number;
         };
         SettingsPatch: {
             effort?: string | null;
@@ -4483,6 +4528,54 @@ export interface operations {
             };
         };
     };
+    post__api_v1_conversations__id__restore: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сессия возвращена из корзины */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationDetail"];
+                };
+            };
+            /** @description not_found или conversation_deleted */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     post__api_v1_conversations__id__resume: {
         parameters: {
             query?: never;
@@ -4813,6 +4906,63 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StopExecutionOutcome"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_conversations__id__trash: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сессия удалена окончательно */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description not_found или conversation_deleted */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description invalid_state: сессия не в корзине */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

@@ -4,7 +4,8 @@ export type Tab =
   | { kind: "all" }
   | { kind: "pinned" }
   | { kind: "group"; id: string }
-  | { kind: "archive" };
+  | { kind: "archive" }
+  | { kind: "trash" };
 
 export interface Group {
   id: string;
@@ -67,9 +68,11 @@ export function buildSections(
   const ordered = [...groups].sort(
     (a, b) => a.position - b.position || a.name.localeCompare(b.name, "ru"),
   );
-  const active = items.filter((item) => !item.archived);
+  const active = items.filter((item) => !item.archived && !item.trashed_at);
   if (tab.kind === "archive") {
-    const archived = items.filter((item) => item.archived && !item.accepted);
+    const archived = items.filter(
+      (item) => item.archived && !item.accepted && !item.trashed_at,
+    );
     return [
       section(
         "archive",
@@ -78,6 +81,10 @@ export function buildSections(
         collapsed,
       ),
     ];
+  }
+  if (tab.kind === "trash") {
+    const trashed = items.filter((item) => item.trashed_at);
+    return [section("trash", "Корзина", nest(trashed, new Set(trashed.map((item) => item.id)), kids), collapsed)];
   }
   if (tab.kind === "pinned") {
     const pinned = active.filter((item) => item.pinned);
@@ -290,6 +297,7 @@ export function tabCounts(
       count: byId.get(group.id) ?? 0,
     })),
     { tab: { kind: "archive" }, label: "Архив", count: counts.archived },
+    { tab: { kind: "trash" }, label: "Корзина", count: counts.trashed },
   ];
 }
 

@@ -443,7 +443,7 @@ async fn group(f: &Fixture) -> Uuid {
     id
 }
 
-async fn delete(f: &Fixture, id: Uuid, key: &str) -> TestResponse {
+async fn trash(f: &Fixture, id: Uuid, key: &str) -> TestResponse {
     f.client
         .send(
             Method::DELETE,
@@ -452,6 +452,31 @@ async fn delete(f: &Fixture, id: Uuid, key: &str) -> TestResponse {
             None,
         )
         .await
+}
+
+async fn purge(f: &Fixture, id: Uuid, key: &str) -> TestResponse {
+    f.client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{id}/trash"),
+            Some(key),
+            None,
+        )
+        .await
+}
+
+/// Старое окончательное удаление: HTTP теперь сначала прячет сессию, поэтому тесты
+/// прежнего пути проходят через корзину и сразу окончательную уборку.
+async fn delete(f: &Fixture, id: Uuid, key: &str) -> TestResponse {
+    let response = trash(f, id, key).await;
+    if response.status != 204 {
+        return response;
+    }
+    let purged = purge(f, id, &format!("purge-{key}")).await;
+    if purged.status != 204 {
+        return purged;
+    }
+    response
 }
 
 fn code(response: &TestResponse) -> String {
@@ -735,12 +760,15 @@ async fn delete_frees_the_files_of_the_session_and_no_others(pool: PgPool) {
 async fn retry_replays_and_a_new_request_gets_a_clear_not_found(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let id = f.conversation;
-    assert_eq!(delete(&f, id, "same").await.status, 204);
-    assert_eq!(delete(&f, id, "same").await.status, 204, "same key replays");
-    let again = delete(&f, id, "other").await;
+    assert_eq!(trash(&f, id, "same").await.status, 204);
+    assert_eq!(trash(&f, id, "same").await.status, 204, "same key replays");
+    assert_eq!(trash(&f, id, "other").await.status, 204, "already trashed");
+    assert_eq!(purge(&f, id, "purge").await.status, 204);
+    assert_eq!(purge(&f, id, "purge").await.status, 204, "same key replays");
+    let again = trash(&f, id, "after").await;
     assert_eq!(again.status, 404);
     assert_eq!(code(&again), "conversation_deleted");
-    let unknown = delete(&f, Uuid::now_v7(), "unknown").await;
+    let unknown = trash(&f, Uuid::now_v7(), "unknown").await;
     assert_eq!(unknown.status, 404);
     assert_eq!(code(&unknown), "not_found");
     let events: i64 =
@@ -829,8 +857,14 @@ async fn a_reference_from_a_neighbour_refuses_the_whole_delete(pool: PgPool) {
         &[input, victim.attachments[0]],
     )
     .await;
+    assert_eq!(
+        trash(&f, victim.conversation, "shared-reference")
+            .await
+            .status,
+        204
+    );
     let before = mentions(&f.pool, &victim.needles).await;
-    let response = delete(&f, victim.conversation, "shared-reference").await;
+    let response = purge(&f, victim.conversation, "shared-reference-purge").await;
     assert_eq!(response.status, 409, "{:?}", response.body);
     assert_eq!(code(&response), "invalid_state");
     assert_eq!(mentions(&f.pool, &victim.needles).await, before);
@@ -868,7 +902,8 @@ async fn other_devices_learn_through_the_event_flow(pool: PgPool) {
     assert_eq!(last["payload"]["id"], victim.conversation.to_string());
     // Остаются соседняя сессия и потомок удалённой.
     assert_eq!(last["payload"]["counts"]["all"], 2);
-    assert_eq!(last["scope_seq"], (head + 1).to_string());
+    // Корзина оставила в журнале обновление, окончательная уборка спрятала его и добавила удаление.
+    assert_eq!(last["scope_seq"], (head + 2).to_string());
     assert!(
         events[..events.len() - 1]
             .iter()

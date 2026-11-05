@@ -317,7 +317,7 @@ pub async fn schedule_message(
     let hash = idempotency::request_hash("schedule_message", &body);
     let locked_key = key.to_owned();
     let value=idempotency::run_in_tx(pool,owner_id,key,"schedule_message",&body,Some(conversation_id),move|conn|Box::pin(async move {
-        let found:Option<Uuid>=sqlx::query_scalar("select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id where c.id=$1 and c.owner_id=$2 for update of q").bind(conversation_id).bind(owner_id).fetch_optional(&mut *conn).await?;
+        let found:Option<Uuid>=sqlx::query_scalar("select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id where c.id=$1 and c.owner_id=$2 and c.trashed_at is null for update of q").bind(conversation_id).bind(owner_id).fetch_optional(&mut *conn).await?;
         if found.is_none(){return Err(ScheduleError::NotFound);}
         if let Some(replay)=replay_locked(conn,owner_id,&locked_key,"schedule_message",&hash).await?{return Ok(replay);}
         validate_time(req.run_at,now)?; validate_content(&req.content,!req.attachment_ids.is_empty())?;
@@ -466,6 +466,8 @@ pub struct Scheduler {
     registry: Option<Registry>,
     limits: Arc<LimitsConfig>,
     session_tools: SessionToolsConfig,
+    /// Срок хранения корзины: через него уборка удаляет сессию окончательно.
+    trash_retention: Duration,
     /// Пороги устоявшегося состояния для перепроверки задания `nudge`.
     settle: crate::session_tools::settle::SettleConfig,
     /// Пороги активности: задание не верит устаревшей проекции цели.
@@ -496,6 +498,7 @@ impl Scheduler {
             registry: None,
             limits: Arc::new(LimitsConfig::default()),
             session_tools: SessionToolsConfig::default(),
+            trash_retention: Duration::from_secs(24 * 3600),
             settle: crate::session_tools::settle::SettleConfig::default(),
             thresholds: crate::activity::Thresholds::from(&crate::config::ActivityConfig::default()),
             blobs: None,
@@ -519,6 +522,13 @@ impl Scheduler {
     pub fn with_session_tools(mut self, config: SessionToolsConfig) -> Self {
         self.session_tools = config;
         self
+    }
+    pub fn with_trash_retention(mut self, retention: Duration) -> Self {
+        self.trash_retention = retention;
+        self
+    }
+    pub fn trash_retention(&self) -> Duration {
+        self.trash_retention
     }
     /// Пороги и выключатель автопинка для перепроверки отложенного толчка.
     pub fn with_settle(mut self, settle: crate::session_tools::settle::SettleConfig) -> Self {
@@ -544,7 +554,7 @@ impl Scheduler {
         let mut report = TickReport::default();
         loop {
             let mut tx = crate::db::begin(&self.pool).await?;
-            let job = sqlx::query_as("select * from scheduled_jobs where state='pending' and run_at<=$1 order by run_at,id for update skip locked limit 1").bind(now).fetch_optional(&mut *tx).await;
+            let job = sqlx::query_as("select j.* from scheduled_jobs j where j.state='pending' and j.run_at<=$1 and (j.kind<>'message' or not exists(select 1 from conversations c where c.id=j.conversation_id and c.trashed_at is not null)) order by j.run_at,j.id for update skip locked limit 1").bind(now).fetch_optional(&mut *tx).await;
             let job: Option<JobRow> = match job {
                 Ok(job) => job,
                 Err(error) => {
@@ -589,10 +599,13 @@ impl Scheduler {
                 }
             }
         }
-        report.next_due =
-            sqlx::query_scalar("select min(run_at) from scheduled_jobs where state='pending'")
-                .fetch_one(&self.pool)
-                .await?;
+        report.next_due = sqlx::query_scalar(
+            "select min(j.run_at) from scheduled_jobs j where j.state='pending'
+               and (j.kind<>'message' or not exists(select 1 from conversations c
+                        where c.id=j.conversation_id and c.trashed_at is not null))",
+        )
+        .fetch_one(&self.pool)
+        .await?;
         Ok(report)
     }
 
@@ -1143,6 +1156,7 @@ impl Scheduler {
             "select c.id,c.owner_id from conversations c
              where c.accepted_at is not null and c.accepted_at <= $1
                and c.archived_at is not null and c.spawn_depth > 0
+               and c.trashed_at is null
                and not c.pinned
                and not exists (select 1 from conversation_group_members gm
                                 where gm.conversation_id=c.id)
@@ -1179,6 +1193,7 @@ impl Scheduler {
                     | crate::deletion::DeleteError::Live
                     | crate::deletion::DeleteError::WorktreeNotRemoved
                     | crate::deletion::DeleteError::Referenced
+                    | crate::deletion::DeleteError::NotTrashed
                     | crate::deletion::DeleteError::IdempotencyConflict,
                 ) => {}
             }
@@ -1188,6 +1203,52 @@ impl Scheduler {
             deleted,
             "accepted delegates removed"
         );
+        Ok(deleted)
+    }
+
+    /// Уборка корзины: сессии, пролежавшие дольше `[sessions].trash_retention`,
+    /// удаляются прежним окончательным путём, пачками.
+    pub async fn purge_trashed(&self, now: DateTime<Utc>) -> Result<usize, sqlx::Error> {
+        let retention = self.trash_retention;
+        if retention.is_zero() {
+            return Ok(0);
+        }
+        let cutoff = now - retention;
+        let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "select c.id,c.owner_id from conversations c
+             where c.trashed_at is not null and c.trashed_at <= $1
+             order by c.trashed_at,c.id limit $2",
+        )
+        .bind(cutoff)
+        .bind(RETENTION_BATCH)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut deleted = 0usize;
+        for (id, owner_id) in candidates {
+            match crate::deletion::purge_retained(
+                &self.pool,
+                self.blobs.as_deref(),
+                owner_id,
+                id,
+                cutoff,
+                Uuid::now_v7(),
+            )
+            .await
+            {
+                Ok(()) => deleted += 1,
+                Err(crate::deletion::DeleteError::Db(error)) => return Err(error),
+                Err(
+                    crate::deletion::DeleteError::NotFound
+                    | crate::deletion::DeleteError::Deleted
+                    | crate::deletion::DeleteError::Live
+                    | crate::deletion::DeleteError::WorktreeNotRemoved
+                    | crate::deletion::DeleteError::Referenced
+                    | crate::deletion::DeleteError::NotTrashed
+                    | crate::deletion::DeleteError::IdempotencyConflict,
+                ) => {}
+            }
+        }
+        tracing::info!(kind = "trash_purged", deleted, "trashed sessions removed");
         Ok(deleted)
     }
 
@@ -1210,8 +1271,17 @@ impl Scheduler {
                 }
             }
         }
-        // Уборка принятых делегаций идёт реже остальной уборки: не чаще раза в несколько часов.
+        // Корзина проверяется каждый час: срок меряется часами, а частичный индекс дешёв.
         let now = Utc::now();
+        if !self.trash_retention.is_zero()
+            && let Err(error) = self.purge_trashed(now).await
+        {
+            log_error(&error);
+            if first.is_none() {
+                first = Some(error);
+            }
+        }
+        // Уборка принятых делегаций идёт реже остальной уборки: не чаще раза в несколько часов.
         if !self.session_tools.accepted_retention.is_zero()
             && now.timestamp() >= self.retention_next.load(Ordering::Relaxed)
         {

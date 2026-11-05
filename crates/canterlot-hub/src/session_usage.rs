@@ -252,7 +252,7 @@ pub async fn for_conversation(
                 .execute(&mut *conn)
                 .await?;
             let known: bool = sqlx::query_scalar(
-                "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
+                "select exists(select 1 from conversations where id=$1 and owner_id=$2 and trashed_at is null)",
             )
             .bind(id)
             .bind(owner_id)

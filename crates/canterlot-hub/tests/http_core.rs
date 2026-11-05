@@ -1758,6 +1758,7 @@ async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
             "limit_thresholds": {"weekly_reserve_pct": 90, "warn_pcts": [70, 85], "warn_remaining_pct": 20, "danger_remaining_pct": 5, "reserve_remaining_pct": 10, "stale_after_secs": 1200},
             "defaults": {"crunch_resume_text": "Продолжай работу."},
             "auth": {"logout_url": null},
+            "sessions": {"trash_retention_secs": 86_400},
         })
     );
     assert_eq!(UPLOAD_CHUNK_BYTES, 8 * 1024 * 1024);
