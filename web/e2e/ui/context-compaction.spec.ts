@@ -64,9 +64,9 @@ for (const theme of ['dark', 'light'] as const) {
 		hub.flush();
 		const running = feed.getByText('Сжимает контекст');
 		await expect(running).toBeVisible();
-		const pulse = page.locator('.compact[data-running="true"] .pulse');
-		await expect(pulse).toBeVisible();
-		const animated = await pulse.evaluate((el) => getComputedStyle(el).animationName);
+		const fold = page.locator('.compact[data-running="true"] .fold i').first();
+		await expect(fold).toBeVisible();
+		const animated = await fold.evaluate((el) => getComputedStyle(el).animationName);
 		if (await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)) {
 			expect(animated).toBe('none');
 		} else {
@@ -75,6 +75,17 @@ for (const theme of ['dark', 'light'] as const) {
 
 		const ctx = await indicator(page);
 		await expect(ctx).toBeVisible();
+		// Пока идёт сжатие, индикатор говорит то же, что строка ленты.
+		await expect(ctx).toHaveAttribute('data-compacting', 'true');
+		await expect(ctx).toContainText('Сжимает контекст');
+		hub.append(`conversation:${id}`, {
+			kind: 'phase_changed',
+			conversation_id: id,
+			payload: { phase: 'awaiting_input', tool_name: null, summary: null }
+		});
+		hub.flush();
+		await expect(feed.getByText('Сжимает контекст')).toHaveCount(0);
+		await expect(ctx).not.toHaveAttribute('data-compacting', 'true');
 		await expect(ctx).toContainText('Контекст 64%');
 		await expect(ctx).toHaveAttribute('data-tone', 'accent');
 		api.pushContext(id, 750_000, 1_000_000);
@@ -123,7 +134,7 @@ for (const theme of ['dark', 'light'] as const) {
 		});
 		hub.flush();
 		await expect(feed.getByText('Сжимает контекст')).toBeVisible();
-		const still = page.locator('.compact[data-running="true"] .pulse');
+		const still = page.locator('.compact[data-running="true"] .fold i').first();
 		await expect(still).toBeVisible();
 		expect(await still.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
 		await page.emulateMedia({ reducedMotion: 'no-preference' });

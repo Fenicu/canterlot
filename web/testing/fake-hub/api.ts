@@ -322,51 +322,37 @@ export class FakeHubApi {
 		});
 	}
 
-	/** Как эпизод сжатия хаба: идущая строка сразу, тихая строка финишем. */
+	/** Как эпизод сжатия хаба: строка встаёт в ленту номером события старта, тихая строка финишем. */
 	pushCompaction(
 		id: string,
 		opts: { trigger?: string; ok?: boolean | null; pre_tokens?: number | null } = {}
 	): HubEvent {
 		const items = this.histories.get(id) ?? [];
-		let max = 0n;
+		const scope = `conversation:${id}`;
 		for (const item of items) {
-			if (item.kind === 'input') continue;
-			try {
-				const seq = BigInt(item.created_seq);
-				if (seq > max) max = seq;
-			} catch {}
+			const at = item.kind === 'input' ? item.feed_seq || item.created_seq : item.created_seq;
+			if (at && /^\d+$/.test(at)) this.hub.reach(scope, at);
 		}
-		const seq = String(max + 1n);
-		const at = new Date().toISOString();
+		const compactionId = this.id();
+		const trigger = opts.trigger ?? 'auto';
+		const started = this.hub.append(scope, {
+			kind: 'compaction_started',
+			conversation_id: id,
+			payload: { id: compactionId, trigger }
+		});
 		const row = {
 			kind: 'compaction',
-			id: this.id(),
-			trigger: opts.trigger ?? 'auto',
+			id: compactionId,
+			trigger,
 			pre_tokens: opts.pre_tokens ?? null,
-			ok: null,
-			created_seq: seq,
-			created_at: at,
-			finished_at: null
+			ok: null as boolean | null,
+			created_seq: started.scope_seq,
+			created_at: started.committed_at,
+			finished_at: null as string | null
 		} as const;
 		items.push({ ...row });
 		this.histories.set(id, items);
-		const started = this.hub.append(`conversation:${id}`, {
-			kind: 'compaction_started',
-			conversation_id: id,
-			payload: { id: row.id, trigger: row.trigger }
-		});
-		if (opts.ok !== undefined && opts.ok !== null) {
-			const finished = items.find((item) => item.id === row.id);
-			if (finished && finished.kind === 'compaction') {
-				finished.ok = opts.ok;
-				finished.finished_at = at;
-			}
-			return this.hub.append(`conversation:${id}`, {
-				kind: 'compaction_finished',
-				conversation_id: id,
-				payload: { id: row.id, trigger: row.trigger, ok: opts.ok }
-			});
-		}
+		if (opts.ok !== undefined && opts.ok !== null) return this.finishCompaction(id, compactionId, opts.ok);
 		return started;
 	}
 
@@ -382,6 +368,12 @@ export class FakeHubApi {
 			conversation_id: id,
 			payload: { id: compactionId, trigger: row.trigger, ok }
 		});
+	}
+
+	/** Как хаб в конце хода или при смерти исполнения: открытые эпизоды закрываются отказом. */
+	closeOpenCompactions(id: string): HubEvent[] {
+		const open = (this.histories.get(id) ?? []).filter((item) => item.kind === 'compaction' && item.ok === null);
+		return open.map((row) => this.finishCompaction(id, row.id, false));
 	}
 
 	/** Как `background_work_changed` хаба: только изменившиеся задачи. */

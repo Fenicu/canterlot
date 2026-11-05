@@ -233,6 +233,41 @@ pub async fn apply_event(
     Ok(false)
 }
 
+/// Открытые эпизоды исполнения закрываются отказом: итога от CLI уже не будет.
+/// Открытый чат узнаёт об этом событием, перечитанный — строкой истории.
+pub(crate) async fn close_open(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let closed: Vec<(Uuid, String)> = sqlx::query_as(
+        "update compactions set ok = false, finished_at = coalesce(finished_at, now())
+         where execution_id = $1 and ok is null
+         returning id, trigger",
+    )
+    .bind(execution_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, trigger) in closed {
+        events::append(
+            conn,
+            NewEvent {
+                scope: Scope::Conversation {
+                    id: conversation_id,
+                },
+                kind: "compaction_finished",
+                conversation_id: Some(conversation_id),
+                execution_id: Some(execution_id),
+                payload: serde_json::json!({"id": id, "trigger": trigger, "ok": false}),
+                correlation_id,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Живой расход контекста: нулевой размер после сжатия гасит токены, окно при этом
 /// не трогаем (сжатие окно не меняет); нулевое окно в прогрессе оставляет прежнее.
 pub async fn apply_progress(

@@ -772,16 +772,23 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
   await page.route('**/api/v1/conversations/*/compact', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
-    hub.append(`conversation:${id}`, {
-      kind: 'queue_state_changed',
-      conversation_id: id,
-      payload: {
-        pause_reasons: [{ reason: 'session_stuck', compaction: 'requested' }],
-        hold_reasons: [],
-        run_slot: 'free'
-      }
-    });
-    hub.flush();
+    // Как хаб: прогресс сжатия помечается только в застрявшей паузе, остальное в очереди не меняется.
+    const scope = `conversation:${id}`;
+    const last = hub.log(scope).findLast((event) => event.kind === 'queue_state_changed');
+    const queue = (last?.payload ?? {}) as { pause_reasons?: { reason?: string }[]; hold_reasons?: unknown[]; run_slot?: unknown };
+    const pauses = queue.pause_reasons ?? [];
+    if (pauses.some((pause) => pause.reason === 'session_stuck')) {
+      hub.append(scope, {
+        kind: 'queue_state_changed',
+        conversation_id: id,
+        payload: {
+          pause_reasons: pauses.map((pause) => (pause.reason === 'session_stuck' ? { ...pause, compaction: 'requested' } : pause)),
+          hold_reasons: queue.hold_reasons ?? [],
+          run_slot: queue.run_slot ?? 'free'
+        }
+      });
+      hub.flush();
+    }
     await route.fulfill({
       status: 200,
       headers: headers(),

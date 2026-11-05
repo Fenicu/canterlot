@@ -794,3 +794,119 @@ async fn turn_end_context_is_authoritative_for_the_indicator(pool: PgPool) {
     let kinds = event_kinds(&pool, run.seed.conversation_id).await;
     assert!(kinds.contains(&"context_changed".to_owned()), "{kinds:?}");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn turn_end_closes_a_compaction_left_open_by_the_cli(pool: PgPool) {
+    use canterlot_proto::worker::v1::RunFinished;
+    let mut run = Run::start(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(
+        &pool,
+        compaction_event(
+            id,
+            run.execution.execution_id,
+            run.execution.generation as u64,
+            true,
+            false,
+            false,
+            0,
+        ),
+    )
+    .await;
+    // Ход прервали посреди сжатия: CLI закончил ход без границы, исполнение живо.
+    run.send(
+        &pool,
+        Body::RunFinished(RunFinished {
+            execution_id: run.execution.execution_id.to_string(),
+            input_command_id: Uuid::now_v7().to_string(),
+            ..Default::default()
+        }),
+    )
+    .await;
+    let closed: (Option<bool>, bool) =
+        sqlx::query_as("select ok, finished_at is not null from compactions where id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        closed,
+        (Some(false), true),
+        "a compaction cannot outlive its turn"
+    );
+    let kinds = event_kinds(&pool, run.seed.conversation_id).await;
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "compaction_finished").count(),
+        1,
+        "the open chat must learn the episode ended: {kinds:?}"
+    );
+    let page = canterlot_hub::history::page(
+        &mut pool.acquire().await.unwrap(),
+        run.seed.owner_id,
+        run.seed.conversation_id,
+        canterlot_hub::history::HistoryCursor::Tail,
+        50,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let shown = page.items.iter().find_map(|item| match item {
+        canterlot_hub::history::TimelineItem::Compaction(view) if view.id == id => Some(view.ok),
+        _ => None,
+    });
+    assert_eq!(shown, Some(Some(false)));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn running_compaction_is_in_the_snapshot_a_reopened_chat_loads(pool: PgPool) {
+    let mut run = Run::start(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(
+        &pool,
+        compaction_event(
+            id,
+            run.execution.execution_id,
+            run.execution.generation as u64,
+            true,
+            false,
+            false,
+            0,
+        ),
+    )
+    .await;
+    let snapshot = canterlot_hub::snapshot::conversation(
+        &pool,
+        run.seed.owner_id,
+        run.seed.conversation_id,
+        50,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let started: i64 = sqlx::query_scalar(
+        "select scope_seq from events where scope = $1 and kind = 'compaction_started'",
+    )
+    .bind(format!("conversation:{}", run.seed.conversation_id))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let row = snapshot
+        .data
+        .history
+        .items
+        .iter()
+        .find_map(|item| match item {
+            canterlot_hub::history::TimelineItem::Compaction(view) if view.id == id => Some(view),
+            _ => None,
+        });
+    let row = row.expect("a running compaction must be in the snapshot history");
+    assert_eq!(row.ok, None, "still running");
+    assert_eq!(
+        row.created_seq.as_deref(),
+        Some(started.to_string().as_str())
+    );
+    assert!(
+        snapshot.cursor.parse::<i64>().unwrap() >= started,
+        "the snapshot cursor covers the start: no live event is needed to show it"
+    );
+}

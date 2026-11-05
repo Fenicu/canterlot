@@ -1041,6 +1041,16 @@ impl Ingest {
                         )
                         .await
                         .map_err(pilot_error)?;
+                        // Сжатие не переживает свой ход: граница пришла бы раньше итога,
+                        // значит открытый эпизод оборван (прерывание без ошибки в итоге).
+                        crate::compactions::close_open(
+                            conn,
+                            run.conversation_id,
+                            run.execution_id,
+                            correlation,
+                        )
+                        .await
+                        .map_err(pilot_error)?;
                         // Итог хода — авторитетный расход для индикатора контекста.
                         return crate::compactions::note_turn_context(conn, &run, f, correlation)
                             .await

@@ -51,6 +51,10 @@ export class FakeHub {
     return structuredClone(event);
   }
   head(scope: string): string { return this.journal(scope).head; }
+  /** Журнал хаба не отстаёт от ленты: номера засеянной истории заняты скрытыми событиями, без дыры в журнале. */
+  reach(scope: string, at: string): void {
+    while (seq.cmp(at, this.journal(scope).head) > 0) this.append(scope, { kind: 'history_seeded', payload: {} });
+  }
   /** Есть живая подписка на scope: снимок уже взят, и события, добавленные после, до клиента дойдут. */
   subscribed(scope: string): boolean {
     return [...this.sessions].some(session => !session.closed && [...session.subscriptions.values()].some(sub => sub.scope === scope));

@@ -11,6 +11,7 @@
 		contextDetails,
 		contextPercent,
 		contextTone,
+		compactionRunningLine,
 		type ContextTone
 	} from '#lib/timeline/compaction.js';
 
@@ -22,9 +23,12 @@
 
 	const snapshot = $derived(chat.context);
 	const percent = $derived(snapshot ? contextPercent(snapshot.tokens, snapshot.window) : null);
-	const tone: ContextTone = $derived(contextTone(percent));
+	const compacting = $derived(chat.compacting);
+	// Сжатие и есть ответ на полный контекст: пока оно идёт, тревожный цвет не нужен.
+	const tone: ContextTone = $derived(compacting ? 'accent' : contextTone(percent));
 	const gaugeTone = $derived(tone === 'accent' ? 'normal' : tone);
 	const badge = $derived(snapshot ? contextBadge(snapshot.tokens, snapshot.window) : '');
+	const label = $derived(compacting ? compactionRunningLine() : badge);
 	const details = $derived(snapshot ? contextDetails(snapshot.tokens, snapshot.window) : '');
 	const model = $derived(
 		modelLabel((chat.detail as { model?: string } | null)?.model ?? '')
@@ -60,6 +64,7 @@
 		error = '';
 		try {
 			await compactSessionContext(chat.id);
+			chat.noteCompactionRequested();
 			open = false;
 		} catch (err) {
 			error = errorText(err, 'Сжать не удалось');
@@ -74,12 +79,13 @@
 		type="button"
 		class="ctx"
 		data-tone={tone}
+		data-compacting={compacting ? 'true' : undefined}
 		aria-expanded={open}
-		aria-label="Контекст: {badge}"
+		aria-label="Контекст: {label}"
 		onclick={toggle}
 	>
 		<span class="track"><Gauge value={percent ?? 0} tone={gaugeTone} dim={percent === null} label={badge} /></span>
-		<span class="label">{badge}</span>
+		<span class="label">{label}</span>
 	</button>
 	{#if open}
 		<div class="ctx-details" data-details>
@@ -126,6 +132,22 @@
 	.label {
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	/* Пока идёт сжатие, заполнение шкалы сжимается к началу и возвращается в такт строке ленты. */
+	.ctx[data-compacting='true'] .track :global([role='meter'] > span) {
+		transform-origin: left center;
+		animation: ctx-squeeze var(--duration-compact-fold) var(--ease-compact-fold) infinite;
+	}
+	@keyframes ctx-squeeze {
+		0%,
+		25%,
+		100% {
+			transform: scaleX(1);
+		}
+		50%,
+		65% {
+			transform: scaleX(.55);
+		}
 	}
 	.ctx-details {
 		grid-area: details;
