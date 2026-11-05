@@ -3,6 +3,7 @@ use canterlot_proto::worker::v1::{
 };
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     fmt,
     path::{Path, PathBuf},
     process::Stdio,
@@ -13,11 +14,17 @@ use tokio::{io::AsyncReadExt, process::Command, time::Instant};
 
 use super::limits::{LimitsFetch, LimitsSource};
 
-const RUN_TIMEOUT: Duration = Duration::from_secs(20);
+const RUN_TIMEOUT: Duration = Duration::from_secs(45);
 /// Повторный запуск раньше этого срока бессмыслен: CodexBar сам кеширует ответы провайдера.
 const MIN_GAP: Duration = Duration::from_secs(10);
-/// Потолок паузы после сбоев: окно лимита важнее, но точка usage держит блокировку после 429.
+/// Потолок паузы после постоянных сбоев: окно лимита важнее, но точка usage держит блокировку после 429.
 const MAX_BACKOFF: Duration = Duration::from_secs(3600);
+/// Временный сбой повторяем скоро: первый раз через минуту, второй через две, дальше обычный интервал.
+const TRANSIENT_RETRY_FIRST: Duration = Duration::from_secs(60);
+const TRANSIENT_RETRY_SECOND: Duration = Duration::from_secs(120);
+/// CodexBar не должен конкурировать со сборкой за процессор.
+const NICE: &str = "nice";
+const NICE_INCREMENT: &str = "10";
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const FIVE_HOUR_MINUTES: u64 = 300;
 const WEEK_MINUTES: u64 = 10080;
@@ -50,6 +57,49 @@ impl fmt::Display for CodexBarError {
 
 impl std::error::Error for CodexBarError {}
 
+impl CodexBarError {
+    /// Временный сбой: машина занята или процесс не успел запуститься. Повторяем скоро.
+    fn transient(self) -> bool {
+        matches!(self, Self::Spawn | Self::Timeout | Self::Output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RUN_TIMEOUT, command_for};
+    use std::{path::Path, time::Duration};
+
+    #[test]
+    fn a_slow_run_gets_forty_five_seconds() {
+        assert_eq!(RUN_TIMEOUT, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn codexbar_starts_through_nice_with_the_provider_and_json_format() {
+        let command = command_for(Path::new("/opt/codexbar"), "opencode");
+        let command = command.as_std();
+        assert_eq!(command.get_program(), "nice");
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-n",
+                "10",
+                "/opt/codexbar",
+                "usage",
+                "--provider",
+                "opencodego",
+                "--format",
+                "json",
+                "--no-color",
+            ]
+        );
+    }
+}
+
 /// Имя для запуска `codexbar usage --provider`: у OpenCode оно отличается от провайдера хаба.
 fn cli_provider(provider: &str) -> &str {
     if provider == OPENCODE_HUB {
@@ -57,6 +107,29 @@ fn cli_provider(provider: &str) -> &str {
     } else {
         provider
     }
+}
+
+/// Запуск CodexBar с пониженным приоритетом процессора, чтобы сборка не морила его голодом.
+/// `#![forbid(unsafe_code)]` не пускает `pre_exec`, поэтому приоритет задаёт `nice`.
+fn command_for(executable: &Path, provider: &str) -> Command {
+    let mut command = Command::new(NICE);
+    command
+        .arg("-n")
+        .arg(NICE_INCREMENT)
+        .arg(executable)
+        .args([
+            "usage",
+            "--provider",
+            cli_provider(provider),
+            "--format",
+            "json",
+            "--no-color",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    command
 }
 
 /// Окна по `windowMinutes`: `primary` у CodexBar не обязательно пятичасовое
@@ -179,11 +252,20 @@ enum Request {
 }
 
 #[derive(Default)]
-struct State {
+struct ProviderState {
     last_request: Option<Instant>,
     reported: Option<CodexBarError>,
+    /// Постоянные сбои (нет программы, ненулевой код выхода): пауза растёт.
     failures: u32,
+    /// Временные сбои подряд: минута, две, дальше обычный интервал.
+    transient: u32,
     backoff_until: Option<Instant>,
+}
+
+/// У каждого провайдера своё состояние: пауза OpenCode не задерживает Claude и Codex.
+#[derive(Default)]
+struct State {
+    providers: HashMap<String, ProviderState>,
 }
 
 /// Окна провайдера через `codexbar usage`: без запроса к модели, учётные данные
@@ -227,23 +309,8 @@ impl CodexBarLimitsSource {
     /// Один запуск без учёта интервала.
     pub async fn fetch(&self, provider: &str) -> Result<LimitsFetch, CodexBarError> {
         let executable = locate(self.configured.as_deref()).ok_or(CodexBarError::Missing)?;
-        let cli = cli_provider(provider).to_owned();
         let mut child = crate::adapter::spawn_with_retry_io(|| {
-            let mut command = Command::new(&executable);
-            command
-                .args([
-                    "usage",
-                    "--provider",
-                    cli.as_str(),
-                    "--format",
-                    "json",
-                    "--no-color",
-                ])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            std::future::ready(command.spawn())
+            std::future::ready(command_for(&executable, provider).spawn())
         })
         .await
         .map_err(|_| CodexBarError::Spawn)?;
@@ -288,6 +355,26 @@ impl CodexBarLimitsSource {
             .min(MAX_BACKOFF.max(self.interval))
     }
 
+    /// Пауза перед повтором временного сбоя: минута, две, дальше обычный интервал и не больше.
+    fn transient_backoff(&self, failures: u32) -> Duration {
+        match failures {
+            0 | 1 => TRANSIENT_RETRY_FIRST,
+            2 => TRANSIENT_RETRY_SECOND,
+            _ => self.interval,
+        }
+    }
+
+    /// Сколько осталось до назначенного повтора: этим воркер сам будит тикер простоя.
+    pub fn retry_in(&self, provider: &str) -> Option<Duration> {
+        let now = (self.clock)();
+        let state = self.state.lock().expect("codexbar poll state");
+        state
+            .providers
+            .get(provider)?
+            .backoff_until
+            .map(|until| until.saturating_duration_since(now))
+    }
+
     async fn poll_with(&self, provider: &str, request: Request) -> LimitsFetch {
         if !matches!(provider, "claude" | "codex" | OPENCODE_HUB) {
             return LimitsFetch::default();
@@ -295,21 +382,30 @@ impl CodexBarLimitsSource {
         let now = (self.clock)();
         let backed_off = {
             let mut state = self.state.lock().expect("codexbar poll state");
-            let since = |gap: Duration| {
-                state
-                    .last_request
-                    .is_some_and(|at| now.saturating_duration_since(at) < gap)
+            let entry = state.providers.entry(provider.to_owned()).or_default();
+            let since = |at: Option<Instant>, gap: Duration| {
+                at.is_some_and(|at| now.saturating_duration_since(at) < gap)
             };
-            if since(MIN_GAP) {
+            if since(entry.last_request, MIN_GAP) {
                 return LimitsFetch::default();
             }
-            let backed_off =
-                request != Request::Refresh && state.backoff_until.is_some_and(|until| now < until);
-            if !backed_off && request != Request::Refresh && since(self.interval) {
+            // Истёкшая пауза разрешает повтор раньше обычного интервала.
+            let retry_due = entry.backoff_until.is_some_and(|until| now >= until);
+            let backed_off = request != Request::Refresh
+                && !retry_due
+                && entry.backoff_until.is_some_and(|until| now < until);
+            if !backed_off
+                && request != Request::Refresh
+                && !retry_due
+                && since(entry.last_request, self.interval)
+            {
                 return LimitsFetch::default();
+            }
+            if retry_due {
+                entry.backoff_until = None;
             }
             if !backed_off {
-                state.last_request = Some(now);
+                entry.last_request = Some(now);
             }
             backed_off
         };
@@ -319,32 +415,53 @@ impl CodexBarLimitsSource {
         let result = self.fetch(provider).await;
         {
             let mut state = self.state.lock().expect("codexbar poll state");
+            let entry = state.providers.entry(provider.to_owned()).or_default();
             match &result {
-                Ok(_) => {
-                    if state.reported.take().is_some() {
+                Ok(fetched) if !fetched.observations.is_empty() => {
+                    if entry.reported.take().is_some() {
                         tracing::info!(
                             kind = "codexbar_poll_recovered",
+                            provider = provider,
                             "codexbar limits poll recovered"
                         );
                     }
+                    entry.failures = 0;
+                    entry.transient = 0;
+                    entry.backoff_until = None;
                 }
                 Err(error) => {
-                    if state.reported.replace(*error) == Some(*error) {
-                        tracing::debug!(kind = "codexbar_poll_repeated", reason = %error, "codexbar limits poll failed again");
+                    if entry.reported.is_none() {
+                        tracing::warn!(
+                            kind = "codexbar_poll_failed",
+                            provider = provider,
+                            reason = %error,
+                            "codexbar limits poll failed"
+                        );
                     } else {
-                        tracing::warn!(kind = "codexbar_poll_failed", reason = %error, "codexbar limits poll failed");
+                        tracing::debug!(
+                            kind = "codexbar_poll_repeated",
+                            provider = provider,
+                            reason = %error,
+                            "codexbar limits poll failed again"
+                        );
+                    }
+                    entry.reported = Some(*error);
+                    if error.transient() {
+                        entry.transient = entry.transient.saturating_add(1);
+                        entry.failures = 0;
+                        entry.backoff_until = Some(now + self.transient_backoff(entry.transient));
+                    } else {
+                        entry.failures = entry.failures.saturating_add(1);
+                        entry.transient = 0;
+                        entry.backoff_until = Some(now + self.backoff(entry.failures));
                     }
                 }
-            }
-            if result
-                .as_ref()
-                .is_ok_and(|fetched| !fetched.observations.is_empty())
-            {
-                state.failures = 0;
-                state.backoff_until = None;
-            } else {
-                state.failures = state.failures.saturating_add(1);
-                state.backoff_until = Some(now + self.backoff(state.failures));
+                // Пустое, но разобранное чтение: как и раньше, пауза растёт.
+                Ok(_) => {
+                    entry.failures = entry.failures.saturating_add(1);
+                    entry.transient = 0;
+                    entry.backoff_until = Some(now + self.backoff(entry.failures));
+                }
             }
         }
         match result {
