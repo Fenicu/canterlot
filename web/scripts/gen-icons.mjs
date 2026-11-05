@@ -3,8 +3,9 @@ import { pathToFileURL } from 'node:url';
 import { chromium } from '@playwright/test';
 import { darkTokens } from './gen-manifest.mjs';
 
+// Значок фирменный и не зависит от палитры по умолчанию: он всегда в тёмном Аквамарине.
 export function colouredSvg(source, css) {
-  const tokens = darkTokens(css);
+  const tokens = darkTokens(css, 'aquamarine');
   return source.replace(/\{\{([\w-]+)\}\}/g, (_, name) => {
     if (!tokens[name]) throw new Error(`Missing icon token: ${name}`);
     return tokens[name];

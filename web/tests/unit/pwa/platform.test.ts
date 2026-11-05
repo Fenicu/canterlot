@@ -21,7 +21,8 @@ test('manifest_is_generated_from_tokens_and_valid', async () => {
   const { manifest } = await import('../../../scripts/gen-manifest.mjs');
   const css = readFileSync('src/lib/styles/tokens.css', 'utf8');
   const m = manifest(css);
-  expect(m).toMatchObject({ id: '/', start_url: '/', scope: '/', name: 'Canterlot', short_name: 'Canterlot', lang: 'ru', display: 'standalone', theme_color: css.match(/--bg:\s*([^;]+)/)?.[1], background_color: css.match(/--bg:\s*([^;]+)/)?.[1], shortcuts: [{ name: 'Новая сессия', url: '/new' }] });
+  // Заставка совпадает с фоном палитры по умолчанию — тёмной Стандартной.
+  expect(m).toMatchObject({ id: '/', start_url: '/', scope: '/', name: 'Canterlot', short_name: 'Canterlot', lang: 'ru', display: 'standalone', theme_color: '#1c1c1e', background_color: '#1c1c1e', shortcuts: [{ name: 'Новая сессия', url: '/new' }] });
   expect(m).not.toHaveProperty('share_target');
   expect(m.icons).toHaveLength(3);
   for (const icon of m.icons) {

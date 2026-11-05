@@ -1,6 +1,7 @@
 import { test, expect, fillContrast } from './fixtures';
 import { bootSecondary } from './secondary-fixture';
 import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/http-playwright';
+import { PALETTES } from '../../src/lib/palettes';
 
 test('settings_screen_shows_login_connection_theme_enter_install_and_signout', async ({ page, browserName }) => {
   await bootSecondary(page, '/settings');
@@ -10,7 +11,7 @@ test('settings_screen_shows_login_connection_theme_enter_install_and_signout', a
   await expect(main.getByText('Подключено', { exact: true })).toBeVisible();
   await main.getByRole('radio', { name: 'Светлый', exact: true }).check();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  await expect(page.locator('html')).toHaveAttribute('data-palette', 'aquamarine');
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'standard');
   await main.getByRole('radio', { name: 'Выкл', exact: true }).check();
   await expect(page.locator('html')).toHaveAttribute('data-motion', 'off');
   await page.reload();
@@ -31,17 +32,28 @@ test('settings_screen_shows_login_connection_theme_enter_install_and_signout', a
   await expect(main.getByText(/Authelia.*собственной странице/)).toBeVisible();
 });
 
-test('segmented_choice_stands_out_in_all_palettes_and_modes', async ({ page }) => {
+test('chosen_palette_and_mode_stand_out_in_every_palette_and_mode', async ({ page }) => {
   await bootSecondary(page, '/settings');
   const main = page.locator('main');
   const palettes = main.getByRole('radiogroup', { name: 'Тема' });
   const modes = main.getByRole('radiogroup', { name: 'Режим' });
-  for (const palette of ['Аквамарин', 'Стандартная', 'VS Code']) {
-    await palettes.getByRole('radio', { name: palette, exact: true }).check();
+  for (const { name } of PALETTES) {
+    await palettes.getByRole('radio', { name, exact: true }).check();
     for (const mode of ['Тёмный', 'Светлый']) {
       await modes.getByRole('radio', { name: mode, exact: true }).check();
-      expect(await fillContrast(palettes.locator('input:checked + span')), `${palette} ${mode}`).toBeGreaterThanOrEqual(3);
-      expect(await fillContrast(modes.locator('input:checked + span')), `${palette} ${mode}`).toBeGreaterThanOrEqual(3);
+      // Кольцо и метка выбранной карточки отличимы от её фона и от фона страницы на 3:1.
+      const ring = await palettes.locator('label:has(input:checked)').evaluate((node) => {
+        const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
+        const lum = (value: string) => { const [r, g, b] = rgb(value); return [r!, g!, b!].map((c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }).reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i]!, 0); };
+        const ratio = (x: string, y: string) => { const [a, b] = [lum(x), lum(y)].sort((p, q) => q - p); return (a! + 0.05) / (b! + 0.05); };
+        const card = getComputedStyle(node).backgroundColor;
+        const page = getComputedStyle(document.body).backgroundColor;
+        const outline = getComputedStyle(node).outlineColor;
+        const mark = getComputedStyle(node.querySelector('.mark')!).backgroundColor;
+        return Math.min(ratio(outline, card), ratio(outline, page), ratio(mark, card));
+      });
+      expect(ring, `${name} ${mode}`).toBeGreaterThanOrEqual(3);
+      expect(await fillContrast(modes.locator('input:checked + span')), `${name} ${mode}`).toBeGreaterThanOrEqual(3);
     }
   }
 });
@@ -49,39 +61,39 @@ test('segmented_choice_stands_out_in_all_palettes_and_modes', async ({ page }) =
 test('palette_and_mode_apply_before_paint_and_survive_reload', async ({ page }) => {
   await bootSecondary(page, '/settings');
   const main = page.locator('main');
-  await main.getByRole('radio', { name: 'Стандартная', exact: true }).check();
+  await main.getByRole('radio', { name: 'Сепия', exact: true }).check();
   await main.getByRole('radio', { name: 'Светлый', exact: true }).check();
-  await expect(page.locator('html')).toHaveAttribute('data-palette', 'standard');
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'sepia');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  expect(await page.evaluate(() => [localStorage.getItem('canterlot.palette'), localStorage.getItem('canterlot.theme')])).toEqual(['standard', 'light']);
+  expect(await page.evaluate(() => [localStorage.getItem('canterlot.palette'), localStorage.getItem('canterlot.theme')])).toEqual(['sepia', 'light']);
 
   await page.reload();
-  await expect(page.locator('html')).toHaveAttribute('data-palette', 'standard');
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'sepia');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 
   // Без скриптов приложения работают только тема-инициализатор и CSS: атрибуты и фон уже верные.
   const probe = await page.context().newPage();
   await probe.route('**/_app/**', route => route.request().resourceType() === 'script' ? route.abort() : route.continue());
   await probe.goto('/settings');
-  await expect(probe.locator('html')).toHaveAttribute('data-palette', 'standard');
+  await expect(probe.locator('html')).toHaveAttribute('data-palette', 'sepia');
   await expect(probe.locator('html')).toHaveAttribute('data-theme', 'light');
-  expect(await probe.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(246, 247, 248)');
+  expect(await probe.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(244, 236, 216)');
   await probe.close();
 });
 
 test('header_toggle_keeps_the_palette', async ({ page }) => {
   await bootSecondary(page, '/settings');
   const main = page.locator('main');
-  await main.getByRole('radio', { name: 'Стандартная', exact: true }).check();
+  await main.getByRole('radio', { name: 'Лес', exact: true }).check();
   await main.getByRole('radio', { name: 'Тёмный', exact: true }).check();
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: 'Сменить тему' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  await expect(page.locator('html')).toHaveAttribute('data-palette', 'standard');
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'forest');
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  await expect(page.locator('html')).toHaveAttribute('data-palette', 'standard');
+  await expect(page.locator('html')).toHaveAttribute('data-palette', 'forest');
 });
 
 test('enter_preference_changes_composer_behaviour', async ({ page }) => {

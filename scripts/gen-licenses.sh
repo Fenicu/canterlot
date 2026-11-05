@@ -291,6 +291,14 @@ for p in npm_dev:
     doc.append(f"- `{p['name']}` ({p['version']}) — `{p['license']}`{chosen_note}")
 doc.append('')
 
+# Section: Цветовые схемы
+doc.append('## Цветовые схемы\n')
+doc.append('Палитры `web/src/lib/styles/tokens.css`, взятые из сторонних схем; значения подогнаны под проверки контраста. Остальные палитры оригинальные.\n')
+doc.append('| Палитра | Схема | Лицензия | Источник |')
+doc.append('| --- | --- | --- | --- |')
+doc.append('| «Норд» (`nord`) | Nord, Sven Greb (Arctic Ice Studio) | `MIT` | [github.com/nordtheme/nord](https://github.com/nordtheme/nord) |')
+doc.append('')
+
 output_path = 'docs/licenses/THIRD_PARTY.md'
 with open(output_path, 'w', encoding='utf-8') as out:
     out.write('\n'.join(doc) + '\n')

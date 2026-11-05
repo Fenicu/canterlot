@@ -1,5 +1,5 @@
 import type { Plugin } from 'vite';
-export function darkTokens(css: string): Record<string, string>;
+export function darkTokens(css: string, palette?: string): Record<string, string>;
 export function manifest(css: string): {
   id: string; start_url: string; scope: string; name: string; short_name: string; lang: string; display: string;
   theme_color: string; background_color: string;
