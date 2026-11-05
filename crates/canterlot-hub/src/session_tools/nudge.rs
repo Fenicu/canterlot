@@ -999,6 +999,7 @@ pub async fn run_job_in_tx(
         "rule_id": target,
         "attempt": attempt,
         "max": rule.max_consecutive,
+        "signals": facts.signals,
         "chain_depth": depth,
         "event": event,
     });

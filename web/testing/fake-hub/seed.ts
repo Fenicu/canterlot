@@ -165,6 +165,7 @@ export function seedPresets(api: FakeHubApi): void {
 	const clean: FakePreset = {
 		id: 'clean',
 		kind: 'clean',
+		purpose: 'instructions',
 		title: 'Без инструкций',
 		description: 'Агент запускается без личных инструкций владельца: без его глобальных CLAUDE.md и AGENTS.md и без автопамяти. Инструкции самого репозитория, вход, MCP-серверы и плагины владельца остаются.',
 		revision: null,
@@ -177,6 +178,7 @@ export function seedPresets(api: FakeHubApi): void {
 	const owner: FakePreset = {
 		id: 'owner',
 		kind: 'owner',
+		purpose: 'instructions',
 		title: 'Как у владельца',
 		description: 'Конфигурация агента владельца без изменений: его CLAUDE.md, AGENTS.md и автопамять.',
 		revision: null,
@@ -189,6 +191,7 @@ export function seedPresets(api: FakeHubApi): void {
 	const executor: FakePreset = {
 		id: 'seed-executor',
 		kind: 'custom',
+		purpose: 'instructions',
 		title: 'Исполнитель (английский)',
 		description: 'Общение, рассуждения и отчёты на английском; язык коммитов, интерфейса и документации задаёт задача.',
 		revision: 1,
@@ -205,6 +208,7 @@ export function seedPresets(api: FakeHubApi): void {
 	const agentDraft: FakePreset = {
 		id: 'agent-draft',
 		kind: 'custom',
+		purpose: 'instructions',
 		title: 'Агентский черновик',
 		description: 'Сохранено агентом из сессии.',
 		revision: 2,

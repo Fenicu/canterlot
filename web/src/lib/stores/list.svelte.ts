@@ -242,6 +242,8 @@ export class ListStore {
     }
     if (kind === "instruction_preset_changed" && event.kind === "instruction_preset_changed") {
       const preset = event.payload.preset as PresetSummary;
+      // Тексты толчка живут только во вкладке «Текст толчка» и читаются запросом.
+      if (preset.purpose === "nudge") return;
       const next = this.presets.filter((item) => item.id !== preset.id);
       if (!event.payload.deleted) next.push(preset);
       const rank = (item: PresetSummary): number => item.kind === "clean" ? 0 : item.kind === "owner" ? 1 : 2;

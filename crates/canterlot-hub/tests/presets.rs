@@ -1009,6 +1009,21 @@ async fn nudge_purpose_is_filtered_and_its_builtin_is_read_only(pool: PgPool) {
         .json::<Value>();
     assert_eq!(created["purpose"], "nudge");
     let id = created["id"].as_str().unwrap().to_owned();
+    // Текст толчка короче инструкции: предел 4 КиБ.
+    let too_big = f
+        .request(
+            Method::POST,
+            "/api/v1/presets",
+            Some("nudge_too_big"),
+            Some(json!({
+                "title": "Слишком длинный",
+                "text": "я".repeat(4_097),
+                "purpose": "nudge"
+            })),
+        )
+        .await;
+    assert_eq!(too_big.status.as_u16(), 422);
+    assert_eq!(Fx::error_code(&too_big), "preset_invalid");
 
     // Список инструкций не показывает ни встроенный текст толчка, ни пользовательский.
     let instructions: Value = f

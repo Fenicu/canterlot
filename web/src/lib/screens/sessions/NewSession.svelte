@@ -48,6 +48,7 @@
     {
       id: 'clean',
       kind: 'clean',
+      purpose: 'instructions',
       title: 'Без инструкций',
       description: 'Агент запускается без личных инструкций владельца: без его глобальных CLAUDE.md и AGENTS.md и без автопамяти. Инструкции самого репозитория, вход, MCP-серверы и плагины владельца остаются.',
       revision: null,
@@ -59,6 +60,7 @@
     {
       id: 'owner',
       kind: 'owner',
+      purpose: 'instructions',
       title: 'Как у владельца',
       description: 'Конфигурация агента владельца без изменений: его CLAUDE.md, AGENTS.md и автопамять.',
       revision: null,

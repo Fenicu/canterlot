@@ -17,6 +17,7 @@ function summary(patch: Partial<PresetSummaryLike>): PresetSummaryLike {
   return {
     id: patch.id ?? "11111111-1111-4111-8111-111111111111",
     kind: patch.kind ?? "custom",
+    purpose: patch.purpose ?? "instructions",
     title: patch.title ?? "Мой пресет",
     description: patch.description ?? "",
     revision: patch.revision ?? 1,

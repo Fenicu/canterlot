@@ -7,19 +7,37 @@
   import Field from '#lib/ui/Field.svelte';
   import Disclosure from '#lib/ui/Disclosure.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
-  import { byteCounter, PRESET_TEXT_LIMIT, textBytes } from './presetsModel.js';
+  import {
+    byteCounter,
+    PRESET_NUDGE_TEXT_LIMIT,
+    PRESET_TEXT_LIMIT,
+    textBytes,
+  } from './presetsModel.js';
 
   type Detail = components['schemas']['Preset'];
 
   let {
     preset,
+    purpose = 'instructions',
     onclose,
     ondone
   }: {
     preset: { id: string; revision: number | null } | null;
+    purpose?: 'instructions' | 'nudge';
     onclose: () => void;
     ondone: () => void;
   } = $props();
+
+  const limit = $derived(
+    purpose === 'nudge' ? PRESET_NUDGE_TEXT_LIMIT : PRESET_TEXT_LIMIT,
+  );
+  const noun = $derived(purpose === 'nudge' ? 'текст толчка' : 'инструкцию');
+  const editTitle = $derived(
+    purpose === 'nudge' ? 'Изменить текст толчка' : 'Изменить инструкцию',
+  );
+  const newTitle = $derived(
+    purpose === 'nudge' ? 'Новый текст толчка' : 'Новая инструкция',
+  );
 
   const editing = $derived(preset !== null);
   let title = $state('');
@@ -37,9 +55,9 @@
   let loadError = $state<string | null>(null);
 
   const bytes = $derived(textBytes(text));
-  const counter = $derived(byteCounter(bytes));
+  const counter = $derived(byteCounter(bytes, limit));
   const canSave = $derived(
-    loaded && !saving && title.trim().length > 0 && text.trim().length > 0 && bytes <= PRESET_TEXT_LIMIT
+    loaded && !saving && title.trim().length > 0 && text.trim().length > 0 && bytes <= limit
   );
 
   async function load(): Promise<void> {
@@ -50,7 +68,7 @@
     loaded = false;
     loadError = null;
     try {
-      const response = await getPreset(preset.id);
+      const response = await getPreset(preset.id, purpose);
       const detail = response.data as Detail;
       title = detail.title;
       description = detail.description;
@@ -58,7 +76,7 @@
       serverText = text;
       baseRevision = detail.revision ?? 0;
     } catch {
-      loadError = 'Не удалось загрузить инструкцию. Закройте и попробуйте снова';
+      loadError = `Не удалось загрузить ${noun}. Закройте и попробуйте снова`;
     } finally {
       loaded = true;
     }
@@ -113,9 +131,14 @@
     try {
       const body = { title: title.trim(), description: description.trim(), text };
       if (preset) {
-        await patchPreset(preset.id, { ...body, base_revision: baseRevision }, crypto.randomUUID());
+        await patchPreset(
+          preset.id,
+          { ...body, base_revision: baseRevision },
+          crypto.randomUUID(),
+          purpose,
+        );
       } else {
-        await createPreset(body, crypto.randomUUID());
+        await createPreset({ ...body, purpose }, crypto.randomUUID());
       }
       ondone();
     } catch (err) {
@@ -128,7 +151,7 @@
   async function refresh(): Promise<void> {
     if (!preset) return;
     try {
-      const response = await getPreset(preset.id);
+      const response = await getPreset(preset.id, purpose);
       const detail = response.data as Detail;
       baseRevision = detail.revision ?? baseRevision + 1;
       serverText = detail.text ?? '';
@@ -143,7 +166,7 @@
   }
 </script>
 
-<Sheet open title={editing ? 'Изменить инструкцию' : 'Новая инструкция'} {onclose}>
+<Sheet open title={editing ? editTitle : newTitle} {onclose}>
   {#if editing && !loaded}
     <p>Загружаю инструкцию…</p>
   {:else if loadError}
@@ -178,7 +201,7 @@
       {#if canSave}
         <Button variant="primary" type="submit">Сохранить</Button>
       {:else}
-        <Button variant="primary" type="submit" disabled reason="Заполните название и текст">Сохранить</Button>
+        <Button variant="primary" type="submit" disabled reason={`Заполните название и текст до ${limit} байт`}>Сохранить</Button>
       {/if}
     </form>
   {/if}

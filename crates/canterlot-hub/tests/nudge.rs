@@ -439,6 +439,8 @@ async fn nudge_is_delivered_with_origin_and_depth(pool: PgPool) {
     assert_eq!(origin["kind"], "nudge");
     assert_eq!(origin["chain_depth"], 0);
     assert_eq!(origin["attempt"], 1);
+    assert_eq!(origin["max"], 3);
+    assert_eq!(origin["signals"]["no_marker"], true);
     assert_eq!(rule_row(&pool, f.child).await, ("watching".into(), 1, 1));
 }
 

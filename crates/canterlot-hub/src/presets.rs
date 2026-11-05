@@ -23,6 +23,8 @@ pub const MAX_PRESET_TITLE_CHARS: usize = 80;
 pub const MAX_PRESET_DESCRIPTION_CHARS: usize = 500;
 /// Максимум пользовательских пресетов одного владельца (без удалённых).
 pub const MAX_PRESETS_PER_OWNER: i64 = 100;
+/// Текст толчка короче инструкции: до 4 КиБ (§4.5).
+pub const MAX_NUDGE_TEXT_BYTES: usize = 4 * 1024;
 
 /// Встроенный пресет «Без инструкций».
 pub const BUILTIN_CLEAN_ID: &str = "clean";
@@ -579,6 +581,7 @@ fn validate_new(
     title: &str,
     description: &str,
     text: &str,
+    purpose: PresetPurpose,
 ) -> Result<(String, String), PresetError> {
     let title = title.trim().to_owned();
     if !valid_title(&title) {
@@ -595,7 +598,11 @@ fn validate_new(
     if text.trim().is_empty() || text.contains('\0') {
         return Err(PresetError::Invalid { field: "text" });
     }
-    if text.len() > MAX_PRESET_TEXT_BYTES {
+    let limit = match purpose {
+        PresetPurpose::Instructions => MAX_PRESET_TEXT_BYTES,
+        PresetPurpose::Nudge => MAX_NUDGE_TEXT_BYTES,
+    };
+    if text.len() > limit {
         return Err(PresetError::Invalid { field: "text" });
     }
     Ok((title, description.to_owned()))
@@ -635,6 +642,7 @@ async fn create_in_tx(
         &body.title,
         body.description.as_deref().unwrap_or(""),
         &body.text,
+        body.purpose,
     )?;
     if title_taken(conn, owner, &title, None).await? {
         return Err(PresetError::TitleTaken);
@@ -800,7 +808,11 @@ async fn update_in_tx(
     {
         return Err(PresetError::Invalid { field: "text" });
     }
-    if new_text.len() > MAX_PRESET_TEXT_BYTES {
+    let text_limit = match purpose {
+        PresetPurpose::Instructions => MAX_PRESET_TEXT_BYTES,
+        PresetPurpose::Nudge => MAX_NUDGE_TEXT_BYTES,
+    };
+    if new_text.len() > text_limit {
         return Err(PresetError::Invalid { field: "text" });
     }
     let next = current + 1;

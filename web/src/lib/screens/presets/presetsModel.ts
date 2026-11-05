@@ -8,6 +8,8 @@ export type PresetOriginLike = components["schemas"]["PresetOrigin"];
 
 // Лимит текста пресета: тот же MAX_PRESET_TEXT_BYTES, что и в хабе.
 export const PRESET_TEXT_LIMIT = 65_536;
+// Текст толчка короче инструкции: правило обещает до 4 КиБ (§4.5).
+export const PRESET_NUDGE_TEXT_LIMIT = 4_096;
 
 // Встроенные пресеты всегда первые: «Без инструкций», затем «Как у владельца».
 // Пользовательские идут дальше по названию без учёта регистра.
@@ -46,8 +48,13 @@ function formatKib(bytes: number): string {
 }
 
 // Счётчик текста редактора: «12,0 КиБ из 64 КиБ», флаг превышения лимита.
-export function byteCounter(bytes: number): { text: string; over: boolean } {
-  return { text: `${formatKib(bytes)} КиБ из 64 КиБ`, over: bytes > PRESET_TEXT_LIMIT };
+export function byteCounter(
+  bytes: number,
+  limit = PRESET_TEXT_LIMIT,
+): { text: string; over: boolean } {
+  const kib = limit / 1024;
+  const size = Number.isInteger(kib) ? String(kib) : formatKib(limit);
+  return { text: `${formatKib(bytes)} КиБ из ${size} КиБ`, over: bytes > limit };
 }
 
 // Длина текста в байтах UTF-8 для счётчика редактора.

@@ -15,6 +15,7 @@
     isSessionEvent,
     sessionStatus
   } from '#lib/timeline/hubEvent.js';
+  import { nudgeEntryLine, nudgeExhaustedLine } from '#lib/timeline/nudge.js';
   import Icon from '#lib/ui/Icon.svelte';
 
   let { input, open, onToggle }: { input: InputView; open: boolean; onToggle: () => void } = $props();
@@ -27,10 +28,14 @@
   const session = $derived(isSessionEvent(event));
   // Строка будильника считается только для его ввода: у остальных записей текст доставки не читается.
   const alarm = $derived(origin?.kind === 'alarm' ? alarmEntryLine(origin, input.text) : null);
+  const nudge = $derived(origin?.kind === 'nudge' ? nudgeEntryLine(origin) : null);
   // Подпись события не зависит от строки будильника: правка плашки не пересчитывает её.
   const line = $derived(
-    event && !session && origin?.kind !== 'alarm' ? eventLine(event, rawTitle) : null
+    event && !session && origin?.kind !== 'alarm' && origin?.kind !== 'nudge'
+      ? eventLine(event, rawTitle)
+      : null
   );
+  const exhausted = $derived(event ? nudgeExhaustedLine(event) : null);
   const facts = $derived(event ? eventFacts(event) : []);
   const answer = $derived(event?.answer ?? '');
   const long = $derived(isLongText(input.text));
@@ -52,6 +57,9 @@
           <div><dt>{fact.label}</dt><dd>{fact.value}</dd></div>
         {/each}
       </dl>
+    {/if}
+    {#if exhausted}
+      <p class="line nudge-exhausted" data-role="nudge-exhausted">{exhausted}</p>
     {/if}
     {#if answer}
       <button type="button" class="answer-toggle" aria-expanded={open} onclick={onToggle}>
@@ -76,6 +84,20 @@
     {#if open}
       <div class="fold">
         <div class="alarm-body" data-role="alarm-body">
+          <TextBlock block={{ id: input.key, text: input.text, state: 'final' }} />
+        </div>
+      </div>
+    {/if}
+  </div>
+{:else if nudge}
+  <div class="alarm" data-role="nudge-line" data-event-kind="nudge">
+    <button type="button" class="alarm-head" aria-expanded={open} onclick={onToggle}>
+      <span class="chevron" data-open={open ? '' : undefined}><Icon name="chevron" /></span>
+      <span class="line">{nudge}</span>
+    </button>
+    {#if open}
+      <div class="fold">
+        <div class="alarm-body" data-role="nudge-body">
           <TextBlock block={{ id: input.key, text: input.text, state: 'final' }} />
         </div>
       </div>
