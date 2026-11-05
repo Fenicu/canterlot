@@ -251,6 +251,8 @@ const MAX_DELTA_MARKS = 512;
 const MAX_DIAGNOSTICS = 200;
 /** Сколько событий ленты ждут страницу истории; больше — состояние берётся из нового снимка. */
 const MAX_HELD = 2000;
+/** Сколько ждать старта сжатия от агента после запроса: дольше признак не держится. */
+const COMPACT_REQUEST_TTL_MS = 90_000;
 /** События, которые меняют строки ленты: их порядок со страницей истории важен. */
 const SHAPING: ReadonlySet<string> = new Set([
   "input_queued",
@@ -335,6 +337,17 @@ export class ChatStore {
   scheduled = $state<ScheduledMessage[]>([]);
   alarms = $state<AlarmView[]>([]);
   phase = $state<Record<string, unknown> | null>(null);
+  /** Сжатие попросили с этого устройства, а агент о старте ещё не сообщил. */
+  compactRequested = $state(false);
+  /**
+   * Сессия сжимает контекст: идущая строка ленты, фаза агента или свежий запрос.
+   * Строку и индикатор поля ввода ведёт один признак.
+   */
+  readonly compacting = $derived(
+    this.compactRequested ||
+      (this.phase as { phase?: string } | null)?.phase === "context_maintenance" ||
+      this.timeline.entries.some((entry) => entry.kind === "compaction" && entry.compaction.ok === null),
+  );
   interrupt = $state<Record<string, unknown> | null>(null);
   attachments = new SvelteMap<string, Record<string, unknown>>();
   unknownKinds = $state(0);
@@ -380,6 +393,9 @@ export class ChatStore {
   #noteTimers = new SvelteMap<string, () => void>();
   #applier: ScopeApplier | null = null;
   #stopRefused: (() => void) | null = null;
+  #compactTimer: (() => void) | null = null;
+  /** Курсор ленты в момент запроса: эпизод этого сжатия встанет после него. */
+  #compactAfter: string | null = null;
 
   constructor(
     readonly id: string,
@@ -465,6 +481,7 @@ export class ChatStore {
     this.close();
     this.#stopRefused?.();
     this.#stopRefused = null;
+    this.#settleCompactRequest();
     this.#sync.stop();
     this.blocks.clear();
     this.inputs.clear();
@@ -635,6 +652,35 @@ export class ChatStore {
     this.#readSeq = seq;
     this.#readAt = this.deps.clock.now();
     this.deps.api.markRead(this.id, createdSeq).catch(() => undefined);
+  }
+
+  /** Хаб принял запрос сжатия: идущее состояние видно сразу, не дожидаясь агента. */
+  noteCompactionRequested(): void {
+    this.compactRequested = true;
+    this.#compactAfter = this.cursor;
+    this.#compactTimer?.();
+    this.#compactTimer = this.#later(() => {
+      this.#compactTimer = null;
+      this.compactRequested = false;
+    }, COMPACT_REQUEST_TTL_MS);
+  }
+
+  #settleCompactRequest(): void {
+    this.#compactTimer?.();
+    this.#compactTimer = null;
+    this.#compactAfter = null;
+    this.compactRequested = false;
+  }
+
+  /** Снимок заменяет пропущенные события: эпизод после запроса или мёртвое исполнение его закрывают. */
+  #reconcileCompactRequest(items: HistoryItem[]): void {
+    if (!this.compactRequested) return;
+    const after = this.#compactAfter;
+    const episode = items.some(
+      (item) => item.kind === "compaction" && (after === null || cmpSeq(item.created_seq, after) > 0),
+    );
+    if (episode || (this.execution !== null && !executionLive(this.execution)))
+      this.#settleCompactRequest();
   }
 
   #later(fn: () => void, ms: number): () => void {
@@ -852,12 +898,15 @@ export class ChatStore {
         }
         return;
       case "compaction_finished":
+        this.#settleCompactRequest();
         // Тихая строка уже в истории: подтягиваем хвост, переживает перезагрузку.
         // Оторванное окно получит её со страницей: перечитанный хвост увёл бы владельца из чтения.
         if (!this.timeline.tailDetached) this.reloadTail().catch(() => undefined);
         return;
       case "compaction_started":
         if (event.kind === "compaction_started") {
+          // Дальше идёт сама строка эпизода.
+          this.#settleCompactRequest();
           const id = event.payload.id;
           const key = `compaction:${id}`;
           const known = this.timeline.entries.find((entry) => entry.key === key);
@@ -896,12 +945,15 @@ export class ChatStore {
         }
         return;
       case "execution_state_changed":
-        if (event.kind === "execution_state_changed")
+        if (event.kind === "execution_state_changed") {
           this.execution = {
             ...this.execution,
             ...event.payload,
             execution_id: event.execution_id ?? this.execution?.execution_id,
           };
+          // Исполнение кончилось: просьба о сжатии уже не исполнится.
+          if (!executionLive(this.execution)) this.#settleCompactRequest();
+        }
         return;
       case "conversation_settings_changed":
         if (event.kind === "conversation_settings_changed") {
@@ -1375,6 +1427,7 @@ export class ChatStore {
           this.timeline.remove(entry.key);
     }
     if (data.queue?.queued) this.#adoptQueued(data.queue.queued);
+    this.#reconcileCompactRequest(items);
   }
 
   /** Вводы без места в ленте есть только в очереди снимка: полоса сходится с ней в обе стороны. */

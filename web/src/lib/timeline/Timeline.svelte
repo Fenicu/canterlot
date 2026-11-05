@@ -120,9 +120,9 @@
   // Строка «Ход прерван»: прерывание остановило ход, а не сессию. Видна, пока
   // очередь на паузе `user_stop` и новый ход не идёт: продолжение и следующий
   // ход её снимают. От остановленной сессии отличается живой исполняеммостью.
-  const compactingPhase = $derived((chat.phase as { phase?: string } | null)?.phase === 'context_maintenance');
+  // Живая строка закрывает промежуток до строки эпизода: фаза агента или только что принятый запрос.
   const compactingRow = $derived(entries.some((entry) => entry.kind === 'compaction' && entry.compaction.ok === null));
-  const compacting = $derived(!feed && !laneRoot && compactingPhase && !compactingRow);
+  const compacting = $derived(!feed && !laneRoot && chat.compacting && !compactingRow);
   const activeRun = $derived.by(() => {
     const state = chat.activity?.state;
     if (state !== 'working' && state !== 'waiting_for_user') return null;

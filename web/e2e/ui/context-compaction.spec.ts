@@ -75,6 +75,17 @@ for (const theme of ['dark', 'light'] as const) {
 
 		const ctx = await indicator(page);
 		await expect(ctx).toBeVisible();
+		// Пока идёт сжатие, индикатор говорит то же, что строка ленты.
+		await expect(ctx).toHaveAttribute('data-compacting', 'true');
+		await expect(ctx).toContainText('Сжимает контекст');
+		hub.append(`conversation:${id}`, {
+			kind: 'phase_changed',
+			conversation_id: id,
+			payload: { phase: 'awaiting_input', tool_name: null, summary: null }
+		});
+		hub.flush();
+		await expect(feed.getByText('Сжимает контекст')).toHaveCount(0);
+		await expect(ctx).not.toHaveAttribute('data-compacting', 'true');
 		await expect(ctx).toContainText('Контекст 64%');
 		await expect(ctx).toHaveAttribute('data-tone', 'accent');
 		api.pushContext(id, 750_000, 1_000_000);
