@@ -325,6 +325,7 @@ async fn serve(
             limits,
             activity,
             nudge_enabled: orchestrator.nudge.enabled,
+            routing_stale: orchestrator.routing.stale_limits,
             machines,
             attachments,
             blobs,

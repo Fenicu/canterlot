@@ -65,6 +65,8 @@ pub struct AppDeps {
     pub activity: ActivityConfig,
     /// Выключатель `[orchestrator.nudge]`: обновление проекции при отметке прочитанного.
     pub nudge_enabled: bool,
+    /// Свежесть показаний лимитов для предпросмотра маршрута.
+    pub routing_stale: std::time::Duration,
     pub machines: MachinesConfig,
     pub attachments: AttachmentsConfig,
     pub blobs: Arc<dyn BlobStore>,
@@ -84,6 +86,7 @@ pub struct AppState {
     pub limits: Arc<LimitsConfig>,
     pub activity: Arc<ActivityConfig>,
     pub nudge_enabled: bool,
+    pub routing_stale: std::time::Duration,
     pub machines: Arc<MachinesConfig>,
     pub attachments: Arc<AttachmentsConfig>,
     pub blobs: Arc<dyn BlobStore>,
@@ -112,6 +115,7 @@ impl AppState {
             limits: Arc::new(deps.limits),
             activity: Arc::new(deps.activity),
             nudge_enabled: deps.nudge_enabled,
+            routing_stale: deps.routing_stale,
             machines: Arc::new(deps.machines),
             upload_slots: Arc::new(tokio::sync::Semaphore::new(
                 deps.attachments.max_concurrent_uploads.max(1),

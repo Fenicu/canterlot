@@ -102,6 +102,8 @@ pub struct HubGrpc {
     pub limits: Arc<crate::config::LimitsConfig>,
     pub alarms_enabled: bool,
     pub nudge_enabled: bool,
+    pub routing_enabled: bool,
+    pub routing_stale: std::time::Duration,
     pub settle: crate::session_tools::settle::SettleConfig,
     pub dispatcher: Option<crate::dispatcher::Dispatcher>,
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
@@ -306,6 +308,8 @@ impl HubGrpc {
             limits: Default::default(),
             alarms_enabled: true,
             nudge_enabled: true,
+            routing_enabled: true,
+            routing_stale: std::time::Duration::from_secs(1800),
             settle: (&crate::config::ActivityConfig::default()).into(),
             dispatcher: None,
             blobs: None,
@@ -330,6 +334,8 @@ impl HubGrpc {
     pub fn with_orchestrator(mut self, config: &crate::config::OrchestratorConfig) -> Self {
         self.alarms_enabled = config.alarms.enabled;
         self.nudge_enabled = config.nudge.enabled;
+        self.routing_enabled = config.routing.enabled;
+        self.routing_stale = config.routing.stale_limits;
         self
     }
 
