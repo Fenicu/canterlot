@@ -49,6 +49,8 @@ export class TimelineModel {
 	#newerCount = rawCell(0);
 	/** Окно выбросило записи: блоки, на которые они ссылались, можно освободить. */
 	readonly #onTrim: () => void;
+	/** Номер окна: страницы, запрошенные до его замены, уже не про него. */
+	#window = 0;
 
 	constructor(onTrim: () => void = () => undefined) {
 		this.#onTrim = onTrim;
@@ -80,7 +82,16 @@ export class TimelineModel {
 	get entries(): TimelineEntry[] {
 		return this.#entries.get();
 	}
-	clear(): void { this.#entries.set([]); this.hasOlder = false; this.tailDetached = false; this.newerCount = 0; }
+	clear(): void { this.#window += 1; this.#entries.set([]); this.hasOlder = false; this.tailDetached = false; this.newerCount = 0; }
+
+	/** Окно собирается заново: ответы на страницы прежнего окна пора выбросить. */
+	get windowVersion(): number {
+		return this.#window;
+	}
+
+	markReplaced(): void {
+		this.#window += 1;
+	}
 
 	applyHistoryPage(items: TimelineEntry[], dir: 'older' | 'newer' | 'tail'): void {
 		const locals = this.entries.filter(isLocalEntry);
@@ -134,6 +145,7 @@ export class TimelineModel {
 
 	/** Прыжок вдаль заменяет окно куском вокруг цели: между ним и хвостом остаётся дыра. */
 	replaceWindow(items: TimelineEntry[], hasOlder: boolean, tailDetached: boolean): void {
+		this.#window += 1;
 		const locals = this.entries.filter(isLocalEntry);
 		const incoming = dedupe([...items].sort((a, b) => cmpSeq(a.seq, b.seq)));
 		this.#entries.set([...incoming, ...locals]);
