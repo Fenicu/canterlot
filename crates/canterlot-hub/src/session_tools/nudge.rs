@@ -862,6 +862,14 @@ pub async fn run_job_in_tx(
         }
     }
     send::lock_queue(conn, target).await?;
+    // Режимы перечитываются после очереди: смену настроек хаб сериализует той же
+    // очередью, поэтому кэш, снятый до неё, мог остаться прежним.
+    sessions.clear();
+    for id in &conversation_ids {
+        if let Some(session) = access::session_in_tx(conn, head.owner_id, *id).await? {
+            sessions.push(session);
+        }
+    }
     let Some(mut rule) = rule_locked_in_tx(conn, target).await? else {
         return Ok(JobOutcome::Cancelled("rule_gone"));
     };

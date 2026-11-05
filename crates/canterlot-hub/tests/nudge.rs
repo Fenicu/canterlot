@@ -1094,6 +1094,65 @@ async fn disabled_after_hold_gives_one_completion_and_no_nudge(pool: PgPool) {
     assert_eq!(jobs(&pool, f2.parent).await.len(), 1);
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_concurrent_settings_change_is_seen_before_the_nudge(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "mode1",
+        false,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    assert_eq!(rule_row(&pool, f.child).await.0, "pending");
+
+    // Настройки идут тем же порядком, что и в хабе: очередь, затем строки.
+    let mut settings = pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(f.child)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set permission_mode='read_only' where id=$1")
+        .bind(f.parent)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set permission_mode='bypass' where id=$1")
+        .bind(f.child)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+
+    // Задание успевает прочитать старые режимы и встаёт в очередь за настройками.
+    let pooled = pool.clone();
+    let job = tokio::spawn(async move {
+        scheduler(&pooled)
+            .tick(now + TimeDelta::minutes(4))
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    settings.commit().await.unwrap();
+    job.await.unwrap();
+
+    assert_eq!(
+        rule_row(&pool, f.child).await.0,
+        "exhausted",
+        "the job must reread modes after taking the queue"
+    );
+    assert_eq!(jobs(&pool, f.parent).await.len(), 1);
+}
+
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.
 async fn deliver_owner_input(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fx, text: &str) {
     canterlot_hub::delivery::submit_input_in_tx(
