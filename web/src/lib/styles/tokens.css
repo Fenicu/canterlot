@@ -483,6 +483,12 @@
   --motion-base-todo-strike: 480ms;
   --duration-todo-strike: calc(var(--motion-base-todo-strike) * var(--motion-scale));
   --ease-todo-strike: cubic-bezier(.65, 0, .35, 1);
+  /* Агент работает: на одной строке по очереди пишутся три слова и стираются. Сжатие складывает строки по вертикали, работа пишет вдоль. */
+  --motion-base-work-write: 2000ms;
+  --duration-work-write: calc(var(--motion-base-work-write) * var(--motion-scale));
+  --ease-work-write: cubic-bezier(.22, 1, .36, 1);
+  --work-write-width: var(--icon-small);
+  --work-write-gap: var(--s1);
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -507,6 +513,7 @@
     --duration-request-arrive: 0ms;
     --duration-request-accent: 0ms;
     --duration-todo-strike: 0ms;
+    --duration-work-write: 0ms;
   }
 }
 
