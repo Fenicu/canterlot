@@ -1419,6 +1419,166 @@ async fn two_busy_cpu_samples_after_the_turn_mark_background_work(pool: PgPool) 
     assert_eq!(held[0]["signals"]["background_suspected"], true);
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_nudged_summary_keeps_the_substantive_report(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    sqlx::query(
+        "update session_subscriptions set armed_at=clock_timestamp()-interval '2 hours'
+         where subscriber_id=$1 and target_id=$2",
+    )
+    .bind(f.parent)
+    .bind(f.child)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let report = format!("DETAILED-REPORT-MARKER\n{}", "r".repeat(700));
+    let first = answer(&pool, &f, &report).await;
+    finish_run(
+        &pool,
+        &f,
+        first,
+        now - TimeDelta::minutes(1),
+        "sum1",
+        true,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(4))
+        .await
+        .unwrap();
+    accept_inputs(&pool, f.child).await;
+
+    let done = answer(&pool, &f, "STATUS: DONE").await;
+    finish_run(
+        &pool,
+        &f,
+        done,
+        now + TimeDelta::minutes(4),
+        "sum1",
+        false,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now + TimeDelta::minutes(5)).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(6))
+        .await
+        .unwrap();
+
+    let text: String = sqlx::query_scalar(
+        "select content->0->>'text' from inputs where conversation_id=$1
+           and origin->>'kind'='event' order by input_seq desc limit 1",
+    )
+    .bind(f.parent)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(text.contains("Auto-nudge: 1 nudge"), "{text}");
+    assert!(text.contains("Answer before the nudges"), "{text}");
+    assert!(text.contains("DETAILED-REPORT-MARKER"), "{text}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_batched_summary_keeps_nudge_metadata_and_the_report(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    sqlx::query(
+        "update session_subscriptions set armed_at=clock_timestamp()-interval '2 hours'
+         where subscriber_id=$1 and target_id=$2",
+    )
+    .bind(f.parent)
+    .bind(f.child)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    sqlx::query(
+        "insert into alarms(id,owner_id,conversation_id,created_by,kind,condition,deadline_at,batch,call_id)
+         values($1,$2,$3,'agent','condition',$4,now()+interval '1 day',true,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(f.owner)
+    .bind(f.parent)
+    .bind(json!({
+        "kind":"session_state",
+        "session_ids":[f.child],
+        "states":["idle"],
+        "all":true,
+        "armed":{}
+    }))
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await
+    .unwrap();
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let report = format!("BATCH-REPORT-MARKER\n{}", "b".repeat(700));
+    let first = answer(&pool, &f, &report).await;
+    finish_run(
+        &pool,
+        &f,
+        first,
+        now - TimeDelta::minutes(1),
+        "sum2",
+        false,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(4))
+        .await
+        .unwrap();
+    accept_inputs(&pool, f.child).await;
+
+    let done = answer(&pool, &f, "STATUS: DONE").await;
+    finish_run(
+        &pool,
+        &f,
+        done,
+        now + TimeDelta::minutes(4),
+        "sum2",
+        false,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now + TimeDelta::minutes(5)).await;
+    let dbg: Vec<(String, Option<Value>)> =
+        sqlx::query_as("select state,payload from scheduled_jobs where conversation_id=$1")
+            .bind(f.parent)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    eprintln!("batch jobs: {dbg:?}");
+    let alarm: Vec<(String, Value)> = sqlx::query_as("select state,collected from alarms")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    eprintln!("alarms: {alarm:?}");
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(6))
+        .await
+        .unwrap();
+
+    let text: String = sqlx::query_scalar(
+        "select content->0->>'text' from inputs where conversation_id=$1
+         order by input_seq desc limit 1",
+    )
+    .bind(f.parent)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(text.contains("Auto-nudge: 1 nudge"), "{text}");
+    assert!(text.contains("Answer before the nudges"), "{text}");
+    assert!(text.contains("BATCH-REPORT-MARKER"), "{text}");
+}
+
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.
 async fn deliver_owner_input(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fx, text: &str) {
     canterlot_hub::delivery::submit_input_in_tx(

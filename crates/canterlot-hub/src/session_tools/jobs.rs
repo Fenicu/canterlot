@@ -31,8 +31,6 @@ struct EventJob {
     #[serde(default)]
     nudges: i64,
     #[serde(default)]
-    signals_text: String,
-    #[serde(default)]
     asks_in_text: bool,
 }
 
@@ -234,10 +232,7 @@ async fn event_message(
             if event.asks_in_text {
                 facts.asks_in_text = Some(true);
             }
-            let mut text = summary::render(&summary);
-            if let Some(prefix) = nudge_prefix(event) {
-                text = format!("{prefix}\n{text}");
-            }
+            let text = summary::render(&summary);
             let origin = json!({"kind":"event","from":id,"title":summary.title,"harness":summary.harness,"model":summary.model,"chain_depth":depth,"event":facts});
             (text, origin)
         }
@@ -245,26 +240,6 @@ async fn event_message(
             format!("[canterlot] Session {id} was deleted."),
             json!({"kind":"event","from":id,"chain_depth":depth,"event":origin::HubEvent::deleted(id)}),
         ),
-    })
-}
-
-/// Итог после автопинка: исчерпание называет число толчков и последние сигналы.
-fn nudge_prefix(event: &EventJob) -> Option<String> {
-    if event.nudge_exhausted {
-        let mut line = format!(
-            "[canterlot] Auto-nudge gave up after {} nudges without progress.",
-            event.nudges
-        );
-        if !event.signals_text.is_empty() {
-            line.push_str(&format!(" Last signals: {}.", event.signals_text));
-        }
-        return Some(line);
-    }
-    (event.nudges > 0).then(|| {
-        format!(
-            "[canterlot] This result follows {} automatic nudges.",
-            event.nudges
-        )
     })
 }
 
