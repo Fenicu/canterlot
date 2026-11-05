@@ -44,13 +44,13 @@ export default defineConfig({
     ? undefined
     : { command: 'node e2e/edge/serve.mjs', url: origin, reuseExistingServer: false },
   projects: [
-    { name: 'phone', grepInvert: /render_budget_during_long_stream/, use: phone },
+    { name: 'phone', grepInvert: /render_budget_during_long_stream|owner_messages_jump_long_task/, use: phone },
     { name: 'desktop', workers: isStackOrPerf ? 1 : undefined, use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } },
     firefoxLayout('layout-1024', 1024, 768),
     firefoxLayout('layout-1440', 1440, 900),
     firefoxLayout('layout-2560', 2560, 1440),
     firefoxLayout('layout-3840', 3840, 2160),
     // Дроссель 4× считает время кадра по настенным часам: соседний браузер на этой машине раздувает задачу за 200 мс.
-    { name: 'budget', workers: 1, dependencies: ['phone', 'desktop'], grep: /render_budget_during_long_stream/, use: phone }
+    { name: 'budget', workers: 1, dependencies: ['phone', 'desktop'], grep: /render_budget_during_long_stream|owner_messages_jump_long_task/, use: phone }
   ]
 });

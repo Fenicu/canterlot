@@ -128,6 +128,9 @@ export interface HistoryPage {
   next_after?: string | null;
 }
 
+export type OwnerInputView = components["schemas"]["OwnerInputView"];
+export type OwnerInputsPage = components["schemas"]["OwnerInputsPage"];
+
 /** Страница ленты одного субагента: корень и потомки по возрастанию номера, без корня. */
 export interface LanePage {
   root: Omit<HistoryBlock, "kind">;
@@ -141,8 +144,10 @@ export interface ChatApi {
   ): Promise<{ cursor: string; data: SnapshotData }>;
   history(
     id: string,
-    query?: { before?: string; after?: string; limit?: number },
+    query?: { before?: string; after?: string; around?: string; limit?: number },
   ): Promise<HistoryPage>;
+  /** Сообщения владельца для списка перехода; без него список недоступен. */
+  inputs?(id: string, query?: { before?: string; limit?: number }): Promise<OwnerInputsPage>;
   /** Страница ленты субагента; без `before` отдаёт самых новых потомков. */
   lane?(
     id: string,
@@ -340,6 +345,16 @@ export class ChatStore {
   deltaSerial = $state(0);
   /** Счётчик отправок с этого устройства: лента по нему возвращается к хвосту. */
   ownSends = $state(0);
+  /** Просьба ленты прыгнуть к сообщению: место в ленте и номер попытки. */
+  jumpRequest = $state<{ inputId: string; seq: string; nonce: number } | null>(null);
+
+  requestJump(inputId: string, seq: string): void {
+    this.jumpRequest = {
+      inputId,
+      seq,
+      nonce: (this.jumpRequest?.nonce ?? 0) + 1,
+    };
+  }
 
 
   readonly #sync: BlockSync;
@@ -491,6 +506,35 @@ export class ChatStore {
     });
     this.#ingest(page.items, "older");
     this.timeline.hasOlder = Boolean(page.next_before);
+  }
+
+  /** Список сообщений владельца живёт вне окна ленты и покрывает весь разговор. */
+  async ownerMessages(query: { before?: string; limit?: number } = {}): Promise<OwnerInputsPage> {
+    const fetchInputs = this.deps.api.inputs;
+    if (!fetchInputs) throw new Error("inputs_unavailable");
+    return fetchInputs.call(this.deps.api, this.id, query);
+  }
+
+  /**
+   * Окно вокруг сообщения, которого нет в ленте: хаб отдаёт только соседей цели,
+   * а не всю историю между хвостом и ею. Лента заменяется этим окном.
+   */
+  async focusMessage(inputId: string, seq: string): Promise<void> {
+    if (this.timeline.entries.some((entry) => entry.kind === "input" && entry.input.id === inputId))
+      return;
+    const epoch = this.#epoch;
+    this.#holds += 1;
+    try {
+      const page = await this.deps.api.history(this.id, { around: seq, limit: 80 });
+      if (epoch !== this.#epoch) return;
+      this.timeline.replaceWindow(
+        this.#entriesFrom(page.items, false),
+        Boolean(page.next_before),
+        Boolean(page.next_after),
+      );
+    } finally {
+      this.#release();
+    }
   }
 
   /**
@@ -1349,6 +1393,10 @@ export class ChatStore {
   }
 
   #ingest(items: HistoryItem[], dir: "older" | "newer" | "tail"): void {
+    this.timeline.applyHistoryPage(this.#entriesFrom(items, dir === "tail"), dir);
+  }
+
+  #entriesFrom(items: HistoryItem[], wholesale: boolean): TimelineEntry[] {
     const entries: TimelineEntry[] = [];
     for (const item of items) {
       if (item.kind === "request") {
@@ -1359,7 +1407,7 @@ export class ChatStore {
           request: this.requests.ingestHistory(item),
         });
       } else if (item.kind === "block") {
-        const block = this.#blockFromHistory(item, dir === "tail");
+        const block = this.#blockFromHistory(item, wholesale);
         entries.push({
           kind: "block",
           key: `block:${block.id}`,
@@ -1392,7 +1440,7 @@ export class ChatStore {
         }
       }
     }
-    this.timeline.applyHistoryPage(entries, dir);
+    return entries;
   }
 
   #blockFromHistory(item: HistoryBlock, wholesale: boolean): BlockModel {

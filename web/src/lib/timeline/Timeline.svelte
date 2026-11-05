@@ -14,6 +14,7 @@
   import UserBubble from '#lib/timeline/UserBubble.svelte';
   import { FeedFolds } from '#lib/timeline/folds.js';
   import { dayStart, shownInCard, tailKey, RowsCache, type Row } from '#lib/timeline/rows.js';
+  import { rowIndexOfInput } from '#lib/timeline/ownerMessages.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
@@ -61,6 +62,12 @@
   const folds = new FeedFolds(keepInPlace);
   const PIN_PX = 48;
   const OLDER_PAGE = 100;
+  let highlightKey = $state<string | null>(null);
+  let jumpSerial = 0;
+  let highlightTimer: ReturnType<typeof setTimeout> | null = null;
+  // Во время прыжка окно монтирует только то, что нужно у цели: иначе первый кадр
+  // нового окна собирает лишние строки и становится долгой задачей.
+  let overscan = $state(1.5);
 
   const today = $derived(dayStart(now));
   const entries = $derived(feed ? feed.entries : chat.timeline.entries);
@@ -144,7 +151,7 @@
   function layout(list: Row[], top: number, viewport: number): void {
     ix.setCount(list.length);
     list.forEach((row, index) => ix.set(index, known.get(row.key) ?? guess(row)));
-    let next = visibleRange(ix, top, viewport, viewport * 1.5);
+    let next = visibleRange(ix, top, viewport, viewport * overscan);
     if (next.end - next.start > 80) {
       const focus = ix.indexAt(top + viewport / 2);
       const start = Math.max(0, Math.min(focus - 40, list.length - 80));
@@ -262,6 +269,85 @@
     await tick();
     controller?.jumpToBottom();
   }
+
+  const nextFrame = (): Promise<void> =>
+    new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+  /**
+   * Прыжок к своему сообщению: старые блоки не монтируются, пока летим, —
+   * лента заменяется окном вокруг цели, а высоты строк доводят её до верха.
+   */
+  async function jumpTo(request: { inputId: string; seq: string; nonce: number }): Promise<void> {
+    const serial = ++jumpSerial;
+    overscan = 0.1;
+    held = null;
+    controller?.release();
+    try {
+      await chat.focusMessage(request.inputId, request.seq);
+    } catch {
+      if (serial === jumpSerial) overscan = 1.5;
+      return;
+    }
+    if (serial !== jumpSerial || !host) return;
+    // Кадр даёт измерить новые строки до того, как по их высотам считается место.
+    await nextFrame();
+    if (serial !== jumpSerial || !host) return;
+    let target: Row | null = null;
+    const viewport = host.clientHeight || 1;
+    for (let pass = 0; pass < 8; pass++) {
+      if (serial !== jumpSerial || !host) return;
+      const index = rowIndexOfInput(rows, request.inputId);
+      if (index < 0) {
+        await nextFrame();
+        continue;
+      }
+      const row = rows[index]!;
+      target = row;
+      const node = rowNode(host, row.key);
+      if (!node) {
+        layout(rows, host.scrollTop, viewport);
+        const top = ix.offset(index);
+        scrollTo(top);
+        layout(rows, top, viewport);
+        await nextFrame();
+        continue;
+      }
+      const desired = Number.parseFloat(getComputedStyle(host).paddingTop) || 0;
+      const drift = node.getBoundingClientRect().top - host.getBoundingClientRect().top - desired;
+      if (Math.abs(drift) <= 2) break;
+      scrollTo(host.scrollTop + drift);
+      layout(rows, host.scrollTop, viewport);
+      await nextFrame();
+    }
+    if (!target || serial !== jumpSerial) {
+      if (serial === jumpSerial) overscan = 1.5;
+      return;
+    }
+    await markJump(target.key);
+    // Широкий запас вернётся при следующей прокрутке, а не отдельным рывком сразу после прыжка.
+    overscan = 1.5;
+  }
+
+  async function markJump(key: string): Promise<void> {
+    if (highlightTimer) clearTimeout(highlightTimer);
+    highlightKey = null;
+    await tick();
+    highlightKey = key;
+    await tick();
+    if (host) rowNode(host, key)?.querySelector<HTMLElement>('.bubble')?.focus({ preventScroll: true });
+    highlightTimer = setTimeout(() => {
+      highlightKey = null;
+      highlightTimer = null;
+    }, 1600);
+  }
+
+  $effect(() => {
+    const request = chat.jumpRequest;
+    if (!request) return;
+    untrack(() => {
+      void jumpTo(request);
+    });
+  });
 
   async function loadBlock(blockId: string, offset: number): Promise<BlockPage> {
     const pages = await chat.blockContent(blockId);
@@ -411,6 +497,7 @@
       scroller.removeEventListener('scroll', onScroll);
       controller?.destroy();
       observer?.disconnect();
+      if (highlightTimer) clearTimeout(highlightTimer);
     };
   });
 </script>
@@ -434,7 +521,7 @@
         {#if row.kind === 'day'}
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
-          <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} />
+          <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} highlight={row.key === highlightKey} />
         {:else if row.kind === 'event' && row.entries[0]?.kind === 'input'}
           <EventEntry input={row.entries[0].input} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}

@@ -44,6 +44,7 @@
 		onOpenSettings,
 		onOpenDiagnostics,
 		onOpenDelegation,
+		onOpenMessages,
 		onAccept,
 		parentTitle = null,
 		childRunning = 0,
@@ -57,6 +58,7 @@
 		onOpenSettings?: () => void;
 		onOpenDiagnostics?: () => void;
 		onOpenDelegation?: () => void;
+		onOpenMessages?: () => void;
 		onAccept?: () => void;
 		/** Название сессии, запустившей эту; пусто, пока список её не знает. */
 		parentTitle?: string | null;
@@ -200,6 +202,18 @@
 		</div>
 
 		<div class="header-actions">
+			<button
+				type="button"
+				class="icon-button messages-btn"
+				aria-label="Мои сообщения"
+				aria-pressed={pane.desktop ? pane.view === 'messages' : undefined}
+				onclick={() => {
+					if (pane.desktop) pane.toggle('messages');
+					else onOpenMessages?.();
+				}}
+			>
+				<Icon name="list" />
+			</button>
 			{#if pane.desktop && delegated}
 				<button type="button" class="pane-action" aria-pressed={pane.view === 'delegation'} onclick={() => pane.toggle('delegation')}>{running > 0 ? `Делегирование · ${running}` : 'Делегирование'}</button>
 			{/if}
@@ -458,6 +472,10 @@
 	.icon-button[aria-disabled='true'] {
 		color: var(--muted);
 		cursor: default;
+	}
+	.icon-button[aria-pressed='true'] {
+		background: var(--selected);
+		color: var(--accent-link);
 	}
 	.header-status {
 		margin: 0 var(--gutter) var(--s2);

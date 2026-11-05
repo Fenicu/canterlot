@@ -132,6 +132,17 @@ export class TimelineModel {
 		this.#onTrim();
 	}
 
+	/** Прыжок вдаль заменяет окно куском вокруг цели: между ним и хвостом остаётся дыра. */
+	replaceWindow(items: TimelineEntry[], hasOlder: boolean, tailDetached: boolean): void {
+		const locals = this.entries.filter(isLocalEntry);
+		const incoming = dedupe([...items].sort((a, b) => cmpSeq(a.seq, b.seq)));
+		this.#entries.set([...incoming, ...locals]);
+		this.hasOlder = hasOlder;
+		this.tailDetached = tailDetached;
+		this.newerCount = 0;
+		this.#onTrim();
+	}
+
 	upsert(entry: TimelineEntry): void {
 		if (this.tailDetached) {
 			untrack(() => (this.newerCount += 1));

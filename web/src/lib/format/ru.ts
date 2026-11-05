@@ -1,6 +1,7 @@
 const rules = new Intl.PluralRules('ru');
 const clockFmt = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayFmt = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long' });
+const shortDayFmt = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' });
 const weekdayFmt = new Intl.DateTimeFormat('ru-RU', { weekday: 'short' });
 const numberFmt = new Intl.NumberFormat('ru-RU');
 
@@ -63,6 +64,16 @@ export const fmt = {
 		const date = new Date(ts);
 		const label = dayFmt.format(date);
 		return date.getFullYear() === new Date(now).getFullYear() ? label : `${label} ${date.getFullYear()}`;
+	},
+	/**
+	 * Время сообщения в списке: сегодня только часы, вчера с подписью,
+	 * раньше — короткая дата и часы («5 нояб. 14:03»).
+	 */
+	messageTime(ts: number, now: number): string {
+		const date = new Date(ts);
+		if (sameDay(date, new Date(now))) return clockFmt.format(date);
+		if (dayBefore(new Date(now), date)) return `вчера ${clockFmt.format(date)}`;
+		return `${shortDayFmt.format(date)} ${clockFmt.format(date)}`;
 	},
 	/** Дата и время: «28 октября, 15:00», с годом, если он не текущий. */
 	stamp(ts: number, now: number): string {

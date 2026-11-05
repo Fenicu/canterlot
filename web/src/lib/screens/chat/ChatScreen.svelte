@@ -6,8 +6,7 @@
 	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
 	import { loadConfig } from '#lib/api/config.js';
 	import Composer from '#lib/composer/Composer.svelte';
-	import type { ChatStore } from '#lib/stores/chat.svelte.js';
-	import PendingStrip from '#lib/timeline/PendingStrip.svelte';
+	import type { ChatStore, OwnerInputView } from '#lib/stores/chat.svelte.js';	import PendingStrip from '#lib/timeline/PendingStrip.svelte';
 	import AlarmsStrip from '#lib/timeline/AlarmsStrip.svelte';
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
@@ -78,6 +77,7 @@
 	let showSettings = $state(false);
 	let showDiagnostics = $state(false);
 	let showDelegation = $state(false);
+	let showMessages = $state(false);
 	let showSheet = $state(false);
 	let infoRunId = $state<string | null>(null);
 	// Редкие панели не входят в маршрут чата: подгружаются, когда их открывают.
@@ -85,6 +85,7 @@
 	let SessionSettings = $state<Component<{ chat: ChatStore; machine?: MachineRecord | null; desktop?: boolean; onclose?: () => void }> | null>(null);
 	let Diagnostics = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	let InfoSheet = $state<Component<{ chat: ChatStore; runId: string; onclose: () => void }> | null>(null);
+	let OwnerMessagesSheet = $state<Component<{ chat: ChatStore; onpick: (item: OwnerInputView) => void; onclose: () => void }> | null>(null);
 	const todos = $derived(chat.todos.lane(null));
 
 	$effect(() => {
@@ -95,6 +96,9 @@
 	});
 	$effect(() => {
 		if (infoRunId && !InfoSheet) import('./InfoSheet.svelte').then((m) => { InfoSheet = m.default; });
+	});
+	$effect(() => {
+		if (showMessages && !OwnerMessagesSheet) import('./OwnerMessagesSheet.svelte').then((m) => { OwnerMessagesSheet = m.default; });
 	});
 	// Список задач показывается не в каждом ходу: панель догружается вместе с ним.
 	$effect(() => {
@@ -169,6 +173,7 @@
 		}}
 		onOpenDiagnostics={() => (showDiagnostics = true)}
 		onOpenDelegation={() => (showDelegation = true)}
+		onOpenMessages={() => (showMessages = true)}
 		onAccept={() => {
 			acceptError = null;
 			showAccept = true;
@@ -269,6 +274,17 @@
 
 	{#if showDelegation && !pane.desktop}
 		<DelegationSheet {chat} onclose={() => (showDelegation = false)} />
+	{/if}
+
+	{#if showMessages && !pane.desktop && OwnerMessagesSheet}
+		<OwnerMessagesSheet
+			{chat}
+			onclose={() => (showMessages = false)}
+			onpick={(item) => {
+				showMessages = false;
+				chat.requestJump(item.id, item.seq);
+			}}
+		/>
 	{/if}
 
 	{#if infoRunId && InfoSheet}
