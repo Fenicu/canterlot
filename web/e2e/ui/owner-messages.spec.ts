@@ -163,13 +163,14 @@ test('owner_messages_list_opens_scrolled_to_the_newest_with_origins_and_times', 
 	});
 
 	await openMessages(page);
-	await expect(page.getByText(/^20 сообщений$/)).toBeVisible();
+	await expect(page.getByText(/^19 сообщений$/)).toBeVisible();
 
 	const list = page.locator('[data-owner-list]');
 	await expect(list).toBeVisible();
 	await expect(list.getByText('Последнее')).toBeVisible();
 	await expect(list.getByText('От сессии Оркестратор · модель sonnet-5')).toBeVisible();
-	await expect(list.getByText('Будильник', { exact: true })).toBeVisible();
+	// Будильники и события хаба не опорные точки владельца: хаб их не отдаёт.
+	await expect(list.getByText('Сработал будильник')).toHaveCount(0);
 	await expect(list.getByText('Вложений: 1')).toHaveCount(1);
 	expect(await list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
 });
