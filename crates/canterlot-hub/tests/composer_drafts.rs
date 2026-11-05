@@ -85,6 +85,23 @@ impl Fixture {
         response.json()
     }
 
+    async fn attachment(&self, conversation: Uuid, state: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "insert into attachments(id,owner_id,conversation_id,name,size_bytes,sha256,state)
+             values($1,$2,$3,'файл.txt',3,$4,$5)",
+        )
+        .bind(id)
+        .bind(self.owner)
+        .bind(conversation)
+        .bind("a".repeat(64))
+        .bind(state)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
+    }
+
     async fn draft_events(&self) -> Vec<Value> {
         sqlx::query_scalar(
             "select payload from events where scope=$1 and kind='draft_changed' order by scope_seq",
@@ -418,4 +435,128 @@ async fn owner_id_is_stored_with_the_draft(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(owner, f.owner);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn attachment_list_round_trips_and_empty_draft_deletes_the_row(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let first = f.attachment(f.conversation, "ready").await;
+    let second = f.attachment(f.conversation, "ready").await;
+
+    let saved = f
+        .put(
+            f.conversation,
+            json!({"text":"","attachment_ids":[first, second],"base_revision":0,"device_id":"phone"}),
+            200,
+        )
+        .await;
+    assert_eq!(saved["text"], "");
+    assert_eq!(
+        saved["attachment_ids"],
+        json!([first.to_string(), second.to_string()])
+    );
+    assert!(f.stored_text().await.is_some());
+
+    let loaded = f.get(f.conversation).await;
+    assert_eq!(
+        loaded["attachment_ids"],
+        json!([first.to_string(), second.to_string()])
+    );
+
+    let removed = f
+        .put(
+            f.conversation,
+            json!({"text":"","attachment_ids":[second],"base_revision":saved["revision"],"device_id":"desktop"}),
+            200,
+        )
+        .await;
+    assert_eq!(removed["attachment_ids"], json!([second.to_string()]));
+
+    let cleared = f
+        .put(
+            f.conversation,
+            json!({"text":"","attachment_ids":[],"base_revision":removed["revision"],"device_id":"desktop"}),
+            200,
+        )
+        .await;
+    assert_eq!(cleared["attachment_ids"], json!([]));
+    assert!(f.stored_text().await.is_none());
+    assert_eq!(f.draft_events().await.last().unwrap()["attachment_ids"], json!([]));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn foreign_or_not_ready_attachments_are_rejected(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let other = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let foreign = f.attachment(other, "ready").await;
+    let uploading = f.attachment(f.conversation, "uploading").await;
+    let missing = Uuid::now_v7();
+
+    for id in [foreign, uploading, missing] {
+        let refused = f
+            .put(
+                f.conversation,
+                json!({"text":"","attachment_ids":[id],"base_revision":0,"device_id":"phone"}),
+                400,
+            )
+            .await;
+        assert_eq!(refused["error"]["code"], "invalid_request", "{id}");
+    }
+    assert!(f.stored_text().await.is_none());
+    assert!(f.draft_events().await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn sending_with_attachments_consumes_them_and_clears_the_draft(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    sqlx::query("update machines set capabilities='{pilot_v1}', limits_ok=true where id=$1")
+        .bind(f.machine)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let attachment = f.attachment(f.conversation, "ready").await;
+    f.put(
+        f.conversation,
+        json!({"text":"с файлом","attachment_ids":[attachment],"base_revision":0,"device_id":"phone"}),
+        200,
+    )
+    .await;
+
+    let response = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{}/inputs", f.conversation),
+            Some("send-with-attachment"),
+            Some(json!({
+                "content":[{"type":"text","text":"с файлом"}],
+                "attachment_ids":[attachment],
+                "device_id":"phone"
+            })),
+        )
+        .await;
+    assert_eq!(
+        response.status.as_u16(),
+        201,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let input_id: Uuid = response.json::<Value>()["input_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let linked: i64 = sqlx::query_scalar(
+        "select count(*) from input_attachments where input_id=$1 and attachment_id=$2",
+    )
+    .bind(input_id)
+    .bind(attachment)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1);
+    assert!(f.stored_text().await.is_none());
+    let last = f.draft_events().await.pop().unwrap();
+    assert_eq!(last["text"], "");
+    assert_eq!(last["attachment_ids"], json!([]));
 }

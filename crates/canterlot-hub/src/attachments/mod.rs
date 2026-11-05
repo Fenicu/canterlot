@@ -661,6 +661,7 @@ pub(crate) async fn linked(conn: &mut PgConnection, id: Uuid) -> Result<bool, sq
     sqlx::query_scalar(
         "select exists(select 1 from input_attachments where attachment_id=$1)
              or exists(select 1 from scheduled_job_attachments where attachment_id=$1)
+             or exists(select 1 from composer_drafts where attachment_ids ? $1::text)
              or exists(select 1 from block_files where attachment_id=$1 and attached_at is not null)",
     )
     .bind(id)
