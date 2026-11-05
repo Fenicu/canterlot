@@ -608,6 +608,20 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         ),
         case(
             Method::PUT,
+            "/api/v1/conversations/{id}/nudge",
+            format!("/api/v1/conversations/{id}/nudge"),
+            Some(json!({"idle_minutes":5})),
+            Some(json!({"paused":true})),
+        ),
+        case(
+            Method::DELETE,
+            "/api/v1/conversations/{id}/nudge",
+            format!("/api/v1/conversations/{id}/nudge"),
+            None,
+            None,
+        ),
+        case(
+            Method::PUT,
             "/api/v1/conversations/{id}/crunch",
             format!("/api/v1/conversations/{id}/crunch"),
             Some(json!({"enabled":true})),

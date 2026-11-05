@@ -368,6 +368,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/nudge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_conversations__id__nudge"];
+        put: operations["put__api_v1_conversations__id__nudge"];
+        post?: never;
+        delete: operations["delete__api_v1_conversations__id__nudge"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{id}/nudge/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_conversations__id__nudge_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/queue/continue": {
         parameters: {
             query?: never;
@@ -2030,6 +2062,9 @@ export interface components {
             outcome: string;
             signals: unknown;
         };
+        NudgeEvents: {
+            events: components["schemas"]["NudgeEventView"][];
+        };
         /** @description Действующие значения правила: ответ `nudge_set` и снимок разговора. */
         NudgeRuleView: {
             /** Format: int32 */
@@ -2057,6 +2092,10 @@ export interface components {
             state: string;
             /** Format: int32 */
             total: number;
+        };
+        NudgeState: {
+            events: components["schemas"]["NudgeEventView"][];
+            rule?: components["schemas"]["NudgeRuleView"] | null;
         };
         OwnerFileContent: {
             content: string;
@@ -2115,6 +2154,22 @@ export interface components {
         OwnerOverviewView: {
             files: components["schemas"]["OwnerFileView"][];
             memory_projects: components["schemas"]["OwnerMemoryProjectView"][];
+        };
+        /**
+         * @description Правка правила владельцем из PWA: агентских ограничений на потомков нет,
+         *     владелец ставит правило на любую свою сессию.
+         */
+        OwnerUpdate: {
+            /** Format: int32 */
+            context_warn_percent?: number | null;
+            done_markers?: string[] | null;
+            enabled?: boolean | null;
+            /** Format: int32 */
+            idle_minutes?: number | null;
+            /** Format: int32 */
+            max_nudges?: number | null;
+            paused?: boolean | null;
+            text_preset?: string | null;
         };
         PartView: {
             agent: string;
@@ -3976,6 +4031,213 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LanePage"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__nudge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Разговор */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Правило автопинка и последние события */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NudgeState"];
+                };
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_conversations__id__nudge: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path: {
+                /** @description Разговор */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OwnerUpdate"];
+            };
+        };
+        responses: {
+            /** @description Правило сохранено */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NudgeRuleView"];
+                };
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Некорректные значения */
+            422: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_conversations__id__nudge: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path: {
+                /** @description Разговор */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Правило снято */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__nudge_events: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Разговор */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Последние события автопинка */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NudgeEvents"];
+                };
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

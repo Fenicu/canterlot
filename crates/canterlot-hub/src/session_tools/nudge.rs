@@ -58,7 +58,7 @@ const BACKGROUND_PHRASES: &[&str] = &[
 const QUESTION_PREFIXES: &[&str] = &["should i", "do you want", "shall i", "хотите", "нужно ли"];
 
 /// Действующие значения правила: ответ `nudge_set` и снимок разговора.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NudgeRuleView {
     pub session_id: Uuid,
     pub enabled: bool,
@@ -1591,6 +1591,174 @@ async fn check_text_preset_in_tx(
     } else {
         Err(ToolError::new(ToolErrorCode::ProfileUnknown))
     }
+}
+
+/// Правка правила владельцем из PWA: агентских ограничений на потомков нет,
+/// владелец ставит правило на любую свою сессию.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerUpdate {
+    pub enabled: Option<bool>,
+    pub paused: Option<bool>,
+    pub idle_minutes: Option<i32>,
+    pub max_nudges: Option<i32>,
+    pub done_markers: Option<Vec<String>>,
+    pub text_preset: Option<String>,
+    pub context_warn_percent: Option<i32>,
+}
+
+fn validate_owner(update: &OwnerUpdate) -> Result<(), ToolError> {
+    if update.enabled.is_some() && update.paused.is_some() {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    if update
+        .idle_minutes
+        .is_some_and(|value| !(1..=120).contains(&value))
+        || update
+            .max_nudges
+            .is_some_and(|value| !(1..=10).contains(&value))
+        || update
+            .context_warn_percent
+            .is_some_and(|value| !(50..=99).contains(&value))
+    {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    if let Some(markers) = &update.done_markers
+        && (markers.is_empty()
+            || markers.len() > MAX_MARKERS
+            || markers.iter().any(|marker| {
+                marker.trim().is_empty() || marker.chars().count() > MAX_MARKER_CHARS
+            }))
+    {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    Ok(())
+}
+
+/// Владелец включает, меняет или ставит на паузу правило любой своей сессии.
+pub async fn owner_update(
+    tx: &mut PgConnection,
+    owner_id: Uuid,
+    target_id: Uuid,
+    update: &OwnerUpdate,
+    correlation_id: Uuid,
+) -> Result<NudgeRuleView, ToolError> {
+    validate_owner(update)?;
+    let now = Utc::now();
+    send::lock_queue(tx, target_id).await?;
+    access::session_in_tx(tx, owner_id, target_id)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
+    check_text_preset_in_tx(tx, owner_id, update.text_preset.as_deref()).await?;
+    let rule = if let Some(rule) = rule_locked_in_tx(tx, target_id).await? {
+        let held = rule.held_fingerprint.clone();
+        if update.paused == Some(true) {
+            cancel_pending_jobs_in_tx(tx, target_id, None, "paused").await?;
+        }
+        let row: RuleRow = sqlx::query_as(
+            "update nudge_rules set
+                 enabled=coalesce($2,enabled),
+                 idle_minutes=coalesce($3,idle_minutes),
+                 background_minutes=greatest(coalesce($3,idle_minutes),background_minutes),
+                 max_consecutive=coalesce($4,max_consecutive),
+                 done_markers=coalesce($5,done_markers),
+                 text_preset_id=coalesce($6,text_preset_id),
+                 context_warn_percent=coalesce($7,context_warn_percent),
+                 state=case when $8 then 'paused' when $9 then 'watching' else state end,
+                 held_fingerprint=case when $8 then null else held_fingerprint end,
+                 consecutive=case when $9 then 0 else consecutive end,
+                 updated_at=$10
+             where conversation_id=$1 returning *",
+        )
+        .bind(target_id)
+        .bind(update.enabled)
+        .bind(update.idle_minutes)
+        .bind(update.max_nudges)
+        .bind(&update.done_markers)
+        .bind(&update.text_preset)
+        .bind(update.context_warn_percent)
+        .bind(update.paused == Some(true))
+        .bind(update.paused == Some(false))
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+        if update.paused == Some(true) || update.enabled == Some(false) {
+            release_held_in_tx(
+                tx,
+                &row,
+                held.as_deref(),
+                &Signals::default(),
+                Some("paused"),
+                now,
+            )
+            .await?;
+        }
+        row
+    } else {
+        if update.enabled == Some(false) {
+            return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+        }
+        let paused = update.paused == Some(true);
+        sqlx::query_as(
+            "insert into nudge_rules(conversation_id,owner_id,set_by,enabled,idle_minutes,
+                 background_minutes,max_consecutive,done_markers,text_preset_id,
+                 context_warn_percent,state,created_at,updated_at)
+             values($1,$2,'owner',true,coalesce($3,3),greatest(coalesce($3,3),10),
+                 coalesce($4,3),coalesce($5,array['STATUS: DONE','STATUS: BLOCKED']),$6,
+                 coalesce($7,80),case when $8 then 'paused' else 'watching' end,$9,$9)
+             returning *",
+        )
+        .bind(target_id)
+        .bind(owner_id)
+        .bind(update.idle_minutes)
+        .bind(update.max_nudges)
+        .bind(&update.done_markers)
+        .bind(&update.text_preset)
+        .bind(update.context_warn_percent)
+        .bind(paused)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?
+    };
+    changed_in_tx(tx, &rule, correlation_id, Some("owner")).await?;
+    Ok(rule.view())
+}
+
+/// Владелец снимает правило целиком: удержанный итог уходит подписчикам.
+pub async fn owner_clear(
+    tx: &mut PgConnection,
+    owner_id: Uuid,
+    target_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<bool, ToolError> {
+    let now = Utc::now();
+    send::lock_queue(tx, target_id).await?;
+    access::session_in_tx(tx, owner_id, target_id)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
+    let Some(mut rule) = rule_locked_in_tx(tx, target_id).await? else {
+        return Ok(false);
+    };
+    let held = rule.held_fingerprint.clone();
+    cancel_pending_jobs_in_tx(tx, target_id, None, "cleared").await?;
+    release_held_in_tx(
+        tx,
+        &rule,
+        held.as_deref(),
+        &Signals::default(),
+        Some("cleared"),
+        now,
+    )
+    .await?;
+    sqlx::query("delete from nudge_rules where conversation_id=$1")
+        .bind(target_id)
+        .execute(&mut *tx)
+        .await?;
+    rule.held_fingerprint = None;
+    rule.state = "exhausted".to_owned();
+    rule.updated_at = now;
+    changed_in_tx(tx, &rule, correlation_id, Some("cleared")).await?;
+    Ok(true)
 }
 
 /// Строка про маркер готовности для брифа запуска. `None`, если автопинок выключен:

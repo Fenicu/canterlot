@@ -108,6 +108,14 @@ async fn owner_messages_skip_hub_events_and_alarms(pool: PgPool) {
     .await;
     delivered(
         &f,
+        "nudge",
+        25,
+        "автоматический толчок",
+        Some(json!({"kind":"nudge","rule_id":Uuid::now_v7(),"attempt":2,"max":3,"chain_depth":0})),
+    )
+    .await;
+    delivered(
+        &f,
         "message",
         40,
         "от сессии",
