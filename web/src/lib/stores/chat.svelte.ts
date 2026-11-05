@@ -172,6 +172,8 @@ export function executionLive(execution: ChatExecution | null): boolean {
 type QueuedInput = QueueSnapshot["queued"][number];
 export type ScheduledMessage = components["schemas"]["ScheduledMessage"];
 export type AlarmView = components["schemas"]["AlarmView"];
+export type NudgeRule = components["schemas"]["NudgeRuleView"];
+export type NudgeEvent = components["schemas"]["NudgeEventView"];
 
 /**
  * Снимок и повторное событие приходят и без изменений: тот же список будильников
@@ -191,6 +193,8 @@ export interface SnapshotData {
   history?: HistoryPage;
   scheduled?: ScheduledMessage[];
   alarms?: AlarmView[];
+  nudge?: NudgeRule | null;
+  nudge_events?: NudgeEvent[];
   open_requests?: unknown[];
   todos?: TodoList[];
   background?: BackgroundTask[];
@@ -334,6 +338,8 @@ export class ChatStore {
   });
   scheduled = $state<ScheduledMessage[]>([]);
   alarms = $state<AlarmView[]>([]);
+  nudge = $state<NudgeRule | null>(null);
+  nudgeEvents = $state<NudgeEvent[]>([]);
   phase = $state<Record<string, unknown> | null>(null);
   interrupt = $state<Record<string, unknown> | null>(null);
   attachments = new SvelteMap<string, Record<string, unknown>>();
@@ -492,6 +498,8 @@ export class ChatStore {
     this.context = null;
     this.scheduled = [];
     this.alarms = [];
+    this.nudge = null;
+    this.nudgeEvents = [];
     this.settings = { effective: null, pending: null, rev: 0 };
     this.crunch = { enabled: false, resume_pending: false };
   }
@@ -968,6 +976,15 @@ export class ChatStore {
           if (!sameAlarms(this.alarms, next)) this.alarms = next;
         }
         return;
+      case "nudge_changed":
+        if (event.kind === "nudge_changed") {
+          const payload = event.payload as NudgeRule & { detail?: string };
+          this.nudge =
+            payload.detail === "cleared" || payload.detail === "accepted"
+              ? null
+              : payload;
+        }
+        return;
       case "scheduled_changed":
         if (event.kind === "scheduled_changed") {
           const next = this.scheduled.filter(
@@ -1355,6 +1372,8 @@ export class ChatStore {
     if (data.scheduled) this.scheduled = data.scheduled;
     if (data.alarms && !sameAlarms(this.alarms, data.alarms))
       this.alarms = data.alarms;
+    if (data.nudge !== undefined) this.nudge = data.nudge ?? null;
+    if (data.nudge_events) this.nudgeEvents = data.nudge_events;
     if (data.open_requests) this.requests.reconcileSnapshot(data.open_requests);
     if (data.todos) this.todos.ingestSnapshot(data.todos);
     if (data.background) this.background.ingestSnapshot(data.background);

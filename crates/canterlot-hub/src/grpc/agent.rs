@@ -304,7 +304,7 @@ async fn save(
                 let created_here: Option<bool> = sqlx::query_scalar(
                     "select origin='agent' and origin_conversation_id is not distinct from $3
                      from instruction_presets
-                     where owner_id=$1 and id=$2 and deleted_at is null",
+                     where owner_id=$1 and id=$2 and purpose='instructions' and deleted_at is null",
                 )
                 .bind(owner)
                 .bind(uuid)
@@ -365,6 +365,7 @@ async fn save(
             title: args.title,
             description: args.description,
             text: args.text,
+            purpose: crate::presets::PresetPurpose::Instructions,
         },
         actor,
         *call_id,

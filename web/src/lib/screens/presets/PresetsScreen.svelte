@@ -1,7 +1,7 @@
 <script lang="ts">
   import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
-  import { deletePreset } from '#lib/api/client.js';
+  import { deletePreset, listPresets } from '#lib/api/client.js';
   import { fmt } from '#lib/format/ru.js';
   import { ApiError } from '#lib/api/http.js';
   import Button from '#lib/ui/Button.svelte';
@@ -9,7 +9,7 @@
   import Pill from '#lib/ui/Pill.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import PresetEditor from './PresetEditor.svelte';
-  import { formatOrigin, isAgentMarked, sortPresets } from './presetsModel.js';
+  import { formatOrigin, isAgentMarked, sortPresets, type PresetSummaryLike } from './presetsModel.js';
   import '../secondary.css';
   import type { Component } from 'svelte';
 
@@ -21,6 +21,9 @@
 
   let runtime = $state<Runtime | null>(null);
   let error = $state('');
+  let purpose = $state<'instructions' | 'nudge'>('instructions');
+  let nudgePresets = $state<PresetSummaryLike[]>([]);
+  let nudgeError = $state('');
   let creating = $state(false);
   let editing = $state<{ id: string; revision: number | null } | null>(null);
   let deleting = $state<{ id: string; title: string; used_by: number } | null>(null);
@@ -33,7 +36,13 @@
     if (ownerOpen && !OwnerSheet) import('./OwnerSheet.svelte').then((m) => { OwnerSheet = m.default; });
   });
 
-  const presets = $derived(runtime ? sortPresets([...runtime.list.presets]) : []);
+  const presets = $derived(
+    !runtime
+      ? []
+      : purpose === 'nudge'
+        ? sortPresets([...nudgePresets])
+        : sortPresets([...runtime.list.presets]),
+  );
   const ownerMachines = $derived(
     runtime ? [...runtime.machines.items.values()].map((m) => ({ id: m.id, name: m.name })) : [],
   );
@@ -47,13 +56,31 @@
     }
   }
 
+  async function loadNudges(): Promise<void> {
+    nudgeError = '';
+    try {
+      nudgePresets = (await listPresets('nudge')).data as PresetSummaryLike[];
+    } catch {
+      nudgeError = 'Не удалось загрузить тексты толчка. Повторите при восстановлении связи';
+    }
+  }
+
+  function choose(next: 'instructions' | 'nudge'): void {
+    purpose = next;
+    deleting = null;
+    creating = false;
+    editing = null;
+    if (next === 'nudge') void loadNudges();
+  }
+
   async function remove(): Promise<void> {
     const target = deleting;
     if (!target) return;
     deleteError = '';
     try {
-      await deletePreset(target.id, crypto.randomUUID());
+      await deletePreset(target.id, crypto.randomUUID(), purpose);
       deleting = null;
+      if (purpose === 'nudge') void loadNudges();
     } catch (err) {
       deleteError = err instanceof ApiError ? err.message : 'Не удалось удалить инструкцию';
     }
@@ -62,10 +89,13 @@
   $effect(() => {
     void load();
   });
+  $effect(() => {
+    if (runtime && purpose === 'nudge') void loadNudges();
+  });
 </script>
 
 <main id="main" tabindex="-1" data-presets-ready={runtime ? '' : undefined}>
-  <SecondaryHeader title="Инструкции" subtitle="Пресеты инструкций агента" />
+  <SecondaryHeader title="Инструкции" subtitle="Пресеты инструкций агента и тексты толчка" />
   <div class="secondary-body"><div class="secondary-content">
     {#if error}
       <p class="error">{error}</p>
@@ -73,8 +103,28 @@
     {:else if !runtime}
       <p>Загружаю инструкции…</p>
     {:else}
-      <Button variant="primary" onclick={() => (creating = true)}>Новая инструкция</Button>
-      {#if deleteError}<p class="error" role="alert">{deleteError}</p>{/if}
+      <div class="tabs" role="tablist" aria-label="Вид пресетов">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={purpose === 'instructions'}
+          data-purpose-tab="instructions"
+          onclick={() => choose('instructions')}
+        >Инструкции</button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={purpose === 'nudge'}
+          data-purpose-tab="nudge"
+          onclick={() => choose('nudge')}
+        >Текст толчка</button>
+      </div>
+      {#if purpose === 'nudge' && nudgeError}
+        <p class="error">{nudgeError}</p>
+        <Button onclick={() => void loadNudges()}>Повторить</Button>
+      {:else}
+        <Button variant="primary" onclick={() => (creating = true)}>{purpose === 'nudge' ? 'Новый текст толчка' : 'Новая инструкция'}</Button>
+        {#if deleteError}<p class="error" role="alert">{deleteError}</p>{/if}
       <ul>
         {#each presets as preset (preset.id)}
           <li data-preset={preset.id} data-owner-card={preset.kind === 'owner' ? '' : undefined}>
@@ -104,6 +154,7 @@
           </li>
         {/each}
       </ul>
+        {/if}
     {/if}
   </div></div>
 </main>
@@ -111,6 +162,7 @@
 {#if creating || editing}
   <PresetEditor
     preset={editing}
+    {purpose}
     onclose={() => {
       creating = false;
       editing = null;
@@ -118,15 +170,18 @@
     ondone={() => {
       creating = false;
       editing = null;
+      if (purpose === 'nudge') void loadNudges();
     }}
   />
 {/if}
 
 {#if deleting}
   <ConfirmDialog
-    title={`Удалить инструкцию «${deleting.title}»?`}
-    body={`Сессии, где он применён (${deleting.used_by}), продолжат работать со своей копией.`}
-    confirmLabel="Удалить инструкцию"
+    title={`Удалить ${purpose === 'nudge' ? 'текст толчка' : 'инструкцию'} «${deleting.title}»?`}
+    body={purpose === 'nudge'
+      ? 'Правила, где он выбран, вернутся к встроенному тексту.'
+      : `Сессии, где он применён (${deleting.used_by}), продолжат работать со своей копией.`}
+    confirmLabel={purpose === 'nudge' ? 'Удалить текст толчка' : 'Удалить инструкцию'}
     onconfirm={() => void remove()}
     onclose={() => (deleting = null)}
   />
@@ -141,6 +196,23 @@
 {/if}
 
 <style>
+  .tabs {
+    display: flex;
+    gap: var(--s2);
+    margin-bottom: var(--s5);
+  }
+  .tabs button {
+    min-height: var(--target);
+    padding: 0 var(--s5);
+    border-radius: var(--radius-pill);
+    color: var(--secondary);
+    background: var(--raised);
+  }
+  .tabs button[aria-selected='true'] {
+    color: var(--text);
+    background: var(--surface);
+    font-weight: var(--weight-semibold);
+  }
   ul {
     list-style: none;
     margin: var(--s6) 0 0;

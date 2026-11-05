@@ -23,6 +23,7 @@
 	import { liveNodes } from './delegationNodes';
 	import { isSubagentCall } from '#lib/timeline/rows.js';
 	import { ACCEPT_LABEL, acceptView, type AcceptDetail } from './accept';
+	import { nudgeStateText } from '#lib/timeline/nudge.js';
 
 	interface DetailLike {
 		title?: string;
@@ -54,6 +55,7 @@
 		onOpenDelegation,
 		onOpenMessages,
 		onOpenAlarms,
+		onOpenNudge,
 		onAccept,
 		parentTitle = null,
 		childRunning = 0,
@@ -69,6 +71,7 @@
 		onOpenDelegation?: () => void;
 		onOpenMessages?: () => void;
 		onOpenAlarms?: () => void;
+		onOpenNudge?: () => void;
 		onAccept?: () => void;
 		/** Название сессии, запустившей эту; пусто, пока список её не знает. */
 		parentTitle?: string | null;
@@ -100,6 +103,7 @@
 	const harnessTitle = $derived(detail?.harness?.title || 'Claude Code');
 	const machineName = $derived(detail?.machine?.name || 'workstation');
 	const provider = $derived(detail?.harness?.provider || 'claude');
+	const nudgeText = $derived(chat.nudge ? nudgeStateText(chat.nudge) : '');
 
 	const effectiveModel = $derived(modelLabel(settings?.effective?.model || detail?.model || 'opus-5.5'));
 	const pendingModel = $derived(settings?.pending?.model && modelLabel(settings.pending.model));
@@ -221,6 +225,11 @@
 					<a class="parent-link" data-parent-link href={resolve(`c/${parentId}`)}>Запущена сессией {parentTitle || 'без названия'}</a>
 				</div>
 			{/if}
+			{#if nudgeText}
+				<div class="nudge-row">
+					<button type="button" class="nudge-link" data-role="nudge-state-line" onclick={onOpenNudge}>{nudgeText}</button>
+				</div>
+			{/if}
 		</div>
 
 		<div class="header-actions">
@@ -323,6 +332,10 @@
 
 				{#if onOpenSettings}
 					<MenuItem icon="sliders" onclick={() => { menuOpen = false; onOpenSettings(); }}>Настройки сессии</MenuItem>
+				{/if}
+
+				{#if chat.nudge && onOpenNudge}
+					<MenuItem icon="pin" onclick={() => { menuOpen = false; onOpenNudge(); }}>Автопинок</MenuItem>
 				{/if}
 
 				{#if onOpenDiagnostics}
@@ -588,5 +601,22 @@
 		padding: var(--s2) var(--s5);
 		font-size: var(--fs-meta);
 		color: var(--danger);
+	}
+	.nudge-row {
+		margin-top: var(--s1);
+	}
+	.nudge-link {
+		min-height: var(--target);
+		padding: 0;
+		background: transparent;
+		color: var(--muted);
+		font-size: var(--fs-meta);
+		text-align: left;
+	}
+	.nudge-link:hover,
+	.nudge-link:focus-visible {
+		color: var(--secondary);
+		text-decoration: underline;
+		text-underline-offset: var(--s1);
 	}
 </style>

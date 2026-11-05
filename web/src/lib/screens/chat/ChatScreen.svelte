@@ -76,6 +76,7 @@
 	let showDelegation = $state(false);
 	let showMessages = $state(false);
 	let showAlarms = $state(false);
+	let showNudge = $state(false);
 	let showSheet = $state(false);
 	let infoRunId = $state<string | null>(null);
 	// Редкие панели не входят в маршрут чата: подгружаются, когда их открывают.
@@ -85,6 +86,7 @@
 	let InfoSheet = $state<Component<{ chat: ChatStore; runId: string; onclose: () => void }> | null>(null);
 	let OwnerMessagesSheet = $state<Component<{ chat: ChatStore; onpick: (item: OwnerInputView) => void; onclose: () => void }> | null>(null);
 	let AlarmsSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
+	let NudgeSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	const todos = $derived(chat.todos.lane(null));
 
 	$effect(() => {
@@ -101,6 +103,7 @@
 	});
 	$effect(() => {
 		if (showAlarms && !AlarmsSheet) import('./AlarmsSheet.svelte').then((m) => { AlarmsSheet = m.default; });
+		if (showNudge && !NudgeSheet) import('./NudgeSheet.svelte').then((m) => { NudgeSheet = m.default; });
 	});
 	// Список задач показывается не в каждом ходу: панель догружается вместе с ним.
 	$effect(() => {
@@ -175,6 +178,7 @@
 		onOpenDelegation={() => (showDelegation = true)}
 		onOpenMessages={() => (showMessages = true)}
 		onOpenAlarms={() => (showAlarms = true)}
+		onOpenNudge={() => (showNudge = true)}
 		onAccept={() => {
 			acceptError = null;
 			showAccept = true;
@@ -288,6 +292,10 @@
 
 	{#if showAlarms && !pane.desktop && AlarmsSheet}
 		<AlarmsSheet {chat} onclose={() => (showAlarms = false)} />
+	{/if}
+
+	{#if showNudge && NudgeSheet}
+		<NudgeSheet {chat} onclose={() => (showNudge = false)} />
 	{/if}
 
 	{#if infoRunId && InfoSheet}

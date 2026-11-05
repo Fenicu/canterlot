@@ -897,17 +897,31 @@ export function spendReserve(
   );
 }
 
+export type PresetPurpose = "instructions" | "nudge";
+
 export function listPresets(
+  purpose: PresetPurpose = "instructions",
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_presets"]>>> {
-  return http("GET", "/api/v1/presets", undefined, opts);
+  return http(
+    "GET",
+    withQuery("/api/v1/presets", { purpose }),
+    undefined,
+    opts,
+  );
 }
 
 export function getPreset(
   presetId: string,
+  purpose: PresetPurpose = "instructions",
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_presets__id_"]>>> {
-  return http("GET", `/api/v1/presets/${id(presetId)}`, undefined, opts);
+  return http(
+    "GET",
+    withQuery(`/api/v1/presets/${id(presetId)}`, { purpose }),
+    undefined,
+    opts,
+  );
 }
 
 export function createPreset(
@@ -922,11 +936,12 @@ export function patchPreset(
   presetId: string,
   body: Body<operations["patch__api_v1_presets__id_"]>,
   key: string,
+  purpose: PresetPurpose = "instructions",
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["patch__api_v1_presets__id_"]>>> {
   return http(
     "PATCH",
-    `/api/v1/presets/${id(presetId)}`,
+    withQuery(`/api/v1/presets/${id(presetId)}`, { purpose }),
     body,
     keyed(key, opts),
   );
@@ -935,11 +950,55 @@ export function patchPreset(
 export function deletePreset(
   presetId: string,
   key: string,
+  purpose: PresetPurpose = "instructions",
   opts?: RequestOptions,
 ): Promise<HttpResponse<void>> {
   return http(
     "DELETE",
-    `/api/v1/presets/${id(presetId)}`,
+    withQuery(`/api/v1/presets/${id(presetId)}`, { purpose }),
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function getNudge(
+  conversationId: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_conversations__id__nudge"]>>
+> {
+  return http(
+    "GET",
+    `/api/v1/conversations/${id(conversationId)}/nudge`,
+    undefined,
+    opts,
+  );
+}
+
+export function putNudge(
+  conversationId: string,
+  body: Body<operations["put__api_v1_conversations__id__nudge"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["put__api_v1_conversations__id__nudge"]>>
+> {
+  return http(
+    "PUT",
+    `/api/v1/conversations/${id(conversationId)}/nudge`,
+    body,
+    keyed(key, opts),
+  );
+}
+
+export function deleteNudge(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<void>> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/nudge`,
     undefined,
     keyed(key, opts),
   );

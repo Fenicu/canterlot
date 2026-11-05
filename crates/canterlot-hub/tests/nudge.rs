@@ -439,6 +439,8 @@ async fn nudge_is_delivered_with_origin_and_depth(pool: PgPool) {
     assert_eq!(origin["kind"], "nudge");
     assert_eq!(origin["chain_depth"], 0);
     assert_eq!(origin["attempt"], 1);
+    assert_eq!(origin["max"], 3);
+    assert_eq!(origin["signals"]["no_marker"], true);
     assert_eq!(rule_row(&pool, f.child).await, ("watching".into(), 1, 1));
 }
 
@@ -1816,4 +1818,88 @@ async fn jobs_abandon(
             .await
             .unwrap()
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nudge_text_comes_from_a_nudge_preset_and_set_rejects_instructions(pool: PgPool) {
+    let f = fx(&pool).await;
+    let custom = canterlot_hub::presets::create(
+        &pool,
+        f.owner,
+        "nudge_preset_text",
+        canterlot_hub::presets::NewPreset {
+            title: "Свой толчок".into(),
+            description: None,
+            text: "[canterlot] PRESET-TEXT {markers} | {signals}".into(),
+            purpose: canterlot_hub::presets::PresetPurpose::Nudge,
+        },
+        canterlot_hub::presets::Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let instruction = canterlot_hub::presets::create(
+        &pool,
+        f.owner,
+        "nudge_instruction_text",
+        canterlot_hub::presets::NewPreset {
+            title: "Обычная инструкция".into(),
+            description: None,
+            text: "обычный текст".into(),
+            purpose: canterlot_hub::presets::PresetPurpose::Instructions,
+        },
+        canterlot_hub::presets::Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let ctx = context(&pool);
+    let error = nudge::set(
+        &ctx,
+        &caller(&f),
+        json!({"session_id": f.child, "text_preset": instruction.summary.id}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ToolErrorCode::ProfileUnknown);
+
+    let set_answer = nudge::set(
+        &ctx,
+        &caller(&f),
+        json!({"session_id": f.child, "text_preset": custom.summary.id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(set_answer["state"], "watching");
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    let command = answer(&pool, &f, "Halfway through the parser.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "eee",
+        true,
+        &["bash"],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(4))
+        .await
+        .unwrap();
+    let text: Value = sqlx::query_scalar(
+        "select content from inputs where conversation_id=$1 order by input_seq desc limit 1",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let text = text[0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("[canterlot] PRESET-TEXT STATUS: DONE or STATUS: BLOCKED"),
+        "{text}"
+    );
+    assert!(text.contains("| idle"), "{text}");
 }

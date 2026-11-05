@@ -13,6 +13,11 @@ import type { components } from '../../src/lib/api/generated/openapi.js';
 
 type PresetSummary = components['schemas']['PresetSummary'];
 type QueueSnapshot = components['schemas']['SnapshotQueueView'];
+export type NudgeRuleView = components['schemas']['NudgeRuleView'];
+export type NudgeEventView = components['schemas']['NudgeEventView'];
+
+export const NUDGE_BUILTIN_TEXT =
+	'[canterlot] Automatic reminder from canterlot, not the owner: you ended your turn without a final status. If the task is finished, give your report and end it with the line {markers}. If you are blocked, explain why and end with STATUS: BLOCKED. Otherwise continue from where you stopped. Do not end your turn while anything is still running or uncommitted.\nObserved: {signals}.';
 
 const WAITING = new Set(['queued', 'dispatched', 'on_machine']);
 
@@ -38,7 +43,8 @@ export interface FakePresetOrigin {
 
 export interface FakePreset {
 	id: string;
-	kind: 'clean' | 'owner' | 'custom';
+	kind: 'clean' | 'owner' | 'custom' | 'nudge';
+	purpose: 'instructions' | 'nudge';
 	title: string;
 	description: string;
 	revision: number | null;
@@ -67,6 +73,8 @@ export class FakeHubApi {
 	limits: ProviderLimits[] = [];
 	truncated = false;
 	presets = new Map<string, FakePreset>();
+	readonly nudgeRules = new Map<string, NudgeRuleView>();
+	readonly nudgeEvents = new Map<string, NudgeEventView[]>();
 	ownerOverview = {
 		files: [
 			{ kind: 'claude_user', harness: 'claude', path: '/home/owner/.claude/CLAUDE.md', present: true, size: 24, mtime: '2026-10-28T12:00:00.000Z', reason: '' },
@@ -279,6 +287,8 @@ export class FakeHubApi {
 			history: this.page(id, {}),
 			scheduled: [],
 			alarms: [...alarms.values()],
+			nudge: this.nudgeRules.get(id) ?? null,
+			nudge_events: this.nudgeEvents.get(id) ?? [],
 			open_requests,
 			todos: [...todos.values()].sort((a, b) => Number(a.lane_block_id !== null) - Number(b.lane_block_id !== null)),
 			background: [...background.values()],
@@ -428,6 +438,7 @@ export class FakeHubApi {
 		return {
 			id: preset.id,
 			kind: preset.kind,
+			purpose: preset.purpose,
 			title: preset.title,
 			description: preset.description,
 			revision: preset.revision,
@@ -438,11 +449,74 @@ export class FakeHubApi {
 		};
 	}
 
-	presetList(): PresetSummary[] {
-		const rank = (kind: string): number => kind === 'clean' ? 0 : kind === 'owner' ? 1 : 2;
-		return [...this.presets.values()]
+	presetList(purpose: 'instructions' | 'nudge' = 'instructions'): PresetSummary[] {
+		const rank = (kind: string): number => kind === 'clean' ? 0 : kind === 'owner' ? 1 : kind === 'nudge' ? 0 : 2;
+		const builtinNudge: FakePreset = {
+			id: 'nudge_default',
+			kind: 'nudge',
+			purpose: 'nudge',
+			title: 'Продолжай (английский)',
+			description: 'Автоматический толчок исполнителю, который закончил ход без строки готовности.',
+			revision: null,
+			text_bytes: null,
+			text: NUDGE_BUILTIN_TEXT,
+			created: { by: 'builtin', conversation_id: null, conversation_title: null, at: null },
+			last_edit: null,
+			used_by: 0
+		};
+		const items = [...this.presets.values()].filter((preset) => preset.purpose === purpose);
+		if (purpose === 'nudge' && !items.some((preset) => preset.id === 'nudge_default')) items.push(builtinNudge);
+		return items
 			.sort((a, b) => rank(a.kind) - rank(b.kind) || a.title.localeCompare(b.title, 'ru'))
 			.map((preset) => this.presetSummary(preset));
+	}
+
+	nudgeState(id: string): { rule: NudgeRuleView | null; events: NudgeEventView[] } {
+		return {
+			rule: this.nudgeRules.get(id) ?? null,
+			events: [...(this.nudgeEvents.get(id) ?? [])].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 5)
+		};
+	}
+
+	putNudge(id: string, body: Partial<NudgeRuleView> & { paused?: boolean }): NudgeRuleView {
+		const current = this.nudgeRules.get(id) ?? null;
+		const paused = body.paused === true;
+		const resumed = body.paused === false;
+		const rule: NudgeRuleView = {
+			session_id: id,
+			enabled: body.enabled ?? current?.enabled ?? true,
+			state: paused ? 'paused' : resumed ? 'watching' : current?.state ?? 'watching',
+			idle_minutes: body.idle_minutes ?? current?.idle_minutes ?? 3,
+			background_minutes: current?.background_minutes ?? 10,
+			max_consecutive: body.max_consecutive ?? current?.max_consecutive ?? 3,
+			max_total: current?.max_total ?? 20,
+			done_markers: body.done_markers ?? current?.done_markers ?? ['STATUS: DONE', 'STATUS: BLOCKED'],
+			context_warn_percent: body.context_warn_percent ?? current?.context_warn_percent ?? 80,
+			set_by: current?.set_by ?? 'owner',
+			set_by_session: current?.set_by_session ?? null,
+			notify_session_id: current?.notify_session_id ?? null,
+			consecutive: resumed ? 0 : current?.consecutive ?? 0,
+			total: current?.total ?? 0,
+			held: paused ? false : current?.held ?? false
+		};
+		this.nudgeRules.set(id, rule);
+		this.hub.append(`conversation:${id}`, { kind: 'nudge_changed', conversation_id: id, payload: { ...rule, detail: 'owner' } });
+		return rule;
+	}
+
+	clearNudge(id: string): void {
+		const rule = this.nudgeRules.get(id);
+		if (!rule) return;
+		this.nudgeRules.delete(id);
+		this.hub.append(`conversation:${id}`, { kind: 'nudge_changed', conversation_id: id, payload: { ...rule, state: 'exhausted', held: false, detail: 'cleared' } });
+	}
+
+	pushNudgeEvent(id: string, event: NudgeEventView, rule: NudgeRuleView): void {
+		const list = this.nudgeEvents.get(id) ?? [];
+		list.push(event);
+		this.nudgeEvents.set(id, list);
+		this.nudgeRules.set(id, rule);
+		this.hub.append(`conversation:${id}`, { kind: 'nudge_changed', conversation_id: id, payload: { ...rule, detail: 'nudged' } });
 	}
 
 	bumpPresetRevision(id: string, text: string): void {
@@ -493,7 +567,7 @@ export class FakeHubApi {
 	async inputs(id: string, query: { before?: string; limit?: number } = {}): Promise<components['schemas']['OwnerInputsPage']> {
 		const all = (this.histories.get(id) ?? [])
 			.filter((item): item is HistoryInput => item.kind === 'input' && Boolean(item.feed_seq) && !waiting(item))
-			.filter((item) => !['event', 'alarm'].includes((item.origin as { kind?: string } | null | undefined)?.kind ?? ''))
+			.filter((item) => !['event', 'alarm', 'nudge'].includes((item.origin as { kind?: string } | null | undefined)?.kind ?? ''))
 			.sort((a, b) => cmp(seqOf(a), seqOf(b)));
 		const limit = query.limit ?? 500;
 		const older = query.before ? all.filter((item) => cmp(seqOf(item), query.before!) < 0) : all;

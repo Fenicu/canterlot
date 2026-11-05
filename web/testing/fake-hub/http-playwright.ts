@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import type { FakeHub } from './hub';
-import type { FakeHubApi } from './api';
+import { NUDGE_BUILTIN_TEXT, type FakeHubApi } from './api';
 import { APP_VERSION } from '../version';
 
 const PNG = Buffer.from(
@@ -195,6 +195,40 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       payload: alarm
     });
     await route.fulfill({ headers: headers(), json: alarm });
+  });
+
+  await page.route(/\/api\/v1\/conversations\/[^/]+\/nudge(?:\/events)?$/, async (route) => {
+    const url = new URL(route.request().url());
+    const parts = url.pathname.split('/');
+    const conversation = parts[4] ?? '';
+    const method = route.request().method();
+    if (method === 'GET' && parts.at(-1) === 'events') {
+      const { events } = api.nudgeState(conversation);
+      await route.fulfill({ headers: headers(), json: { events } });
+      return;
+    }
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: api.nudgeState(conversation) });
+      return;
+    }
+    if (method === 'PUT') {
+      if (!route.request().headers()['idempotency-key']) {
+        await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+        return;
+      }
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      const rule = api.putNudge(conversation, body);
+      hub.flush();
+      await route.fulfill({ headers: headers(), json: rule });
+      return;
+    }
+    if (method === 'DELETE') {
+      api.clearNudge(conversation);
+      hub.flush();
+      await route.fulfill({ status: 204, headers: headers() });
+      return;
+    }
+    await route.fallback();
   });
 
   await page.route('**/api/v1/conversations/*/interrupt', async (route) => {
@@ -972,14 +1006,16 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: api.limitSettingsView() });
   });
 
-  await page.route('**/api/v1/presets', async (route) => {
+  await page.route(/\/api\/v1\/presets(?:\?.*)?$/, async (route) => {
     const method = route.request().method();
     if (method === 'GET') {
-      await route.fulfill({ headers: headers(), json: api.presetList() });
+      const purpose = new URL(route.request().url()).searchParams.get('purpose') === 'nudge' ? 'nudge' : 'instructions';
+      await route.fulfill({ headers: headers(), json: api.presetList(purpose) });
       return;
     }
     if (method === 'POST') {
-      const body = route.request().postDataJSON() as { title?: string; description?: string | null; text?: string };
+      const body = route.request().postDataJSON() as { title?: string; description?: string | null; text?: string; purpose?: 'instructions' | 'nudge' };
+      const purpose = body.purpose === 'nudge' ? 'nudge' : 'instructions';
       const error = validatePresetBody(body, api, null);
       if (error) {
         await route.fulfill({ status: error.status, headers: headers(), json: errorBody(error.code, error.message, error.details) });
@@ -990,6 +1026,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       const record = {
         id,
         kind: 'custom' as const,
+        purpose,
         title: body.title!.trim(),
         description: (body.description ?? '').trim(),
         revision: 1,
@@ -1009,19 +1046,24 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
   });
 
   await page.route(/\/api\/v1\/presets\/[^/]+$/, async (route) => {
-    const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+    const url = new URL(route.request().url());
+    const id = url.pathname.split('/').at(-1) ?? '';
     const method = route.request().method();
-    const stored = api.presets.get(id) ?? (id === 'clean' || id === 'owner' ? builtinPreset(api, id) : undefined);
+    const purpose = url.searchParams.get('purpose') === 'nudge' ? 'nudge' : 'instructions';
+    const builtinNudge = purpose === 'nudge' && id === 'nudge_default'
+      ? { id: 'nudge_default', kind: 'nudge' as const, purpose: 'nudge' as const, title: 'Продолжай (английский)', description: '', revision: null, text_bytes: null, text: NUDGE_BUILTIN_TEXT, created: { by: 'builtin', conversation_id: null, conversation_title: null, at: null }, last_edit: null, used_by: 0 }
+      : undefined;
+    const stored = builtinNudge ?? api.presets.get(id) ?? (id === 'clean' || id === 'owner' ? builtinPreset(api, id) : undefined);
     if (method === 'GET') {
-      if (!stored) {
+      if (!stored || (stored as { purpose?: string }).purpose !== purpose) {
         await route.fulfill({ status: 404, headers: headers(), json: errorBody('preset_not_found', 'Пресет не найден') });
         return;
       }
       await route.fulfill({ headers: headers(), json: { ...api.presetSummary(stored), text: stored.text } });
       return;
     }
-    if (!stored || stored.kind !== 'custom') {
-      await route.fulfill({ status: stored ? 409 : 404, headers: headers(), json: stored ? errorBody('preset_builtin', 'Встроенный пресет нельзя изменить или удалить') : errorBody('preset_not_found', 'Пресет не найден') });
+    if (!stored || stored.kind !== 'custom' || (stored as { purpose?: string }).purpose !== purpose) {
+      await route.fulfill({ status: stored && (stored as { purpose?: string }).purpose === purpose ? 409 : 404, headers: headers(), json: stored && (stored as { purpose?: string }).purpose === purpose ? errorBody('preset_builtin', 'Встроенный пресет нельзя изменить или удалить') : errorBody('preset_not_found', 'Пресет не найден') });
       return;
     }
     if (method === 'DELETE') {

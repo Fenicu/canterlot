@@ -311,6 +311,7 @@ async fn every_revision_keeps_its_text(pool: PgPool) {
             title: "Ревизии".into(),
             description: None,
             text: "первый".into(),
+            purpose: canterlot_hub::presets::PresetPurpose::Instructions,
         },
         Actor::Owner,
         Uuid::now_v7(),
@@ -436,6 +437,7 @@ async fn agent_actor_is_recorded_as_origin_and_last_edit(pool: PgPool) {
             title: "Агентский".into(),
             description: None,
             text: "текст".into(),
+            purpose: canterlot_hub::presets::PresetPurpose::Instructions,
         },
         Actor::Agent {
             conversation_id: conversation,
@@ -986,4 +988,222 @@ async fn idempotency_fingerprints_preset_text_and_stores_no_text(pool: PgPool) {
             "preset text kept in idempotency storage: {response}"
         );
     }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nudge_purpose_is_filtered_and_its_builtin_is_read_only(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let created = f
+        .request(
+            Method::POST,
+            "/api/v1/presets",
+            Some("nudge_create"),
+            Some(json!({
+                "title": "Мягкий толчок",
+                "description": "Свой текст",
+                "text": "[canterlot] Continue. Markers: {markers}. Observed: {signals}.",
+                "purpose": "nudge"
+            })),
+        )
+        .await
+        .json::<Value>();
+    assert_eq!(created["purpose"], "nudge");
+    let id = created["id"].as_str().unwrap().to_owned();
+    // Текст толчка короче инструкции: предел 4 КиБ.
+    let too_big = f
+        .request(
+            Method::POST,
+            "/api/v1/presets",
+            Some("nudge_too_big"),
+            Some(json!({
+                "title": "Слишком длинный",
+                "text": "я".repeat(4_097),
+                "purpose": "nudge"
+            })),
+        )
+        .await;
+    assert_eq!(too_big.status.as_u16(), 422);
+    assert_eq!(Fx::error_code(&too_big), "preset_invalid");
+
+    // Список инструкций не показывает ни встроенный текст толчка, ни пользовательский.
+    let instructions: Value = f
+        .request(Method::GET, "/api/v1/presets", None, None)
+        .await
+        .json();
+    let instruction_ids: Vec<&str> = instructions
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|preset| preset["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(&instruction_ids[..2], &["clean", "owner"]);
+    assert_eq!(
+        instruction_ids.len(),
+        3,
+        "seed executor follows the builtins"
+    );
+    assert!(
+        instructions
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|preset| preset["purpose"] == "instructions")
+    );
+
+    let nudge: Value = f
+        .request(Method::GET, "/api/v1/presets?purpose=nudge", None, None)
+        .await
+        .json();
+    let nudges = nudge.as_array().unwrap();
+    assert_eq!(nudges[0]["id"], "nudge_default");
+    assert_eq!(nudges[0]["kind"], "nudge");
+    assert_eq!(nudges[0]["purpose"], "nudge");
+    assert_eq!(nudges[0]["title"], "Продолжай (английский)");
+    assert_eq!(nudges[1]["id"], id);
+    assert_eq!(nudges[1]["purpose"], "nudge");
+
+    // Встроенный текст виден, но не меняется и не удаляется.
+    let builtin: Value = f
+        .request(
+            Method::GET,
+            "/api/v1/presets/nudge_default?purpose=nudge",
+            None,
+            None,
+        )
+        .await
+        .json();
+    assert!(
+        builtin["text"]
+            .as_str()
+            .unwrap()
+            .contains("Automatic reminder from canterlot")
+    );
+    let patch = f
+        .request(
+            Method::PATCH,
+            "/api/v1/presets/nudge_default?purpose=nudge",
+            Some("nudge_builtin_patch"),
+            Some(json!({"title": "Другое", "base_revision": 1})),
+        )
+        .await;
+    assert_eq!(patch.status.as_u16(), 409);
+    assert_eq!(Fx::error_code(&patch), "preset_builtin");
+    let delete = f
+        .request(
+            Method::DELETE,
+            "/api/v1/presets/nudge_default?purpose=nudge",
+            Some("nudge_builtin_delete"),
+            None,
+        )
+        .await;
+    assert_eq!(delete.status.as_u16(), 409);
+    assert_eq!(Fx::error_code(&delete), "preset_builtin");
+
+    // Пресет толчка не читается и не правится как инструкция.
+    let wrong_get = f
+        .request(Method::GET, &format!("/api/v1/presets/{id}"), None, None)
+        .await;
+    assert_eq!(wrong_get.status.as_u16(), 404);
+    assert_eq!(Fx::error_code(&wrong_get), "preset_not_found");
+    let wrong_patch = f
+        .request(
+            Method::PATCH,
+            &format!("/api/v1/presets/{id}"),
+            Some("nudge_wrong_patch"),
+            Some(json!({"text": "Другой", "base_revision": 1})),
+        )
+        .await;
+    assert_eq!(wrong_patch.status.as_u16(), 404);
+
+    // Правка в своей вкладке работает.
+    let updated: Value = f
+        .request(
+            Method::PATCH,
+            &format!("/api/v1/presets/{id}?purpose=nudge"),
+            Some("nudge_patch"),
+            Some(json!({"text": "Новый {markers}", "base_revision": 1})),
+        )
+        .await
+        .json();
+    assert_eq!(updated["purpose"], "nudge");
+    assert_eq!(updated["revision"], 2);
+
+    // Ограничение схемы не пропускает третье назначение.
+    let invalid = sqlx::query(
+        "insert into instruction_presets(id,owner_id,title,revision,origin,purpose)
+         values($1,$2,'Чужое назначение',1,'owner','other')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(f.owner)
+    .execute(&f.pool)
+    .await;
+    assert!(invalid.is_err(), "check purpose rejects other values");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nudge_text_resolves_only_nudge_presets_and_falls_back_to_builtin(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let preset = f
+        .request(
+            Method::POST,
+            "/api/v1/presets",
+            Some("nudge_text_create"),
+            Some(json!({
+                "title": "Свой текст",
+                "text": "[canterlot] Своё: {markers}; {signals}.",
+                "purpose": "nudge"
+            })),
+        )
+        .await
+        .json::<Value>();
+    let id = preset["id"].as_str().unwrap().to_owned();
+    let instruction = f
+        .create("nudge_text_instruction", "Обычный", "обычный текст")
+        .await;
+    let instruction_id = instruction["id"].as_str().unwrap().to_owned();
+    let mut conn = f.pool.acquire().await.unwrap();
+
+    assert_eq!(
+        presets::nudge_text(&mut conn, f.owner, None).await.unwrap(),
+        presets::BUILTIN_NUDGE_TEXT
+    );
+    assert_eq!(
+        presets::nudge_text(&mut conn, f.owner, Some(&id))
+            .await
+            .unwrap(),
+        "[canterlot] Своё: {markers}; {signals}."
+    );
+    for missing in [
+        "nudge_default",
+        "clean",
+        "owner",
+        &instruction_id,
+        &Uuid::now_v7().to_string(),
+    ] {
+        assert_eq!(
+            presets::nudge_text(&mut conn, f.owner, Some(missing))
+                .await
+                .unwrap(),
+            presets::BUILTIN_NUDGE_TEXT,
+            "{missing} falls back to the built-in text"
+        );
+    }
+
+    // Удалённый пресет тоже даёт встроенный текст.
+    presets::delete_for(
+        &f.pool,
+        f.owner,
+        id.parse().unwrap(),
+        "nudge_text_delete",
+        Uuid::now_v7(),
+        presets::PresetPurpose::Nudge,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        presets::nudge_text(&mut conn, f.owner, Some(&id))
+            .await
+            .unwrap(),
+        presets::BUILTIN_NUDGE_TEXT
+    );
 }

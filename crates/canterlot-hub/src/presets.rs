@@ -23,11 +23,40 @@ pub const MAX_PRESET_TITLE_CHARS: usize = 80;
 pub const MAX_PRESET_DESCRIPTION_CHARS: usize = 500;
 /// Максимум пользовательских пресетов одного владельца (без удалённых).
 pub const MAX_PRESETS_PER_OWNER: i64 = 100;
+/// Текст толчка короче инструкции: до 4 КиБ (§4.5).
+pub const MAX_NUDGE_TEXT_BYTES: usize = 4 * 1024;
 
 /// Встроенный пресет «Без инструкций».
 pub const BUILTIN_CLEAN_ID: &str = "clean";
 /// Встроенный пресет «Как у владельца».
 pub const BUILTIN_OWNER_ID: &str = "owner";
+/// Встроенный текст толчка: его нельзя изменить или удалить.
+pub const BUILTIN_NUDGE_ID: &str = "nudge_default";
+/// Название встроенного текста толчка.
+pub const BUILTIN_NUDGE_TITLE: &str = "Продолжай (английский)";
+/// Описание встроенного текста толчка.
+pub const BUILTIN_NUDGE_DESCRIPTION: &str =
+    "Автоматический толчок исполнителю, который закончил ход без строки готовности.";
+/// Встроенный текст толчка (§4.5). `{markers}` и `{signals}` подставляет хаб.
+pub const BUILTIN_NUDGE_TEXT: &str = "[canterlot] Automatic reminder from canterlot, not the owner: you ended your turn without a final status. If the task is finished, give your report and end it with the line {markers}. If you are blocked, explain why and end with STATUS: BLOCKED. Otherwise continue from where you stopped. Do not end your turn while anything is still running or uncommitted.\nObserved: {signals}.";
+
+/// Назначение пресета: обычные инструкции агента или текст автопинка.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetPurpose {
+    #[default]
+    Instructions,
+    Nudge,
+}
+
+impl PresetPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Instructions => "instructions",
+            Self::Nudge => "nudge",
+        }
+    }
+}
 /// Название встроенного пресета «Без инструкций».
 pub const BUILTIN_CLEAN_TITLE: &str = "Без инструкций";
 /// Название встроенного пресета «Как у владельца».
@@ -75,6 +104,8 @@ pub enum PresetKind {
     Clean,
     Owner,
     Custom,
+    /// Встроенный текст толчка.
+    Nudge,
 }
 
 /// Кто создал пресет или внёс последнюю правку; текст правки не несёт.
@@ -91,9 +122,11 @@ pub struct PresetOrigin {
 /// Строка списка, события и снимка: текста пресета здесь нет.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PresetSummary {
-    /// `clean`, `owner` или UUID пользовательского пресета.
+    /// `clean`, `owner`, `nudge_default` или UUID пользовательского пресета.
     pub id: String,
     pub kind: PresetKind,
+    /// `instructions` или `nudge`.
+    pub purpose: PresetPurpose,
     pub title: String,
     pub description: String,
     pub revision: Option<i64>,
@@ -127,6 +160,8 @@ pub struct NewPreset {
     pub title: String,
     pub description: Option<String>,
     pub text: String,
+    #[serde(default)]
+    pub purpose: PresetPurpose,
 }
 
 /// Тело правки пресета: `base_revision` обязателен для оптимистичной блокировки.
@@ -245,6 +280,7 @@ fn clean_builtin(used_by: i64) -> PresetSummary {
     PresetSummary {
         id: BUILTIN_CLEAN_ID.to_owned(),
         kind: PresetKind::Clean,
+        purpose: PresetPurpose::Instructions,
         title: BUILTIN_CLEAN_TITLE.to_owned(),
         description: BUILTIN_CLEAN_DESCRIPTION.to_owned(),
         revision: None,
@@ -264,6 +300,7 @@ fn owner_builtin(used_by: i64) -> PresetSummary {
     PresetSummary {
         id: BUILTIN_OWNER_ID.to_owned(),
         kind: PresetKind::Owner,
+        purpose: PresetPurpose::Instructions,
         title: BUILTIN_OWNER_TITLE.to_owned(),
         description: BUILTIN_OWNER_DESCRIPTION.to_owned(),
         revision: None,
@@ -276,6 +313,41 @@ fn owner_builtin(used_by: i64) -> PresetSummary {
         },
         last_edit: None,
         used_by,
+    }
+}
+
+fn purpose_of(value: &str) -> PresetPurpose {
+    match value {
+        "nudge" => PresetPurpose::Nudge,
+        _ => PresetPurpose::Instructions,
+    }
+}
+
+fn nudge_builtin() -> PresetSummary {
+    PresetSummary {
+        id: BUILTIN_NUDGE_ID.to_owned(),
+        kind: PresetKind::Nudge,
+        purpose: PresetPurpose::Nudge,
+        title: BUILTIN_NUDGE_TITLE.to_owned(),
+        description: BUILTIN_NUDGE_DESCRIPTION.to_owned(),
+        revision: None,
+        text_bytes: None,
+        created: PresetOrigin {
+            by: "builtin".to_owned(),
+            conversation_id: None,
+            conversation_title: None,
+            at: None,
+        },
+        last_edit: None,
+        used_by: 0,
+    }
+}
+
+/// Встроенный текст толчка с текстом: так его читает вкладка «Текст толчка».
+pub fn builtin_nudge_preset() -> Preset {
+    Preset {
+        summary: nudge_builtin(),
+        text: Some(BUILTIN_NUDGE_TEXT.to_owned()),
     }
 }
 
@@ -321,7 +393,7 @@ async fn summarize(
     id: Uuid,
 ) -> Result<Option<PresetSummary>, sqlx::Error> {
     let row = sqlx::query(
-        "select id, title, description, revision, origin, origin_conversation_id, created_at
+        "select id, title, description, revision, origin, origin_conversation_id, created_at, purpose
          from instruction_presets where owner_id=$1 and id=$2 and deleted_at is null",
     )
     .bind(owner)
@@ -362,6 +434,7 @@ async fn summarize(
     Ok(Some(PresetSummary {
         id: reference.clone(),
         kind: PresetKind::Custom,
+        purpose: purpose_of(row.try_get::<String, _>("purpose")?.as_str()),
         title: row.try_get("title")?,
         description: row.try_get("description")?,
         revision: Some(revision),
@@ -413,16 +486,30 @@ async fn emit(
     .await
 }
 
-/// Список: встроенные первыми, затем пользовательские по `lower(title)`.
+/// Список инструкций: встроенные первыми, затем пользовательские по `lower(title)`.
 pub async fn list(conn: &mut PgConnection, owner: Uuid) -> Result<Vec<PresetSummary>, sqlx::Error> {
-    let mut out = vec![
-        clean_builtin(used_by(conn, owner, BUILTIN_CLEAN_ID).await?),
-        owner_builtin(used_by(conn, owner, BUILTIN_OWNER_ID).await?),
-    ];
+    list_for(conn, owner, PresetPurpose::Instructions).await
+}
+
+/// Список пресетов одного назначения. Встроенные инструкции и текст толчка
+/// не смешиваются: каждая вкладка видит только своё.
+pub async fn list_for(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    purpose: PresetPurpose,
+) -> Result<Vec<PresetSummary>, sqlx::Error> {
+    let mut out = match purpose {
+        PresetPurpose::Instructions => vec![
+            clean_builtin(used_by(conn, owner, BUILTIN_CLEAN_ID).await?),
+            owner_builtin(used_by(conn, owner, BUILTIN_OWNER_ID).await?),
+        ],
+        PresetPurpose::Nudge => vec![nudge_builtin()],
+    };
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "select id from instruction_presets where owner_id=$1 and deleted_at is null order by lower(title), id",
+        "select id from instruction_presets where owner_id=$1 and purpose=$2 and deleted_at is null order by lower(title), id",
     )
     .bind(owner)
+    .bind(purpose.as_str())
     .fetch_all(&mut *conn)
     .await?;
     for id in ids {
@@ -433,38 +520,68 @@ pub async fn list(conn: &mut PgConnection, owner: Uuid) -> Result<Vec<PresetSumm
     Ok(out)
 }
 
-/// Детальный ответ; удалённый или чужой пресет — `NotFound`.
+/// Детальный ответ инструкции; удалённый или чужой пресет — `NotFound`.
 pub async fn get(
     conn: &mut PgConnection,
     owner: Uuid,
     reference: &PresetRef,
 ) -> Result<Preset, PresetError> {
-    match reference {
-        PresetRef::Clean => Ok(Preset {
-            summary: clean_builtin(used_by(conn, owner, BUILTIN_CLEAN_ID).await?),
-            text: None,
-        }),
-        PresetRef::Owner => Ok(Preset {
-            summary: owner_builtin(used_by(conn, owner, BUILTIN_OWNER_ID).await?),
-            text: None,
-        }),
-        PresetRef::Custom(id) => {
-            let summary = summarize(conn, owner, *id)
-                .await?
-                .ok_or(PresetError::NotFound)?;
-            let text = current_text(conn, *id, summary.revision.unwrap_or(1)).await?;
-            Ok(Preset {
-                summary,
-                text: Some(text),
-            })
-        }
+    get_for(conn, owner, reference, PresetPurpose::Instructions).await
+}
+
+/// Детальный ответ пресета нужного назначения. Встроенный текст толчка
+/// приходит с текстом, чтобы PWA показала его только для чтения.
+pub async fn get_for(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    reference: &PresetRef,
+    purpose: PresetPurpose,
+) -> Result<Preset, PresetError> {
+    if purpose == PresetPurpose::Nudge && reference.as_str() == BUILTIN_NUDGE_ID {
+        return Ok(builtin_nudge_preset());
     }
+    if purpose == PresetPurpose::Instructions {
+        return match reference {
+            PresetRef::Clean => Ok(Preset {
+                summary: clean_builtin(used_by(conn, owner, BUILTIN_CLEAN_ID).await?),
+                text: None,
+            }),
+            PresetRef::Owner => Ok(Preset {
+                summary: owner_builtin(used_by(conn, owner, BUILTIN_OWNER_ID).await?),
+                text: None,
+            }),
+            PresetRef::Custom(id) => {
+                let summary = summarize(conn, owner, *id)
+                    .await?
+                    .filter(|summary| summary.purpose == purpose)
+                    .ok_or(PresetError::NotFound)?;
+                let text = current_text(conn, *id, summary.revision.unwrap_or(1)).await?;
+                Ok(Preset {
+                    summary,
+                    text: Some(text),
+                })
+            }
+        };
+    }
+    let PresetRef::Custom(id) = reference else {
+        return Err(PresetError::NotFound);
+    };
+    let summary = summarize(conn, owner, *id)
+        .await?
+        .filter(|summary| summary.purpose == purpose)
+        .ok_or(PresetError::NotFound)?;
+    let text = current_text(conn, *id, summary.revision.unwrap_or(1)).await?;
+    Ok(Preset {
+        summary,
+        text: Some(text),
+    })
 }
 
 fn validate_new(
     title: &str,
     description: &str,
     text: &str,
+    purpose: PresetPurpose,
 ) -> Result<(String, String), PresetError> {
     let title = title.trim().to_owned();
     if !valid_title(&title) {
@@ -481,7 +598,11 @@ fn validate_new(
     if text.trim().is_empty() || text.contains('\0') {
         return Err(PresetError::Invalid { field: "text" });
     }
-    if text.len() > MAX_PRESET_TEXT_BYTES {
+    let limit = match purpose {
+        PresetPurpose::Instructions => MAX_PRESET_TEXT_BYTES,
+        PresetPurpose::Nudge => MAX_NUDGE_TEXT_BYTES,
+    };
+    if text.len() > limit {
         return Err(PresetError::Invalid { field: "text" });
     }
     Ok((title, description.to_owned()))
@@ -521,6 +642,7 @@ async fn create_in_tx(
         &body.title,
         body.description.as_deref().unwrap_or(""),
         &body.text,
+        body.purpose,
     )?;
     if title_taken(conn, owner, &title, None).await? {
         return Err(PresetError::TitleTaken);
@@ -538,8 +660,8 @@ async fn create_in_tx(
     let origin = actor.origin();
     let origin_conversation = actor.conversation_id();
     sqlx::query(
-        "insert into instruction_presets(id,owner_id,title,description,revision,origin,origin_conversation_id)
-         values($1,$2,$3,$4,1,$5,$6)",
+        "insert into instruction_presets(id,owner_id,title,description,revision,origin,origin_conversation_id,purpose)
+         values($1,$2,$3,$4,1,$5,$6,$7)",
     )
     .bind(id)
     .bind(owner)
@@ -547,6 +669,7 @@ async fn create_in_tx(
     .bind(&description)
     .bind(origin)
     .bind(origin_conversation)
+    .bind(body.purpose.as_str())
     .execute(&mut *conn)
     .await?;
     sqlx::query(
@@ -578,7 +701,7 @@ pub async fn create(
     actor: Actor,
     correlation: Uuid,
 ) -> Result<Preset, PresetError> {
-    let request = json!({"title": body.title, "description": body.description, "text_sha256": text_digest(&body.text)});
+    let request = json!({"title": body.title, "description": body.description, "text_sha256": text_digest(&body.text), "purpose": body.purpose});
     let actor_conversation = actor.conversation_id();
     let outcome = idempotency::run_in_tx(
         pool,
@@ -592,6 +715,7 @@ pub async fn create(
                 title: body.title.clone(),
                 description: body.description.clone(),
                 text: body.text.clone(),
+                purpose: body.purpose,
             };
             Box::pin(async move {
                 without_text(create_in_tx(conn, owner, body, actor, correlation).await)
@@ -634,14 +758,16 @@ async fn update_in_tx(
     patch: PresetPatch,
     actor: Actor,
     correlation: Uuid,
+    purpose: PresetPurpose,
 ) -> Result<Preset, PresetError> {
     conversations::lock_owner(conn, owner).await?;
     let row = sqlx::query(
         "select revision, title, description from instruction_presets
-         where owner_id=$1 and id=$2 and deleted_at is null",
+         where owner_id=$1 and id=$2 and purpose=$3 and deleted_at is null",
     )
     .bind(owner)
     .bind(id)
+    .bind(purpose.as_str())
     .fetch_optional(&mut *conn)
     .await?
     .ok_or(PresetError::NotFound)?;
@@ -682,7 +808,11 @@ async fn update_in_tx(
     {
         return Err(PresetError::Invalid { field: "text" });
     }
-    if new_text.len() > MAX_PRESET_TEXT_BYTES {
+    let text_limit = match purpose {
+        PresetPurpose::Instructions => MAX_PRESET_TEXT_BYTES,
+        PresetPurpose::Nudge => MAX_NUDGE_TEXT_BYTES,
+    };
+    if new_text.len() > text_limit {
         return Err(PresetError::Invalid { field: "text" });
     }
     let next = current + 1;
@@ -720,7 +850,7 @@ async fn update_in_tx(
     })
 }
 
-/// Правка с ключом идемпотентности; `base_revision` обязан совпадать с текущей версией.
+/// Правка инструкции с ключом идемпотентности; `base_revision` обязан совпадать.
 pub async fn update(
     pool: &PgPool,
     owner: Uuid,
@@ -730,8 +860,34 @@ pub async fn update(
     actor: Actor,
     correlation: Uuid,
 ) -> Result<Preset, PresetError> {
+    update_for(
+        pool,
+        owner,
+        id,
+        key,
+        patch,
+        actor,
+        correlation,
+        PresetPurpose::Instructions,
+    )
+    .await
+}
+
+/// Правка пресета нужного назначения: чужое назначение отвечает `NotFound`.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_for(
+    pool: &PgPool,
+    owner: Uuid,
+    id: Uuid,
+    key: &str,
+    patch: PresetPatch,
+    actor: Actor,
+    correlation: Uuid,
+    purpose: PresetPurpose,
+) -> Result<Preset, PresetError> {
     let request = json!({"id": id, "title": patch.title, "description": patch.description,
-        "text_sha256": patch.text.as_deref().map(text_digest), "base_revision": patch.base_revision});
+        "text_sha256": patch.text.as_deref().map(text_digest), "base_revision": patch.base_revision,
+        "purpose": purpose});
     let actor_conversation = actor.conversation_id();
     let outcome = idempotency::run_in_tx(
         pool,
@@ -748,7 +904,9 @@ pub async fn update(
                 base_revision: patch.base_revision,
             };
             Box::pin(async move {
-                without_text(update_in_tx(conn, owner, id, patch, actor, correlation).await)
+                without_text(
+                    update_in_tx(conn, owner, id, patch, actor, correlation, purpose).await,
+                )
             })
         },
     )
@@ -756,7 +914,7 @@ pub async fn update(
     with_text(pool, outcome.value).await
 }
 
-/// Мягкое удаление: строки и версии остаются, идущие сессии держат свою копию.
+/// Мягкое удаление инструкции: строки и версии остаются, идущие сессии держат копию.
 pub async fn delete(
     pool: &PgPool,
     owner: Uuid,
@@ -764,7 +922,27 @@ pub async fn delete(
     key: &str,
     correlation: Uuid,
 ) -> Result<(), PresetError> {
-    let request = json!({"id": id});
+    delete_for(
+        pool,
+        owner,
+        id,
+        key,
+        correlation,
+        PresetPurpose::Instructions,
+    )
+    .await
+}
+
+/// Мягкое удаление пресета нужного назначения: чужое назначение — `NotFound`.
+pub async fn delete_for(
+    pool: &PgPool,
+    owner: Uuid,
+    id: Uuid,
+    key: &str,
+    correlation: Uuid,
+    purpose: PresetPurpose,
+) -> Result<(), PresetError> {
+    let request = json!({"id": id, "purpose": purpose});
     idempotency::run_in_tx(
         pool,
         owner,
@@ -772,7 +950,7 @@ pub async fn delete(
         "delete_preset",
         &request,
         None,
-        move |conn| Box::pin(delete_in_tx(conn, owner, id, correlation)),
+        move |conn| Box::pin(delete_in_tx(conn, owner, id, correlation, purpose)),
     )
     .await?;
     Ok(())
@@ -783,13 +961,15 @@ async fn delete_in_tx(
     owner: Uuid,
     id: Uuid,
     correlation: Uuid,
+    purpose: PresetPurpose,
 ) -> Result<(), PresetError> {
     conversations::lock_owner(conn, owner).await?;
     let exists: bool = sqlx::query_scalar(
-        "select exists(select 1 from instruction_presets where owner_id=$1 and id=$2 and deleted_at is null)",
+        "select exists(select 1 from instruction_presets where owner_id=$1 and id=$2 and purpose=$3 and deleted_at is null)",
     )
     .bind(owner)
     .bind(id)
+    .bind(purpose.as_str())
     .fetch_one(&mut *conn)
     .await?;
     if !exists {
@@ -803,7 +983,7 @@ async fn delete_in_tx(
     .execute(&mut *conn)
     .await?;
     let row = sqlx::query(
-        "select title, description, revision, origin, origin_conversation_id, created_at
+        "select title, description, revision, origin, origin_conversation_id, created_at, purpose
          from instruction_presets where owner_id=$1 and id=$2",
     )
     .bind(owner)
@@ -824,6 +1004,7 @@ async fn delete_in_tx(
     let summary = PresetSummary {
         id: reference.clone(),
         kind: PresetKind::Custom,
+        purpose: purpose_of(row.try_get::<String, _>("purpose")?.as_str()),
         title: row.try_get("title")?,
         description: row.try_get("description")?,
         revision: Some(revision),
@@ -926,7 +1107,8 @@ pub async fn resolve_in_tx(
         }),
         PresetRef::Custom(id) => {
             let row = sqlx::query(
-                "select title, revision from instruction_presets where owner_id=$1 and id=$2",
+                "select title, revision from instruction_presets
+                 where owner_id=$1 and id=$2 and purpose='instructions'",
             )
             .bind(owner)
             .bind(id)
@@ -952,6 +1134,31 @@ pub async fn resolve_in_tx(
             })
         }
     }
+}
+
+/// Текст толчка по ссылке правила: только пресет назначения `nudge`, иначе
+/// встроенный английский текст. Правило переживает удаление пресета.
+pub async fn nudge_text(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    reference: Option<&str>,
+) -> Result<String, sqlx::Error> {
+    let Some(reference) = reference.filter(|value| *value != BUILTIN_NUDGE_ID) else {
+        return Ok(BUILTIN_NUDGE_TEXT.to_owned());
+    };
+    let Some(id) = Uuid::parse_str(reference).ok() else {
+        return Ok(BUILTIN_NUDGE_TEXT.to_owned());
+    };
+    let text: Option<String> = sqlx::query_scalar(
+        "select r.text from instruction_presets p
+           join instruction_preset_revisions r on r.preset_id=p.id and r.revision=p.revision
+         where p.owner_id=$1 and p.id=$2 and p.purpose='nudge' and p.deleted_at is null",
+    )
+    .bind(owner)
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(text.unwrap_or_else(|| BUILTIN_NUDGE_TEXT.to_owned()))
 }
 
 /// Применённый пресет для эффективных настроек: название и версии без текста.
@@ -981,7 +1188,8 @@ pub async fn applied_in_tx(
         }),
         PresetRef::Custom(id) => {
             let row = sqlx::query(
-                "select title, revision, deleted_at is not null as gone from instruction_presets where owner_id=$1 and id=$2",
+                "select title, revision, deleted_at is not null as gone from instruction_presets
+                 where owner_id=$1 and id=$2 and purpose='instructions'",
             )
             .bind(owner)
             .bind(id)

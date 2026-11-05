@@ -32,7 +32,7 @@ export const LEGACY_LIMIT = 420;
 // чтобы поле не подписывало строку дважды.
 export function isEventOrigin(origin: InputOrigin | null | undefined): boolean {
   const kind = origin?.kind;
-  return kind === 'event' || kind === 'alarm';
+  return kind === 'event' || kind === 'alarm' || kind === 'nudge';
 }
 
 export function isSessionEvent(event: HubEvent | null | undefined): boolean {

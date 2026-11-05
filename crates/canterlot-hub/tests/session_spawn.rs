@@ -581,6 +581,88 @@ async fn owner_without_a_list_gets_the_default_one(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nudge_appends_one_marker_line_to_the_brief(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (child, _) = f
+        .started(json!({
+            "harness":"claude_code","model":INSIDE,"brief":"Сделай задачу","nudge":true
+        }))
+        .await;
+    let inputs = f.inputs(child).await;
+    let text = &inputs[0].0;
+    assert!(
+        text.ends_with(
+            "When you are completely finished, end your final message with a line `STATUS: DONE` \
+         (or `STATUS: BLOCKED: <reason>` if you cannot continue)."
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("When you are completely finished").count(),
+        1,
+        "the instruction is appended once"
+    );
+    let markers: Vec<String> =
+        sqlx::query_scalar("select done_markers from nudge_rules where conversation_id=$1")
+            .bind(child)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(markers, vec!["STATUS: DONE", "STATUS: BLOCKED"]);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nudge_marker_line_uses_the_rules_markers_and_is_idempotent(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (child, _) = f
+        .started(json!({
+            "harness":"claude_code","model":INSIDE,
+            "brief":"Сделай задачу",
+            "nudge":{"done_markers":["ГОТОВО","НЕ МОГУ"]}
+        }))
+        .await;
+    let text = &f.inputs(child).await[0].0;
+    assert!(
+        text.ends_with(
+            "When you are completely finished, end your final message with a line `ГОТОВО` \
+         (or `НЕ МОГУ: <reason>` if you cannot continue)."
+        ),
+        "{text}"
+    );
+
+    // Бриф, уже кончающийся этой строкой, не получает вторую.
+    let line = "When you are completely finished, end your final message with a line `STATUS: DONE` \
+                (or `STATUS: BLOCKED: <reason>` if you cannot continue).";
+    let (child, _) = f
+        .started(json!({
+            "harness":"claude_code","model":INSIDE,
+            "brief":format!("Сделай задачу\n\n{line}"),
+            "nudge":true
+        }))
+        .await;
+    let text = &f.inputs(child).await[0].0;
+    assert_eq!(
+        text.matches("When you are completely finished").count(),
+        1,
+        "{text}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn without_nudge_the_brief_has_no_marker_line(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    for nudge in [json!(false), json!(null)] {
+        let (child, _) = f
+            .started(json!({
+                "harness":"claude_code","model":INSIDE,"brief":"Сделай задачу","nudge":nudge
+            }))
+            .await;
+        let text = &f.inputs(child).await[0].0;
+        assert!(!text.contains("STATUS: DONE"), "{text}");
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn spawn_without_subscription_stays_unsubscribed(pool: PgPool) {
     let f = Fx::new(pool).await;
     let mut args = inside();

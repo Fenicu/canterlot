@@ -58,7 +58,7 @@ const BACKGROUND_PHRASES: &[&str] = &[
 const QUESTION_PREFIXES: &[&str] = &["should i", "do you want", "shall i", "хотите", "нужно ли"];
 
 /// Действующие значения правила: ответ `nudge_set` и снимок разговора.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NudgeRuleView {
     pub session_id: Uuid,
     pub enabled: bool,
@@ -978,7 +978,15 @@ pub async fn run_job_in_tx(
         ));
     }
     let attempt = rule.total + 1;
-    let text = nudge_text(&rule, &facts.signals, facts.signals.background_suspected);
+    let template =
+        crate::presets::nudge_text(&mut *conn, rule.owner_id, rule.text_preset_id.as_deref())
+            .await?;
+    let text = nudge_text(
+        &rule,
+        &template,
+        &facts.signals,
+        facts.signals.background_suspected,
+    );
     let depth = access::current_depth(conn, target).await?;
     let event = origin::HubEvent {
         kind: "nudge".to_owned(),
@@ -990,6 +998,8 @@ pub async fn run_job_in_tx(
         "kind": "nudge",
         "rule_id": target,
         "attempt": attempt,
+        "max": rule.max_consecutive,
+        "signals": facts.signals,
         "chain_depth": depth,
         "event": event,
     });
@@ -1498,16 +1508,11 @@ pub async fn abandon_in_tx(
 // Текст толчка (встроенный пресет B1)
 // ---------------------------------------------------------------------------
 
-fn nudge_text(rule: &RuleRow, signals: &Signals, background: bool) -> String {
+fn nudge_text(rule: &RuleRow, template: &str, signals: &Signals, background: bool) -> String {
     let markers = rule.done_markers.join(" or ");
-    let mut text = format!(
-        "[canterlot] Automatic reminder from canterlot, not the owner: you ended your turn \
-         without a final status. If the task is finished, give your report and end it with the \
-         line {markers}. If you are blocked, explain why and end with STATUS: BLOCKED. Otherwise \
-         continue from where you stopped. Do not end your turn while anything is still running \
-         or uncommitted.\nObserved: {}.",
-        signals.text()
-    );
+    let mut text = template
+        .replace("{markers}", &markers)
+        .replace("{signals}", &signals.text());
     if background {
         text.push_str(
             "\nA command you started in the background does not wake you when it finishes. \
@@ -1558,6 +1563,247 @@ fn validate_set(args: &SetArgs) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// Пресет текста толчка: встроенный или пользовательский с назначением `nudge`.
+/// Чужая ссылка отвечает `profile_unknown`, как неизвестный профиль.
+async fn check_text_preset_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    reference: Option<&str>,
+) -> Result<(), ToolError> {
+    let Some(reference) = reference else {
+        return Ok(());
+    };
+    if reference == crate::presets::BUILTIN_NUDGE_ID {
+        return Ok(());
+    }
+    let Ok(id) = Uuid::parse_str(reference) else {
+        return Err(ToolError::new(ToolErrorCode::ProfileUnknown));
+    };
+    let alive: bool = sqlx::query_scalar(
+        "select exists(select 1 from instruction_presets
+         where owner_id=$1 and id=$2 and purpose='nudge' and deleted_at is null)",
+    )
+    .bind(owner_id)
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if alive {
+        Ok(())
+    } else {
+        Err(ToolError::new(ToolErrorCode::ProfileUnknown))
+    }
+}
+
+/// Правка правила владельцем из PWA: агентских ограничений на потомков нет,
+/// владелец ставит правило на любую свою сессию.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerUpdate {
+    pub enabled: Option<bool>,
+    pub paused: Option<bool>,
+    pub idle_minutes: Option<i32>,
+    pub max_nudges: Option<i32>,
+    pub done_markers: Option<Vec<String>>,
+    pub text_preset: Option<String>,
+    pub context_warn_percent: Option<i32>,
+}
+
+fn validate_owner(update: &OwnerUpdate) -> Result<(), ToolError> {
+    if update.enabled.is_some() && update.paused.is_some() {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    if update
+        .idle_minutes
+        .is_some_and(|value| !(1..=120).contains(&value))
+        || update
+            .max_nudges
+            .is_some_and(|value| !(1..=10).contains(&value))
+        || update
+            .context_warn_percent
+            .is_some_and(|value| !(50..=99).contains(&value))
+    {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    if let Some(markers) = &update.done_markers
+        && (markers.is_empty()
+            || markers.len() > MAX_MARKERS
+            || markers.iter().any(|marker| {
+                marker.trim().is_empty() || marker.chars().count() > MAX_MARKER_CHARS
+            }))
+    {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    Ok(())
+}
+
+/// Владелец включает, меняет или ставит на паузу правило любой своей сессии.
+pub async fn owner_update(
+    tx: &mut PgConnection,
+    owner_id: Uuid,
+    target_id: Uuid,
+    update: &OwnerUpdate,
+    correlation_id: Uuid,
+) -> Result<NudgeRuleView, ToolError> {
+    validate_owner(update)?;
+    let now = Utc::now();
+    send::lock_queue(tx, target_id).await?;
+    access::session_in_tx(tx, owner_id, target_id)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
+    check_text_preset_in_tx(tx, owner_id, update.text_preset.as_deref()).await?;
+    let rule = if let Some(rule) = rule_locked_in_tx(tx, target_id).await? {
+        let held = rule.held_fingerprint.clone();
+        if update.paused == Some(true) {
+            cancel_pending_jobs_in_tx(tx, target_id, None, "paused").await?;
+        }
+        let row: RuleRow = sqlx::query_as(
+            "update nudge_rules set
+                 enabled=coalesce($2,enabled),
+                 idle_minutes=coalesce($3,idle_minutes),
+                 background_minutes=greatest(coalesce($3,idle_minutes),background_minutes),
+                 max_consecutive=coalesce($4,max_consecutive),
+                 done_markers=coalesce($5,done_markers),
+                 text_preset_id=coalesce($6,text_preset_id),
+                 context_warn_percent=coalesce($7,context_warn_percent),
+                 state=case when $8 then 'paused' when $9 then 'watching' else state end,
+                 held_fingerprint=case when $8 then null else held_fingerprint end,
+                 consecutive=case when $9 then 0 else consecutive end,
+                 updated_at=$10
+             where conversation_id=$1 returning *",
+        )
+        .bind(target_id)
+        .bind(update.enabled)
+        .bind(update.idle_minutes)
+        .bind(update.max_nudges)
+        .bind(&update.done_markers)
+        .bind(&update.text_preset)
+        .bind(update.context_warn_percent)
+        .bind(update.paused == Some(true))
+        .bind(update.paused == Some(false))
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+        if update.paused == Some(true) || update.enabled == Some(false) {
+            release_held_in_tx(
+                tx,
+                &row,
+                held.as_deref(),
+                &Signals::default(),
+                Some("paused"),
+                now,
+            )
+            .await?;
+        }
+        row
+    } else {
+        if update.enabled == Some(false) {
+            return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+        }
+        let paused = update.paused == Some(true);
+        sqlx::query_as(
+            "insert into nudge_rules(conversation_id,owner_id,set_by,enabled,idle_minutes,
+                 background_minutes,max_consecutive,done_markers,text_preset_id,
+                 context_warn_percent,state,created_at,updated_at)
+             values($1,$2,'owner',true,coalesce($3,3),greatest(coalesce($3,3),10),
+                 coalesce($4,3),coalesce($5,array['STATUS: DONE','STATUS: BLOCKED']),$6,
+                 coalesce($7,80),case when $8 then 'paused' else 'watching' end,$9,$9)
+             returning *",
+        )
+        .bind(target_id)
+        .bind(owner_id)
+        .bind(update.idle_minutes)
+        .bind(update.max_nudges)
+        .bind(&update.done_markers)
+        .bind(&update.text_preset)
+        .bind(update.context_warn_percent)
+        .bind(paused)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?
+    };
+    changed_in_tx(tx, &rule, correlation_id, Some("owner")).await?;
+    Ok(rule.view())
+}
+
+/// Владелец снимает правило целиком: удержанный итог уходит подписчикам.
+pub async fn owner_clear(
+    tx: &mut PgConnection,
+    owner_id: Uuid,
+    target_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<bool, ToolError> {
+    let now = Utc::now();
+    send::lock_queue(tx, target_id).await?;
+    access::session_in_tx(tx, owner_id, target_id)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
+    let Some(mut rule) = rule_locked_in_tx(tx, target_id).await? else {
+        return Ok(false);
+    };
+    let held = rule.held_fingerprint.clone();
+    cancel_pending_jobs_in_tx(tx, target_id, None, "cleared").await?;
+    release_held_in_tx(
+        tx,
+        &rule,
+        held.as_deref(),
+        &Signals::default(),
+        Some("cleared"),
+        now,
+    )
+    .await?;
+    sqlx::query("delete from nudge_rules where conversation_id=$1")
+        .bind(target_id)
+        .execute(&mut *tx)
+        .await?;
+    rule.held_fingerprint = None;
+    rule.state = "exhausted".to_owned();
+    rule.updated_at = now;
+    changed_in_tx(tx, &rule, correlation_id, Some("cleared")).await?;
+    Ok(true)
+}
+
+/// Строка про маркер готовности для брифа запуска. `None`, если автопинок выключен:
+/// правило шлёт толчки только по маркерам, поэтому исполнитель должен знать их заранее.
+pub fn marker_instruction(nudge: &Value) -> Option<String> {
+    let markers: Vec<String> = match nudge {
+        Value::Bool(true) => vec!["STATUS: DONE".to_owned(), "STATUS: BLOCKED".to_owned()],
+        Value::Object(object) => object
+            .get("done_markers")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .filter(|items: &Vec<String>| !items.is_empty())
+            .unwrap_or_else(|| vec!["STATUS: DONE".to_owned(), "STATUS: BLOCKED".to_owned()]),
+        _ => return None,
+    };
+    let done = markers.first()?;
+    Some(match markers.get(1) {
+        Some(blocked) => format!(
+            "When you are completely finished, end your final message with a line `{done}` \
+             (or `{blocked}: <reason>` if you cannot continue)."
+        ),
+        None => format!(
+            "When you are completely finished, end your final message with a line `{done}`."
+        ),
+    })
+}
+
+/// Бриф с одной строкой маркера в конце. Повтор не добавляет вторую.
+pub fn brief_with_marker(brief: &str, nudge: &Value) -> String {
+    let Some(line) = marker_instruction(nudge) else {
+        return brief.to_owned();
+    };
+    if brief.contains(&line) {
+        return brief.to_owned();
+    }
+    format!("{brief}\n\n{line}")
+}
+
 fn hint() -> &'static str {
     "canterlot now nudges this session itself. Your subscription stays: you get one message when it is done, asks, fails, or the nudges run out. End your turn."
 }
@@ -1605,9 +1851,9 @@ async fn upsert_rule_in_tx(
     sqlx::query_as(
         "insert into nudge_rules(conversation_id,owner_id,set_by,set_by_conversation,
              notify_conversation_id,enabled,idle_minutes,background_minutes,max_consecutive,
-             max_total,done_markers,context_warn_percent,state,created_at,updated_at)
+             max_total,done_markers,text_preset_id,context_warn_percent,state,created_at,updated_at)
          values($1,$2,'agent',$3,$3,$4,
-             coalesce($5,3),greatest(coalesce($5,3),10),coalesce($6,3),20,$7,
+             coalesce($5,3),greatest(coalesce($5,3),10),coalesce($6,3),20,$7,$10,
              coalesce($8,80),'watching',$9,$9)
          on conflict(conversation_id) do update set
              enabled=excluded.enabled,
@@ -1615,6 +1861,7 @@ async fn upsert_rule_in_tx(
              background_minutes=excluded.background_minutes,
              max_consecutive=excluded.max_consecutive,
              done_markers=excluded.done_markers,
+             text_preset_id=excluded.text_preset_id,
              context_warn_percent=excluded.context_warn_percent,
              notify_conversation_id=excluded.notify_conversation_id,
              set_by='agent',set_by_conversation=$3,
@@ -1634,6 +1881,7 @@ async fn upsert_rule_in_tx(
     .bind(&markers)
     .bind(args.context_warn_percent)
     .bind(now)
+    .bind(&args.text_preset)
     .fetch_one(&mut *conn)
     .await
 }
@@ -1651,10 +1899,6 @@ pub async fn set(
             "Auto-nudge is disabled on this hub",
         ));
     }
-    if args.text_preset.is_some() {
-        // Пресеты текста толчка появятся в B2; сейчас действует встроенный английский.
-        return Err(ToolError::new(ToolErrorCode::ProfileUnknown));
-    }
     if args.enabled == Some(false) {
         return clear(context, caller, json!({"session_id": args.session_id})).await;
     }
@@ -1667,6 +1911,7 @@ pub async fn set(
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     check_descendant_in_tx(&mut tx, caller.owner_id, author.id, target.id).await?;
     access::check_read_only(&author, &target)?;
+    check_text_preset_in_tx(&mut tx, caller.owner_id, args.text_preset.as_deref()).await?;
     send::lock_queue(&mut tx, target.id).await?;
     let rule = upsert_rule_in_tx(&mut tx, caller.owner_id, &author, target.id, &args, now).await?;
     changed_in_tx(&mut tx, &rule, caller.call_id, Some("set")).await?;
@@ -1742,9 +1987,6 @@ pub fn validate_spawn_arg(value: &Option<Value>) -> Result<(), ToolError> {
             }
             let args: SetArgs = parse_arguments(value)?;
             validate_set(&args)?;
-            if args.text_preset.is_some() {
-                return Err(ToolError::new(ToolErrorCode::ProfileUnknown));
-            }
             Ok(())
         }
         Some(_) => Err(ToolError::new(ToolErrorCode::InvalidArguments)),
@@ -1774,9 +2016,7 @@ pub async fn set_for_child_in_tx(
     }
     let args: SetArgs = parse_arguments(value)?;
     validate_set(&args)?;
-    if args.text_preset.is_some() {
-        return Err(ToolError::new(ToolErrorCode::ProfileUnknown));
-    }
+    check_text_preset_in_tx(conn, owner_id, args.text_preset.as_deref()).await?;
     let rule = upsert_rule_in_tx(conn, owner_id, author, child, &args, now).await?;
     changed_in_tx(conn, &rule, Uuid::now_v7(), Some("set")).await?;
     Ok(())
@@ -1950,13 +2190,45 @@ mod tests {
     #[test]
     fn nudge_text_names_markers_and_does_not_pretend_to_be_the_owner() {
         let rule = rule_stub();
-        let text = nudge_text(&rule, &Signals::default(), false);
+        let text = nudge_text(
+            &rule,
+            crate::presets::BUILTIN_NUDGE_TEXT,
+            &Signals::default(),
+            false,
+        );
         assert!(text.starts_with("[canterlot] Automatic reminder"));
         assert!(text.contains("not the owner"));
         assert!(text.contains("STATUS: DONE or STATUS: BLOCKED"));
         assert!(!text.contains("background command may still be running"));
-        let text = nudge_text(&rule, &Signals::default(), true);
+        let text = nudge_text(
+            &rule,
+            crate::presets::BUILTIN_NUDGE_TEXT,
+            &Signals::default(),
+            true,
+        );
         assert!(text.contains("does not wake you when it finishes"));
+    }
+
+    #[test]
+    fn nudge_text_substitutes_the_rule_markers_and_signals_into_a_preset() {
+        let rule = rule_stub();
+        let signals = Signals {
+            no_marker: true,
+            continue_phrase: true,
+            idle_minutes: 6,
+            ..Signals::default()
+        };
+        let text = nudge_text(
+            &rule,
+            "[canterlot] Continue. Finish with {markers}. Observed: {signals}.",
+            &signals,
+            false,
+        );
+        assert_eq!(
+            text,
+            "[canterlot] Continue. Finish with STATUS: DONE or STATUS: BLOCKED. \
+             Observed: idle 6 min; no done marker; you said you would continue."
+        );
     }
 
     fn rule_stub() -> RuleRow {

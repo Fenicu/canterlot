@@ -506,6 +506,7 @@ async fn preset_seed(pool: &PgPool) -> (Seed, String) {
             title: "Исполнитель".into(),
             description: None,
             text: "текст A".into(),
+            purpose: canterlot_hub::presets::PresetPurpose::Instructions,
         },
         canterlot_hub::presets::Actor::Owner,
         Uuid::now_v7(),

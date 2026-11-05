@@ -213,15 +213,19 @@
 | `PUT /api/v1/conversations/{id}/crunch` | Сохранение `enabled` и `resume_text` |
 | `POST /api/v1/conversations/{id}/spend-reserve` | 200, `continued`, `already_continued` или `not_held`; продолжение этой сессии за счёт недельного резерва |
 | `POST /api/v1/conversations/{id}/read` | 204, монотонный максимум `seq` (десятичная строка), ключ не нужен |
+| `GET /api/v1/conversations/{id}/nudge` | Правило автопинка (`rule`, `null` — правила нет) и последние 5 событий толчков (`events`) |
+| `GET /api/v1/conversations/{id}/nudge/events` | До 20 последних событий автопинка: время, попытка, исход и сигналы |
+| `PUT /api/v1/conversations/{id}/nudge` | Владелец включает, меняет, ставит на паузу (`paused: true`) или возобновляет правило любой своей сессии; поля как у `nudge_set`, `text_preset` — только пресет назначения `nudge` |
+| `DELETE /api/v1/conversations/{id}/nudge` | 204, правило снято, удержанный итог отпущен; повтор безвреден |
 | `GET /api/v1/groups` | Группы по `position`, затем `id` |
 | `POST /api/v1/groups` | 201, новая группа с `name` |
 | `PATCH /api/v1/groups/{id}` | Имя и/или позиция группы |
 | `DELETE /api/v1/groups/{id}` | 204; разговоры сохраняются |
-| `GET /api/v1/presets` | Сводки пресетов без текста: сначала `clean` и `owner`, затем пользовательские по названию |
-| `GET /api/v1/presets/{id}` | Пресет; `text` только у пользовательского (`clean`, `owner` или UUID) |
-| `POST /api/v1/presets` | 201, новый пресет с `title`, необязательными `description` и `text` |
-| `PATCH /api/v1/presets/{id}` | Название, описание и/или текст; обязателен `base_revision` |
-| `DELETE /api/v1/presets/{id}` | 204, мягкое удаление; сессии держат свою копию |
+| `GET /api/v1/presets?purpose=...` | Сводки пресетов без текста: `instructions` (по умолчанию) — `clean` и `owner`, затем пользовательские по названию; `nudge` — встроенный `nudge_default` и тексты толчка |
+| `GET /api/v1/presets/{id}?purpose=...` | Пресет своего назначения; `text` у пользовательского и у встроенного `nudge_default` |
+| `POST /api/v1/presets` | 201, новый пресет с `title`, необязательными `description`, `text` и `purpose` (`instructions` по умолчанию, `nudge` — текст толчка) |
+| `PATCH /api/v1/presets/{id}?purpose=...` | Название, описание и/или текст своего назначения; обязателен `base_revision` |
+| `DELETE /api/v1/presets/{id}?purpose=...` | 204, мягкое удаление своего назначения; сессии держат свою копию |
 | `GET /api/v1/spawn-whitelist` | Белый список делегирования: `entries`, `is_default`, `default_entries` |
 | `PUT /api/v1/spawn-whitelist` | Замена списка; `entries: null` возвращает встроенный. До 64 записей без повторов, модель с каталогом не сверяется |
 | `GET /api/v1/limit-settings` | Пороги лимитов владельца: `settings`, `is_default`, `default_settings`. Проценты — остаток: жёлтый ниже `warn_remaining_pct`, красный ниже `danger_remaining_pct`, недельный резерв `reserve_remaining_pct` (`0` — без резерва) |
@@ -267,7 +271,7 @@
 
 Каждая правка увеличивает `revision` на единицу и пишет полную строку версии, поэтому номер версии всегда называет один текст; идущие сессии держат применённую копию. Удаление мягкое: строки и версии остаются, из списков пресет пропадает. Название уникально без учёта регистра, не длиннее 80 символов и отличается от обоих встроенных; текст не пуст и не больше 64 КиБ; не больше 100 пользовательских пресетов на владельца. Правка требует `base_revision`, при расхождении ответ `preset_revision_conflict` с `details.current_revision`.
 
-Сводки (`PresetSummary`: вид, название, описание, версия, объём текста в байтах, создатель и последняя правка с пометкой агента, счётчик `used_by`) не содержат текста; текст отдаёт только детальное чтение и чтение агента. Изменение публикует `instruction_preset_changed` (`{preset, deleted}`) в области списка, снимок списка несёт поле `presets`. Текст пресета — данные уровня сообщения: он не попадает в журналы, `Debug`, события, снимки и списки.
+Сводки (`PresetSummary`: вид, назначение, название, описание, версия, объём текста в байтах, создатель и последняя правка с пометкой агента, счётчик `used_by`) не содержат текста; текст отдаёт только детальное чтение и чтение агента. Назначение `purpose` разделяет инструкции и текст автопинка: списки, правка, `session_spawn`, `canterlot_preset_apply` и `canterlot_presets_list` принимают только `instructions`, а правило автопинка ищет только `nudge`; встроенный `nudge_default` виден с текстом и не меняется. Изменение публикует `instruction_preset_changed` (`{preset, deleted}`) в области списка, снимок списка несёт поле `presets`. Текст пресета — данные уровня сообщения: он не попадает в журналы, `Debug`, события, снимки и списки.
 
 Ссылка на пресет везде называется `instruction_profile` (имя поля осталось от прежних профилей воркера): `clean`, `owner` или UUID пользовательского пресета. Её принимают тело `POST /api/v1/conversations` (по умолчанию `clean`) и тело `PATCH /api/v1/conversations/{id}/settings`. Неизвестный, чужой или удалённый пресет даёт `422 profile_unknown`. Действующие настройки (`effective`) несут `instruction_profile` и `instruction_preset` (`AppliedPreset`: `id`, `kind`, название, закреплённая `revision`, `current_revision` пресета, `deleted`).
 
@@ -527,7 +531,7 @@ Pump читает журнал только при доступной ёмкос
 | 24 | Удаление остановленной сессии с подтверждением, синхронно между устройствами (ТЗ §14.1) | `DELETE /api/v1/conversations/{id}` | `conversation_deleted` | пилот |
 | 25 | Туду-лист агента: живая панель с пунктами, состоянием и прогрессом в чате и в ленте субагента (§12.2) | `todos` в снимке разговора | `todo_updated` | 12.2 |
 | 26 | Фоновая работа: число задач в строке состояния, бейдж «Фоном», состояние субагента до настоящего результата | `background` в `GET /api/v1/conversations/{id}/snapshot`, `GET /api/v1/conversations/{id}/delegation` | `background_work_changed` | 6.1 |
-| 28 | Будильники: плашки под лентой, служебная строка срабатывания, отмена владельцем (§3.6); автопинок отдаёт в снимок правило и последние события толчков (§4.9) | `GET /api/v1/conversations/{id}/alarms`, `DELETE /api/v1/conversations/{id}/alarms/{alarm_id}`; `alarms`, `nudge`, `nudge_events` в снимке разговора | `alarm_changed`, `nudge_changed` | A1, B1 |
+| 28 | Будильники: плашки под лентой, служебная строка срабатывания, отмена владельцем (§3.6); автопинок: состояние и история в чате, пауза и снятие владельцем, текст толчка из пресета (§4.9) | `GET /api/v1/conversations/{id}/alarms`, `DELETE /api/v1/conversations/{id}/alarms/{alarm_id}`, `GET /api/v1/conversations/{id}/nudge`, `GET /api/v1/conversations/{id}/nudge/events`, `PUT /api/v1/conversations/{id}/nudge`, `DELETE /api/v1/conversations/{id}/nudge`; `alarms`, `nudge`, `nudge_events` в снимке разговора | `alarm_changed`, `nudge_changed` | A1, B2 |
 | 27 | Белый список делегирования: какие пары харнесса и модели агент запускает без вопроса, карточка запуска вне списка и приём результата делегированной сессии (§12) | `GET /api/v1/spawn-whitelist`, `PUT /api/v1/spawn-whitelist`, `POST /api/v1/conversations/{id}/accept`, решение по запросу `spawn_approval` (строка 12) | `request_opened` (с видом запроса spawn_approval), `request_closed`, `request_decided`, `conversation_updated` | межсессионные инструменты |
 | 29 | Пороги лимитов владельца: жёлтый и красный остаток, недельный резерв; хранение на владельца, сразу применяется к удержаниям и окраске в PWA | `GET /api/v1/limit-settings`, `PUT /api/v1/limit-settings`, `limit_thresholds` в `GET /api/v1/config` | `limits_changed` | лимиты |
 

@@ -13,8 +13,8 @@ use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
 use super::{
-    Caller, ToolContext, ToolError, ToolErrorCode, access, origin, parse_arguments, send, subs,
-    whitelist,
+    Caller, ToolContext, ToolError, ToolErrorCode, access, nudge, origin, parse_arguments, send,
+    subs, whitelist,
 };
 use crate::{
     config::LimitsConfig,
@@ -219,7 +219,8 @@ fn invalid() -> ToolError {
 }
 
 fn check_arguments(args: &SpawnArgs) -> Result<(), ToolError> {
-    if args.brief.len() > MAX_BRIEF_BYTES {
+    let usable = args.nudge.clone().unwrap_or(Value::Null);
+    if nudge::brief_with_marker(&args.brief, &usable).len() > MAX_BRIEF_BYTES {
         return Err(ToolError::new(ToolErrorCode::TextTooLarge));
     }
     let bad_base = args.base.as_deref().is_some_and(|base| {
@@ -237,7 +238,7 @@ fn check_arguments(args: &SpawnArgs) -> Result<(), ToolError> {
         .permission_mode
         .as_deref()
         .is_some_and(|mode| !MODES.contains(&mode));
-    crate::session_tools::nudge::validate_spawn_arg(&args.nudge)?;
+    nudge::validate_spawn_arg(&args.nudge)?;
     if args.brief.trim().is_empty()
         || args.brief.contains('\0')
         || bad_base
@@ -471,6 +472,8 @@ async fn validate(
         check_isolation(&context.registry, caller.machine_id, &place)?;
     }
     let base = args.isolated.then(|| args.base.or(parent_branch)).flatten();
+    let nudge_arg = args.nudge.unwrap_or(Value::Bool(false));
+    let brief = nudge::brief_with_marker(&args.brief, &nudge_arg);
     Ok((
         SpawnSpec {
             harness: args.harness,
@@ -482,10 +485,10 @@ async fn validate(
             base,
             preset,
             permission_mode: mode,
-            brief: args.brief,
+            brief,
             subscribe: args.subscribe,
             attachment_ids: args.attachment_ids,
-            nudge: args.nudge.unwrap_or(Value::Bool(false)),
+            nudge: nudge_arg,
             chain_depth,
             wider_than_parent,
         },

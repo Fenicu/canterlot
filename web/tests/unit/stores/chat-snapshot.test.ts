@@ -320,3 +320,50 @@ describe("отметка прочтения", () => {
     expect(reads).toEqual(["5", "7"]);
   });
 });
+
+describe("правило автопинка", () => {
+  const rule = (patch: Record<string, unknown> = {}) => ({
+    session_id: CONV,
+    enabled: true,
+    state: "watching",
+    idle_minutes: 3,
+    background_minutes: 10,
+    max_consecutive: 3,
+    max_total: 20,
+    done_markers: ["STATUS: DONE", "STATUS: BLOCKED"],
+    context_warn_percent: 80,
+    set_by: "agent",
+    set_by_session: null,
+    notify_session_id: null,
+    consecutive: 0,
+    total: 1,
+    held: false,
+    ...patch,
+  });
+
+  it("живое событие ставит правило, а снимок после переподключения его перечитывает", () => {
+    const chat = chatOf();
+    apply(chat, ev("nudge_changed", { ...rule(), detail: "held" }, "2"));
+    expect(chat.nudge?.state).toBe("watching");
+
+    snapshot(chat, {
+      nudge: rule({ state: "pending", idle_minutes: 6 }),
+      nudge_events: [
+        {
+          id: "00000000-0000-4000-8000-0000000000e1",
+          at: "2026-11-05T12:00:00.000Z",
+          attempt: 1,
+          outcome: "nudged",
+          signals: { no_marker: true },
+        },
+      ],
+    });
+    expect(chat.nudge?.state).toBe("pending");
+    expect(chat.nudge?.idle_minutes).toBe(6);
+    expect(chat.nudgeEvents).toHaveLength(1);
+
+    apply(chat, ev("nudge_changed", { ...rule(), detail: "cleared" }, "3"));
+    expect(chat.nudge).toBeNull();
+    expect(chat.nudgeEvents).toHaveLength(1);
+  });
+});
