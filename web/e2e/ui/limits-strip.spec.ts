@@ -98,7 +98,7 @@ test('expanded_strip_puts_resets_beside_meters_and_offers_the_refresh_button', a
   const strip = page.locator('.limits').first();
   await strip.locator('summary').click();
   await expect(strip.locator('.reset').first()).toBeVisible();
-  await expect(strip.locator('.reset').first()).toHaveText(/^сброс (\p{L}{2} )?\d\d:\d\d$/u);
+  await expect(strip.locator('.reset').first()).toHaveText(/^сброс\s+(\p{L}{2}\s+)?\d\d:\d\d$/u);
   await expect(strip.locator('.reset')).toHaveCount(4);
   await expect(strip.locator('.updated')).toHaveText(/^обновлено \d\d:\d\d$/);
   await expect(strip.getByRole('button', { name: 'Обновить лимиты' })).toBeVisible();
@@ -332,8 +332,8 @@ test('opencode_name_fits_beside_the_meters_and_all_meters_stay_aligned', async (
     const rows = [...root.querySelectorAll(':scope .row')];
     const boxes = rows.map((row) => {
       const name = row.querySelector(':scope .name')!.getBoundingClientRect();
-      const meter = row.querySelector(':scope .meter')!.getBoundingClientRect();
-      return { nameRight: name.right, metersLeft: meter.left };
+      const tag = row.querySelector(':scope .tag')!.getBoundingClientRect();
+      return { nameRight: name.right, metersLeft: tag.left };
     });
     const gaps = boxes.map((box) => box.metersLeft - box.nameRight);
     const starts = boxes.map((box) => box.metersLeft);
@@ -407,6 +407,157 @@ test('alternating_provider_rows_are_tinted_and_the_week_values_stay_aligned', as
   expect(expandedBackgrounds[0]).not.toBe(expandedBackgrounds[1]);
   expect(expandedBackgrounds[0]).toBe(expandedBackgrounds[2]);
   aligned(await weekValues());
+});
+
+const FOUR_PROVIDERS = ['Claude', 'Codex', 'Antigravity', 'OpenCode'];
+
+/** Ровно те провайдеры, что были у владельца: у Claude только неделя, у OpenCode месяц и все окна устарели. */
+function fourProviders(api: FakeHubApi): void {
+  const observed = new Date(Date.now() - 60_000).toISOString();
+  const reset = new Date(Date.now() + 3_600_000).toISOString();
+  const later = new Date(Date.now() + 2 * 86_400_000).toISOString();
+  const staleObserved = new Date(Date.now() - 4 * 3_600_000).toISOString();
+  const staleReset = new Date(Date.now() - 60_000).toISOString();
+  api.limits = [
+    {
+      provider: 'claude',
+      weekly_reserve_active: false,
+      five_hour: null,
+      five_hour_absent: true,
+      weekly: { used_permille: 300, resets_at: later, observed_at: observed }
+    },
+    {
+      provider: 'codex',
+      weekly_reserve_active: false,
+      five_hour: { used_permille: 100, resets_at: reset, observed_at: observed },
+      weekly: { used_permille: 430, resets_at: later, observed_at: observed }
+    },
+    {
+      provider: 'antigravity',
+      weekly_reserve_active: false,
+      five_hour: { used_permille: 0, resets_at: reset, observed_at: observed },
+      weekly: { used_permille: 0, resets_at: later, observed_at: observed }
+    },
+    {
+      provider: 'opencode',
+      weekly_reserve_active: false,
+      five_hour: { used_permille: 100, resets_at: staleReset, observed_at: staleObserved },
+      weekly: { used_permille: 300, resets_at: staleReset, observed_at: staleObserved },
+      monthly: { used_permille: 200, resets_at: staleReset, observed_at: staleObserved }
+    }
+  ];
+}
+
+interface WindowMetrics {
+  window: string;
+  band: string;
+  gaugeX: number;
+  bandTop: number;
+  bandBottom: number;
+  meterTop: number;
+  meterBottom: number;
+  value: string;
+  valueOverflow: number;
+  resetOverflow: number;
+  resetLines: number;
+  resetVisible: boolean;
+  resetHeight: number;
+  resetLineHeight: number;
+}
+
+async function windowMetrics(page: Page): Promise<WindowMetrics[]> {
+  return page.locator('.limits').first().evaluate((root) => {
+    return [...root.querySelectorAll<HTMLElement>('.meter')].map((meter) => {
+      const band = meter.closest<HTMLElement>('.row')!;
+      const bar = meter.querySelector<HTMLElement>('.bar')!;
+      const value = meter.querySelector<HTMLElement>('.pct')!;
+      const reset = meter.querySelector<HTMLElement>('.reset');
+      const bandBox = band.getBoundingClientRect();
+      const meterBox = meter.getBoundingClientRect();
+      const resetBox = reset?.getBoundingClientRect();
+      return {
+        window: meter.dataset.window ?? '',
+        band: (band.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        gaugeX: bar.getBoundingClientRect().x,
+        bandTop: bandBox.top,
+        bandBottom: bandBox.bottom,
+        meterTop: meterBox.top,
+        meterBottom: meterBox.bottom,
+        value: (value.textContent ?? '').replace(/^осталось\s*/, '').trim(),
+        valueOverflow: value.scrollWidth - value.clientWidth,
+        resetOverflow: reset ? reset.scrollWidth - reset.clientWidth : 0,
+        resetLines: reset ? reset.getClientRects().length : 0,
+        resetVisible: reset ? getComputedStyle(reset).display !== 'none' : false,
+        resetHeight: resetBox?.height ?? 0,
+        resetLineHeight: reset ? Number.parseFloat(getComputedStyle(reset).lineHeight) : 0
+      };
+    });
+  });
+}
+
+async function expectFourProviderStrip(page: Page, open: boolean): Promise<void> {
+  const strip = page.locator('.limits').first();
+  const isOpen = await strip.evaluate((node) => (node as HTMLDetailsElement).open);
+  if (isOpen !== open) await strip.locator('summary').click();
+  await expect(strip.locator('.row')).toHaveCount(4);
+
+  const metrics = await windowMetrics(page);
+  expect(metrics.map((item) => item.window)).toEqual(['week', 'five', 'week', 'five', 'week', 'five', 'week', 'month']);
+  // Одна колонка полосы для всех окон всех провайдеров, в обоих состояниях.
+  for (const item of metrics) expect(Math.abs(item.gaugeX - metrics[0]!.gaugeX)).toBeLessThanOrEqual(1);
+  // Название провайдера не режется, пока в колонке есть место.
+  for (const name of FOUR_PROVIDERS) {
+    const label = strip.locator('.meter .name').filter({ hasText: name });
+    await expect(label).toHaveCount(1);
+    const clipped = await label.evaluate((node) => node.scrollWidth - node.clientWidth);
+    expect(clipped, name).toBeLessThanOrEqual(0);
+  }
+  // Значение устаревшего окна не вылезает из своей колонки, не наезжает на соседа и остаётся читаемым.
+  for (const item of metrics) {
+    expect(item.valueOverflow, `${item.window}: ${item.value}`).toBeLessThanOrEqual(0);
+  }
+  const stale = metrics.filter((item) => item.value === 'устарело');
+  expect(stale).toHaveLength(3);
+  for (const item of stale) expect(item.band).toContain('OpenCode');
+  const month = metrics.find((item) => item.window === 'month')!;
+  expect(month.band).toContain('OpenCode');
+  expect(month.meterTop).toBeGreaterThanOrEqual(month.bandTop - 0.5);
+  expect(month.meterBottom).toBeLessThanOrEqual(month.bandBottom + 0.5);
+  const summary = await strip.locator('summary').boundingBox();
+  expect(summary!.height).toBeGreaterThanOrEqual(44);
+
+  if (open) {
+    const resets = metrics.filter((item) => item.resetVisible);
+    expect(resets).toHaveLength(5);
+    for (const item of resets) {
+      expect(item.resetLines, `${item.window} reset lines`).toBe(1);
+      expect(item.resetOverflow, `${item.window} reset overflow`).toBeLessThanOrEqual(0);
+      expect(Math.abs(item.resetHeight - item.resetLineHeight), `${item.window} reset height`).toBeLessThanOrEqual(1);
+    }
+  } else {
+    expect(metrics.some((item) => item.resetVisible)).toBe(false);
+  }
+}
+
+test('four_providers_keep_one_aligned_grid_at_the_desktop_sidebar_and_a_390_phone', async ({ page }) => {
+  await boot(page, fourProviders);
+  for (const width of [2560, 1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expectFourProviderStrip(page, false);
+    await shot(page, `strip-four-${width}-collapsed`);
+    await expectFourProviderStrip(page, true);
+    await shot(page, `strip-four-${width}-expanded`);
+    await expectFourProviderStrip(page, false);
+    await page.getByRole('button', { name: 'Сменить тему' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    await expectFourProviderStrip(page, false);
+    await shot(page, `strip-four-${width}-collapsed`);
+    await expectFourProviderStrip(page, true);
+    await shot(page, `strip-four-${width}-expanded`);
+    await page.getByRole('button', { name: 'Сменить тему' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await expectFourProviderStrip(page, false);
+  }
 });
 
 test('expanded_strip_has_one_shared_grid_across_providers', async ({ page }) => {

@@ -64,15 +64,29 @@
   }
 
   onDestroy(() => clearTimeout(timer));
+
+  /** Полный текст сброса остаётся в title, а по узкой полосе показываем только время. */
+  function resetParts(reset: string): { day: string; clock: string } {
+    const body = reset.replace(/^сброс\s+/, '');
+    const cut = body.indexOf(' ');
+    return cut === -1
+      ? { day: '', clock: body }
+      : { day: body.slice(0, cut), clock: body.slice(cut + 1) };
+  }
 </script>
 
 {#snippet meter(tag: string, name: string, m: MeterView, window: 'five' | 'week' | 'month', first: boolean = false)}
   <span class="meter" data-window={window} data-stale={m.stale || undefined} data-known={m.known}>
-    <span class="pname">{first ? name : ''}</span>
+    <span class="name pname" title={first ? name : undefined}>{first ? name : ''}</span>
     <span class="tag">{tag}</span>
     <span class="bar" aria-hidden="true"><Gauge value={m.fill} tone={m.tone} dim={m.stale || !m.known} label="{name} {tag}" /></span>
     <b class="pct" data-tone={m.tone}><span class="sr-only">осталось </span>{m.text}</b>
-    {#if m.reset}<span class="reset">{m.reset}</span>{/if}
+    {#if m.reset}
+      {@const parts = resetParts(m.reset)}
+      <span class="reset" title={m.reset}>
+        <span class="reset-prefix">сброс&nbsp;</span>{#if parts.day}<span class="reset-day">{parts.day}&nbsp;</span>{/if}{parts.clock}
+      </span>
+    {/if}
   </span>
 {/snippet}
 
@@ -82,17 +96,21 @@
       <span class="rows">
         {#each shown as row (row.provider)}
           <span class="row">
-            <span class="name">{compact ? 'Лимиты' : row.label}</span>
-            <span class="meters">
-              {#if row.empty}
+            {#if row.empty}
+              <span class="meter empty">
+                <span class="name pname">{compact ? 'Лимиты' : row.label}</span>
                 <span class="none">нет данных</span>
+              </span>
+            {:else}
+              {#if row.five.absent}
+                {@render meter('нед', compact ? 'Лимиты' : row.label, row.week, 'week', true)}
               {:else}
-                {#if !row.five.absent}{@render meter('5ч', row.label, row.five, 'five', true)}{:else}<span class="slot" aria-hidden="true"></span>{/if}
-                {@render meter('нед', row.label, row.week, 'week', row.five.absent)}
-                {#if row.month}{@render meter('мес', row.label, row.month, 'month', false)}{/if}
-                {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
+                {@render meter('5ч', compact ? 'Лимиты' : row.label, row.five, 'five', true)}
+                {@render meter('нед', row.label, row.week, 'week')}
               {/if}
-            </span>
+              {#if row.month}{@render meter('мес', row.label, row.month, 'month')}{/if}
+              {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
+            {/if}
             {#if row.estimated}<span class="estimated" title="Расход выведен из локальных журналов, а не получен от провайдера">оценка</span>{/if}
           </span>
         {/each}
@@ -114,6 +132,8 @@
   .limits {
     margin: var(--s0) var(--gutter) var(--s3);
     font-size: var(--fs-sm);
+    --gauge-width: calc(var(--s4) * 2);
+    container-type: inline-size;
   }
   summary {
     display: flex;
@@ -130,36 +150,48 @@
   }
   summary::-webkit-details-marker { display: none; }
   summary::marker { content: ''; }
-  .rows { display: flex; flex: 1; flex-direction: column; gap: var(--s2); min-width: 0; }
-  .row { display: grid; grid-template-columns: minmax(calc(var(--s4) * 7), 1fr) max-content max-content; align-items: baseline; gap: var(--s2) var(--s4); min-width: 0; padding-inline: var(--s2); margin-inline: calc(-1 * var(--s2)); border-radius: var(--radius-sm); }
+  /* Одна сетка на все состояния: имя, метка окна, полоса, значение, сброс. */
+  .rows {
+    display: grid;
+    grid-template-columns: minmax(0, max-content) minmax(calc(var(--s4) * 3), max-content) var(--gauge-width) max-content minmax(0, 1fr);
+    column-gap: var(--s2);
+    row-gap: var(--s2);
+    align-items: baseline;
+    flex: 1;
+    min-width: 0;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: subgrid;
+    grid-column: 1 / -1;
+    row-gap: var(--s1);
+    align-items: baseline;
+    border-radius: var(--radius-sm);
+  }
   .row:nth-child(even) { background: var(--raised); }
+  /* Каждое окно — своя строка общей сетки: колонки не сдвигаются от числа окон. */
+  .meter {
+    display: grid;
+    grid-template-columns: subgrid;
+    grid-column: 1 / -1;
+    align-items: baseline;
+    min-width: 0;
+  }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pname { display: none; }
-  .meters { display: contents; }
-  .meter { display: inline-flex; align-items: center; gap: var(--s2); width: calc(var(--s4) * 11); white-space: nowrap; --gauge-width: calc(var(--s4) * 2); }
-  .meter[data-window='five'], .slot { grid-column: 2; }
-  .slot { width: calc(var(--s4) * 11); }
-  .meter[data-window='week'] { grid-column: 3; }
-  .meter[data-window='month'] { grid-column: 2 / -1; grid-row: 2; justify-self: start; }
-  .limits[open] .rows { display: grid; grid-template-columns: auto auto auto auto auto; align-items: baseline; gap: var(--s1) var(--s4); min-width: 0; }
-  .limits[open] .row { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; align-items: baseline; }
-  .limits[open] .meters { display: contents; }
-  .limits[open] .meter { display: contents; width: auto; }
-  .limits[open] .pname { display: inline-block; white-space: nowrap; }
-  .limits[open] .name { display: none; }
-  .limits[open] .reset { white-space: normal; word-break: break-word; }
-  .limits[open] .slot { display: none; }
-  .tag { color: var(--muted); font-size: var(--fs-xs); min-width: calc(var(--s4) * 3); }
+  .tag { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
   .bar { display: inline-flex; }
-  .pct { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; min-width: calc(var(--s4) * 3.5); }
+  .pct { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .pct[data-tone='warning'], .reserve { color: var(--warning); }
   .pct[data-tone='danger'] { color: var(--danger); }
   .meter[data-stale] .pct, .meter[data-known='false'] .pct { color: var(--muted); font-weight: var(--weight-normal); }
-  .none { grid-column: 2 / -1; justify-self: start; color: var(--muted); }
-  .reserve { grid-column: 2 / -1; grid-row: 3; justify-self: start; }
-  .estimated { grid-column: 2 / -1; justify-self: start; color: var(--muted); font-size: var(--fs-xs); }
-  .reset { display: none; color: var(--muted); }
+  .reset { display: none; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .limits[open] .reset { display: inline; }
+  .none { grid-column: 2 / -1; justify-self: start; color: var(--muted); white-space: nowrap; }
+  .reserve { grid-column: 2 / -1; justify-self: start; }
+  .estimated { grid-column: 2 / -1; justify-self: start; color: var(--muted); font-size: var(--fs-xs); }
+  /* В узкой полосе сброс укорачивается, но никогда не переносится. */
+  @container (max-width: 24em) { .reset-prefix { display: none; } }
+  @container (max-width: 16em) { .reset-day { display: none; } }
   .chevron { flex: none; color: var(--secondary); transition: transform var(--duration-fast) var(--ease); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .limits[open] .chevron { transform: rotate(180deg); }
