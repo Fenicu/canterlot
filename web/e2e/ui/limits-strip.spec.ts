@@ -60,6 +60,9 @@ test('collapsed_strip_shows_the_remaining_share_of_both_windows_per_provider', a
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'strip-collapsed');
+  await page.getByRole('button', { name: 'Сменить тему' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await shot(page, 'strip-collapsed');
 });
 
 test('antigravity_is_named_on_the_limits_strip', async ({ page }) => {
@@ -370,6 +373,40 @@ test('monthly_windows_line_up_by_kind_across_providers', async ({ page }) => {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'strip-monthly');
+});
+
+test('alternating_provider_rows_are_tinted_and_the_week_values_stay_aligned', async ({ page }) => {
+  await boot(page, (api) => {
+    const observed = new Date(Date.now() - 60_000).toISOString();
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    api.limits.push({
+      provider: 'opencode',
+      weekly_reserve_active: false,
+      five_hour: { used_permille: 125, resets_at: reset, observed_at: observed },
+      weekly: { used_permille: 340, resets_at: reset, observed_at: observed },
+      monthly: { used_permille: 93, resets_at: reset, observed_at: observed }
+    });
+  });
+  const strip = page.locator('.limits').first();
+  const rows = strip.locator('.row');
+  await expect(rows).toHaveCount(3);
+  const backgrounds = () => rows.evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).backgroundColor));
+  const weekValues = () => strip.locator('.meter[data-window="week"] .pct').evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().x));
+  const aligned = (positions: number[]) => {
+    for (const x of positions) expect(Math.abs(x - positions[0]!)).toBeLessThanOrEqual(1);
+  };
+
+  const collapsedBackgrounds = await backgrounds();
+  expect(collapsedBackgrounds[0]).not.toBe(collapsedBackgrounds[1]);
+  expect(collapsedBackgrounds[0]).toBe(collapsedBackgrounds[2]);
+  aligned(await weekValues());
+
+  await strip.locator('summary').click();
+  await expect(strip.locator('.reset').first()).toBeVisible();
+  const expandedBackgrounds = await backgrounds();
+  expect(expandedBackgrounds[0]).not.toBe(expandedBackgrounds[1]);
+  expect(expandedBackgrounds[0]).toBe(expandedBackgrounds[2]);
+  aligned(await weekValues());
 });
 
 test('expanded_strip_has_one_shared_grid_across_providers', async ({ page }) => {

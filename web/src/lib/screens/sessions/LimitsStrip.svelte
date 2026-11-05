@@ -131,7 +131,8 @@
   summary::-webkit-details-marker { display: none; }
   summary::marker { content: ''; }
   .rows { display: flex; flex: 1; flex-direction: column; gap: var(--s2); min-width: 0; }
-  .row { display: grid; grid-template-columns: minmax(calc(var(--s4) * 7), 1fr) max-content max-content; align-items: baseline; gap: var(--s2) var(--s4); min-width: 0; }
+  .row { display: grid; grid-template-columns: minmax(calc(var(--s4) * 7), 1fr) max-content max-content; align-items: baseline; gap: var(--s2) var(--s4); min-width: 0; padding-inline: var(--s2); margin-inline: calc(-1 * var(--s2)); border-radius: var(--s3); }
+  .row:nth-child(even) { background: var(--raised); }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pname { display: none; }
   .meters { display: contents; }
@@ -141,7 +142,7 @@
   .meter[data-window='week'] { grid-column: 3; }
   .meter[data-window='month'] { grid-column: 2 / -1; grid-row: 2; justify-self: start; }
   .limits[open] .rows { display: grid; grid-template-columns: auto auto auto auto auto; align-items: baseline; gap: var(--s1) var(--s4); min-width: 0; }
-  .limits[open] .row { display: contents; }
+  .limits[open] .row { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; align-items: baseline; }
   .limits[open] .meters { display: contents; }
   .limits[open] .meter { display: contents; width: auto; }
   .limits[open] .pname { display: inline-block; white-space: nowrap; }
