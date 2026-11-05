@@ -838,6 +838,7 @@ async fn list(
         "all" => ListFilter::All,
         "pinned" => ListFilter::Pinned,
         "archived" => ListFilter::Archived,
+        "trashed" => ListFilter::Trashed,
         other => ListFilter::Group(
             other
                 .strip_prefix("group:")

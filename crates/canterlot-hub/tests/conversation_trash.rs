@@ -8,11 +8,15 @@ use std::{sync::Arc, time::Duration};
 
 use axum::http::Method;
 use canterlot_hub::{
-    config::SessionToolsConfig,
+    activity::Thresholds,
+    config::{ActivityConfig, SessionToolsConfig},
     deletion,
+    delivery::{ContentBlock, SubmitError, SubmitInput, submit_input},
     dispatcher::Dispatcher,
-    scheduler::Scheduler,
-    session_tools::{self, Caller, ToolContext, ToolErrorCode as Code, read, settle::SettleConfig},
+    scheduler::{ClaimedJob, JobKind, Scheduler},
+    session_tools::{
+        self, Caller, ToolContext, ToolErrorCode as Code, jobs, read, settle::SettleConfig,
+    },
     session_usage,
     testkit::TestResponse,
 };
@@ -724,5 +728,400 @@ async fn purged_session_answers_conversation_deleted(pool: PgPool) {
         deletion::tombstoned(&f.pool, f.owner, f.conversation)
             .await
             .unwrap()
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn accepted_retention_never_deletes_a_trashed_delegate(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let child = f.conversation().await;
+    sqlx::query(
+        "update conversations
+         set parent_conversation_id=$2,spawn_depth=1,archived_at=clock_timestamp(),
+             accepted_at=clock_timestamp()-interval '4 days'
+         where id=$1",
+    )
+    .bind(child)
+    .bind(f.conversation)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(trash(&f, child, "retention-trash").await.status, 204);
+
+    let (dispatcher, _) = Dispatcher::channel();
+    let scheduler = Scheduler::new(f.pool.clone(), dispatcher, Default::default());
+    assert_eq!(
+        scheduler
+            .purge_accepted_retention(chrono::Utc::now())
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>("select exists(select 1 from conversations where id=$1)")
+            .bind(child)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        "accepted retention must not hard-delete a session in the trash"
+    );
+    // И под самими блокировками уборка не имеет права трогать корзину.
+    assert!(matches!(
+        deletion::delete_retained(&f.pool, None, f.owner, child, Uuid::now_v7()).await,
+        Err(deletion::DeleteError::NotTrashed)
+    ));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleted_event_after_trash_has_only_the_minimal_notice(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let subscriber = f.conversation().await;
+    let target = f.conversation().await;
+    sqlx::query("update conversations set title=$2 where id=$1")
+        .bind(target)
+        .bind("секретное название удалённой сессии")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(trash(&f, target, "event-trash").await.status, 204);
+
+    let job = ClaimedJob {
+        id: Uuid::now_v7(),
+        kind: JobKind::SessionTask,
+        owner_id: f.owner,
+        conversation_id: Some(subscriber),
+        run_at: chrono::Utc::now(),
+        payload: json!({
+            "action": "event",
+            "target_id": target,
+            "state": "deleted",
+            "chain_depth": 0,
+        }),
+        attempts: 0,
+    };
+    let mut tx = f.pool.begin().await.unwrap();
+    jobs::run_in_tx(
+        &mut tx,
+        &job,
+        chrono::Utc::now(),
+        Uuid::now_v7(),
+        None,
+        &SettleConfig::default(),
+        &Thresholds::from(&ActivityConfig::default()),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let (content, origin): (Value, Option<Value>) = sqlx::query_as(
+        "select content,origin from inputs where conversation_id=$1 and idempotency_key=$2",
+    )
+    .bind(subscriber)
+    .bind(format!("sub:{}", job.id))
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    let text = content[0]["text"].as_str().unwrap();
+    assert_eq!(text, format!("[canterlot] Session {target} was deleted."));
+    assert!(!text.contains("секретное"), "the notice leaks the title");
+    let origin = origin.unwrap_or(Value::Null);
+    assert_eq!(origin["kind"], "event");
+    assert_eq!(origin["from"], json!(target));
+    assert!(!origin.to_string().contains("секретное"));
+    assert!(
+        canterlot_hub::session_tools::summary::build(
+            &mut *f.pool.acquire().await.unwrap(),
+            f.owner,
+            target,
+            "deleted",
+            None,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "summaries of trashed sessions are gone"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn scheduled_message_survives_trash_and_resumes_after_restore(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let file = f
+        .ready_in(f.conversation, "later.txt", "text/plain", &content(32, 9))
+        .await;
+    let blob = f.blob_path(file);
+    let run_at = chrono::Utc::now() + chrono::TimeDelta::seconds(2);
+    let create = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{}/scheduled", f.conversation),
+            Some("schedule"),
+            Some(json!({
+                "run_at": run_at.to_rfc3339(),
+                "content": [{"type":"text","text":"после возврата"}],
+                "attachment_ids": [file],
+            })),
+        )
+        .await;
+    assert_eq!(create.status, 201, "{:?}", create.body);
+    let job_id: Uuid = create.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        trash(&f, f.conversation, "schedule-trash").await.status,
+        204
+    );
+
+    let (dispatcher, _) = Dispatcher::channel();
+    let scheduler = Scheduler::new(f.pool.clone(), dispatcher, Default::default());
+    let report = scheduler
+        .tick(run_at + chrono::TimeDelta::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(report.fired, 0, "a trashed session accepts nothing");
+    let (state, attempts): (String, i32) =
+        sqlx::query_as("select state,attempts from scheduled_jobs where id=$1")
+            .bind(job_id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!((state.as_str(), attempts), ("pending", 0));
+    let linked: i64 =
+        sqlx::query_scalar("select count(*) from scheduled_job_attachments where job_id=$1")
+            .bind(job_id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(linked, 1, "the attachment stays reserved");
+    assert!(blob.exists());
+
+    let refused = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{}/scheduled", f.conversation),
+            Some("schedule-after-trash"),
+            Some(json!({
+                "run_at": (chrono::Utc::now() + chrono::TimeDelta::seconds(5)).to_rfc3339(),
+                "content": [{"type":"text","text":"нельзя"}],
+            })),
+        )
+        .await;
+    assert_eq!(refused.status, 404);
+    assert_eq!(code(&refused), "not_found");
+
+    assert_eq!(
+        restore(&f, f.conversation, "schedule-restore").await.status,
+        200
+    );
+    let report = scheduler
+        .tick(run_at + chrono::TimeDelta::seconds(2))
+        .await
+        .unwrap();
+    assert_eq!(report.fired, 1);
+    let state: String = sqlx::query_scalar("select state from scheduled_jobs where id=$1")
+        .bind(job_id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "fired");
+    let input: Uuid =
+        sqlx::query_scalar("select id from inputs where conversation_id=$1 and idempotency_key=$2")
+            .bind(f.conversation)
+            .bind(format!("sched:{job_id}"))
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    let linked: i64 = sqlx::query_scalar(
+        "select count(*) from input_attachments where input_id=$1 and attachment_id=$2",
+    )
+    .bind(input)
+    .bind(file)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1, "the restored message keeps its attachment");
+    assert!(blob.exists());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn submit_waiting_for_the_queue_rechecks_trash(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let id = f.conversation;
+    let mut tx = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+    let pool = f.pool.clone();
+    let owner = f.owner;
+    let submitting = tokio::spawn(async move {
+        submit_input(
+            &pool,
+            SubmitInput {
+                owner_id: owner,
+                conversation_id: id,
+                idempotency_key: "race-with-trash".into(),
+                content: vec![ContentBlock::Text {
+                    text: "не должно пройти".into(),
+                }],
+                received_at: chrono::Utc::now(),
+                correlation_id: Uuid::now_v7(),
+                origin: None,
+            },
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    sqlx::query("update conversations set trashed_at=clock_timestamp() where id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), submitting)
+        .await
+        .expect("submit unblocks")
+        .unwrap();
+    assert!(matches!(result, Err(SubmitError::ConversationNotFound)));
+    let inputs: i64 = sqlx::query_scalar("select count(*) from inputs where conversation_id=$1")
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(inputs, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn trash_and_subscribe_share_one_lock_order(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let subscriber = f.conversation().await;
+    let target = f.conversation().await;
+
+    // Держим строку цели до очереди: при старом порядке trash уже держал бы очередь,
+    // и подписка, которой нужны разговор и очередь, встала бы намертво.
+    let mut held = f.pool.begin().await.unwrap();
+    sqlx::query("select id from conversations where id=$1 for key share")
+        .bind(target)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+
+    let pool = f.pool.clone();
+    let owner = f.owner;
+    let trashing = tokio::spawn(async move {
+        deletion::trash(&pool, owner, target, "order-trash", Uuid::now_v7()).await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let context = tool_context(&f.pool);
+    let from = caller(subscriber, f.machine, f.owner);
+    let subscribed = tokio::time::timeout(
+        Duration::from_secs(2),
+        session_tools::send::subscribe(&context, &from, json!({"session_id": target})),
+    )
+    .await
+    .expect("subscribe must not wait for the held conversation lock");
+    subscribed.unwrap();
+
+    held.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), trashing)
+        .await
+        .expect("trash finishes")
+        .unwrap()
+        .unwrap();
+    assert!(trashed_at(&f.pool, target).await.is_some());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn trash_listing_is_paginated_and_ordered_by_trash_time(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let first = f.conversation().await;
+    let second = f.conversation().await;
+    let third = f.conversation().await;
+    for (id, age) in [(first, 3i64), (second, 2), (third, 1)] {
+        assert_eq!(trash(&f, id, &format!("list-trash-{id}")).await.status, 204);
+        age_trash(&f.pool, id, age).await;
+    }
+    let page = f
+        .client
+        .send(
+            Method::GET,
+            "/api/v1/conversations?filter=trashed&limit=2",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(page.status, 200, "{:?}", page.body);
+    let page: Value = page.json();
+    let ids: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![third.to_string().as_str(), second.to_string().as_str()]
+    );
+    let cursor = page["next_cursor"].as_str().expect("next page");
+    let next = f
+        .client
+        .send(
+            Method::GET,
+            &format!("/api/v1/conversations?filter=trashed&limit=2&cursor={cursor}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(next.status, 200, "{:?}", next.body);
+    let next: Value = next.json();
+    assert_eq!(next["items"].as_array().unwrap()[0]["id"], json!(first));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machine_session_list_hides_trashed_sessions(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let machine = f
+        .client
+        .send(
+            Method::GET,
+            &format!("/api/v1/machines/{}", f.machine),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(machine.status, 200);
+    assert!(
+        machine.json::<Value>()["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["conversation_id"] == json!(f.conversation))
+    );
+    assert_eq!(trash(&f, f.conversation, "machine-trash").await.status, 204);
+    let machine: Value = f
+        .client
+        .send(
+            Method::GET,
+            &format!("/api/v1/machines/{}", f.machine),
+            None,
+            None,
+        )
+        .await
+        .json();
+    assert!(
+        !machine["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["conversation_id"] == json!(f.conversation)),
+        "machine sessions leak the trash"
     );
 }

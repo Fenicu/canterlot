@@ -116,7 +116,7 @@ pub async fn delete(
                 id,
                 correlation_id,
                 DeleteMode::Manual,
-                None,
+                TrashGuard::Forbid,
             ))
         },
     )
@@ -226,7 +226,7 @@ pub async fn purge(
                 id,
                 correlation_id,
                 DeleteMode::Retention,
-                Some(cutoff),
+                TrashGuard::Before(cutoff),
             ))
         },
     )
@@ -262,7 +262,7 @@ pub async fn purge_retained(
         id,
         correlation_id,
         DeleteMode::Retention,
-        Some(cutoff),
+        TrashGuard::Before(cutoff),
     )
     .await
     {
@@ -299,7 +299,7 @@ pub async fn delete_retained(
         id,
         correlation_id,
         DeleteMode::Retention,
-        None,
+        TrashGuard::Forbid,
     )
     .await
     {
@@ -366,17 +366,27 @@ enum DeleteMode {
     Retention,
 }
 
+/// Что делать с отметкой корзины при окончательной уборке.
+#[derive(Clone, Copy)]
+enum TrashGuard {
+    /// Принятая делегация удаляется только вне корзины; под блокировкой это перепроверяется.
+    Forbid,
+    /// Корзина удаляется только после своего срока.
+    Before(DateTime<Utc>),
+}
+
 async fn delete_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     id: Uuid,
     correlation_id: Uuid,
     mode: DeleteMode,
-    trash_cutoff: Option<DateTime<Utc>>,
+    trash_guard: TrashGuard,
 ) -> Result<Value, DeleteError> {
     conversations::lock_owner(&mut *conn, owner_id).await?;
-    // Порядок ingest: курсор раньше очереди. Встречное исполнение после блокировки очереди
-    // либо живое и даёт отказ, либо его курсор удержит внешний ключ.
+    // Порядок ingest: курсор раньше разговора, разговор раньше очереди. Встречное
+    // исполнение после блокировки разговора либо живое и даёт отказ, либо его курсор
+    // удержит внешний ключ.
     let known: Vec<Uuid> = sqlx::query_scalar("select id from executions where conversation_id=$1")
         .bind(id)
         .fetch_all(&mut *conn)
@@ -388,15 +398,6 @@ async fn delete_in_tx(
     .bind(&known)
     .execute(&mut *conn)
     .await?;
-    sqlx::query_scalar::<_, Uuid>(
-        "select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id
-         where c.id=$1 and c.owner_id=$2 for update of q",
-    )
-    .bind(id)
-    .bind(owner_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    .ok_or(DeleteError::NotFound)?;
     let (machine_id, trashed_at): (Uuid, Option<DateTime<Utc>>) = sqlx::query_as(
         "select machine_id,trashed_at from conversations
          where id=$1 and owner_id=$2 for update",
@@ -408,10 +409,12 @@ async fn delete_in_tx(
     .ok_or(DeleteError::NotFound)?;
     // Окончательная уборка не трогает сессию, которую успели вернуть: отметка снята
     // или обновлена после отбора кандидатов. Владелец блокировки решает гонку целиком.
-    if let Some(cutoff) = trash_cutoff
-        && !matches!(trashed_at, Some(at) if at <= cutoff)
-    {
-        return Err(DeleteError::NotTrashed);
+    match trash_guard {
+        TrashGuard::Forbid if trashed_at.is_some() => return Err(DeleteError::NotTrashed),
+        TrashGuard::Before(cutoff) if !matches!(trashed_at, Some(at) if at <= cutoff) => {
+            return Err(DeleteError::NotTrashed);
+        }
+        _ => {}
     }
     if executions::live(conn, id).await?.is_some() {
         return Err(DeleteError::Live);
@@ -419,6 +422,15 @@ async fn delete_in_tx(
     if holds_worktree(conn, id).await? {
         return Err(DeleteError::WorktreeNotRemoved);
     }
+    sqlx::query_scalar::<_, Uuid>(
+        "select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id
+         where c.id=$1 and c.owner_id=$2 for update of q",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or(DeleteError::NotFound)?;
     // До очистки runs: расходы уходят родителю одной строкой и переживают уборку.
     crate::session_usage::fold_in_tx(&mut *conn, id).await?;
     let (generation, execution_ids): (i64, Vec<Uuid>) = sqlx::query_as(
@@ -451,7 +463,7 @@ async fn delete_in_tx(
 }
 
 /// Мягкое удаление в тех же блокировках, что и окончательное: владелец, курсоры журнала,
-/// очередь, строка разговора. Ни одна строка сессии не удаляется.
+/// строка разговора, очередь. Ни одна строка сессии не удаляется.
 async fn trash_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -470,15 +482,6 @@ async fn trash_in_tx(
     .bind(&known)
     .execute(&mut *conn)
     .await?;
-    sqlx::query_scalar::<_, Uuid>(
-        "select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id
-         where c.id=$1 and c.owner_id=$2 for update of q",
-    )
-    .bind(id)
-    .bind(owner_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    .ok_or(DeleteError::NotFound)?;
     let trashed_at: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
         "select trashed_at from conversations where id=$1 and owner_id=$2 for update",
     )
@@ -499,6 +502,15 @@ async fn trash_in_tx(
     if holds_worktree(conn, id).await? {
         return Err(DeleteError::WorktreeNotRemoved);
     }
+    sqlx::query_scalar::<_, Uuid>(
+        "select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id
+         where c.id=$1 and c.owner_id=$2 for update of q",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or(DeleteError::NotFound)?;
     sqlx::query(
         "update conversations set trashed_at=clock_timestamp(),updated_at=clock_timestamp()
          where id=$1",

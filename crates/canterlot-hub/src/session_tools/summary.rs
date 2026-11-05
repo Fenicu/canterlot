@@ -261,7 +261,8 @@ pub async fn build_bounded(
     boundary: Option<&Boundary>,
 ) -> Result<Option<SessionSummary>, sqlx::Error> {
     let conversation: Option<(String, String, String, Option<Value>)> = sqlx::query_as(
-        "select title,harness,model,worktree from conversations where id=$1 and owner_id=$2",
+        "select title,harness,model,worktree from conversations
+         where id=$1 and owner_id=$2 and trashed_at is null",
     )
     .bind(target_id)
     .bind(owner_id)

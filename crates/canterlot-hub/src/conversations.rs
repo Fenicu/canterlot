@@ -292,12 +292,16 @@ pub enum ListFilter {
     Pinned,
     Group(Uuid),
     Archived,
+    Trashed,
 }
 #[derive(Serialize, Deserialize)]
 pub struct ListCursor {
     pub pinned: bool,
     pub pinned_at: Option<DateTime<Utc>>,
     pub last_activity_at: Option<DateTime<Utc>>,
+    /// Верхняя граница страницы корзины: время переноса в корзину.
+    #[serde(default)]
+    pub trashed_at: Option<DateTime<Utc>>,
     pub id: Uuid,
     pub seen: Vec<Uuid>,
     pub filter: ListFilter,
@@ -434,9 +438,12 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
         return Err(invalid());
     }
     let mut sql = sqlx::QueryBuilder::new(SELECT);
-    sql.push(" where c.owner_id=")
-        .push_bind(q.owner_id)
-        .push(" and c.trashed_at is null");
+    sql.push(" where c.owner_id=").push_bind(q.owner_id);
+    if q.filter == ListFilter::Trashed {
+        sql.push(" and c.trashed_at is not null");
+    } else {
+        sql.push(" and c.trashed_at is null");
+    }
     let group_filter = match q.filter {
         ListFilter::Group(id) => Some(id),
         _ => None,
@@ -454,6 +461,7 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
         ListFilter::Group(id) => {
             sql.push(" and c.archived_at is null and exists(select 1 from conversation_group_members gm where gm.conversation_id=c.id and gm.group_id=").push_bind(id).push(")");
         }
+        ListFilter::Trashed => {}
     }
     if let Some(text) = &q.q {
         let pattern = format!(
@@ -466,9 +474,20 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
             .push_bind(pattern)
             .push(" collate \"und-x-icu\") escape E'\\\\'");
     }
-    // В группе закрепление своё: сортировка и граница страницы идут по времени
-    // закрепления в этой группе, а не по глобальному.
+    // Корзина листается по времени переноса, а не по закреплению или активности.
     if let Some(c) = &q.cursor
+        && q.filter == ListFilter::Trashed
+    {
+        sql.push(" and not(c.id=any(")
+            .push_bind(c.seen.clone())
+            .push(")) and (c.trashed_at < ")
+            .push_bind(c.trashed_at)
+            .push("::timestamptz or (c.trashed_at = ")
+            .push_bind(c.trashed_at)
+            .push("::timestamptz and c.id > ")
+            .push_bind(c.id)
+            .push("))");
+    } else if let Some(c) = &q.cursor
         && let Some(group) = group_filter
     {
         sql.push(" and not(c.id=any(")
@@ -493,7 +512,10 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
             .push(" or (c.pinned = ").push_bind(c.pinned).push(" and (coalesce(c.pinned_at,'-infinity') < coalesce(").push_bind(c.pinned_at).push("::timestamptz,'-infinity') or (coalesce(c.pinned_at,'-infinity')=coalesce(").push_bind(c.pinned_at)
             .push("::timestamptz,'-infinity') and (coalesce(c.last_activity_at,'-infinity') < coalesce(").push_bind(c.last_activity_at).push("::timestamptz,'-infinity') or (coalesce(c.last_activity_at,'-infinity')=coalesce(").push_bind(c.last_activity_at).push("::timestamptz,'-infinity') and c.id > ").push_bind(c.id).push("))))))");
     }
-    if let Some(group) = group_filter {
+    if q.filter == ListFilter::Trashed {
+        sql.push(" order by c.trashed_at desc,c.id limit ")
+            .push_bind(q.limit + 1);
+    } else if let Some(group) = group_filter {
         sql.push(" order by (select gp.pinned_at from conversation_group_pins gp where gp.conversation_id=c.id and gp.group_id=")
             .push_bind(group)
             .push(") desc nulls last,c.last_activity_at desc nulls last,c.id limit ")
@@ -515,6 +537,11 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
             seen.push(row.try_get("id")?);
         }
         let last_id: Uuid = row.try_get("id")?;
+        let trashed_at = if q.filter == ListFilter::Trashed {
+            row.try_get("trashed_at")?
+        } else {
+            None
+        };
         let pinned_at = if let Some(group) = group_filter {
             sqlx::query_scalar(
                 "select pinned_at from conversation_group_pins where conversation_id=$1 and group_id=$2",
@@ -535,6 +562,7 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
                 },
                 pinned_at,
                 last_activity_at: row.try_get("last_activity_at")?,
+                trashed_at,
                 id: last_id,
                 seen,
                 filter: q.filter.clone(),
