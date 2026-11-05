@@ -489,6 +489,10 @@
   --ease-work-write: cubic-bezier(.22, 1, .36, 1);
   --work-write-width: var(--icon-small);
   --work-write-gap: var(--s1);
+  /* Строка списка уходит или возвращается: высота сходится и растёт, соседи едут следом. */
+  --motion-base-row-fold: 280ms;
+  --duration-row-fold: calc(var(--motion-base-row-fold) * var(--motion-scale));
+  --ease-row-fold: cubic-bezier(.25, 1, .5, 1);
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -514,6 +518,7 @@
     --duration-request-accent: 0ms;
     --duration-todo-strike: 0ms;
     --duration-work-write: 0ms;
+    --duration-row-fold: 0ms;
   }
 }
 

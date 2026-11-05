@@ -43,6 +43,7 @@
   import { diskLimits, lowDiskNotice, type DiskNotice } from '../machines/model.js';
   import SearchBar from './SearchBar.svelte';
   import Section from './Section.svelte';
+  import { rowFold } from '#lib/ui/fold.js';
   import SessionSheet from './SessionSheet.svelte';
   import { installation } from '#lib/pwa/register.js';
 
@@ -140,6 +141,7 @@
       ? [{ id: 'search', title: 'Результаты', count: found.length, items: found, collapsed: false }]
       : buildSections(rows, groups, tab, collapsedSet(collapsed), kids)
   );
+  const view = $derived(results ? `search:${query.trim()}` : JSON.stringify(tab));
   const emptyTab = $derived.by(() => {
     if (results || !ready || rows.length === 0 || sections.some((section) => section.items.length > 0)) return '';
     if (tab.kind === 'archive') return 'В архиве пока пусто';
@@ -362,7 +364,11 @@
     {:else if emptyTab}
       <EmptyState kind="tab" text={emptyTab} />
     {:else}
+      <!-- Смена вкладки или запроса строит список заново и без движения: схлопываются только строки, ушедшие на глазах. -->
+      {#key view}
       {#each sections as section (section.id)}
+        <!-- Раздел, из которого ушла последняя строка, складывается вместе с заголовком. -->
+        <div class="section-slot" data-section-slot={section.id} transition:rowFold>
         <Section
           {...section}
           now={now}
@@ -372,7 +378,9 @@
           ontoggleKids={toggleKids}
           onopen={openSheet}
         />
+        </div>
       {/each}
+      {/key}
     {/if}
   </div>
   {#if sheetItem}
