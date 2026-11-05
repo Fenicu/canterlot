@@ -62,6 +62,19 @@ async function bootChat(
 	return { hub, api, id };
 }
 
+test('header_quietly_names_an_unavailable_machine', async ({ page }) => {
+	await bootChat(page, {
+		setupApi: (api) => {
+			const machine = api.machines.get('workstation');
+			if (!machine) throw new Error('workstation is seeded');
+			machine.availability = 'unavailable';
+			machine.availability_since = new Date(Date.now() - 12 * 60_000).toISOString();
+		}
+	});
+
+	await expect(page.getByText('Машина недоступна 12 мин')).toBeVisible();
+});
+
 test('header_shows_subtitle_state_chip_and_pending_setting_indicator', async ({ page }) => {
 	const { hub, id } = await bootChat(page);
 

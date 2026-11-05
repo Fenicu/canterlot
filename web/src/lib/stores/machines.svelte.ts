@@ -93,7 +93,7 @@ export class MachinesStore {
 		const kind = event.kind as string;
 		if (kind === 'machine_availability_changed' && event.kind === 'machine_availability_changed') {
 			const machine = this.items.get(event.payload.machine_id);
-			if (machine) this.items.set(machine.id, { ...machine, availability: event.payload.availability });
+			if (machine) this.items.set(machine.id, { ...machine, availability: event.payload.availability, availability_since: event.committed_at });
 			return;
 		}
 		if (kind === 'machine_report_updated' && event.kind === 'machine_report_updated') {

@@ -161,6 +161,7 @@
 		{chat}
 		providers={limitProviders}
 		{now}
+		machine={resolvedMachine}
 		onOpenSheet={listRow ? () => (showSheet = true) : undefined}
 		onOpenSettings={() => {
 			if (pane.desktop) pane.open('settings');
