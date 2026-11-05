@@ -66,10 +66,17 @@ async fn replace(
         None,
         move |conn| {
             Box::pin(async move {
+                let before = limit_settings::effective(conn, owner, &config).await?;
                 limit_settings::replace(conn, owner, settings).await?;
-                let now = Utc::now();
-                // Пересчёт сразу в той же транзакции: сохранение не ждёт следующего показания.
-                crunch::reapply_reserve_in_tx(conn, owner, &config, now, Uuid::now_v7()).await?;
+                let after = limit_settings::effective(conn, owner, &config).await?;
+                // Окраска и резерв меняются независимо: смена только цветов не должна
+                // трогать действующий резерв и его гистерезис.
+                if before.reserve_remaining_pct != after.reserve_remaining_pct {
+                    let now = Utc::now();
+                    // Пересчёт сразу в той же транзакции: сохранение не ждёт следующего показания.
+                    crunch::reapply_reserve_in_tx(conn, owner, &config, now, Uuid::now_v7())
+                        .await?;
+                }
                 Ok::<_, ApiError>(limit_settings::view(conn, owner, &config).await?)
             })
         },

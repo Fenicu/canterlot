@@ -497,20 +497,47 @@ pub async fn reapply_reserve_in_tx(
 ) -> Result<(), sqlx::Error> {
     let settings = crate::limit_settings::effective(conn, owner_id, config).await?;
     let threshold = settings.reserve_threshold_permille();
-    let providers: Vec<String> = sqlx::query_scalar(
-        "select distinct mh.provider from machine_harnesses mh
+    // Порядок блокировок как у приёма отчётов лимитов: сначала все строки провайдеров
+    // в отсортированном порядке, потом события и очереди. Иначе смена порогов и отчёт
+    // по разным провайдерам берут строки в разном порядке и ловят взаимоблокировку.
+    let advertised: Vec<String> = sqlx::query_scalar(
+        "select provider from machine_harnesses mh
            join machines m on m.id=mh.machine_id
           where m.owner_id=$1 and mh.provider <> ''
-          order by mh.provider",
+         union
+         select provider from provider_limits where weekly_reserve_active
+         union
+         select h->>'provider'
+           from conversations c
+           join queue_state q on q.conversation_id=c.id
+           cross join lateral jsonb_array_elements(q.hold_reasons) h
+          where c.owner_id=$1 and h->>'reason'='weekly_reserve'
+            and coalesce(h->>'provider','') <> ''",
     )
     .bind(owner_id)
     .fetch_all(&mut *conn)
     .await?;
+    let mut providers: std::collections::BTreeSet<String> = advertised.into_iter().collect();
+    // Сессия в кранче без удержания тоже помнит провайдера через свой харнесс.
+    let waiting: Vec<String> = sqlx::query_scalar(
+        "select distinct c.harness from conversations c
+          where c.owner_id=$1 and (c.resume_pending or c.reserve_override_until is not null)",
+    )
+    .bind(owner_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    providers.extend(
+        waiting
+            .iter()
+            .filter_map(|harness| harness::provider_of(harness))
+            .map(str::to_owned),
+    );
+    providers.retain(|provider| limits::known_provider(provider));
+    for provider in &providers {
+        limits::lock_provider(conn, provider).await?;
+    }
+
     for provider in providers {
-        if !limits::known_provider(&provider) {
-            continue;
-        }
-        limits::lock_provider(conn, &provider).await?;
         let row: Option<ReserveState> = sqlx::query_as(
             "select weekly_reserve_active,weekly_used_permille,weekly_resets_at,weekly_reserve_resets_at,weekly_low_count from provider_limits where provider=$1",
         )
@@ -520,37 +547,62 @@ pub async fn reapply_reserve_in_tx(
         let Some((active, used, weekly_resets, _reserve_resets, _low_count)) = row else {
             continue;
         };
-        // Явное действие владельца не ждёт гистерезиса: условие либо выполняется сейчас,
-        // либо нет. Это отличается от выхода по новым показаниям, где гистерезис защищает
-        // от дребезга вокруг порога.
-        let holds = threshold.is_some_and(|threshold| used.is_some_and(|used| used >= threshold));
-        if holds && !active {
+        let Some(threshold) = threshold else {
+            // Резерв выключен: снимаем удержания тем же путём, что и обычный выход.
+            if active {
+                let harnesses = harness::harnesses_of(&provider);
+                let mut effect = WeeklyEffect::default();
+                leave(
+                    conn,
+                    owner_id,
+                    &provider,
+                    &harnesses,
+                    now,
+                    correlation_id,
+                    &mut effect,
+                )
+                .await?;
+            }
+            continue;
+        };
+        let exit = threshold - i32::from(config.reserve_exit_hysteresis_permille);
+        let used = used.unwrap_or(0);
+        if active {
+            if used < exit {
+                let harnesses = harness::harnesses_of(&provider);
+                let mut effect = WeeklyEffect::default();
+                leave(
+                    conn,
+                    owner_id,
+                    &provider,
+                    &harnesses,
+                    now,
+                    correlation_id,
+                    &mut effect,
+                )
+                .await?;
+                continue;
+            }
+            // Порог сменился: старые подтверждения выхода относятся к прежнему порогу.
+            sqlx::query("update provider_limits set weekly_low_count=0,weekly_low_at=null where provider=$1")
+                .bind(&provider)
+                .execute(&mut *conn)
+                .await?;
+            if used >= threshold {
+                apply_weekly_rule_in_tx(conn, owner_id, &provider, config, now, correlation_id)
+                    .await?;
+            }
+            continue;
+        }
+        if used >= threshold {
             sqlx::query("update provider_limits set weekly_reserve_active=true,weekly_reserve_resets_at=$2,weekly_low_count=0,weekly_low_at=null,updated_at=$3 where provider=$1")
                 .bind(&provider)
                 .bind(weekly_resets)
                 .bind(now)
                 .execute(&mut *conn)
                 .await?;
-        }
-        if holds {
             apply_weekly_rule_in_tx(conn, owner_id, &provider, config, now, correlation_id).await?;
-            if !active {
-                limits::emit_changed(conn, owner_id, &provider, Window::Weekly, correlation_id)
-                    .await?;
-            }
-        } else if active {
-            let harnesses = harness::harnesses_of(&provider);
-            let mut effect = WeeklyEffect::default();
-            leave(
-                conn,
-                owner_id,
-                &provider,
-                &harnesses,
-                now,
-                correlation_id,
-                &mut effect,
-            )
-            .await?;
+            limits::emit_changed(conn, owner_id, &provider, Window::Weekly, correlation_id).await?;
         }
     }
     Ok(())
