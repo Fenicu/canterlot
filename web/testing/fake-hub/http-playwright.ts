@@ -128,6 +128,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
           upload_chunk_bytes: 8_388_608
         },
         defaults: { crunch_resume_text: 'продолжи с места остановки' },
+        sessions: { trash_retention_secs: 86_400 },
         limit_thresholds: api.limitThresholds()
       }
     });
@@ -295,7 +296,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     if (url.pathname !== '/api/v1/conversations') return route.fallback();
     if (route.request().method() === 'GET') {
       const q = url.searchParams.get('q') ?? '';
-      const items = [...api.list.values()].filter((item) => item.title.includes(q));
+      const items = [...api.list.values()].filter((item) => !item.trashed_at && item.title.includes(q));
       await route.fulfill({ headers: headers(), json: { counts: api.counts, items, next_cursor: null } });
       return;
     }
@@ -343,6 +344,29 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fallback();
   });
 
+  await page.route('**/api/v1/conversations/*/restore', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    if (!api.list.has(id)) return route.fulfill(refuse(404, 'not_found', 'Не найдено'));
+    api.restoreConversation(id);
+    await route.fulfill({ headers: headers(), json: api.list.get(id) ?? {} });
+  });
+  await page.route('**/api/v1/conversations/*/trash', async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    if (!api.list.has(id)) return route.fulfill(refuse(404, 'not_found', 'Не найдено'));
+    const row = api.list.get(id)!;
+    if (!row.trashed_at) {
+      return route.fulfill({
+        status: 409,
+        headers: headers(),
+        json: { error: { code: 'invalid_state', message: 'Сессия не в корзине', scope: 'delivery', retry: 'never', correlation_id: '00000000-0000-4000-8000-0000000000e6' } }
+      });
+    }
+    api.purgeConversation(id);
+    await route.fulfill({ status: 204, headers: headers() });
+  });
+
   const deletions = new Map<string, string>();
   const refuse = (status: number, code: string, message: string) => ({
     status,
@@ -361,7 +385,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         return route.fulfill({ ...refuse(409, 'conversation_live', 'Сначала остановите сессию'), status: 409 });
       }
       deletions.set(key, id);
-      api.deleteConversation(id);
+      api.trashConversation(id);
       await route.fulfill({ status: 204, headers: headers() });
       return;
     }
@@ -1308,16 +1332,7 @@ function validatePresetBody(
 }
 
 function recount(api: FakeHubApi) {
-  const items = [...api.list.values()];
-  return {
-    all: items.filter((item) => !item.archived).length,
-    pinned: items.filter((item) => item.pinned && !item.archived).length,
-    archived: items.filter((item) => item.archived).length,
-    groups: api.counts.groups.map((group) => ({
-      ...group,
-      count: items.filter((item) => !item.archived && item.groups.includes(group.id)).length
-    }))
-  };
+  return api.recount();
 }
 
 /** Числа макетов 09/10, даты относительно дня запуска. */
@@ -1326,7 +1341,7 @@ export async function seedSecondaryScreens(page: Page, api: FakeHubApi, ids: { m
   const machine = api.machines.get(ids.machine)!;
   Object.assign(machine, { os: 'Linux · x86_64', availability: 'available', heartbeat_age_ms: 2000, availability_since: new Date(Date.now() - 3_600_000).toISOString(), metrics: { ...metrics, observed_at: new Date().toISOString() }, warnings: ['disk_usage_high'] });
   const historyRequests: URLSearchParams[] = [];
-  await page.route('**/api/v1/config', r => r.fulfill({ json: { version: hubVersion, schema_version: 1, auth: { logout_url: logout }, machines: { disk_warn_pct: 85, disk_warn_free_gb: 30, disk_critical_free_gb: 10, metrics_stale_after_secs: 90 }, limits: { max_attachment_bytes: 104_857_600, max_attachments_per_input: 10, upload_chunk_bytes: 8_388_608, max_input_text_bytes: 262_144, queue_limit: 100 }, defaults: { crunch_resume_text: 'продолжи с места остановки' }, limit_thresholds: api.limitThresholds() } }));
+  await page.route('**/api/v1/config', r => r.fulfill({ json: { version: hubVersion, schema_version: 1, auth: { logout_url: logout }, machines: { disk_warn_pct: 85, disk_warn_free_gb: 30, disk_critical_free_gb: 10, metrics_stale_after_secs: 90 }, limits: { max_attachment_bytes: 104_857_600, max_attachments_per_input: 10, upload_chunk_bytes: 8_388_608, max_input_text_bytes: 262_144, queue_limit: 100 }, defaults: { crunch_resume_text: 'продолжи с места остановки' }, sessions: { trash_retention_secs: 86_400 }, limit_thresholds: api.limitThresholds() } }));
   await page.route('**/api/v1/limits/history?*', r => {
     const query = new URL(r.request().url()).searchParams; historyRequests.push(query);
     const provider = query.get('provider') ?? 'claude';

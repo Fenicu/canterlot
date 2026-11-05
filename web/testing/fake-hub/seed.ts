@@ -39,9 +39,10 @@ export function seedConversation(api: FakeHubApi, patch: Partial<ListRow> = {}):
 	api.list.set(id, row);
 	api.details.set(id, { ...row });
 	api.counts = {
-		all: [...api.list.values()].filter((item) => !item.archived).length,
-		pinned: [...api.list.values()].filter((item) => item.pinned && !item.archived).length,
-		archived: [...api.list.values()].filter((item) => item.archived && !item.accepted).length,
+		all: [...api.list.values()].filter((item) => !item.archived && !item.trashed_at).length,
+		pinned: [...api.list.values()].filter((item) => item.pinned && !item.archived && !item.trashed_at).length,
+		archived: [...api.list.values()].filter((item) => item.archived && !item.accepted && !item.trashed_at).length,
+		trashed: [...api.list.values()].filter((item) => item.trashed_at).length,
 		groups: api.counts.groups
 	};
 	api.bindConversation(id);

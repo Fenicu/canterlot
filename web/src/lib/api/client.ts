@@ -213,6 +213,32 @@ export function deleteConversation(
   );
 }
 
+export function restoreConversation(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_conversations__id__restore"]>>> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/restore`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function purgeConversation(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["delete__api_v1_conversations__id__trash"]>>> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/trash`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function listMachines(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_machines"]>>> {

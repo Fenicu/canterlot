@@ -63,7 +63,7 @@ export class FakeHubApi {
 	readonly decisions = new Map<string, { winnerId: string; decision: unknown; key: string }>();
 	readonly deleted = new Set<string>();
 	groups: ListSnapshot['groups'] = [];
-	counts: Counts = { all: 0, pinned: 0, archived: 0, groups: [] };
+	counts: Counts = { all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] };
 	limits: ProviderLimits[] = [];
 	truncated = false;
 	presets = new Map<string, FakePreset>();
@@ -141,29 +141,87 @@ export class FakeHubApi {
 		};
 	}
 
-	/** Как настоящий хаб: строки исчезают, список узнаёт из `conversation_deleted`. */
+	/** Как настоящий хаб: окончательная уборка убирает строки и шлёт `conversation_deleted`. */
 	deleteConversation(id: string): void {
 		const row = this.list.get(id);
 		this.list.delete(id);
 		this.details.delete(id);
 		this.histories.delete(id);
 		this.deleted.add(id);
-		const rows = [...this.list.values()];
-		this.counts = {
-			all: rows.filter((item) => !item.archived).length,
-			pinned: rows.filter((item) => item.pinned && !item.archived).length,
-			archived: rows.filter((item) => item.archived && !item.accepted).length,
-			groups: this.groups.map((group) => ({
-				id: group.id,
-				count: rows.filter((item) => item.groups.includes(group.id) && !item.archived).length
-			}))
-		};
+		this.counts = this.recount();
 		if (!row) return;
 		this.hub.append('conversations', {
 			kind: 'conversation_deleted',
 			conversation_id: id,
 			payload: { id, counts: this.counts }
 		});
+		this.hub.flush();
+	}
+
+	/** Ручное удаление владельца: строка остаётся, но переезжает во вкладку «Корзина». */
+	trashConversation(id: string): void {
+		const row = this.list.get(id);
+		if (!row || row.trashed_at) return;
+		row.trashed_at = new Date().toISOString();
+		const detail = this.details.get(id);
+		if (detail) detail.trashed_at = row.trashed_at;
+		this.counts = this.recount();
+		this.emitUpdated(id);
+	}
+
+	restoreConversation(id: string): void {
+		const row = this.list.get(id);
+		if (!row) return;
+		row.trashed_at = null;
+		const detail = this.details.get(id);
+		if (detail) detail.trashed_at = null;
+		this.counts = this.recount();
+		this.emitUpdated(id);
+	}
+
+	purgeConversation(id: string): void {
+		this.deleteConversation(id);
+	}
+
+	recount(): Counts {
+		const rows = [...this.list.values()].filter((item) => !item.trashed_at);
+		return {
+			all: rows.filter((item) => !item.archived).length,
+			pinned: rows.filter((item) => item.pinned && !item.archived).length,
+			archived: rows.filter((item) => item.archived && !item.accepted).length,
+			trashed: [...this.list.values()].filter((item) => item.trashed_at).length,
+			groups: this.groups.map((group) => ({
+				id: group.id,
+				count: rows.filter((item) => item.groups.includes(group.id) && !item.archived).length
+			}))
+		};
+	}
+
+	private emitUpdated(id: string): void {
+		const row = this.list.get(id);
+		if (!row) return;
+		const payload = {
+			id: row.id,
+			title: row.title,
+			title_source: row.title_source === 'auto' ? 'auto' : 'user',
+			color: row.color,
+			pinned: row.pinned,
+			archived: row.archived,
+			accepted: Boolean(row.accepted),
+			trashed: Boolean(row.trashed_at),
+			trashed_at: row.trashed_at ?? null,
+			groups: row.groups,
+			group_pins: row.group_pins,
+			machine: row.machine,
+			harness: row.harness,
+			workdir: row.workdir,
+			created_at: row.created_at,
+			parent_id: row.parent_id,
+			spawn_depth: row.spawn_depth,
+			counts: this.counts
+		};
+		this.hub.append('conversations', { kind: 'conversation_updated', conversation_id: id, payload });
+		this.hub.append(`conversation:${id}`, { kind: 'conversation_updated', conversation_id: id, payload });
 		this.hub.flush();
 	}
 
