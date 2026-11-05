@@ -17,6 +17,20 @@ export function rowFold(node: HTMLElement): TransitionConfig {
 }
 
 /**
+ * Новая ветка дерева делегирования вырастает из своей связи: место раскрывается по высоте,
+ * а строка выходит от ствола «└» вправо.
+ */
+export function branchGrow(node: HTMLElement): TransitionConfig {
+  const height = node.getBoundingClientRect().height;
+  const shift = parseFloat(getComputedStyle(node).getPropertyValue('--shift-enter')) || 0;
+  return {
+    duration: durationMs('--duration-branch-grow'),
+    easing: easing('--ease-branch-grow'),
+    css: (t) => `overflow: clip; height: ${(t * height).toFixed(3)}px; opacity: ${Math.min(1, t * 1.5).toFixed(3)}; transform: translateX(${((t - 1) * shift).toFixed(3)}px);`
+  };
+}
+
+/**
  * Тело блока ленты раскрывается и сворачивается сеткой: строка сетки идёт от 0fr к 1fr, содержимое
  * не перестраивается, а лента меряет растущую строку каждый кадр и держит читаемое на месте.
  * Ключевые кадры считаются здесь, поэтому движение плавное и там, где браузер не интерполирует

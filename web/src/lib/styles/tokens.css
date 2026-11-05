@@ -497,6 +497,10 @@
   --motion-base-gauge: 640ms;
   --duration-gauge: calc(var(--motion-base-gauge) * var(--motion-scale));
   --ease-gauge: cubic-bezier(.25, 1, .5, 1);
+  /* Делегирование: новая ветка вырастает из своей связи, от значка ветки вправо. */
+  --motion-base-branch-grow: 440ms;
+  --duration-branch-grow: calc(var(--motion-base-branch-grow) * var(--motion-scale));
+  --ease-branch-grow: cubic-bezier(.22, 1, .36, 1);
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -524,6 +528,7 @@
     --duration-work-write: 0ms;
     --duration-row-fold: 0ms;
     --duration-gauge: 0ms;
+    --duration-branch-grow: 0ms;
   }
 }
 
