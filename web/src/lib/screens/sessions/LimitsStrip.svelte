@@ -131,7 +131,7 @@
   summary::-webkit-details-marker { display: none; }
   summary::marker { content: ''; }
   .rows { display: flex; flex: 1; flex-direction: column; gap: var(--s2); min-width: 0; }
-  .row { display: grid; grid-template-columns: minmax(calc(var(--s4) * 7), 1fr) max-content max-content; align-items: baseline; gap: var(--s2) var(--s4); min-width: 0; padding-inline: var(--s2); margin-inline: calc(-1 * var(--s2)); border-radius: var(--s3); }
+  .row { display: grid; grid-template-columns: minmax(calc(var(--s4) * 7), 1fr) max-content max-content; align-items: baseline; gap: var(--s2) var(--s4); min-width: 0; padding-inline: var(--s2); margin-inline: calc(-1 * var(--s2)); border-radius: var(--radius-sm); }
   .row:nth-child(even) { background: var(--raised); }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pname { display: none; }
