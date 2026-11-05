@@ -795,6 +795,8 @@ test('chat_chrome_has_no_horizontal_scroll_at_360px_and_keyboard_reaches_every_a
 	await expect(backLink).toBeFocused();
 
 	await page.keyboard.press('Tab');
+	await expect(page.getByRole('button', { name: 'Мои сообщения' })).toBeFocused();
+	await page.keyboard.press('Tab');
 	await expect(page.getByRole('button', { name: 'Меню сессии' })).toBeFocused();
 	// На узком экране тема переехала в меню сессии и названию остаётся место.
 	await expect(page.locator('.chat-header [data-theme-toggle]')).toHaveCount(0);
@@ -844,8 +846,8 @@ test('header_keeps_the_subtitle_readable_and_names_a_long_title', async ({ page 
 	// Подзаголовок не сжимается до одной буквы: либо ему хватает места в строке, либо он уходит на свою.
 	const subtitle = (await page.locator('.chat-header .subtitle').boundingBox())!;
 	expect(subtitle.width).toBeGreaterThanOrEqual(64);
-	// Тема ушла в меню, и названию остаётся две трети ширины телефона.
-	expect((await heading.boundingBox())!.width).toBeGreaterThanOrEqual(256);
+	// Тема ушла в меню; рядом с меню остаётся только кнопка «Мои сообщения», и названию хватает больше половины ширины телефона.
+	expect((await heading.boundingBox())!.width).toBeGreaterThanOrEqual(216);
 });
 
 test('session_menu_items_start_their_text_at_one_line', async ({ page }) => {
