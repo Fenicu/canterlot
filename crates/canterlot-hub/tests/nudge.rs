@@ -1306,6 +1306,67 @@ async fn accept_removes_the_rule_and_pending_nudges(pool: PgPool) {
     assert_eq!(pending, 0);
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn release_waits_for_a_locked_subscription_instead_of_a_fallback_note(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "rel1",
+        true,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    let fingerprint: String =
+        sqlx::query_scalar("select held_fingerprint from nudge_rules where conversation_id=$1")
+            .bind(f.child)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Подписку держит чужая транзакция: отпускание должно дождаться её, а не
+    // решить, что подписчиков нет, и не ставить заметку.
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("select id from session_subscriptions where target_id=$1 for update")
+        .bind(f.child)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let pooled = pool.clone();
+    let child = f.child;
+    let release = tokio::spawn(async move {
+        let mut tx = pooled.begin().await.unwrap();
+        session_tools::jobs::abandon_in_tx(
+            &mut tx,
+            Uuid::nil(),
+            Some(child),
+            &json!({"action":"nudge","fingerprint":fingerprint}),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    blocker.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), release)
+        .await
+        .expect("release completes after the lock")
+        .unwrap();
+
+    let jobs = jobs(&pool, f.parent).await;
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["action"], "event", "no fallback note");
+}
+
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.
 async fn deliver_owner_input(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fx, text: &str) {
     canterlot_hub::delivery::submit_input_in_tx(

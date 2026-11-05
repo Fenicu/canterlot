@@ -1247,12 +1247,14 @@ async fn release_held_in_tx(
     let Some(fingerprint) = held else {
         return Ok(());
     };
+    // Ждём строки подписок, а не пропускаем запертые: иначе отпускание решило бы,
+    // что подписчиков нет, и поставило заметку, а затем пришёл бы ещё и обычный итог.
     let rows: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(
-        "select s.id,s.owner_id,s.subscriber_id,s.chain_depth,s.armed_at
-         from session_subscriptions s join conversations c on c.id=s.subscriber_id
-         where s.target_id=$1 and s.closed_at is null and s.last_fingerprint is distinct from $2
-         order by s.id
-         for update of s skip locked for key share of c skip locked",
+        "select id,owner_id,subscriber_id,chain_depth,armed_at
+         from session_subscriptions
+         where target_id=$1 and closed_at is null and last_fingerprint is distinct from $2
+         order by id
+         for update",
     )
     .bind(rule.conversation_id)
     .bind(fingerprint)
