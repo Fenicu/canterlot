@@ -1,10 +1,24 @@
 import { readFileSync } from 'node:fs';
 
-export function darkTokens(css) {
-  return Object.fromEntries([...css.slice(0, css.indexOf('}')).matchAll(/--([\w-]+):\s*([^;]+);/g)].map(([, key, value]) => [key, value.trim()]));
+import postcss from 'postcss';
+
+/**
+ * Цвета тёмного варианта палитры. Без имени — палитра по умолчанию: её тёмный вариант
+ * стоит в `:root` рядом со своим селектором, голый `:root` держит только нецветовые токены.
+ */
+export function darkTokens(css, palette) {
+  const tokens = {};
+  postcss.parse(css).walkRules(rule => {
+    if (rule.parent?.type !== 'root') return;
+    const selectors = rule.selectors.map(selector => selector.trim());
+    const match = palette ? selectors.includes(`[data-palette=${palette}][data-theme=dark]`) : selectors.includes(':root') && selectors.some(selector => selector.endsWith('[data-theme=dark]'));
+    if (match) rule.walkDecls(decl => { if (decl.prop.startsWith('--')) tokens[decl.prop.slice(2)] = decl.value.trim(); });
+  });
+  return tokens;
 }
 
 export function manifest(css) {
+  // Заставка установленного приложения совпадает с фоном палитры по умолчанию.
   const tokens = darkTokens(css);
   return {
     id: '/', start_url: '/', scope: '/', name: 'Canterlot', short_name: 'Canterlot', lang: 'ru', display: 'standalone',
