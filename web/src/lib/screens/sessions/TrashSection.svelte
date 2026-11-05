@@ -4,6 +4,7 @@
   import { cachedConfig } from '#lib/api/config.js';
   import { fmt } from '#lib/format/ru.js';
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
+  import { rowFold } from '#lib/ui/fold.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
 
   let {
@@ -63,6 +64,8 @@
 <section class="trash">
   <h2>Корзина <span class="count">{items.length}</span></h2>
   {#each items as item (item.id)}
+    <!-- Восстановленная или удалённая навсегда строка схлопывается, соседи подтягиваются. -->
+    <div data-slot={item.id} transition:rowFold>
     <article class="row" data-session={item.id}>
       <div class="body">
         <span class="title" title={item.title}>{item.title}</span>
@@ -73,6 +76,7 @@
         <button type="button" class="danger" onclick={() => { if (!busy) confirming = item; }}>Удалить навсегда</button>
       </div>
     </article>
+    </div>
   {/each}
   {#if more}
     <button type="button" class="more" aria-busy={loading} onclick={() => { if (!loading) onmore?.(); }}>

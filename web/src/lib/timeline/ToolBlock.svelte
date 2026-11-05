@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { blockFold } from '#lib/ui/fold.js';
   import type { Component } from 'svelte';
   import type { BackgroundFact } from '#lib/stores/background.svelte.js';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
@@ -120,7 +121,7 @@
     </div>
   {/if}
   {#if open}
-    <div class="fold">
+    <div class="fold" transition:blockFold>
       <div class="body">
         {#if called}<ToolOutput {block} caption={callCaption(block)} {load} />{/if}
         {#if result || !called}<ToolOutput block={result ?? block} running={timing.running} {load} />{/if}
@@ -146,10 +147,9 @@
     font-size: var(--fs-xs);
     white-space: nowrap;
   }
-  .fold { display: grid; grid-template-rows: 1fr; animation: fold var(--duration-expand) var(--ease-expand); }
+  .fold { display: grid; grid-template-rows: 1fr; }
   .body { display: flex; flex-direction: column; gap: var(--s2); min-height: 0; overflow: hidden; padding-inline: var(--s2); }
   .body > :global(:last-child) { margin-bottom: var(--s2); }
-  @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
   .shots { display: flex; flex-wrap: wrap; gap: var(--s2); padding: var(--s0) var(--s2) var(--s2); }
   .files { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s2); margin: 0; padding: var(--s0) var(--s2) var(--s2); list-style: none; }
   .files li { display: flex; min-width: 0; max-width: 100%; }

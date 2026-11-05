@@ -269,3 +269,41 @@ test('owner_messages_jump_long_task_stays_within_budget_and_is_visible_fast', as
 		`owner-messages jump: longest task ${Math.round(longest)} ms, visible in ${visibleMs} ms\n`
 	);
 });
+
+for (const motion of ['full', 'reduced'] as const) {
+	test(`jump_target_glows_then_fades_and_the_mark_clears_${motion}`, async ({ page }) => {
+		test.setTimeout(60_000);
+		if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
+		await boot(page, (api, id) => seedLongChat(api, id, 400, 25));
+		await openMessages(page);
+		const list = page.locator('[data-owner-list]');
+		await list.evaluate((el) => {
+			el.scrollTop = 0;
+		});
+		await page.locator('[data-owner-message]').first().click();
+
+		const bubble = page.locator('.bubble[data-jump]');
+		await expect(bubble).toHaveCount(1, { timeout: 10_000 });
+		const style = await bubble.evaluate((el) => {
+			const own = getComputedStyle(el);
+			const rest = getComputedStyle(el).getPropertyValue('--jump-rest');
+			const probe = document.createElement('span');
+			probe.style.backgroundColor = rest;
+			document.body.append(probe);
+			const restColor = getComputedStyle(probe).backgroundColor;
+			probe.remove();
+			return { animation: own.animationName, background: own.backgroundColor, restColor };
+		});
+		if (motion === 'reduced') {
+			// Без движения подсветка стоит ровным тоном, отличным от фона сообщения.
+			expect(style.animation).toBe('none');
+			expect(style.background).not.toBe(style.restColor);
+		} else {
+			expect(style.animation).toMatch(/jump-glow$/);
+		}
+		// Отметка снимается сама и не мигает повторно.
+		await expect(bubble).toHaveCount(0, { timeout: 4_000 });
+		await page.waitForTimeout(400);
+		await expect(page.locator('.bubble[data-jump]')).toHaveCount(0);
+	});
+}

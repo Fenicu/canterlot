@@ -1,6 +1,7 @@
 <script lang="ts">
   import { kidsTitle, type TreeNode } from './grouping';
   import Icon from '#lib/ui/Icon.svelte';
+  import { rowFold } from '#lib/ui/fold.js';
   import SessionRow from './SessionRow.svelte';
 
   let {
@@ -48,8 +49,10 @@
     </button>
     {#if node.open}
       {#each node.children as child (child.item.id)}
-        <SessionRow item={child.item} {now} depth={child.depth} current={child.item.id === current} {onopen} />
-        {@render branch(child)}
+        <div class="slot" data-slot={child.item.id} transition:rowFold>
+          <SessionRow item={child.item} {now} depth={child.depth} current={child.item.id === current} {onopen} />
+          {@render branch(child)}
+        </div>
       {/each}
     {/if}
   {/if}
@@ -67,8 +70,11 @@
   {/if}
   {#if !heading || !collapsed}
     {#each items as node (node.item.id)}
-      <SessionRow item={node.item} {now} depth={node.depth} current={node.item.id === current} {onopen} />
-      {@render branch(node)}
+      <!-- Строка, ушедшая в архив или удалённая, схлопывается; вернувшаяся раскрывается на своём месте. -->
+      <div class="slot" data-slot={node.item.id} transition:rowFold>
+        <SessionRow item={node.item} {now} depth={node.depth} current={node.item.id === current} {onopen} />
+        {@render branch(node)}
+      </div>
     {/each}
   {/if}
 </section>

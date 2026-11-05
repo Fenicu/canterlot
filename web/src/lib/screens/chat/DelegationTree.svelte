@@ -13,6 +13,7 @@
 	import { groupDelegation, latestTurnStart, mergeNodes, subagentVerb, type DelegationNode } from '#lib/stores/delegation.js';
 	import { isMainAgent, nodeStatus, STATUS_TONE, STATUS_WORD, toolTitle } from '#lib/timeline/present.js';
 	import Icon from '#lib/ui/Icon.svelte';
+	import { branchGrow } from '#lib/ui/fold.js';
 	import { liveNodes } from './delegationNodes';
 
 	let {
@@ -30,6 +31,8 @@
 	} = $props();
 
 	let serverNodes = $state<DelegationNode[]>([]);
+	// Дерево, собранное при открытии, стоит сразу; ветки, пришедшие после, вырастают из своей связи.
+	let loaded = $state(false);
 	let expanded = $state(false);
 	let sessionsExpanded = $state(false);
 	const listId = $props.id();
@@ -74,6 +77,7 @@
 		} catch {
 			// остаются узлы из живой ленты
 		}
+		loaded = true;
 	});
 
 	function verb(node: DelegationNode): string {
@@ -142,9 +146,11 @@
 <div class="tree">
 	<div class="tree-root">{sessionTitle}</div>
 
+	{#key loaded}
 	{#each groups.shown as node (node.block_id)}
-		{@render row(node)}
+		<div class="sprout" data-node={node.block_id} in:branchGrow>{@render row(node)}</div>
 	{/each}
+	{/key}
 
 	{#if groups.older.length > 0}
 		<button type="button" class="tree-node older-toggle" aria-expanded={expanded} aria-controls={listId} onclick={() => (expanded = !expanded)}>
@@ -162,9 +168,11 @@
 
 	{#if sessions.length > 0}
 		<div class="tree-root sessions-title">Сессии</div>
+		{#key loaded}
 		{#each shownSessions as row (row.id)}
-			{@render sessionRow(row)}
+			<div class="sprout" data-node={row.id} in:branchGrow>{@render sessionRow(row)}</div>
 		{/each}
+		{/key}
 		{#if olderSessions.length > 0}
 			<button type="button" class="tree-node older-toggle" aria-expanded={sessionsExpanded} onclick={() => (sessionsExpanded = !sessionsExpanded)}>
 				<span class="grow">{sessionsLabel}</span>
@@ -189,6 +197,10 @@
 		padding: var(--s4) var(--s3);
 		border-radius: var(--radius-card);
 		background: var(--surface);
+	}
+	.sprout {
+		display: flex;
+		flex-direction: column;
 	}
 	.tree-root {
 		padding: var(--s1) var(--s3);

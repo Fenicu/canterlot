@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import StepHead from '#lib/timeline/StepHead.svelte';
   import StageTrack from '#lib/ui/StageTrack.svelte';
   import type { Stage, StageState } from '#lib/ui/stage-track.js';
@@ -6,6 +7,7 @@
   import QuestionCard from './QuestionCard.svelte';
   import SpawnApprovalCard from './SpawnApprovalCard.svelte';
   import { spawnApprovalView } from './spawnApprovalView';
+  import { firstArrival } from './arrival';
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
 
@@ -15,7 +17,8 @@
     open,
     onToggle,
     harnessId = '',
-    permissionMode = ''
+    permissionMode = '',
+    arrive = false
   }: {
     request: RequestItem;
     onDecision: (d: DecisionBody) => Promise<void>;
@@ -24,7 +27,12 @@
     onToggle?: () => void;
     harnessId?: string;
     permissionMode?: string;
+    /** Карточка у поля ввода: её появление показывается движением, строка ленты появляется молча. */
+    arrive?: boolean;
   } = $props();
+
+  // Решается один раз при создании: смена состояния карточки не запускает вход заново.
+  const entering = untrack(() => arrive && firstArrival(request.id));
 
   const stages: Stage[] = [
     { id: 'sending', label: 'отправка' },
@@ -177,7 +185,7 @@
     {/if}
   </div>
 {:else}
-  <div class="card-root" data-state={request.state}>
+  <div class="card-root" data-state={request.state} data-arrive={entering ? '' : undefined}>
     {#if showTrack}
       <div class="track-wrapper">
         <StageTrack
@@ -229,6 +237,20 @@
     color: var(--text);
     box-sizing: border-box;
     width: 100%;
+  }
+
+  .card-root[data-arrive] {
+    --arrive-peak: color-mix(in srgb, var(--accent) var(--request-accent-share), var(--surface));
+    animation:
+      request-arrive var(--duration-request-arrive) var(--ease-enter) backwards,
+      request-accent var(--duration-request-accent) var(--ease-jump-glow) backwards;
+  }
+  @keyframes request-arrive {
+    from { opacity: 0; transform: translateY(var(--shift-enter)); }
+  }
+  @keyframes request-accent {
+    from { background-color: var(--arrive-peak); }
+    to { background-color: var(--surface); }
   }
 
   .conflict-notice {

@@ -619,3 +619,31 @@ test('expanded_strip_has_one_shared_grid_across_providers', async ({ page }) => 
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await shot(page, 'strip-expanded-grid');
 });
+
+for (const motion of ['full', 'reduced'] as const) {
+  test(`meter_slides_to_a_new_reading_by_transform_and_stands_still_on_first_paint_${motion}`, async ({ page }) => {
+    if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
+    const { hub, api } = await boot(page);
+    const fill = page.locator('.limits').first().locator('.row').nth(0).locator('[role="meter"] span').first();
+    await expect(fill).toBeVisible();
+    // Первая отрисовка: заливка уже на месте, переход не идёт.
+    expect(await fill.evaluate((node) => node.getAnimations().length)).toBe(0);
+    const before = await fill.evaluate((node) => ({ width: getComputedStyle(node).width, track: getComputedStyle(node.parentElement!).width, x: new DOMMatrix(getComputedStyle(node).transform).m41 }));
+    // Ширина заливки не меняется: показание едет переносом.
+    expect(before.width).toBe(before.track);
+    const five = claude(api).five_hour!;
+    hub.append('conversations', {
+      kind: 'limits_changed',
+      payload: { provider: 'claude', window: 'five_hour', used_permille: 900, resets_at: five.resets_at, observed_at: new Date().toISOString(), weekly_reserve_active: false, weekly_reserve_resets_at: null }
+    });
+    hub.flush();
+    await expect(page.locator('.limits').first().locator('.row').nth(0).locator('.meter').first()).toContainText('10%');
+    const during = await fill.evaluate((node) => node.getAnimations().map((animation) => (animation as CSSTransition).transitionProperty));
+    if (motion === 'reduced') expect(during).toEqual([]);
+    else expect(during).toEqual(['transform']);
+    await expect.poll(() => fill.evaluate((node) => node.getAnimations().length), { timeout: 3_000 }).toBe(0);
+    const after = await fill.evaluate((node) => ({ width: getComputedStyle(node).width, x: new DOMMatrix(getComputedStyle(node).transform).m41 }));
+    expect(after.width).toBe(before.width);
+    expect(after.x).toBeLessThan(before.x);
+  });
+}

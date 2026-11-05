@@ -468,6 +468,39 @@
   --compact-fold-width: var(--icon-small);
   --compact-fold-height: var(--s5);
   --compact-fold-line: var(--s1);
+  /* Цель прыжка: сообщение вспыхивает тоном акцента и медленно гаснет до своего фона. */
+  --motion-base-jump-glow: 1300ms;
+  --duration-jump-glow: calc(var(--motion-base-jump-glow) * var(--motion-scale));
+  --ease-jump-glow: cubic-bezier(.33, 0, .2, 1);
+  --jump-glow-share: 22%;
+  /* Новый запрос агента: карточка поднимается из-под поля ввода и коротко теплится тоном акцента. */
+  --motion-base-request-arrive: 320ms;
+  --duration-request-arrive: calc(var(--motion-base-request-arrive) * var(--motion-scale));
+  --motion-base-request-accent: 1100ms;
+  --duration-request-accent: calc(var(--motion-base-request-accent) * var(--motion-scale));
+  --request-accent-share: 18%;
+  /* Готовый пункт плана: черта проходит по тексту слева направо, точка перекрашивается тем же шагом. */
+  --motion-base-todo-strike: 480ms;
+  --duration-todo-strike: calc(var(--motion-base-todo-strike) * var(--motion-scale));
+  --ease-todo-strike: cubic-bezier(.65, 0, .35, 1);
+  /* Агент работает: на одной строке по очереди пишутся три слова и стираются. Сжатие складывает строки по вертикали, работа пишет вдоль. */
+  --motion-base-work-write: 2000ms;
+  --duration-work-write: calc(var(--motion-base-work-write) * var(--motion-scale));
+  --ease-work-write: cubic-bezier(.22, 1, .36, 1);
+  --work-write-width: var(--icon-small);
+  --work-write-gap: var(--s1);
+  /* Строка списка уходит или возвращается: высота сходится и растёт, соседи едут следом. */
+  --motion-base-row-fold: 280ms;
+  --duration-row-fold: calc(var(--motion-base-row-fold) * var(--motion-scale));
+  --ease-row-fold: cubic-bezier(.25, 1, .5, 1);
+  /* Шкала доезжает до нового показания: видно, куда сдвинулся остаток. */
+  --motion-base-gauge: 640ms;
+  --duration-gauge: calc(var(--motion-base-gauge) * var(--motion-scale));
+  --ease-gauge: cubic-bezier(.25, 1, .5, 1);
+  /* Делегирование: новая ветка вырастает из своей связи, от значка ветки вправо. */
+  --motion-base-branch-grow: 440ms;
+  --duration-branch-grow: calc(var(--motion-base-branch-grow) * var(--motion-scale));
+  --ease-branch-grow: cubic-bezier(.22, 1, .36, 1);
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -488,6 +521,14 @@
     --duration-text-reveal: 0ms;
     --duration-compact-fold: 0ms;
     --duration-compact-settle: 0ms;
+    --duration-jump-glow: 0ms;
+    --duration-request-arrive: 0ms;
+    --duration-request-accent: 0ms;
+    --duration-todo-strike: 0ms;
+    --duration-work-write: 0ms;
+    --duration-row-fold: 0ms;
+    --duration-gauge: 0ms;
+    --duration-branch-grow: 0ms;
   }
 }
 

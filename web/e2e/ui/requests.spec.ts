@@ -855,3 +855,49 @@ test.describe('E2E Requests and Recovery', () => {
     await expect(card.getByText(BYPASS_NOTE)).toHaveCount(0);
   });
 });
+
+function openQuestion(hub: FakeHub, id: string, requestId: string, text: string): void {
+  hub.append(`conversation:${id}`, {
+    kind: 'request_opened',
+    conversation_id: id,
+    payload: { request_id: requestId, kind: 'question', payload: { questions: [{ id: 'q1', text, options: [{ label: 'Да' }, { label: 'Нет' }] }] } }
+  });
+  hub.flush();
+}
+
+for (const motion of ['full', 'reduced'] as const) {
+  test(`request_card_enters_once_with_a_brief_accent_${motion}`, async ({ page }) => {
+    if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
+    const { hub, api, id } = await bootChat(page);
+    const requestId = api.id();
+    openQuestion(hub, id, requestId, 'Слить ветку сейчас?');
+    const card = page.locator('.request-cards-slot .card-root');
+    await expect(card).toHaveAttribute('data-arrive', '');
+    const names = await card.evaluate((el) => el.getAnimations().map((animation) => (animation as CSSAnimation).animationName));
+    if (motion === 'reduced') expect(names).toEqual([]);
+    else expect(names.some((name) => name.endsWith('request-arrive')) && names.some((name) => name.endsWith('request-accent'))).toBe(true);
+    // Вход не повторяется: ни по времени, ни от смены состояния карточки.
+    await expect.poll(() => card.evaluate((el) => el.getAnimations().length), { timeout: 3_000 }).toBe(0);
+    let release = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route('**/api/v1/conversations/*/requests/*/decision', async (route) => { await held; await route.fallback(); });
+    await page.getByText('Да', { exact: true }).click();
+    await page.getByRole('button', { name: 'Ответить' }).click();
+    await expect(card).toHaveAttribute('data-state', 'sending');
+    expect(await card.evaluate((el) => el.getAnimations().length)).toBe(0);
+    release();
+  });
+}
+
+test('request_card_does_not_replay_its_entrance_after_returning_to_the_chat', async ({ page }) => {
+  const { hub, api, id } = await bootChat(page);
+  openQuestion(hub, id, api.id(), 'Продолжать?');
+  const card = page.locator('.request-cards-slot .card-root');
+  await expect(card).toHaveAttribute('data-arrive', '');
+  // Уход в список и возврат пересобирают экран чата: карточка уже показана и входит без движения.
+  await page.evaluate(() => (document.querySelector('a[href$="/sessions"], a[href="/"]') as HTMLAnchorElement | null)?.click());
+  await expect(page.locator('.request-cards-slot')).toHaveCount(0);
+  await page.locator(`[data-session="${id}"] a`).first().click();
+  await expect(page.locator('.request-cards-slot .card-root')).toBeVisible();
+  await expect(page.locator('.request-cards-slot .card-root')).not.toHaveAttribute('data-arrive', '');
+});

@@ -4,6 +4,7 @@
   import { announce } from '#lib/a11y/announce.js';
   import RequestCard from '#lib/requests/RequestCard.svelte';
   import { clock } from '#lib/clock.js';
+  import { durationMs } from '#lib/motion.js';
   import { probe } from '#lib/perf/probe.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -65,6 +66,7 @@
   let highlightKey = $state<string | null>(null);
   let jumpSerial = 0;
   let highlightTimer: ReturnType<typeof setTimeout> | null = null;
+  const JUMP_HOLD_MS = 1300;
   // Во время прыжка окно монтирует только то, что нужно у цели: иначе первый кадр
   // нового окна собирает лишние строки и становится долгой задачей.
   let overscan = $state(1.5);
@@ -335,10 +337,11 @@
     highlightKey = key;
     await tick();
     if (host) rowNode(host, key)?.querySelector<HTMLElement>('.bubble')?.focus({ preventScroll: true });
+    // Подсветка живёт, пока гаснет; без движения она стоит ровным тоном столько же, сколько гасла бы.
     highlightTimer = setTimeout(() => {
       highlightKey = null;
       highlightTimer = null;
-    }, 1600);
+    }, durationMs('--duration-jump-glow') || JUMP_HOLD_MS);
   }
 
   $effect(() => {
