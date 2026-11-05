@@ -34,6 +34,7 @@ export function seedConversation(api: FakeHubApi, patch: Partial<ListRow> = {}):
 		queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
 		crunch: { enabled: false },
 		last_activity_at: null,
+		routing: null,
 		...rest
 	};
 	api.list.set(id, row);

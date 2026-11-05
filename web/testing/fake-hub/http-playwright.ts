@@ -1085,6 +1085,39 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: api.spawnWhitelistView() });
   });
 
+  await page.route('**/api/v1/routing-policy', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: api.routingPolicyView() });
+      return;
+    }
+    if (method !== 'PUT') return route.fallback();
+    const key = route.request().headers()['idempotency-key'];
+    if (!key) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const body = route.request().postDataJSON() as { policy: unknown | null; revision: number };
+    if (!api.saveRoutingPolicy(body.policy ?? null, body.revision)) {
+      await route.fulfill({ status: 409, headers: headers(), json: errorBody('routing_policy_conflict', 'Политика уже изменена') });
+      return;
+    }
+    hub.flush();
+    await route.fulfill({ headers: headers(), json: api.routingPolicyView() });
+  });
+
+  await page.route('**/api/v1/routing-policy/preview', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const body = route.request().postDataJSON() as { task_type: string; level?: string; workdir?: string };
+    try {
+      const answer = api.previewRoutingPolicy(body.task_type, body.level, body.workdir);
+      await route.fulfill({ headers: headers(), json: answer });
+    } catch (error) {
+      const failure = error as { status: number; code: string; message: string };
+      await route.fulfill({ status: failure.status, headers: headers(), json: errorBody(failure.code, failure.message) });
+    }
+  });
+
   await page.route('**/api/v1/limit-settings', async (route) => {
     const method = route.request().method();
     if (method === 'GET') {

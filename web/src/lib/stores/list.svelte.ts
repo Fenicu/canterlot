@@ -57,6 +57,8 @@ export interface ListRow {
   last_activity_at: string | null;
   /** Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом. */
   working_ms?: number;
+  /** Решение маршрута, выбравшее исполнителя; `null` — запуск без маршрута. */
+  routing?: unknown;
 }
 
 export interface GroupCount {

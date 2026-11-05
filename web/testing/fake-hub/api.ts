@@ -103,6 +103,30 @@ export class FakeHubApi {
 	]);
 	/** `null`: встроенный список по умолчанию, как у хаба. */
 	spawnWhitelist: { harness: string; model: string }[] | null = null;
+	/** `null`: встроенная политика по умолчанию, как у хаба. */
+	routingPolicy: unknown | null = null;
+	routingPolicyRevision = 0;
+	readonly builtinRoutingPolicy = {
+		task_types: {
+			bugfix: {
+				title: 'Исправление по ясному брифу',
+				candidates: [
+					{ harness: 'opencode', model: 'opencode-go/deepseek-v4.1-flash', effort: 'high', nudge: { max_nudges: 2 }, watchdog_minutes: 90, exclude_workdirs: [] },
+					{ harness: 'claude_code', model: 'opus[1m]', effort: 'high', nudge: false, exclude_workdirs: [] }
+				],
+				isolated: true
+			},
+			review: {
+				title: 'Взгляд со стороны',
+				candidates: [{ harness: 'codex', model: 'gpt-6.1-sol', effort: 'high', nudge: false, exclude_workdirs: [] }],
+				isolated: false
+			}
+		},
+		providers: { claude: { max_weekly_percent: 90 }, codex: { max_weekly_percent: 80 }, opencode: { max_weekly_percent: 95 } },
+		unlimited_models: ['opencode-go/beam-free'],
+		max_parallel: { 'codex/gpt-6.1-sol': 1 },
+		unknown_limits: 'allow'
+	};
 	readonly spawnWhitelistKeys: string[] = [];
 	/** `null`: пороги лимитов по умолчанию, как у хаба. */
 	limitSettings: components['schemas']['LimitSettings'] | null = null;
@@ -134,6 +158,49 @@ export class FakeHubApi {
 			entries: this.spawnWhitelist ?? this.defaultSpawnWhitelist,
 			is_default: this.spawnWhitelist === null,
 			default_entries: this.defaultSpawnWhitelist
+		};
+	}
+
+	routingPolicyView(): { policy: unknown | null; revision: number; builtin: unknown } {
+		return { policy: this.routingPolicy, revision: this.routingPolicyRevision, builtin: this.builtinRoutingPolicy };
+	}
+
+	/** Сохранение политики: `false` — устаревшая ревизия, как `409` у хаба. */
+	saveRoutingPolicy(policy: unknown | null, revision: number): boolean {
+		if (revision !== this.routingPolicyRevision) return false;
+		this.routingPolicy = policy;
+		this.routingPolicyRevision += 1;
+		this.hub.append('conversations', { kind: 'routing_policy_changed', payload: { revision: this.routingPolicyRevision } });
+		return true;
+	}
+
+	/** Предпросмотр выбора для C3: первый кандидат типа или ошибка вида хаба. */
+	previewRoutingPolicy(task_type: string, level?: string, workdir?: string): { decision: unknown; machine: unknown } {
+		const policy = (this.routingPolicy ?? this.builtinRoutingPolicy) as {
+			task_types: Record<string, { title: string; candidates: { harness: string; model: string; effort?: string }[] }>;
+		};
+		const task = policy.task_types[task_type];
+		if (!task) {
+			throw { status: 404, code: 'task_type_unknown', message: `Unknown task type ${task_type}` };
+		}
+		const candidate = task.candidates[0];
+		if (!candidate) throw { status: 422, code: 'no_executor_available', message: 'No executor available' };
+		void level;
+		void workdir;
+		return {
+			decision: {
+				policy_revision: this.routingPolicyRevision,
+				task_type,
+				level: level ?? null,
+				harness: candidate.harness,
+				model: candidate.model,
+				effort: candidate.effort ?? 'medium',
+				preset: null,
+				nudge: false,
+				watchdog_minutes: null,
+				considered: [{ harness: candidate.harness, model: candidate.model, verdict: 'chosen', reason: '' }]
+			},
+			machine: { free_disk_gb: 72, load_per_core: 0.6, mem_available_gb: 41, observed_at: '2026-11-05T12:00:00.000Z', stale: false }
 		};
 	}
 
