@@ -9,6 +9,7 @@ use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
+pub mod claude_history;
 pub mod codexbar;
 pub mod limits;
 pub mod metrics;

@@ -2,10 +2,15 @@ use axum::http::Method;
 use canterlot_hub::{
     executions,
     http::{self, AppState},
-    session::{CAPABILITY_WORKDIR_SUGGEST_V1, MAX_SUGGESTS_PER_MACHINE, Registry},
+    session::{
+        CAPABILITY_CLAUDE_HISTORIES_V1, CAPABILITY_WORKDIR_SUGGEST_V1, MAX_SUGGESTS_PER_MACHINE,
+        Registry,
+    },
     testkit::{self, TestClient},
 };
-use canterlot_proto::worker::v1::{SuggestWorkdirs, WorkdirSuggestions, control_down};
+use canterlot_proto::worker::v1::{
+    ClaudeHistories, ClaudeHistory, SuggestWorkdirs, WorkdirSuggestions, control_down,
+};
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -2250,4 +2255,212 @@ async fn deleting_a_conversation_drops_its_group_pins(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(left, 0);
+}
+
+async fn claude_code_catalog(pool: &PgPool, machine: Uuid) {
+    sqlx::query(
+        "insert into machine_harnesses(machine_id,harness,provider,title,permission_modes,models)
+         values($1,'claude_code','claude','Claude Code','[\"bypass\"]','[{\"id\":\"opus\",\"title\":\"Opus\",\"efforts\":[\"high\"]}]')",
+    )
+    .bind(machine)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn resume_body(machine: Uuid, native: &str) -> Value {
+    json!({
+        "machine_id": machine,
+        "harness": "claude_code",
+        "workdir": "/tmp/w",
+        "model": "opus",
+        "effort": "high",
+        "start": true,
+        "resume_native_id": native,
+    })
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn resume_history_starts_the_new_session_on_the_existing_native_id(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    f.caps(&[
+        "pilot_v1",
+        "instructions_v1",
+        CAPABILITY_CLAUDE_HISTORIES_V1,
+    ]);
+    claude_code_catalog(&f.pool, f.machine).await;
+    let native = Uuid::now_v7().to_string();
+    let created = f
+        .request(
+            Method::POST,
+            "/api/v1/conversations",
+            Some(resume_body(f.machine, &native)),
+            201,
+        )
+        .await;
+    let id: Uuid = created["conversation_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let (stored, state): (Option<String>, String) = sqlx::query_as(
+        "select native_conversation_id,state from executions where conversation_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.as_deref(), Some(native.as_str()));
+    assert_eq!(state, "created");
+    let payload: Value = sqlx::query_scalar(
+        "select payload from commands where conversation_id=$1 and kind='start_execution'",
+    )
+    .bind(id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["native_conversation_id"], native);
+    let detail = f.get(id).await;
+    assert!(detail["continued_from_at"].is_string(), "{detail}");
+    assert_eq!(detail["execution"]["native_conversation_id"], native);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn resume_history_rejects_a_bad_id_another_harness_and_a_worker_without_the_capability(
+    pool: PgPool,
+) {
+    let mut f = Fixture::new(pool).await;
+    f.caps(&["pilot_v1", "instructions_v1"]);
+    claude_code_catalog(&f.pool, f.machine).await;
+    let missing = f
+        .request(
+            Method::POST,
+            "/api/v1/conversations",
+            Some(resume_body(f.machine, &Uuid::now_v7().to_string())),
+            409,
+        )
+        .await;
+    assert_eq!(missing["error"]["code"], "capability_missing");
+
+    f.caps(&[
+        "pilot_v1",
+        "instructions_v1",
+        CAPABILITY_CLAUDE_HISTORIES_V1,
+    ]);
+    for native in ["not-a-uuid", "../../.claude/projects"] {
+        let bad = f
+            .request(
+                Method::POST,
+                "/api/v1/conversations",
+                Some(resume_body(f.machine, native)),
+                400,
+            )
+            .await;
+        assert_eq!(bad["error"]["code"], "invalid_request");
+        assert_eq!(bad["error"]["details"]["field"], "resume_native_id");
+    }
+    let mut queued = resume_body(f.machine, &Uuid::now_v7().to_string());
+    queued["start"] = json!(false);
+    assert_eq!(
+        f.request(Method::POST, "/api/v1/conversations", Some(queued), 400)
+            .await["error"]["details"]["field"],
+        "resume_native_id"
+    );
+
+    let mut other = f.body();
+    other["resume_native_id"] = json!(Uuid::now_v7().to_string());
+    other["start"] = json!(true);
+    let refused = f
+        .request(Method::POST, "/api/v1/conversations", Some(other), 422)
+        .await;
+    assert_eq!(refused["error"]["code"], "resume_harness_unsupported");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn claude_histories_come_from_the_live_worker(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    f._leases.clear();
+    let mut session = testkit::fake_session(
+        &f.registry,
+        f.machine,
+        &[CAPABILITY_CLAUDE_HISTORIES_V1],
+        true,
+    );
+    let (registry, machine) = (f.registry.clone(), f.machine);
+    let first = Uuid::now_v7().to_string();
+    let second = Uuid::now_v7().to_string();
+    let worker = tokio::spawn(async move {
+        let down = session.commands.recv().await.unwrap();
+        let Some(control_down::Msg::ListClaudeHistories(request)) = down.msg else {
+            panic!("{down:?}")
+        };
+        assert_eq!(request.workdir, "/srv/project");
+        let request_id = request.request_id;
+        registry.finish_histories(
+            machine,
+            ClaudeHistories {
+                request_id,
+                items: vec![
+                    ClaudeHistory {
+                        id: first,
+                        modified_at_ms: 200,
+                        size: 4096,
+                        preview: "Вторая история".into(),
+                    },
+                    ClaudeHistory {
+                        id: second,
+                        modified_at_ms: 100,
+                        size: 128,
+                        preview: "Первая история".into(),
+                    },
+                    ClaudeHistory {
+                        id: "not-a-uuid".into(),
+                        ..Default::default()
+                    },
+                ],
+            },
+        );
+        session
+    });
+    let body = f
+        .request(
+            Method::GET,
+            &format!(
+                "/api/v1/machines/{}/claude-histories?workdir=%2Fsrv%2Fproject",
+                f.machine
+            ),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(body["histories"].as_array().unwrap().len(), 2);
+    assert_eq!(body["histories"][0]["preview"], "Вторая история");
+    assert_eq!(body["histories"][0]["modified_at_ms"], 200);
+    assert_eq!(body["histories"][1]["size"], 128);
+    worker.await.unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn claude_histories_are_empty_without_a_capable_live_worker(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    let path = format!(
+        "/api/v1/machines/{}/claude-histories?workdir=/srv/project",
+        f.machine
+    );
+    f._leases.clear();
+    assert_eq!(
+        f.request(Method::GET, &path, None, 200).await,
+        json!({"histories":[]}),
+        "offline machine"
+    );
+    let mut old = testkit::fake_session(&f.registry, f.machine, &["pilot_v1"], true);
+    assert_eq!(
+        f.request(Method::GET, &path, None, 200).await,
+        json!({"histories":[]}),
+        "worker without the capability"
+    );
+    assert!(
+        old.commands.try_recv().is_err(),
+        "old worker gets no request"
+    );
 }

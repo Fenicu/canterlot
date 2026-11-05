@@ -90,6 +90,7 @@ message ControlUp {
     WorkdirSuggestions workdir_suggestions = 8;
     OwnerInstructionsOverview owner_overview = 9;
     OwnerInstructionsFile owner_file = 10;
+    ClaudeHistories claude_histories = 11;
   }
 }
 
@@ -116,6 +117,7 @@ message ControlDown {
     LimitsSnapshot limits_snapshot = 6;
     SuggestWorkdirs suggest_workdirs = 7;
     ReadOwnerInstructions read_owner = 8;
+    ListClaudeHistories list_claude_histories = 9;
   }
 }
 
@@ -645,6 +647,25 @@ message SuggestWorkdirs {
 message WorkdirSuggestions {
   string request_id = 1;
   repeated string directories = 2;
+}
+
+// Необязательная возможность claude_histories_v1: беседы Claude Code выбранного
+// рабочего каталога, которые можно продолжить новой сессией.
+message ListClaudeHistories {
+  string request_id = 1;
+  string workdir = 2;
+}
+
+message ClaudeHistory {
+  string id = 1;
+  uint64 modified_at_ms = 2;
+  uint64 size = 3;
+  string preview = 4;
+}
+
+message ClaudeHistories {
+  string request_id = 1;
+  repeated ClaudeHistory items = 2;
 }
 
 // Чтение глобальных инструкций владельца: запрос называет только вид,

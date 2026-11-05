@@ -172,6 +172,10 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Рабочий каталог вне разрешённых корней",
   },
+  resume_harness_unsupported: {
+    action: "none",
+    message: "Продолжение истории доступно только для Claude Code",
+  },
   group_not_found: {
     action: "none",
     message: "Группа не найдена",

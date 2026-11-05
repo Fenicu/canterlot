@@ -764,6 +764,7 @@ fn ownership_roundtrip() {
         phase: OwnershipPhase::Attached as i32,
         released_reason: "normal_exit".into(),
         reclaimed_cj_seq: 7,
+        native_conversation_id: "019a1b10-0000-7000-8000-000000000008".into(),
     });
     for (number, name) in ["UNSPECIFIED", "SPAWNING", "ATTACHED", "RELEASED"]
         .into_iter()

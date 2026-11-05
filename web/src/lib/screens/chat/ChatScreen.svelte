@@ -18,6 +18,7 @@
 	import { ACCEPT_LABEL, acceptView, type AcceptDetail } from './accept';
 	import { acceptSession } from './controls';
 	import { errorText } from '#lib/api/errors.js';
+	import { fmt } from '#lib/format/ru.js';
 	import SessionSheet from '#lib/screens/sessions/SessionSheet.svelte';
 	import { childLive } from '#lib/screens/sessions/grouping.js';
 	import { pane } from '#lib/shell/pane.svelte.js';
@@ -120,6 +121,9 @@
 	});
 	const accept = $derived(acceptView(chat.detail as AcceptDetail | null));
 	const sessionHarnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
+	const continuedFromAt = $derived(
+		(chat.detail as { continued_from_at?: string | null } | null)?.continued_from_at ?? null
+	);
 	const sessionPermissionMode = $derived(
 		(chat.settings.effective as { permission_mode?: string } | null | undefined)?.permission_mode ??
 			((chat.detail?.permission_mode as string | undefined) ?? '')
@@ -187,6 +191,9 @@
 		childRunning={childRunning}
 		hasChildren={childSessions.length > 0}
 	/>
+	{#if continuedFromAt}
+		<p class="continuation" data-role="continuation">Продолжение истории Claude Code от {fmt.stamp(Date.parse(continuedFromAt), now)}</p>
+	{/if}
 
 	<Timeline
 		{chat}
@@ -308,6 +315,12 @@
 </section>
 
 <style>
+	.continuation {
+		margin: 0;
+		padding: 0 var(--s6);
+		color: var(--muted);
+		font-size: var(--fs-sm);
+	}
 	.screen {
 		flex: 1;
 		height: auto;

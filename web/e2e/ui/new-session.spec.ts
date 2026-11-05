@@ -5,7 +5,7 @@ import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect, fillWorkdir, test } from './fixtures';
 
-async function boot(page: Page, options: { solo?: boolean; home?: string | null; models?: { id: string; title: string; efforts: string[] }[]; extraHarness?: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[] }[]; permission_modes: string[] } } = {}) {
+async function boot(page: Page, options: { solo?: boolean; home?: string | null; histories?: boolean; models?: { id: string; title: string; efforts: string[] }[]; extraHarness?: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[] }[]; permission_modes: string[] } } = {}) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   const { machine } = seedMockupSessions(api);
@@ -14,6 +14,7 @@ async function boot(page: Page, options: { solo?: boolean; home?: string | null;
   }
   const record = api.machines.get(machine)!;
   if (options.home !== undefined) record.home_dir = options.home;
+  if (options.histories) record.capabilities = [...(record.capabilities ?? []), 'claude_histories_v1'];
   if (options.models) record.harnesses[0]!.models = options.models;
   if (options.extraHarness) record.harnesses.push(options.extraHarness);
   seedPresets(api);
@@ -139,6 +140,44 @@ test('new_session_offers_recent_workdirs_and_submits_a_typed_path', async ({ pag
   await page.getByRole('button', { name: 'Создать' }).click();
   await expect(page).toHaveURL(/\/c\//);
   expect(bodies[0]?.workdir).toBe('/tmp/typed-by-hand');
+});
+
+test('new_session_continues_a_claude_code_history_from_the_collapsed_list', async ({ page }) => {
+  const { api } = await boot(page, { histories: true });
+  const bodies: { resume_native_id?: string; harness?: string }[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/conversations') {
+      bodies.push({ ...(request.postDataJSON() as { resume_native_id?: string; harness?: string }) });
+    }
+  });
+  await page.goto('/new');
+  await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
+  await fillWorkdir(page, '/srv/canterlot');
+  await page.getByRole('radio', { name: 'Claude Code' }).check();
+  const details = page.locator('[data-role="claude-history"]');
+  await expect(details).not.toHaveAttribute('open', '');
+  await details.locator('summary').click();
+  await expect(details).toHaveAttribute('open', '');
+  const item = page.getByRole('button', { name: /Почини удалённую сессию/ });
+  await expect(item).toBeVisible();
+  await expect(item).toContainText('180 КБ');
+  await item.click();
+  await expect(item).toHaveAttribute('aria-pressed', 'true');
+  expect(api.historyCalls.at(-1)).toEqual({ machine: api.machines.keys().next().value, workdir: '/srv/canterlot' });
+  await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
+  await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
+  await page.getByRole('button', { name: 'Создать' }).click();
+  await expect(page).toHaveURL(/\/c\//);
+  expect(bodies[0]?.resume_native_id).toBe('01a1a7af-6e9b-7517-8b6e-92d714b66fc3');
+  await expect(page.getByText(/Продолжение истории Claude Code от/)).toBeVisible();
+});
+
+test('new_session_hides_claude_history_for_a_worker_without_the_capability', async ({ page }) => {
+  await boot(page);
+  await page.goto('/new');
+  await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
+  await page.getByRole('radio', { name: 'Claude Code' }).check();
+  await expect(page.locator('[data-role="claude-history"]')).toHaveCount(0);
 });
 
 test('new_session_takes_the_only_machine_and_loads_it_like_a_manual_pick', async ({ page }) => {

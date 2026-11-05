@@ -4694,6 +4694,73 @@
         }
       }
     },
+    "/api/v1/machines/{id}/claude-histories": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "operationId": "get__api_v1_machines__id__claude_histories",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workdir",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Беседы Claude Code рабочего каталога, свежие первыми; пусто, если машина не ответила",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaudeHistoryList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{id}/owner-instructions": {
       "get": {
         "tags": [
@@ -6912,6 +6979,47 @@
           }
         ]
       },
+      "ClaudeHistoryList": {
+        "type": "object",
+        "required": [
+          "histories"
+        ],
+        "properties": {
+          "histories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClaudeHistoryView"
+            }
+          }
+        }
+      },
+      "ClaudeHistoryView": {
+        "type": "object",
+        "required": [
+          "id",
+          "modified_at_ms",
+          "size",
+          "preview"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "modified_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "preview": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "CompactOutcome": {
         "oneOf": [
           {
@@ -7216,6 +7324,13 @@
               "activity": {
                 "$ref": "#/components/schemas/ActivityView"
               },
+              "continued_from_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Начало продолженной истории Claude Code; тихая первая строка ленты."
+              },
               "crunch": {
                 "$ref": "#/components/schemas/CrunchDetail"
               },
@@ -7433,6 +7548,13 @@
               "string",
               "null"
             ]
+          },
+          "resume_native_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Продолжить готовую историю Claude Code: только её идентификатор."
           },
           "start": {
             "type": "boolean"
@@ -7878,6 +8000,7 @@
           "settings_midsession_unsupported",
           "profile_unknown",
           "workdir_not_allowed",
+          "resume_harness_unsupported",
           "group_not_found",
           "group_name_taken",
           "archive_active",

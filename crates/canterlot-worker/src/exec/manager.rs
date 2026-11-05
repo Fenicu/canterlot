@@ -1249,6 +1249,26 @@ impl Actor {
         if let Err(rejection) = super::storage_preflight(&data_dir) {
             return self.spawn_failed(&command, false, rejection.reason()).await;
         }
+        // Продолжать можно только записанную беседу этого рабочего каталога: хаб
+        // присылает идентификатор, а не путь, и файл ищется в каталоге проекта CLI.
+        if start.harness == "claude_code" && !start.native_conversation_id.is_empty() {
+            let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+            let config_dir = crate::config::claude_config_dir(
+                &home,
+                std::env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
+            );
+            if crate::machine::claude_history::transcript(
+                &workdir.to_string_lossy(),
+                &config_dir,
+                &start.native_conversation_id,
+            )
+            .is_none()
+            {
+                return self
+                    .spawn_failed(&command, false, "resume_transcript_missing")
+                    .await;
+            }
+        }
         if let (Some(spec), Some(source)) = (&start.worktree, &source) {
             // Подготовка идёт в акторе: медленная распаковка не задерживает остальные команды.
             if let Err(reason) = crate::worktree::prepare(&workdir, source, spec).await {
@@ -1342,6 +1362,7 @@ impl Actor {
             secret_sha256: sha256(&prepared.secret),
             ipc_protocol_version: IPC_PROTOCOL_VERSION,
             phase: OwnershipPhase::Spawning as i32,
+            native_conversation_id: start.native_conversation_id.clone(),
             ..Default::default()
         };
         self.shared

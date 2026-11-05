@@ -48,6 +48,7 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "settings_midsession_unsupported",
   "profile_unknown",
   "workdir_not_allowed",
+  "resume_harness_unsupported",
   "group_not_found",
   "group_name_taken",
   "archive_active",
@@ -111,7 +112,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(58);
+    expect(ALL_ERROR_CODES.length).toBe(59);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(

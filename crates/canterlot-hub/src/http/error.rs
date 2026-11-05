@@ -115,6 +115,7 @@ error_codes! {
     SettingsMidsessionUnsupported => "settings_midsession_unsupported", 422, Browser, Never, "Смена настроек во время исполнения не поддерживается";
     ProfileUnknown => "profile_unknown", 422, Browser, Never, "Пресет инструкций не найден";
     WorkdirNotAllowed => "workdir_not_allowed", 422, Browser, Never, "Рабочий каталог вне разрешённых корней";
+    ResumeHarnessUnsupported => "resume_harness_unsupported", 422, Browser, Never, "Продолжение истории доступно только для Claude Code";
     GroupNotFound => "group_not_found", 404, Browser, Never, "Группа не найдена";
     GroupNameTaken => "group_name_taken", 409, Browser, Never, "Группа с таким именем уже существует";
     ArchiveActive => "archive_active", 409, Browser, Never, "В сессии есть активная работа";
@@ -542,6 +543,7 @@ impl From<crate::conversations::CreateError> for ApiError {
             E::PermissionModeUnknown => ErrorCode::PermissionModeUnknown,
             E::ProfileUnknown => ErrorCode::ProfileUnknown,
             E::WorkdirNotAllowed => ErrorCode::WorkdirNotAllowed,
+            E::ResumeHarnessUnsupported => ErrorCode::ResumeHarnessUnsupported,
             E::GroupNotFound => ErrorCode::GroupNotFound,
             E::Invalid(field) => return invalid_field(field),
             E::IdempotencyConflict => ErrorCode::IdempotencyConflict,

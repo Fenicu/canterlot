@@ -11,6 +11,7 @@ import {
 } from "#lib/ops/journal.js";
 import {
   defaultModelId,
+  historySize,
   keptHarness,
   NewSessionModel,
   soleEffort,
@@ -170,6 +171,47 @@ describe("sessions/new", () => {
     await model.refreshRecent();
     expect(recentWorkdirs).toHaveBeenCalledWith("m1");
     expect(model.recent).toEqual(["/srv/canterlot", "/srv/notes", "/srv/third"]);
+  });
+
+  it("new_session_offers_claude_history_only_with_the_capability_and_claude", () => {
+    const capable = machine({ capabilities: ["pilot_v1", "claude_histories_v1"] });
+    const model = new NewSessionModel(store([capable]), config, ops());
+    ready(model);
+    expect(model.canResumeHistory).toBe(true);
+    model.harness = "codex";
+    expect(model.canResumeHistory).toBe(false);
+    const old = new NewSessionModel(store([machine()]), config, ops());
+    ready(old);
+    expect(old.canResumeHistory).toBe(false);
+  });
+
+  it("new_session_submits_the_chosen_history_only_while_it_matches_the_form", async () => {
+    const journal = ops();
+    const model = new NewSessionModel(
+      store([machine({ capabilities: ["pilot_v1", "claude_histories_v1"] })]),
+      config,
+      journal,
+    );
+    ready(model);
+    model.resumeNativeId = "01a1a7af-6e9b-7517-8b6e-92d714b66fc3";
+    await model.submit();
+    expect(vi.mocked(journal.begin).mock.calls[0]?.[1]).toMatchObject({
+      resume_native_id: "01a1a7af-6e9b-7517-8b6e-92d714b66fc3",
+    });
+    const old = new NewSessionModel(store([machine()]), config, journal);
+    ready(old);
+    old.resumeNativeId = "01a1a7af-6e9b-7517-8b6e-92d714b66fc3";
+    await old.submit();
+    expect(vi.mocked(journal.begin).mock.calls[1]?.[1]).not.toHaveProperty(
+      "resume_native_id",
+    );
+  });
+
+  it("new_session_sizes_the_history_list_like_the_owner_reads_it", () => {
+    expect(historySize(512)).toBe("512 Б");
+    expect(historySize(2048)).toBe("2,0 КБ");
+    expect(historySize(184_320)).toBe("180 КБ");
+    expect(historySize(3 * 1024 * 1024)).toBe("3,0 МБ");
   });
 
   it("new_session_submits_a_typed_path_outside_reported_roots", async () => {

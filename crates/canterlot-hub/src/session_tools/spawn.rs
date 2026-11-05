@@ -260,7 +260,9 @@ fn create_error(error: CreateError) -> ToolError {
         CreateError::ModelUnknown => ToolErrorCode::ModelUnknown,
         CreateError::EffortNotAllowed => ToolErrorCode::EffortNotAllowed,
         CreateError::ProfileUnknown => ToolErrorCode::ProfileUnknown,
-        CreateError::WorkdirNotAllowed => ToolErrorCode::WorkdirNotAllowed,
+        CreateError::WorkdirNotAllowed | CreateError::ResumeHarnessUnsupported => {
+            ToolErrorCode::WorkdirNotAllowed
+        }
         CreateError::PermissionModeUnknown
         | CreateError::GroupNotFound
         | CreateError::Invalid(_)
@@ -542,6 +544,7 @@ async fn start_child(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Star
             group_ids: Vec::new(),
             crunch: CrunchSetting::default(),
             start: true,
+            resume_native_id: None,
             parent: Some(ParentLink {
                 id: parent.id,
                 spawn_depth: parent.spawn_depth + 1,

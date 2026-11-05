@@ -200,6 +200,8 @@ pub(crate) struct ExecInfo {
     pub acked_seq: u64,
     pub retired: bool,
     pub cj_terminal_seq: Option<u64>,
+    /// Беседа агента, которую ведёт исполнение: её историю не предлагают для продолжения.
+    pub native_conversation_id: Option<String>,
     /// Журнал потерянного сопровождения: его точка продолжения нужна сессии, даже когда
     /// исполнение для наблюдений уже списано.
     pub lost_journal: bool,
@@ -480,8 +482,12 @@ impl Shared {
                     acked_seq: 0,
                     retired: false,
                     cj_terminal_seq: None,
+                    native_conversation_id: None,
                     lost_journal: false,
                 });
+                if !state.native_conversation_id.is_empty() {
+                    info.native_conversation_id = Some(state.native_conversation_id.clone());
+                }
                 info.state = state.state;
                 info.outcome = state.outcome;
                 info.cj_terminal_seq = Some(seq);
@@ -715,6 +721,21 @@ impl ExecutionManager {
         list
     }
 
+    /// Беседы живых исполнений: предлагать их же для продолжения нельзя.
+    pub fn live_native_ids(&self) -> Vec<String> {
+        let infos = self.shared.infos.lock().expect("infos lock");
+        let mut list: Vec<String> = infos
+            .values()
+            .filter(|info| {
+                !info.retired && !matches!(info.state.as_str(), "stopped" | "failed" | "owner_lost")
+            })
+            .filter_map(|info| info.native_conversation_id.clone())
+            .collect();
+        list.sort();
+        list.dedup();
+        list
+    }
+
     pub fn journal_cursors(&self) -> Vec<JournalCursor> {
         let infos = self.shared.infos.lock().expect("infos lock");
         let mut list: Vec<_> = infos
@@ -784,6 +805,7 @@ impl ExecutionManager {
                 acked_seq: 0,
                 retired: false,
                 cj_terminal_seq: None,
+                native_conversation_id: None,
                 lost_journal: lost,
             },
         );
@@ -923,6 +945,8 @@ impl ExecutionManager {
                     acked_seq: 0,
                     retired: reported && verified.is_err(),
                     cj_terminal_seq: None,
+                    native_conversation_id: (!record.native_conversation_id.is_empty())
+                        .then(|| record.native_conversation_id.clone()),
                     lost_journal: false,
                 },
             );
@@ -1113,6 +1137,8 @@ impl ExecutionManager {
                     acked_seq: 0,
                     retired: false,
                     cj_terminal_seq: None,
+                    native_conversation_id: (!start.native_conversation_id.is_empty())
+                        .then(|| start.native_conversation_id.clone()),
                     lost_journal: false,
                 },
             );

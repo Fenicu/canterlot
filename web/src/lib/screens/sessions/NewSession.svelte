@@ -4,6 +4,8 @@
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { loadConfig } from '#lib/api/config.js';
+  import { claudeHistories } from '#lib/api/client.js';
+  import { fmt } from '#lib/format/ru.js';
   import { limitThresholds } from '#lib/stores/limitThresholds.svelte.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
@@ -16,7 +18,7 @@
   import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount, untrack } from 'svelte';
-  import { defaultModelId, keptHarness, machineProblem, NewSessionModel, prefillWorkdir, soleEffort, soleMachine } from './newSessionModel';
+  import { defaultModelId, historySize, keptHarness, machineProblem, NewSessionModel, prefillWorkdir, soleEffort, soleMachine } from './newSessionModel';
   import WorkdirField from './WorkdirField.svelte';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
@@ -34,6 +36,12 @@
   let resume = $state('');
   let recent = $state<string[]>([]);
   let error = $state('');
+  let resumeOpen = $state(false);
+  let resumeLoading = $state(false);
+  let resumeError = $state('');
+  let resumeItems = $state<{ id: string; modified_at_ms: number; size: number; preview: string }[]>([]);
+  let resumeNativeId = $state('');
+  let resumeFor = $state('');
 
   const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
   const machine = $derived(machines.find((item) => item.id === machineId));
@@ -83,6 +91,12 @@
   const effortOptions = $derived([{ value: '', label: 'Выбрать' }, ...efforts.map((item) => ({ value: item, label: effortLabel(item) }))]);
   const presetOptions = $derived(presets.map((item) => ({ value: item.id, label: item.title })));
   const permissionOptions = $derived(permissions.map((value) => ({ value, label: permissionLabel(value) })));
+  const canResume = $derived(
+    Boolean(
+      machine?.capabilities?.includes('claude_histories_v1') &&
+        (selectedHarness?.id === 'claude_code' || selectedHarness?.provider === 'claude')
+    )
+  );
   const imagesNote = $derived(modelImagesNote(models.find((item) => item.id === modelId)?.images));
   const catalogNote = $derived(provider === 'antigravity' ? ANTIGRAVITY_CATALOG_NOTE : '');
   const gate = $derived.by(() => {
@@ -96,6 +110,7 @@
     model.profile = profile;
     model.crunch = crunch;
     model.resumeText = resume;
+    model.resumeNativeId = resumeNativeId;
     return model.canSubmit;
   });
 
@@ -139,6 +154,49 @@
     const only = soleMachine(machines);
     if (only && !machineId) machineId = only;
   });
+
+  // Другая машина, агент или папка — другая история: выбранная не переезжает молча.
+  let resumeKey = '';
+  $effect(() => {
+    const key = `${machineId}|${harness}|${path}`;
+    untrack(() => {
+      if (resumeKey === key) return;
+      resumeKey = key;
+      resumeNativeId = '';
+      resumeItems = [];
+      resumeFor = '';
+      resumeError = '';
+    });
+  });
+
+  $effect(() => {
+    if (!resumeOpen || !canResume || !machineId || !path) return;
+    const key = `${machineId}|${path.trim().replace(/(?<=.)\/+$/, '')}`;
+    if (resumeFor === key) return;
+    resumeFor = key;
+    void loadHistories();
+  });
+
+  async function loadHistories() {
+    const target = machineId;
+    const workdir = path.trim().replace(/(?<=.)\/+$/, '');
+    if (!target || !workdir) return;
+    resumeLoading = true;
+    resumeError = '';
+    try {
+      const response = await claudeHistories(target, workdir);
+      if (machineId !== target || path.trim().replace(/(?<=.)\/+$/, '') !== workdir) return;
+      resumeItems = response.data.histories;
+    } catch {
+      resumeError = 'Не удалось загрузить истории Claude Code';
+    } finally {
+      resumeLoading = false;
+    }
+  }
+
+  function chooseHistory(id: string) {
+    resumeNativeId = resumeNativeId === id ? '' : id;
+  }
 
   let prefilled = '';
   $effect(() => {
@@ -202,6 +260,36 @@
     {/if}
     <WorkdirField {machineId} bind:value={path} />
     <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
+    {#if canResume}
+      <details class="resume" bind:open={resumeOpen} data-role="claude-history">
+        <summary>Продолжить историю Claude Code</summary>
+        {#if resumeLoading}
+          <p class="hint">Загружаю истории…</p>
+        {:else if resumeError}
+          <p class="error" role="alert">{resumeError}</p>
+        {:else if resumeItems.length === 0}
+          <p class="hint">В этой папке нет историй Claude Code</p>
+        {:else}
+          <ul class="histories">
+            {#each resumeItems as item (item.id)}
+              <li>
+                <button
+                  type="button"
+                  class="history"
+                  class:selected={resumeNativeId === item.id}
+                  aria-pressed={resumeNativeId === item.id}
+                  onclick={() => chooseHistory(item.id)}
+                >
+                  <span class="when">{fmt.stamp(item.modified_at_ms, Date.now())}</span>
+                  <span class="size">{historySize(item.size)}</span>
+                  <span class="preview">{item.preview || 'Без первого сообщения'}</span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </details>
+    {/if}
     {#if provider === 'antigravity'}
       <Select label="Модель" options={modelOptions} bind:value={modelId} />
     {:else}
@@ -262,6 +350,31 @@
   .error { margin: 0; color: var(--danger); }
   .hint { color: var(--muted); font-size: var(--fs-sm); margin: 0; }
   .recent { display: flex; flex-direction: column; gap: var(--s1); }
+  .resume { display: flex; flex-direction: column; gap: var(--s3); }
+  .resume summary {
+    min-height: var(--target);
+    cursor: pointer;
+    color: var(--secondary);
+    font-size: var(--fs-sm);
+  }
+  .histories { list-style: none; display: flex; flex-direction: column; gap: var(--s2); margin: 0; padding: 0; }
+  .history {
+    display: grid;
+    grid-template-columns: max-content max-content minmax(0, 1fr);
+    gap: var(--s1) var(--s4);
+    width: 100%;
+    min-height: var(--target);
+    border: var(--s0);
+    border-radius: var(--radius-card);
+    background: var(--transparent);
+    color: var(--text);
+    padding: var(--s3) var(--s4);
+    text-align: left;
+    align-items: baseline;
+  }
+  .history.selected { background: var(--raised); outline: var(--s0) solid var(--accent); outline-offset: calc(-1 * var(--s0)); }
+  .history .when, .history .size { color: var(--muted); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .history .preview { grid-column: 1 / -1; color: var(--secondary); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .recent-item {
     display: block;
     width: 100%;

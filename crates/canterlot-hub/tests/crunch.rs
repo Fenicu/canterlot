@@ -1996,6 +1996,7 @@ fn new_conversation(env: &Env, start_execution: bool) -> NewConversation {
         group_ids: vec![],
         crunch: CrunchSetting::default(),
         start: start_execution,
+        resume_native_id: None,
         parent: None,
         worktree_source: None,
     }

@@ -21,6 +21,8 @@ pub const MAX_AGENT_CALL_BYTES: usize = 262_144;
 /// Рабочая папка: входит в ключ `machine_workdirs`, длиннее не принимается и подсказка.
 pub const MAX_WORKDIR_BYTES: usize = 2048;
 pub const MAX_WORKDIR_SUGGESTIONS: usize = 30;
+/// Историй Claude Code в одном ответе формы.
+pub const MAX_CLAUDE_HISTORIES: usize = 50;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1_048_576;
