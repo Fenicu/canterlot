@@ -41,6 +41,7 @@ pub mod runs;
 pub mod scheduler;
 pub mod session;
 pub mod session_tools;
+pub mod session_usage;
 pub mod singleton;
 pub mod snapshot;
 pub mod speed;

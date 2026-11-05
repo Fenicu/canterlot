@@ -180,6 +180,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into conversation_usage_rollup(parent_id,source_id,turns,models)
+         values($1,$2,1,'[{\"model\":\"opus\",\"input_tokens\":1,\"output_tokens\":1,\"cache_read_tokens\":0,\"cache_write_tokens\":0}]')",
+        &[conversation, execution],
+    )
+    .await;
+    exec(
+        pool,
         "insert into agent_todos(conversation_id,generation,source_revision,revision,items,omitted)
          values($1,1,1,1,'[]',0)",
         &[conversation],

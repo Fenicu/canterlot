@@ -239,6 +239,8 @@ async fn delete_in_tx(
     if holds_worktree(conn, id).await? {
         return Err(DeleteError::WorktreeNotRemoved);
     }
+    // До очистки runs: расходы уходят родителю одной строкой и переживают уборку.
+    crate::session_usage::fold_in_tx(&mut *conn, id).await?;
     let (generation, execution_ids): (i64, Vec<Uuid>) = sqlx::query_as(
         "select coalesce(max(generation),0), coalesce(array_agg(id),'{}') from executions
          where conversation_id=$1",

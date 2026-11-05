@@ -545,6 +545,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_conversations__id__usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -1895,7 +1911,6 @@ export interface components {
             today: components["schemas"]["SpeedStats"];
         };
         ModelUsageView: {
-            agent: string;
             /** Format: int64 */
             cache_read_tokens: number;
             /** Format: int64 */
@@ -2248,6 +2263,12 @@ export interface components {
                 steer_command_id: string;
             };
         };
+        SessionUsageView: {
+            /** @description Все делегаты в поддереве: живые потомки и свёрнутые после удаления. */
+            delegates: components["schemas"]["UsageTotalsView"];
+            /** @description Собственный расход сессии: субагенты внутри CLI уже входят в её ходы. */
+            session: components["schemas"]["UsageTotalsView"];
+        };
         SessionView: {
             activity_state: string;
             /** Format: uuid */
@@ -2443,6 +2464,19 @@ export interface components {
             runs: number;
             /** Format: int64 */
             weekly_delta_permille: number;
+        };
+        UsageTotalsView: {
+            /** Format: int64 */
+            cache_read_tokens: number;
+            /** Format: int64 */
+            cache_write_tokens: number;
+            /** Format: int64 */
+            input_tokens: number;
+            models: components["schemas"]["ModelUsageView"][];
+            /** Format: int64 */
+            output_tokens: number;
+            /** Format: int64 */
+            turns: number;
         };
         WhitelistBody: {
             /** @description `null` возвращает встроенный список; поле обязательно, чтобы пустое тело его не сбрасывало. */
@@ -4303,6 +4337,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StopExecutionOutcome"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__usage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Токены за сессию и её делегатов */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionUsageView"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
