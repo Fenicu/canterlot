@@ -544,6 +544,11 @@ impl Default for AttachmentsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MachinesConfig {
+    /// Свободного места меньше этого — предупреждение в PWA и событие подписчикам.
+    pub disk_warn_free_gb: u64,
+    /// Свободного места меньше этого — второй, отдельный уровень предупреждения.
+    pub disk_critical_free_gb: u64,
+    /// Устарело: прежний порог по доле занятого места. Принимается ради старых файлов.
     pub disk_warn_pct: u8,
     #[serde(with = "humantime_serde")]
     pub metrics_stale_after: Duration,
@@ -552,8 +557,25 @@ pub struct MachinesConfig {
 impl Default for MachinesConfig {
     fn default() -> Self {
         Self {
+            disk_warn_free_gb: 30,
+            disk_critical_free_gb: 10,
             disk_warn_pct: 85,
             metrics_stale_after: Duration::from_secs(90),
         }
+    }
+}
+
+impl MachinesConfig {
+    pub fn disk_warn_bytes(&self) -> u64 {
+        self.disk_warn_free_gb.saturating_mul(1_000_000_000)
+    }
+
+    pub fn disk_critical_bytes(&self) -> u64 {
+        self.disk_critical_free_gb.saturating_mul(1_000_000_000)
+    }
+
+    /// Возврат к обычному состоянию с запасом: иначе колебания у порога мигают.
+    pub fn disk_recover_bytes(&self) -> u64 {
+        self.disk_warn_bytes().saturating_add(5_000_000_000)
     }
 }

@@ -10,6 +10,7 @@ pub mod access;
 pub mod alarms;
 pub mod completion;
 pub mod control;
+pub mod disk;
 pub mod jobs;
 pub mod origin;
 pub mod outage;

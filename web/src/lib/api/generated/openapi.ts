@@ -1901,7 +1901,14 @@ export interface components {
             items: components["schemas"]["MachineView"][];
         };
         MachinesView: {
-            /** Format: int32 */
+            /** Format: int64 */
+            disk_critical_free_gb: number;
+            /** Format: int64 */
+            disk_warn_free_gb: number;
+            /**
+             * Format: int32
+             * @description Устарело: прежний порог по доле занятого места; клиент читает свободные гигабайты.
+             */
             disk_warn_pct: number;
             /** Format: int64 */
             metrics_stale_after_secs: number;

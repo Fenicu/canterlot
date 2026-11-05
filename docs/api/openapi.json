@@ -9229,12 +9229,25 @@
         "type": "object",
         "required": [
           "disk_warn_pct",
+          "disk_warn_free_gb",
+          "disk_critical_free_gb",
           "metrics_stale_after_secs"
         ],
         "properties": {
+          "disk_critical_free_gb": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "disk_warn_free_gb": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
           "disk_warn_pct": {
             "type": "integer",
             "format": "int32",
+            "description": "Устарело: прежний порог по доле занятого места; клиент читает свободные гигабайты.",
             "minimum": 0
           },
           "metrics_stale_after_secs": {

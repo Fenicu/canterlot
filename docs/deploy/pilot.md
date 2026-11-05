@@ -274,7 +274,9 @@ gc_grace = "24h"
 gc_interval = "1h"
 
 [machines]
-disk_warn_pct = 85
+disk_warn_free_gb = 30
+disk_critical_free_gb = 10
+disk_warn_pct = 85                                 # устарело
 metrics_stale_after = "90s"
 
 [session_tools]                                     # пределы межсессионных инструментов, таблица необязательна

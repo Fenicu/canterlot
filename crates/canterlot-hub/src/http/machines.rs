@@ -124,16 +124,13 @@ pub(crate) async fn load_stored(
         let mut v: Value = m.try_get("value")?;
         let at: DateTime<Utc> = m.try_get("observed_at")?;
         v["observed_at"] = json!(conversations::time(at));
-        let disk_high = v["disks"].as_array().is_some_and(|ds| {
+        let disk_low = v["disks"].as_array().is_some_and(|ds| {
             ds.iter().any(|d| {
-                let total = d["total_bytes"].as_u64().unwrap_or(0);
-                let free = d["free_bytes"].as_u64().unwrap_or(total);
-                total > 0
-                    && u128::from(total.saturating_sub(free)) * 100
-                        >= u128::from(total) * u128::from(config.disk_warn_pct)
+                d["total_bytes"].as_u64().unwrap_or(0) > 0
+                    && d["free_bytes"].as_u64().unwrap_or(u64::MAX) <= config.disk_warn_bytes()
             })
         });
-        if disk_high {
+        if disk_low {
             warnings.push(MachineWarning::DiskUsageHigh)
         }
         if (Utc::now() - at)

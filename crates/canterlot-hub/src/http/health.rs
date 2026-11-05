@@ -178,7 +178,10 @@ pub struct ActivityView {
 
 #[derive(Serialize, ToSchema)]
 pub struct MachinesView {
+    /// Устарело: прежний порог по доле занятого места; клиент читает свободные гигабайты.
     pub disk_warn_pct: u8,
+    pub disk_warn_free_gb: u64,
+    pub disk_critical_free_gb: u64,
     pub metrics_stale_after_secs: u64,
 }
 
@@ -255,6 +258,8 @@ async fn config(o: Owner, State(state): State<AppState>) -> Result<Json<ConfigVi
         },
         machines: MachinesView {
             disk_warn_pct: state.machines.disk_warn_pct,
+            disk_warn_free_gb: state.machines.disk_warn_free_gb,
+            disk_critical_free_gb: state.machines.disk_critical_free_gb,
             metrics_stale_after_secs: state.machines.metrics_stale_after.as_secs(),
         },
         limit_thresholds: LimitThresholdsView {
