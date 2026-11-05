@@ -1597,6 +1597,10 @@
   --motion-base-branch-grow: 440ms;
   --duration-branch-grow: calc(var(--motion-base-branch-grow) * var(--motion-scale));
   --ease-branch-grow: cubic-bezier(.22, 1, .36, 1);
+  /* Смена темы: новая палитра раскрывается кругом от нажатой кнопки или карточки. */
+  --motion-base-theme-reveal: 420ms;
+  --duration-theme-reveal: calc(var(--motion-base-theme-reveal) * var(--motion-scale));
+  --ease-theme-reveal: cubic-bezier(.4, 0, .2, 1);
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -1625,6 +1629,7 @@
     --duration-row-fold: 0ms;
     --duration-gauge: 0ms;
     --duration-branch-grow: 0ms;
+    --duration-theme-reveal: 0ms;
   }
 }
 

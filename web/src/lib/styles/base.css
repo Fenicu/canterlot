@@ -30,7 +30,12 @@ pre { font-size: var(--fs-sm); line-height: var(--lh-code); overflow: auto; }
 .skeleton { display: block; max-width: 100%; height: var(--caret-height); border-radius: var(--radius-pill); background: var(--raised); }
 .skip-link { position: fixed; inset: var(--s4) auto auto var(--s4); padding: var(--s6); background: var(--accent); color: var(--accent-ink); transform: translateY(-200%); z-index: 10; border-radius: var(--radius-pill); }
 .skip-link:focus { transform: none; }
-:root[data-theme-switching] *, :root[data-motion=off] * { animation: none !important; transition: none !important; }
+/* Смена темы не проигрывает переходы цвета: новая палитра встаёт целиком. Анимации не трогаем, иначе они начнутся заново.
+   Только внутри body: проба durationMs живёт прямо в html и должна видеть настоящую длительность. */
+:root[data-theme-switching] body *, :root[data-theme-switching] body *::before, :root[data-theme-switching] body *::after { transition: none !important; }
+:root[data-motion=off] * { animation: none !important; transition: none !important; }
+/* Раскрытие темы: старый снимок лежит под новым без затухания, новый растёт кругом из анимации в theme.svelte.ts. */
+:root[data-theme-reveal]::view-transition-old(root), :root[data-theme-reveal]::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
 .app-root { display: contents; }

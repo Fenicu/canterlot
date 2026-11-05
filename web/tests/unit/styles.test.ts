@@ -133,6 +133,7 @@ test('reduced_motion_zeroes_all_duration_tokens', () => {
   const root: Record<string, string> = {};
   postcss.parse(text).walkRules(rule => { if (rule.parent?.type === 'root' && rule.selector.trim() === ':root') rule.walkDecls(d => { root[d.prop] = d.value; }); });
   const durations = Object.keys(root).filter(n => n.startsWith('--duration-'));
+  expect(durations).toContain('--duration-theme-reveal');
   for (const name of durations) {
     expect(root[name]).toContain('var(--motion-scale)');
     expect(reduced).toContain(`${name}: 0ms`);

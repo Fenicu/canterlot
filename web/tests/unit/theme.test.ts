@@ -32,6 +32,8 @@ afterEach(() => {
   document.documentElement.removeAttribute('data-theme');
   document.documentElement.removeAttribute('data-palette');
   document.documentElement.removeAttribute('data-theme-switching');
+  document.documentElement.removeAttribute('data-theme-reveal');
+  Reflect.deleteProperty(document, 'startViewTransition');
 });
 
 test('stored_mode_keeps_working_and_defaults_to_standard', async () => {
@@ -160,4 +162,62 @@ test('prepaint_script_knows_every_palette_and_the_same_default', () => {
   expect(prepaint({})).toEqual({ palette: DEFAULT_PALETTE, theme: 'dark' });
   expect(prepaint({ 'canterlot.palette': 'unknown' }).palette).toBe(DEFAULT_PALETTE);
   for (const { key } of PALETTES) expect(prepaint({ 'canterlot.palette': key, 'canterlot.theme': 'light' })).toEqual({ palette: key, theme: 'light' });
+});
+
+function fakeTransition() {
+  const calls: (() => void)[] = [];
+  const start = vi.fn((update: () => void) => {
+    calls.push(update);
+    update();
+    return { ready: Promise.resolve(), finished: Promise.resolve(), updateCallbackDone: Promise.resolve(), skipTransition: vi.fn() };
+  });
+  Object.defineProperty(document, 'startViewTransition', { value: start, configurable: true, writable: true });
+  return start;
+}
+
+test('owner_choice_reveals_through_a_view_transition', async () => {
+  setup();
+  const { theme, release } = await load();
+  const start = fakeTransition();
+  const animate = vi.fn();
+  document.documentElement.animate = animate as unknown as typeof document.documentElement.animate;
+  theme.setPalette('forest');
+  expect(start).toHaveBeenCalledTimes(1);
+  expect(document.documentElement.dataset.palette).toBe('forest');
+  await Promise.resolve(); await Promise.resolve();
+  expect(animate).toHaveBeenCalledTimes(1);
+  expect(animate.mock.calls[0]![1]).toMatchObject({ pseudoElement: '::view-transition-new(root)' });
+  theme.toggle();
+  expect(start).toHaveBeenCalledTimes(2);
+  expect(document.documentElement.dataset.theme).toBe('light');
+  release();
+});
+
+test('reduced_motion_motion_off_and_sync_switch_instantly', async () => {
+  setup();
+  const { theme, release } = await load();
+  const start = fakeTransition();
+  const reduced = (window.matchMedia('(prefers-reduced-motion: reduce)'), media.get('(prefers-reduced-motion: reduce)')!);
+  reduced.matches = true;
+  theme.setPalette('sepia');
+  expect(document.documentElement.dataset.palette).toBe('sepia');
+  reduced.matches = false;
+  document.documentElement.style.setProperty('--motion-scale', '0');
+  theme.setPalette('nord');
+  expect(document.documentElement.dataset.palette).toBe('nord');
+  document.documentElement.style.removeProperty('--motion-scale');
+  window.dispatchEvent(new StorageEvent('storage', { key: 'canterlot.palette', newValue: 'lavender' }));
+  expect(document.documentElement.dataset.palette).toBe('lavender');
+  expect(start).not.toHaveBeenCalled();
+  release();
+});
+
+test('unchanged_choice_does_not_start_a_transition', async () => {
+  setup();
+  const { theme, release } = await load();
+  const start = fakeTransition();
+  theme.setPalette('standard');
+  theme.set('dark');
+  expect(start).not.toHaveBeenCalled();
+  release();
 });
