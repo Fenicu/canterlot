@@ -36,6 +36,11 @@ test('limits_page_puts_current_first_and_draws_one_weekly_chart_per_provider', a
   // Приблизительность сказана один раз заголовком «≈» и примечанием, а не в каждой строке.
   await expect(main.getByText('приблизительно', { exact: true })).toHaveCount(0);
   const usage = main.getByRole('table', { name: 'Сегодня по сессиям' });
+  // Провайдер без недельного окна всё равно виден, но вместо выдуманного «≈ 0%» стоит прочерк.
+  const antigravity = usage.locator('tbody tr').filter({ hasText: 'Antigravity' });
+  await expect(antigravity).toHaveCount(1);
+  await expect(antigravity.locator('td').nth(2)).toHaveText('—');
+  await expect(usage.locator('tbody tr').last().locator('td').nth(2)).toHaveText('—');
   // Числа токенов не рвутся посреди разрядов, а ссылка на сессию — полноценная цель нажатия.
   for (const count of await usage.locator('.count').all()) expect(await count.evaluate((node) => node.getClientRects().length)).toBe(1);
   await expect(usage.locator('.count').first()).toHaveText(/^вх\. [\d ]+$/);

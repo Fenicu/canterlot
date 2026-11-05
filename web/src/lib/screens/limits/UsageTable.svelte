@@ -7,7 +7,7 @@
 <h2>Сегодня по сессиям</h2>
 {#if rows.length}
   <table aria-label="Сегодня по сессиям"><thead><tr><th>Сессия / модель</th><th>Токены</th><th>≈ доля недели</th></tr></thead><tbody>
-    {#each rows as row (row.id)}<tr><td><a href={resolve('/c/[id]', { id: row.conversationId })}>{row.title}</a><small>{row.detail}</small>{#if row.overlapped}<small>Запуски пересекались</small>{/if}</td><td><span class="count">вх. {fmt.tokens(row.input)}</span><span class="count">вых. {fmt.tokens(row.output)}</span></td><td><span class="count">{fmt.pctApprox(row.delta)}</span></td></tr>{/each}
+    {#each rows as row (row.id)}<tr><td><a href={resolve('/c/[id]', { id: row.conversationId })}>{row.title}</a><small>{row.detail}</small>{#if row.overlapped}<small>Запуски пересекались</small>{/if}</td><td><span class="count">вх. {fmt.tokens(row.input)}</span><span class="count">вых. {fmt.tokens(row.output)}</span></td><td><span class="count">{row.weekly ? fmt.pctApprox(row.delta) : '—'}</span></td></tr>{/each}
   </tbody></table>
 {:else}<p class="note">Сегодня завершённых запусков ещё нет</p>{/if}
 <p class="note">Доли по сессиям приблизительные: по изменению квоты во время работы. Кэш включён во входные токены.</p>

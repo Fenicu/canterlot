@@ -78,18 +78,36 @@ export function limitsSubtitle(providers: { provider: string }[]): string {
   if (names.length <= 1) return names[0] ?? '';
   return `${names.slice(0, -1).join(', ')} и ${names.at(-1)}`;
 }
-export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<string, { title: string }>) {
-  return usage.filter(row => row.day === day).sort((a, b) => b.weekly_delta_permille - a.weekly_delta_permille).map(row => ({
-    id: `${row.provider}:${row.conversation_id}:${row.agent}:${row.model}`,
-    conversationId: row.conversation_id,
-    title: sessions.get(row.conversation_id)?.title ?? `Сессия ${row.conversation_id.slice(0, 8)}`,
-    detail: `${row.agent === 'main' ? providerLabel(row.provider) : 'Субагент'} · ${row.model}`,
-    input: row.input_tokens + row.cache_read_tokens + row.cache_write_tokens,
-    output: row.output_tokens, delta: row.weekly_delta_permille,
-    // Квота измеряется за время работы, а не по каждому отдельному токену.
-    approximate: true,
-    overlapped: row.overlapped_runs > 0
-  }));
+/** Провайдеры, у которых в текущем снимке есть недельное окно. */
+export function providersWithWeekly(providers: ProviderLimits[]): ReadonlySet<string> {
+  return new Set(providers.filter(row => row.weekly).map(row => row.provider));
+}
+
+export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<string, { title: string }>, weekly: ReadonlySet<string>) {
+  return usage
+    .filter(row => row.day === day)
+    .map(row => {
+      const input = row.input_tokens + row.cache_read_tokens + row.cache_write_tokens;
+      return {
+        id: `${row.provider}:${row.conversation_id}:${row.agent}:${row.model}`,
+        conversationId: row.conversation_id,
+        title: sessions.get(row.conversation_id)?.title ?? `Сессия ${row.conversation_id.slice(0, 8)}`,
+        detail: `${row.agent === 'main' ? providerLabel(row.provider) : 'Субагент'} · ${row.model}`,
+        input,
+        output: row.output_tokens, delta: row.weekly_delta_permille,
+        // Без недельного окна долю показать нечем: «≈ 0%» читалось бы как настоящее измерение.
+        weekly: weekly.has(row.provider),
+        tokens: input + row.output_tokens,
+        // Квота измеряется за время работы, а не по каждому отдельному токену.
+        approximate: true,
+        overlapped: row.overlapped_runs > 0
+      };
+    })
+    .sort((a, b) => {
+      if (a.weekly !== b.weekly) return a.weekly ? -1 : 1;
+      if (a.weekly && a.delta !== b.delta) return b.delta - a.delta;
+      return b.tokens - a.tokens;
+    });
 }
 
 type Speed = components['schemas']['ModelSpeedSummary'];

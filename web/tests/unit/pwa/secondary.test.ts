@@ -27,11 +27,11 @@ describe('Task 9b', () => {
     expect(model[0]?.days[1]).toMatchObject({ value: 4, text: '4%' });
   });
   it('usage_table_orders_by_weekly_delta_and_marks_estimates_and_agent_rows', () => {
-    const rows = usageRows([usage({ weekly_delta_permille: 2, agent: 'agent-1', model: 'haiku', overlapped_runs: 1 }), usage({ weekly_delta_permille: 32 }), usage({ day: '2026-10-28' })], '2026-10-29', new Map([['abcdef12-0000', { title: 'Поток' }]]));
+    const rows = usageRows([usage({ weekly_delta_permille: 2, agent: 'agent-1', model: 'haiku', overlapped_runs: 1 }), usage({ weekly_delta_permille: 32 }), usage({ day: '2026-10-28' })], '2026-10-29', new Map([['abcdef12-0000', { title: 'Поток' }]]), new Set(['claude']));
     expect(rows.map(r => r.delta)).toEqual([32, 2]);
     expect(rows[0]).toMatchObject({ title: 'Поток', input: 150, approximate: true });
     expect(rows[1]).toMatchObject({ detail: 'Субагент · haiku', approximate: true });
-    expect(usageRows([usage({})], '2026-10-29', new Map())[0]?.title).toBe('Сессия abcdef12');
+    expect(usageRows([usage({})], '2026-10-29', new Map(), new Set(['claude']))[0]?.title).toBe('Сессия abcdef12');
   });
   it('share_picker_attaches_files_and_appends_text_and_url_to_the_draft', async () => {
     const file = new File(['payload'], 'notes.txt');

@@ -15,7 +15,7 @@
   import UsageTable from './UsageTable.svelte';
   import SpeedTable from './SpeedTable.svelte';
   import Button from '#lib/ui/Button.svelte';
-  import { limitsSubtitle, sevenDays, usageRows, historyRange, speedRows, currentBlocks, historyCharts } from './model.js';
+  import { limitsSubtitle, sevenDays, usageRows, historyRange, speedRows, currentBlocks, historyCharts, providersWithWeekly } from './model.js';
   import '../secondary.css';
   let runtime = $state<Runtime | null>(null);
   let series = $state<components['schemas']['ProviderSeries'][]>([]);
@@ -24,7 +24,8 @@
   let days = $state<string[]>([]); let zone = $state(''); let error = $state(''); let loading = $state(true);
   const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
   let thresholds = $state({ stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 });
-  const rows = $derived(usageRows(usage, days.at(-1) ?? '', runtime?.list.items ?? new Map()));
+  const weekly = $derived(providersWithWeekly(runtime?.list.limits ?? []));
+  const rows = $derived(usageRows(usage, days.at(-1) ?? '', runtime?.list.items ?? new Map(), weekly));
   const subtitle = $derived(limitsSubtitle(runtime?.list.limits ?? []));
   const blocks = $derived(currentBlocks(runtime?.list.limits ?? [], now, thresholds));
   const charts = $derived(historyCharts(series, days, zone));
@@ -35,9 +36,9 @@
       runtime = rt; thresholds = cfg.limit_thresholds;
       zone = Intl.DateTimeFormat().resolvedOptions().timeZone; days = sevenDays(new Date(clock.serverNow()));
       const range = historyRange(new Date(clock.serverNow()));
-      // История и скорость — по всем провайдерам; расход по сессиям остаётся у Claude и Codex.
+      // История, расход и скорость — по всем провайдерам.
       const replies = await Promise.all(['claude', 'codex', 'opencode', 'antigravity'].map(provider => limitsHistory({ provider, ...range, tz: zone })));
-      series = replies.flatMap(r => r.data.series); usage = replies.slice(0, 2).flatMap(r => r.data.usage);
+      series = replies.flatMap(r => r.data.series); usage = replies.flatMap(r => r.data.usage);
       speed = replies.flatMap(r => r.data.speed ?? []);
     } catch (err) { error = err instanceof ApiError ? `История недоступна: ${err.message}` : 'История недоступна: нет связи с хабом'; }
     finally { loading = false; }

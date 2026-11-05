@@ -501,78 +501,52 @@ test.describe('скриншоты README для телефона', () => {
           period: { runs: 19, tokens_per_second: 126.4, first_token_ms: 800 }
         }]
       }[provider] ?? [];
-      if (provider === 'opencode') {
-        await route.fulfill({ json: { series: [], usage: [], speed } });
-        return;
-      }
-      const series = provider === 'claude'
-        ? [{
-            provider,
-            five_hour: days.map((day, index) => ({
-              observed_at: day.toISOString(),
-              used_permille: 520 + index * 40,
-              used_pct: (520 + index * 40) / 10
-            })),
-            weekly: days.map((day, index) => ({
-              observed_at: day.toISOString(),
-              used_permille: 710 + index * 22,
-              used_pct: (710 + index * 22) / 10
-            }))
-          }]
-        : [{
-            provider,
-            five_hour: [],
-            weekly: days.map((day, index) => {
-              // У Antigravity неделя сбросилась посреди периода: столбики снова высокие.
-              const used = provider === 'antigravity' ? [620, 780, 910, 40, 210, 350, 470][index]! : 310 + index * 18;
-              return { observed_at: day.toISOString(), used_permille: used, used_pct: used / 10 };
-            })
-          }];
-      const usage = provider === 'claude'
-        ? [
-            {
-              day: dayKey(days.at(-1)!),
-              conversation_id: ids.themes,
+      const series = provider === 'opencode'
+        ? []
+        : provider === 'claude'
+          ? [{
               provider,
-              agent: 'main',
-              model: 'opus-5.5',
-              input_tokens: 126_000,
-              output_tokens: 8_400,
-              cache_read_tokens: 0,
-              cache_write_tokens: 2_000,
-              weekly_delta_permille: 32,
-              runs: 3,
-              overlapped_runs: 0
-            },
-            {
-              day: dayKey(days.at(-1)!),
-              conversation_id: ids.pinned,
+              five_hour: days.map((day, index) => ({
+                observed_at: day.toISOString(),
+                used_permille: 520 + index * 40,
+                used_pct: (520 + index * 40) / 10
+              })),
+              weekly: days.map((day, index) => ({
+                observed_at: day.toISOString(),
+                used_permille: 710 + index * 22,
+                used_pct: (710 + index * 22) / 10
+              }))
+            }]
+          : [{
               provider,
-              agent: 'agent-1',
-              model: 'haiku',
-              input_tokens: 18_000,
-              output_tokens: 1_200,
-              cache_read_tokens: 0,
-              cache_write_tokens: 0,
-              weekly_delta_permille: 2,
-              runs: 1,
-              overlapped_runs: 1
-            }
-          ]
-        : [{
-            day: dayKey(days.at(-1)!),
-            conversation_id: ids.adapter,
-            provider,
-            agent: 'main',
-            model: 'gpt-6.1-sol',
-            input_tokens: 98_000,
-            output_tokens: 6_700,
-            cache_read_tokens: 0,
-            cache_write_tokens: 1_400,
-            weekly_delta_permille: 18,
-            runs: 2,
-            overlapped_runs: 0
-          }];
+              five_hour: [],
+              weekly: days.map((day, index) => {
+                // У Antigravity неделя сбросилась посреди периода: столбики снова высокие.
+                const used = provider === 'antigravity' ? [620, 780, 910, 40, 210, 350, 470][index]! : 310 + index * 18;
+                return { observed_at: day.toISOString(), used_permille: used, used_pct: used / 10 };
+              })
+            }];
+      const usageRow = (patch: Record<string, unknown>) => ({
+        day: dayKey(days.at(-1)!),
+        provider,
+        agent: 'main',
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        runs: 1,
+        overlapped_runs: 0,
+        ...patch
+      });
+      const usage = {
+        claude: [
+          usageRow({ conversation_id: ids.themes, model: 'opus-5.5', input_tokens: 126_000, output_tokens: 8_400, cache_write_tokens: 2_000, weekly_delta_permille: 32, runs: 3 }),
+          usageRow({ conversation_id: ids.pinned, agent: 'agent-1', model: 'haiku', input_tokens: 18_000, output_tokens: 1_200, weekly_delta_permille: 2, overlapped_runs: 1 })
+        ],
+        codex: [usageRow({ conversation_id: ids.adapter, model: 'gpt-6.1-sol', input_tokens: 98_000, output_tokens: 6_700, cache_write_tokens: 1_400, weekly_delta_permille: 18, runs: 2 })],
+        opencode: [usageRow({ conversation_id: ids.themes, model: 'deepseek', input_tokens: 84_000, output_tokens: 5_200, cache_write_tokens: 1_800, weekly_delta_permille: 12, runs: 2 })],
+        antigravity: [usageRow({ conversation_id: ids.adapter, model: 'gemini-3-pro', input_tokens: 54_000, output_tokens: 3_100, cache_write_tokens: 900, weekly_delta_permille: 8 })]
+      }[provider] ?? [];
       await route.fulfill({ json: { series, usage, speed } });
     });
     await page.goto('/limits');
@@ -580,6 +554,11 @@ test.describe('скриншоты README для телефона', () => {
     await expect(page.getByRole('heading', { name: 'История лимитов' })).toBeVisible();
     await expect(page.getByRole('table', { name: 'Скорость моделей' })).toBeVisible();
     await expect(page.getByRole('table', { name: 'Скорость моделей' })).toContainText('deepseek');
+    // Расход по сессиям показывает все четыре провайдера, а не только Claude и Codex.
+    const usage = page.getByRole('table', { name: 'Сегодня по сессиям' });
+    await expect(usage.locator('tbody tr')).toHaveCount(5);
+    await expect(usage.locator('tbody tr').filter({ hasText: 'OpenCode · deepseek' })).toHaveCount(1);
+    await expect(usage.locator('tbody tr').filter({ hasText: 'Antigravity · gemini-3-pro' })).toHaveCount(1);
     // Прокручиваем весь экран истории: в кадр попадают график, текущие лимиты, расход и скорость.
     await page.setViewportSize({ width: 390, height: Math.max(844, await page.locator('.secondary-body').evaluate((node) => node.scrollHeight + 120)) });
     await page.locator('.secondary-body').evaluate((node) => { node.scrollTop = 0; });

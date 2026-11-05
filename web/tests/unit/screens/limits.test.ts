@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { limitsSubtitle, speedRows } from "#lib/screens/limits/model.js";
+import { limitsSubtitle, speedRows, usageRows } from "#lib/screens/limits/model.js";
+import type { components } from "#lib/api/generated/openapi.js";
+
+type Usage = components["schemas"]["UsageDay"];
+const usage = (patch: Partial<Usage>): Usage => ({
+  day: "2026-10-29",
+  conversation_id: "abcdef12-0000",
+  provider: "claude",
+  agent: "main",
+  model: "opus",
+  input_tokens: 100,
+  output_tokens: 10,
+  cache_read_tokens: 20,
+  cache_write_tokens: 30,
+  weekly_delta_permille: 20,
+  overlapped_runs: 0,
+  runs: 1,
+  ...patch,
+});
 
 describe("screens/limits", () => {
   it("subtitle_names_every_provider_the_page_shows", () => {
@@ -41,6 +59,19 @@ describe("screens/limits", () => {
     expect(rows[0]?.today).toEqual({ speed: null, firstToken: null });
     expect(rows[0]?.period).toEqual({ speed: "1 240 ток/с", firstToken: "старт 0,4 с" });
     expect(rows[1]?.provider).toBe("Claude");
+  });
+
+  it("usage_rows_put_providers_without_a_weekly_window_after_rows_with_a_number", () => {
+    const rows = usageRows([
+      usage({ provider: "opencode", model: "free-large", weekly_delta_permille: 50, input_tokens: 50_000, output_tokens: 5_000 }),
+      usage({ provider: "claude", model: "opus", weekly_delta_permille: 10, input_tokens: 1_000, output_tokens: 100 }),
+      usage({ provider: "antigravity", model: "gemini", weekly_delta_permille: 2, input_tokens: 2_000, output_tokens: 200 }),
+      usage({ provider: "opencode", model: "free-small", weekly_delta_permille: 1, input_tokens: 900, output_tokens: 100 }),
+    ], "2026-10-29", new Map(), new Set(["claude", "antigravity"]));
+
+    expect(rows.map((row) => row.detail.split(" · ").at(-1))).toEqual(["opus", "gemini", "free-large", "free-small"]);
+    expect(rows.map((row) => row.weekly)).toEqual([true, true, false, false]);
+    expect(rows.map((row) => row.delta)).toEqual([10, 2, 50, 1]);
   });
 });
 
