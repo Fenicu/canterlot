@@ -4,7 +4,7 @@
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { loadConfig } from '#lib/api/config.js';
-  import { DEFAULT_LIMIT_THRESHOLDS } from '#lib/stores/limits.js';
+  import { limitThresholds } from '#lib/stores/limitThresholds.svelte.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { browserRuntime } from '#lib/app/browser.js';
@@ -105,7 +105,7 @@
       runtime = value;
       const fallback = {
         defaults: { crunch_resume_text: 'продолжи с места остановки' },
-        limit_thresholds: DEFAULT_LIMIT_THRESHOLDS
+        limit_thresholds: limitThresholds
       };
       model = new NewSessionModel(value.machines, (config ?? fallback) as never, value.journal);
       resume = model.resumeText;

@@ -87,3 +87,37 @@ test('limit_settings_fit_a_narrow_phone', async ({ page }) => {
   await expect(section.getByRole('button', { name: 'Сохранить' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test('desktop_strip_recolors_without_reload_after_a_threshold_change', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'desktop keeps the session list mounted beside settings');
+  const { api } = await bootSecondary(page, '/settings', null, (api) => {
+    const claude = api.limits.find((item) => item.provider === 'claude')!;
+    claude.weekly = {
+      used_permille: 750,
+      resets_at: new Date(Date.now() + 86_400_000).toISOString(),
+      observed_at: new Date().toISOString()
+    };
+    claude.weekly_reserve_active = false;
+  });
+  const strip = page.locator('aside[data-pane="list"] .limits').first();
+  await expect(strip).toBeVisible({ timeout: 15_000 });
+  const week = strip.locator('.row').first().locator('.meter[data-window="week"] .pct');
+  await expect(week).toHaveAttribute('data-tone', 'normal');
+  await expect(week).toHaveText(/25%/);
+
+  const section = page.locator('section[data-limit-settings]');
+  await expect(section.getByRole('heading', { name: 'Предупреждения о лимитах' })).toBeVisible();
+  await section.getByLabel(WARN, { exact: true }).fill('40');
+  await section.getByLabel(DANGER, { exact: true }).fill('10');
+  await section.getByRole('button', { name: 'Сохранить' }).click();
+  await expect(section.getByRole('button', { name: 'Сохранить' })).toBeDisabled();
+
+  // Список сессий не перезагружался: цвет меняет общий реактивный порог.
+  await expect(week).toHaveAttribute('data-tone', 'warning');
+  await expect(week).toHaveText(/25%/);
+  expect(api.limitSettings).toEqual({
+    warn_remaining_pct: 40,
+    danger_remaining_pct: 10,
+    reserve_remaining_pct: 5
+  });
+});

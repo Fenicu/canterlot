@@ -23,8 +23,7 @@
 	import SessionSheet from '#lib/screens/sessions/SessionSheet.svelte';
 	import { childLive } from '#lib/screens/sessions/grouping.js';
 	import { pane } from '#lib/shell/pane.svelte.js';
-	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
-	import { DEFAULT_LIMIT_THRESHOLDS } from '#lib/stores/limits.js';
+	import type { ProviderLimits } from '#lib/stores/limits.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import Sheet from '#lib/ui/Sheet.svelte';
 	import type { Component } from 'svelte';
@@ -42,14 +41,12 @@
 		onInfo,
 		now = Date.now(),
 		providers = [],
-		thresholds = DEFAULT_LIMIT_THRESHOLDS,
 		machine = null
 	}: {
 		chat: ChatStore;
 		onInfo?: (runId: string) => void;
 		now?: number;
 		providers?: ProviderLimits[];
-		thresholds?: LimitThresholds;
 		machine?: MachineRecord | null;
 	} = $props();
 
@@ -136,10 +133,8 @@
 				const mid = detail.machine.id;
 				machine = runtime.machines.items.get(mid) ?? [...runtime.machines.items.values()][0] ?? null;
 			}
-			const cfg = await loadConfig();
-			if (cfg?.limit_thresholds) {
-				thresholds = cfg.limit_thresholds;
-			}
+			// Конфиг обновляет общий реактивный порог для полосы лимитов.
+			await loadConfig();
 		} catch {
 			// fallback
 		}
@@ -161,7 +156,6 @@
 	<ChatHeader
 		{chat}
 		providers={limitProviders}
-		{thresholds}
 		{now}
 		onOpenSheet={listRow ? () => (showSheet = true) : undefined}
 		onOpenSettings={() => {

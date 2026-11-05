@@ -16,8 +16,8 @@
 	import { stopSession, resumeSession, continueSessionQueue, resolveOwnerLost, controlBusy } from './controls';
 	import { RESOLVE_WARNING, runLabel } from './pauseCards';
 	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
-	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
-	import { DEFAULT_LIMIT_THRESHOLDS } from '#lib/stores/limits.js';
+	import type { ProviderLimits } from '#lib/stores/limits.js';
+	import { limitThresholds } from '#lib/stores/limitThresholds.svelte.js';
 	import { runningCount } from '#lib/stores/delegation.js';
 	import { liveNodes } from './delegationNodes';
 	import { isSubagentCall } from '#lib/timeline/rows.js';
@@ -39,7 +39,6 @@
 	let {
 		chat,
 		providers = [],
-		thresholds = DEFAULT_LIMIT_THRESHOLDS,
 		now = Date.now(),
 		onOpenSheet,
 		onOpenSettings,
@@ -52,7 +51,6 @@
 	}: {
 		chat: ChatStore;
 		providers?: ProviderLimits[];
-		thresholds?: LimitThresholds;
 		now?: number;
 		onOpenSheet?: () => void;
 		onOpenSettings?: () => void;
@@ -266,7 +264,7 @@
 			<LimitsStrip
 				providers={providers}
 				now={now}
-				thresholds={thresholds}
+				thresholds={limitThresholds}
 				prefer={provider}
 				compact
 			/>

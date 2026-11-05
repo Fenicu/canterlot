@@ -1,6 +1,7 @@
 import { getConfig } from "#lib/api/client.js";
 import type { components } from "#lib/api/generated/openapi.js";
 import { notifyIncompatible } from "#lib/pwa/update.js";
+import { setLimitThresholds } from "#lib/stores/limitThresholds.svelte.js";
 
 export type LimitsView = components["schemas"]["LimitsView"];
 export type ConfigView = components["schemas"]["ConfigView"];
@@ -28,6 +29,7 @@ export async function loadConfig(): Promise<ConfigView> {
   const response = await getConfig();
   limits = response.data.limits;
   config = response.data;
+  setLimitThresholds(response.data.limit_thresholds);
   if (response.data.schema_version !== 1) notifyIncompatible();
   return response.data;
 }
