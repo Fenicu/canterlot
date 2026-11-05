@@ -161,6 +161,7 @@ async fn handle(
                 limits: grpc.limits.clone(),
                 settle: grpc.settle,
                 alarms_enabled: grpc.alarms_enabled,
+                nudge_enabled: grpc.nudge_enabled,
                 dispatcher: grpc.dispatcher.clone(),
                 registry: grpc.registry.clone(),
                 shutdown: grpc.shutdown.clone(),

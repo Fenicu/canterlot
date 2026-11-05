@@ -110,8 +110,14 @@ pub struct SessionSummary {
     worktree: Option<(String, String)>,
     /// Взведённые будильники: сколько и когда ближайший. Заметки остаются у владельца.
     alarms: Option<(i64, DateTime<Utc>)>,
+    /// Автопинок: сколько толчков получила цель и последние сигналы.
+    nudges: Option<i64>,
+    nudge_exhausted: bool,
+    nudge_signals: Option<String>,
     detail: Detail,
     answer: Option<Answer>,
+    /// Ответ хода до толчка: маркер после толчка часто короче содержательного отчёта.
+    previous_answer: Option<Answer>,
 }
 
 impl fmt::Debug for SessionSummary {
@@ -379,6 +385,67 @@ pub async fn build_bounded(
     .bind(target_id)
     .fetch_one(&mut *conn)
     .await?;
+    let answer = answer.map(|(block_id, head, total)| Answer {
+        block_id,
+        head,
+        total_bytes: total.max(0) as usize,
+    });
+    // Автопинок: число толчков и последние сигналы видны и обычному итогу, и пачке.
+    let nudge_rule: Option<(i32, String)> =
+        sqlx::query_as("select total,state from nudge_rules where conversation_id=$1")
+            .bind(target_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let nudges = nudge_rule
+        .as_ref()
+        .map(|(total, _)| i64::from(*total))
+        .filter(|total| *total > 0);
+    let nudge_exhausted = nudge_rule
+        .as_ref()
+        .is_some_and(|(_, state)| state == "exhausted");
+    let nudge_signals: Option<String> = sqlx::query_scalar(
+        "select signals from nudge_events where conversation_id=$1
+         order by at desc,id desc limit 1",
+    )
+    .bind(target_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .and_then(|value: Value| {
+        serde_json::from_value::<crate::session_tools::nudge::Signals>(value).ok()
+    })
+    .map(|signals| signals.text())
+    .filter(|text| !text.is_empty());
+    // §4.4: после толчка ответ часто сводится к маркеру. Тогда показываем последний
+    // содержательный ответ до толчка в том же окне итога.
+    let previous_answer = match (&answer, nudges) {
+        (Some(latest), Some(_)) if latest.total_bytes < 512 => {
+            let commands: &[Uuid] = boundary
+                .map(|boundary| boundary.command_ids.as_slice())
+                .unwrap_or(run_ids.as_slice());
+            sqlx::query_as::<_, (Uuid, String, i64)>(
+                "select block_id,left(content,$5::int),octet_length(content)::bigint from blocks
+                 where conversation_id=$1 and kind='text' and parent_block_id is null
+                   and agent='main' and btrim(content) <> '' and block_id<>$2
+                   and octet_length(content)>=512
+                   and (input_command_id = any($3)
+                        or ($4::timestamptz is not null and created_at >= $4))
+                 order by created_seq desc,created_at desc limit 1",
+            )
+            .bind(target_id)
+            .bind(latest.block_id)
+            .bind(commands)
+            .bind(armed_at)
+            .bind(ANSWER_LIMIT as i32)
+            .fetch_optional(&mut *conn)
+            .await?
+            .map(|(block_id, head, total)| Answer {
+                block_id,
+                head,
+                total_bytes: total.max(0) as usize,
+            })
+        }
+        _ => None,
+    };
     let detail = detail(conn, target_id, state).await?;
     let worktree = worktree.and_then(|value| {
         if matches!(
@@ -412,12 +479,12 @@ pub async fn build_bounded(
         git,
         worktree,
         alarms: alarm_next.map(|next| (alarm_count, next)),
+        nudges,
+        nudge_exhausted,
+        nudge_signals,
         detail,
-        answer: answer.map(|(block_id, head, total)| Answer {
-            block_id,
-            head,
-            total_bytes: total.max(0) as usize,
-        }),
+        answer,
+        previous_answer,
     }))
 }
 
@@ -701,6 +768,21 @@ pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
             next.format("%Y-%m-%d %H:%M UTC")
         );
     }
+    if let Some(nudges) = summary.nudges {
+        let noun = if nudges == 1 { "nudge" } else { "nudges" };
+        let signals = summary
+            .nudge_signals
+            .as_deref()
+            .map_or(String::new(), |text| format!("; last signals: {text}"));
+        if summary.nudge_exhausted {
+            let _ = writeln!(
+                head,
+                "Auto-nudge gave up after {nudges} {noun} without progress{signals}."
+            );
+        } else {
+            let _ = writeln!(head, "Auto-nudge: {nudges} {noun}{signals}.");
+        }
+    }
     head.push_str(&git_section(
         summary.git.as_ref(),
         summary.worktree.as_ref(),
@@ -736,6 +818,21 @@ pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
                 let _ = writeln!(out, "{label}:");
                 out.push_str(kept.trim_end());
             }
+            out.push('\n');
+        }
+    }
+    if let Some(previous) = &summary.previous_answer {
+        let budget = limit.saturating_sub(out.len() + tail.len() + 200);
+        if budget > 200 {
+            let kept = truncate_at_boundary(&previous.head, budget);
+            let _ = writeln!(
+                out,
+                "Answer before the nudges ({kept_bytes} of {} bytes; session_inspect with block_id {} and offset {kept_bytes} reads on):",
+                previous.total_bytes,
+                previous.block_id,
+                kept_bytes = kept.len()
+            );
+            out.push_str(kept.trim_end());
             out.push('\n');
         }
     }
@@ -776,6 +873,8 @@ impl SessionSummary {
                     .collect()
             }),
             changed_files: self.git.as_ref().map(|git| git.files.len() as i64),
+            nudges: self.nudges,
+            nudge_exhausted: self.nudge_exhausted.then_some(true),
             ..HubEvent::default()
         };
         if let Some(answer) = &self.answer {

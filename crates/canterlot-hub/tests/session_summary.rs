@@ -1015,9 +1015,19 @@ async fn deliver_event(
         }),
         attempts: 0,
     };
-    jobs::run_in_tx(&mut tx, &job, Utc::now(), Uuid::now_v7(), None)
-        .await
-        .unwrap();
+    jobs::run_in_tx(
+        &mut tx,
+        &job,
+        Utc::now(),
+        Uuid::now_v7(),
+        None,
+        &Default::default(),
+        &canterlot_hub::activity::Thresholds::from(
+            &canterlot_hub::config::ActivityConfig::default(),
+        ),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     let (content, origin): (Value, Option<Value>) = sqlx::query_as(
         "select content,origin from inputs where conversation_id=$1 order by input_seq desc limit 1",

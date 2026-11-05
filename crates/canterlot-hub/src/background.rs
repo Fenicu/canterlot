@@ -13,6 +13,8 @@ pub struct BackgroundDeps {
     pub activity: crate::config::ActivityConfig,
     pub machines: crate::config::MachinesConfig,
     pub session_tools: crate::config::SessionToolsConfig,
+    /// Выключатель `[orchestrator.nudge]`: шлюз автопинка в проекторе цели.
+    pub nudge_enabled: bool,
     pub multi_process: bool,
     /// Сборщик вложений; `None` у служебных стендов без хранилища.
     pub attachments: Option<(
@@ -43,6 +45,7 @@ impl Background {
             activity,
             machines,
             session_tools,
+            nudge_enabled,
             multi_process,
             attachments,
         } = deps;
@@ -55,6 +58,7 @@ impl Background {
                     bus.clone(),
                     activity,
                     machines.clone(),
+                    nudge_enabled,
                     stopped.clone(),
                 )),
             ),

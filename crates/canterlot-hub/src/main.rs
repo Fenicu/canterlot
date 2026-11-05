@@ -249,6 +249,11 @@ async fn serve(
     )
     .with_limits(registry.clone(), limits.clone())
     .with_session_tools(session_tools.clone())
+    .with_settle(canterlot_hub::session_tools::settle::SettleConfig {
+        nudge_enabled: orchestrator.nudge.enabled,
+        ..(&activity).into()
+    })
+    .with_thresholds(canterlot_hub::activity::Thresholds::from(&activity))
     .with_blobs(blobs.clone());
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
@@ -273,6 +278,7 @@ async fn serve(
         activity: activity.clone(),
         machines: machines.clone(),
         session_tools: session_tools.clone(),
+        nudge_enabled: orchestrator.nudge.enabled,
         multi_process: http_parts
             .as_ref()
             .is_some_and(|(config, _, _)| config.multi_process),
@@ -316,6 +322,7 @@ async fn serve(
             proxy_secret,
             limits,
             activity,
+            nudge_enabled: orchestrator.nudge.enabled,
             machines,
             attachments,
             blobs,

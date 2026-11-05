@@ -870,6 +870,20 @@ pub async fn evaluate_session_in_tx(
     }
     let fingerprint =
         settle::fingerprint(state, facts.since, facts.last_turn_at, facts.phase_since);
+    // Общий шлюз завершения: удержанный автопинком `idle` не засчитывает условие
+    // будильника и не отменяет сторож до исчерпания правила или маркера.
+    if completion::gate_in_tx(
+        conn,
+        target_id,
+        state,
+        &fingerprint,
+        now,
+        config.nudge_enabled,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
     // Цель взведённых будильников входит в обход проектора (`activity::sweep`), поэтому
     // пропущенная под чужой блокировкой строка будет оценена на следующем тике. Терять
     // здесь нечего: в отличие от удаления цели, событие не одноразовое.

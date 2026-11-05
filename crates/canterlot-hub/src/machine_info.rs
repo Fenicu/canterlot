@@ -309,6 +309,42 @@ pub(crate) async fn apply_metrics_with_registry(
     if stored == 0 {
         return Ok(ignored("stale_sample"));
     }
+    // Занятость после хода считается по настоящему id исполнения: две выборки подряд
+    // выше порога; пропуск в отчёте сбрасывает серию.
+    for e in &m.executions {
+        let Ok(id) = Uuid::parse_str(&e.execution_id) else {
+            continue;
+        };
+        let busy = e.alive && e.cpu_permille >= 150;
+        if busy {
+            sqlx::query(
+                "update executions set cpu_busy_streak=cpu_busy_streak+1,
+                     cpu_busy_first_at=coalesce(cpu_busy_first_at,$2)
+                 where id=$1",
+            )
+            .bind(id)
+            .bind(observed_at)
+            .execute(&mut *conn)
+            .await?;
+        } else {
+            sqlx::query(
+                "update executions set cpu_busy_streak=0,cpu_busy_first_at=null where id=$1",
+            )
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    sqlx::query(
+        "update executions e set cpu_busy_streak=0,cpu_busy_first_at=null
+         from conversations c
+         where c.id=e.conversation_id and c.machine_id=$1 and e.id<>all($2)
+           and (e.cpu_busy_streak<>0 or e.cpu_busy_first_at is not null)",
+    )
+    .bind(machine_id)
+    .bind(&ids)
+    .execute(&mut *conn)
+    .await?;
     emit(&mut *conn,owner_id,"machine_metrics",json!({"machine_id":machine_id,"machine_time_ms":m.machine_time_ms,"cpu_cores":m.cpu_cores,"cpu_permille":m.cpu_permille,"mem_total_bytes":m.mem_total_bytes,"mem_available_bytes":m.mem_available_bytes,"load1_centi":m.load1_centi,"load5_centi":m.load5_centi,"load15_centi":m.load15_centi,"disks":disks,"executions":executions}),correlation_id).await?;
     // Сторож машины проверяет взведённые будильники этой машины на каждом свежем отчёте.
     // Выборка могла быть снята раньше приёма: оба условия сверяются с её временем.

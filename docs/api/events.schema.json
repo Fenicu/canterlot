@@ -91,6 +91,9 @@
       "$ref": "#/$defs/alarm_changed"
     },
     {
+      "$ref": "#/$defs/nudge_changed"
+    },
+    {
       "$ref": "#/$defs/limits_changed"
     },
     {
@@ -3869,6 +3872,60 @@
       ],
       "additionalProperties": false
     },
+    "nudge_changed": {
+      "type": "object",
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/Uuid" },
+        "scope": { "$ref": "#/$defs/Scope" },
+        "scope_seq": { "$ref": "#/$defs/Seq" },
+        "scope_seq_from": { "$ref": "#/$defs/Seq" },
+        "committed_at": { "$ref": "#/$defs/Time" },
+        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "conversation_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "execution_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "correlation_id": { "$ref": "#/$defs/Uuid" },
+        "kind": { "const": "nudge_changed" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "session_id": { "$ref": "#/$defs/Uuid" },
+            "enabled": { "type": "boolean" },
+            "state": { "type": "string" },
+            "idle_minutes": { "type": "integer" },
+            "background_minutes": { "type": "integer" },
+            "max_consecutive": { "type": "integer" },
+            "max_total": { "type": "integer" },
+            "done_markers": { "type": "array", "items": { "type": "string" } },
+            "context_warn_percent": {
+              "anyOf": [ { "type": "integer" }, { "type": "null" } ]
+            },
+            "set_by": { "type": "string" },
+            "set_by_session": {
+              "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+            },
+            "notify_session_id": {
+              "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+            },
+            "consecutive": { "type": "integer" },
+            "total": { "type": "integer" },
+            "held": { "type": "boolean" },
+            "detail": { "type": "string" }
+          }
+        }
+      },
+      "required": [
+        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
+        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
+        "kind", "payload"
+      ],
+      "additionalProperties": false
+    },
     "limits_changed": {
       "type": "object",
       "properties": {
@@ -5478,6 +5535,9 @@
                   "$ref": "#/$defs/alarm_changed"
                 },
                 {
+                  "$ref": "#/$defs/nudge_changed"
+                },
+                {
                   "$ref": "#/$defs/limits_changed"
                 },
                 {
@@ -6262,6 +6322,15 @@
         },
         "detail": {
           "type": "string"
+        },
+        "nudges": {
+          "type": "integer"
+        },
+        "nudge_exhausted": {
+          "type": "boolean"
+        },
+        "asks_in_text": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -6276,7 +6345,9 @@
           "enum": [
             "message",
             "spawn",
-            "event"
+            "event",
+            "alarm",
+            "nudge"
           ]
         },
         "from": {

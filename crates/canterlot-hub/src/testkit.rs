@@ -96,6 +96,7 @@ pub async fn test_app_deps(
         proxy_secret,
         limits: Default::default(),
         activity: Default::default(),
+        nudge_enabled: true,
         machines: Default::default(),
         attachments,
         blobs,
@@ -292,6 +293,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         activity: activity.clone(),
         machines: machines.clone(),
         session_tools,
+        nudge_enabled: true,
         multi_process: http.as_ref().is_some_and(|config| config.multi_process),
         attachments: Some((blobs.clone(), attachments.clone())),
     });
@@ -314,6 +316,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
                 proxy_secret: secret,
                 limits,
                 activity,
+                nudge_enabled: true,
                 machines,
                 attachments,
                 blobs,

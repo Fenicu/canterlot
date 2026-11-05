@@ -608,6 +608,18 @@ async fn submit_attempt(
     if inserted == 0 {
         return Ok(Attempt::LostRace);
     }
+    // Ввод не от автопинка сбрасывает серию толчков и возвращает `exhausted` в наблюдение:
+    // оркестратор или владелец вмешался, отсчёт начинается заново.
+    if req
+        .origin
+        .as_ref()
+        .and_then(|origin| origin.get("kind"))
+        .and_then(Value::as_str)
+        != Some("nudge")
+    {
+        crate::session_tools::nudge::on_input_in_tx(conn, req.conversation_id, req.received_at)
+            .await?;
+    }
     // Ввод не от подписчика (будильник, событие о ребёнке, заметка хаба или сообщение
     // другой сессии) продолжает работу цели: подписку, закрытую её `idle`, надо открыть
     // снова, иначе родитель примет ожидающего делегата за закончившего. Ввод самого

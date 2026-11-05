@@ -1312,6 +1312,8 @@ export interface components {
             context?: components["schemas"]["ContextSnapshot"] | null;
             detail: components["schemas"]["ConversationDetail"];
             history: components["schemas"]["HistoryPage"];
+            nudge?: components["schemas"]["NudgeRuleView"] | null;
+            nudge_events: components["schemas"]["NudgeEventView"][];
             /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */
             open_requests: components["schemas"]["RequestView"][];
             queue: components["schemas"]["SnapshotQueueView"];
@@ -1659,6 +1661,8 @@ export interface components {
             answer_block_id?: string | null;
             /** Format: int64 */
             answer_bytes?: number | null;
+            /** @description Ответ кончается вопросом в тексте, а не карточкой. */
+            asks_in_text?: boolean | null;
             branch?: string | null;
             branch_kept?: boolean | null;
             /** Format: int64 */
@@ -1682,6 +1686,13 @@ export interface components {
             kind: string;
             /** Format: date-time */
             last_event_at?: string | null;
+            /** @description `true`: толчки кончились без маркера, итог отпущен правилом. */
+            nudge_exhausted?: boolean | null;
+            /**
+             * Format: int64
+             * @description Сколько автоматических толчков получила цель до этого итога.
+             */
+            nudges?: number | null;
             outcome?: string | null;
             phase?: string | null;
             process_alive?: boolean | null;
@@ -2008,6 +2019,44 @@ export interface components {
             sha256: string;
             /** Format: int64 */
             size: number;
+        };
+        /** @description Событие автопинка для `session_inspect` и PWA. */
+        NudgeEventView: {
+            at: string;
+            /** Format: int32 */
+            attempt: number;
+            /** Format: uuid */
+            id: string;
+            outcome: string;
+            signals: unknown;
+        };
+        /** @description Действующие значения правила: ответ `nudge_set` и снимок разговора. */
+        NudgeRuleView: {
+            /** Format: int32 */
+            background_minutes: number;
+            /** Format: int32 */
+            consecutive: number;
+            /** Format: int32 */
+            context_warn_percent?: number | null;
+            done_markers: string[];
+            enabled: boolean;
+            held: boolean;
+            /** Format: int32 */
+            idle_minutes: number;
+            /** Format: int32 */
+            max_consecutive: number;
+            /** Format: int32 */
+            max_total: number;
+            /** Format: uuid */
+            notify_session_id?: string | null;
+            /** Format: uuid */
+            session_id: string;
+            set_by: string;
+            /** Format: uuid */
+            set_by_session?: string | null;
+            state: string;
+            /** Format: int32 */
+            total: number;
         };
         OwnerFileContent: {
             content: string;
@@ -2386,6 +2435,8 @@ export interface components {
                 context?: components["schemas"]["ContextSnapshot"] | null;
                 detail: components["schemas"]["ConversationDetail"];
                 history: components["schemas"]["HistoryPage"];
+                nudge?: components["schemas"]["NudgeRuleView"] | null;
+                nudge_events: components["schemas"]["NudgeEventView"][];
                 /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */
                 open_requests: components["schemas"]["RequestView"][];
                 queue: components["schemas"]["SnapshotQueueView"];

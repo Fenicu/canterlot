@@ -20,6 +20,20 @@ pub fn is_completion(state: Settled) -> bool {
     }
 }
 
+/// Шлюз автопинка: при включённом правиле `idle` без маркера готовности не завершение,
+/// пока правило не исчерпано. Единственное место, где об этом спрашивают доставка
+/// подписки, пачки, будильники, сторож и сам толчок.
+pub async fn gate_in_tx(
+    conn: &mut sqlx::PgConnection,
+    target_id: uuid::Uuid,
+    state: Settled,
+    fingerprint: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    enabled: bool,
+) -> Result<bool, sqlx::Error> {
+    super::nudge::gate_in_tx(conn, target_id, state, fingerprint, now, enabled).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -45,6 +59,7 @@ mod tests {
     fn config() -> SettleConfig {
         SettleConfig {
             idle_quiet: Duration::from_secs(5),
+            nudge_enabled: true,
         }
     }
 

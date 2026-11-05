@@ -220,6 +220,20 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[Uuid::now_v7(), owner, conversation, Uuid::now_v7()],
     )
     .await;
+    exec(
+        pool,
+        "insert into nudge_rules(conversation_id,owner_id,set_by,set_by_conversation,notify_conversation_id)
+         values($1,$2,'agent',$1,$1)",
+        &[conversation, owner],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into nudge_events(id,conversation_id,owner_id,outcome,input_id,signals)
+         values($1,$2,$3,'nudged',$4,'{}')",
+        &[Uuid::now_v7(), conversation, owner, input],
+    )
+    .await;
     // Потомок и подписки в обе стороны: после удаления остаются потомок без родителя и ничего больше.
     let delegate = f.conversation().await;
     exec(
@@ -530,8 +544,10 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
         limits: Default::default(),
         settle: SettleConfig {
             idle_quiet: std::time::Duration::from_secs(5),
+            nudge_enabled: true,
         },
         alarms_enabled: true,
+        nudge_enabled: true,
         dispatcher: None,
         registry: canterlot_hub::session::Registry::new(Default::default()),
         shutdown: tokio_util::sync::CancellationToken::new(),

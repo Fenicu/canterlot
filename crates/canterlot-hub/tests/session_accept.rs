@@ -65,8 +65,10 @@ fn context(pool: &PgPool, registry: &Registry) -> ToolContext {
         limits: Default::default(),
         settle: SettleConfig {
             idle_quiet: std::time::Duration::from_secs(5),
+            nudge_enabled: true,
         },
         alarms_enabled: true,
+        nudge_enabled: true,
         dispatcher: None,
         registry: registry.clone(),
         shutdown: tokio_util::sync::CancellationToken::new(),

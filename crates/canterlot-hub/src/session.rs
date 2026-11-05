@@ -32,6 +32,7 @@ pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";
 pub const CAPABILITY_OWNER_INSTRUCTIONS_V1: &str = "owner_instructions_v1";
 pub const CAPABILITY_ALARMS_V1: &str = "alarms_v1";
+pub const CAPABILITY_NUDGE_V1: &str = "nudge_v1";
 
 /// Форма спрашивает по одному запросу с паузой на ввод, остальным ждать незачем.
 pub const MAX_SUGGESTS_PER_MACHINE: usize = 4;

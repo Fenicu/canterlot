@@ -55,8 +55,10 @@ impl Fx {
                 limits: Default::default(),
                 settle: SettleConfig {
                     idle_quiet: Duration::from_secs(5),
+                    nudge_enabled: true,
                 },
                 alarms_enabled: true,
+                nudge_enabled: true,
                 dispatcher: None,
                 shutdown: CancellationToken::new(),
                 registry: canterlot_hub::session::Registry::new(Default::default()),

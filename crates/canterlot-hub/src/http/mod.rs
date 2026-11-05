@@ -61,6 +61,8 @@ pub struct AppDeps {
     pub proxy_secret: Option<Vec<u8>>,
     pub limits: LimitsConfig,
     pub activity: ActivityConfig,
+    /// Выключатель `[orchestrator.nudge]`: обновление проекции при отметке прочитанного.
+    pub nudge_enabled: bool,
     pub machines: MachinesConfig,
     pub attachments: AttachmentsConfig,
     pub blobs: Arc<dyn BlobStore>,
@@ -79,6 +81,7 @@ pub struct AppState {
     pub proxy_secret: Option<Arc<Vec<u8>>>,
     pub limits: Arc<LimitsConfig>,
     pub activity: Arc<ActivityConfig>,
+    pub nudge_enabled: bool,
     pub machines: Arc<MachinesConfig>,
     pub attachments: Arc<AttachmentsConfig>,
     pub blobs: Arc<dyn BlobStore>,
@@ -106,6 +109,7 @@ impl AppState {
             proxy_secret: deps.proxy_secret.map(Arc::new),
             limits: Arc::new(deps.limits),
             activity: Arc::new(deps.activity),
+            nudge_enabled: deps.nudge_enabled,
             machines: Arc::new(deps.machines),
             upload_slots: Arc::new(tokio::sync::Semaphore::new(
                 deps.attachments.max_concurrent_uploads.max(1),

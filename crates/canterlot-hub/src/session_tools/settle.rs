@@ -67,12 +67,24 @@ pub struct SettleFacts {
 #[derive(Clone, Copy, Debug)]
 pub struct SettleConfig {
     pub idle_quiet: Duration,
+    /// Выключатель `[orchestrator.nudge]`: шлюз автопинка не удерживает итоги.
+    pub nudge_enabled: bool,
+}
+
+impl Default for SettleConfig {
+    fn default() -> Self {
+        Self {
+            idle_quiet: Duration::from_secs(5),
+            nudge_enabled: true,
+        }
+    }
 }
 
 impl From<&ActivityConfig> for SettleConfig {
     fn from(config: &ActivityConfig) -> Self {
         Self {
             idle_quiet: config.idle_quiet,
+            nudge_enabled: true,
         }
     }
 }
@@ -81,6 +93,7 @@ impl From<&Thresholds> for SettleConfig {
     fn from(thresholds: &Thresholds) -> Self {
         Self {
             idle_quiet: thresholds.idle_quiet,
+            nudge_enabled: true,
         }
     }
 }

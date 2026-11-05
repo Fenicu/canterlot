@@ -111,6 +111,7 @@ async fn projector(
         bus.clone(),
         config,
         MachinesConfig::default(),
+        true,
         rx,
     ));
     (stop, task, bus)

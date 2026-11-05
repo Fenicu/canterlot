@@ -57,8 +57,12 @@ impl Fx {
                 pool: pool.clone(),
                 config: Arc::new(config),
                 limits: Default::default(),
-                settle: SettleConfig { idle_quiet: QUIET },
+                settle: SettleConfig {
+                    idle_quiet: QUIET,
+                    nudge_enabled: true,
+                },
                 alarms_enabled: true,
+                nudge_enabled: true,
                 dispatcher: None,
                 registry: canterlot_hub::session::Registry::new(Default::default()),
                 shutdown: tokio_util::sync::CancellationToken::new(),

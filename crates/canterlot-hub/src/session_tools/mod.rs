@@ -12,6 +12,7 @@ pub mod completion;
 pub mod control;
 pub mod disk;
 pub mod jobs;
+pub mod nudge;
 pub mod origin;
 pub mod outage;
 pub mod read;
@@ -54,6 +55,8 @@ pub const TOOLS: &[&str] = &[
     "alarms.set",
     "alarms.cancel",
     "alarms.list",
+    "nudge.set",
+    "nudge.clear",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -222,6 +225,7 @@ pub struct ToolContext {
     pub limits: Arc<LimitsConfig>,
     pub settle: SettleConfig,
     pub alarms_enabled: bool,
+    pub nudge_enabled: bool,
     pub dispatcher: Option<Dispatcher>,
     pub registry: Registry,
     /// Останов хаба: долгие вызовы (`sessions.wait`) возвращаются, не дожидаясь срока.
@@ -260,6 +264,8 @@ pub async fn call(
         "alarms.set" => alarms::set(context, caller, arguments).await,
         "alarms.cancel" => alarms::cancel(context, caller, arguments).await,
         "alarms.list" => alarms::list(context, caller, arguments).await,
+        "nudge.set" => nudge::set(context, caller, arguments).await,
+        "nudge.clear" => nudge::clear(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }
