@@ -38,8 +38,12 @@ use opencode::{Fake, find};
 
 const WAIT: Duration = Duration::from_secs(60);
 
-async fn until(what: &str, mut condition: impl AsyncFnMut() -> bool) {
-    timeout(WAIT, async {
+async fn until(what: &str, condition: impl AsyncFnMut() -> bool) {
+    until_within(WAIT, what, condition).await;
+}
+
+async fn until_within(limit: Duration, what: &str, mut condition: impl AsyncFnMut() -> bool) {
+    timeout(limit, async {
         while !condition().await {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -139,10 +143,20 @@ struct Stack {
     owner: Uuid,
     conversation: Uuid,
     machine_id: Uuid,
+    state: watch::Receiver<SessionState>,
 }
 
 impl Stack {
     async fn start(pool: PgPool, script: Script) -> Self {
+        Self::start_with(pool, Fake::new(script), true, None).await
+    }
+
+    async fn start_with(
+        pool: PgPool,
+        fake: Fake,
+        wait_for_catalog: bool,
+        retry_delays: Option<Vec<Duration>>,
+    ) -> Self {
         let timers = HubTimers {
             dispatch_sweep: Duration::from_millis(20),
             ..Default::default()
@@ -159,7 +173,6 @@ impl Stack {
         fs::write(root.path().join("ca.pem"), &hub.pki.ca_pem).unwrap();
         let work = root.path().join("work");
         fs::create_dir(&work).unwrap();
-        let fake = Fake::new(script);
         let config: WorkerConfig = toml::from_str(&worker_toml(
             &Paths {
                 root: root.path(),
@@ -186,7 +199,10 @@ impl Stack {
         let store = WorkerStore::open(&config.data_dir).unwrap();
         let machine_id = config.machine_id;
         let runtime_dir = config.data_dir.join("runtime");
-        let worker = Worker::new(config, store).with_runtime_dir(runtime_dir);
+        let mut worker = Worker::new(config, store).with_runtime_dir(runtime_dir);
+        if let Some(delays) = retry_delays {
+            worker = worker.with_catalog_retry_delays(delays);
+        }
         let state = worker.state();
         let (stop, shutdown) = watch::channel(false);
         let join = tokio::spawn(worker.run(shutdown));
@@ -194,18 +210,20 @@ impl Stack {
             *state.borrow() == SessionState::Live && hub.registry.is_reconciled(machine_id)
         })
         .await;
-        until("harness in the catalog", async || {
-            sqlx::query_scalar::<_, i64>(
-                "select count(*) from machine_harnesses where machine_id = $1
-                 and harness = 'opencode' and provider = 'opencode'",
-            )
-            .bind(machine_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-                == 1
-        })
-        .await;
+        if wait_for_catalog {
+            until("harness in the catalog", async || {
+                sqlx::query_scalar::<_, i64>(
+                    "select count(*) from machine_harnesses where machine_id = $1
+                     and harness = 'opencode' and provider = 'opencode'",
+                )
+                .bind(machine_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                    == 1
+            })
+            .await;
+        }
         Self {
             pool,
             hub,
@@ -217,6 +235,7 @@ impl Stack {
             owner,
             conversation,
             machine_id,
+            state,
         }
     }
 
@@ -364,6 +383,60 @@ async fn worker_with_the_table_reports_the_harness_and_runs_a_turn(pool: PgPool)
     let requests = stack.fake.requests();
     let prompt = find(&requests, "POST", "/prompt").unwrap();
     assert_eq!(prompt["body"]["text"], "Скажи привет");
+    stack.close().await;
+}
+
+/// Сбой пробы на старте не убирает харнесс до перезапуска: повтор доносит каталог до хаба.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn failed_startup_probe_is_retried_and_updates_the_catalog(pool: PgPool) {
+    let script = Script::from_capture("start_stream", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models();
+    let stack = Stack::start_with(
+        pool.clone(),
+        Fake::failing_first(script),
+        false,
+        Some(vec![Duration::from_secs(1)]),
+    )
+    .await;
+
+    let harnesses = sqlx::query_scalar::<_, i64>(
+        "select count(*) from machine_harnesses where machine_id = $1 and harness = 'opencode'",
+    )
+    .bind(stack.machine_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(harnesses, 0);
+    assert_eq!(*stack.state.borrow(), SessionState::Live);
+
+    until_within(
+        Duration::from_secs(10),
+        "opencode catalog after retry",
+        async || {
+            sqlx::query_scalar::<_, i64>(
+                "select count(*) from machine_harnesses where machine_id = $1
+                 and harness = 'opencode' and provider = 'opencode'",
+            )
+            .bind(stack.machine_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+                == 1
+        },
+    )
+    .await;
+
+    assert_eq!(*stack.state.borrow(), SessionState::Live);
+    let reports: i64 =
+        sqlx::query_scalar("select count(*) from events where kind = 'machine_report_updated'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        reports >= 2,
+        "catalog update did not reach the hub: {reports}"
+    );
     stack.close().await;
 }
 
