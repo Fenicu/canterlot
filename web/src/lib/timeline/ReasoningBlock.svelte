@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { blockFold } from '#lib/ui/fold.js';
   import type { BlockModel } from '#lib/stores/blocks.js';
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import Icon from '#lib/ui/Icon.svelte';
@@ -12,7 +13,7 @@
     <span>Рассуждение</span>
   </button>
   {#if open}
-    <div class="fold"><div class="body"><TextBlock {block} /></div></div>
+    <div class="fold" transition:blockFold><div class="body"><TextBlock {block} /></div></div>
   {/if}
 </div>
 
@@ -22,7 +23,6 @@
   .chevron { color: var(--muted); transition: transform var(--duration-expand) var(--ease-expand); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   [data-open] .chevron { transform: rotate(90deg); }
-  .fold { display: grid; grid-template-rows: 1fr; animation: fold var(--duration-expand) var(--ease-expand); }
+  .fold { display: grid; grid-template-rows: 1fr; }
   .body { min-height: 0; overflow: hidden; font-size: var(--fs-meta); }
-  @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
 </style>

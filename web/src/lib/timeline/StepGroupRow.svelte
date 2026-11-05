@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { blockFold } from '#lib/ui/fold.js';
   import type { Snippet } from 'svelte';
   import { fmt } from '#lib/format/ru.js';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
@@ -23,7 +24,7 @@
     />
   </div>
   {#if view}
-    <div class="fold">
+    <div class="fold" transition:blockFold>
       <div class="rows">
         {#each view.shown as entry (entry.key)}
           {#if entry.key === view.seam}
@@ -39,9 +40,8 @@
 <style>
   .steps { display: flex; flex-direction: column; min-width: 0; }
   .surface { border-radius: var(--radius-card); background: var(--raised); }
-  .fold { display: grid; grid-template-rows: 1fr; animation: fold var(--duration-expand) var(--ease-expand); }
+  .fold { display: grid; grid-template-rows: 1fr; }
   .rows { display: flex; flex-direction: column; gap: var(--s2); min-height: 0; min-width: 0; overflow: hidden; padding-top: var(--s2); }
   .rows > div { min-width: 0; }
   .more { align-self: flex-start; min-height: var(--target); padding-inline: var(--s6); color: var(--accent-link); font-size: var(--fs-sm); }
-  @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
 </style>

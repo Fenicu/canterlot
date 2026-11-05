@@ -12,7 +12,21 @@ export function rowFold(node: HTMLElement): TransitionConfig {
   return {
     duration: durationMs('--duration-row-fold'),
     easing: easing('--ease-row-fold'),
-    css: (t) => `overflow: clip; height: ${t * height}px; opacity: ${Math.min(1, t * 1.5)};`
+    css: (t) => `overflow: clip; height: ${(t * height).toFixed(3)}px; opacity: ${Math.min(1, t * 1.5).toFixed(3)};`
+  };
+}
+
+/**
+ * Тело блока ленты раскрывается и сворачивается сеткой: строка сетки идёт от 0fr к 1fr, содержимое
+ * не перестраивается, а лента меряет растущую строку каждый кадр и держит читаемое на месте.
+ * Ключевые кадры считаются здесь, поэтому движение плавное и там, где браузер не интерполирует
+ * строки сетки сам. Переход локальный: строка, вернувшаяся в окно ленты раскрытой, не раскрывается заново.
+ */
+export function blockFold(_node: HTMLElement): TransitionConfig {
+  return {
+    duration: durationMs('--duration-expand'),
+    easing: easing('--ease-expand'),
+    css: (t) => `grid-template-rows: ${t.toFixed(4)}fr; opacity: ${Math.min(1, t * 2).toFixed(3)};`
   };
 }
 
