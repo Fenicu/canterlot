@@ -1362,6 +1362,7 @@ impl Actor {
             secret_sha256: sha256(&prepared.secret),
             ipc_protocol_version: IPC_PROTOCOL_VERSION,
             phase: OwnershipPhase::Spawning as i32,
+            native_conversation_id: start.native_conversation_id.clone(),
             ..Default::default()
         };
         self.shared

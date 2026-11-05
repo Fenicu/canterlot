@@ -945,7 +945,8 @@ impl ExecutionManager {
                     acked_seq: 0,
                     retired: reported && verified.is_err(),
                     cj_terminal_seq: None,
-                    native_conversation_id: None,
+                    native_conversation_id: (!record.native_conversation_id.is_empty())
+                        .then(|| record.native_conversation_id.clone()),
                     lost_journal: false,
                 },
             );
