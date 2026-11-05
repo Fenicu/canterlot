@@ -1731,6 +1731,8 @@ async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
     };
     deps.machines = MachinesConfig {
         disk_warn_pct: 70,
+        disk_warn_free_gb: 12,
+        disk_critical_free_gb: 4,
         metrics_stale_after: Duration::from_secs(45),
     };
     let h = harness_from(deps, dir).await;
@@ -1751,7 +1753,7 @@ async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
             },
             "ws": {"path": "/api/v1/ws", "protocol": "canterlot.v1", "delta_window_ms": 40},
             "activity": {"stalled_generating_secs": 120, "stalled_tool_secs": 600},
-            "machines": {"disk_warn_pct": 70, "metrics_stale_after_secs": 45},
+            "machines": {"disk_warn_pct": 70, "disk_warn_free_gb": 12, "disk_critical_free_gb": 4, "metrics_stale_after_secs": 45},
             "limit_thresholds": {"weekly_reserve_pct": 90, "warn_pcts": [70, 85], "warn_remaining_pct": 20, "danger_remaining_pct": 5, "reserve_remaining_pct": 10, "stale_after_secs": 1200},
             "defaults": {"crunch_resume_text": "Продолжай работу."},
             "auth": {"logout_url": null},

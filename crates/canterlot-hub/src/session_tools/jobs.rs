@@ -39,9 +39,14 @@ struct NoteJob {
 #[derive(Deserialize)]
 struct MachineEventJob {
     target_id: Uuid,
-    /// `unavailable` или `available`.
+    /// `unavailable`, `available`, `disk_low` или `disk_critical`.
     kind: String,
-    outage_id: Uuid,
+    #[serde(default)]
+    outage_id: Option<Uuid>,
+    #[serde(default)]
+    free_gb: Option<u64>,
+    #[serde(default)]
+    free_pct: Option<u64>,
     #[serde(default)]
     chain_depth: i32,
 }
@@ -229,7 +234,24 @@ async fn machine_event_message(
     let title = super::origin::clean_title(&title);
     let machine = super::origin::clean_title(&machine);
     let id = event.target_id;
-    let (text, state, kind) = if event.kind == "available" {
+    let (text, state, kind) = if event.kind == "disk_low" || event.kind == "disk_critical" {
+        let critical = event.kind == "disk_critical";
+        let free_gb = event.free_gb.unwrap_or(0);
+        let free_pct = event.free_pct.unwrap_or(0);
+        (
+            format!(
+                "[canterlot] Machine \"{machine}\" is {}low on disk: \
+                 {free_gb} GB free ({free_pct}%). Builds and new sessions may fail.",
+                if critical { "critically " } else { "" }
+            ),
+            machine_state(&state, &reason),
+            if critical {
+                "machine_disk_critical"
+            } else {
+                "machine_disk_low"
+            },
+        )
+    } else if event.kind == "available" {
         let state = machine_state(&state, &reason);
         (
             format!(

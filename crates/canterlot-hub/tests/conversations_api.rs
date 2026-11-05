@@ -1107,7 +1107,7 @@ async fn metrics(f: &Fixture, free: u64, ms: u64) {
             mem_available_bytes: 5000,
             disks: vec![DiskUsage {
                 label: "data".into(),
-                total_bytes: 10000,
+                total_bytes: 100_000_000_000,
                 free_bytes: free,
             }],
             ..Default::default()
@@ -1121,7 +1121,7 @@ async fn metrics(f: &Fixture, free: u64, ms: u64) {
 async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let id = f.create(json!({"title":"Сессия"})).await;
-    metrics(&f, 1510, 1).await;
+    metrics(&f, 30_500_000_000, 1).await;
     let path = format!("/api/v1/machines/{}", f.machine);
     let m = f.request(Method::GET, &path, None, 200).await;
     assert_eq!(m["os"], "linux");
@@ -1138,7 +1138,7 @@ async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning(pool: PgPoo
     assert_eq!(m["sessions"][0]["activity_state"], "idle");
     assert_eq!(m["availability"], "available");
     assert_eq!(m["warnings"], json!([]));
-    metrics(&f, 1500, 2).await;
+    metrics(&f, 30_000_000_000, 2).await;
     let m = f.request(Method::GET, &path, None, 200).await;
     assert_eq!(m["warnings"], json!(["disk_usage_high"]));
     assert_eq!(
@@ -1151,7 +1151,7 @@ async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning(pool: PgPoo
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn machines_endpoint_flags_limits_mismatch_and_stale_metrics(pool: PgPool) {
     let f = Fixture::new(pool).await;
-    metrics(&f, 2000, 1).await;
+    metrics(&f, 30_500_000_000, 1).await;
     sqlx::query("update machines set limits_ok=false where id=$1")
         .bind(f.machine)
         .execute(&f.pool)
@@ -1174,7 +1174,7 @@ async fn machines_endpoint_flags_limits_mismatch_and_stale_metrics(pool: PgPool)
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn machines_endpoint_shows_a_journal_stop_until_its_cursor_passes(pool: PgPool) {
     let f = Fixture::new(pool).await;
-    metrics(&f, 2000, 1).await;
+    metrics(&f, 30_500_000_000, 1).await;
     let (cj, sj) = (Uuid::now_v7(), Uuid::now_v7());
     for (journal, kind) in [(cj, "cj"), (sj, "sj")] {
         sqlx::query(

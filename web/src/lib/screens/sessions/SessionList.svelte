@@ -40,6 +40,7 @@
   import { buildSections, tabCounts, type Tab, type TreeNode } from './grouping';
   import { readTab, resolveTab, writeTab } from './listTab';
   import LimitsStrip from './LimitsStrip.svelte';
+  import { diskLimits, lowDiskNotice, type DiskNotice } from '../machines/model.js';
   import SearchBar from './SearchBar.svelte';
   import Section from './Section.svelte';
   import SessionSheet from './SessionSheet.svelte';
@@ -64,6 +65,9 @@
   let canInstall = $state(false);
   let scroller = $state<HTMLElement | null>(null);
   let restore = true;
+  let diskConfig = $state({ disk_warn_free_gb: 30, disk_critical_free_gb: 10 });
+  let lowDiskActive = $state<string[]>([]);
+  let diskNotice = $state<DiskNotice | null>(null);
   const now = $derived.by(() => {
     void ticker.second;
     return clock.serverNow();
@@ -87,8 +91,8 @@
     void browserRuntime().then(async (value) => {
       if (!alive) return;
       runtime = value;
-      // Конфиг обновляет общий реактивный порог для полосы лимитов.
-      void loadConfig().catch(() => undefined);
+      // Конфиг обновляет общий реактивный порог для полосы лимитов и пороги диска.
+      void loadConfig().then((config) => { diskConfig = config.machines; }).catch(() => undefined);
     }).catch(() => undefined);
     const releaseTicker = ticker.retain();
     return () => {
@@ -163,6 +167,24 @@
     }
     return counts;
   });
+
+  // Строка о нехватке места живёт, пока машина не вернётся выше порога с запасом.
+  $effect(() => {
+    const store = runtime;
+    if (!store) return;
+    const machines = [...store.machines.items.values()];
+    const limits = diskLimits(diskConfig);
+    untrack(() => {
+      const next = lowDiskNotice(machines, limits, lowDiskActive);
+      if (next.active.length !== lowDiskActive.length || next.active.some((id, index) => id !== lowDiskActive[index])) {
+        lowDiskActive = next.active;
+      }
+      if (next.notice?.text !== diskNotice?.text || next.notice?.tone !== diskNotice?.tone) {
+        diskNotice = next.notice;
+      }
+    });
+  });
+
   const ready = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' || rows.length > 0 : false);
   // Строки могут прийти из памяти устройства раньше снимка, а лимиты и счёт вкладок — только со снимком.
   const synced = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' : false);
@@ -311,6 +333,7 @@
       <!-- Место полосы лимитов держится до снимка, чтобы строки не съезжали вниз, когда она придёт. -->
       <div class="strip-slot" aria-hidden="true"></div>
     {/if}
+    {#if diskNotice}<p class="disk-notice" data-tone={diskNotice.tone} role="status">{diskNotice.text}</p>{/if}
 
     <GroupTabs
       tabs={tabs}
@@ -372,6 +395,9 @@
 
 <style>
   .search-error { margin: var(--s2) var(--gutter); color: var(--danger); font-size: var(--fs-sm); }
+  /* Тихая строка в семействе прочих уведомлений: цветом, без эмодзи и заливки. */
+  .disk-notice { margin: var(--s0) var(--gutter) var(--s2); color: var(--warning); font-size: var(--fs-sm); }
+  .disk-notice[data-tone='danger'] { color: var(--danger); }
   .list { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
   .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding-block: var(--s2); }
   .brand { flex: 1 0 auto; margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }

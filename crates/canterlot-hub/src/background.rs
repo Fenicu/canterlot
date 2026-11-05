@@ -54,7 +54,7 @@ impl Background {
                     pool.clone(),
                     bus.clone(),
                     activity,
-                    machines,
+                    machines.clone(),
                     stopped.clone(),
                 )),
             ),
@@ -87,7 +87,15 @@ impl Background {
                 "machine_outage_task_error",
                 tokio::spawn(crate::session_tools::outage::run(
                     pool.clone(),
-                    session_tools,
+                    session_tools.clone(),
+                    stopped.clone(),
+                )),
+            ),
+            (
+                "machine_disk_task_error",
+                tokio::spawn(crate::session_tools::disk::run(
+                    pool.clone(),
+                    machines,
                     stopped.clone(),
                 )),
             ),

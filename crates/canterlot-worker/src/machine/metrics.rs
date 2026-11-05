@@ -324,3 +324,40 @@ fn read_process(path: &Path) -> Option<Process> {
         rss,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn disks_measure_the_data_dir_filesystem_and_dedupe_roots_by_device() {
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let collector = MetricsCollector::new(
+            data.path().to_owned(),
+            vec![root.path().to_owned()],
+            PathBuf::from("/proc"),
+        );
+        let disks = collector.disks().unwrap();
+        let stat = rustix::fs::statvfs(data.path()).unwrap();
+        let total = stat.f_blocks.saturating_mul(stat.f_frsize);
+        let expected = DiskUsage {
+            label: "data".to_owned(),
+            total_bytes: total,
+            free_bytes: stat.f_bavail.saturating_mul(stat.f_frsize),
+        };
+        assert_eq!(disks[0].label, "data");
+        assert_eq!(disks[0].total_bytes, expected.total_bytes);
+        let drift = disks[0].free_bytes.abs_diff(expected.free_bytes);
+        assert!(drift <= total / 100, "free space moved by {drift} bytes");
+        let same_device =
+            fs::metadata(data.path()).unwrap().dev() == fs::metadata(root.path()).unwrap().dev();
+        if same_device {
+            assert_eq!(disks.len(), 1, "one filesystem, one row");
+        } else {
+            assert_eq!(disks.len(), 2);
+            assert_eq!(disks[1].label, "root_0");
+        }
+    }
+}

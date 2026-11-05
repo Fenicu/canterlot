@@ -162,6 +162,8 @@ fn pilot_sections_parse_with_defaults() {
     assert_eq!(config.attachments.max_concurrent_uploads, 4);
     assert_eq!(config.attachments.gc_grace, D::from_secs(86400));
     assert_eq!(config.attachments.gc_interval, D::from_secs(3600));
+    assert_eq!(config.machines.disk_warn_free_gb, 30);
+    assert_eq!(config.machines.disk_critical_free_gb, 10);
     assert_eq!(config.machines.disk_warn_pct, 85);
     assert_eq!(config.machines.metrics_stale_after, D::from_secs(90));
     fs::write(&path, format!("{PILOT_BASE}[limits]\nverify_backoff = ['1s', '2m']\n[limits.poll_floor]\nclaude = '45m'\ncodex = '7m'\n")).unwrap();

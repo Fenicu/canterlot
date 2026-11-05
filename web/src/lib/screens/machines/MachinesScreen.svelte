@@ -11,22 +11,23 @@
   import Segmented from '#lib/ui/Segmented.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import MetricCard from './MetricCard.svelte';
-  import { diskView, journalStops, machineStatus, machineWarnings } from './model.js';
+  import { diskLimits, diskView, journalStops, machineStatus, machineWarnings } from './model.js';
   import '../secondary.css';
 
   let runtime = $state<Runtime | null>(null);
   let selected = $state(''); let error = $state('');
   const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
-  let config = $state({ disk_warn_pct: 85, metrics_stale_after_secs: 90 });
+  let config = $state({ disk_warn_pct: 85, disk_warn_free_gb: 30, disk_critical_free_gb: 10, metrics_stale_after_secs: 90 });
   const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
   $effect(() => { if (!machines.some(m => m.id === selected)) selected = machines[0]?.id ?? ''; });
   const machine = $derived(machines.find(m => m.id === selected) ?? machines[0]);
   const metrics = $derived(machine?.metrics);
   const stale = $derived(Boolean(metrics && (now - Date.parse(metrics.observed_at) > config.metrics_stale_after_secs * 1000 || machine?.warnings.includes('metrics_stale'))));
+  const limits = $derived(diskLimits(config));
   const memory = $derived(metrics?.mem_total_bytes);
   const usedMemory = $derived(memory !== undefined && metrics?.mem_available_bytes !== undefined ? memory - metrics.mem_available_bytes : null);
-  const disks = $derived((metrics?.disks ?? []).map(disk => ({ ...disk, ...diskView(disk, machine?.allowed_roots ?? [], config.disk_warn_pct) })));
-  const warnings = $derived(machineWarnings([...new Set([...(machine?.warnings ?? []), ...(disks.some(d => d.warn) ? ['disk_usage_high'] : [])])]));
+  const disks = $derived((metrics?.disks ?? []).map(disk => ({ ...disk, ...diskView(disk, machine?.allowed_roots ?? [], limits) })));
+  const warnings = $derived(machineWarnings([...new Set([...(machine?.warnings ?? []).filter(w => w !== 'disk_usage_high'), ...(disks.some(d => d.tone !== 'normal') ? ['disk_usage_high'] : [])])]));
   const sessions = $derived(machine?.sessions?.map(session => ({ id: session.conversation_id, title: session.title, detail: runtime?.list.items.get(session.conversation_id) })) ?? (runtime && machine ? [...runtime.list.items.values()].filter(s => s.machine.id === machine.id).map(session => ({ id: session.id, title: session.title, detail: session })) : []));
   const heartbeat = $derived(machine?.heartbeat_age_ms != null ? (machine.heartbeat_received_at === undefined ? now : machine.heartbeat_received_at + clock.offset) - machine.heartbeat_age_ms : metrics ? Date.parse(metrics.observed_at) : null);
 
@@ -57,7 +58,7 @@
           <MetricCard title="CPU" value={metrics.cpu_permille === undefined ? 'Нет данных' : fmt.pct(metrics.cpu_permille)} pct={metrics.cpu_permille === undefined ? null : metrics.cpu_permille / 10} caption={metrics.cpu_cores ? `${metrics.cpu_cores} ${fmt.plural(metrics.cpu_cores, ['ядро', 'ядра', 'ядер'])}` : ''} />
           <MetricCard title="RAM" value={usedMemory !== null && memory ? `${fmt.bytes(usedMemory)} / ${fmt.bytes(memory)}` : 'Нет данных'} pct={usedMemory !== null && memory ? Math.round(usedMemory / memory * 1000) / 10 : null} caption={metrics.mem_available_bytes === undefined ? '' : `Доступно ${fmt.bytes(metrics.mem_available_bytes)}`} />
           {#each disks as disk (disk.label)}
-            <MetricCard title={disk.label} value={disk.pct === null ? 'Нет данных' : fmt.pct(Math.round(disk.pct * 10))} pct={disk.pct} warn={disk.warn} caption={`Диск · ${fmt.bytes(disk.total_bytes - disk.free_bytes)} из ${fmt.bytes(disk.total_bytes)} · свободно ${fmt.bytes(disk.free_bytes)}`} />
+            <MetricCard title={disk.label} value={disk.pct === null ? 'Нет данных' : fmt.pct(Math.round(disk.pct * 10))} pct={disk.pct} tone={disk.tone} caption={disk.text} />
           {/each}
           {#each warnings as warning (warning)}<p class="notice">{warning}</p>{/each}
           <MetricCard title="Нагрузка" value={loadText(metrics.load1_centi)} caption={`1 / 5 / 15 мин: ${loadText(metrics.load1_centi)} · ${loadText(metrics.load5_centi)} · ${loadText(metrics.load15_centi)}`} />
