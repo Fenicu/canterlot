@@ -6,6 +6,7 @@
   import { limitsHistory } from '#lib/api/client.js';
   import { ApiError } from '#lib/api/http.js';
   import { loadConfig } from '#lib/api/config.js';
+  import { limitThresholds } from '#lib/stores/limitThresholds.svelte.js';
   import type { components } from '#lib/api/generated/openapi.js';
   import { clock } from '#lib/clock.js';
   import { ticker } from '#lib/ticker.svelte.js';
@@ -23,17 +24,16 @@
   let speed = $state<components['schemas']['ModelSpeedSummary'][]>([]);
   let days = $state<string[]>([]); let zone = $state(''); let error = $state(''); let loading = $state(true);
   const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
-  let thresholds = $state({ stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 });
   const weekly = $derived(providersWithWeekly(runtime?.list.limits ?? []));
   const rows = $derived(usageRows(usage, days.at(-1) ?? '', runtime?.list.items ?? new Map(), weekly));
   const subtitle = $derived(limitsSubtitle(runtime?.list.limits ?? []));
-  const blocks = $derived(currentBlocks(runtime?.list.limits ?? [], now, thresholds));
+  const blocks = $derived(currentBlocks(runtime?.list.limits ?? [], now, limitThresholds));
   const charts = $derived(historyCharts(series, days, zone));
   async function load() {
     loading = true; error = '';
     try {
-      const [rt, cfg] = await Promise.all([browserRuntime(), loadConfig()]);
-      runtime = rt; thresholds = cfg.limit_thresholds;
+      const [rt] = await Promise.all([browserRuntime(), loadConfig()]);
+      runtime = rt;
       zone = Intl.DateTimeFormat().resolvedOptions().timeZone; days = sevenDays(new Date(clock.serverNow()));
       const range = historyRange(new Date(clock.serverNow()));
       // История, расход и скорость — по всем провайдерам.

@@ -35,6 +35,7 @@ pub mod groups;
 pub mod health;
 pub mod history;
 pub mod layers;
+pub mod limit_settings;
 pub mod limits;
 pub mod machines;
 pub mod media;
@@ -143,6 +144,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(groups::routes())
         .merge(presets::routes())
         .merge(session_tools::routes())
+        .merge(limit_settings::routes())
         .merge(machines::routes())
         .merge(limits::routes())
         .merge(snapshot::routes())

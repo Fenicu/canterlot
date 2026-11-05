@@ -27,7 +27,7 @@
   import MenuItem from '#lib/ui/MenuItem.svelte';
   import { theme } from '#lib/theme.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
-  import type { LimitThresholds } from '#lib/stores/limits.js';
+  import { limitThresholds } from '#lib/stores/limitThresholds.svelte.js';
   import { beforeNavigate, goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
@@ -63,7 +63,6 @@
   let menu = $state(false);
   let canInstall = $state(false);
   let scroller = $state<HTMLElement | null>(null);
-  let thresholds = $state<LimitThresholds>({ stale_after_secs: 35 * 60, warn_pcts: [80], weekly_reserve_pct: 95 });
   let restore = true;
   const now = $derived.by(() => {
     void ticker.second;
@@ -88,8 +87,8 @@
     void browserRuntime().then(async (value) => {
       if (!alive) return;
       runtime = value;
-      const config = await loadConfig().catch(() => null);
-      if (config?.limit_thresholds) thresholds = config.limit_thresholds;
+      // Конфиг обновляет общий реактивный порог для полосы лимитов.
+      void loadConfig().catch(() => undefined);
     }).catch(() => undefined);
     const releaseTicker = ticker.retain();
     return () => {
@@ -305,7 +304,7 @@
     <LimitsStrip
       providers={runtime.list.limits}
       now={now}
-      thresholds={thresholds}
+      thresholds={limitThresholds}
       prefer={openRow?.harness.provider ?? ''}
     />
     {#if !synced && runtime.list.limits.length === 0}

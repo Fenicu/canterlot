@@ -116,7 +116,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
           upload_chunk_bytes: 8_388_608
         },
         defaults: { crunch_resume_text: 'продолжи с места остановки' },
-        limit_thresholds: { stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 }
+        limit_thresholds: api.limitThresholds()
       }
     });
   });
@@ -929,6 +929,37 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: api.spawnWhitelistView() });
   });
 
+  await page.route('**/api/v1/limit-settings', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: api.limitSettingsView() });
+      return;
+    }
+    if (method !== 'PUT') return route.fallback();
+    const key = route.request().headers()['idempotency-key'];
+    if (!key) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    api.limitSettingsKeys.push(key);
+    const body = route.request().postDataJSON() as { settings: { warn_remaining_pct?: number; danger_remaining_pct?: number; reserve_remaining_pct?: number } | null };
+    const settings = body.settings;
+    const percent = (value: unknown) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 99;
+    const valid = settings === null || (
+      settings !== undefined
+      && percent(settings.warn_remaining_pct)
+      && percent(settings.danger_remaining_pct)
+      && percent(settings.reserve_remaining_pct)
+      && settings.danger_remaining_pct! <= settings.warn_remaining_pct!
+    );
+    if (!valid) {
+      await route.fulfill({ status: 422, headers: headers(), json: errorBody('limit_settings_invalid', 'Некорректные пороги лимитов') });
+      return;
+    }
+    api.limitSettings = settings as typeof api.limitSettings;
+    await route.fulfill({ headers: headers(), json: api.limitSettingsView() });
+  });
+
   await page.route('**/api/v1/presets', async (route) => {
     const method = route.request().method();
     if (method === 'GET') {
@@ -1283,7 +1314,7 @@ export async function seedSecondaryScreens(page: Page, api: FakeHubApi, ids: { m
   const machine = api.machines.get(ids.machine)!;
   Object.assign(machine, { os: 'Linux · x86_64', availability: 'available', heartbeat_age_ms: 2000, availability_since: new Date(Date.now() - 3_600_000).toISOString(), metrics: { ...metrics, observed_at: new Date().toISOString() }, warnings: ['disk_usage_high'] });
   const historyRequests: URLSearchParams[] = [];
-  await page.route('**/api/v1/config', r => r.fulfill({ json: { version: hubVersion, schema_version: 1, auth: { logout_url: logout }, machines: { disk_warn_pct: 85, metrics_stale_after_secs: 90 }, limits: { max_attachment_bytes: 104_857_600, max_attachments_per_input: 10, upload_chunk_bytes: 8_388_608, max_input_text_bytes: 262_144, queue_limit: 100 }, defaults: { crunch_resume_text: 'продолжи с места остановки' }, limit_thresholds: { stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 } } }));
+  await page.route('**/api/v1/config', r => r.fulfill({ json: { version: hubVersion, schema_version: 1, auth: { logout_url: logout }, machines: { disk_warn_pct: 85, metrics_stale_after_secs: 90 }, limits: { max_attachment_bytes: 104_857_600, max_attachments_per_input: 10, upload_chunk_bytes: 8_388_608, max_input_text_bytes: 262_144, queue_limit: 100 }, defaults: { crunch_resume_text: 'продолжи с места остановки' }, limit_thresholds: api.limitThresholds() } }));
   await page.route('**/api/v1/limits/history?*', r => {
     const query = new URL(r.request().url()).searchParams; historyRequests.push(query);
     const provider = query.get('provider') ?? 'claude';

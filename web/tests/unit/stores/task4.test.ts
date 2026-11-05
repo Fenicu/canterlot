@@ -1808,6 +1808,9 @@ describe("stores task 4", () => {
       stale_after_secs: 60,
       warn_pcts: [80, 95],
       weekly_reserve_pct: 95,
+      warn_remaining_pct: 20,
+      danger_remaining_pct: 5,
+      reserve_remaining_pct: 5,
     };
     const fresh = "2026-10-28T11:59:30.000Z";
     const warning = limitView(

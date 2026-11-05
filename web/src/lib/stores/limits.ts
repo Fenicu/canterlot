@@ -21,15 +21,33 @@ export interface ProviderLimits {
 
 export interface LimitThresholds {
   stale_after_secs: number;
+  /** Устарело: первый порог красил полосу до появления остатка в конфиге. */
   warn_pcts: number[];
+  /** Действующий резерв как расход, %: совместимо с прежним полем. */
   weekly_reserve_pct: number;
+  /** Жёлтый, когда остаток меньше этого процента. */
+  warn_remaining_pct: number;
+  /** Красный, когда остаток меньше этого процента. */
+  danger_remaining_pct: number;
+  /** Сколько недельного остатка оставить себе; `0` — без резерва. */
+  reserve_remaining_pct: number;
 }
 
 export type MeterTone = "normal" | "warning" | "danger";
 
+/** Умолчания, пока конфиг хаба не загружен: те же значения, что у `/api/v1/config`. */
+export const DEFAULT_LIMIT_THRESHOLDS: LimitThresholds = {
+  stale_after_secs: 2100,
+  warn_pcts: [80, 90, 95],
+  weekly_reserve_pct: 95,
+  warn_remaining_pct: 20,
+  danger_remaining_pct: 5,
+  reserve_remaining_pct: 5,
+};
+
 /** Остаток ниже этих долей окрашивает полосу: предупреждение и тревога. */
-export const WARN_REMAINING_PCT = 20;
-export const DANGER_REMAINING_PCT = 5;
+export const WARN_REMAINING_PCT = DEFAULT_LIMIT_THRESHOLDS.warn_remaining_pct;
+export const DANGER_REMAINING_PCT = DEFAULT_LIMIT_THRESHOLDS.danger_remaining_pct;
 
 export const NO_LIMIT_DATA = "нет данных";
 export const STALE_DATA = "устарело";
@@ -70,9 +88,12 @@ export function remainingText(usedPermille: number): string {
   return `${Math.round(remaining)}%`;
 }
 
-export function meterTone(remaining: number): MeterTone {
-  if (remaining < DANGER_REMAINING_PCT) return "danger";
-  if (remaining < WARN_REMAINING_PCT) return "warning";
+export function meterTone(
+  remaining: number,
+  thresholds: Pick<LimitThresholds, "warn_remaining_pct" | "danger_remaining_pct"> = DEFAULT_LIMIT_THRESHOLDS,
+): MeterTone {
+  if (remaining < thresholds.danger_remaining_pct) return "danger";
+  if (remaining < thresholds.warn_remaining_pct) return "warning";
   return "normal";
 }
 
@@ -107,7 +128,10 @@ const NOT_SEEN: MeterView = {
 export function windowText(
   window: LimitWindow | null | undefined,
   now: number,
-  options?: { staleAfterMs?: number },
+  options?: {
+    staleAfterMs?: number;
+    thresholds?: Pick<LimitThresholds, "warn_remaining_pct" | "danger_remaining_pct">;
+  },
 ): MeterView {
   if (!window) return NOT_SEEN;
   const observedAt = Date.parse(window.observed_at);
@@ -123,7 +147,7 @@ export function windowText(
     known: true,
     fill: remaining,
     text: stale ? STALE_DATA : remainingText(window.used_permille),
-    tone: stale ? "normal" : meterTone(remaining),
+    tone: stale ? "normal" : meterTone(remaining, options?.thresholds),
     stale,
     reset:
       !stale && Number.isFinite(resetAt) ? `сброс ${dayClock(resetAt, now)}` : "",
@@ -136,7 +160,10 @@ export function limitView(
   now: number,
   cfg: LimitThresholds,
 ): LimitView {
-  const options = { staleAfterMs: cfg.stale_after_secs * 1000 };
+  const options = {
+    staleAfterMs: cfg.stale_after_secs * 1000,
+    thresholds: cfg,
+  };
   const five: MeterView = provider.five_hour_absent && !provider.five_hour
     ? { ...NOT_SEEN, absent: true, text: "" }
     : windowText(provider.five_hour, now, options);

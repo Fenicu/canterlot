@@ -19,6 +19,7 @@
   import Button from '#lib/ui/Button.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import SpawnWhitelist from './SpawnWhitelist.svelte';
+  import LimitSettings from './LimitSettings.svelte';
   import { motionPref, saveMotion, type MotionPref } from './preferences.js';
   import '../secondary.css';
 
@@ -79,7 +80,8 @@
         <section><h2>Данные и выход</h2><Button {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(false)} full>Очистить данные на устройстве</Button><div class="logout"><Button full {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(true)}>Выйти</Button></div>{#if busy}<p role="status">Очищаю данные на устройстве…</p>{/if}<p class="note">{config.auth.logout_url ? 'Перед выходом через Authelia данные на устройстве будут удалены' : 'Сессия Authelia завершается на собственной странице'}</p></section>
       </div><div>
         <section><h2>Подключение</h2><p>Логин: <strong>{login}</strong></p><p>{connectionText}</p><p class="note sync">{#if sync}Последняя синхронизация: {fmt.clock(sync)}{/if}</p></section>
-        <section><h2>Предупреждения о лимитах</h2><div class="card"><p>Предупредить при {config.limit_thresholds.warn_pcts.join('%, ')}%</p><p>Резерв владельца {config.limit_thresholds.weekly_reserve_pct}%</p><p class="note">Для 5 часов и недели, Claude и Codex. Кранч ждёт сброса, сохраняя резерв владельца</p></div><a href={resolve('/limits')}>История лимитов</a></section>
+        <LimitSettings />
+        <section><a href={resolve('/limits')}>История лимитов</a></section>
         <section><a href={resolve('/machines')}>Машины</a></section>
         <SpawnWhitelist />
         <section><h2>О приложении</h2><p>Canterlot</p><p class="versions">Приложение <strong>{APP_VERSION}</strong> {#if hubVersion}· хаб <strong>{hubVersion}</strong>{/if}</p>{#if versionMismatch}<p class="note">Версии приложения и хаба различаются. Обновите отставшую часть при удобном случае</p>{/if}<a href={resolve('/changes')}>История изменений</a>{#if canInstall}<button type="button" onclick={() => { void installation().prompt().catch(() => error = 'Не удалось установить приложение. Повторите в меню браузера'); }}>Установить приложение</button>{/if}<p>Обновление: {updateState === 'idle' ? 'установлена текущая версия' : updateState === 'applying' ? 'обновляю…' : 'доступна новая версия'}</p>{#if update}<button type="button" onclick={updateAction}>{updateState === 'idle' ? 'Проверить обновления' : 'Обновить приложение'}</button>{/if}</section>
@@ -90,7 +92,6 @@
 
 <style>
   section { margin-bottom: var(--s10); }
-  .card { padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
   section > a { display: inline-flex; align-items: center; min-height: var(--target); }
   /* Строка синхронизации появляется после первого снимка: её место занято с первого кадра. */
   .sync { min-height: calc(var(--fs-meta) * var(--lh-body)); }

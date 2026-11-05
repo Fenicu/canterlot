@@ -87,6 +87,14 @@ export class FakeHubApi {
 	/** `null`: встроенный список по умолчанию, как у хаба. */
 	spawnWhitelist: { harness: string; model: string }[] | null = null;
 	readonly spawnWhitelistKeys: string[] = [];
+	/** `null`: пороги лимитов по умолчанию, как у хаба. */
+	limitSettings: components['schemas']['LimitSettings'] | null = null;
+	readonly limitSettingsKeys: string[] = [];
+	readonly defaultLimitSettings: components['schemas']['LimitSettings'] = {
+		warn_remaining_pct: 20,
+		danger_remaining_pct: 5,
+		reserve_remaining_pct: 5
+	};
 	/** Вызовы приёма результата: ключ идемпотентности и `force`, как их прислал клиент. */
 	readonly acceptCalls: { id: string; force: boolean; key: string }[] = [];
 	/** Рабочая копия с правками: приём без `force` оставляет её и переводит в `dirty`. */
@@ -109,6 +117,27 @@ export class FakeHubApi {
 			entries: this.spawnWhitelist ?? this.defaultSpawnWhitelist,
 			is_default: this.spawnWhitelist === null,
 			default_entries: this.defaultSpawnWhitelist
+		};
+	}
+
+	limitSettingsView(): components['schemas']['LimitSettingsView'] {
+		return {
+			settings: this.limitSettings ?? this.defaultLimitSettings,
+			is_default: this.limitSettings === null,
+			default_settings: this.defaultLimitSettings
+		};
+	}
+
+	/** `/api/v1/config` отдаёт действующие пороги вместе с устаревшими полями. */
+	limitThresholds() {
+		const settings = this.limitSettings ?? this.defaultLimitSettings;
+		return {
+			stale_after_secs: 2100,
+			warn_pcts: [80, 95],
+			weekly_reserve_pct: 100 - settings.reserve_remaining_pct,
+			warn_remaining_pct: settings.warn_remaining_pct,
+			danger_remaining_pct: settings.danger_remaining_pct,
+			reserve_remaining_pct: settings.reserve_remaining_pct
 		};
 	}
 

@@ -220,7 +220,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 28, "screen coverage rows");
+    assert_eq!(rows, 29, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -626,6 +626,15 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             "/api/v1/spawn-whitelist".into(),
             Some(json!({"entries":[{"harness":"codex","model":"default"}]})),
             Some(json!({"entries":null})),
+        ),
+        case(
+            Method::PUT,
+            "/api/v1/limit-settings",
+            "/api/v1/limit-settings".into(),
+            Some(
+                json!({"settings":{"warn_remaining_pct":20,"danger_remaining_pct":5,"reserve_remaining_pct":10}}),
+            ),
+            Some(json!({"settings":null})),
         ),
         case(
             Method::POST,

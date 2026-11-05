@@ -3814,6 +3814,120 @@
         }
       }
     },
+    "/api/v1/limit-settings": {
+      "get": {
+        "tags": [
+          "limits"
+        ],
+        "operationId": "get__api_v1_limit_settings",
+        "responses": {
+          "200": {
+            "description": "Пороги лимитов владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LimitSettingsView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "limits"
+        ],
+        "operationId": "put__api_v1_limit_settings",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LimitSettingsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Пороги сохранены",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LimitSettingsView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/limits": {
       "get": {
         "tags": [
@@ -7297,6 +7411,7 @@
           "preset_limit_reached",
           "preset_invalid",
           "spawn_whitelist_invalid",
+          "limit_settings_invalid",
           "not_delegated",
           "worktree_removed",
           "worktree_not_removed"
@@ -8558,14 +8673,97 @@
           }
         }
       },
+      "LimitSettings": {
+        "type": "object",
+        "required": [
+          "warn_remaining_pct",
+          "danger_remaining_pct",
+          "reserve_remaining_pct"
+        ],
+        "properties": {
+          "danger_remaining_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Красный цвет, когда остаток меньше этого процента.",
+            "minimum": 0
+          },
+          "reserve_remaining_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Сколько недельного остатка оставить себе; `0` — без резерва.",
+            "minimum": 0
+          },
+          "warn_remaining_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Жёлтый цвет, когда остаток меньше этого процента.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "LimitSettingsBody": {
+        "type": "object",
+        "required": [
+          "settings"
+        ],
+        "properties": {
+          "settings": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LimitSettings",
+                "description": "`null` возвращает значения по умолчанию; поле обязательно, чтобы пустое тело не сбрасывало."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "LimitSettingsView": {
+        "type": "object",
+        "required": [
+          "settings",
+          "is_default",
+          "default_settings"
+        ],
+        "properties": {
+          "default_settings": {
+            "$ref": "#/components/schemas/LimitSettings"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/LimitSettings"
+          }
+        }
+      },
       "LimitThresholdsView": {
         "type": "object",
         "required": [
           "weekly_reserve_pct",
           "warn_pcts",
+          "warn_remaining_pct",
+          "danger_remaining_pct",
+          "reserve_remaining_pct",
           "stale_after_secs"
         ],
         "properties": {
+          "danger_remaining_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Красный, когда остаток меньше этого процента.",
+            "minimum": 0
+          },
+          "reserve_remaining_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Сколько недельного остатка владелец оставляет себе; `0` — без резерва.",
+            "minimum": 0
+          },
           "stale_after_secs": {
             "type": "integer",
             "format": "int64",
@@ -8577,11 +8775,19 @@
               "type": "integer",
               "format": "int32",
               "minimum": 0
-            }
+            },
+            "description": "Устарело: раньше первый порог окрашивал полосу. Оставлено для старых клиентов."
+          },
+          "warn_remaining_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Жёлтый, когда остаток меньше этого процента.",
+            "minimum": 0
           },
           "weekly_reserve_pct": {
             "type": "integer",
             "format": "int32",
+            "description": "Действующий резерв как расход, %: совместимо с прежним полем (`100 - reserve`).",
             "minimum": 0
           }
         }

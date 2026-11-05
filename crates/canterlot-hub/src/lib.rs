@@ -29,6 +29,7 @@ pub mod http;
 pub mod idempotency;
 pub mod ingest;
 pub mod installation;
+pub mod limit_settings;
 pub mod limits;
 pub mod machine_info;
 pub mod machines;

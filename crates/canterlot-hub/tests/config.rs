@@ -172,6 +172,24 @@ fn pilot_sections_parse_with_defaults() {
 }
 
 #[test]
+fn deprecated_warn_pcts_still_parse_from_old_hub_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(
+        &path,
+        format!("{PILOT_BASE}[limits]\nwarn_pcts = [50, 75]\nweekly_reserve_pct = 80\n"),
+    )
+    .unwrap();
+    let limits = HubConfig::load(&path).unwrap().limits;
+    assert_eq!(limits.warn_pcts, [50, 75]);
+    assert_eq!(limits.weekly_reserve_pct, 80);
+    assert_eq!(
+        canterlot_hub::limit_settings::default_settings(&limits).reserve_remaining_pct,
+        20
+    );
+}
+
+#[test]
 fn unknown_pilot_fields_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hub.toml");

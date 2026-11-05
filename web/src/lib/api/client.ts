@@ -148,6 +148,21 @@ export function putSpawnWhitelist(
   return http("PUT", "/api/v1/spawn-whitelist", body, keyed(key, opts));
 }
 
+export function getLimitSettings(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_limit_settings"]>>> {
+  return http("GET", "/api/v1/limit-settings", undefined, opts);
+}
+
+// settings: null возвращает значения по умолчанию.
+export function putLimitSettings(
+  body: Body<operations["put__api_v1_limit_settings"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_limit_settings"]>>> {
+  return http("PUT", "/api/v1/limit-settings", body, keyed(key, opts));
+}
+
 export function listGroups(
   query?: Query,
   opts?: RequestOptions,

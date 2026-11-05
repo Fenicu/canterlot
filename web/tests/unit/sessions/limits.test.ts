@@ -7,7 +7,7 @@ import {
 } from "#lib/stores/limits.js";
 
 const NOW = new Date(2026, 9, 29, 12, 0).getTime();
-const cfg = { stale_after_secs: 35 * 60, warn_pcts: [80, 95], weekly_reserve_pct: 95 };
+const cfg = { stale_after_secs: 35 * 60, warn_pcts: [80, 95], weekly_reserve_pct: 95, warn_remaining_pct: 20, danger_remaining_pct: 5, reserve_remaining_pct: 5 };
 
 function at(day: number, hour: number, minute: number): string {
   return new Date(2026, 9, day, hour, minute).toISOString();
