@@ -143,6 +143,10 @@ impl WorkerControl for HubGrpc {
                                 if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_WORKDIR_SUGGEST_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
                                 state.registry.finish_suggest(machine_id, reply);
                             }
+                            Some(control_up::Msg::ClaudeHistories(reply)) => {
+                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_CLAUDE_HISTORIES_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
+                                state.registry.finish_histories(machine_id, reply);
+                            }
                             Some(control_up::Msg::OwnerOverview(reply)) => {
                                 if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_OWNER_INSTRUCTIONS_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
                                 state.registry.finish_owner_overview(machine_id, reply);

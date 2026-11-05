@@ -8,9 +8,10 @@ use std::{
 };
 
 use canterlot_proto::{
-    limits::MAX_WORKDIR_SUGGESTIONS,
+    limits::{MAX_CLAUDE_HISTORIES, MAX_WORKDIR_SUGGESTIONS},
     worker::v1::{
-        ControlDown, ReadOwnerInstructions, SuggestWorkdirs, WorkdirSuggestions, control_down,
+        ClaudeHistories, ClaudeHistory, ControlDown, ListClaudeHistories, ReadOwnerInstructions,
+        SuggestWorkdirs, WorkdirSuggestions, control_down,
     },
 };
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
@@ -31,6 +32,7 @@ pub const CAPABILITY_OWNER_EXIT_V1: &str = "owner_exit_v1";
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";
 pub const CAPABILITY_OWNER_INSTRUCTIONS_V1: &str = "owner_instructions_v1";
+pub const CAPABILITY_CLAUDE_HISTORIES_V1: &str = "claude_histories_v1";
 pub const CAPABILITY_ALARMS_V1: &str = "alarms_v1";
 pub const CAPABILITY_NUDGE_V1: &str = "nudge_v1";
 
@@ -38,6 +40,8 @@ pub const CAPABILITY_NUDGE_V1: &str = "nudge_v1";
 pub const MAX_SUGGESTS_PER_MACHINE: usize = 4;
 /// Параллельных чтений инструкций владельца на машину.
 pub const MAX_OWNER_READS_PER_MACHINE: usize = 4;
+/// Списков историй на машину одновременно.
+pub const MAX_HISTORY_REQUESTS_PER_MACHINE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
@@ -70,6 +74,7 @@ struct SessionEntry {
 }
 
 type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String>>>>>;
+type ClaudeHistoryWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<ClaudeHistory>>>>>;
 type OwnerOverviewWaiters = Arc<
     Mutex<
         HashMap<
@@ -90,6 +95,7 @@ pub struct Registry {
     timers: HubTimers,
     changes: broadcast::Sender<(Uuid, Availability)>,
     suggests: SuggestWaiters,
+    histories: ClaudeHistoryWaiters,
     owner_overview: OwnerOverviewWaiters,
     owner_files: OwnerFileWaiters,
 }
@@ -105,6 +111,20 @@ impl Drop for SuggestSlot {
         self.waiters
             .lock()
             .expect("suggest waiters lock")
+            .remove(&self.key);
+    }
+}
+
+struct ClaudeHistorySlot {
+    waiters: ClaudeHistoryWaiters,
+    key: (Uuid, Uuid),
+}
+
+impl Drop for ClaudeHistorySlot {
+    fn drop(&mut self) {
+        self.waiters
+            .lock()
+            .expect("history waiters lock")
             .remove(&self.key);
     }
 }
@@ -158,6 +178,7 @@ impl Registry {
             timers,
             changes: broadcast::channel(256).0,
             suggests: Arc::default(),
+            histories: Arc::default(),
             owner_overview: Arc::default(),
             owner_files: Arc::default(),
         }
@@ -389,6 +410,73 @@ impl Registry {
             let mut directories = reply.directories;
             directories.truncate(MAX_WORKDIR_SUGGESTIONS);
             let _ = waiter.send(directories);
+        }
+    }
+
+    /// История Claude Code выбранного рабочего каталога. Нет сеанса с возможностью,
+    /// занято или вышел срок: пустой список, форма не показывает продолжение.
+    pub async fn claude_histories(
+        &self,
+        machine_id: Uuid,
+        workdir: &str,
+        wait: std::time::Duration,
+    ) -> Vec<ClaudeHistory> {
+        if !self.has_capability(machine_id, CAPABILITY_CLAUDE_HISTORIES_V1) {
+            return Vec::new();
+        }
+        let Some(sender) = self.command_sender(machine_id) else {
+            return Vec::new();
+        };
+        let request_id = Uuid::now_v7();
+        let key = (machine_id, request_id);
+        let (answer, answered) = oneshot::channel();
+        {
+            let mut waiters = self.histories.lock().expect("history waiters lock");
+            let busy = waiters.keys().filter(|(id, _)| *id == machine_id).count();
+            if busy >= MAX_HISTORY_REQUESTS_PER_MACHINE {
+                return Vec::new();
+            }
+            waiters.insert(key, answer);
+        }
+        let _slot = ClaudeHistorySlot {
+            waiters: self.histories.clone(),
+            key,
+        };
+        let message = ControlDown {
+            msg: Some(control_down::Msg::ListClaudeHistories(
+                ListClaudeHistories {
+                    request_id: request_id.to_string(),
+                    workdir: workdir.to_owned(),
+                },
+            )),
+        };
+        if sender.try_send(message).is_err() {
+            return Vec::new();
+        }
+        tokio::time::timeout(wait, answered)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+    }
+
+    /// Ответ принимается только от машины, которую спросили.
+    pub fn finish_histories(&self, machine_id: Uuid, reply: ClaudeHistories) {
+        let Ok(request_id) = Uuid::parse_str(&reply.request_id) else {
+            return;
+        };
+        let waiter = self
+            .histories
+            .lock()
+            .expect("history waiters lock")
+            .remove(&(machine_id, request_id));
+        if let Some(waiter) = waiter {
+            let mut items = reply.items;
+            items.truncate(MAX_CLAUDE_HISTORIES);
+            items.retain(|item| {
+                Uuid::parse_str(&item.id).is_ok() && item.preview.chars().count() <= 120
+            });
+            let _ = waiter.send(items);
         }
     }
 

@@ -769,6 +769,8 @@ pub struct CreateBody {
     pub crunch: CrunchSetting,
     #[serde(default)]
     pub start: bool,
+    /// Продолжить готовую историю Claude Code: только её идентификатор.
+    pub resume_native_id: Option<String>,
 }
 #[derive(Default, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -815,6 +817,7 @@ async fn create(
             group_ids: b.group_ids,
             crunch: b.crunch,
             start: b.start,
+            resume_native_id: b.resume_native_id,
             parent: None,
             worktree_source: None,
         },

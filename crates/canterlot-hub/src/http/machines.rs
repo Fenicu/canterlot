@@ -20,6 +20,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get))
         .routes(routes!(recent))
         .routes(routes!(suggest))
+        .routes(routes!(claude_histories))
         .routes(routes!(owner_overview))
         .routes(routes!(owner_file))
 }
@@ -28,6 +29,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
 const SUGGEST_WAIT: Duration = Duration::from_secs(3);
 /// Чтение файла владельца: воркер читает с диска, срок с запасом.
 const OWNER_WAIT: Duration = Duration::from_secs(5);
+/// История читается с диска машины; срок с запасом к листингу каталогов.
+const HISTORY_WAIT: Duration = Duration::from_secs(4);
 #[derive(Serialize, ToSchema)]
 pub struct MachineView {
     pub id: Uuid,
@@ -85,6 +88,53 @@ pub struct Workdirs {
 pub struct SuggestParams {
     pub path: String,
 }
+#[derive(Serialize, ToSchema)]
+pub struct ClaudeHistoryView {
+    pub id: String,
+    pub modified_at_ms: u64,
+    pub size: u64,
+    pub preview: String,
+}
+#[derive(Serialize, ToSchema)]
+pub struct ClaudeHistoryList {
+    pub histories: Vec<ClaudeHistoryView>,
+}
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct HistoryParams {
+    pub workdir: String,
+}
+#[utoipa::path(get,path="/api/v1/machines/{id}/claude-histories",tag="machines",params(("id"=Uuid,Path),HistoryParams),responses((status=200,description="Беседы Claude Code рабочего каталога, свежие первыми; пусто, если машина не ответила",body=ClaudeHistoryList)))]
+async fn claude_histories(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiQuery(p): ApiQuery<HistoryParams>,
+) -> Result<Json<ClaudeHistoryList>, ApiError> {
+    let mut conn = s.pool.acquire().await?;
+    require_owned(&mut conn, o.owner_id, id).await?;
+    drop(conn);
+    if p.workdir.len() > conversations::MAX_WORKDIR_BYTES {
+        return Ok(Json(ClaudeHistoryList {
+            histories: Vec::new(),
+        }));
+    }
+    let histories = s
+        .registry
+        .claude_histories(id, &p.workdir, HISTORY_WAIT)
+        .await
+        .into_iter()
+        .map(|item| ClaudeHistoryView {
+            id: item.id,
+            modified_at_ms: item.modified_at_ms,
+            size: item.size,
+            preview: item.preview,
+        })
+        .collect();
+    Ok(Json(ClaudeHistoryList { histories }))
+}
+
 pub(crate) async fn load_stored(
     conn: &mut PgConnection,
     config: &crate::config::MachinesConfig,

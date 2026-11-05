@@ -6,7 +6,10 @@ use crate::{
     idempotency,
     model::{HoldReason, HoldView},
     presets::{self, AppliedPreset, PresetRef},
-    session::{CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_SESSION_TOOLS_V1, Registry},
+    session::{
+        CAPABILITY_CLAUDE_HISTORIES_V1, CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_SESSION_TOOLS_V1,
+        Registry,
+    },
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -37,6 +40,9 @@ pub struct NewConversation {
     pub group_ids: Vec<Uuid>,
     pub crunch: CrunchSetting,
     pub start: bool,
+    /// Продолжить готовую беседу Claude Code: только идентификатор, путь строит воркер.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_native_id: Option<String>,
     // Сессии владельца эти поля не несут: их хеш идемпотентности не меняется.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<ParentLink>,
@@ -78,6 +84,8 @@ pub enum CreateError {
     PermissionModeUnknown,
     #[error("profile unknown")]
     ProfileUnknown,
+    #[error("resume harness unsupported")]
+    ResumeHarnessUnsupported,
     #[error("workdir not allowed")]
     WorkdirNotAllowed,
     #[error("group not found")]
@@ -264,6 +272,8 @@ pub struct ConversationDetail {
     pub crunch: CrunchDetail,
     #[schema(value_type=Option<LiveExecutionView>)]
     pub execution: Option<Value>,
+    /// Начало продолженной истории Claude Code; тихая первая строка ленты.
+    pub continued_from_at: Option<String>,
     pub holds: Vec<HoldView>,
     /// Принятый ход записан: следующий запуск продолжит беседу, а не начнёт новую.
     pub turn_recorded: bool,
@@ -732,6 +742,7 @@ pub async fn detail(
             resume_pending,
         },
         execution,
+        continued_from_at: optional_time(&row, "continued_from_at")?,
         holds,
         turn_recorded,
     }))
@@ -867,6 +878,18 @@ async fn replace_groups(
     }
     Ok(())
 }
+/// Время UUIDv7: у бесед Claude Code оно совпадает с началом истории.
+fn uuid_v7_time(value: &str) -> Option<DateTime<Utc>> {
+    let bytes = Uuid::parse_str(value).ok()?.into_bytes();
+    if bytes[6] >> 4 != 7 {
+        return None;
+    }
+    let millis = u64::from_be_bytes([
+        0, 0, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+    ]);
+    DateTime::from_timestamp_millis(i64::try_from(millis).ok()?)
+}
+
 fn validate_crunch(setting: &CrunchSetting) -> bool {
     setting
         .resume_text
@@ -1245,6 +1268,17 @@ pub(crate) async fn create_in_tx(
         .fetch_optional(&mut *conn)
         .await?
         .ok_or(CreateError::HarnessUnknown)?;
+    if let Some(native) = req.resume_native_id.as_deref() {
+        if req.harness != "claude_code" {
+            return Err(CreateError::ResumeHarnessUnsupported);
+        }
+        if Uuid::parse_str(native).is_err() || !req.start {
+            return Err(CreateError::Invalid("resume_native_id"));
+        }
+        if !registry.has_capability(req.machine_id, CAPABILITY_CLAUDE_HISTORIES_V1) {
+            return Err(CreateError::CapabilityMissing);
+        }
+    }
     let models: Value = h.try_get("models")?;
     let model = models
         .as_array()
@@ -1343,6 +1377,7 @@ pub(crate) async fn create_in_tx(
         .map_or(req.workdir.as_str(), |(path, _)| path);
     let title = req.title.as_deref().unwrap_or("");
     let user = !title.trim().is_empty();
+    let continued_from_at = req.resume_native_id.as_deref().and_then(uuid_v7_time);
     let resume = if req.crunch.enabled {
         Some(
             req.crunch
@@ -1353,9 +1388,9 @@ pub(crate) async fn create_in_tx(
     } else {
         req.crunch.resume_text.as_deref()
     };
-    sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,instruction_preset_revision,crunch_enabled,crunch_resume_text,parent_conversation_id,spawn_depth,worktree) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
+    sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,instruction_preset_revision,crunch_enabled,crunch_resume_text,parent_conversation_id,spawn_depth,worktree,continued_from_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)")
             .bind(id).bind(req.owner_id).bind(req.machine_id).bind(&req.harness).bind(workdir).bind(if user{title}else{"Новая сессия"}).bind(if user{"user"}else{"auto"}).bind(&req.color).bind(&req.model).bind(&req.effort).bind(permission).bind(reference.as_str()).bind(revision).bind(req.crunch.enabled).bind(resume)
-            .bind(req.parent.map(|parent| parent.id)).bind(req.parent.map_or(0, |parent| parent.spawn_depth)).bind(isolated.as_ref().map(|(_, row)| row)).execute(&mut *conn).await?;
+            .bind(req.parent.map(|parent| parent.id)).bind(req.parent.map_or(0, |parent| parent.spawn_depth)).bind(isolated.as_ref().map(|(_, row)| row)).bind(continued_from_at).execute(&mut *conn).await?;
     // Путь рабочей копии одноразовый: на экране новой сессии ему делать нечего.
     if isolated.is_none() {
         remember_workdir(&mut *conn, req.owner_id, req.machine_id, &req.workdir).await?;
@@ -1368,12 +1403,18 @@ pub(crate) async fn create_in_tx(
     replace_groups(conn, id, &req.group_ids).await?;
     let execution = if req.start {
         Some(
-            executions::start_in_tx(conn, req.owner_id, id, correlation_id)
-                .await
-                .map_err(|e| match e {
-                    executions::ExecutionError::Db(e) => CreateError::Db(e),
-                    _ => CreateError::Invalid("start"),
-                })?,
+            executions::start_in_tx_with_native(
+                conn,
+                req.owner_id,
+                id,
+                correlation_id,
+                req.resume_native_id.as_deref(),
+            )
+            .await
+            .map_err(|e| match e {
+                executions::ExecutionError::Db(e) => CreateError::Db(e),
+                _ => CreateError::Invalid("start"),
+            })?,
         )
     } else {
         None

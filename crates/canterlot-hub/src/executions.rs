@@ -137,6 +137,18 @@ pub async fn start_in_tx(
     conversation_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<StartedExecution, ExecutionError> {
+    start_in_tx_with_native(conn, owner_id, conversation_id, correlation_id, None).await
+}
+
+/// `native_override` — новая сессия продолжает готовую историю: её беседа известна
+/// до первого хода, и `--resume` получает именно этот идентификатор.
+pub async fn start_in_tx_with_native(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    correlation_id: Uuid,
+    native_override: Option<&str>,
+) -> Result<StartedExecution, ExecutionError> {
     let harness: Option<String> =
         sqlx::query_scalar("select harness from conversations where id=$1 and owner_id=$2")
             .bind(conversation_id)
@@ -190,7 +202,10 @@ pub async fn start_in_tx(
         "title": resolved.title,
         "text": resolved.text.unwrap_or_default(),
     });
-    let native = resumable_native_id(&mut *conn, conversation_id).await?;
+    let native = match native_override {
+        Some(native) => Some(native.to_owned()),
+        None => resumable_native_id(&mut *conn, conversation_id).await?,
+    };
     if queue.closed {
         return Err(ExecutionError::ConversationClosed);
     }
@@ -240,12 +255,13 @@ pub async fn start_in_tx(
         command_id: Uuid::now_v7(),
     };
     sqlx::query(
-        "insert into executions (id, conversation_id, generation, state)
-         values ($1, $2, $3, 'created')",
+        "insert into executions (id, conversation_id, generation, state, native_conversation_id)
+         values ($1, $2, $3, 'created', $4)",
     )
     .bind(started.execution_id)
     .bind(conversation_id)
     .bind(generation)
+    .bind(&native)
     .execute(&mut *conn)
     .await?;
     let mut payload = json!({"harness": row.try_get::<String,_>("harness")?, "workdir": row.try_get::<String,_>("workdir")?,
