@@ -384,9 +384,9 @@ async fn delete_in_tx(
     trash_guard: TrashGuard,
 ) -> Result<Value, DeleteError> {
     conversations::lock_owner(&mut *conn, owner_id).await?;
-    // Порядок ingest: курсор раньше разговора, разговор раньше очереди. Встречное
-    // исполнение после блокировки разговора либо живое и даёт отказ, либо его курсор
-    // удержит внешний ключ.
+    // Порядок ingest: курсор раньше очереди; очередь раньше строки разговора.
+    // Встречное исполнение после блокировки очереди либо живое и даёт отказ, либо его
+    // курсор удержит внешний ключ.
     let known: Vec<Uuid> = sqlx::query_scalar("select id from executions where conversation_id=$1")
         .bind(id)
         .fetch_all(&mut *conn)
@@ -398,6 +398,15 @@ async fn delete_in_tx(
     .bind(&known)
     .execute(&mut *conn)
     .await?;
+    sqlx::query_scalar::<_, Uuid>(
+        "select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id
+         where c.id=$1 and c.owner_id=$2 for update of q",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or(DeleteError::NotFound)?;
     let (machine_id, trashed_at): (Uuid, Option<DateTime<Utc>>) = sqlx::query_as(
         "select machine_id,trashed_at from conversations
          where id=$1 and owner_id=$2 for update",
@@ -422,15 +431,6 @@ async fn delete_in_tx(
     if holds_worktree(conn, id).await? {
         return Err(DeleteError::WorktreeNotRemoved);
     }
-    sqlx::query_scalar::<_, Uuid>(
-        "select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id
-         where c.id=$1 and c.owner_id=$2 for update of q",
-    )
-    .bind(id)
-    .bind(owner_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    .ok_or(DeleteError::NotFound)?;
     // До очистки runs: расходы уходят родителю одной строкой и переживают уборку.
     crate::session_usage::fold_in_tx(&mut *conn, id).await?;
     let (generation, execution_ids): (i64, Vec<Uuid>) = sqlx::query_as(
@@ -463,7 +463,9 @@ async fn delete_in_tx(
 }
 
 /// Мягкое удаление в тех же блокировках, что и окончательное: владелец, курсоры журнала,
-/// строка разговора, очередь. Ни одна строка сессии не удаляется.
+/// очередь, строка разговора. Строка берётся `FOR NO KEY UPDATE`: подписка держит на ней
+/// `FOR KEY SHARE`, и обновление неключевой отметки корзины не должно с ней конфликтовать.
+/// Ни одна строка сессии не удаляется.
 async fn trash_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -482,8 +484,17 @@ async fn trash_in_tx(
     .bind(&known)
     .execute(&mut *conn)
     .await?;
+    sqlx::query_scalar::<_, Uuid>(
+        "select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id
+         where c.id=$1 and c.owner_id=$2 for update of q",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or(DeleteError::NotFound)?;
     let trashed_at: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
-        "select trashed_at from conversations where id=$1 and owner_id=$2 for update",
+        "select trashed_at from conversations where id=$1 and owner_id=$2 for no key update",
     )
     .bind(id)
     .bind(owner_id)
@@ -502,15 +513,6 @@ async fn trash_in_tx(
     if holds_worktree(conn, id).await? {
         return Err(DeleteError::WorktreeNotRemoved);
     }
-    sqlx::query_scalar::<_, Uuid>(
-        "select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id
-         where c.id=$1 and c.owner_id=$2 for update of q",
-    )
-    .bind(id)
-    .bind(owner_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    .ok_or(DeleteError::NotFound)?;
     sqlx::query(
         "update conversations set trashed_at=clock_timestamp(),updated_at=clock_timestamp()
          where id=$1",

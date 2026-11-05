@@ -1027,8 +1027,12 @@ async fn trash_and_subscribe_share_one_lock_order(pool: PgPool) {
         session_tools::send::subscribe(&context, &from, json!({"session_id": target})),
     )
     .await
-    .expect("subscribe must not wait for the held conversation lock");
-    subscribed.unwrap();
+    .expect("subscribe must not deadlock with the trash");
+    // Корзина обновляет неключевую отметку и может успеть раньше подписки:
+    // тогда цель уже не видна. Важно, что обе стороны завершились.
+    if let Err(error) = subscribed {
+        assert_eq!(error.code, Code::SessionNotFound);
+    }
 
     held.commit().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), trashing)
@@ -1124,4 +1128,44 @@ async fn machine_session_list_hides_trashed_sessions(pool: PgPool) {
             .any(|item| item["conversation_id"] == json!(f.conversation)),
         "machine sessions leak the trash"
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn trash_does_not_block_a_queue_first_conversation_update(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let id = f.conversation;
+    // Первый шаг PATCH /settings (`change_settings`): очередь, затем разговор
+    // `FOR NO KEY UPDATE`. Держим очередь и проверяем, что корзина не заперла
+    // разговор раньше неё.
+    let mut settings = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(id)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+
+    let pool = f.pool.clone();
+    let owner = f.owner;
+    let trashing = tokio::spawn(async move {
+        deletion::trash(&pool, owner, id, "order-settings", Uuid::now_v7()).await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query("select id from conversations where id=$1 for no key update")
+            .bind(id)
+            .execute(&mut *settings),
+    )
+    .await
+    .expect("the settings lock must not wait for a queue-first trash")
+    .unwrap();
+    settings.commit().await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), trashing)
+        .await
+        .expect("trash finishes")
+        .unwrap()
+        .unwrap();
+    assert!(trashed_at(&f.pool, id).await.is_some());
 }
