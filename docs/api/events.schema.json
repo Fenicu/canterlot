@@ -88,6 +88,9 @@
       "$ref": "#/$defs/scheduled_changed"
     },
     {
+      "$ref": "#/$defs/draft_changed"
+    },
+    {
       "$ref": "#/$defs/alarm_changed"
     },
     {
@@ -3509,6 +3512,113 @@
       ],
       "additionalProperties": false
     },
+    "draft_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "draft_changed"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "conversation_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "text": {
+              "type": "string"
+            },
+            "attachment_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Uuid"
+              },
+              "maxItems": 10
+            },
+            "device_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "conversation_id",
+            "revision",
+            "text",
+            "attachment_ids",
+            "device_id"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "scheduled_changed": {
       "type": "object",
       "properties": {
@@ -5561,6 +5671,9 @@
                 },
                 {
                   "$ref": "#/$defs/scheduled_changed"
+                },
+                {
+                  "$ref": "#/$defs/draft_changed"
                 },
                 {
                   "$ref": "#/$defs/alarm_changed"

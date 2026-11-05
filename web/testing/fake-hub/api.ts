@@ -8,6 +8,7 @@ import type { RunInfo } from '../../src/lib/stores/run';
 import type { TodoList } from '../../src/lib/stores/todos.svelte';
 import type { RangeResult } from '../../src/lib/sync/scope';
 import type { HubEvent } from '../../src/lib/sync/wire';
+import type { DraftRecord } from '../../src/lib/drafts/sync';
 import type { FakeHub } from './hub';
 import type { components } from '../../src/lib/api/generated/openapi.js';
 
@@ -73,6 +74,9 @@ export class FakeHubApi {
 	readonly reads: { id: string; seq: string }[] = [];
 	readonly decisions = new Map<string, { winnerId: string; decision: unknown; key: string }>();
 	readonly deleted = new Set<string>();
+	readonly drafts = new Map<string, DraftRecord>();
+	readonly attachments = new Map<string, { size: number; offset: number; key: string; name: string; mime: string; conversation_id: string }>();
+	draftRevision = 0;
 	groups: ListSnapshot['groups'] = [];
 	counts: Counts = { all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] };
 	limits: ProviderLimits[] = [];
@@ -306,6 +310,56 @@ export class FakeHubApi {
 		return requestsMap;
 	}
 
+	draft(id: string): DraftRecord {
+		return this.drafts.get(id) ?? { text: '', attachment_ids: [], revision: 0, updated_at: null };
+	}
+
+	putDraft(
+		id: string,
+		body: { text: string; attachment_ids?: string[]; device_id?: string | null }
+	): DraftRecord {
+		const revision = ++this.draftRevision;
+		const attachment_ids = body.attachment_ids ?? [];
+		if (body.text === '' && attachment_ids.length === 0) {
+			this.drafts.delete(id);
+			const record: DraftRecord = { text: '', attachment_ids: [], revision, updated_at: null };
+			this.hub.append(`conversation:${id}`, {
+				kind: 'draft_changed',
+				conversation_id: id,
+				payload: {
+					conversation_id: id,
+					revision,
+					text: '',
+					attachment_ids: [],
+					device_id: body.device_id ?? null
+				}
+			});
+			this.hub.flush();
+			return record;
+		}
+		const record: DraftRecord = {
+			text: body.text,
+			attachment_ids,
+			revision,
+			updated_at: new Date().toISOString(),
+			device_id: body.device_id ?? null
+		};
+		this.drafts.set(id, record);
+		this.hub.append(`conversation:${id}`, {
+			kind: 'draft_changed',
+			conversation_id: id,
+			payload: {
+				conversation_id: id,
+				revision,
+				text: record.text,
+				attachment_ids: record.attachment_ids,
+				device_id: record.device_id ?? null
+			}
+		});
+		this.hub.flush();
+		return record;
+	}
+
 	conversationData(id: string): SnapshotData {
 		const open_requests = [...this.requestRows(id).values()].filter((r) =>
 			r.state === 'open' || r.state === 'decision_saved' || r.state === 'decision_transmitting'
@@ -349,6 +403,7 @@ export class FakeHubApi {
 			},
 			history: this.page(id, {}),
 			scheduled: [],
+			draft: this.drafts.get(id) ?? null,
 			alarms: [...alarms.values()],
 			nudge: this.nudgeRules.get(id) ?? null,
 			nudge_events: this.nudgeEvents.get(id) ?? [],

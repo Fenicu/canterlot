@@ -222,6 +222,7 @@ const SCOPES = new Set<ErrorScope>([
 ]);
 
 const CONTENT_PATCH = /^\/api\/v1\/attachments\/[^/]+\/content$/;
+const DRAFT_PUT = /^\/api\/v1\/conversations\/[^/]+\/draft$/;
 const MARK_READ = /^\/api\/v1\/conversations\/[^/]+\/read$/;
 const LIMITS_REFRESH = /^\/api\/v1\/limits\/refresh$/;
 
@@ -240,6 +241,8 @@ function isMutationExempt(method: HttpMethod, path: string): boolean {
   if (method === "PATCH" && CONTENT_PATCH.test(pathname)) return true;
   if (method === "POST" && MARK_READ.test(pathname)) return true;
   if (method === "POST" && LIMITS_REFRESH.test(pathname)) return true;
+  // Полная замена черновика идемпотентна: повтор того же тела даёт тот же текст.
+  if (method === "PUT" && DRAFT_PUT.test(pathname)) return true;
   return false;
 }
 

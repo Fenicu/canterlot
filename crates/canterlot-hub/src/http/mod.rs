@@ -29,6 +29,7 @@ pub mod auth;
 mod connection;
 pub mod conversations;
 pub mod crunch;
+pub mod drafts;
 pub mod error;
 pub mod extract;
 pub mod groups;
@@ -146,6 +147,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(alarms::routes())
         .merge(nudge::routes())
         .merge(conversations::routes())
+        .merge(drafts::routes())
         .merge(crunch::routes())
         .merge(groups::routes())
         .merge(presets::routes())

@@ -150,6 +150,9 @@ pub struct SubmitBody {
     #[serde(default)]
     attachment_ids: Vec<Uuid>,
     retry_of: Option<Uuid>,
+    /// Устройство, отправившее текст из композера: свой `draft_changed` оно игнорирует.
+    #[serde(default)]
+    device_id: Option<String>,
 }
 #[utoipa::path(post,path="/api/v1/conversations/{id}/inputs",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=SubmitBody,responses((status=201,description="Сообщение в очереди",body=crate::delivery::SubmittedInput)))]
 async fn submit(
@@ -160,7 +163,7 @@ async fn submit(
     Correlation(c): Correlation,
     ApiJson(body): ApiJson<SubmitBody>,
 ) -> Result<(StatusCode, Json<crate::delivery::SubmittedInput>), ApiError> {
-    let result = conversations::submit_message(
+    let result = conversations::submit_message_with_device(
         &s.pool,
         conversations::SubmitMessage {
             owner_id: o.owner_id,
@@ -172,6 +175,7 @@ async fn submit(
             received_at: chrono::Utc::now(),
         },
         c,
+        body.device_id,
     )
     .await
     .map_err(ApiError::from);

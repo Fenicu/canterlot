@@ -28,6 +28,9 @@ pub struct ScheduleBody {
     pub content: Vec<ContentBlock>,
     #[serde(default)]
     pub attachment_ids: Vec<Uuid>,
+    /// Устройство, отправившее текст из композера: свой `draft_changed` оно игнорирует.
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 #[utoipa::path(get,path="/api/v1/conversations/{id}/scheduled",tag="scheduled",params(("id"=Uuid,Path,description="Разговор")),responses(
@@ -68,7 +71,7 @@ async fn create(
     Correlation(correlation): Correlation,
     ApiJson(body): ApiJson<ScheduleBody>,
 ) -> Result<(StatusCode, Json<ScheduledMessage>), ApiError> {
-    let message = scheduler::schedule_message(
+    let message = scheduler::schedule_message_with_device(
         &state.pool,
         owner.owner_id,
         &key,
@@ -80,6 +83,7 @@ async fn create(
         },
         Utc::now(),
         correlation,
+        body.device_id,
     )
     .await?;
     state.scheduler.notify();

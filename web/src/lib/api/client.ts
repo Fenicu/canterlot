@@ -1,5 +1,6 @@
 import { http, type HttpResponse, type RequestOptions } from "#lib/api/http.js";
 import type { operations } from "#lib/api/generated/openapi.js";
+import type { DraftRecord } from "#lib/drafts/sync.js";
 
 type Ok<T> = T extends { responses: infer R }
   ? R extends { 200: { content: { "application/json": infer B } } }
@@ -83,6 +84,31 @@ export function conversationSnapshot(
     "GET",
     `/api/v1/conversations/${id(conversationId)}/snapshot`,
     undefined,
+    opts,
+  );
+}
+
+export function getConversationDraft(
+  conversationId: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<DraftRecord>> {
+  return http(
+    "GET",
+    `/api/v1/conversations/${id(conversationId)}/draft`,
+    undefined,
+    opts,
+  );
+}
+
+export function putConversationDraft(
+  conversationId: string,
+  body: { text: string; attachment_ids: string[]; base_revision: number; device_id: string },
+  opts?: RequestOptions,
+): Promise<HttpResponse<DraftRecord>> {
+  return http(
+    "PUT",
+    `/api/v1/conversations/${id(conversationId)}/draft`,
+    body,
     opts,
   );
 }

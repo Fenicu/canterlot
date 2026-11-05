@@ -22,6 +22,28 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const id = parts[4] ?? '';
     const kind = parts[5] ?? '';
     const headers = { 'X-Server-Time-Ms': String(Date.now()) };
+    if (kind === 'draft') {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({ headers, json: api.draft(id) });
+        return;
+      }
+      if (route.request().method() === 'PUT') {
+        const body = route.request().postDataJSON() as {
+          text?: string;
+          attachment_ids?: string[];
+          device_id?: string | null;
+        };
+        await route.fulfill({
+          headers,
+          json: api.putDraft(id, {
+            text: body.text ?? '',
+            attachment_ids: body.attachment_ids ?? [],
+            device_id: body.device_id ?? null
+          })
+        });
+        return;
+      }
+    }
     if (route.request().method() === 'GET' && kind === 'snapshot') {
       if (api.deleted.has(id)) {
         await route.fulfill({
@@ -95,7 +117,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
 
   const inputs = new Map<string, string>();
   const scheduled = new Map<string, string>();
-  const attachments = new Map<string, { size: number; offset: number; key: string }>();
+  const attachments = api.attachments;
   const headers = () => ({ 'X-Server-Time-Ms': String(Date.now()), 'cache-control': 'no-store' });
   const failure = (status: number, code: string, message: string, extra?: Record<string, string>) => ({
     status,
@@ -140,6 +162,13 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const prior = key ? inputs.get(key) : undefined;
     const id = prior ?? crypto.randomUUID();
     if (key && !prior) inputs.set(key, id);
+    const conversation = new URL(route.request().url()).pathname.split('/')[4] ?? '';
+    const body = route.request().postDataJSON() as { device_id?: string | null };
+    api.putDraft(conversation, {
+      text: '',
+      attachment_ids: [],
+      device_id: body.device_id ?? null
+    });
     await route.fulfill({ headers: headers(), json: { id, idempotency_key: key } });
   });
 
@@ -149,7 +178,17 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const prior = key ? scheduled.get(key) : undefined;
     const id = prior ?? crypto.randomUUID();
     if (key && !prior) scheduled.set(key, id);
-    const body = route.request().postDataJSON() as { run_at?: string; content?: unknown };
+    const body = route.request().postDataJSON() as {
+      run_at?: string;
+      content?: unknown;
+      device_id?: string | null;
+    };
+    const conversation = new URL(route.request().url()).pathname.split('/')[4] ?? '';
+    api.putDraft(conversation, {
+      text: '',
+      attachment_ids: [],
+      device_id: body.device_id ?? null
+    });
     await route.fulfill({
       headers: headers(),
       json: {
@@ -276,9 +315,21 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         });
         return;
       }
-      const body = route.request().postDataJSON() as { size?: number };
+      const body = route.request().postDataJSON() as {
+        size?: number;
+        name?: string;
+        mime?: string;
+        conversation_id?: string;
+      };
       const id = crypto.randomUUID();
-      attachments.set(id, { size: body.size ?? 0, offset: 0, key });
+      attachments.set(id, {
+        size: body.size ?? 0,
+        offset: 0,
+        key,
+        name: body.name ?? 'файл',
+        mime: body.mime ?? 'application/octet-stream',
+        conversation_id: body.conversation_id ?? ''
+      });
       await route.fulfill({
         headers: headers(),
         json: { id, state: 'uploading', upload: { upload_chunk_bytes: 8_388_608 } }
@@ -288,6 +339,23 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const id = parts[4] ?? '';
     const tail = parts[5] ?? '';
     const record = attachments.get(id);
+    if (method === 'GET' && !tail) {
+      await route.fulfill({
+        headers: headers(),
+        json: {
+          id,
+          conversation_id: record?.conversation_id ?? '',
+          name: record?.name ?? 'файл',
+          mime: record?.mime ?? 'application/octet-stream',
+          size: record?.size ?? 0,
+          sha256: 'a'.repeat(64),
+          state: 'ready',
+          fail_reason: null,
+          uploaded_bytes: record?.size ?? 0
+        }
+      });
+      return;
+    }
     if (method === 'HEAD' && tail === 'content') {
       await route.fulfill({
         status: 200,

@@ -309,6 +309,20 @@ pub async fn schedule_message(
     now: DateTime<Utc>,
     correlation_id: Uuid,
 ) -> Result<ScheduledMessage, ScheduleError> {
+    schedule_message_with_device(pool, owner_id, key, req, now, correlation_id, None).await
+}
+
+/// Создание отложенного сообщения из композера удаляет общий черновик в той же
+/// транзакции: набранный текст уже ушёл в задание планировщика.
+pub async fn schedule_message_with_device(
+    pool: &PgPool,
+    owner_id: Uuid,
+    key: &str,
+    req: NewScheduled,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+    device_id: Option<String>,
+) -> Result<ScheduledMessage, ScheduleError> {
     validate_key(key)?;
     let settings = service(pool);
     let config = settings.config.clone();
@@ -328,7 +342,9 @@ pub async fn schedule_message(
             .bind(Uuid::now_v7()).bind(owner_id).bind(conversation_id).bind(req.run_at).bind(json!({"content":req.content,"attachment_ids":req.attachment_ids})).fetch_one(&mut *conn).await?;
         let refs=crate::attachments::link_scheduled_in_tx(conn,owner_id,conversation_id,job.id,&req.attachment_ids).await?;
         validate_refs(&req.content,&refs)?;
-        let message=job.message()?; changed(conn,&message,correlation_id).await?; Ok(message)
+        let message=job.message()?; changed(conn,&message,correlation_id).await?;
+        crate::drafts::clear_in_tx(conn,conversation_id,device_id.as_deref(),correlation_id).await?;
+        Ok(message)
     })).await?.value;
     settings.notify.notify_one();
     Ok(value)
