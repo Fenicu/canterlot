@@ -1032,6 +1032,7 @@ async fn read(
         seq,
         &crate::activity::Thresholds::from(&*s.activity),
         s.machines.metrics_stale_after,
+        s.nudge_enabled,
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)

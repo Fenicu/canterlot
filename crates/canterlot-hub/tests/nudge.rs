@@ -1003,6 +1003,97 @@ async fn a_stale_job_clears_the_hold_so_a_new_one_can_be_scheduled(pool: PgPool)
     assert_eq!(pending, 1);
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn disabled_after_hold_gives_one_completion_and_no_nudge(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "dis1",
+        true,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    assert_eq!(rule_row(&pool, f.child).await.0, "pending");
+
+    // Запуск хаба с выключателем: снимаем удержание и ожидающее задание.
+    nudge::disable_all_on_startup(&pool, now + TimeDelta::minutes(1))
+        .await
+        .unwrap();
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from scheduled_jobs where state='pending'
+           and conversation_id=$1 and payload->>'action'='nudge'",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0);
+    assert_eq!(jobs(&pool, f.parent).await.len(), 1, "held result released");
+
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(4))
+        .await
+        .unwrap();
+    let nudges: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1 and origin->>'kind'='nudge'",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(nudges, 0);
+    let completions: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1 and origin->>'kind'='event'",
+    )
+    .bind(f.parent)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(completions, 1);
+
+    // Задание, дожившее до выполнения с выключенным автопинком, тоже не толкает.
+    let f2 = fx(&pool).await;
+    subscribe(&pool, &f2).await;
+    prime_idle(&pool, &f2, now).await;
+    rule(&pool, &f2, f2.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f2, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f2,
+        command,
+        now - TimeDelta::minutes(1),
+        "dis2",
+        true,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f2.child, now).await;
+    let disabled = scheduler(&pool);
+    let disabled = disabled.with_settle(SettleConfig {
+        nudge_enabled: false,
+        ..Default::default()
+    });
+    disabled.tick(now + TimeDelta::minutes(4)).await.unwrap();
+    let nudges: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1 and origin->>'kind'='nudge'",
+    )
+    .bind(f2.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(nudges, 0);
+    assert_eq!(jobs(&pool, f2.parent).await.len(), 1);
+}
+
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.
 async fn deliver_owner_input(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fx, text: &str) {
     canterlot_hub::delivery::submit_input_in_tx(

@@ -321,6 +321,7 @@ async fn serve(
             proxy_secret,
             limits,
             activity,
+            nudge_enabled: orchestrator.nudge.enabled,
             machines,
             attachments,
             blobs,

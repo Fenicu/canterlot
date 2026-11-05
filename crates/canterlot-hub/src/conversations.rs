@@ -1145,6 +1145,7 @@ pub async fn mark_read(
     seq: i64,
     thresholds: &activity::Thresholds,
     metrics_stale_after: std::time::Duration,
+    nudge_enabled: bool,
 ) -> Result<(), UpdateError> {
     if seq < 0 {
         return Err(UpdateError::Invalid("seq"));
@@ -1169,7 +1170,7 @@ pub async fn mark_read(
         Utc::now(),
         thresholds,
         metrics_stale_after,
-        true,
+        nudge_enabled,
         Uuid::now_v7(),
     )
     .await?;

@@ -608,15 +608,7 @@ pub async fn on_input_in_tx(
     .await?;
     if let Some(rule) = changed {
         // Отпечаток изменился: ожидавший толчок уже не про этот простой.
-        sqlx::query(
-            "update scheduled_jobs set state='cancelled',result=$2,updated_at=clock_timestamp()
-             where kind='session_task' and state='pending' and conversation_id=$1
-               and payload->>'action'='nudge'",
-        )
-        .bind(target_id)
-        .bind(json!({"reason":"input"}))
-        .execute(&mut *conn)
-        .await?;
+        cancel_pending_jobs_in_tx(conn, target_id, None, "input").await?;
         changed_in_tx(conn, &rule, Uuid::now_v7(), Some("input")).await?;
     }
     Ok(())
@@ -873,6 +865,10 @@ pub async fn run_job_in_tx(
     let Some(mut rule) = rule_locked_in_tx(conn, target).await? else {
         return Ok(JobOutcome::Cancelled("rule_gone"));
     };
+    if !settle_config.nudge_enabled {
+        disable_locked_in_tx(conn, &mut rule, Some(job.id), now, correlation_id).await?;
+        return Ok(JobOutcome::Done(json!({"state":"disabled"})));
+    }
     if !rule.enabled
         || rule.state != "pending"
         || rule.held_fingerprint.as_deref() != Some(&payload.fingerprint)
@@ -1018,6 +1014,111 @@ pub async fn run_job_in_tx(
         "attempt":attempt,
         "input_id":submitted.input_id
     })))
+}
+
+/// Снять ожидающие задания толчка. `skip locked` не ждёт строку, которую уже
+/// выбрал планировщик: отпечаток всё равно сделает такое задание устаревшим.
+async fn cancel_pending_jobs_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+    current: Option<Uuid>,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from scheduled_jobs
+         where kind='session_task' and state='pending' and conversation_id=$1
+           and payload->>'action'='nudge'
+         for update skip locked",
+    )
+    .bind(target_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for id in ids {
+        if Some(id) == current {
+            continue;
+        }
+        sqlx::query(
+            "update scheduled_jobs set state='cancelled',result=$2,updated_at=clock_timestamp()
+             where id=$1",
+        )
+        .bind(id)
+        .bind(json!({"reason":reason}))
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Выключатель `[orchestrator.nudge]`: правило перестаёт удерживать и толкать,
+/// удержанный итог уходит подписчикам. Очередь цели уже взята вызывающим.
+async fn disable_locked_in_tx(
+    conn: &mut PgConnection,
+    rule: &mut RuleRow,
+    current: Option<Uuid>,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    if let Some(fingerprint) = rule.held_fingerprint.clone() {
+        let row: RuleRow = sqlx::query_as(
+            "update nudge_rules set state='watching',held_fingerprint=null,updated_at=$2
+             where conversation_id=$1 returning *",
+        )
+        .bind(rule.conversation_id)
+        .bind(now)
+        .fetch_one(&mut *conn)
+        .await?;
+        *rule = row;
+        let signals = Signals::default();
+        release_held_in_tx(
+            conn,
+            rule,
+            Some(&fingerprint),
+            &signals,
+            Some("disabled"),
+            now,
+        )
+        .await?;
+    } else {
+        let row: Option<RuleRow> = sqlx::query_as(
+            "update nudge_rules set state='watching',updated_at=$2
+             where conversation_id=$1 and state='pending' returning *",
+        )
+        .bind(rule.conversation_id)
+        .bind(now)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(row) = row {
+            *rule = row;
+        }
+    }
+    cancel_pending_jobs_in_tx(conn, rule.conversation_id, current, "disabled").await?;
+    changed_in_tx(conn, rule, correlation_id, Some("disabled")).await?;
+    Ok(())
+}
+
+/// Запуск хаба с выключенным автопинком: снимаем удержания и ожидающие задания
+/// до первого тика планировщика. Каждое правило — своя транзакция с очередью цели.
+pub async fn disable_all_on_startup(
+    pool: &sqlx::PgPool,
+    now: DateTime<Utc>,
+) -> Result<usize, sqlx::Error> {
+    let targets: Vec<Uuid> = sqlx::query_scalar(
+        "select conversation_id from nudge_rules
+         where state='pending' or held_fingerprint is not null order by conversation_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut done = 0;
+    for target in targets {
+        let mut tx = crate::db::begin(pool).await?;
+        send::lock_queue(&mut tx, target).await?;
+        if let Some(mut rule) = rule_locked_in_tx(&mut tx, target).await? {
+            disable_locked_in_tx(&mut tx, &mut rule, None, now, Uuid::now_v7()).await?;
+            done += 1;
+        }
+        tx.commit().await?;
+    }
+    Ok(done)
 }
 
 /// Задание не смогло толкнуть: удержание снимается, проектор оценит простой заново.
@@ -1492,15 +1593,7 @@ pub async fn clear(
         now,
     )
     .await?;
-    sqlx::query(
-        "update scheduled_jobs set state='cancelled',result=$2,updated_at=clock_timestamp()
-         where kind='session_task' and state='pending' and conversation_id=$1
-           and payload->>'action'='nudge'",
-    )
-    .bind(target.id)
-    .bind(json!({"reason":"rule_off"}))
-    .execute(&mut *tx)
-    .await?;
+    cancel_pending_jobs_in_tx(&mut tx, target.id, None, "rule_off").await?;
     sqlx::query("delete from nudge_rules where conversation_id=$1")
         .bind(target.id)
         .execute(&mut *tx)

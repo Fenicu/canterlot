@@ -796,6 +796,12 @@ pub async fn run(
     shutdown: watch::Receiver<bool>,
 ) {
     crate::singleton::supervise(&pool, "activity", shutdown, || async {
+        if !nudge_enabled
+            && let Err(error) =
+                crate::session_tools::nudge::disable_all_on_startup(&pool, Utc::now()).await
+        {
+            log_error(&error);
+        }
         let mut notices = bus.subscribe();
         let mut tick = tokio::time::interval(config.tick.max(Duration::from_millis(1)));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
