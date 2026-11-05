@@ -1169,6 +1169,7 @@ pub async fn mark_read(
         Utc::now(),
         thresholds,
         metrics_stale_after,
+        true,
         Uuid::now_v7(),
     )
     .await?;
