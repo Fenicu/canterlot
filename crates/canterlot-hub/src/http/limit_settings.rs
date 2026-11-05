@@ -8,13 +8,15 @@ use super::{
     extract::ApiJson,
 };
 use crate::{
-    idempotency,
+    crunch, idempotency,
     limit_settings::{self, LimitSettings, LimitSettingsView},
 };
 use axum::{Json, extract::State};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
+use uuid::Uuid;
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new().routes(routes!(read, replace))
@@ -65,6 +67,9 @@ async fn replace(
         move |conn| {
             Box::pin(async move {
                 limit_settings::replace(conn, owner, settings).await?;
+                let now = Utc::now();
+                // Пересчёт сразу в той же транзакции: сохранение не ждёт следующего показания.
+                crunch::reapply_reserve_in_tx(conn, owner, &config, now, Uuid::now_v7()).await?;
                 Ok::<_, ApiError>(limit_settings::view(conn, owner, &config).await?)
             })
         },

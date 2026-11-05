@@ -170,7 +170,7 @@ pub async fn record_observation_in_tx(
     config: &LimitsConfig,
     correlation_id: Uuid,
 ) -> Result<Recorded, sqlx::Error> {
-    let result = record_in_tx(conn, o, now, config, true, correlation_id).await?;
+    let result = record_in_tx(conn, owner_id, o, now, config, true, correlation_id).await?;
     if result.provider_changed || result.refreshed {
         emit_changed(conn, owner_id, &o.provider, o.window, correlation_id).await?;
     }
@@ -188,6 +188,7 @@ pub(crate) fn known_provider(provider: &str) -> bool {
 }
 pub(crate) async fn record_in_tx(
     conn: &mut PgConnection,
+    owner_id: Uuid,
     o: &Observation,
     now: DateTime<Utc>,
     config: &LimitsConfig,
@@ -241,7 +242,7 @@ pub(crate) async fn record_in_tx(
         }).bind(&o.provider).bind(i32::from(o.used_permille)).bind(o.resets_at).bind(observed_at).bind(o.data_confidence.as_str()).bind(now).execute(&mut *conn).await?;
     }
     if newer && o.window == Window::Weekly {
-        weekly_stage(conn, o, observed_at, now, config).await?;
+        weekly_stage(conn, owner_id, o, observed_at, now, config).await?;
     }
     // Свежее показание сперва попадает в `provider_limits`, поэтому условие будильника
     // оценивается уже по новой строке. Строка провайдера заперта выше: порядок блокировок
@@ -273,11 +274,17 @@ pub(crate) async fn record_in_tx(
 /// Стадия наблюдения недельного резерва; сами удержания ставит задание `limit_rule`.
 async fn weekly_stage(
     conn: &mut PgConnection,
+    owner_id: Uuid,
     o: &Observation,
     observed_at: DateTime<Utc>,
     now: DateTime<Utc>,
     config: &LimitsConfig,
 ) -> Result<(), sqlx::Error> {
+    let settings = crate::limit_settings::effective(conn, owner_id, config).await?;
+    let Some(threshold) = settings.reserve_threshold_permille() else {
+        // Резерв выключен: действующий флаг снимет задание правила, новых не ставим.
+        return Ok(());
+    };
     let (active, mut reserve_resets, mut low_count, mut low_at): (
         bool,
         Option<DateTime<Utc>>,
@@ -287,7 +294,6 @@ async fn weekly_stage(
         .bind(&o.provider)
         .fetch_one(&mut *conn)
         .await?;
-    let threshold = i32::from(config.weekly_reserve_pct) * 10;
     let exit = threshold - i32::from(config.reserve_exit_hysteresis_permille);
     let used = i32::from(o.used_permille);
     let interval = chrono::Duration::from_std(config.snapshot_min_interval)

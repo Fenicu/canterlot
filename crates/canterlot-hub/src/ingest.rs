@@ -971,6 +971,7 @@ impl Ingest {
                     };
                     let result = limits::record_in_tx(
                         conn,
+                        owner,
                         &observation,
                         now,
                         limits,
@@ -2199,9 +2200,16 @@ impl crate::grpc::Ingest for Ingest {
                     if !limits::known_provider(&o.provider) {
                         continue;
                     }
-                    let recorded =
-                        limits::record_in_tx(&mut *conn, &o, now, &limits, mapped, Uuid::now_v7())
-                            .await?;
+                    let recorded = limits::record_in_tx(
+                        &mut *conn,
+                        owner,
+                        &o,
+                        now,
+                        &limits,
+                        mapped,
+                        Uuid::now_v7(),
+                    )
+                    .await?;
                     if recorded.provider_changed || recorded.refreshed {
                         changed.insert((o.provider, o.window));
                     }

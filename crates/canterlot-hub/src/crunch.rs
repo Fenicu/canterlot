@@ -367,9 +367,23 @@ pub async fn apply_weekly_rule_in_tx(
     if !active {
         return Ok(effect);
     }
-    let threshold = i32::from(config.weekly_reserve_pct) * 10;
-    let new_window = matches!((current_resets, reserve_resets), (Some(current), Some(entered)) if current > entered + TimeDelta::hours(1));
+    let settings = crate::limit_settings::effective(conn, owner_id, config).await?;
     let harnesses = harness::harnesses_of(provider);
+    let Some(threshold) = settings.reserve_threshold_permille() else {
+        // Владелец выключил резерв: снимаем удержания тем же путём, что и обычный выход.
+        leave(
+            conn,
+            owner_id,
+            provider,
+            &harnesses,
+            now,
+            correlation_id,
+            &mut effect,
+        )
+        .await?;
+        return Ok(effect);
+    };
+    let new_window = matches!((current_resets, reserve_resets), (Some(current), Some(entered)) if current > entered + TimeDelta::hours(1));
     if (new_window && used.is_some_and(|u| u < threshold)) || low_count >= 2 {
         leave(
             conn,
@@ -459,6 +473,87 @@ pub async fn apply_weekly_rule_in_tx(
         limits::emit_changed(conn, owner_id, provider, Window::Weekly, correlation_id).await?;
     }
     Ok(effect)
+}
+
+/// Состояние резерва строки провайдера: флаг, недельный расход, сброс недели,
+/// сброс окна входа и счётчик подтверждений выхода.
+type ReserveState = (
+    bool,
+    Option<i32>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    i16,
+);
+
+/// Пересчёт недельного резерва после смены порогов владельцем. Действующие значения
+/// читаются из БД; вход ставит флаг и удержания тем же правилом `limit_rule`, выход
+/// снимает их `leave` — тем же путём, что и подтверждённый сброс окна.
+pub async fn reapply_reserve_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    config: &LimitsConfig,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let settings = crate::limit_settings::effective(conn, owner_id, config).await?;
+    let threshold = settings.reserve_threshold_permille();
+    let providers: Vec<String> = sqlx::query_scalar(
+        "select distinct mh.provider from machine_harnesses mh
+           join machines m on m.id=mh.machine_id
+          where m.owner_id=$1 and mh.provider <> ''
+          order by mh.provider",
+    )
+    .bind(owner_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for provider in providers {
+        if !limits::known_provider(&provider) {
+            continue;
+        }
+        limits::lock_provider(conn, &provider).await?;
+        let row: Option<ReserveState> = sqlx::query_as(
+            "select weekly_reserve_active,weekly_used_permille,weekly_resets_at,weekly_reserve_resets_at,weekly_low_count from provider_limits where provider=$1",
+        )
+        .bind(&provider)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some((active, used, weekly_resets, _reserve_resets, _low_count)) = row else {
+            continue;
+        };
+        // Явное действие владельца не ждёт гистерезиса: условие либо выполняется сейчас,
+        // либо нет. Это отличается от выхода по новым показаниям, где гистерезис защищает
+        // от дребезга вокруг порога.
+        let holds = threshold.is_some_and(|threshold| used.is_some_and(|used| used >= threshold));
+        if holds && !active {
+            sqlx::query("update provider_limits set weekly_reserve_active=true,weekly_reserve_resets_at=$2,weekly_low_count=0,weekly_low_at=null,updated_at=$3 where provider=$1")
+                .bind(&provider)
+                .bind(weekly_resets)
+                .bind(now)
+                .execute(&mut *conn)
+                .await?;
+        }
+        if holds {
+            apply_weekly_rule_in_tx(conn, owner_id, &provider, config, now, correlation_id).await?;
+            if !active {
+                limits::emit_changed(conn, owner_id, &provider, Window::Weekly, correlation_id)
+                    .await?;
+            }
+        } else if active {
+            let harnesses = harness::harnesses_of(&provider);
+            let mut effect = WeeklyEffect::default();
+            leave(
+                conn,
+                owner_id,
+                &provider,
+                &harnesses,
+                now,
+                correlation_id,
+                &mut effect,
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn leave(
