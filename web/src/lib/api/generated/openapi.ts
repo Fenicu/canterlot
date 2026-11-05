@@ -2173,6 +2173,7 @@ export interface components {
         };
         PresetBody: {
             description?: string | null;
+            purpose?: components["schemas"]["PresetPurpose"];
             text: string;
             title: string;
         };
@@ -2180,7 +2181,7 @@ export interface components {
          * @description Вид пресета в списках и событиях.
          * @enum {string}
          */
-        PresetKind: "clean" | "owner" | "custom";
+        PresetKind: "clean" | "owner" | "custom" | "nudge";
         /** @description Кто создал пресет или внёс последнюю правку; текст правки не несёт. */
         PresetOrigin: {
             at?: string | null;
@@ -2197,14 +2198,21 @@ export interface components {
             text?: string | null;
             title?: string | null;
         };
+        /**
+         * @description Назначение пресета: обычные инструкции агента или текст автопинка.
+         * @enum {string}
+         */
+        PresetPurpose: "instructions" | "nudge";
         /** @description Строка списка, события и снимка: текста пресета здесь нет. */
         PresetSummary: {
             created: components["schemas"]["PresetOrigin"];
             description: string;
-            /** @description `clean`, `owner` или UUID пользовательского пресета. */
+            /** @description `clean`, `owner`, `nudge_default` или UUID пользовательского пресета. */
             id: string;
             kind: components["schemas"]["PresetKind"];
             last_edit?: components["schemas"]["PresetOrigin"] | null;
+            /** @description `instructions` или `nudge`. */
+            purpose: components["schemas"]["PresetPurpose"];
             /** Format: int64 */
             revision?: number | null;
             /** Format: int64 */
@@ -5377,7 +5385,9 @@ export interface operations {
     };
     get__api_v1_presets: {
         parameters: {
-            query?: never;
+            query?: {
+                purpose?: components["schemas"]["PresetPurpose"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -5449,7 +5459,9 @@ export interface operations {
     };
     get__api_v1_presets__id_: {
         parameters: {
-            query?: never;
+            query?: {
+                purpose?: components["schemas"]["PresetPurpose"];
+            };
             header?: never;
             path: {
                 id: string;
@@ -5484,7 +5496,9 @@ export interface operations {
     };
     delete__api_v1_presets__id_: {
         parameters: {
-            query?: never;
+            query?: {
+                purpose?: components["schemas"]["PresetPurpose"];
+            };
             header: {
                 "Idempotency-Key": string;
             };
@@ -5519,7 +5533,9 @@ export interface operations {
     };
     patch__api_v1_presets__id_: {
         parameters: {
-            query?: never;
+            query?: {
+                purpose?: components["schemas"]["PresetPurpose"];
+            };
             header: {
                 "Idempotency-Key": string;
             };

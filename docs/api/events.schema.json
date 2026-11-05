@@ -6013,7 +6013,8 @@
       "enum": [
         "clean",
         "owner",
-        "custom"
+        "custom",
+        "nudge"
       ]
     },
     "PresetOrigin": {
@@ -6069,6 +6070,12 @@
         "kind": {
           "$ref": "#/$defs/PresetKind"
         },
+        "purpose": {
+          "enum": [
+            "instructions",
+            "nudge"
+          ]
+        },
         "title": {
           "type": "string"
         },
@@ -6118,6 +6125,7 @@
       "required": [
         "id",
         "kind",
+        "purpose",
         "title",
         "description",
         "created",

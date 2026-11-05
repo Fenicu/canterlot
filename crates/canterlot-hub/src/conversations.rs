@@ -1274,7 +1274,7 @@ pub(crate) async fn create_in_tx(
         PresetRef::Clean | PresetRef::Owner => None,
         PresetRef::Custom(id) => {
             let alive: bool = sqlx::query_scalar(
-                "select exists(select 1 from instruction_presets where owner_id=$1 and id=$2 and deleted_at is null)",
+                "select exists(select 1 from instruction_presets where owner_id=$1 and id=$2 and purpose='instructions' and deleted_at is null)",
             )
             .bind(req.owner_id)
             .bind(id)
@@ -1577,7 +1577,7 @@ pub async fn change_settings(
             let reference = PresetRef::parse(profile).map_err(|_| SettingsError::PresetUnknown)?;
             if let PresetRef::Custom(id) = reference {
                 let alive: bool = sqlx::query_scalar(
-                    "select exists(select 1 from instruction_presets where owner_id=$1 and id=$2 and deleted_at is null)",
+                    "select exists(select 1 from instruction_presets where owner_id=$1 and id=$2 and purpose='instructions' and deleted_at is null)",
                 )
                 .bind(owner_id)
                 .bind(id)
@@ -1822,7 +1822,7 @@ pub(crate) async fn revalidate_pending_in_tx(
             Err(_) => true,
             Ok(PresetRef::Custom(_)) => {
                 let alive: bool = sqlx::query_scalar(
-                    "select exists(select 1 from instruction_presets where owner_id=$1 and id::text=$2 and deleted_at is null)",
+                    "select exists(select 1 from instruction_presets where owner_id=$1 and id::text=$2 and purpose='instructions' and deleted_at is null)",
                 )
                 .bind(owner)
                 .bind(profile)

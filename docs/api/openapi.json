@@ -4890,6 +4890,16 @@
           "presets"
         ],
         "operationId": "get__api_v1_presets",
+        "parameters": [
+          {
+            "name": "purpose",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PresetPurpose"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Пресеты владельца без текста",
@@ -5015,6 +5025,14 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "purpose",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PresetPurpose"
+            }
           }
         ],
         "responses": {
@@ -5079,6 +5097,14 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "purpose",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PresetPurpose"
+            }
           }
         ],
         "responses": {
@@ -5135,6 +5161,14 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "purpose",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/PresetPurpose"
             }
           }
         ],
@@ -10170,6 +10204,9 @@
               "null"
             ]
           },
+          "purpose": {
+            "$ref": "#/components/schemas/PresetPurpose"
+          },
           "text": {
             "type": "string"
           },
@@ -10185,7 +10222,8 @@
         "enum": [
           "clean",
           "owner",
-          "custom"
+          "custom",
+          "nudge"
         ]
       },
       "PresetOrigin": {
@@ -10251,12 +10289,21 @@
         },
         "additionalProperties": false
       },
+      "PresetPurpose": {
+        "type": "string",
+        "description": "Назначение пресета: обычные инструкции агента или текст автопинка.",
+        "enum": [
+          "instructions",
+          "nudge"
+        ]
+      },
       "PresetSummary": {
         "type": "object",
         "description": "Строка списка, события и снимка: текста пресета здесь нет.",
         "required": [
           "id",
           "kind",
+          "purpose",
           "title",
           "description",
           "created",
@@ -10271,7 +10318,7 @@
           },
           "id": {
             "type": "string",
-            "description": "`clean`, `owner` или UUID пользовательского пресета."
+            "description": "`clean`, `owner`, `nudge_default` или UUID пользовательского пресета."
           },
           "kind": {
             "$ref": "#/components/schemas/PresetKind"
@@ -10285,6 +10332,10 @@
                 "type": "null"
               }
             ]
+          },
+          "purpose": {
+            "$ref": "#/components/schemas/PresetPurpose",
+            "description": "`instructions` или `nudge`."
           },
           "revision": {
             "type": [

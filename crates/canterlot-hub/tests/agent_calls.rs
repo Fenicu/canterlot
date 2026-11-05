@@ -111,6 +111,7 @@ impl Fx {
                 title: title.to_owned(),
                 description: None,
                 text: text.to_owned(),
+                purpose: canterlot_hub::presets::PresetPurpose::Instructions,
             },
             presets::Actor::Owner,
             Uuid::now_v7(),
@@ -681,6 +682,7 @@ async fn agent_updates_only_presets_its_session_created(pool: PgPool) {
             title: "Чужой агентский".to_owned(),
             description: None,
             text: "текст другого агента".to_owned(),
+            purpose: canterlot_hub::presets::PresetPurpose::Instructions,
         },
         presets::Actor::Agent {
             conversation_id: other,
@@ -748,4 +750,55 @@ async fn delegated_session_cannot_apply_the_owner_preset(pool: PgPool) {
         "a root session may: {}",
         response.error_message
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn agent_preset_paths_never_see_nudge_text_presets(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let nudge = presets::create(
+        &fx.pool,
+        fx.owner,
+        "agent_nudge_purpose",
+        presets::NewPreset {
+            title: "Текст толчка агента".into(),
+            description: None,
+            text: "[canterlot] {markers}".into(),
+            purpose: presets::PresetPurpose::Nudge,
+        },
+        presets::Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let nudge_id = nudge.summary.id.clone();
+
+    let listed = fx.agent("presets.list", json!({}), &Uuid::now_v7()).await;
+    assert_eq!(listed.error_code, "", "{}", listed.error_message);
+    let body: Value = serde_json::from_str(&listed.result_json).unwrap();
+    assert!(
+        body["presets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|preset| preset["id"] != nudge_id)
+    );
+
+    let read = fx
+        .agent("presets.list", json!({"id": nudge_id}), &Uuid::now_v7())
+        .await;
+    assert_eq!(read.error_code, "preset_not_found");
+
+    let saved = fx
+        .agent(
+            "presets.save",
+            json!({"id": nudge_id, "title": "Чужой", "text": "чужой", "base_revision": 1}),
+            &Uuid::now_v7(),
+        )
+        .await;
+    assert_eq!(saved.error_code, "preset_not_found");
+
+    let applied = fx
+        .agent("presets.apply", json!({"id": nudge_id}), &Uuid::now_v7())
+        .await;
+    assert_eq!(applied.error_code, "profile_unknown");
 }

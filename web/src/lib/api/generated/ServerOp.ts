@@ -107,7 +107,7 @@ export type ContentBlock =
       sha256: string;
       image: boolean;
     };
-export type PresetKind = "clean" | "owner" | "custom";
+export type PresetKind = "clean" | "owner" | "custom" | "nudge";
 
 export interface InputQueued {
   v: 1;
@@ -1263,6 +1263,7 @@ export interface InstructionPresetChanged {
 export interface PresetSummary {
   id: string;
   kind: PresetKind;
+  purpose: "instructions" | "nudge";
   title: string;
   description: string;
   revision?: number | null;

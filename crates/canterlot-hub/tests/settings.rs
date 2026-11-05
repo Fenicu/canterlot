@@ -1129,6 +1129,7 @@ async fn create_preset(pool: &PgPool, owner: Uuid, key: &str, title: &str, text:
             title: title.into(),
             description: None,
             text: text.into(),
+            purpose: canterlot_hub::presets::PresetPurpose::Instructions,
         },
         Actor::Owner,
         Uuid::now_v7(),
