@@ -160,22 +160,19 @@ export class ComposerModel {
   async #reconcileAttachments(ids: string[]): Promise<void> {
     this.#attachmentsInFlight += 1;
     try {
-      const wanted = new Set(ids);
       const ready = this.deps.uploads
         .list(this.deps.conversationId)
         .filter((item) => item.phase === "ready" && item.attachmentId);
       for (const item of ready) {
-        if (!wanted.has(item.attachmentId!)) {
+        if (!ids.includes(item.attachmentId!)) {
           await this.deps.uploads.cancel(item.id).catch(() => undefined);
         }
       }
-      const known = new Set(
-        this.deps.uploads
-          .list(this.deps.conversationId)
-          .filter((item) => item.phase === "ready" && item.attachmentId)
-          .map((item) => item.attachmentId!),
-      );
-      const missing = ids.filter((id) => !known.has(id));
+      const known = this.deps.uploads
+        .list(this.deps.conversationId)
+        .filter((item) => item.phase === "ready" && item.attachmentId)
+        .map((item) => item.attachmentId!);
+      const missing = ids.filter((id) => !known.includes(id));
       if (missing.length > 0 && this.deps.attachmentInfo) {
         const found = await Promise.all(
           missing.map((id) =>

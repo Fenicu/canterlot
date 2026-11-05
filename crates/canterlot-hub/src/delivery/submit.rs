@@ -408,7 +408,7 @@ pub async fn submit_input(pool: &PgPool, req: SubmitInput) -> Result<SubmittedIn
     validate_content(&req, false)?;
     let hash = request_hash(&req, &[], None);
     let mut tx = crate::db::begin(pool).await?;
-    match submit_attempt(&mut tx, &req, &hash, None, &[], None, false).await {
+    match submit_attempt(&mut tx, &req, &hash, None, &[], None, false, None).await {
         Ok(Attempt::Submitted(submitted)) => {
             tx.commit().await?;
             Ok(submitted)
@@ -435,7 +435,7 @@ pub async fn submit_input_in_tx(
         return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
     }
     let hash = request_hash(req, &[], None);
-    match submit_attempt(tx, req, &hash, None, &[], None, false).await? {
+    match submit_attempt(tx, req, &hash, None, &[], None, false, None).await? {
         Attempt::Submitted(submitted) => Ok(submitted),
         Attempt::LostRace => Err(SubmitError::KeyRaceLost),
     }
@@ -446,8 +446,9 @@ pub(crate) async fn submit_message_input_in_tx(
     req: &SubmitInput,
     attachments: &[Uuid],
     retry_of: Option<Uuid>,
+    draft_device: Option<&str>,
 ) -> Result<SubmittedInput, SubmitError> {
-    submit_message_input_scoped_in_tx(tx, req, attachments, retry_of, None).await
+    submit_message_input_scoped_in_tx(tx, req, attachments, retry_of, None, draft_device).await
 }
 
 /// Вложения другого разговора вызывающего: источник проверяется вместо целевого.
@@ -458,8 +459,15 @@ pub async fn submit_forwarded_message_input_in_tx(
     retry_of: Option<Uuid>,
     source_conversation_id: Uuid,
 ) -> Result<SubmittedInput, SubmitError> {
-    submit_message_input_scoped_in_tx(tx, req, attachments, retry_of, Some(source_conversation_id))
-        .await
+    submit_message_input_scoped_in_tx(
+        tx,
+        req,
+        attachments,
+        retry_of,
+        Some(source_conversation_id),
+        None,
+    )
+    .await
 }
 
 async fn submit_message_input_scoped_in_tx(
@@ -468,6 +476,7 @@ async fn submit_message_input_scoped_in_tx(
     attachments: &[Uuid],
     retry_of: Option<Uuid>,
     source_conversation_id: Option<Uuid>,
+    draft_device: Option<&str>,
 ) -> Result<SubmittedInput, SubmitError> {
     if !tx.is_in_transaction() {
         return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
@@ -493,6 +502,7 @@ async fn submit_message_input_scoped_in_tx(
         attachments,
         source_conversation_id,
         true,
+        draft_device,
     )
     .await?
     {
@@ -509,6 +519,7 @@ async fn submit_attempt(
     attachment_ids: &[Uuid],
     source_conversation_id: Option<Uuid>,
     auto_title: bool,
+    draft_device: Option<&str>,
 ) -> Result<Attempt, SubmitError> {
     match idempotency::lookup(conn, req.owner_id, &req.idempotency_key, OPERATION, hash).await? {
         Begin::Replay(response) => return replay(response).map(Attempt::Submitted),
@@ -789,6 +800,8 @@ async fn submit_attempt(
     )
     .await?
     {
+        crate::drafts::clear_in_tx(conn, req.conversation_id, draft_device, req.correlation_id)
+            .await?;
         Ok(Attempt::Submitted(submitted))
     } else {
         Ok(Attempt::LostRace)

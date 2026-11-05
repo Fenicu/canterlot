@@ -351,10 +351,7 @@ async fn a_refused_input_keeps_the_draft(pool: PgPool) {
         )
         .await;
     assert_eq!(response.status.as_u16(), 409);
-    assert_eq!(
-        f.stored_text().await.as_deref(),
-        Some("не должно пропасть")
-    );
+    assert_eq!(f.stored_text().await.as_deref(), Some("не должно пропасть"));
     assert!(f.draft_events().await.len() == 1);
 }
 
@@ -429,11 +426,12 @@ async fn owner_id_is_stored_with_the_draft(pool: PgPool) {
         200,
     )
     .await;
-    let owner: Uuid = sqlx::query_scalar("select owner_id from composer_drafts where conversation_id=$1")
-        .bind(f.conversation)
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
+    let owner: Uuid =
+        sqlx::query_scalar("select owner_id from composer_drafts where conversation_id=$1")
+            .bind(f.conversation)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
     assert_eq!(owner, f.owner);
 }
 
@@ -481,7 +479,10 @@ async fn attachment_list_round_trips_and_empty_draft_deletes_the_row(pool: PgPoo
         .await;
     assert_eq!(cleared["attachment_ids"], json!([]));
     assert!(f.stored_text().await.is_none());
-    assert_eq!(f.draft_events().await.last().unwrap()["attachment_ids"], json!([]));
+    assert_eq!(
+        f.draft_events().await.last().unwrap()["attachment_ids"],
+        json!([])
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -559,4 +560,45 @@ async fn sending_with_attachments_consumes_them_and_clears_the_draft(pool: PgPoo
     let last = f.draft_events().await.pop().unwrap();
     assert_eq!(last["text"], "");
     assert_eq!(last["attachment_ids"], json!([]));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn replaying_a_sent_input_does_not_clear_a_new_draft(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let body = json!({
+        "content":[{"type":"text","text":"ушло"}],
+        "device_id":"phone"
+    });
+    let first = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{}/inputs", f.conversation),
+            Some("replay-keeps-new-draft"),
+            Some(body.clone()),
+        )
+        .await;
+    assert_eq!(first.status.as_u16(), 201);
+    f.put(
+        f.conversation,
+        json!({"text":"набрано после отправки","base_revision":0,"device_id":"desktop"}),
+        200,
+    )
+    .await;
+
+    let replay = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{}/inputs", f.conversation),
+            Some("replay-keeps-new-draft"),
+            Some(body),
+        )
+        .await;
+    assert_eq!(replay.status.as_u16(), 201);
+    assert_eq!(replay.body, first.body);
+    assert_eq!(
+        f.stored_text().await.as_deref(),
+        Some("набрано после отправки")
+    );
 }

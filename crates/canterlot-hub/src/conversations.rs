@@ -1990,15 +1990,7 @@ pub async fn submit_message_with_device(
     let retry_device = device_id.clone();
     match crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
-            let value = submit_message_in_tx(conn, &req, correlation_id).await?;
-            crate::drafts::clear_in_tx(
-                conn,
-                req.conversation_id,
-                device_id.as_deref(),
-                correlation_id,
-            )
-            .await?;
-            Ok(value)
+            submit_message_in_tx_with_device(conn, &req, correlation_id, device_id.as_deref()).await
         })
     })
     .await
@@ -2007,15 +1999,13 @@ pub async fn submit_message_with_device(
         Err(crate::delivery::SubmitError::KeyRaceLost) => {
             crate::db::in_tx(pool, move |conn| {
                 Box::pin(async move {
-                    let value = submit_message_in_tx(conn, &retry, correlation_id).await?;
-                    crate::drafts::clear_in_tx(
+                    submit_message_in_tx_with_device(
                         conn,
-                        retry.conversation_id,
-                        retry_device.as_deref(),
+                        &retry,
                         correlation_id,
+                        retry_device.as_deref(),
                     )
-                    .await?;
-                    Ok(value)
+                    .await
                 })
             })
             .await
@@ -2028,6 +2018,15 @@ pub async fn submit_message_in_tx(
     conn: &mut PgConnection,
     req: &SubmitMessage,
     correlation_id: Uuid,
+) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
+    submit_message_in_tx_with_device(conn, req, correlation_id, None).await
+}
+
+async fn submit_message_in_tx_with_device(
+    conn: &mut PgConnection,
+    req: &SubmitMessage,
+    correlation_id: Uuid,
+    draft_device: Option<&str>,
 ) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
     let owned: bool = sqlx::query_scalar(
         "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
@@ -2052,6 +2051,7 @@ pub async fn submit_message_in_tx(
         },
         &req.attachment_ids,
         req.retry_of,
+        draft_device,
     )
     .await
 }

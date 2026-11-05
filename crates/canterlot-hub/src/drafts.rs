@@ -253,7 +253,16 @@ pub async fn clear_in_tx(
     let revision: i64 = sqlx::query_scalar("select nextval('composer_draft_revision_seq')")
         .fetch_one(&mut *conn)
         .await?;
-    publish(conn, conversation_id, revision, "", &[], device_id, correlation_id).await?;
+    publish(
+        conn,
+        conversation_id,
+        revision,
+        "",
+        &[],
+        device_id,
+        correlation_id,
+    )
+    .await?;
     Ok(())
 }
 
