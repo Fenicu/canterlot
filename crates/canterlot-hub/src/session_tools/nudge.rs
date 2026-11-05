@@ -227,7 +227,10 @@ fn without_code_blocks(text: &str) -> String {
 
 /// Маркер готовности: строка целиком, без учёта регистра и пробелов по краям.
 pub fn marker_seen(text: &str, markers: &[String]) -> bool {
-    let text = without_code_blocks(tail(text));
+    // Состояние ограды считается по полному ответу: хвост может начинаться внутри
+    // длинного блока кода, и тогда закрывающая ограда перевернула бы признак.
+    let full = without_code_blocks(text);
+    let text = tail(&full);
     let markers: Vec<String> = markers
         .iter()
         .map(|marker| marker.trim().to_lowercase())
@@ -244,7 +247,8 @@ pub fn marker_seen(text: &str, markers: &[String]) -> bool {
 
 /// Последний абзац — вопрос. Это не толчок: итог уходит оркестратору сразу.
 pub fn asks_in_text(text: &str) -> bool {
-    let text = without_code_blocks(tail(text));
+    let full = without_code_blocks(text);
+    let text = tail(&full);
     let last = text
         .trim_end()
         .rsplit("\n\n")
@@ -1757,6 +1761,12 @@ mod tests {
             "```\nSTATUS: DONE\n```\nSTATUS: DONE",
             &markers()
         ));
+    }
+
+    #[test]
+    fn a_long_fenced_report_does_not_hide_a_trailing_marker() {
+        let text = format!("```\n{}\n```\nSTATUS: DONE", "x".repeat(2000));
+        assert!(marker_seen(&text, &markers()));
     }
 
     #[test]
