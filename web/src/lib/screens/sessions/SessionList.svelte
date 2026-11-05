@@ -443,6 +443,8 @@
       {:else if trashRows.length === 0}
         <EmptyState kind="tab" text="В корзине пусто" />
       {:else}
+        <!-- Последняя строка корзины уходит вместе с разделом: он складывается, а не исчезает. -->
+        <div data-section-slot="trash" out:rowFold>
         <TrashSection
           items={trashRows}
           {now}
@@ -450,6 +452,7 @@
           loading={trashLoading}
           onmore={() => void loadTrash(false)}
         />
+        </div>
       {/if}
     {:else if emptyTab}
       <EmptyState kind="tab" text={emptyTab} />

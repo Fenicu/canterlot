@@ -34,26 +34,41 @@ function setArchived(hub: FakeHub, api: FakeHubApi, id: string, archived: boolea
  * Срезы движения: переход места строки ставится на паузу и проматывается на десятую, четверть и половину.
  * Так проверка не зависит от того, сколько кадров успел нарисовать загруженный браузер.
  */
-async function slices(page: Page, selector: string, neighbour: string, act: () => void): Promise<{ slot: number[]; below: number[] } | null> {
-	act();
-	const found = await page
-		.waitForFunction((selector) => [...document.querySelectorAll(selector)].some((slot) => slot.getAnimations().length > 0), selector, { timeout: 1_500 })
-		.then(() => true, () => false);
-	if (!found) return null;
-	return page.evaluate(({ selector, neighbour }) => {
-		const slot = [...document.querySelectorAll(selector)].find((node) => node.getAnimations().length > 0)!;
-		const [animation] = slot.getAnimations();
-		animation!.pause();
+async function slices(page: Page, selector: string, neighbour: string, act: () => unknown): Promise<{ start: number; slot: number[]; below: number[] } | null> {
+	// Ожидание и пауза в одном кадре: загруженный браузер иначе успевает доиграть переход между вызовами.
+	const waiting = page.evaluate(({ selector }) => new Promise<boolean>((resolve) => {
+		const started = performance.now();
+		const look = () => {
+			// Svelte сперва ставит пустую вводную анимацию нулевой длины: ждём настоящую.
+			const real = (node: Element) => node.getAnimations().filter((animation) => Number(animation.effect?.getComputedTiming().duration) > 0);
+			const slot = [...document.querySelectorAll(selector)].find((node) => real(node).length > 0);
+			if (slot) {
+				for (const animation of real(slot)) animation.pause();
+				(window as unknown as { __slot: Element }).__slot = slot;
+				resolve(true);
+			} else if (performance.now() - started > 8_000) resolve(false);
+			else requestAnimationFrame(look);
+		};
+		look();
+	}), { selector });
+	await act();
+	if (!(await waiting)) return null;
+	return page.evaluate(({ neighbour }) => {
+		const slot = (window as unknown as { __slot: Element }).__slot;
+		const [animation] = slot.getAnimations().filter((item) => Number(item.effect?.getComputedTiming().duration) > 0);
 		const total = Number(animation!.effect!.getComputedTiming().duration);
-		const out = { slot: [] as number[], below: [] as number[] };
+		animation!.currentTime = 0;
+		const out = { start: slot.getBoundingClientRect().height, slot: [] as number[], below: [] as number[] };
 		for (const share of [0.1, 0.25, 0.5]) {
 			animation!.currentTime = total * share;
 			out.slot.push(slot.getBoundingClientRect().height);
-			out.below.push(document.querySelector(`[data-session="${neighbour}"]`)!.getBoundingClientRect().top);
+			const next = document.querySelector<HTMLElement>(`[data-session="${neighbour}"]`)!;
+			const scroller = next.closest<HTMLElement>('[data-list-scroll]')!;
+			out.below.push(next.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop);
 		}
 		animation!.play();
 		return out;
-	}, { selector, neighbour });
+	}, { neighbour });
 }
 
 /** Соседняя строка ниже уходящей: по ней видно, едет список или прыгает. */
@@ -66,7 +81,11 @@ async function nextRow(page: Page, id: string, nextSection: boolean): Promise<st
 	}, { id, nextSection });
 }
 
-const topOf = (page: Page, id: string) => page.locator(`[data-session="${id}"]`).evaluate((el) => el.getBoundingClientRect().top);
+/** Верх строки в содержимом списка: прокрутка, которую двигает меню строки, на него не влияет. */
+const topOf = (page: Page, id: string) => page.locator(`[data-session="${id}"]`).evaluate((el) => {
+	const scroller = el.closest<HTMLElement>('[data-list-scroll]')!;
+	return el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+});
 
 for (const motion of ['full', 'reduced'] as const) for (const which of ['pinned', 'plain'] as const) {
 	// Закреплённая строка уходит из раздела с соседями; обычная — последняя в своём разделе, и раздел складывается вместе с ней.
@@ -147,4 +166,67 @@ test('first_paint_and_tab_switch_build_rows_without_motion', async ({ page }) =>
 	expect(await moving()).toBe(0);
 	await tabs.nth(0).click();
 	expect(await moving()).toBe(0);
+});
+
+const idOf = (page: Page, title: string) => page.getByRole('link', { name: new RegExp(title) }).evaluate((el) => el.closest<HTMLElement>('[data-session]')!.dataset.session!);
+
+async function moveToTrash(page: Page, title: string): Promise<void> {
+	await page.getByRole('button', { name: `Действия: ${title}` }).click();
+	await page.getByRole('button', { name: /^Переместить в корзину/ }).click();
+	await page.getByRole('dialog', { name: 'Переместить сессию в корзину?' }).getByRole('button', { name: 'В корзину', exact: true }).click();
+}
+
+function expectFolding(cut: { start: number; slot: number[] } | null): void {
+	expect(cut).not.toBeNull();
+	const [a, b, c] = cut!.slot;
+	expect(a!).toBeLessThan(cut!.start - 0.5);
+	expect(b!).toBeLessThan(a!);
+	expect(c!).toBeLessThan(b!);
+}
+
+function expectGrowing(cut: { slot: number[] } | null, height: number): void {
+	expect(cut).not.toBeNull();
+	const [a, b, c] = cut!.slot;
+	expect(a!).toBeGreaterThan(0.5);
+	expect(b!).toBeGreaterThan(a!);
+	expect(c!).toBeGreaterThan(b!);
+	expect(c!).toBeLessThan(height - 0.5);
+}
+
+test('trash_move_undo_restore_and_purge_fold_and_unfold_rows_in_place', async ({ page }) => {
+	test.setTimeout(60_000);
+	await boot(page);
+	const catalog = await idOf(page, 'Каталог');
+	const cover = await idOf(page, 'Обложка');
+	const below = await nextRow(page, catalog, false);
+	const slotOf = (id: string) => `[data-slot="${id}"], [data-slot-leaving="${id}"]`;
+	const height = (await page.locator(`[data-slot="${catalog}"]`).boundingBox())!.height;
+	const top = await topOf(page, below);
+
+	// «Переместить в корзину»: строка складывается, сосед подтягивается на её место.
+	expectFolding(await slices(page, slotOf(catalog), below, () => moveToTrash(page, 'Каталог')));
+	await expect.poll(() => topOf(page, below)).toBeCloseTo(top - height, 0);
+	// «Вернуть» в подсказке: строка раскрывается там же, сосед возвращается вниз.
+	expectGrowing(await slices(page, slotOf(catalog), below, () => page.getByRole('button', { name: 'Вернуть' }).click()), height);
+	await expect.poll(() => topOf(page, below)).toBeCloseTo(top, 0);
+
+	// Две сессии в корзине: «Восстановить» складывает строку корзины, «Удалить навсегда» последней — весь раздел.
+	await moveToTrash(page, 'Каталог');
+	await expect(page.locator(`[data-slot="${catalog}"]`)).toHaveCount(0);
+	await moveToTrash(page, 'Обложка');
+	await expect(page.getByRole('tab', { name: /Корзина 2/ })).toBeVisible();
+	await page.getByRole('tab', { name: /Корзина/ }).click();
+	await expect(page.locator(`.trash [data-slot="${cover}"]`)).toBeVisible();
+	await expect(page.locator('.trash [data-slot]')).toHaveCount(2);
+	const [first, second] = await page.locator('.trash [data-slot]').evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.slot!));
+	const restoring = await slices(page, slotOf(first!), second!, () => page.locator(`[data-session="${first}"]`).getByRole('button', { name: 'Восстановить' }).click());
+	expectFolding(restoring);
+	await expect(page.locator('.trash [data-slot]')).toHaveCount(1);
+
+	await page.locator(`[data-session="${second}"]`).getByRole('button', { name: 'Удалить навсегда' }).click();
+	const dialog = page.getByRole('dialog', { name: 'Удалить сессию навсегда?' });
+	await dialog.getByRole('button', { name: 'Удалить навсегда' }).click();
+	await page.waitForFunction(() => [...document.querySelectorAll('[data-section-slot="trash"], [data-section-slot-leaving="trash"]')].some((node) => node.getAnimations().length > 0), null, { timeout: 2_000 });
+	await expect(page.getByText('В корзине пусто')).toBeVisible();
+	await expect(page.locator('[data-section-slot-leaving="trash"], [data-section-slot="trash"]')).toHaveCount(0);
 });
