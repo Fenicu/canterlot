@@ -28,6 +28,14 @@ if ((fast && stack)); then
     exit 2
 fi
 
+# Lock-файл ставится и вне локальной сети: в нём только публичный реестр npm.
+foreign=$(grep -oE '"resolved": "[^"]+' web/package-lock.json | grep -vc '"resolved": "https://registry.npmjs.org/' || true)
+if ((foreign)); then
+    echo "BLOCKED: в web/package-lock.json $foreign ссылок не на https://registry.npmjs.org/;" \
+        "заменить адрес реестра в полях resolved" >&2
+    exit 1
+fi
+
 if [[ $(df --output=avail -BG / | tail -1 | tr -dc '0-9') -lt 5 ]]; then
     echo 'BLOCKED: менее 5 ГБ свободного места' >&2
     exit 1
