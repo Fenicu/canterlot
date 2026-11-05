@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::http::Method;
 use canterlot_hub::{
-    config::{LimitsConfig, SessionToolsConfig},
+    config::SessionToolsConfig,
     dispatcher::Dispatcher,
     http,
     session::Registry,
@@ -126,7 +126,7 @@ impl Fx {
             .execute(&pool)
             .await
             .unwrap();
-        let (dispatcher, _) = Dispatcher::channel();
+        let (_dispatcher, _) = Dispatcher::channel();
         Self {
             context: ToolContext {
                 pool: pool.clone(),

@@ -234,9 +234,11 @@ fn candidate(
         levels: None,
         preset: None,
         nudge: Some(nudge),
-        exclude_workdirs: exclude_work
-            .then(|| vec!["/home/fenicu/work".to_owned()])
-            .unwrap_or_default(),
+        exclude_workdirs: if exclude_work {
+            vec!["/home/fenicu/work".to_owned()]
+        } else {
+            Vec::new()
+        },
         watchdog_minutes,
     }
 }
@@ -626,20 +628,34 @@ pub enum RouteError {
     },
 }
 
+/// Вход чистой функции выбора: политика, окружение и запрос одним значением.
+pub struct RouteInputs<'a> {
+    pub policy: &'a Policy,
+    pub revision: i64,
+    pub whitelist: &'a [WhitelistEntry],
+    pub catalogs: &'a HashMap<String, HarnessCatalog>,
+    pub limits: &'a HashMap<String, ProviderView>,
+    pub live: &'a HashMap<(String, String), i64>,
+    pub stale: Duration,
+    pub now: DateTime<Utc>,
+    pub request: &'a RouteRequest,
+}
+
 /// Чистая функция выбора (§5.2 + §C1 пп. 5–7): уровень, канонизация через каталог,
 /// белый список, совместимость режима, лимиты, параллельность, `exclude_workdirs`.
 /// Первый прошедший кандидат выбран.
-pub fn route(
-    policy: &Policy,
-    revision: i64,
-    whitelist: &[WhitelistEntry],
-    catalogs: &HashMap<String, HarnessCatalog>,
-    limits: &HashMap<String, ProviderView>,
-    live: &HashMap<(String, String), i64>,
-    stale: Duration,
-    now: DateTime<Utc>,
-    request: &RouteRequest,
-) -> Result<Decision, RouteError> {
+pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
+    let RouteInputs {
+        policy,
+        revision,
+        whitelist,
+        catalogs,
+        limits,
+        live,
+        stale,
+        now,
+        request,
+    } = inputs;
     let task = policy.task_types.get(&request.task_type).ok_or_else(|| {
         let mut available: Vec<String> = policy.task_types.keys().cloned().collect();
         available.sort();
@@ -812,6 +828,7 @@ fn window_name(key: &str) -> &str {
     key
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_window(
     provider: &str,
     window: &str,
@@ -1228,17 +1245,17 @@ pub async fn preview(
     )
     .await?;
     let existing = policy.task_types.contains_key(task_type);
-    match route(
-        &policy,
+    match route(RouteInputs {
+        policy: &policy,
         revision,
-        &list.entries,
-        &catalogs,
-        &limits,
-        &live,
-        context.routing_stale,
+        whitelist: &list.entries,
+        catalogs: &catalogs,
+        limits: &limits,
+        live: &live,
+        stale: context.routing_stale,
         now,
-        &request,
-    ) {
+        request: &request,
+    }) {
         Ok(decision) => {
             tx.commit().await?;
             Ok(serde_json::json!({
@@ -1392,17 +1409,17 @@ mod tests {
 
     #[test]
     fn first_passing_candidate_wins() {
-        let decision = route(
-            &policy(),
-            3,
-            &entries(),
-            &catalogs(),
-            &HashMap::new(),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("bugfix"),
-        )
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 3,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+        })
         .unwrap();
         assert_eq!(decision.harness, "opencode");
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1420,17 +1437,17 @@ mod tests {
         task.candidates[0].levels = Some(vec!["low".to_owned()]);
         let mut with_level = request("mechanical");
         with_level.level = Some("high".to_owned());
-        let decision = route(
-            &policy,
-            0,
-            &entries(),
-            &catalogs(),
-            &HashMap::new(),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &with_level,
-        )
+        let decision = route(RouteInputs {
+            policy: &policy,
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &with_level,
+        })
         .unwrap();
         // Beam пропущен по уровню; DeepSeek без effort берёт уровень как усилие.
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1440,17 +1457,17 @@ mod tests {
 
     #[test]
     fn whitelist_skip_is_explained() {
-        let decision = route(
-            &policy(),
-            0,
-            &[],
-            &catalogs(),
-            &HashMap::new(),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("bugfix"),
-        );
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &[],
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+        });
         let error = decision.unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
             panic!("expected no executor");
@@ -1467,17 +1484,17 @@ mod tests {
     fn missing_harness_is_not_available() {
         let mut catalogs = catalogs();
         catalogs.remove("claude_code");
-        let decision = route(
-            &policy(),
-            0,
-            &entries(),
-            &catalogs,
-            &HashMap::new(),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("review"),
-        )
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs,
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("review"),
+        })
         .unwrap();
         // claude_code нет в каталоге: выбран codex, а не отсутствующий opus.
         assert_eq!(decision.harness, "codex");
@@ -1505,17 +1522,17 @@ mod tests {
                 isolated: None,
             },
         );
-        let decision = route(
-            &policy,
-            0,
-            &entries(),
-            &catalogs(),
-            &HashMap::new(),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("probe"),
-        )
+        let decision = route(RouteInputs {
+            policy: &policy,
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("probe"),
+        })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
     }
@@ -1541,17 +1558,17 @@ mod tests {
                 isolated: None,
             },
         );
-        let decision = route(
-            &policy,
-            0,
-            &entries(),
-            &catalogs(),
-            &HashMap::new(),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("probe"),
-        )
+        let decision = route(RouteInputs {
+            policy: &policy,
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("probe"),
+        })
         .unwrap();
         assert_eq!(decision.model, "opus[1m]");
     }
@@ -1578,17 +1595,17 @@ mod tests {
             },
         );
         // Beam свободен от лимитов, но усилие `high` он не знает.
-        let error = route(
-            &policy,
-            0,
-            &entries(),
-            &catalogs(),
-            &HashMap::new(),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("probe"),
-        )
+        let error = route(RouteInputs {
+            policy: &policy,
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("probe"),
+        })
         .unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
             panic!("expected no executor");
@@ -1598,17 +1615,17 @@ mod tests {
 
     #[test]
     fn over_threshold_skips_with_numbers() {
-        let decision = route(
-            &policy(),
-            0,
-            &entries(),
-            &catalogs(),
-            &limits_with(97.0),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("bugfix"),
-        )
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits_with(97.0),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+        })
         .unwrap();
         // DeepSeek и Muse упёрлись в лимит opencode; у claude показаний нет —
         // unknown allow, поэтому выбран opus, а сброс недели известен.
@@ -1644,17 +1661,17 @@ mod tests {
                 },
             ),
         ]);
-        let error = route(
-            &policy(),
-            0,
-            &entries(),
-            &catalogs(),
-            &limits,
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("bugfix"),
-        )
+        let error = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+        })
         .unwrap_err();
         let RouteError::NoExecutor { considered, reset } = error else {
             panic!("expected no executor");
@@ -1692,17 +1709,17 @@ mod tests {
             },
         );
         policy.unlimited_models = vec!["opencode-go/beam-free".to_owned()];
-        let decision = route(
-            &policy,
-            0,
-            &entries(),
-            &catalogs(),
-            &limits_with(99.0),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("fast"),
-        )
+        let decision = route(RouteInputs {
+            policy: &policy,
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits_with(99.0),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("fast"),
+        })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/beam-free");
     }
@@ -1718,17 +1735,17 @@ mod tests {
             },
         );
         // allow: кандидат проходит с пометкой (пустой отчёт: он первый и выбран).
-        let decision = route(
-            &policy(),
-            0,
-            &entries(),
-            &catalogs(),
-            &limits,
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("bugfix"),
-        )
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+        })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
         // skip: несвежий кандидат отсекается, выбирается следующий свежий.
@@ -1744,17 +1761,17 @@ mod tests {
                 ..ProviderView::default()
             },
         );
-        let error_or_next = route(
-            &strict,
-            0,
-            &entries(),
-            &catalogs(),
-            &fresh,
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("bugfix"),
-        );
+        let error_or_next = route(RouteInputs {
+            policy: &strict,
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &fresh,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+        });
         let decision = error_or_next.unwrap();
         assert_ne!(decision.model, "opencode-go/deepseek-v4.1-flash");
         assert!(
@@ -1775,17 +1792,17 @@ mod tests {
                 ..ProviderView::default()
             },
         )]);
-        let decision = route(
-            &policy(),
-            0,
-            &entries(),
-            &catalogs(),
-            &limits,
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("bugfix"),
-        )
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+        })
         .unwrap();
         // Первый два кандидата на паузе; выбран opus.
         assert_eq!(decision.harness, "claude_code");
@@ -1803,17 +1820,17 @@ mod tests {
             ("opencode".to_owned(), "opencode-go/deepseek-v4.1-flash".to_owned()),
             4,
         )]);
-        let decision = route(
-            &policy(),
-            0,
-            &entries(),
-            &catalogs(),
-            &HashMap::new(),
-            &live,
-            Duration::from_secs(1800),
-            now(),
-            &request("bugfix"),
-        )
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &live,
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+        })
         .unwrap();
         // DeepSeek занят 4 из 4; Muse исключён workdir? Нет: workdir /tmp/w.
         assert_eq!(decision.model, "opencode-go/muse-spark-1.3-contributor");
@@ -1829,17 +1846,17 @@ mod tests {
     fn exclude_workdirs_matches_components() {
         let mut with_home = request("bugfix");
         with_home.workdir = "/home/fenicu/work/project".to_owned();
-        let decision = route(
-            &policy(),
-            0,
-            &entries(),
-            &catalogs(),
-            &HashMap::new(),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &with_home,
-        )
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &with_home,
+        })
         .unwrap();
         // Muse исключён каталогом; DeepSeek первый и проходит.
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1851,17 +1868,17 @@ mod tests {
             ("opencode".to_owned(), "opencode-go/deepseek-v4.1-flash".to_owned()),
             4,
         )]);
-        let decision = route(
-            &policy(),
-            0,
-            &entries(),
-            &catalogs(),
-            &HashMap::new(),
-            &live,
-            Duration::from_secs(1800),
-            now(),
-            &shop,
-        )
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &live,
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &shop,
+        })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/muse-spark-1.3-contributor");
     }
@@ -1911,17 +1928,17 @@ mod tests {
 
     #[test]
     fn unknown_task_lists_available() {
-        let error = route(
-            &policy(),
-            0,
-            &entries(),
-            &catalogs(),
-            &HashMap::new(),
-            &HashMap::new(),
-            Duration::from_secs(1800),
-            now(),
-            &request("nope"),
-        )
+        let error = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("nope"),
+        })
         .unwrap_err();
         let RouteError::UnknownTask { available } = error else {
             panic!("expected unknown task");

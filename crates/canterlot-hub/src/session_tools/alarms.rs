@@ -2267,6 +2267,7 @@ pub async fn cancel_owner_in_tx(
 /// `only_on_timeout` — будит только сроком. Ключ `watchdog-<префикс ребёнка>`,
 /// повторная взводка заменяет прежний. Дитя только создано, поэтому отметок
 /// взвода нет: первое устоявшееся состояние и будет срабатыванием.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn arm_watchdog_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,

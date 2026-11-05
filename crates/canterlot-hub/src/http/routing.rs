@@ -250,17 +250,17 @@ async fn preview(
         std::time::Duration::from_secs(120),
     )
     .await?;
-    match routing::route(
-        &policy,
+    match routing::route(routing::RouteInputs {
+        policy: &policy,
         revision,
-        &list.entries,
-        &catalogs,
-        &limits,
-        &live,
-        s.routing_stale,
+        whitelist: &list.entries,
+        catalogs: &catalogs,
+        limits: &limits,
+        live: &live,
+        stale: s.routing_stale,
         now,
-        &request,
-    ) {
+        request: &request,
+    }) {
         Ok(decision) => {
             let considered = decision.considered.clone();
             Ok(Json(RoutingPreviewView {

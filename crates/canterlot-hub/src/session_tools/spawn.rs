@@ -252,16 +252,15 @@ fn check_arguments(args: &SpawnArgs) -> Result<(), ToolError> {
     if args.route.is_some() && (args.model.is_some() || args.effort.is_some()) {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
-    if let Some(route) = &args.route {
-        if route.task_type.trim().is_empty()
+    if args.route.as_ref().is_some_and(|route| {
+        route.task_type.trim().is_empty()
             || route.task_type.contains('\0')
             || route
                 .level
                 .as_deref()
                 .is_some_and(|level| !super::routing::LEVELS.contains(&level))
-        {
-            return Err(ToolError::new(ToolErrorCode::InvalidArguments));
-        }
+    }) {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
     if let Some(watchdog) = args.watchdog_minutes
         && !(5..=1440).contains(&watchdog)
@@ -552,6 +551,7 @@ async fn validate(
 }
 
 /// Маршрутизированный запуск: выбор исполнителя по политике владельца (§C1 п. 9).
+#[allow(clippy::too_many_arguments)]
 /// Явные `preset`, `isolated`, `title`, `workdir`, `base`, `permission_mode`,
 /// `nudge` и `watchdog_minutes` важнее политики.
 async fn validate_routed(
@@ -602,17 +602,17 @@ async fn validate_routed(
         explicit_mode: args.permission_mode.clone(),
         workdir,
     };
-    let mut decision = super::routing::route(
-        &policy,
+    let mut decision = super::routing::route(super::routing::RouteInputs {
+        policy: &policy,
         revision,
-        &list.entries,
-        &catalogs,
-        &limits,
-        &live,
-        context.routing_stale,
+        whitelist: &list.entries,
+        catalogs: &catalogs,
+        limits: &limits,
+        live: &live,
+        stale: context.routing_stale,
         now,
-        &request,
-    )
+        request: &request,
+    })
     .map_err(|error| match error {
         super::routing::RouteError::UnknownTask { available } => ToolError::with_message(
             ToolErrorCode::TaskTypeUnknown,
