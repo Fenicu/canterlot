@@ -27,15 +27,54 @@ test('machine_screen_follows_mockup_09_and_updates_metrics_live', async ({ page 
   await expect(main.getByText('Связь нестабильна', { exact: true })).toBeVisible();
 });
 
-test('machine_screen_flags_disk_warning_and_stale_data', async ({ page }) => {
+test('machine_screen_flags_disk_warning_and_stale_data', async ({ page }, testInfo) => {
   const { hub, ids, metrics } = await bootSecondary(page);
-  await expect(page.getByRole('meter', { name: 'Данные воркера' })).toHaveClass(/warn/);
+  const disk = page.getByRole('meter', { name: 'Данные воркера' });
+  await expect(disk).toHaveClass(/warn/);
+  await expect(page.locator('main').getByText('Свободно 24 ГБ из 295')).toBeVisible();
   await expect(page.locator('main').getByText('Мало свободного места на диске')).toBeVisible();
+  if (process.env.DISK_WARN_SCREENSHOTS) {
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync('/tmp/disk-warn', { recursive: true });
+    await page.screenshot({ path: `/tmp/disk-warn/${testInfo.project.name}-machines.png`, fullPage: true });
+  }
   await page.clock.install();
   await page.clock.fastForward(92_000);
   await expect(page.locator('[data-stale="true"]')).toContainText('данные устарели');
-  hub.append('machines', { kind: 'machine_metrics', payload: { machine_id: ids.machine, ...metrics, disks: [{ label: 'data', total_bytes: 1000, free_bytes: 151 }] } }); hub.flush();
-  await expect(page.getByRole('meter', { name: 'Данные воркера' })).not.toHaveClass(/warn/);
+  hub.append('machines', { kind: 'machine_metrics', payload: { machine_id: ids.machine, ...metrics, disks: [{ label: 'data', total_bytes: 295_000_000_000, free_bytes: 36_000_000_000 }] } }); hub.flush();
+  await expect(disk).not.toHaveClass(/warn/);
+  await expect(page.locator('main').getByText('Свободно 36 ГБ из 295')).toBeVisible();
+  await expect(page.locator('main').getByText('Мало свободного места на диске')).toHaveCount(0);
+});
+
+test('machine_screen_uses_danger_tone_below_the_critical_threshold', async ({ page }) => {
+  const { hub, ids, metrics } = await bootSecondary(page);
+  const disk = page.getByRole('meter', { name: 'Данные воркера' });
+  await expect(disk).toHaveAttribute('data-tone', 'warning');
+  hub.append('machines', { kind: 'machine_metrics', payload: { machine_id: ids.machine, ...metrics, disks: [{ label: 'data', total_bytes: 295_000_000_000, free_bytes: 8_000_000_000 }] } }); hub.flush();
+  await expect(disk).toHaveAttribute('data-tone', 'danger');
+  await expect(page.locator('main').getByText('Свободно 8 ГБ из 295')).toBeVisible();
+});
+
+test('sessions_list_shows_a_quiet_low_disk_notice_with_hysteresis', async ({ page }, testInfo) => {
+  const { hub, ids, metrics } = await bootSecondary(page, '/sessions');
+  const notice = page.locator('.disk-notice');
+  await expect(notice).toHaveText('На workstation мало места: свободно 24 ГБ');
+  await expect(notice).toHaveAttribute('data-tone', 'warning');
+  if (process.env.DISK_WARN_SCREENSHOTS) {
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync('/tmp/disk-warn', { recursive: true });
+    await page.screenshot({ path: `/tmp/disk-warn/${testInfo.project.name}-sessions.png`, fullPage: true });
+  }
+  // Ниже порога с запасом (35 ГБ) строка ещё держится.
+  hub.append('machines', { kind: 'machine_metrics', payload: { machine_id: ids.machine, ...metrics, disks: [{ label: 'data', total_bytes: 295_000_000_000, free_bytes: 34_000_000_000 }] } }); hub.flush();
+  await expect(notice).toHaveText('На workstation мало места: свободно 34 ГБ');
+  // Ниже критического порога — тон меняется на опасный.
+  hub.append('machines', { kind: 'machine_metrics', payload: { machine_id: ids.machine, ...metrics, disks: [{ label: 'data', total_bytes: 295_000_000_000, free_bytes: 8_000_000_000 }] } }); hub.flush();
+  await expect(notice).toHaveAttribute('data-tone', 'danger');
+  // Возврат выше порога с запасом убирает строку без сообщения.
+  hub.append('machines', { kind: 'machine_metrics', payload: { machine_id: ids.machine, ...metrics, disks: [{ label: 'data', total_bytes: 295_000_000_000, free_bytes: 36_000_000_000 }] } }); hub.flush();
+  await expect(notice).toHaveCount(0);
 });
 
 test('machines_and_limits_have_no_horizontal_scroll_at_360px', async ({ page }) => {

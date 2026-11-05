@@ -156,6 +156,10 @@ export const fmt = {
 		const text = Number.isInteger(value) ? String(value) : value.toFixed(1).replace('.', ',');
 		return `${text} ${units[unit]}`;
 	},
+	/** Свободное место в десятичных гигабайтах: «24 ГБ». */
+	gb(n: number): string {
+		return `${grouped(Math.round(n / 1_000_000_000))} ГБ`;
+	},
 	plural(n: number, forms: [string, string, string]): string {
 		const category = rules.select(n);
 		if (category === 'one') return forms[0];

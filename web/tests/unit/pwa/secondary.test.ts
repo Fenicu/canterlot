@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { machineStatus, machineWarnings, diskView } from '#lib/screens/machines/model.js';
+import { machineStatus, machineWarnings, diskView, diskLimits, lowDiskNotice } from '#lib/screens/machines/model.js';
 import { historyCharts, usageRows, historyRange } from '#lib/screens/limits/model.js';
 import { applyShare } from '#lib/screens/share/model.js';
 import { MachinesStore } from '#lib/stores/machines.svelte.js';
@@ -14,10 +14,25 @@ describe('Task 9b', () => {
     expect(['available', 'degraded', 'unavailable'].map(machineStatus)).toEqual(['В сети', 'Связь нестабильна', 'Не в сети']);
     expect(machineWarnings(['disk_usage_high', 'metrics_stale', 'limits_mismatch'])).toEqual(['Мало свободного места на диске', 'Данные устарели', 'Лимиты машины не совпадают с настройками хаба']);
   });
-  it('disk_warning_at_the_85_percent_boundary', () => {
-    expect(diskView({ label: 'data', free_bytes: 151, total_bytes: 1000 }, [], 85)).toMatchObject({ warn: false, label: 'Данные воркера' });
-    expect(diskView({ label: 'root_0', free_bytes: 150, total_bytes: 1000 }, ['/srv'], 85)).toMatchObject({ warn: true, label: '/srv', pct: 85 });
-    expect(diskView({ label: 'data', free_bytes: 0, total_bytes: 0 }, [], 85).pct).toBeNull();
+  it('disk_free_bytes_choose_warning_and_danger_tones_and_the_free_text', () => {
+    const limits = diskLimits({ disk_warn_free_gb: 30, disk_critical_free_gb: 10 });
+    expect(diskView({ label: 'data', free_bytes: 31_000_000_000, total_bytes: 295_000_000_000 }, [], limits)).toMatchObject({ tone: 'normal', label: 'Данные воркера', text: 'Свободно 31 ГБ из 295' });
+    expect(diskView({ label: 'data', free_bytes: 24_000_000_000, total_bytes: 295_000_000_000 }, [], limits)).toMatchObject({ tone: 'warning', warn: true, text: 'Свободно 24 ГБ из 295' });
+    expect(diskView({ label: 'root_0', free_bytes: 8_000_000_000, total_bytes: 295_000_000_000 }, ['/srv'], limits)).toMatchObject({ tone: 'danger', label: '/srv' });
+    expect(diskView({ label: 'data', free_bytes: 0, total_bytes: 0 }, [], limits).pct).toBeNull();
+  });
+  it('low_disk_notice_names_the_worst_machine_and_uses_hysteresis', () => {
+    const limits = diskLimits({ disk_warn_free_gb: 30, disk_critical_free_gb: 10 });
+    const machine = (id: string, name: string, free: number) => ({ id, name, metrics: { disks: [{ label: 'data', total_bytes: 295_000_000_000, free_bytes: free }] } });
+    const first = lowDiskNotice([machine('dev-vm', 'dev-vm', 24_000_000_000)], limits, []);
+    expect(first.notice).toEqual({ text: 'На dev-vm мало места: свободно 24 ГБ', tone: 'warning' });
+    expect(first.active).toEqual(['dev-vm']);
+    // Выше порога, но ниже порога с запасом: строка ещё держится.
+    expect(lowDiskNotice([machine('dev-vm', 'dev-vm', 34_000_000_000)], limits, first.active).notice?.text).toBe('На dev-vm мало места: свободно 34 ГБ');
+    // Возврат с запасом убирает строку.
+    expect(lowDiskNotice([machine('dev-vm', 'dev-vm', 36_000_000_000)], limits, first.active).notice).toBeNull();
+    // Критический уровень даёт красный тон.
+    expect(lowDiskNotice([machine('dev-vm', 'dev-vm', 8_000_000_000)], limits, []).notice?.tone).toBe('danger');
   });
   it('limits_history_shows_the_remaining_weekly_share_and_ignores_five_hours', () => {
     const days = ['2026-10-28', '2026-10-29'];
