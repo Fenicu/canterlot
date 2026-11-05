@@ -19,7 +19,7 @@ const PROVIDERS: [(ToolSet, &str); 3] = [
     (ToolSet::LimitsOnly, "opencode"),
 ];
 
-const SESSION_TOOLS: [(&str, &str); 13] = [
+const SESSION_TOOLS: [(&str, &str); 15] = [
     ("sessions_list", "sessions.list"),
     ("session_inspect", "sessions.inspect"),
     ("session_send", "sessions.send"),
@@ -33,6 +33,8 @@ const SESSION_TOOLS: [(&str, &str); 13] = [
     ("alarm_set", "alarms.set"),
     ("alarm_cancel", "alarms.cancel"),
     ("alarm_list", "alarms.list"),
+    ("nudge_set", "nudge.set"),
+    ("nudge_clear", "nudge.clear"),
 ];
 
 fn tools_of(tool_set: ToolSet, provider: &str) -> Vec<Value> {
@@ -81,9 +83,9 @@ fn session_tools_listed_for_all_three_providers() {
             );
         }
         let expected = if tool_set == ToolSet::ApproveAndLimits {
-            2 + 3 + 13 + 1
+            2 + 3 + SESSION_TOOLS.len() + 1
         } else {
-            1 + 3 + 13 + 1
+            1 + 3 + SESSION_TOOLS.len() + 1
         };
         assert_eq!(tools.len(), expected, "{provider}");
         for required in [
@@ -373,11 +375,12 @@ fn no_tool_touches_the_whitelist() {
         assert!(
             hub_name.starts_with("presets.")
                 || hub_name.starts_with("sessions.")
-                || hub_name.starts_with("alarms."),
+                || hub_name.starts_with("alarms.")
+                || hub_name.starts_with("nudge."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 16);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 18);
 }
 
 #[tokio::test]

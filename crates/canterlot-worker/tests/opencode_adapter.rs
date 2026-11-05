@@ -4822,7 +4822,9 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "session_stop",
             "alarm_set",
             "alarm_cancel",
-            "alarm_list"
+            "alarm_list",
+            "nudge_set",
+            "nudge_clear"
         ]
     );
     bench.close(CloseMode::Graceful).await;

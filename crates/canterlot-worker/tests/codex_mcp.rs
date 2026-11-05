@@ -21,7 +21,7 @@ fn limits_only_tool_set_lists_only_canterlot_limits() {
     let tools = list.as_reply().expect("tools/list")["result"]["tools"]
         .as_array()
         .expect("tools");
-    assert_eq!(tools.len(), 18);
+    assert_eq!(tools.len(), 20);
     assert_eq!(tools[0]["name"], "canterlot_limits");
     assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
     let names: Vec<&str> = tools
@@ -40,7 +40,7 @@ fn limits_only_tool_set_lists_only_canterlot_limits() {
     let tools = claude.as_reply().expect("claude tools/list")["result"]["tools"]
         .as_array()
         .expect("tools");
-    assert_eq!(tools.len(), 19);
+    assert_eq!(tools.len(), 21);
     let names: Vec<&str> = tools
         .iter()
         .map(|t| t["name"].as_str().expect("name"))
