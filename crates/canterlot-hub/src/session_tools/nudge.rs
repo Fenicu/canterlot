@@ -855,9 +855,12 @@ pub async fn run_job_in_tx(
             sessions.push(session);
         }
     }
-    send::lock_queue(conn, target).await?;
-    // Режимы перечитываются после очереди: смену настроек хаб сериализует той же
-    // очередью, поэтому кэш, снятый до неё, мог остаться прежним.
+    // Очереди автора и цели — по возрастанию ID: смену настроек хаб сериализует
+    // очередью самой сессии, поэтому режимы перечитываются только после обеих.
+    for id in &conversation_ids {
+        send::lock_queue(conn, *id).await?;
+    }
+    // Режимы перечитываются после очередей: кэш, снятый до них, мог остаться прежним.
     sessions.clear();
     for id in &conversation_ids {
         if let Some(session) = access::session_in_tx(conn, head.owner_id, *id).await? {

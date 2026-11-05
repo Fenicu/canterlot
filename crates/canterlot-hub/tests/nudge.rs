@@ -1589,6 +1589,67 @@ async fn a_batched_summary_keeps_nudge_metadata_and_the_report(pool: PgPool) {
     assert!(text.contains("BATCH-REPORT-MARKER"), "{text}");
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_concurrent_author_read_only_change_blocks_the_nudge(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer(&pool, &f, "Halfway.").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "mode2",
+        false,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    assert_eq!(rule_row(&pool, f.child).await.0, "pending");
+
+    // Смена настроек автора идёт под очередью автора; цель остаётся свободной.
+    let mut settings = pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(f.parent)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set permission_mode='read_only' where id=$1")
+        .bind(f.parent)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set permission_mode='bypass' where id=$1")
+        .bind(f.child)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+
+    let pooled = pool.clone();
+    let job = tokio::spawn(async move {
+        scheduler(&pooled)
+            .tick(now + TimeDelta::minutes(4))
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    settings.commit().await.unwrap();
+    job.await.unwrap();
+
+    let nudges: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1 and origin->>'kind'='nudge'",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(nudges, 0, "author became read_only before the nudge");
+    assert_eq!(rule_row(&pool, f.child).await.0, "exhausted");
+}
+
 // Доставка ввода владельца — тот же путь, что у обычного сообщения.
 async fn deliver_owner_input(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, f: &Fx, text: &str) {
     canterlot_hub::delivery::submit_input_in_tx(
