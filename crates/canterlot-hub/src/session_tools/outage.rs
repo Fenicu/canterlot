@@ -141,8 +141,11 @@ async fn sweep_once(
         Box::pin(async move {
             // Порядок блокировок как у проекции доступности: машины по id, затем подписки.
             let machines: Vec<(Uuid, Uuid, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-                "select id,owner_id,availability,availability_at from machines
-                 order by id for no key update",
+                "select m.id,m.owner_id,m.availability,m.availability_at from machines m
+                 where m.availability='unavailable'
+                    or exists (select 1 from machine_outages o
+                               where o.machine_id=m.id and o.ended_at is null)
+                 order by m.id for no key update of m",
             )
             .fetch_all(&mut *conn)
             .await?;
