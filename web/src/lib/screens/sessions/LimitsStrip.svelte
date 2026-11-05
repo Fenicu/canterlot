@@ -189,7 +189,8 @@
   .limits:not([open]) .meter[data-window='five'] > .tag { grid-column: 2; }
   .limits:not([open]) .meter[data-window='five'] > .bar { grid-column: 3; }
   .limits:not([open]) .meter[data-window='five'] > .pct { grid-column: 4; }
-  .limits:not([open]) .meter[data-window='week'] > .tag { grid-column: 5; }
+  /* Значение 5ч («устарело») не должно сливаться с меткой недели. */
+  .limits:not([open]) .meter[data-window='week'] > .tag { grid-column: 5; padding-inline-start: var(--s3); }
   .limits:not([open]) .meter[data-window='week'] > .bar { grid-column: 6; }
   .limits:not([open]) .meter[data-window='week'] > .pct { grid-column: 7; }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
