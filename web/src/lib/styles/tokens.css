@@ -468,6 +468,11 @@
   --compact-fold-width: var(--icon-small);
   --compact-fold-height: var(--s5);
   --compact-fold-line: var(--s1);
+  /* Цель прыжка: сообщение вспыхивает тоном акцента и медленно гаснет до своего фона. */
+  --motion-base-jump-glow: 1300ms;
+  --duration-jump-glow: calc(var(--motion-base-jump-glow) * var(--motion-scale));
+  --ease-jump-glow: cubic-bezier(.33, 0, .2, 1);
+  --jump-glow-share: 22%;
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -488,6 +493,7 @@
     --duration-text-reveal: 0ms;
     --duration-compact-fold: 0ms;
     --duration-compact-settle: 0ms;
+    --duration-jump-glow: 0ms;
   }
 }
 

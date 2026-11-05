@@ -274,17 +274,24 @@
     gap: var(--s3);
   }
   .bubble[data-origin] { --st-surface: var(--raised); --jump-rest: var(--raised); background: var(--raised); }
+  /* Цель прыжка вспыхивает тоном акцента сразу, держится миг и гаснет до своего фона: глаз находит её, движения строки нет. */
   .bubble[data-jump] {
-    animation: jump-pulse var(--duration-caret) var(--ease) 1;
+    --jump-peak: color-mix(in srgb, var(--accent) var(--jump-glow-share), var(--jump-rest));
+    animation: jump-glow var(--duration-jump-glow) var(--ease-jump-glow) both;
   }
   .bubble[data-jump]:focus {
     outline: var(--focus-width) solid var(--accent);
     outline-offset: var(--s1);
   }
-  @keyframes jump-pulse {
-    0%, 100% { background-color: var(--jump-rest); }
-    30%, 60% { background-color: var(--selected); }
+  @keyframes jump-glow {
+    0%, 15% { background-color: var(--jump-peak); }
+    100% { background-color: var(--jump-rest); }
   }
+  /* Без движения подсветка стоит ровным тоном, пока лента держит цель, и снимается сразу. */
+  @media (prefers-reduced-motion: reduce) {
+    .bubble[data-jump] { animation: none; background-color: var(--jump-peak); }
+  }
+  :global(:root[data-motion='off']) .bubble[data-jump] { background-color: var(--jump-peak); }
   .origin { color: var(--secondary); font-size: var(--fs-sm); font-weight: var(--weight-medium); }
   .bubble[data-state='rejected'] { background: var(--danger-soft); }
   p { margin: 0; overflow-wrap: anywhere; }
