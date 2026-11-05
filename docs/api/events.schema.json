@@ -5718,6 +5718,9 @@
                   "$ref": "#/$defs/nudge_changed"
                 },
                 {
+                  "$ref": "#/$defs/routing_policy_changed"
+                },
+                {
                   "$ref": "#/$defs/limits_changed"
                 },
                 {

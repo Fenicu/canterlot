@@ -294,6 +294,7 @@ fn exempt(method: &str, path: &str) -> bool {
     (method == "PATCH" && path.ends_with("/content"))
         || (method == "POST" && path.ends_with("/read"))
         || (method == "POST" && path == "/api/v1/limits/refresh")
+        || (method == "POST" && path == "/api/v1/routing-policy/preview")
         || (method == "PUT" && path.ends_with("/draft"))
 }
 
@@ -649,6 +650,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             "/api/v1/spawn-whitelist".into(),
             Some(json!({"entries":[{"harness":"codex","model":"default"}]})),
             Some(json!({"entries":null})),
+        ),
+        case(
+            Method::PUT,
+            "/api/v1/routing-policy",
+            "/api/v1/routing-policy".into(),
+            Some(json!({"policy":null,"revision":0})),
+            Some(json!({"policy":{"task_types":{"smoke":{"title":"Проверка","candidates":[{"harness":"opencode","model":"m"}]}}},"revision":0})),
         ),
         case(
             Method::PUT,
