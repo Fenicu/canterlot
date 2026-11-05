@@ -6892,7 +6892,8 @@
           "open_requests",
           "todos",
           "background",
-          "alarms"
+          "alarms",
+          "nudge_events"
         ],
         "properties": {
           "alarms": {
@@ -6924,6 +6925,23 @@
           },
           "history": {
             "$ref": "#/components/schemas/HistoryPage"
+          },
+          "nudge": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NudgeRuleView",
+                "description": "Правило автопинка этой сессии и последние события толчков."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "nudge_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NudgeEventView"
+            }
           },
           "open_requests": {
             "type": "array",
@@ -8336,6 +8354,13 @@
             ],
             "format": "int64"
           },
+          "asks_in_text": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Ответ кончается вопросом в тексте, а не карточкой."
+          },
           "branch": {
             "type": [
               "string",
@@ -8420,6 +8445,21 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "nudge_exhausted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true`: толчки кончились без маркера, итог отпущен правилом."
+          },
+          "nudges": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Сколько автоматических толчков получила цель до этого итога."
           },
           "outcome": {
             "type": [
@@ -9540,6 +9580,121 @@
           }
         },
         "additionalProperties": false
+      },
+      "NudgeEventView": {
+        "type": "object",
+        "description": "Событие автопинка для `session_inspect` и PWA.",
+        "required": [
+          "id",
+          "at",
+          "attempt",
+          "outcome",
+          "signals"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "signals": {}
+        }
+      },
+      "NudgeRuleView": {
+        "type": "object",
+        "description": "Действующие значения правила: ответ `nudge_set` и снимок разговора.",
+        "required": [
+          "session_id",
+          "enabled",
+          "state",
+          "idle_minutes",
+          "background_minutes",
+          "max_consecutive",
+          "max_total",
+          "done_markers",
+          "set_by",
+          "consecutive",
+          "total",
+          "held"
+        ],
+        "properties": {
+          "background_minutes": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "consecutive": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "context_warn_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "done_markers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "held": {
+            "type": "boolean"
+          },
+          "idle_minutes": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "max_consecutive": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "max_total": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "notify_session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "set_by": {
+            "type": "string"
+          },
+          "set_by_session": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
       },
       "OwnerFileContent": {
         "type": "object",
@@ -10998,7 +11153,8 @@
               "open_requests",
               "todos",
               "background",
-              "alarms"
+              "alarms",
+              "nudge_events"
             ],
             "properties": {
               "alarms": {
@@ -11030,6 +11186,23 @@
               },
               "history": {
                 "$ref": "#/components/schemas/HistoryPage"
+              },
+              "nudge": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/NudgeRuleView",
+                    "description": "Правило автопинка этой сессии и последние события толчков."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "nudge_events": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/NudgeEventView"
+                }
               },
               "open_requests": {
                 "type": "array",

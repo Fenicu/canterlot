@@ -361,6 +361,8 @@ pub async fn inspect(
     let processes = processes(&mut tx, target.id).await?;
     let run = last_run(&mut tx, target.id).await?;
     let requests = open_requests(&mut tx, target.id).await?;
+    let nudge = super::nudge::snapshot_rule(&mut tx, target.id).await?;
+    let nudge_events = super::nudge::snapshot_events(&mut tx, target.id, 5).await?;
     tx.commit().await?;
     let a = &item.attributes;
     Ok(json!({
@@ -385,5 +387,7 @@ pub async fn inspect(
         "processes": processes,
         "last_run": run,
         "open_requests": requests,
+        "nudge": nudge,
+        "nudge_events": nudge_events,
     }))
 }

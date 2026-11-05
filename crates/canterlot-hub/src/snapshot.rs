@@ -45,6 +45,9 @@ pub struct ConversationSnapshot {
     pub context: Option<crate::compactions::ContextSnapshot>,
     /// Взведённые и недавние завершившиеся будильники разговора.
     pub alarms: Vec<crate::session_tools::alarms::AlarmView>,
+    /// Правило автопинка этой сессии и последние события толчков.
+    pub nudge: Option<crate::session_tools::nudge::NudgeRuleView>,
+    pub nudge_events: Vec<crate::session_tools::nudge::NudgeEventView>,
 }
 
 pub type ConversationSnapshotView = ConversationSnapshot;
@@ -224,6 +227,8 @@ pub async fn conversation_with_registry(
     let background = crate::background_tasks::list(&mut *conn, id).await?;
     let context = crate::compactions::latest_context(&mut *conn, id).await?;
     let alarm_rows = crate::session_tools::alarms::snapshot_rows(&mut *conn, id).await?;
+    let nudge = crate::session_tools::nudge::snapshot_rule(&mut *conn, id).await?;
+    let nudge_events = crate::session_tools::nudge::snapshot_events(&mut *conn, id, 5).await?;
     let data = ConversationSnapshot {
         detail,
         queue: QueueView {
@@ -239,6 +244,8 @@ pub async fn conversation_with_registry(
         background,
         context,
         alarms: crate::session_tools::alarms::snapshot_views(&alarm_rows),
+        nudge,
+        nudge_events,
     };
     Ok(Some(Snapshot {
         scope: events::wire_scope(&scope),

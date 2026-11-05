@@ -38,6 +38,7 @@ export type ServerOp =
         | GroupChanged
         | ScheduledChanged
         | AlarmChanged
+        | NudgeChanged
         | LimitsChanged
         | LimitReached
         | AttachmentStateChanged
@@ -130,7 +131,7 @@ export interface InputQueued {
   };
 }
 export interface InputOrigin {
-  kind: "message" | "spawn" | "event";
+  kind: "message" | "spawn" | "event" | "alarm" | "nudge";
   from?: Uuid;
   title?: string;
   harness?: string;
@@ -172,6 +173,9 @@ export interface HubEvent {
   child_id?: Uuid;
   closed?: boolean;
   detail?: string;
+  nudges?: number;
+  nudge_exhausted?: boolean;
+  asks_in_text?: boolean;
 }
 export interface HubCommit {
   sha: string;
@@ -873,6 +877,37 @@ export interface AlarmChanged {
     note: string | null;
     note_bytes: number;
     created_at: Time;
+  };
+}
+export interface NudgeChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "nudge_changed";
+  payload: {
+    session_id?: Uuid;
+    enabled?: boolean;
+    state?: string;
+    idle_minutes?: number;
+    background_minutes?: number;
+    max_consecutive?: number;
+    max_total?: number;
+    done_markers?: string[];
+    context_warn_percent?: number | null;
+    set_by?: string;
+    set_by_session?: Uuid | null;
+    notify_session_id?: Uuid | null;
+    consecutive?: number;
+    total?: number;
+    held?: boolean;
+    detail?: string;
   };
 }
 export interface LimitsChanged {

@@ -291,6 +291,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "instruction_preset_changed",
     "scheduled_changed",
     "alarm_changed",
+    "nudge_changed",
     "limits_changed",
     "limit_reached",
     "attachment_state_changed",
