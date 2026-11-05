@@ -237,7 +237,7 @@ poll_interval = "2s"
 stall_timeout = "15s"
 
 [limits]
-weekly_reserve_pct = 95                             # порог недельного резерва: с этого показания новые ходы провайдера удерживаются (`weekly_reserve`), «кранч» на это не влияет; диапазон кодом не проверяется, значения выше 100 не имеют смысла
+weekly_reserve_pct = 95                             # умолчание резерва как расход: 100 - значение = остаток, который владелец оставляет себе; действующее значение меняется в настройках PWA
 snapshot_min_interval = "10m"
 history_days = 90
 default_resume_text = "Лимиты восстановлены, продолжай с того места, где остановился."
@@ -246,7 +246,7 @@ verify_backoff = ["30s", "1m", "2m", "5m"]
 poll_min_interval = "5m"
 unknown_reset_retry = "30m"
 reserve_exit_hysteresis_permille = 20
-warn_pcts = [80, 90, 95]
+warn_pcts = [80, 90, 95]                            # устарело: принимается для старых файлов, больше не используется
 stale_after = "35m"
 unverified_wake_after = "20m"
 

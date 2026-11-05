@@ -184,8 +184,16 @@ pub struct MachinesView {
 
 #[derive(Serialize, ToSchema)]
 pub struct LimitThresholdsView {
+    /// Действующий резерв как расход, %: совместимо с прежним полем (`100 - reserve`).
     pub weekly_reserve_pct: u16,
+    /// Устарело: раньше первый порог окрашивал полосу. Оставлено для старых клиентов.
     pub warn_pcts: Vec<u16>,
+    /// Жёлтый, когда остаток меньше этого процента.
+    pub warn_remaining_pct: u16,
+    /// Красный, когда остаток меньше этого процента.
+    pub danger_remaining_pct: u16,
+    /// Сколько недельного остатка владелец оставляет себе; `0` — без резерва.
+    pub reserve_remaining_pct: u16,
     pub stale_after_secs: u64,
 }
 
@@ -218,8 +226,14 @@ pub struct ConfigView {
     (status = 401, description = "Нет личности", body = ErrorEnvelope),
     (status = 403, description = "Чужой пользователь", body = ErrorEnvelope),
 ))]
-async fn config(_owner: Owner, State(state): State<AppState>) -> Json<ConfigView> {
-    Json(ConfigView {
+async fn config(o: Owner, State(state): State<AppState>) -> Result<Json<ConfigView>, ApiError> {
+    let settings = crate::limit_settings::effective(
+        &mut *state.pool.acquire().await?,
+        o.owner_id,
+        &state.limits,
+    )
+    .await?;
+    Ok(Json(ConfigView {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         schema_version: 1,
         limits: LimitsView {
@@ -244,8 +258,11 @@ async fn config(_owner: Owner, State(state): State<AppState>) -> Json<ConfigView
             metrics_stale_after_secs: state.machines.metrics_stale_after.as_secs(),
         },
         limit_thresholds: LimitThresholdsView {
-            weekly_reserve_pct: state.limits.weekly_reserve_pct,
+            weekly_reserve_pct: settings.reserve_used_pct(),
             warn_pcts: state.limits.warn_pcts.clone(),
+            warn_remaining_pct: settings.warn_remaining_pct,
+            danger_remaining_pct: settings.danger_remaining_pct,
+            reserve_remaining_pct: settings.reserve_remaining_pct,
             stale_after_secs: state.limits.stale_after.as_secs(),
         },
         defaults: DefaultsView {
@@ -254,7 +271,7 @@ async fn config(_owner: Owner, State(state): State<AppState>) -> Json<ConfigView
         auth: AuthView {
             logout_url: state.http.logout_url.clone(),
         },
-    })
+    }))
 }
 
 /// Машиночитаемый контракт API (`docs/api/openapi.json`).

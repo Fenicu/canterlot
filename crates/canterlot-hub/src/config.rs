@@ -325,6 +325,8 @@ impl Default for WsConfig {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LimitsConfig {
+    /// Умолчание недельного резерва как расход, %: `100 - weekly_reserve_pct` — остаток.
+    /// Владелец меняет действующее значение в PWA; файл задаёт только умолчание.
     pub weekly_reserve_pct: u16,
     #[serde(with = "humantime_serde")]
     pub snapshot_min_interval: Duration,
@@ -341,6 +343,8 @@ pub struct LimitsConfig {
     #[serde(deserialize_with = "duration_map")]
     pub poll_floor: BTreeMap<String, Duration>,
     pub reserve_exit_hysteresis_permille: u16,
+    /// Устарело: раньше окрашивало остаток в PWA. Оставлено, чтобы старые hub.toml
+    /// разбирались; действующие пороги владелец задаёт в настройках.
     pub warn_pcts: Vec<u16>,
     #[serde(with = "humantime_serde")]
     pub stale_after: Duration,
