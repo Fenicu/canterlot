@@ -1,4 +1,11 @@
-use std::{future::Future, thread};
+use std::{
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -12,6 +19,7 @@ type Job = Box<dyn FnOnce(&mut Option<WorkerStore>) + Send>;
 pub struct StoreThread {
     sender: mpsc::Sender<Job>,
     thread: thread::JoinHandle<()>,
+    failed: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -50,6 +58,8 @@ impl StoreClient {
 impl StoreThread {
     pub fn new(store: WorkerStore) -> Self {
         let (sender, mut receiver) = mpsc::channel::<Job>(8);
+        let failed = Arc::new(AtomicBool::new(false));
+        let thread_failed = failed.clone();
         let thread = thread::spawn(move || {
             let mut store = Some(store);
             while let Some(job) = receiver.blocking_recv() {
@@ -59,10 +69,19 @@ impl StoreThread {
                     .is_some_and(|s| matches!(s.cj_cursor(), Err(StoreError::NeedsReopen)))
                 {
                     store.take();
+                    thread_failed.store(true, Ordering::Relaxed);
                 }
             }
         });
-        Self { sender, thread }
+        Self {
+            sender,
+            thread,
+            failed,
+        }
+    }
+
+    pub(crate) fn take_failed(&self) -> bool {
+        self.failed.swap(false, Ordering::Relaxed)
     }
 
     pub fn client(&self) -> StoreClient {

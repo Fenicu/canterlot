@@ -312,17 +312,23 @@ fn storage_preflight_with_min_free(
     data_dir: &std::path::Path,
     min_free: u64,
 ) -> Result<(), StorageRejection> {
+    let stat = rustix::fs::statvfs(data_dir)
+        .map_err(|error| rejection(is_no_space_code(error.raw_os_error())))?;
+    if stat.f_bavail.saturating_mul(stat.f_frsize) < min_free {
+        return Err(StorageRejection::DiskFull);
+    }
+    storage_probe(data_dir)
+}
+
+/// Проверяет, что каталог данных переживает запись: файл, fsync файла и каталога,
+/// удаление и ещё один fsync каталога. Неудалённый пробник не считается успехом.
+pub(crate) fn storage_probe(data_dir: &std::path::Path) -> Result<(), StorageRejection> {
     use std::{
         fs::{self, OpenOptions},
         io::Write,
         os::unix::fs::OpenOptionsExt,
     };
 
-    let stat = rustix::fs::statvfs(data_dir)
-        .map_err(|error| rejection(is_no_space_code(error.raw_os_error())))?;
-    if stat.f_bavail.saturating_mul(stat.f_frsize) < min_free {
-        return Err(StorageRejection::DiskFull);
-    }
     let probe = data_dir.join(format!(".storage-probe-{}", Uuid::now_v7()));
     let written = (|| -> io::Result<()> {
         let mut file = OpenOptions::new()
@@ -331,13 +337,35 @@ fn storage_preflight_with_min_free(
             .mode(0o600)
             .open(&probe)?;
         file.write_all(b"canterlot")?;
-        file.sync_all()
+        file.sync_all()?;
+        fs::File::open(data_dir)?.sync_all()
     })();
-    let removed = fs::remove_file(&probe);
-    match written {
-        Ok(()) => removed.map_err(|_| StorageRejection::Unavailable),
+    let outcome = match written {
+        Ok(()) => Ok(()),
         Err(error) => Err(rejection(is_no_space(&error))),
+    };
+    match fs::remove_file(&probe) {
+        Ok(()) => {
+            if let Err(error) = fs::File::open(data_dir).and_then(|dir| dir.sync_all()) {
+                tracing::warn!(
+                    kind = "storage_probe_cleanup_failed",
+                    %error,
+                    "cannot sync the data directory after removing the storage probe"
+                );
+                return Err(StorageRejection::Unavailable);
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(
+                kind = "storage_probe_cleanup_failed",
+                %error,
+                "cannot remove the storage probe"
+            );
+            return Err(StorageRejection::Unavailable);
+        }
     }
+    outcome
 }
 
 fn rejection(no_space: bool) -> StorageRejection {

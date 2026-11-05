@@ -40,6 +40,10 @@ use crate::{
 mod catalog;
 mod data;
 
+/// Код выхода, когда хранилище снова доступно для записи: служба должна
+/// перезапустить воркер штатно, чтобы восстановление после сбоя прошло целиком.
+pub const STORAGE_RESTART_EXIT_CODE: u8 = 75;
+
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
     "pilot_v1",
@@ -204,6 +208,7 @@ pub enum ErrorKind {
     InvalidConfig,
     StoreThread,
     Execution,
+    Storage,
 }
 
 #[derive(Debug, Error)]
@@ -220,12 +225,12 @@ pub enum WorkerError {
     Transport,
     #[error("hub status: {code}: {message}")]
     Hub { code: tonic::Code, message: String },
-    #[error("store reopen failed ({kind:?}): {source}", kind = .0.kind(), source = .0)]
-    Reopen(#[source] StoreError),
     #[error("execution manager failed")]
     Execution,
     #[error("store thread failed")]
     StoreThread,
+    #[error("worker data store is writable again; restarting worker")]
+    StorageRestart,
     #[error("session receipt or handshake timed out")]
     Timeout,
     #[error("invalid session message")]
@@ -246,7 +251,7 @@ impl WorkerError {
     pub fn kind(&self) -> ErrorKind {
         match self {
             Self::Hub { code, .. } => ErrorKind::Hub(*code),
-            Self::Store(error) | Self::Reopen(error) => ErrorKind::Store(error.kind()),
+            Self::Store(error) => ErrorKind::Store(error.kind()),
             Self::Rejected { reason, .. } => ErrorKind::Rejected(*reason),
             Self::Config(_) => ErrorKind::Config,
             Self::Io(_) => ErrorKind::Io,
@@ -259,7 +264,13 @@ impl WorkerError {
             Self::InvalidConfig => ErrorKind::InvalidConfig,
             Self::StoreThread => ErrorKind::StoreThread,
             Self::Execution => ErrorKind::Execution,
+            Self::StorageRestart => ErrorKind::Storage,
         }
+    }
+
+    /// Код выхода процесса, если ошибка требует штатного перезапуска службы.
+    pub fn exit_code(&self) -> Option<u8> {
+        matches!(self, Self::StorageRestart).then_some(STORAGE_RESTART_EXIT_CODE)
     }
 }
 
@@ -406,7 +417,6 @@ pub struct Worker {
     probe: crate::fault_injection::SessionProbe,
     config: WorkerConfig,
     store: StoreThread,
-    disk_full_notified: bool,
     state: watch::Sender<SessionState>,
     runtime_dir: Option<PathBuf>,
     manager: Option<ExecutionManager>,
@@ -577,7 +587,6 @@ impl Worker {
             probe: Default::default(),
             config,
             store: StoreThread::new(store),
-            disk_full_notified: false,
             state: watch::channel(SessionState::Disconnected).0,
             runtime_dir,
             manager: None,
@@ -780,13 +789,7 @@ impl Worker {
             self.manager.as_ref().unwrap().set_media_sink(None);
             self.manager.as_ref().unwrap().set_agent_caller(None);
             let error = result.err().unwrap_or(WorkerError::Transport);
-            if let WorkerError::Store(source) | WorkerError::Reopen(source) = &error
-                && store_is_disk_full(source)
-                && !self.disk_full_notified
-            {
-                self.disk_full_notified = true;
-                tracing::warn!(kind = "disk_full", "worker data store is out of space");
-            }
+            let store_failed = self.store.take_failed() || matches!(&error, WorkerError::Store(_));
             let last_error = error.kind();
             if live_since.is_some() {
                 refusal = None;
@@ -818,6 +821,23 @@ impl Worker {
                 read_retries = 0;
                 None
             };
+            let fatal = matches!(
+                &error,
+                WorkerError::Hub {
+                    code: tonic::Code::Unauthenticated,
+                    ..
+                } | WorkerError::Rejected {
+                    retryable: false,
+                    ..
+                } | WorkerError::RestoreGenerationChanged
+                    | WorkerError::GenerationMismatch
+                    | WorkerError::StateDivergence
+                    | WorkerError::InvalidConfig
+                    | WorkerError::StoreThread
+            ) || (matches!(&error, WorkerError::Config(_)) && !read_error);
+            if store_failed && !fatal {
+                return self.storage_wait(&mut shutdown, &error).await;
+            }
             match error {
                 error @ WorkerError::Hub {
                     code: tonic::Code::Unauthenticated,
@@ -848,13 +868,11 @@ impl Worker {
                         retryable: true,
                     });
                 }
-                WorkerError::Reopen(ref source) if transient_store_error(source) => {}
                 error @ (WorkerError::RestoreGenerationChanged
                 | WorkerError::GenerationMismatch
                 | WorkerError::StateDivergence
                 | WorkerError::InvalidConfig
-                | WorkerError::StoreThread
-                | WorkerError::Reopen(_)) => return Err(error),
+                | WorkerError::StoreThread) => return Err(error),
                 error @ WorkerError::Config(_) if !read_error => return Err(error),
                 _ => {}
             }
@@ -886,6 +904,51 @@ impl Worker {
         }
     }
 
+    /// Ждёт, пока каталог данных снова переживёт запись, и просит службу
+    /// перезапустить воркер: восстановление после сбоя выполняется только при старте.
+    async fn storage_wait(
+        &mut self,
+        shutdown: &mut watch::Receiver<bool>,
+        error: &WorkerError,
+    ) -> Result<(), WorkerError> {
+        let data_dir = self.config.data_dir.clone();
+        tracing::warn!(
+            kind = "disk_full",
+            error_kind = ?error.kind(),
+            "worker data store is unavailable; waiting for writable storage"
+        );
+        self.transition(SessionState::Backoff {
+            last_error: error.kind(),
+        });
+        let mut cap = self.config.timers.backoff_min;
+        loop {
+            let delay = Duration::from_nanos(rand::random_range(
+                self.config
+                    .timers
+                    .backoff_min
+                    .as_nanos()
+                    .min(u64::MAX as u128) as u64
+                    ..=cap.as_nanos().min(u64::MAX as u128) as u64,
+            ));
+            tokio::select! {
+                biased;
+                _ = stopped(shutdown) => {
+                    self.transition(SessionState::Disconnected);
+                    return Ok(());
+                }
+                _ = sleep(delay) => {}
+            }
+            if crate::exec::storage_probe(&data_dir).is_ok() {
+                tracing::warn!(
+                    kind = "disk_recovered",
+                    "worker data store is writable again; restarting worker"
+                );
+                return Err(WorkerError::StorageRestart);
+            }
+            cap = cap.saturating_mul(2).min(self.config.timers.backoff_max);
+        }
+    }
+
     async fn attempt(
         &mut self,
         boot_id: &str,
@@ -893,30 +956,17 @@ impl Worker {
     ) -> Result<(), WorkerError> {
         let connection_id = Uuid::now_v7();
         let configured = self.config.restore_generation;
-        let data_dir = self.config.data_dir.clone();
-        let (cursor, generation, reopened) = self
+        let (cursor, generation) = self
             .store
             .call(move |slot| {
-                let reopened = slot.is_none();
-                if reopened {
-                    *slot = Some(WorkerStore::open(&data_dir).map_err(WorkerError::Reopen)?);
-                }
                 let store = store_mut(slot)?;
                 initialize_generation(store, configured)?;
                 Ok((
                     store.cj_cursor()?,
                     store.restore_generation()?.ok_or(WorkerError::Protocol)?,
-                    reopened,
                 ))
             })
             .await?;
-        if reopened && self.disk_full_notified {
-            self.disk_full_notified = false;
-            tracing::warn!(
-                kind = "disk_recovered",
-                "worker data store writes recovered"
-            );
-        }
         let token_file = self.config.token_file.clone();
         let ca_cert = self.config.ca_cert.clone();
         let (token, ca) = tokio::task::spawn_blocking(move || {
@@ -1399,11 +1449,8 @@ impl Worker {
                 } else if execution_operation.is_none()
                     && let Some(command) = commands.pop_front()
                 {
-                    operation = Some(Box::pin(self.store.call(move |store| {
-                        let accept = store
-                            .as_mut()
-                            .unwrap()
-                            .accept_command_with_pilot(&command, pilot)?;
+                    operation = Some(Box::pin(self.store.call(move |slot| {
+                        let accept = store_mut(slot)?.accept_command_with_pilot(&command, pilot)?;
                         Ok(StoreReply::Command(Box::new(command), accept))
                     })));
                 }
@@ -1621,26 +1668,6 @@ fn check_generation(generation: Uuid, accepted: &Accepted) -> Result<(), WorkerE
         return Err(WorkerError::RestoreGenerationChanged);
     }
     Ok(())
-}
-
-fn store_is_disk_full(error: &StoreError) -> bool {
-    match error {
-        StoreError::Io(error) => crate::exec::is_no_space(error),
-        StoreError::Journal(canterlot_journal::JournalError::Io(error)) => {
-            crate::exec::is_no_space(error)
-        }
-        _ => false,
-    }
-}
-
-fn transient_store_error(error: &StoreError) -> bool {
-    matches!(
-        error,
-        StoreError::Io(_)
-            | StoreError::Journal(
-                canterlot_journal::JournalError::Io(_) | canterlot_journal::JournalError::Locked
-            )
-    )
 }
 
 fn state_kind(state: &SessionState) -> &'static str {
