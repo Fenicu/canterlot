@@ -34,11 +34,24 @@ struct NoteJob {
     origin: Option<Value>,
 }
 
+/// Событие простоя машины: текст собирается при доставке, потому что состояние цели
+/// и время простоя к этому моменту могли измениться.
+#[derive(Deserialize)]
+struct MachineEventJob {
+    target_id: Uuid,
+    /// `unavailable` или `available`.
+    kind: String,
+    outage_id: Uuid,
+    #[serde(default)]
+    chain_depth: i32,
+}
+
 /// Действие задания `session_task`. Разбор исчерпывающий: новое действие обязано
 /// получить обработчик в `run_in_tx` и `abandon_in_tx`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Event,
+    MachineEvent,
     Note,
     Spawn,
     SpawnClose,
@@ -49,8 +62,9 @@ enum Action {
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Event,
+        Self::MachineEvent,
         Self::Note,
         Self::Spawn,
         Self::SpawnClose,
@@ -62,6 +76,7 @@ impl Action {
     fn parse(value: &str) -> Option<Self> {
         match value {
             "event" => Some(Self::Event),
+            "machine_event" => Some(Self::MachineEvent),
             "note" => Some(Self::Note),
             "spawn" => Some(Self::Spawn),
             "spawn_close" => Some(Self::SpawnClose),
@@ -95,6 +110,28 @@ pub async fn run_in_tx(
                 return Ok(JobOutcome::Cancelled("invalid_payload"));
             };
             let (text, origin) = event_message(conn, job.owner_id, &event).await?;
+            deliver(
+                conn,
+                job,
+                subscriber,
+                text,
+                Some(origin),
+                now,
+                correlation_id,
+            )
+            .await
+        }
+        Action::MachineEvent => {
+            let Ok(event) = serde_json::from_value::<MachineEventJob>(job.payload.clone()) else {
+                return Ok(JobOutcome::Cancelled("invalid_payload"));
+            };
+            let Some((text, origin)) =
+                machine_event_message(conn, job.owner_id, &event, now).await?
+            else {
+                // Цель удалили: подписки больше нет, а отдельного события об удалении
+                // подписчик уже не ждёт.
+                return Ok(JobOutcome::Cancelled("target_deleted"));
+            };
             deliver(
                 conn,
                 job,
@@ -168,6 +205,84 @@ async fn event_message(
     })
 }
 
+async fn machine_event_message(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    event: &MachineEventJob,
+    now: DateTime<Utc>,
+) -> Result<Option<(String, Value)>, sqlx::Error> {
+    let row: Option<(String, String, String, String, String, String)> = sqlx::query_as(
+        "select c.title,c.harness,c.model,m.name,
+                coalesce(d.activity_state,'unknown'),
+                coalesce(d.activity_evidence->>'reason','')
+         from conversations c join machines m on m.id=c.machine_id
+         left join conversation_derived d on d.conversation_id=c.id
+         where c.id=$1 and c.owner_id=$2",
+    )
+    .bind(event.target_id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((title, harness, model, machine, state, reason)) = row else {
+        return Ok(None);
+    };
+    let title = super::origin::clean_title(&title);
+    let machine = super::origin::clean_title(&machine);
+    let id = event.target_id;
+    let (text, state, kind) = if event.kind == "available" {
+        let state = machine_state(&state, &reason);
+        (
+            format!(
+                "[canterlot] Machine \"{machine}\" is available again; \
+                 session \"{title}\" (id {id}) is now {state}."
+            ),
+            state,
+            "machine_available",
+        )
+    } else {
+        let started: Option<DateTime<Utc>> =
+            sqlx::query_scalar("select started_at from machine_outages where id=$1")
+                .bind(event.outage_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        let minutes = started
+            .map(|at| (now - at).num_minutes().max(1))
+            .unwrap_or(1);
+        (
+            format!(
+                "[canterlot] Machine \"{machine}\" is unavailable for {minutes} min; \
+                 session \"{title}\" (id {id}) state is unknown. \
+                 It may resume when the machine reconnects."
+            ),
+            "unknown".to_owned(),
+            "machine_unavailable",
+        )
+    };
+    let origin = json!({
+        "kind": "event",
+        "from": id,
+        "title": title,
+        "harness": harness,
+        "model": model,
+        "chain_depth": event.chain_depth,
+        "event": {"kind": kind, "session_id": id, "state": state},
+    });
+    Ok(Some((text, origin)))
+}
+
+/// Состояние цели словами для события о возврате машины. У сбоя называем причину:
+/// потерянное исполнение видно подписчику как `failed (owner_lost)`.
+fn machine_state(state: &str, reason: &str) -> String {
+    match state {
+        "working" => "running".to_owned(),
+        "waiting_for_user" => "waiting for the owner".to_owned(),
+        "quota_paused" => "paused by a limit".to_owned(),
+        "failed" if !reason.is_empty() => format!("failed ({reason})"),
+        "idle" | "stalled" | "failed" | "stopped" => state.to_owned(),
+        _ => "unknown".to_owned(),
+    }
+}
+
 async fn deliver(
     conn: &mut PgConnection,
     job: &ClaimedJob,
@@ -224,7 +339,7 @@ pub async fn abandon_in_tx(
         return Ok(false);
     };
     match action {
-        Action::Event | Action::Note => Ok(false),
+        Action::Event | Action::Note | Action::MachineEvent => Ok(false),
         Action::Spawn => {
             spawn::abandon_spawn_in_tx(conn, conversation, payload, now, correlation_id)
                 .await
@@ -271,6 +386,12 @@ mod tests {
         for action in Action::ALL {
             let payload = match action {
                 Action::Event => json!({"action": "event"}),
+                Action::MachineEvent => json!({
+                    "action": "machine_event",
+                    "target_id": Uuid::now_v7(),
+                    "kind": "unavailable",
+                    "outage_id": Uuid::now_v7(),
+                }),
                 Action::Note => json!({"action": "note"}),
                 Action::Spawn => json!({"action": "spawn", "request_id": Uuid::now_v7()}),
                 Action::SpawnClose => json!({

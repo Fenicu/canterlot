@@ -455,6 +455,10 @@ pub struct SessionToolsConfig {
     /// `0` выключает автоматическое удаление.
     #[serde(with = "humantime_serde")]
     pub accepted_retention: Duration,
+    /// Сколько машина должна пробыть без живого воркера, чтобы подписчики её незавершённых
+    /// сессий услышали об этом один раз. Короткий простой молчит.
+    #[serde(with = "humantime_serde")]
+    pub machine_unavailable_after: Duration,
 }
 
 impl Default for SessionToolsConfig {
@@ -469,6 +473,7 @@ impl Default for SessionToolsConfig {
             parent_spawns: 10,
             spawn_window: Duration::from_secs(3600),
             accepted_retention: Duration::from_secs(3 * 86400),
+            machine_unavailable_after: Duration::from_secs(3 * 60),
         }
     }
 }

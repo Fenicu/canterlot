@@ -275,7 +275,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
     let scheduler =
         crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), scheduler_config)
             .with_limits(registry.clone(), limits.clone())
-            .with_session_tools(session_tools)
+            .with_session_tools(session_tools.clone())
             .with_blobs(blobs.clone());
     #[cfg(feature = "fault-injection")]
     let scheduler = {
@@ -291,6 +291,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         scheduler: scheduler.clone(),
         activity: activity.clone(),
         machines: machines.clone(),
+        session_tools,
         multi_process: http.as_ref().is_some_and(|config| config.multi_process),
         attachments: Some((blobs.clone(), attachments.clone())),
     });

@@ -253,7 +253,7 @@ async fn serve(
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())
-            .with_session_tools(session_tools)
+            .with_session_tools(session_tools.clone())
             .with_limits(limits.clone())
             .with_orchestrator(&orchestrator)
             .with_activity(&activity)
@@ -272,6 +272,7 @@ async fn serve(
         scheduler: scheduler.clone(),
         activity: activity.clone(),
         machines: machines.clone(),
+        session_tools: session_tools.clone(),
         multi_process: http_parts
             .as_ref()
             .is_some_and(|(config, _, _)| config.multi_process),

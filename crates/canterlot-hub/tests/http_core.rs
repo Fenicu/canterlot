@@ -530,6 +530,7 @@ async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPo
         ),
         activity: Default::default(),
         machines: Default::default(),
+        session_tools: Default::default(),
         multi_process: false,
         attachments: Some((blobs, attachments)),
     });
