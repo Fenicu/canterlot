@@ -78,7 +78,7 @@
 <style>
 	.todo {
 		box-sizing: border-box;
-		padding: var(--s2) var(--gutter) var(--s0);
+		padding: var(--s2) var(--gutter) var(--s3);
 	}
 
 	.panel {

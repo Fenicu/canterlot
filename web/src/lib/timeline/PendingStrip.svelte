@@ -348,7 +348,7 @@
 {/if}
 
 <style>
-  .strip { display: flex; flex-direction: column; gap: var(--s2); padding-inline: var(--gutter); }
+  .strip { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--gutter); }
   .item { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
   .pill { display: flex; align-items: center; gap: var(--s4); min-width: 0; min-height: var(--target); padding: var(--s0) var(--s1) var(--s0) var(--s6); border-radius: var(--radius-pill); background: var(--surface); font-size: var(--fs-sm); }
   .failed { background: var(--danger-soft); }
