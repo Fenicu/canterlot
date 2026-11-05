@@ -57,15 +57,15 @@ async fn read(State(s): State<AppState>, o: Owner) -> Result<Json<RoutingPolicyV
             .bind(o.owner_id)
             .fetch_one(&mut *conn)
             .await?;
-    let revision: i64 = sqlx::query_scalar("select routing_policy_revision from owners where id=$1")
-        .bind(o.owner_id)
-        .fetch_one(&mut *conn)
-        .await?;
+    let revision: i64 =
+        sqlx::query_scalar("select routing_policy_revision from owners where id=$1")
+            .bind(o.owner_id)
+            .fetch_one(&mut *conn)
+            .await?;
     let policy = match stored {
-        Some(value) => Some(
-            serde_json::from_value(value)
-                .map_err(|_| ApiError::new(ErrorCode::Internal))?,
-        ),
+        Some(value) => {
+            Some(serde_json::from_value(value).map_err(|_| ApiError::new(ErrorCode::Internal))?)
+        }
         None => None,
     };
     Ok(Json(policy_view(policy, revision)))
@@ -82,12 +82,12 @@ async fn replace(
     if let Some(policy) = b.policy.as_ref()
         && let Err(message) = routing::validate(policy)
     {
-        return Err(ApiError::new(ErrorCode::RoutingPolicyInvalid).with_details(
-            ErrorDetails {
+        return Err(
+            ApiError::new(ErrorCode::RoutingPolicyInvalid).with_details(ErrorDetails {
                 reason: Some(message),
                 ..Default::default()
-            },
-        ));
+            }),
+        );
     }
     let owner = o.owner_id;
     let policy = b.policy.clone();
@@ -110,14 +110,14 @@ async fn replace(
                 if current != revision {
                     return Err(ApiError::new(ErrorCode::RoutingPolicyConflict));
                 }
-                let next = routing::save_policy(conn, owner, policy.as_ref()).await.map_err(
-                    |message| {
+                let next = routing::save_policy(conn, owner, policy.as_ref())
+                    .await
+                    .map_err(|message| {
                         ApiError::new(ErrorCode::RoutingPolicyInvalid).with_details(ErrorDetails {
                             reason: Some(message),
                             ..Default::default()
                         })
-                    },
-                )?;
+                    })?;
                 events::append(
                     conn,
                     NewEvent {
@@ -142,10 +142,9 @@ async fn replace(
             .fetch_one(&mut *conn)
             .await?;
     let policy = match stored {
-        Some(value) => Some(
-            serde_json::from_value(value)
-                .map_err(|_| ApiError::new(ErrorCode::Internal))?,
-        ),
+        Some(value) => {
+            Some(serde_json::from_value(value).map_err(|_| ApiError::new(ErrorCode::Internal))?)
+        }
         None => None,
     };
     Ok(Json(policy_view(policy, outcome.value)))
@@ -216,13 +215,15 @@ async fn preview(
     let live = routing::live_counts(&mut conn, o.owner_id).await?;
     let workdir = match b.workdir {
         Some(workdir) => workdir,
-        None => sqlx::query_scalar("select workdir from conversations where id in (
+        None => sqlx::query_scalar(
+            "select workdir from conversations where id in (
                 select id from conversations where owner_id=$1
-                order by last_activity_at desc nulls last limit 1)")
-            .bind(o.owner_id)
-            .fetch_optional(&mut *conn)
-            .await?
-            .unwrap_or_default(),
+                order by last_activity_at desc nulls last limit 1)",
+        )
+        .bind(o.owner_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .unwrap_or_default(),
     };
     let parent: Option<(String, String, Option<String>)> = sqlx::query_as(
         "select harness,permission_mode,pending_settings->>'permission_mode' as pending_mode
@@ -238,18 +239,17 @@ async fn preview(
         task_type: b.task_type.clone(),
         level: b.level.clone(),
         parent_harness,
-        parent_mode: crate::session_tools::spawn::parent_mode(&parent_mode, pending_mode.as_deref())
-            .to_owned(),
+        parent_mode: crate::session_tools::spawn::parent_mode(
+            &parent_mode,
+            pending_mode.as_deref(),
+        )
+        .to_owned(),
         explicit_mode: None,
         workdir,
     };
     let now = chrono::Utc::now();
-    let headroom = routing::machine_headroom(
-        &mut conn,
-        machine,
-        std::time::Duration::from_secs(120),
-    )
-    .await?;
+    let headroom =
+        routing::machine_headroom(&mut conn, machine, std::time::Duration::from_secs(120)).await?;
     match routing::route(routing::RouteInputs {
         policy: &policy,
         revision,
@@ -272,11 +272,12 @@ async fn preview(
         Err(routing::RouteError::UnknownTask { .. }) => {
             Err(ApiError::new(ErrorCode::TaskTypeUnknown))
         }
-        Err(routing::RouteError::NoExecutor { considered, reset }) => {
-            Err(ApiError::new(ErrorCode::NoExecutorAvailable).with_details(ErrorDetails {
-                reason: Some(routing::no_executor_message(&considered, reset)),
-                ..Default::default()
-            }))
-        }
+        Err(routing::RouteError::NoExecutor { considered, reset }) => Err(ApiError::new(
+            ErrorCode::NoExecutorAvailable,
+        )
+        .with_details(ErrorDetails {
+            reason: Some(routing::no_executor_message(&considered, reset)),
+            ..Default::default()
+        })),
     }
 }

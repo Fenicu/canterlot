@@ -1281,7 +1281,10 @@ pub async fn preview(
     }
 }
 
-pub(crate) fn no_executor_message(considered: &[Considered], reset: Option<DateTime<Utc>>) -> String {
+pub(crate) fn no_executor_message(
+    considered: &[Considered],
+    reset: Option<DateTime<Utc>>,
+) -> String {
     let mut message = String::from("No executor available for this task type:");
     for entry in considered {
         message.push_str(&format!(" {}: {}; ", entry.harness, entry.reason));
@@ -1323,8 +1326,14 @@ mod tests {
                 "opencode".to_owned(),
                 catalog(
                     &[
-                        ("opencode-go/deepseek-v4.1-flash", &["low", "medium", "high"]),
-                        ("opencode-go/muse-spark-1.3-contributor", &["low", "medium", "high"]),
+                        (
+                            "opencode-go/deepseek-v4.1-flash",
+                            &["low", "medium", "high"],
+                        ),
+                        (
+                            "opencode-go/muse-spark-1.3-contributor",
+                            &["low", "medium", "high"],
+                        ),
                         ("opencode-go/beam-free", &["low", "medium"]),
                     ],
                     &["owner", "ask", "bypass", "read_only"],
@@ -1348,16 +1357,22 @@ mod tests {
     }
 
     fn entries() -> Vec<WhitelistEntry> {
-        ["opencode/opencode-go/deepseek-v4.1-flash", "opencode/opencode-go/muse-spark-1.3-contributor", "opencode/opencode-go/beam-free", "claude_code/opus[1m]", "codex/gpt-6.1-sol"]
-            .iter()
-            .map(|pair| {
-                let (harness, model) = pair.split_once('/').unwrap();
-                WhitelistEntry {
-                    harness: harness.to_owned(),
-                    model: model.to_owned(),
-                }
-            })
-            .collect()
+        [
+            "opencode/opencode-go/deepseek-v4.1-flash",
+            "opencode/opencode-go/muse-spark-1.3-contributor",
+            "opencode/opencode-go/beam-free",
+            "claude_code/opus[1m]",
+            "codex/gpt-6.1-sol",
+        ]
+        .iter()
+        .map(|pair| {
+            let (harness, model) = pair.split_once('/').unwrap();
+            WhitelistEntry {
+                harness: harness.to_owned(),
+                model: model.to_owned(),
+            }
+        })
+        .collect()
     }
 
     fn policy() -> Policy {
@@ -1817,7 +1832,10 @@ mod tests {
     #[test]
     fn parallelism_counts_matching_pairs() {
         let live: HashMap<(String, String), i64> = HashMap::from([(
-            ("opencode".to_owned(), "opencode-go/deepseek-v4.1-flash".to_owned()),
+            (
+                "opencode".to_owned(),
+                "opencode-go/deepseek-v4.1-flash".to_owned(),
+            ),
             4,
         )]);
         let decision = route(RouteInputs {
@@ -1865,7 +1883,10 @@ mod tests {
         let mut shop = request("feature");
         shop.workdir = "/home/fenicu/workshop".to_owned();
         let live: HashMap<(String, String), i64> = HashMap::from([(
-            ("opencode".to_owned(), "opencode-go/deepseek-v4.1-flash".to_owned()),
+            (
+                "opencode".to_owned(),
+                "opencode-go/deepseek-v4.1-flash".to_owned(),
+            ),
             4,
         )]);
         let decision = route(RouteInputs {
@@ -1892,7 +1913,9 @@ mod tests {
         );
         assert!(excluded_prefix(&["/home/fenicu/work".to_owned()], "/home/fenicu/work/").is_some());
         assert!(excluded_prefix(&["/home/fenicu/work/".to_owned()], "/home/fenicu/work").is_some());
-        assert!(excluded_prefix(&["/home/fenicu/work".to_owned()], "/home/fenicu/workshop").is_none());
+        assert!(
+            excluded_prefix(&["/home/fenicu/work".to_owned()], "/home/fenicu/workshop").is_none()
+        );
     }
 
     #[test]
@@ -1923,7 +1946,10 @@ mod tests {
             verdict: "skipped".to_owned(),
             reason: "not in the owner's list".to_owned(),
         }];
-        assert_eq!(queue_reason(&skipped, now(), Duration::from_secs(6 * 3600)), None);
+        assert_eq!(
+            queue_reason(&skipped, now(), Duration::from_secs(6 * 3600)),
+            None
+        );
     }
 
     #[test]

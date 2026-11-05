@@ -656,7 +656,9 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             "/api/v1/routing-policy",
             "/api/v1/routing-policy".into(),
             Some(json!({"policy":null,"revision":0})),
-            Some(json!({"policy":{"task_types":{"smoke":{"title":"Проверка","candidates":[{"harness":"opencode","model":"m"}]}}},"revision":0})),
+            Some(
+                json!({"policy":{"task_types":{"smoke":{"title":"Проверка","candidates":[{"harness":"opencode","model":"m"}]}}},"revision":0}),
+            ),
         ),
         case(
             Method::PUT,

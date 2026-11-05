@@ -8,7 +8,9 @@ use canterlot_hub::{
     dispatcher::Dispatcher,
     http,
     session::Registry,
-    session_tools::{self, Caller, TOOLS, ToolContext, ToolErrorCode as Code, settle::SettleConfig},
+    session_tools::{
+        self, Caller, TOOLS, ToolContext, ToolErrorCode as Code, settle::SettleConfig,
+    },
     testkit::{self, FakeSession, TestClient},
 };
 use serde_json::{Value, json};
@@ -72,8 +74,14 @@ impl Fx {
                 "opencode",
                 "opencode",
                 json!([
-                    model("opencode-go/deepseek-v4.1-flash", &["low", "medium", "high"]),
-                    model("opencode-go/muse-spark-1.3-contributor", &["low", "medium", "high"]),
+                    model(
+                        "opencode-go/deepseek-v4.1-flash",
+                        &["low", "medium", "high"]
+                    ),
+                    model(
+                        "opencode-go/muse-spark-1.3-contributor",
+                        &["low", "medium", "high"]
+                    ),
                     model("opencode-go/beam-free", &["low", "medium"]),
                 ]),
             ),
@@ -106,14 +114,9 @@ impl Fx {
         .execute(&pool)
         .await
         .unwrap();
-        let started = canterlot_hub::executions::start(
-            &pool,
-            owner,
-            conversation,
-            Uuid::now_v7(),
-        )
-        .await
-        .unwrap();
+        let started = canterlot_hub::executions::start(&pool, owner, conversation, Uuid::now_v7())
+            .await
+            .unwrap();
         sqlx::query("update owners set spawn_whitelist=$2 where id=$1")
             .bind(owner)
             .bind(json!([
@@ -205,13 +208,12 @@ async fn spawn_with_route_starts_resolved_session(pool: PgPool) {
         .unwrap();
     assert_eq!(answer["status"], "started", "{answer}");
     let child: Uuid = serde_json::from_value(answer["session_id"].clone()).unwrap();
-    let row: (String, String, String, Option<Value>) = sqlx::query_as(
-        "select harness,model,effort,routing from conversations where id=$1",
-    )
-    .bind(child)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
+    let row: (String, String, String, Option<Value>) =
+        sqlx::query_as("select harness,model,effort,routing from conversations where id=$1")
+            .bind(child)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
     assert_eq!(row.0, "opencode");
     assert_eq!(row.1, "opencode-go/deepseek-v4.1-flash");
     assert_eq!(row.2, "high");
@@ -228,21 +230,19 @@ async fn spawn_with_route_starts_resolved_session(pool: PgPool) {
     );
     assert_eq!(answer["routing"]["task_type"], "bugfix");
     // Автопинок кандидата и сторож взведены.
-    let nudge: Option<i32> = sqlx::query_scalar(
-        "select max_consecutive from nudge_rules where conversation_id=$1",
-    )
-    .bind(child)
-    .fetch_optional(&f.pool)
-    .await
-    .unwrap();
+    let nudge: Option<i32> =
+        sqlx::query_scalar("select max_consecutive from nudge_rules where conversation_id=$1")
+            .bind(child)
+            .fetch_optional(&f.pool)
+            .await
+            .unwrap();
     assert_eq!(nudge, Some(2));
-    let watchdog: Option<String> = sqlx::query_scalar(
-        "select key from alarms where conversation_id=$1 and state='armed'",
-    )
-    .bind(f.parent)
-    .fetch_optional(&f.pool)
-    .await
-    .unwrap();
+    let watchdog: Option<String> =
+        sqlx::query_scalar("select key from alarms where conversation_id=$1 and state='armed'")
+            .bind(f.parent)
+            .fetch_optional(&f.pool)
+            .await
+            .unwrap();
     assert!(
         watchdog.is_some_and(|key| key.starts_with("watchdog-")),
         "watchdog armed"
@@ -334,8 +334,7 @@ async fn spawn_with_route_counts_only_live_delegates(pool: PgPool) {
         .unwrap();
     assert_eq!(answer["status"], "started", "{answer}");
     assert_eq!(
-        answer["routing"]["model"],
-        "opencode-go/muse-spark-1.3-contributor",
+        answer["routing"]["model"], "opencode-go/muse-spark-1.3-contributor",
         "{answer}"
     );
 }
@@ -383,13 +382,12 @@ async fn spawn_with_route_applies_explicit_overrides(pool: PgPool) {
     assert_eq!(row.0, "read_only");
     assert!(row.1.is_some(), "explicit isolated:true wins");
     assert_eq!(row.2, preset_id.to_string(), "explicit preset wins");
-    let nudge: Option<Uuid> = sqlx::query_scalar(
-        "select conversation_id from nudge_rules where conversation_id=$1",
-    )
-    .bind(child)
-    .fetch_optional(&f.pool)
-    .await
-    .unwrap();
+    let nudge: Option<Uuid> =
+        sqlx::query_scalar("select conversation_id from nudge_rules where conversation_id=$1")
+            .bind(child)
+            .fetch_optional(&f.pool)
+            .await
+            .unwrap();
     assert_eq!(nudge, None, "explicit nudge:false wins");
     let deadline: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
         "select deadline_at from alarms
@@ -409,12 +407,10 @@ async fn spawn_with_route_applies_explicit_overrides(pool: PgPool) {
 async fn no_agent_call_changes_routing_policy(pool: PgPool) {
     let f = Fx::new(pool).await;
     let snapshot = |pool: PgPool| async move {
-        sqlx::query_scalar::<_, String>(
-            "select string_agg(o::text,',' order by id) from owners o",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap()
+        sqlx::query_scalar::<_, String>("select string_agg(o::text,',' order by id) from owners o")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
     };
     let before = snapshot(f.pool.clone()).await;
     let attempts = [
@@ -473,7 +469,10 @@ async fn routing_policy_http_roundtrip(pool: PgPool) {
     assert_eq!(saved.status, 200, "{:?}", saved.body);
     let saved_body = saved.json::<Value>();
     assert_eq!(saved_body["revision"], 1);
-    assert_eq!(saved_body["policy"]["task_types"]["smoke"]["title"], "Проверка");
+    assert_eq!(
+        saved_body["policy"]["task_types"]["smoke"]["title"],
+        "Проверка"
+    );
 
     // Устаревшая ревизия даёт конфликт.
     let stale = client
@@ -510,12 +509,8 @@ async fn routing_policy_http_roundtrip(pool: PgPool) {
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn routing_preview_http_matches_tool(pool: PgPool) {
-    let (deps, _dir) = testkit::test_app_deps(
-        pool.clone(),
-        testkit::test_http_config(),
-        None,
-    )
-    .await;
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
     let f = Fx::for_owner(pool, owner).await;
     let http_client = TestClient::in_process(http::router(http::AppState::new(deps))).as_owner();
@@ -533,12 +528,21 @@ async fn routing_preview_http_matches_tool(pool: PgPool) {
         .await;
     assert_eq!(via_http.status, 200, "{:?}", via_http.body);
     let http_body = via_http.json::<Value>();
-    assert_eq!(http_body["decision"], tool["decision"], "preview equals tool answer");
+    assert_eq!(
+        http_body["decision"], tool["decision"],
+        "preview equals tool answer"
+    );
     assert_eq!(http_body["decision"]["harness"], "opencode");
 
     // Список типов без task_type.
     let list = f.call("routing.preview", json!({})).await.unwrap();
-    assert!(list["task_types"].as_array().unwrap().iter().any(|t| t["key"] == "bugfix"));
+    assert!(
+        list["task_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["key"] == "bugfix")
+    );
 
     // Неизвестный тип называет доступные.
     let error = f
