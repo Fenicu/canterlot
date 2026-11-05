@@ -177,6 +177,21 @@
     align-items: baseline;
     min-width: 0;
   }
+  /* Свёрнутая полоса компактна: одна строка на провайдера, 5ч и нед рядом, месяц скрыт. */
+  .limits:not([open]) .rows {
+    grid-template-columns: minmax(0, 1fr) minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content;
+    column-gap: var(--s1);
+  }
+  .limits:not([open]) .meter { display: contents; }
+  .limits:not([open]) .meter[data-window='month'] { display: none; }
+  .limits:not([open]) .name:empty { display: none; }
+  .limits:not([open]) .meter > .name { grid-column: 1; }
+  .limits:not([open]) .meter[data-window='five'] > .tag { grid-column: 2; }
+  .limits:not([open]) .meter[data-window='five'] > .bar { grid-column: 3; }
+  .limits:not([open]) .meter[data-window='five'] > .pct { grid-column: 4; }
+  .limits:not([open]) .meter[data-window='week'] > .tag { grid-column: 5; }
+  .limits:not([open]) .meter[data-window='week'] > .bar { grid-column: 6; }
+  .limits:not([open]) .meter[data-window='week'] > .pct { grid-column: 7; }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tag { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
   .bar { display: inline-flex; }

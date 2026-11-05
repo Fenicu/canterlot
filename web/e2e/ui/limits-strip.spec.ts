@@ -241,8 +241,8 @@ test('a_provider_without_a_five_hour_limit_shows_one_balanced_meter', async ({ p
   const codexRow = strip.locator('.row').nth(1);
   await expect(codexRow.locator('.meter')).toHaveCount(2);
   // Пустой пятичасовой слот не сдвигает недельное окно: «нед» стоит под «нед».
-  const codexWeek = await codexRow.locator('.meter').nth(1).boundingBox();
-  const claudeWeek = await claudeRow.locator('.meter').nth(0).boundingBox();
+  const codexWeek = await codexRow.locator('.meter').nth(1).locator('.tag').boundingBox();
+  const claudeWeek = await claudeRow.locator('.meter').nth(0).locator('.tag').boundingBox();
   expect(Math.abs(claudeWeek!.x - codexWeek!.x)).toBeLessThanOrEqual(1);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
@@ -366,6 +366,10 @@ test('monthly_windows_line_up_by_kind_across_providers', async ({ page }) => {
   const strip = page.locator('.limits').first();
   const months = strip.locator('.meter[data-window="month"]');
   await expect(months).toHaveCount(2);
+  // Свёрнутая полоса остаётся компактной: месячное окно живёт только в раскрытой.
+  await expect(months.first()).toBeHidden();
+  await strip.locator('summary').click();
+  await expect(months.first()).toBeVisible();
   const boxes = await months.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().x));
   expect(Math.abs(boxes[0]! - boxes[1]!)).toBeLessThanOrEqual(1);
   await expect(months.nth(0)).toContainText('мес');
@@ -451,6 +455,7 @@ function fourProviders(api: FakeHubApi): void {
 interface WindowMetrics {
   window: string;
   band: string;
+  visible: boolean;
   gaugeX: number;
   bandTop: number;
   bandBottom: number;
@@ -474,10 +479,12 @@ async function windowMetrics(page: Page): Promise<WindowMetrics[]> {
       const reset = meter.querySelector<HTMLElement>('.reset');
       const bandBox = band.getBoundingClientRect();
       const meterBox = meter.getBoundingClientRect();
+      const tagBox = meter.querySelector<HTMLElement>('.tag')!.getBoundingClientRect();
       const resetBox = reset?.getBoundingClientRect();
       return {
         window: meter.dataset.window ?? '',
         band: (band.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        visible: getComputedStyle(meter).display !== 'none' && tagBox.width > 0 && tagBox.height > 0,
         gaugeX: bar.getBoundingClientRect().x,
         bandTop: bandBox.top,
         bandBottom: bandBox.bottom,
@@ -495,16 +502,39 @@ async function windowMetrics(page: Page): Promise<WindowMetrics[]> {
   });
 }
 
+/** Каждая колонка полосы совпадает по x у всех строк, где она есть. */
+function expectColumnsAligned(items: WindowMetrics[], column: string): void {
+  const positions = items.map((item) => item.gaugeX);
+  expect(positions.length).toBeGreaterThan(0);
+  for (const x of positions) expect(Math.abs(x - positions[0]!), column).toBeLessThanOrEqual(1);
+}
+
 async function expectFourProviderStrip(page: Page, open: boolean): Promise<void> {
   const strip = page.locator('.limits').first();
   const isOpen = await strip.evaluate((node) => (node as HTMLDetailsElement).open);
   if (isOpen !== open) await strip.locator('summary').click();
   await expect(strip.locator('.row')).toHaveCount(4);
 
-  const metrics = await windowMetrics(page);
-  expect(metrics.map((item) => item.window)).toEqual(['week', 'five', 'week', 'five', 'week', 'five', 'week', 'month']);
-  // Одна колонка полосы для всех окон всех провайдеров, в обоих состояниях.
-  for (const item of metrics) expect(Math.abs(item.gaugeX - metrics[0]!.gaugeX)).toBeLessThanOrEqual(1);
+  const all = await windowMetrics(page);
+  const metrics = all.filter((item) => item.visible);
+  const month = all.find((item) => item.window === 'month');
+  if (open) {
+    // Раскрытая полоса: каждое окно своей строкой, одна колонка полосы на все окна.
+    expect(metrics.map((item) => item.window)).toEqual(['week', 'five', 'week', 'five', 'week', 'five', 'week', 'month']);
+    expectColumnsAligned(metrics, 'expanded');
+  } else {
+    // Свёрнутая полоса: одна строка на провайдера, 5ч и нед стоят рядом, месяца нет.
+    expect(metrics.map((item) => item.window)).toEqual(['week', 'five', 'week', 'five', 'week', 'five', 'week']);
+    expect(month?.visible).toBe(false);
+    expectColumnsAligned(metrics.filter((item) => item.window === 'five'), 'five');
+    expectColumnsAligned(metrics.filter((item) => item.window === 'week'), 'week');
+    const five = metrics.find((item) => item.window === 'five')!.gaugeX;
+    const week = metrics.find((item) => item.window === 'week')!.gaugeX;
+    expect(week).toBeGreaterThan(five);
+    const heights = await strip.locator('.row').evaluateAll((rows) => rows.map((row) => ({ height: row.getBoundingClientRect().height, line: Number.parseFloat(getComputedStyle(row).lineHeight) })));
+    for (const row of heights) expect(row.height).toBeLessThanOrEqual(row.line * 1.6);
+  }
+
   // Название провайдера не режется, пока в колонке есть место.
   for (const name of FOUR_PROVIDERS) {
     const label = strip.locator('.meter .name').filter({ hasText: name });
@@ -517,16 +547,15 @@ async function expectFourProviderStrip(page: Page, open: boolean): Promise<void>
     expect(item.valueOverflow, `${item.window}: ${item.value}`).toBeLessThanOrEqual(0);
   }
   const stale = metrics.filter((item) => item.value === 'устарело');
-  expect(stale).toHaveLength(3);
+  expect(stale).toHaveLength(open ? 3 : 2);
   for (const item of stale) expect(item.band).toContain('OpenCode');
-  const month = metrics.find((item) => item.window === 'month')!;
-  expect(month.band).toContain('OpenCode');
-  expect(month.meterTop).toBeGreaterThanOrEqual(month.bandTop - 0.5);
-  expect(month.meterBottom).toBeLessThanOrEqual(month.bandBottom + 0.5);
   const summary = await strip.locator('summary').boundingBox();
   expect(summary!.height).toBeGreaterThanOrEqual(44);
 
   if (open) {
+    expect(month?.band).toContain('OpenCode');
+    expect(month!.meterTop).toBeGreaterThanOrEqual(month!.bandTop - 0.5);
+    expect(month!.meterBottom).toBeLessThanOrEqual(month!.bandBottom + 0.5);
     const resets = metrics.filter((item) => item.resetVisible);
     expect(resets).toHaveLength(5);
     for (const item of resets) {
