@@ -2456,6 +2456,16 @@
               "type": "integer",
               "minimum": 0
             },
+            "routing": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "counts": {
               "$ref": "#/$defs/Counts"
             },
@@ -3388,6 +3398,16 @@
             "working_ms": {
               "type": "integer",
               "minimum": 0
+            },
+            "routing": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
