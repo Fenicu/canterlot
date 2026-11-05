@@ -13,7 +13,7 @@ pub enum PermissionMode {
 
 /// Чтение через MCP canterlot и будильники: они касаются только своей очереди,
 /// поэтому разрешены и в `ask`, и в `read_only`. Сохранение и применение пресета решает режим.
-const READ_TOOLS: [&str; 10] = [
+const READ_TOOLS: [&str; 11] = [
     "canterlot_canterlot_limits",
     "canterlot_canterlot_presets_list",
     "canterlot_sessions_list",
@@ -25,6 +25,7 @@ const READ_TOOLS: [&str; 10] = [
     "canterlot_alarm_set",
     "canterlot_alarm_cancel",
     "canterlot_alarm_list",
+    "canterlot_route_preview",
 ];
 
 fn rule(action: &str, effect: &str) -> Value {
@@ -88,6 +89,13 @@ mod tests {
             .unwrap()
             .iter()
             .any(|rule| rule["action"] == tool && rule["effect"] == "allow")
+    }
+
+    #[test]
+    fn route_preview_is_allowed_in_ask_and_read_only() {
+        for mode in [PermissionMode::Ask, PermissionMode::ReadOnly] {
+            assert!(allowed(mode, "canterlot_route_preview"), "{mode:?}");
+        }
     }
 
     #[test]
