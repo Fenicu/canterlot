@@ -144,6 +144,40 @@ function createMockDeps(overrides?: Partial<ComposerDeps>): {
 }
 
 describe("composer/model", () => {
+  it("typing_before_remote_attachment_metadata_arrives_keeps_the_attachment", async () => {
+    const put = vi.fn(
+      async (text: string, attachmentIds: string[], base: number) => ({
+        text,
+        attachment_ids: attachmentIds,
+        revision: base + 1,
+      }),
+    );
+    const { deps } = createMockDeps({
+      deviceId: "device-a",
+      serverDrafts: { put },
+      attachmentInfo: () => new Promise(() => undefined),
+      now: () => 0,
+      schedule: () => () => undefined,
+      online: () => true,
+    });
+    const model = new ComposerModel(deps);
+    await model.startDraft({
+      text: "чужой текст",
+      attachment_ids: ["att-1"],
+      revision: 1,
+    });
+
+    model.text = "печатаю, пока грузится метаданные";
+    model.typed();
+    await model.flushDraft();
+
+    expect(put).toHaveBeenCalledWith(
+      "печатаю, пока грузится метаданные",
+      ["att-1"],
+      1,
+    );
+  });
+
   it("gate_reasons_are_russian_text_for_every_disabled_state", () => {
     const { deps, uploadsList } = createMockDeps();
     const model = new ComposerModel(deps);

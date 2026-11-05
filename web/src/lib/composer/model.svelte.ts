@@ -86,6 +86,8 @@ export class ComposerModel {
   #interruptTimer: ReturnType<typeof setTimeout> | null = null;
   #draft: DraftSync | null = null;
   #attachmentsInFlight = 0;
+  #draftAttachmentIds: string[] = [];
+  #reconcileToken = 0;
 
   constructor(deps: ComposerDeps) {
     this.deps = deps;
@@ -94,9 +96,10 @@ export class ComposerModel {
         deviceId: deps.deviceId ?? "local",
         api: deps.serverDrafts,
         current: () => this.text,
-        currentAttachments: () => this.draftAttachmentIds(),
+        currentAttachments: () => this.#draftAttachmentIds,
         apply: (text, attachmentIds) => {
           this.text = text;
+          this.#draftAttachmentIds = [...attachmentIds];
           this.draftApplied += 1;
           void this.#reconcileAttachments(attachmentIds);
         },
@@ -117,8 +120,8 @@ export class ComposerModel {
     }
   }
 
-  /** Готовые вложения лотка в порядке показа: только они входят в общий черновик. */
-  draftAttachmentIds(): string[] {
+  /** Готовые вложения лотка в порядке показа. */
+  #readyAttachmentIds(): string[] {
     return this.deps.uploads
       .list(this.deps.conversationId)
       .filter((item) => item.phase === "ready" && item.attachmentId)
@@ -154,10 +157,12 @@ export class ComposerModel {
   /** Смена лотка: готовые вложения и удаление должны попасть в общий черновик. */
   attachmentsChanged(): void {
     if (this.#attachmentsInFlight > 0) return;
+    this.#draftAttachmentIds = this.#readyAttachmentIds();
     this.typed();
   }
 
   async #reconcileAttachments(ids: string[]): Promise<void> {
+    const token = ++this.#reconcileToken;
     this.#attachmentsInFlight += 1;
     try {
       const ready = this.deps.uploads
@@ -187,6 +192,8 @@ export class ComposerModel {
           ),
         );
       }
+      if (token !== this.#reconcileToken) return;
+      this.#draftAttachmentIds = this.#readyAttachmentIds();
       this.deps.drafts.set(this.deps.conversationId, {
         attachments: this.deps.uploads
           .list(this.deps.conversationId)
