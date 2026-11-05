@@ -32,16 +32,35 @@ fn state(pid: u32) -> Option<char> {
 }
 
 impl Fake {
-    pub fn new(mut script: Script) -> Self {
+    pub fn new(script: Script) -> Self {
+        Self::build(script, false)
+    }
+
+    /// Первый `serve` завершается сразу: так проверяется повторная проба после сбоя.
+    pub fn failing_first(script: Script) -> Self {
+        Self::build(script, true)
+    }
+
+    fn build(mut script: Script, fail_first: bool) -> Self {
         let dir = TempDir::new().unwrap();
         let log = dir.path().join("requests.jsonl");
         script.log = Some(log.clone());
         let path = dir.path().join("script.json");
         fs::write(&path, serde_json::to_vec(&script).unwrap()).unwrap();
+        let failed_marker = dir.path().join("first-serve-failed");
+        let fail = if fail_first {
+            format!(
+                "if [ \"$1\" = serve ] && [ ! -e '{}' ]; then : > '{}'; exit 1; fi\n",
+                failed_marker.display(),
+                failed_marker.display()
+            )
+        } else {
+            String::new()
+        };
         let exe = fake_exec::write_executable(
             &dir.path().join("opencode"),
             format!(
-                "#!/bin/sh\nexec '{}' --script '{}' \"$@\"\n",
+                "#!/bin/sh\n{fail}exec '{}' --script '{}' \"$@\"\n",
                 env!("CARGO_BIN_EXE_fake-opencode"),
                 path.display()
             ),

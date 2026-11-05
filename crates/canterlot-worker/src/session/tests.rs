@@ -5,6 +5,36 @@ use super::*;
 pub(super) mod support;
 
 #[test]
+fn disabled_antigravity_is_not_probed_or_retried() {
+    let config: WorkerConfig = toml::from_str(&format!(
+        r#"
+hub_url = "https://localhost:1"
+ca_cert = "/tmp/ca.pem"
+token_file = "/tmp/token"
+machine_id = "{}"
+installation_id = "{}"
+restore_generation = "{}"
+data_dir = "/tmp/store"
+
+[opencode]
+executable = "/bin/false"
+
+[antigravity]
+enabled = false
+"#,
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    ))
+    .unwrap();
+    let probes = catalog::Probe::configured(&config);
+    assert!(
+        matches!(probes.as_slice(), [catalog::Probe::OpenCode(_)]),
+        "a disabled harness must stay out of probes"
+    );
+}
+
+#[test]
 fn test_runtime_dir_stays_inside_storage() {
     let root = tempfile::tempdir().unwrap();
     let runtime = default_runtime_dir(&root.path().join("store")).unwrap();

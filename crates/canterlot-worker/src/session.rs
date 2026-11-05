@@ -37,6 +37,7 @@ use crate::{
     store::{Accept, StoreError, WorkerStore},
 };
 
+mod catalog;
 mod data;
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
@@ -416,10 +417,9 @@ pub struct Worker {
     metrics: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
     metrics_task: Option<MetricsFuture>,
     workdirs: crate::machine::workdirs::WorkdirSuggester,
-    claude_version: Option<crate::adapter::claude_code::version::CliVersion>,
-    codex_catalog: Option<crate::adapter::codex::CodexCatalog>,
-    opencode_catalog: Option<crate::adapter::opencode::OpenCodeCatalog>,
-    antigravity_catalog: Option<crate::adapter::antigravity::AntigravityCatalog>,
+    catalogs: std::sync::Arc<catalog::Catalogs>,
+    catalog_retry_delays: Option<Vec<Duration>>,
+    catalog_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 type MetricsFuture = Pin<
@@ -569,10 +569,9 @@ impl Worker {
             metrics: std::sync::Arc::new(metrics),
             metrics_task: None,
             workdirs,
-            claude_version: None,
-            codex_catalog: None,
-            opencode_catalog: None,
-            antigravity_catalog: None,
+            catalogs: std::sync::Arc::new(catalog::Catalogs::new()),
+            catalog_retry_delays: None,
+            catalog_tasks: Vec::new(),
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
             config,
@@ -608,6 +607,13 @@ impl Worker {
         self
     }
 
+    /// Паузы повторов пробы каталога; в тестах короче, чтобы не ждать минуты.
+    #[cfg(feature = "fault-injection")]
+    pub fn with_catalog_retry_delays(mut self, delays: Vec<Duration>) -> Self {
+        self.catalog_retry_delays = Some(delays);
+        self
+    }
+
     pub fn state(&self) -> watch::Receiver<SessionState> {
         self.state.subscribe()
     }
@@ -624,6 +630,13 @@ impl Worker {
 
     pub async fn run(mut self, shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
         let result = self.run_inner(shutdown).await;
+        let tasks = std::mem::take(&mut self.catalog_tasks);
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
         if let Some(task) = self.metrics_task.take() {
             let _ = task.await;
         }
@@ -648,32 +661,39 @@ impl Worker {
             .call(move |store| initialize_generation(store.as_mut().unwrap(), configured))
             .await?;
         let (sender, relay) = mpsc::channel(8);
-        if let Some(cfg) = &self.config.claude_code {
-            self.claude_version =
-                match crate::adapter::claude_code::version::check(&cfg.executable).await {
-                    Ok(version) => Some(version),
-                    Err(reason) => {
-                        tracing::warn!(
-                            kind = "claude_code_unavailable",
-                            ?reason,
-                            "Claude Code omitted from catalog"
-                        );
-                        None
-                    }
-                };
-        }
-        if let Some(cfg) = &self.config.codex {
-            self.codex_catalog = match crate::adapter::codex::discover(cfg).await {
-                Ok(catalog) => Some(catalog),
+        let mut catalogs = catalog::CatalogState::default();
+        let mut retry = Vec::new();
+        for probe in catalog::Probe::configured(&self.config) {
+            match probe.discover(&self.config.data_dir).await {
+                Ok(slot) => {
+                    catalog::log_no_models(&probe, &slot);
+                    catalogs.set(slot);
+                }
                 Err(reason) => {
                     tracing::warn!(
-                        kind = "codex_unavailable",
-                        ?reason,
-                        "Codex omitted from catalog"
+                        kind = probe.failure_kind(),
+                        reason = %reason,
+                        "{}",
+                        probe.omitted()
                     );
-                    None
+                    retry.push(probe);
                 }
-            };
+            }
+        }
+        self.catalogs.publish(&self.config, catalogs);
+        let delays = self
+            .catalog_retry_delays
+            .clone()
+            .unwrap_or_else(catalog::retry_delays);
+        for probe in retry {
+            self.catalog_tasks
+                .push(tokio::spawn(catalog::retry_until_discovered(
+                    probe,
+                    self.config.clone(),
+                    self.catalogs.clone(),
+                    shutdown.clone(),
+                    delays.clone(),
+                )));
         }
         let runtime_dir = self
             .runtime_dir
@@ -686,50 +706,6 @@ impl Worker {
             self.config.attachments.clone(),
             runtime_dir,
         );
-        if let Some(cfg) = self.config.antigravity.as_ref().filter(|cfg| cfg.enabled) {
-            self.antigravity_catalog =
-                match crate::adapter::antigravity::catalog::discover(cfg).await {
-                    Ok(catalog) => {
-                        if catalog.models.is_empty() {
-                            tracing::warn!(
-                                kind = "antigravity_no_models",
-                                "Antigravity has no available models"
-                            );
-                        }
-                        Some(catalog)
-                    }
-                    Err(reason) => {
-                        tracing::warn!(
-                            kind = "antigravity_unavailable",
-                            ?reason,
-                            "Antigravity omitted from catalog"
-                        );
-                        None
-                    }
-                };
-        }
-        if let Some(cfg) = &self.config.opencode {
-            self.opencode_catalog =
-                match crate::adapter::opencode::discover(cfg, &self.config.data_dir).await {
-                    Ok(catalog) => {
-                        if catalog.models.is_empty() {
-                            tracing::warn!(
-                                kind = "opencode_no_models",
-                                "OpenCode has no available models"
-                            );
-                        }
-                        Some(catalog)
-                    }
-                    Err(reason) => {
-                        tracing::warn!(
-                            kind = "opencode_unavailable",
-                            ?reason,
-                            "OpenCode omitted from catalog"
-                        );
-                        None
-                    }
-                };
-        }
         manager.configure_adapters(
             self.config.claude_code.clone(),
             self.config.codex.clone(),
@@ -1176,28 +1152,12 @@ impl Worker {
         let mut report_outbound = None;
         let mut report_created = false;
         let mut reconciled = false;
+        let mut catalog_updates = self.catalogs.subscribe();
+        let initial_report = catalog_updates.borrow_and_update().clone();
         let mut machine_outbound = if pilot {
-            let config = self.config.clone();
-            let cli = self.claude_version.clone();
-            let codex = self.codex_catalog.clone();
-            let opencode = self.opencode_catalog.clone();
-            let antigravity = self.antigravity_catalog.clone();
             Some(ControlUp {
                 msg: Some(control_up::Msg::MachineReport(
-                    tokio::task::spawn_blocking(move || {
-                        crate::machine::build_report(
-                            &config,
-                            &crate::adapter::catalog_with(
-                                config.claude_code.as_ref(),
-                                cli.as_ref(),
-                                codex.as_ref(),
-                                opencode.as_ref(),
-                                antigravity.as_ref(),
-                            ),
-                        )
-                    })
-                    .await
-                    .map_err(|_| WorkerError::StoreThread)?,
+                    initial_report.as_ref().clone(),
                 )),
             })
         } else {
@@ -1440,6 +1400,13 @@ impl Worker {
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
             tokio::select! {
+                changed = catalog_updates.changed(), if pilot && machine_outbound.is_none() => {
+                    changed.map_err(|_| WorkerError::Transport)?;
+                    let report = catalog_updates.borrow_and_update().clone();
+                    machine_outbound = Some(ControlUp {
+                        msg: Some(control_up::Msg::MachineReport(report.as_ref().clone())),
+                    });
+                }
                 message = inbound.message(), if commands.len() < 32 && polls.len()<8 => {
                     let message = message.map_err(status_error)?.ok_or(WorkerError::Transport)?;
                     match message.msg {
