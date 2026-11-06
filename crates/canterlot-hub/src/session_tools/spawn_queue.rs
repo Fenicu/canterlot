@@ -44,6 +44,11 @@ const STATE_EXPIRED: &str = "expired";
 pub(crate) struct QueuedSpawn {
     pub(crate) args: spawn::SpawnArgs,
     pub(crate) chain_depth: i32,
+    /// Разрешённая пара прямого запуска: нужна только для карточки очереди.
+    #[serde(default)]
+    pub(crate) resolved_harness: Option<String>,
+    #[serde(default)]
+    pub(crate) resolved_model: Option<String>,
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -66,10 +71,18 @@ pub struct QueueRow {
 }
 
 /// Элемент очереди для PWA, снимка и события.
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct QueueItemView {
     pub id: Uuid,
     pub parent_id: Uuid,
+    /// Запрошенный заголовок будущей сессии; `null` — автоназвание.
+    pub title: Option<String>,
+    /// Тип задачи маршрута; `null` у прямого запуска.
+    pub task_type: Option<String>,
+    pub level: Option<String>,
+    /// Пара прямого запуска; у маршрута появляется только после старта.
+    pub harness: Option<String>,
+    pub model: Option<String>,
     pub reason: String,
     pub detail: Value,
     pub state: String,
@@ -85,9 +98,43 @@ pub struct QueueItemView {
 
 impl QueueItemView {
     fn of(row: &QueueRow, position: i64) -> Self {
+        let queued = serde_json::from_value::<QueuedSpawn>(row.spec.clone()).ok();
+        let (title, task_type, level, harness, model) = match queued {
+            Some(queued) => {
+                let title = queued.args.title.clone();
+                match queued.args.route.as_ref() {
+                    Some(route) => (
+                        title,
+                        Some(route.task_type.clone()),
+                        route.level.clone(),
+                        None,
+                        None,
+                    ),
+                    None => (
+                        title,
+                        None,
+                        None,
+                        queued
+                            .resolved_harness
+                            .clone()
+                            .or_else(|| queued.args.harness.clone()),
+                        queued
+                            .resolved_model
+                            .clone()
+                            .or_else(|| queued.args.model.clone()),
+                    ),
+                }
+            }
+            None => (None, None, None, None, None),
+        };
         Self {
             id: row.id,
             parent_id: row.parent_id,
+            title,
+            task_type,
+            level,
+            harness,
+            model,
             reason: row.reason.clone(),
             detail: row.detail.clone(),
             state: row.state.clone(),
@@ -100,6 +147,42 @@ impl QueueItemView {
             updated_at: row.updated_at,
             position,
         }
+    }
+}
+
+/// Итог «Запустить сейчас»: обычный исход всегда коммитится, чтобы переход
+/// `failed`/`expired` не откатывался вместе с ответом.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct StartNowOutcome {
+    pub status: String,
+    pub queue_id: Uuid,
+    pub session_id: Option<Uuid>,
+    pub title: Option<String>,
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    pub reason: Option<String>,
+    pub detail: Option<String>,
+}
+
+fn existing_outcome(row: &QueueRow) -> StartNowOutcome {
+    StartNowOutcome {
+        status: row.state.clone(),
+        queue_id: row.id,
+        session_id: row.child_id,
+        title: None,
+        harness: None,
+        model: None,
+        reason: row
+            .result
+            .as_ref()
+            .and_then(|value| value.get("code").or_else(|| value.get("reason")))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        detail: row
+            .detail
+            .get("detail")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     }
 }
 
@@ -134,6 +217,8 @@ pub struct Enqueue {
     pub(crate) reason: &'static str,
     pub(crate) detail: Value,
     pub(crate) not_before: DateTime<Utc>,
+    /// Разрешённая пара прямого запуска, если она уже известна.
+    pub(crate) resolved: Option<(String, String)>,
 }
 
 fn time(at: DateTime<Utc>) -> String {
@@ -327,9 +412,15 @@ pub async fn enqueue_in_tx(
     let id = Uuid::now_v7();
     let expires_at =
         now + TimeDelta::from_std(runtime.spawn_queue.ttl).unwrap_or_else(|_| TimeDelta::days(1));
+    let (resolved_harness, resolved_model) = match request.resolved {
+        Some((harness, model)) => (Some(harness), Some(model)),
+        None => (None, None),
+    };
     let spec = serde_json::to_value(QueuedSpawn {
         args: request.args,
         chain_depth: request.chain_depth,
+        resolved_harness,
+        resolved_model,
     })
     .map_err(|_| ToolError::new(ToolErrorCode::Internal))?;
     let mut tx = conn.begin().await?; // db::begin: savepoint
@@ -369,6 +460,21 @@ pub async fn enqueue_in_tx(
 }
 
 /// Задание на ближайший готовый элемент; текущее задание не считается.
+/// Родитель остановлен владельцем или родителем: очередь не растёт и не запускается.
+pub async fn parent_stopped_in_tx(
+    conn: &mut PgConnection,
+    parent: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let stopped: Option<bool> = sqlx::query_scalar(
+        "select pause_reasons @> '[{\"reason\":\"user_stop\"}]'::jsonb
+           from queue_state where conversation_id=$1",
+    )
+    .bind(parent)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(stopped.unwrap_or(false))
+}
+
 pub async fn wake_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -402,14 +508,22 @@ pub async fn wake_in_tx(
     if exists {
         return Ok(());
     }
-    subs::insert_job(
-        conn,
-        owner_id,
-        parent,
-        at,
-        &json!({"action": "spawn_dequeue"}),
+    // У задания всегда есть durable-идентичность головы: отказ задания знает,
+    // какой элемент закрыть, а обход очереди всё равно идёт по готовности.
+    let head: Option<Uuid> = sqlx::query_scalar(
+        "select id from spawn_queue
+          where parent_id=$1 and state='queued' and expires_at>$2
+          order by created_at, id limit 1",
     )
+    .bind(parent)
+    .bind(now)
+    .fetch_optional(&mut *conn)
     .await?;
+    let mut payload = json!({"action": "spawn_dequeue"});
+    if let Some(head) = head {
+        payload["queue_id"] = json!(head);
+    }
+    subs::insert_job(conn, owner_id, parent, at, &payload).await?;
     Ok(())
 }
 
@@ -425,7 +539,9 @@ async fn set_state_in_tx(
     row.result = result;
     row.updated_at = now;
     sqlx::query(
-        "update spawn_queue set state=$2,result=$3,attempts=$4,child_id=$5,updated_at=$6
+        "update spawn_queue
+            set state=$2,result=$3,attempts=$4,child_id=$5,updated_at=$6,
+                reason=$7,detail=$8,not_before=$9
           where id=$1",
     )
     .bind(row.id)
@@ -434,6 +550,9 @@ async fn set_state_in_tx(
     .bind(row.attempts)
     .bind(row.child_id)
     .bind(row.updated_at)
+    .bind(&row.reason)
+    .bind(&row.detail)
+    .bind(row.not_before)
     .execute(&mut *conn)
     .await?;
     let position = if row.state == STATE_QUEUED {
@@ -461,12 +580,21 @@ pub async fn cancel_in_tx(
     now: DateTime<Utc>,
     note: bool,
 ) -> Result<Value, ToolError> {
-    let mut row: Option<QueueRow> =
-        sqlx::query_as("select * from spawn_queue where id=$1 and parent_id=$2 for update")
-            .bind(queue_id)
-            .bind(parent)
-            .fetch_optional(&mut *conn)
-            .await?;
+    // Порядок блокировок как у удаления: строка разговора раньше элемента очереди.
+    sqlx::query("select id from conversations where id=$1 and owner_id=$2 for no key update")
+        .bind(parent)
+        .bind(owner_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::NotParent))?;
+    let mut row: Option<QueueRow> = sqlx::query_as(
+        "select * from spawn_queue where id=$1 and parent_id=$2 and owner_id=$3 for update",
+    )
+    .bind(queue_id)
+    .bind(parent)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let Some(mut row) = row.take() else {
         return Err(ToolError::new(ToolErrorCode::NotParent));
     };
@@ -577,20 +705,56 @@ pub async fn start_now_in_tx(
     queue_id: Uuid,
     correlation_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<Value, ToolError> {
+) -> Result<StartNowOutcome, ToolError> {
     conversations::lock_owner(&mut *conn, owner_id).await?;
     let Some(parent_session) = access::session_in_tx(conn, owner_id, parent).await? else {
         return Err(ToolError::new(ToolErrorCode::SessionNotFound));
     };
-    let mut row: QueueRow =
-        sqlx::query_as("select * from spawn_queue where id=$1 and parent_id=$2 for update")
-            .bind(queue_id)
-            .bind(parent)
-            .fetch_optional(&mut *conn)
-            .await?
-            .ok_or_else(|| ToolError::new(ToolErrorCode::NotParent))?;
+    sqlx::query("select id from conversations where id=$1 and owner_id=$2 for no key update")
+        .bind(parent)
+        .bind(owner_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
+    crate::session_tools::send::lock_queue(conn, parent).await?;
+    let stopped = parent_stopped_in_tx(&mut *conn, parent).await?;
+    let mut row: QueueRow = sqlx::query_as(
+        "select * from spawn_queue where id=$1 and parent_id=$2 and owner_id=$3 for update",
+    )
+    .bind(queue_id)
+    .bind(parent)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| ToolError::new(ToolErrorCode::NotParent))?;
     if row.state != STATE_QUEUED {
-        return Ok(answer_existing(&row));
+        return Ok(existing_outcome(&row));
+    }
+    if stopped {
+        row.result = Some(json!({"reason": "parent_stopped"}));
+        let result = row.result.clone();
+        set_state_in_tx(conn, &mut row, STATE_CANCELLED, result, now, correlation_id).await?;
+        return Ok(existing_outcome(&row));
+    }
+    if row.expires_at <= now {
+        row.result = Some(json!({"reason": "expired"}));
+        let result = row.result.clone();
+        set_state_in_tx(conn, &mut row, STATE_EXPIRED, result, now, correlation_id).await?;
+        note_in_tx(
+            conn,
+            owner_id,
+            parent,
+            format!(
+                "[canterlot] Queued spawn q-{} expired before it could start. Nothing was started.",
+                &row.id.to_string()[..8]
+            ),
+            spec_depth(&row.spec),
+            queue_event(&row),
+            now,
+        )
+        .await?;
+        wake_in_tx(conn, owner_id, parent, now, None).await?;
+        return Ok(existing_outcome(&row));
     }
     let machine = machine_of(conn, parent).await?;
     let caller = Caller {
@@ -614,37 +778,67 @@ pub async fn start_now_in_tx(
     {
         Attempt::Started(started) => {
             let AttemptStarted { child, spec } = *started;
-            let answer = json!({
-                "status": "started",
-                "queue_id": row.id,
-                "session_id": child.session_id,
-                "title": child.title,
-                "harness": spec.harness,
-                "model": spec.model,
-            });
-            Ok(answer)
+            Ok(StartNowOutcome {
+                status: "started".to_owned(),
+                queue_id: row.id,
+                session_id: Some(child.session_id),
+                title: Some(child.title),
+                harness: Some(spec.harness),
+                model: Some(spec.model),
+                reason: None,
+                detail: None,
+            })
         }
         Attempt::Blocked { reason, detail, at } => {
             row.reason = reason.to_owned();
-            row.detail = json!({"detail": detail});
+            row.detail = json!({"detail": detail.clone()});
             row.not_before = at;
             row.attempts += 1;
             set_state_in_tx(conn, &mut row, STATE_QUEUED, None, now, correlation_id).await?;
             wake_in_tx(conn, owner_id, parent, now, None).await?;
-            Err(ToolError::with_message(
-                ToolErrorCode::MachineBusy,
-                row.detail["detail"].as_str().unwrap_or_default().to_owned(),
-            ))
+            Ok(StartNowOutcome {
+                status: "queued".to_owned(),
+                queue_id: row.id,
+                session_id: None,
+                title: None,
+                harness: None,
+                model: None,
+                reason: Some(reason.to_owned()),
+                detail: Some(detail),
+            })
         }
         Attempt::Failed { code } => {
             row.result = Some(json!({"code": code}));
             let result = row.result.clone();
             set_state_in_tx(conn, &mut row, STATE_FAILED, result, now, correlation_id).await?;
+            note_in_tx(
+                conn,
+                owner_id,
+                parent,
+                format!(
+                    "[canterlot] Queued spawn q-{} failed: {code}. Nothing was started.",
+                    &row.id.to_string()[..8]
+                ),
+                spec_depth(&row.spec),
+                queue_event(&row),
+                now,
+            )
+            .await?;
             wake_in_tx(conn, owner_id, parent, now, None).await?;
-            Err(ToolError::with_message(
-                ToolErrorCode::InvalidArguments,
-                format!("Queued spawn cannot start: {code}"),
-            ))
+            Ok(StartNowOutcome {
+                status: "failed".to_owned(),
+                queue_id: row.id,
+                session_id: None,
+                title: None,
+                harness: None,
+                model: None,
+                reason: Some(code.to_owned()),
+                detail: row
+                    .detail
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            })
         }
     }
 }
@@ -692,6 +886,15 @@ async fn try_start(
             at: retry_at(runtime.spawn_queue, now),
         });
     };
+    // После перезапуска хаба тик может обогнать повторное подключение воркера:
+    // отсутствие связи — не постоянная нехватка возможности.
+    if registry.session_info(caller.machine_id).is_none() {
+        return Ok(Attempt::Blocked {
+            reason: "resources",
+            detail: "the machine is not connected".to_owned(),
+            at: retry_at(runtime.spawn_queue, now),
+        });
+    }
     let Ok(queued) = serde_json::from_value::<QueuedSpawn>(row.spec.clone()) else {
         return Ok(Attempt::Failed {
             code: "invalid_arguments",
@@ -773,6 +976,7 @@ async fn try_start(
             code: "not_in_whitelist",
         });
     }
+    let mut metrics_stale = false;
     if !start_now {
         let rate = access::rate_state(&mut *conn, runtime.session_tools, parent.id, now).await?;
         if rate.blocked {
@@ -802,6 +1006,7 @@ async fn try_start(
             now,
         )
         .await?;
+        metrics_stale = verdict.stale;
         if verdict.blocked() {
             return Ok(Attempt::Blocked {
                 reason: REASON_RESOURCES,
@@ -822,6 +1027,7 @@ async fn try_start(
             key: format!("spawnq:{}", row.id),
             correlation_id,
         },
+        false,
     )
     .await;
     match started {
@@ -847,17 +1053,30 @@ async fn try_start(
                 correlation_id,
             )
             .await?;
+            subs::insert_job(
+                conn,
+                caller.owner_id,
+                row.parent_id,
+                now,
+                &json!({"action": "spawn_attributes", "conversation_id": child.session_id}),
+            )
+            .await?;
             let follow = if spec.subscribe {
                 "You are subscribed."
             } else {
                 "You are not subscribed."
+            };
+            let stale = if metrics_stale {
+                " Machine metrics are stale."
+            } else {
+                ""
             };
             note_in_tx(
                 conn,
                 caller.owner_id,
                 row.parent_id,
                 format!(
-                    "[canterlot] Queued spawn q-{} started as session \"{}\" ({}, {}, model {}). {follow}",
+                    "[canterlot] Queued spawn q-{} started as session \"{}\" ({}, {}, model {}). {follow}{stale}",
                     &row.id.to_string()[..8],
                     origin::clean_title(&child.title),
                     child.session_id,
@@ -911,9 +1130,23 @@ pub(crate) async fn run_job_in_tx(
     correlation_id: Uuid,
 ) -> Result<JobOutcome, SubmitError> {
     conversations::lock_owner(&mut *conn, job.owner_id).await?;
+    crate::session_tools::send::lock_queue(conn, parent).await?;
     let Some(parent_session) = access::session_in_tx(conn, job.owner_id, parent).await? else {
         return Ok(JobOutcome::Done(json!({"skipped": "parent_missing"})));
     };
+    if parent_stopped_in_tx(&mut *conn, parent).await? {
+        cancel_for_parent_in_tx(
+            conn,
+            job.owner_id,
+            parent,
+            "parent_stopped",
+            correlation_id,
+            now,
+            false,
+        )
+        .await?;
+        return Ok(JobOutcome::Done(json!({"cancelled": "parent_stopped"})));
+    }
     if parent_session.archived {
         cancel_for_parent_in_tx(
             conn,
@@ -1041,43 +1274,47 @@ pub async fn abandon_in_tx(
     payload: &Value,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    let Some(queue_id) = payload
-        .get("queue_id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
+    let Some(owner_id) =
+        sqlx::query_scalar::<_, Uuid>("select owner_id from conversations where id=$1")
+            .bind(parent)
+            .fetch_optional(&mut *conn)
+            .await?
     else {
         return Ok(());
     };
-    let owner_id: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+    let queue_id = payload
+        .get("queue_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    if let Some(queue_id) = queue_id {
+        let mut row: Option<QueueRow> = sqlx::query_as(
+            "select * from spawn_queue where id=$1 and parent_id=$2 and state='queued' for update",
+        )
+        .bind(queue_id)
         .bind(parent)
-        .fetch_one(&mut *conn)
+        .fetch_optional(&mut *conn)
         .await?;
-    let mut row: Option<QueueRow> = sqlx::query_as(
-        "select * from spawn_queue where id=$1 and parent_id=$2 and state='queued' for update",
-    )
-    .bind(queue_id)
-    .bind(parent)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some(mut row) = row.take() else {
-        return Ok(());
-    };
-    row.result = Some(json!({"code": "job_failed"}));
-    let result = row.result.clone();
-    set_state_in_tx(conn, &mut row, STATE_FAILED, result, now, Uuid::now_v7()).await?;
-    note_in_tx(
-        conn,
-        owner_id,
-        parent,
-        format!(
-            "[canterlot] Queued spawn q-{} failed: job_failed. Nothing was started.",
-            &row.id.to_string()[..8]
-        ),
-        spec_depth(&row.spec),
-        queue_event(&row),
-        now,
-    )
-    .await?;
+        if let Some(mut row) = row.take() {
+            row.result = Some(json!({"code": "job_failed"}));
+            let result = row.result.clone();
+            set_state_in_tx(conn, &mut row, STATE_FAILED, result, now, Uuid::now_v7()).await?;
+            note_in_tx(
+                conn,
+                owner_id,
+                parent,
+                format!(
+                    "[canterlot] Queued spawn q-{} failed: job_failed. Nothing was started.",
+                    &row.id.to_string()[..8]
+                ),
+                spec_depth(&row.spec),
+                queue_event(&row),
+                now,
+            )
+            .await?;
+        }
+    }
+    // Задание без идентичности — обход очереди: даже если закрывать нечего,
+    // следующий элемент обязан получить задание.
     wake_in_tx(conn, owner_id, parent, now, None).await?;
     Ok(())
 }

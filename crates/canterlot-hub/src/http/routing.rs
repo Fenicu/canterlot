@@ -264,6 +264,7 @@ async fn preview(
         stale: s.routing_stale,
         now,
         request: &request,
+        bypass_limits: false,
     }) {
         Ok(decision) => {
             let considered = decision.considered.clone();
@@ -281,7 +282,8 @@ async fn preview(
             ErrorCode::NoExecutorAvailable,
         )
         .with_details(ErrorDetails {
-            reason: Some(routing::no_executor_message(&considered, reset)),
+            candidates: Some(considered),
+            nearest_reset: reset,
             ..Default::default()
         })),
     }

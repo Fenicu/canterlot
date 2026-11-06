@@ -4148,13 +4148,31 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "id", "parent_id", "reason", "detail", "state", "not_before",
-            "expires_at", "attempts", "child_id", "result", "created_at",
-            "updated_at", "position"
+            "id", "parent_id", "title", "task_type", "level", "harness", "model",
+            "reason", "detail", "state", "not_before", "expires_at", "attempts",
+            "child_id", "result", "created_at", "updated_at", "position"
           ],
           "properties": {
             "id": { "$ref": "#/$defs/Uuid" },
             "parent_id": { "$ref": "#/$defs/Uuid" },
+            "title": {
+              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+            },
+            "task_type": {
+              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+            },
+            "level": {
+              "anyOf": [
+                { "enum": ["low", "medium", "high", "xhigh"] },
+                { "type": "null" }
+              ]
+            },
+            "harness": {
+              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+            },
+            "model": {
+              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+            },
             "reason": { "enum": ["rate", "concurrency", "limits", "resources"] },
             "detail": { "type": "object" },
             "state": {

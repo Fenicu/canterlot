@@ -1694,6 +1694,8 @@ export interface components {
         ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
+            /** @description Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`. */
+            candidates?: components["schemas"]["Considered"][];
             /**
              * Format: int64
              * @description Текущая версия пресета (`preset_revision_conflict`).
@@ -1702,6 +1704,11 @@ export interface components {
             current_state?: string;
             /** @description Поле запроса, которое не прошло проверку (`preset_invalid`). */
             field?: string;
+            /**
+             * Format: date-time
+             * @description Ближайший сброс лимита провайдера (`no_executor_available`).
+             */
+            nearest_reset?: string;
             question_id?: string;
             reason?: components["schemas"]["ErrorReason"];
             reasons?: components["schemas"]["ArchiveReason"][];
@@ -2606,8 +2613,12 @@ export interface components {
             detail: unknown;
             /** Format: date-time */
             expires_at: string;
+            /** @description Пара прямого запуска; у маршрута появляется только после старта. */
+            harness?: string | null;
             /** Format: uuid */
             id: string;
+            level?: string | null;
+            model?: string | null;
             /** Format: date-time */
             not_before: string;
             /** Format: uuid */
@@ -2617,6 +2628,10 @@ export interface components {
             reason: string;
             result?: unknown;
             state: string;
+            /** @description Тип задачи маршрута; `null` у прямого запуска. */
+            task_type?: string | null;
+            /** @description Запрошенный заголовок будущей сессии; `null` — автоназвание. */
+            title?: string | null;
             /** Format: date-time */
             updated_at: string;
         };

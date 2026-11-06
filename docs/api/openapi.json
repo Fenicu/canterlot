@@ -9093,6 +9093,13 @@
         "type": "object",
         "description": "Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок.",
         "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Considered"
+            },
+            "description": "Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`."
+          },
           "current_revision": {
             "type": "integer",
             "format": "int64",
@@ -9105,6 +9112,11 @@
           "field": {
             "type": "string",
             "description": "Поле запроса, которое не прошло проверку (`preset_invalid`)."
+          },
+          "nearest_reset": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Ближайший сброс лимита провайдера (`no_executor_available`)."
           },
           "question_id": {
             "type": "string"
@@ -12361,9 +12373,28 @@
             "type": "string",
             "format": "date-time"
           },
+          "harness": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Пара прямого запуска; у маршрута появляется только после старта."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "not_before": {
             "type": "string",
@@ -12383,6 +12414,20 @@
           "result": {},
           "state": {
             "type": "string"
+          },
+          "task_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Тип задачи маршрута; `null` у прямого запуска."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Запрошенный заголовок будущей сессии; `null` — автоназвание."
           },
           "updated_at": {
             "type": "string",

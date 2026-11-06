@@ -662,6 +662,7 @@ pub(crate) async fn validate_routed(
         stale: context.routing_stale,
         now,
         request: &request,
+        bypass_limits: bypass_queue,
     }) {
         Ok(decision) => decision,
         Err(super::routing::RouteError::UnknownTask { available }) => {
@@ -768,6 +769,7 @@ pub(crate) struct Launch<'a> {
 pub(crate) async fn start_child(
     conn: &mut PgConnection,
     launch: Launch<'_>,
+    publish_attributes: bool,
 ) -> Result<Started, ToolError> {
     let Launch {
         registry,
@@ -813,7 +815,7 @@ pub(crate) async fn start_child(
     .await
     .map_err(create_error)?;
     let child = created.conversation_id;
-    if conversations::auto_title_in_tx(conn, owner, child, &brief).await? {
+    if conversations::auto_title_in_tx(conn, owner, child, &brief).await? && publish_attributes {
         conversations::emit_attributes(conn, owner, child, correlation_id).await?;
     }
     let (title, worktree): (String, Option<Value>) =
@@ -909,7 +911,11 @@ fn native_request_id(caller: &Caller) -> String {
 }
 
 /// Этот вызов уже прошёл: повтор транспорта получает тот же ответ, вторая сессия не создаётся.
-async fn replayed(conn: &mut PgConnection, caller: &Caller) -> Result<Option<Value>, sqlx::Error> {
+async fn replayed(
+    conn: &mut PgConnection,
+    caller: &Caller,
+    guards: &crate::config::GuardsConfig,
+) -> Result<Option<Value>, sqlx::Error> {
     let child: Option<(Uuid, String, Option<Value>, bool)> = sqlx::query_as(
         "select c.id,c.permission_mode,c.worktree,exists(
            select 1 from session_subscriptions s
@@ -923,12 +929,14 @@ async fn replayed(conn: &mut PgConnection, caller: &Caller) -> Result<Option<Val
     .fetch_optional(&mut *conn)
     .await?;
     if let Some((id, mode, worktree, subscribed)) = child {
-        return Ok(Some(started_answer(
-            id,
-            &mode,
-            worktree.as_ref(),
-            subscribed,
-        )));
+        let mut answer = started_answer(id, &mode, worktree.as_ref(), subscribed);
+        let verdict =
+            guard::check_in_tx(conn, caller.owner_id, caller.machine_id, guards, Utc::now())
+                .await?;
+        if verdict.stale {
+            answer["machine_metrics"] = serde_json::json!("stale");
+        }
+        return Ok(Some(answer));
     }
     let request: Option<Uuid> = sqlx::query_scalar(
         "select id from requests where conversation_id=$1 and native_request_id=$2",
@@ -1008,16 +1016,21 @@ pub async fn spawn(
     check_arguments(&args)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
-    if let Some(answer) = replayed(&mut tx, caller).await? {
+    if let Some(answer) = replayed(&mut tx, caller, &context.guards).await? {
         return Ok(answer);
     }
     // Владелец раньше строки разговора: тот же порядок у удаления и создания.
     conversations::lock_owner(&mut tx, caller.owner_id).await?;
+    // Очередь родителя: остановка и постановка идут через одну блокировку.
+    send::lock_queue(&mut tx, caller.conversation_id).await?;
     // Повтор вызова, который уже встал в очередь, отвечает тем же элементом.
     if let Some(row) = spawn_queue::find_by_call(&mut tx, caller.owner_id, caller.call_id).await? {
         let answer = spawn_queue::answer_replay(&mut tx, &row).await?;
         tx.commit().await?;
         return Ok(answer);
+    }
+    if spawn_queue::parent_stopped_in_tx(&mut tx, caller.conversation_id).await? {
+        return Err(ToolError::new(ToolErrorCode::ConversationClosed));
     }
     let parent = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if parent.spawn_depth >= context.config.max_spawn_depth as i32 {
@@ -1112,6 +1125,7 @@ pub async fn spawn(
                 not_before: now
                     + chrono::TimeDelta::from_std(context.spawn_queue.retry_delay)
                         .unwrap_or_else(|_| chrono::TimeDelta::seconds(60)),
+                resolved: None,
             },
             now,
             caller.call_id,
@@ -1124,16 +1138,20 @@ pub async fn spawn(
         return Ok(answer);
     };
     let list = whitelist::view(&mut tx, caller.owner_id).await?;
-    if spec.wider_than_parent
-        || !whitelist::allows(&list.entries, &spec.harness, &spec.model, &first_model)
-    {
+    let needs_card = spec.wider_than_parent
+        || !whitelist::allows(&list.entries, &spec.harness, &spec.model, &first_model);
+    // Карточки считаются в часовом окне: зацикленный родитель не растит их без предела.
+    let rate = access::rate_state(&mut tx, &context.config, parent.id, now).await?;
+    if needs_card && rate.blocked {
+        return Err(ToolError::new(ToolErrorCode::RateLimited));
+    }
+    if needs_card {
         let request = open_card(&mut tx, caller, &spec).await?;
         tx.commit().await?;
         return Ok(pending_answer(request));
     }
     // Единственные препятствия дальше — частота, страж машины или (у маршрута)
     // занятость и лимит: они ставят запуск в очередь.
-    let rate = access::rate_state(&mut tx, &context.config, parent.id, now).await?;
     let queue_reason = if rate.blocked {
         Some(super::spawn_queue::REASON_RATE)
     } else {
@@ -1201,6 +1219,7 @@ pub async fn spawn(
                 reason,
                 detail,
                 not_before,
+                resolved: Some((spec.harness.clone(), spec.model.clone())),
             },
             now,
             caller.call_id,
@@ -1223,6 +1242,7 @@ pub async fn spawn(
             key: input_key(caller),
             correlation_id: caller.call_id,
         },
+        true,
     )
     .await?;
     tx.commit().await?;
@@ -1235,6 +1255,9 @@ pub async fn spawn(
         started.worktree.as_ref(),
         spec.subscribe,
     );
+    if guard.stale {
+        answer["machine_metrics"] = serde_json::json!("stale");
+    }
     if let Some(routing) = spec.routing.as_ref()
         && let Ok(decision) = serde_json::from_value::<super::routing::Decision>(routing.clone())
     {
@@ -1398,7 +1421,7 @@ async fn allow(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Started, T
     }
     // Вложенная точка сохранения на уже открытой транзакции, не новое соединение.
     let mut attempt = conn.begin().await?; // db::begin: savepoint
-    match start_child(&mut attempt, launch).await {
+    match start_child(&mut attempt, launch, true).await {
         Ok(child) => {
             attempt.commit().await?;
             Ok(child)

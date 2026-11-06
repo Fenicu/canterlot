@@ -313,6 +313,14 @@ pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub current_revision: Option<i64>,
+    /// Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub candidates: Option<Vec<crate::session_tools::routing::Considered>>,
+    /// Ближайший сброс лимита провайдера (`no_executor_available`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub nearest_reset: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ErrorDetails {

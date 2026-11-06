@@ -181,8 +181,8 @@ export class FakeHubApi {
 	readonly routingSkips = new Map<string, { verdict: string; reason: string }>();
 	/** Вердикт стража в предпросмотре. */
 	routingGuard: { stale: boolean; blocked: boolean; violations: string[]; detail: string | null } = { stale: false, blocked: false, violations: [], detail: null };
-	/** Строка `no_executor_available` хаба: предпросмотр отказывает с ней в `details.reason`. */
-	routingRefusal: string | null = null;
+	/** Отказ `no_executor_available`: разбор по кандидатам и ближайший сброс в `details`, как у хаба. */
+	routingRefusal: { candidates: { harness: string; model: string; verdict: string; reason: string }[]; nearest_reset: string | null } | null = null;
 	readonly routingPreviews: { task_type: string; level?: string; workdir?: string }[] = [];
 
 	/** Предпросмотр выбора: кандидаты по порядку, первый не пропущенный выбран, как у хаба. */
@@ -195,7 +195,7 @@ export class FakeHubApi {
 		if (!task) {
 			throw { status: 404, code: 'task_type_unknown', message: `Unknown task type ${task_type}` };
 		}
-		if (this.routingRefusal) throw { status: 422, code: 'no_executor_available', message: 'No executor available', details: { reason: this.routingRefusal } };
+		if (this.routingRefusal) throw { status: 422, code: 'no_executor_available', message: 'No executor available', details: this.routingRefusal };
 		const considered: { harness: string; model: string; verdict: string; reason: string }[] = [];
 		let chosen: (typeof task.candidates)[number] | undefined;
 		for (const candidate of task.candidates) {
@@ -208,7 +208,7 @@ export class FakeHubApi {
 			chosen = candidate;
 			break;
 		}
-		if (!chosen) throw { status: 422, code: 'no_executor_available', message: 'No executor available' };
+		if (!chosen) throw { status: 422, code: 'no_executor_available', message: 'No executor available', details: { candidates: considered, nearest_reset: null } };
 		const decision = {
 			policy_revision: this.routingPolicyRevision,
 			task_type,
@@ -513,6 +513,11 @@ export class FakeHubApi {
 		const item: QueueItemView = {
 			id: input.id ?? crypto.randomUUID(),
 			parent_id: id,
+			title: input.title ?? null,
+			task_type: input.task_type ?? null,
+			level: input.level ?? null,
+			harness: input.harness ?? null,
+			model: input.model ?? null,
 			reason: input.reason ?? 'rate',
 			detail: input.detail ?? { detail: '10 spawns in the last hour' },
 			state: input.state ?? 'queued',
