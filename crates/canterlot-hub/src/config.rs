@@ -525,6 +525,7 @@ impl Default for SchedulerConfig {
 pub struct OrchestratorConfig {
     pub alarms: AlarmsConfig,
     pub nudge: NudgeConfig,
+    pub routing: RoutingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -548,6 +549,24 @@ pub struct AlarmsConfig {
 impl Default for AlarmsConfig {
     fn default() -> Self {
         Self { enabled: true }
+    }
+}
+
+/// Маршрутизация: выключатель и свежесть показаний лимитов для выбора.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoutingConfig {
+    pub enabled: bool,
+    #[serde(with = "humantime_serde")]
+    pub stale_limits: Duration,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stale_limits: Duration::from_secs(30 * 60),
+        }
     }
 }
 

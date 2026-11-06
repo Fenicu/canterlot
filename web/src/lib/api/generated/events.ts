@@ -50,7 +50,8 @@ export type WireEvent =
   | InstructionPresetChanged
   | CompactionStarted
   | CompactionFinished
-  | ContextChanged;
+  | ContextChanged
+  | RoutingPolicyChanged;
 export type Uuid = string;
 export type Scope = string;
 export type Seq = string;
@@ -541,6 +542,7 @@ export interface ConversationCreated {
     };
     last_activity_at: Time | null;
     working_ms?: number;
+    routing?: {} | null;
     counts: Counts;
     parent_id?: Uuid | null;
     spawn_depth?: number;
@@ -753,6 +755,7 @@ export interface DerivedChanged {
       enabled: boolean;
     };
     working_ms?: number;
+    routing?: {} | null;
   };
 }
 export interface Settings {
@@ -1329,5 +1332,21 @@ export interface ContextChanged {
   payload: {
     tokens: number | null;
     window_tokens: number | null;
+  };
+}
+export interface RoutingPolicyChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "routing_policy_changed";
+  payload: {
+    revision?: number;
   };
 }

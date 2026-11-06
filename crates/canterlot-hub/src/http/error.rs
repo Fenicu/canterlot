@@ -137,6 +137,10 @@ error_codes! {
     PresetInvalid => "preset_invalid", 422, Browser, Never, "Некорректный пресет";
     SpawnWhitelistInvalid => "spawn_whitelist_invalid", 422, Browser, Never, "Некорректный белый список";
     LimitSettingsInvalid => "limit_settings_invalid", 422, Browser, Never, "Некорректные пороги лимитов";
+    RoutingPolicyInvalid => "routing_policy_invalid", 422, Browser, Never, "Некорректная политика маршрутизации";
+    RoutingPolicyConflict => "routing_policy_conflict", 409, Browser, AfterCondition, "Политика уже изменена";
+    TaskTypeUnknown => "task_type_unknown", 404, Browser, Never, "Неизвестный тип задачи маршрутизации";
+    NoExecutorAvailable => "no_executor_available", 422, Browser, AfterCondition, "Нет доступного исполнителя";
     NotDelegated => "not_delegated", 409, Browser, Never, "Сессия не запущена агентом";
     WorktreeRemoved => "worktree_removed", 409, Delivery, Never, "Рабочая копия уже убрана";
     WorktreeNotRemoved => "worktree_not_removed", 409, Browser, AfterCondition, "Сначала примите результат: рабочая копия ещё на машине";

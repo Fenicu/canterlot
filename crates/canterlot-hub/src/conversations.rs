@@ -240,6 +240,8 @@ pub struct ListItem {
     pub last_activity_at: Option<String>,
     /// Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом.
     pub working_ms: i64,
+    /// Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута.
+    pub routing: Option<Value>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct EffectiveSettings {
@@ -282,6 +284,8 @@ pub struct ConversationDetail {
     pub holds: Vec<HoldView>,
     /// Принятый ход записан: следующий запуск продолжит беседу, а не начнёт новую.
     pub turn_recorded: bool,
+    /// Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута.
+    pub routing: Option<Value>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct GroupCount {
@@ -424,6 +428,7 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
         },
         last_activity_at: optional_time(row, "derived_last_activity")?,
         working_ms: row.try_get("working_ms")?,
+        routing: row.try_get("routing").ok().flatten(),
     })
 }
 pub async fn counts(conn: &mut PgConnection, owner_id: Uuid) -> Result<Counts, sqlx::Error> {
@@ -788,6 +793,7 @@ pub async fn detail(
         continued_from_at: optional_time(&row, "continued_from_at")?,
         holds,
         turn_recorded,
+        routing: row.try_get("routing").ok().flatten(),
     }))
 }
 pub async fn recent_workdirs(

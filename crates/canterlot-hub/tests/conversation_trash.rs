@@ -97,6 +97,8 @@ fn tool_context(pool: &PgPool) -> ToolContext {
         },
         alarms_enabled: true,
         nudge_enabled: true,
+        routing_enabled: true,
+        routing_stale: std::time::Duration::from_secs(1800),
         dispatcher: None,
         registry: canterlot_hub::session::Registry::new(Default::default()),
         shutdown: CancellationToken::new(),

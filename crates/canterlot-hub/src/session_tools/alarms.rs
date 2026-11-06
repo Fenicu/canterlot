@@ -2263,6 +2263,83 @@ pub async fn cancel_owner_in_tx(
     Ok(view(&updated))
 }
 
+/// Сторож маршрутизации: будильник `session_state` по ребёнку для родителя,
+/// `only_on_timeout` — будит только сроком. Ключ `watchdog-<префикс ребёнка>`,
+/// повторная взводка заменяет прежний. Дитя только создано, поэтому отметок
+/// взвода нет: первое устоявшееся состояние и будет срабатыванием.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn arm_watchdog_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    parent_id: Uuid,
+    child_id: Uuid,
+    minutes: i64,
+    chain_depth: i32,
+    correlation_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let key = format!("watchdog-{}", child_id.simple().to_string()[..8].to_owned());
+    let old: Option<Uuid> = sqlx::query_scalar(
+        "select id from alarms where conversation_id=$1 and key=$2 and state='armed' for update",
+    )
+    .bind(parent_id)
+    .bind(&key)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(old) = old {
+        cancel_in_tx(conn, old, "replaced", now, correlation_id).await?;
+    }
+    let deadline = now + TimeDelta::minutes(minutes);
+    let condition = SessionCondition {
+        kind: "session_state".into(),
+        session_ids: vec![child_id],
+        states: DEFAULT_STATES
+            .iter()
+            .map(|state| state.to_string())
+            .collect(),
+        all: false,
+        armed: BTreeMap::new(),
+    };
+    let id = Uuid::now_v7();
+    let response = json!({
+        "state": "armed",
+        "alarm_id": id,
+        "deadline_at": time(deadline),
+        "condition": condition_text(&condition, deadline, true, false),
+        "replaced": old,
+        "hint": HINT_ARMED,
+    });
+    insert_alarm_in_tx(
+        conn,
+        id,
+        owner_id,
+        parent_id,
+        "agent",
+        Some(&key),
+        "condition",
+        None,
+        Some(deadline),
+        true,
+        false,
+        Some(serde_json::to_value(&condition).unwrap_or(Value::Null)),
+        Collected::default(),
+        None,
+        chain_depth,
+        "armed",
+        None,
+        None,
+        correlation_id,
+        &response,
+        now,
+    )
+    .await?;
+    insert_job_in_tx(conn, owner_id, parent_id, deadline + COALESCE, id, true).await?;
+    if let Some(row) = row_in_tx(conn, id).await? {
+        changed_in_tx(conn, &row, correlation_id).await?;
+    }
+    Ok(())
+}
+
 /// `alarm_list`: только свои будильники; заметка не отдаётся, её уже знает модель.
 pub async fn list(
     context: &ToolContext,

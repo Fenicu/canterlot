@@ -963,6 +963,38 @@ export interface paths {
         patch: operations["patch__api_v1_presets__id_"];
         trace?: never;
     };
+    "/api/v1/routing-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_routing_policy"];
+        put: operations["put__api_v1_routing_policy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/routing-policy/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_routing_policy_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/scheduled/{id}": {
         parameters: {
             query?: never;
@@ -1303,6 +1335,18 @@ export interface components {
                 state: components["schemas"]["InputState"];
             };
         };
+        /** @description Кандидат типа задачи. */
+        Candidate: {
+            effort?: string | null;
+            exclude_workdirs?: string[];
+            harness: string;
+            levels?: string[] | null;
+            model: string;
+            nudge?: unknown;
+            preset?: string | null;
+            /** Format: int64 */
+            watchdog_minutes?: number | null;
+        };
         ClaudeHistoryList: {
             histories: components["schemas"]["ClaudeHistoryView"][];
         };
@@ -1360,6 +1404,13 @@ export interface components {
             version: string;
             ws: components["schemas"]["WsView"];
         };
+        /** @description Кандидат в ответе: пара, вердикт и короткая английская причина. */
+        Considered: {
+            harness: string;
+            model: string;
+            reason: string;
+            verdict: string;
+        };
         /**
          * @description Блок содержимого ввода. Владелец присылает только `text`; блоки `attachment` хаб добавляет
          *     сам после текста при привязке готовых вложений.
@@ -1412,6 +1463,8 @@ export interface components {
             model: string;
             permission_mode: string;
             queue: components["schemas"]["QueueView"];
+            /** @description Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута. */
+            routing?: unknown;
             settings: components["schemas"]["SettingsView"];
             /** @description Принятый ход записан: следующий запуск продолжит беседу, а не начнёт новую. */
             turn_recorded: boolean;
@@ -1490,6 +1543,21 @@ export interface components {
          * @enum {string}
          */
         DataConfidence: "exact" | "estimated";
+        /** @description Решение маршрута: выбранная пара и полный разбор кандидатов. */
+        Decision: {
+            considered: components["schemas"]["Considered"][];
+            effort: string;
+            harness: string;
+            level?: string | null;
+            model: string;
+            nudge: unknown;
+            /** Format: int64 */
+            policy_revision: number;
+            preset?: string | null;
+            task_type: string;
+            /** Format: int64 */
+            watchdog_minutes?: number | null;
+        };
         DecisionAnswer: string | string[];
         /** @enum {string} */
         DecisionBehavior: "allow" | "deny";
@@ -1573,7 +1641,7 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "not_delegated" | "worktree_removed" | "worktree_not_removed";
+        ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
             /**
@@ -1974,6 +2042,8 @@ export interface components {
             model: string;
             permission_mode: string;
             queue: components["schemas"]["QueueView"];
+            /** @description Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута. */
+            routing?: unknown;
             /** Format: int32 */
             unread_count: number;
             /**
@@ -2005,6 +2075,21 @@ export interface components {
             native_conversation_id?: string | null;
             outcome?: string | null;
             state: string;
+        };
+        /**
+         * @description Запас машины для предпросмотра: минимум свободного диска, нагрузка на ядро,
+         *     свободная память и свежесть метрик.
+         */
+        MachineHeadroom: {
+            /** Format: double */
+            free_disk_gb?: number | null;
+            /** Format: double */
+            load_per_core?: number | null;
+            /** Format: double */
+            mem_available_gb?: number | null;
+            /** Format: date-time */
+            observed_at?: string | null;
+            stale: boolean;
         };
         MachineRef: {
             /** Format: uuid */
@@ -2315,6 +2400,25 @@ export interface components {
             /** Format: int32 */
             used_permille: number;
         };
+        /** @description Политика маршрутизации владельца. `None` в базе — встроенная политика. */
+        Policy: {
+            /** @default {} */
+            max_parallel: {
+                [key: string]: number;
+            };
+            /** @default {} */
+            providers: {
+                [key: string]: components["schemas"]["ProviderThresholds"];
+            };
+            /** @default {} */
+            task_types: {
+                [key: string]: components["schemas"]["TaskType"];
+            };
+            /** @default allow */
+            unknown_limits: components["schemas"]["UnknownLimits"];
+            /** @default [] */
+            unlimited_models: string[];
+        };
         /** @description Детальный ответ: текст только у пользовательских пресетов. */
         Preset: components["schemas"]["PresetSummary"] & {
             text?: string | null;
@@ -2391,6 +2495,24 @@ export interface components {
             five_hour: components["schemas"]["Point"][];
             provider: string;
             weekly: components["schemas"]["Point"][];
+        };
+        /** @description Пороги провайдера в процентах расхода. */
+        ProviderThresholds: {
+            /**
+             * Format: double
+             * @default null
+             */
+            max_five_hour_percent: number | null;
+            /**
+             * Format: double
+             * @default null
+             */
+            max_monthly_percent: number | null;
+            /**
+             * Format: double
+             * @default null
+             */
+            max_weekly_percent: number | null;
         };
         ProviderView: {
             /** @description `estimated`, когда CodexBar вывел расход из локальных журналов, иначе `exact`. */
@@ -2488,6 +2610,30 @@ export interface components {
         };
         /** @enum {string} */
         Retry: "safe_same_key" | "explicit_new_operation" | "after_condition" | "never";
+        RoutingPolicyBody: {
+            policy: components["schemas"]["Policy"] | null;
+            /** Format: int64 */
+            revision: number;
+        };
+        /** @description Политика владельца: `null` — встроенная; ответ всегда несёт и встроенную. */
+        RoutingPolicyView: {
+            builtin: components["schemas"]["Policy"];
+            policy?: components["schemas"]["Policy"] | null;
+            /** Format: int64 */
+            revision: number;
+        };
+        /** @description Предпросмотр выбора для типа задачи; `workdir` переопределяет каталог родителя. */
+        RoutingPreviewBody: {
+            level?: string | null;
+            task_type: string;
+            workdir?: string | null;
+        };
+        /** @description Решение маршрута и запас машины; та же форма, что у `route_preview`. */
+        RoutingPreviewView: {
+            considered: components["schemas"]["Considered"][];
+            decision: components["schemas"]["Decision"];
+            machine: components["schemas"]["MachineHeadroom"];
+        };
         RunInfo: {
             /** Format: int32 */
             compactions?: number | null;
@@ -2709,6 +2855,13 @@ export interface components {
             input_seq: number;
             state: components["schemas"]["InputState"];
         };
+        /** @description Тип задачи: русское название для PWA и упорядоченные кандидаты. */
+        TaskType: {
+            candidates: components["schemas"]["Candidate"][];
+            isolated?: boolean | null;
+            preset?: string | null;
+            title: string;
+        };
         TimelineItem: (components["schemas"]["InputView"] & {
             /** @enum {string} */
             kind: "input";
@@ -2746,6 +2899,8 @@ export interface components {
         };
         /** @enum {string} */
         TodoStatus: "pending" | "in_progress" | "completed" | "cancelled";
+        /** @enum {string} */
+        UnknownLimits: "allow" | "skip";
         UploadOffer: {
             /** Format: int64 */
             offset: number;
@@ -6173,6 +6328,126 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Preset"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_routing_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Политика маршрутизации владельца */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoutingPolicyView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_routing_policy: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RoutingPolicyBody"];
+            };
+        };
+        responses: {
+            /** @description Политика сохранена */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoutingPolicyView"];
+                };
+            };
+            /** @description Устаревшая ревизия */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_routing_policy_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RoutingPreviewBody"];
+            };
+        };
+        responses: {
+            /** @description Выбор маршрута и запас машины */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RoutingPreviewView"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

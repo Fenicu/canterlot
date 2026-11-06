@@ -260,6 +260,22 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Некорректные пороги лимитов",
   },
+  routing_policy_invalid: {
+    action: "none",
+    message: "Некорректная политика маршрутизации",
+  },
+  routing_policy_conflict: {
+    action: "reload",
+    message: "Политика уже изменена",
+  },
+  task_type_unknown: {
+    action: "none",
+    message: "Неизвестный тип задачи маршрутизации",
+  },
+  no_executor_available: {
+    action: "none",
+    message: "Нет доступного исполнителя",
+  },
   not_delegated: {
     action: "none",
     message: "Сессия не запущена агентом",

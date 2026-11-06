@@ -5993,6 +5993,197 @@
         }
       }
     },
+    "/api/v1/routing-policy": {
+      "get": {
+        "tags": [
+          "routing"
+        ],
+        "operationId": "get__api_v1_routing_policy",
+        "responses": {
+          "200": {
+            "description": "Политика маршрутизации владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutingPolicyView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "routing"
+        ],
+        "operationId": "put__api_v1_routing_policy",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoutingPolicyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Политика сохранена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutingPolicyView"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Устаревшая ревизия",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/routing-policy/preview": {
+      "post": {
+        "tags": [
+          "routing"
+        ],
+        "operationId": "post__api_v1_routing_policy_preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoutingPreviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Выбор маршрута и запас машины",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutingPreviewView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/scheduled/{id}": {
       "delete": {
         "tags": [
@@ -7339,6 +7530,58 @@
           }
         ]
       },
+      "Candidate": {
+        "type": "object",
+        "description": "Кандидат типа задачи.",
+        "required": [
+          "harness",
+          "model"
+        ],
+        "properties": {
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exclude_workdirs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "harness": {
+            "type": "string"
+          },
+          "levels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "model": {
+            "type": "string"
+          },
+          "nudge": {},
+          "preset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "watchdog_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
       "ClaudeHistoryList": {
         "type": "object",
         "required": [
@@ -7541,6 +7784,30 @@
           }
         }
       },
+      "Considered": {
+        "type": "object",
+        "description": "Кандидат в ответе: пара, вердикт и короткая английская причина.",
+        "required": [
+          "harness",
+          "model",
+          "verdict",
+          "reason"
+        ],
+        "properties": {
+          "harness": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": "string"
+          }
+        }
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -7731,6 +7998,9 @@
               },
               "queue": {
                 "$ref": "#/components/schemas/QueueView"
+              },
+              "routing": {
+                "description": "Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута."
               },
               "settings": {
                 "$ref": "#/components/schemas/SettingsView"
@@ -8054,6 +8324,63 @@
           "exact",
           "estimated"
         ]
+      },
+      "Decision": {
+        "type": "object",
+        "description": "Решение маршрута: выбранная пара и полный разбор кандидатов.",
+        "required": [
+          "policy_revision",
+          "task_type",
+          "harness",
+          "model",
+          "effort",
+          "nudge",
+          "considered"
+        ],
+        "properties": {
+          "considered": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Considered"
+            }
+          },
+          "effort": {
+            "type": "string"
+          },
+          "harness": {
+            "type": "string"
+          },
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "nudge": {},
+          "policy_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "preset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_type": {
+            "type": "string"
+          },
+          "watchdog_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
       },
       "DecisionAnswer": {
         "oneOf": [
@@ -8432,6 +8759,10 @@
           "preset_invalid",
           "spawn_whitelist_invalid",
           "limit_settings_invalid",
+          "routing_policy_invalid",
+          "routing_policy_conflict",
+          "task_type_unknown",
+          "no_executor_available",
           "not_delegated",
           "worktree_removed",
           "worktree_not_removed"
@@ -9919,6 +10250,9 @@
               "queue": {
                 "$ref": "#/components/schemas/QueueView"
               },
+              "routing": {
+                "description": "Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута."
+              },
               "unread_count": {
                 "type": "integer",
                 "format": "int32"
@@ -10034,6 +10368,46 @@
           },
           "state": {
             "type": "string"
+          }
+        }
+      },
+      "MachineHeadroom": {
+        "type": "object",
+        "description": "Запас машины для предпросмотра: минимум свободного диска, нагрузка на ядро,\nсвободная память и свежесть метрик.",
+        "required": [
+          "stale"
+        ],
+        "properties": {
+          "free_disk_gb": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "load_per_core": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "mem_available_gb": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "observed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "stale": {
+            "type": "boolean"
           }
         }
       },
@@ -11150,6 +11524,55 @@
           }
         }
       },
+      "Policy": {
+        "type": "object",
+        "description": "Политика маршрутизации владельца. `None` в базе — встроенная политика.",
+        "properties": {
+          "max_parallel": {
+            "type": "object",
+            "default": {},
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "providers": {
+            "type": "object",
+            "default": {},
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProviderThresholds"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "task_types": {
+            "type": "object",
+            "default": {},
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TaskType"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "unknown_limits": {
+            "$ref": "#/components/schemas/UnknownLimits",
+            "default": "allow"
+          },
+          "unlimited_models": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
       "Preset": {
         "allOf": [
           {
@@ -11424,6 +11847,37 @@
             }
           }
         }
+      },
+      "ProviderThresholds": {
+        "type": "object",
+        "description": "Пороги провайдера в процентах расхода.",
+        "properties": {
+          "max_five_hour_percent": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "default": null
+          },
+          "max_monthly_percent": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "default": null
+          },
+          "max_weekly_percent": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "default": null
+          }
+        },
+        "additionalProperties": false
       },
       "ProviderView": {
         "type": "object",
@@ -11787,6 +12241,106 @@
           "after_condition",
           "never"
         ]
+      },
+      "RoutingPolicyBody": {
+        "type": "object",
+        "required": [
+          "policy",
+          "revision"
+        ],
+        "properties": {
+          "policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Policy",
+                "description": "`null` сбрасывает политику ко встроенной."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RoutingPolicyView": {
+        "type": "object",
+        "description": "Политика владельца: `null` — встроенная; ответ всегда несёт и встроенную.",
+        "required": [
+          "revision",
+          "builtin"
+        ],
+        "properties": {
+          "builtin": {
+            "$ref": "#/components/schemas/Policy"
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Policy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "RoutingPreviewBody": {
+        "type": "object",
+        "description": "Предпросмотр выбора для типа задачи; `workdir` переопределяет каталог родителя.",
+        "required": [
+          "task_type"
+        ],
+        "properties": {
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_type": {
+            "type": "string"
+          },
+          "workdir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "RoutingPreviewView": {
+        "type": "object",
+        "description": "Решение маршрута и запас машины; та же форма, что у `route_preview`.",
+        "required": [
+          "decision",
+          "machine",
+          "considered"
+        ],
+        "properties": {
+          "considered": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Considered"
+            }
+          },
+          "decision": {
+            "$ref": "#/components/schemas/Decision"
+          },
+          "machine": {
+            "$ref": "#/components/schemas/MachineHeadroom"
+          }
+        }
       },
       "RunInfo": {
         "type": "object",
@@ -12650,6 +13204,38 @@
           }
         }
       },
+      "TaskType": {
+        "type": "object",
+        "description": "Тип задачи: русское название для PWA и упорядоченные кандидаты.",
+        "required": [
+          "title",
+          "candidates"
+        ],
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Candidate"
+            }
+          },
+          "isolated": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "preset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "TimelineItem": {
         "oneOf": [
           {
@@ -12794,6 +13380,13 @@
           "in_progress",
           "completed",
           "cancelled"
+        ]
+      },
+      "UnknownLimits": {
+        "type": "string",
+        "enum": [
+          "allow",
+          "skip"
         ]
       },
       "UploadOffer": {

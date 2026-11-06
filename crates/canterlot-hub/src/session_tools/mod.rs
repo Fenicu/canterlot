@@ -17,6 +17,7 @@ pub mod origin;
 pub mod outage;
 pub mod read;
 pub mod report;
+pub mod routing;
 pub mod send;
 pub mod settle;
 pub mod spawn;
@@ -57,6 +58,7 @@ pub const TOOLS: &[&str] = &[
     "alarms.list",
     "nudge.set",
     "nudge.clear",
+    "routing.preview",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -89,12 +91,14 @@ pub enum ToolErrorCode {
     TooLarge,
     TooManyAlarms,
     AlarmNotFound,
+    TaskTypeUnknown,
+    NoExecutorAvailable,
     InvalidArguments,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 27] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -118,6 +122,8 @@ impl ToolErrorCode {
         Self::TooLarge,
         Self::TooManyAlarms,
         Self::AlarmNotFound,
+        Self::TaskTypeUnknown,
+        Self::NoExecutorAvailable,
         Self::InvalidArguments,
         Self::Internal,
     ];
@@ -147,6 +153,8 @@ impl ToolErrorCode {
             Self::TooLarge => "too_large",
             Self::TooManyAlarms => "too_many_alarms",
             Self::AlarmNotFound => "alarm_not_found",
+            Self::TaskTypeUnknown => "task_type_unknown",
+            Self::NoExecutorAvailable => "no_executor_available",
             Self::InvalidArguments => "invalid_arguments",
             Self::Internal => "internal_error",
         }
@@ -177,6 +185,8 @@ impl ToolErrorCode {
             Self::TooLarge => "The payload is too large",
             Self::TooManyAlarms => "Too many armed alarms in this session",
             Self::AlarmNotFound => "No such alarm",
+            Self::TaskTypeUnknown => "Unknown routing task type",
+            Self::NoExecutorAvailable => "No executor available for this task type",
             Self::InvalidArguments => "Invalid arguments",
             Self::Internal => "The hub could not complete the call, try later",
         }
@@ -226,6 +236,8 @@ pub struct ToolContext {
     pub settle: SettleConfig,
     pub alarms_enabled: bool,
     pub nudge_enabled: bool,
+    pub routing_enabled: bool,
+    pub routing_stale: std::time::Duration,
     pub dispatcher: Option<Dispatcher>,
     pub registry: Registry,
     /// Останов хаба: долгие вызовы (`sessions.wait`) возвращаются, не дожидаясь срока.
@@ -266,6 +278,7 @@ pub async fn call(
         "alarms.list" => alarms::list(context, caller, arguments).await,
         "nudge.set" => nudge::set(context, caller, arguments).await,
         "nudge.clear" => nudge::clear(context, caller, arguments).await,
+        "routing.preview" => routing::preview(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

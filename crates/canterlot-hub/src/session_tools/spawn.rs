@@ -55,15 +55,24 @@ fn subscribe_by_default() -> bool {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RouteArg {
+    task_type: String,
+    level: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpawnArgs {
-    harness: String,
+    harness: Option<String>,
+    #[serde(default)]
+    route: Option<RouteArg>,
     brief: String,
     model: Option<String>,
     effort: Option<String>,
     title: Option<String>,
     workdir: Option<String>,
     #[serde(default)]
-    isolated: bool,
+    isolated: Option<bool>,
     base: Option<String>,
     preset: Option<String>,
     permission_mode: Option<String>,
@@ -73,6 +82,7 @@ struct SpawnArgs {
     attachment_ids: Vec<Uuid>,
     /// `true`, `false` или поля `nudge_set` без `session_id`.
     nudge: Option<Value>,
+    watchdog_minutes: Option<i64>,
 }
 
 /// Проверенный запуск с уже выбранным режимом: `request_payload` карточки.
@@ -94,6 +104,12 @@ pub struct SpawnSpec {
     /// Правило автопинка для потомка; `false` — без правила.
     #[serde(default)]
     nudge: Value,
+    /// Решение маршрута, сохранённое в `conversations.routing` ребёнка.
+    #[serde(default)]
+    routing: Option<Value>,
+    /// Сторож-будильник родителя по ребёнку, минуты; взводится после создания.
+    #[serde(default)]
+    watchdog_minutes: Option<i64>,
     /// Глубина хода родителя: с неё подписка и бриф считают цепочку.
     chain_depth: i32,
     /// Режим у CLI потомка сильнее, чем у родителя: запуск только через карточку.
@@ -126,7 +142,7 @@ fn rank(mode: &str) -> Option<u8> {
 /// У Codex `ask` идёт без песочницы, и команды он почти никогда не спрашивает
 /// (`approvalPolicy: on-request` при `dangerFullAccess`), поэтому он равен `bypass`.
 /// `owner` неизвестен заранее: сравнивается как `ask`.
-fn power(harness: &str, mode: &str) -> u8 {
+pub(crate) fn power(harness: &str, mode: &str) -> u8 {
     match (harness, rank(mode)) {
         ("codex", Some(1)) => WIDEST_RANK,
         (_, Some(rank)) => rank,
@@ -136,7 +152,7 @@ fn power(harness: &str, mode: &str) -> u8 {
 
 /// Более узкий из действующего и ожидающего (D11). `owner` с рангами не сравним:
 /// ограниченный режим считается уже него, `bypass` ничего не сужает.
-fn parent_mode<'a>(effective: &'a str, pending: Option<&'a str>) -> &'a str {
+pub(crate) fn parent_mode<'a>(effective: &'a str, pending: Option<&'a str>) -> &'a str {
     let effective = if effective.is_empty() {
         OWNER_MODE
     } else {
@@ -154,17 +170,42 @@ fn parent_mode<'a>(effective: &'a str, pending: Option<&'a str>) -> &'a str {
     }
 }
 
-struct ChildMode {
+pub(crate) struct ChildMode {
     mode: String,
     /// Режим по названию не шире родителя, но у CLI потомка сильнее: нужна карточка.
     wider_than_parent: bool,
 }
 
-/// Режим потомка: по названию не шире родителя, по силе у его CLI не сильнее без карточки.
+/// Режим по умолчанию: самый широкий из не сильнее родителя.
 /// `owner` значит разное у разных CLI, поэтому через границу харнесса он становится `ask`.
-/// Без явного режима берётся самый широкий из не сильнее родителя: Codex от родителя
-/// в `ask` или `owner` получает `read_only`.
-fn resolve_mode(
+/// Без явного режима Codex от родителя в `ask` или `owner` получает `read_only`.
+pub(crate) fn resolve_default_mode(
+    parent_harness: &str,
+    parent: &str,
+    child_harness: &str,
+) -> String {
+    let same_harness = parent_harness == child_harness;
+    let ceiling = if parent == OWNER_MODE && !same_harness {
+        "ask"
+    } else {
+        parent
+    };
+    if ceiling == OWNER_MODE {
+        return OWNER_MODE.to_owned();
+    }
+    let limit = power(parent_harness, parent);
+    let ceiling_rank = rank(ceiling).unwrap_or(0);
+    ["bypass", "ask", "read_only"]
+        .into_iter()
+        .find(|mode| {
+            rank(mode).is_some_and(|rank| rank <= ceiling_rank)
+                && power(child_harness, mode) <= limit
+        })
+        .unwrap_or("read_only")
+        .to_owned()
+}
+/// Режим потомка: по названию не шире родителя, по силе у его CLI не сильнее без карточки.
+pub(crate) fn resolve_mode(
     parent_harness: &str,
     parent: &str,
     child_harness: &str,
@@ -178,22 +219,8 @@ fn resolve_mode(
     };
     let limit = power(parent_harness, parent);
     let Some(requested) = requested else {
-        if ceiling == OWNER_MODE {
-            return Ok(ChildMode {
-                mode: OWNER_MODE.to_owned(),
-                wider_than_parent: false,
-            });
-        }
-        let ceiling_rank = rank(ceiling).unwrap_or(0);
-        let mode = ["bypass", "ask", "read_only"]
-            .into_iter()
-            .find(|mode| {
-                rank(mode).is_some_and(|rank| rank <= ceiling_rank)
-                    && power(child_harness, mode) <= limit
-            })
-            .unwrap_or("read_only");
         return Ok(ChildMode {
-            mode: mode.to_owned(),
+            mode: resolve_default_mode(parent_harness, parent, child_harness),
             wider_than_parent: false,
         });
     };
@@ -219,12 +246,34 @@ fn invalid() -> ToolError {
 }
 
 fn check_arguments(args: &SpawnArgs) -> Result<(), ToolError> {
+    if args.harness.is_none() == args.route.is_none() {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    if args.route.is_some() && (args.model.is_some() || args.effort.is_some()) {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    if args.route.as_ref().is_some_and(|route| {
+        route.task_type.trim().is_empty()
+            || route.task_type.contains('\0')
+            || route
+                .level
+                .as_deref()
+                .is_some_and(|level| !super::routing::LEVELS.contains(&level))
+    }) {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    if let Some(watchdog) = args.watchdog_minutes
+        && !(5..=1440).contains(&watchdog)
+    {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
     let usable = args.nudge.clone().unwrap_or(Value::Null);
     if nudge::brief_with_marker(&args.brief, &usable).len() > MAX_BRIEF_BYTES {
         return Err(ToolError::new(ToolErrorCode::TextTooLarge));
     }
+    let isolated = args.isolated.unwrap_or(false);
     let bad_base = args.base.as_deref().is_some_and(|base| {
-        !args.isolated
+        !isolated
             || base.is_empty()
             || base.len() > MAX_BASE_BYTES
             || base.starts_with('-')
@@ -399,7 +448,8 @@ async fn parent_place(
 /// Рабочая копия родителя вне разрешённых корней: дочерняя копия строится от его исходного
 /// репозитория и его ветки, а без изоляции каталог надо назвать явно.
 fn resolve_workdir(
-    args: &SpawnArgs,
+    workdir: Option<&str>,
+    isolated: bool,
     place: &ParentPlace,
 ) -> Result<(String, Option<String>), ToolError> {
     let source = place.worktree.as_ref().and_then(|worktree| {
@@ -408,12 +458,10 @@ fn resolve_workdir(
             worktree["branch"].as_str()?,
         ))
     });
-    let (workdir, parent_branch) = match (&args.workdir, source) {
-        (Some(workdir), _) => (workdir.clone(), None),
+    let (workdir, parent_branch) = match (workdir, source) {
+        (Some(workdir), _) => (workdir.to_owned(), None),
         (None, None) => (place.workdir.clone(), None),
-        (None, Some((source, branch))) if args.isolated => {
-            (source.to_owned(), Some(branch.to_owned()))
-        }
+        (None, Some((source, branch))) if isolated => (source.to_owned(), Some(branch.to_owned())),
         (None, Some(_)) => {
             let path = serde_json::to_string(&place.workdir).unwrap_or_default();
             return Err(ToolError::with_message(
@@ -451,7 +499,8 @@ async fn validate(
     args: SpawnArgs,
     chain_depth: i32,
 ) -> Result<(SpawnSpec, Catalog), ToolError> {
-    let catalog = Catalog::load(conn, caller.machine_id, &args.harness).await?;
+    let harness = args.harness.clone().ok_or_else(invalid)?;
+    let catalog = Catalog::load(conn, caller.machine_id, &harness).await?;
     let model = catalog.resolve_model(args.model.as_deref())?;
     let effort = resolve_effort(model, args.effort.as_deref())?;
     let model = model["id"].as_str().unwrap_or_default().to_owned();
@@ -461,7 +510,7 @@ async fn validate(
     } = resolve_mode(
         &parent.harness,
         parent_mode(&parent.permission_mode, parent.pending_mode.as_deref()),
-        &args.harness,
+        &harness,
         args.permission_mode.as_deref(),
     )?;
     if !catalog.has_mode(&mode) {
@@ -469,21 +518,22 @@ async fn validate(
     }
     let preset = resolve_preset(conn, caller.owner_id, args.preset.as_deref()).await?;
     let place = parent_place(conn, parent.id, caller.machine_id).await?;
-    let (workdir, parent_branch) = resolve_workdir(&args, &place)?;
-    if args.isolated {
+    let isolated = args.isolated.unwrap_or(false);
+    let (workdir, parent_branch) = resolve_workdir(args.workdir.as_deref(), isolated, &place)?;
+    if isolated {
         check_isolation(&context.registry, caller.machine_id, &place)?;
     }
-    let base = args.isolated.then(|| args.base.or(parent_branch)).flatten();
+    let base = isolated.then(|| args.base.or(parent_branch)).flatten();
     let nudge_arg = args.nudge.unwrap_or(Value::Bool(false));
     let brief = nudge::brief_with_marker(&args.brief, &nudge_arg);
     Ok((
         SpawnSpec {
-            harness: args.harness,
+            harness,
             model,
             effort,
             title: args.title,
             workdir,
-            isolated: args.isolated,
+            isolated,
             base,
             preset,
             permission_mode: mode,
@@ -491,10 +541,171 @@ async fn validate(
             subscribe: args.subscribe,
             attachment_ids: args.attachment_ids,
             nudge: nudge_arg,
+            routing: None,
+            watchdog_minutes: args.watchdog_minutes,
             chain_depth,
             wider_than_parent,
         },
         catalog,
+    ))
+}
+
+/// Маршрутизированный запуск: выбор исполнителя по политике владельца (§C1 п. 9).
+#[allow(clippy::too_many_arguments)]
+/// Явные `preset`, `isolated`, `title`, `workdir`, `base`, `permission_mode`,
+/// `nudge` и `watchdog_minutes` важнее политики.
+async fn validate_routed(
+    conn: &mut PgConnection,
+    context: &ToolContext,
+    caller: &Caller,
+    parent: &access::Session,
+    args: SpawnArgs,
+    route: RouteArg,
+    chain_depth: i32,
+    now: DateTime<Utc>,
+) -> Result<(SpawnSpec, String), ToolError> {
+    if !context.routing_enabled {
+        return Err(ToolError::with_message(
+            ToolErrorCode::InvalidArguments,
+            "Routing is disabled on this hub",
+        ));
+    }
+    let (policy, revision) = super::routing::load_policy(conn, caller.owner_id).await?;
+    let task = policy.task_types.get(&route.task_type).ok_or_else(|| {
+        let mut types: Vec<&str> = policy.task_types.keys().map(String::as_str).collect();
+        types.sort_unstable();
+        ToolError::with_message(
+            ToolErrorCode::TaskTypeUnknown,
+            format!(
+                "Unknown task type {:?}. Available: {}",
+                route.task_type,
+                types.join(", ")
+            ),
+        )
+    })?;
+    let catalogs = super::routing::load_catalogs(conn, caller.machine_id).await?;
+    let list = whitelist::view(conn, caller.owner_id).await?;
+    let limits = super::routing::limits_view(conn).await?;
+    let live = super::routing::live_counts(conn, caller.owner_id).await?;
+    let place = parent_place(conn, parent.id, caller.machine_id).await?;
+    let workdir = args
+        .workdir
+        .clone()
+        .unwrap_or_else(|| place.workdir.clone());
+    let parent_mode_value =
+        parent_mode(&parent.permission_mode, parent.pending_mode.as_deref()).to_owned();
+    let request = super::routing::RouteRequest {
+        task_type: route.task_type.clone(),
+        level: route.level.clone(),
+        parent_harness: parent.harness.clone(),
+        parent_mode: parent_mode_value,
+        explicit_mode: args.permission_mode.clone(),
+        workdir,
+    };
+    let mut decision = super::routing::route(super::routing::RouteInputs {
+        policy: &policy,
+        revision,
+        whitelist: &list.entries,
+        catalogs: &catalogs,
+        limits: &limits,
+        live: &live,
+        stale: context.routing_stale,
+        now,
+        request: &request,
+    })
+    .map_err(|error| match error {
+        super::routing::RouteError::UnknownTask { available } => ToolError::with_message(
+            ToolErrorCode::TaskTypeUnknown,
+            format!(
+                "Unknown task type {:?}. Available: {}",
+                route.task_type,
+                available.join(", ")
+            ),
+        ),
+        super::routing::RouteError::NoExecutor { considered, reset } => {
+            let mut message = String::from("No executor available for this task type:");
+            for entry in &considered {
+                message.push_str(&format!(" {}: {}; ", entry.harness, entry.reason));
+            }
+            if let Some(reset) = reset {
+                message.push_str(&format!(
+                    "nearest limit reset at {}",
+                    reset.format("%H:%M UTC")
+                ));
+            }
+            ToolError::with_message(
+                ToolErrorCode::NoExecutorAvailable,
+                message.trim_end().to_owned(),
+            )
+        }
+    })?;
+    let first_model = catalogs
+        .get(&decision.harness)
+        .and_then(|catalog| catalog.first_model())
+        .unwrap_or_default()
+        .to_owned();
+    let ChildMode {
+        mode,
+        wider_than_parent,
+    } = resolve_mode(
+        &parent.harness,
+        parent_mode(&parent.permission_mode, parent.pending_mode.as_deref()),
+        &decision.harness,
+        args.permission_mode.as_deref(),
+    )?;
+    if !catalogs
+        .get(&decision.harness)
+        .is_some_and(|catalog| catalog.has_mode(&mode))
+    {
+        return Err(invalid());
+    }
+    let preset = match args.preset.as_deref() {
+        Some(_) => resolve_preset(conn, caller.owner_id, args.preset.as_deref()).await?,
+        None => {
+            let resolved = super::routing::resolve_policy_preset(
+                conn,
+                caller.owner_id,
+                decision.preset.as_deref(),
+            )
+            .await?;
+            decision.preset = Some(resolved.clone());
+            resolved
+        }
+    };
+    let isolated = args.isolated.or(task.isolated).unwrap_or(false);
+    let (workdir, parent_branch) = resolve_workdir(args.workdir.as_deref(), isolated, &place)?;
+    if isolated {
+        check_isolation(&context.registry, caller.machine_id, &place)?;
+    }
+    let base = isolated.then(|| args.base.or(parent_branch)).flatten();
+    let nudge_arg = args.nudge.unwrap_or(decision.nudge.clone());
+    let brief = nudge::brief_with_marker(&args.brief, &nudge_arg);
+    let watchdog_minutes = args.watchdog_minutes.or(decision.watchdog_minutes);
+    decision.nudge = nudge_arg.clone();
+    decision.watchdog_minutes = watchdog_minutes;
+    let routing_value =
+        serde_json::to_value(&decision).map_err(|_| ToolError::new(ToolErrorCode::Internal))?;
+    Ok((
+        SpawnSpec {
+            harness: decision.harness.clone(),
+            model: decision.model.clone(),
+            effort: decision.effort.clone(),
+            title: args.title,
+            workdir,
+            isolated,
+            base,
+            preset,
+            permission_mode: mode,
+            brief,
+            subscribe: args.subscribe,
+            attachment_ids: args.attachment_ids,
+            nudge: nudge_arg,
+            routing: Some(routing_value),
+            watchdog_minutes,
+            chain_depth,
+            wider_than_parent,
+        },
+        first_model,
     ))
 }
 
@@ -602,6 +813,26 @@ async fn start_child(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Star
         Utc::now(),
     )
     .await?;
+    if let Some(routing) = &spec.routing {
+        sqlx::query("update conversations set routing=$2 where id=$1")
+            .bind(child)
+            .bind(routing)
+            .execute(&mut *conn)
+            .await?;
+    }
+    if let Some(minutes) = spec.watchdog_minutes {
+        super::alarms::arm_watchdog_in_tx(
+            conn,
+            owner,
+            parent.id,
+            child,
+            minutes,
+            spec.chain_depth,
+            correlation_id,
+            Utc::now(),
+        )
+        .await?;
+    }
     Ok(Started {
         session_id: child,
         title,
@@ -731,7 +962,7 @@ pub async fn spawn(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: SpawnArgs = parse_arguments(arguments)?;
+    let mut args: SpawnArgs = parse_arguments(arguments)?;
     check_arguments(&args)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
@@ -747,11 +978,22 @@ pub async fn spawn(
     let depth = access::current_depth(&mut tx, parent.id).await?;
     access::check_depth(&context.config, depth + 1)?;
     access::check_spawn_rate(&mut tx, &context.config, parent.id, Utc::now()).await?;
-    let (spec, catalog) = validate(&mut tx, context, caller, &parent, args, depth).await?;
+    let now = Utc::now();
+    let (spec, first_model) = match args.route.take() {
+        Some(route) => {
+            let (spec, first_model) =
+                validate_routed(&mut tx, context, caller, &parent, args, route, depth, now).await?;
+            (spec, first_model)
+        }
+        None => {
+            let (spec, catalog) = validate(&mut tx, context, caller, &parent, args, depth).await?;
+            let first_model = catalog.first_model().unwrap_or_default().to_owned();
+            (spec, first_model)
+        }
+    };
     let list = whitelist::view(&mut tx, caller.owner_id).await?;
-    let first_model = catalog.first_model().unwrap_or_default();
     if spec.wider_than_parent
-        || !whitelist::allows(&list.entries, &spec.harness, &spec.model, first_model)
+        || !whitelist::allows(&list.entries, &spec.harness, &spec.model, &first_model)
     {
         let request = open_card(&mut tx, caller, &spec).await?;
         tx.commit().await?;
@@ -774,12 +1016,39 @@ pub async fn spawn(
     if let Some(dispatcher) = &context.dispatcher {
         dispatcher.trigger(started.session_id);
     }
-    Ok(started_answer(
+    let mut answer = started_answer(
         started.session_id,
         &spec.permission_mode,
         started.worktree.as_ref(),
         spec.subscribe,
-    ))
+    );
+    if let Some(routing) = spec.routing.as_ref()
+        && let Ok(decision) = serde_json::from_value::<super::routing::Decision>(routing.clone())
+    {
+        answer["routing"] = serde_json::json!({
+            "task_type": decision.task_type,
+            "harness": decision.harness,
+            "model": decision.model,
+            "effort": decision.effort,
+            "policy_revision": decision.policy_revision,
+        });
+        let mut hint = format!(
+            "Routed {} to {}/{} ({});",
+            decision.task_type, decision.harness, decision.model, decision.effort,
+        );
+        if let Some(skipped) = decision
+            .considered
+            .iter()
+            .find(|entry| entry.verdict != "chosen")
+        {
+            hint.push_str(&format!(
+                " skipped {}: {}.",
+                skipped.harness, skipped.reason
+            ));
+        }
+        answer["hint"] = serde_json::json!(hint);
+    }
+    Ok(answer)
 }
 
 /// Вместо команды машине: решение выполнит задание хаба.
