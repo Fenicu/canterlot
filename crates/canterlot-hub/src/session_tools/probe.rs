@@ -136,14 +136,20 @@ pub async fn ask_clock(
         .await
     {
         ProbeReply::Answered(reply) => {
-            let worker_now = i64::try_from(reply.now_ms)
-                .ok()
-                .and_then(DateTime::from_timestamp_millis);
+            let worker_now = worker_clock(reply.now_ms);
             (PathProbe::from(reply), worker_now)
         }
         ProbeReply::CapabilityMissing => (PathProbe::CapabilityMissing, None),
         ProbeReply::Unavailable => (PathProbe::Unavailable, None),
     }
+}
+
+/// Ноль — старый воркер без часов: границу взвода взять неоткуда.
+fn worker_clock(now_ms: u64) -> Option<DateTime<Utc>> {
+    (now_ms != 0)
+        .then(|| i64::try_from(now_ms).ok())
+        .flatten()
+        .and_then(DateTime::from_timestamp_millis)
 }
 
 struct Entry {
@@ -260,6 +266,15 @@ mod tests {
             })),
             now_ms: 1_762_345_300_000,
         }
+    }
+
+    #[test]
+    fn a_zero_worker_clock_means_unknown_not_the_epoch() {
+        assert_eq!(worker_clock(0), None);
+        assert_eq!(
+            worker_clock(1_762_345_300_000),
+            DateTime::from_timestamp_millis(1_762_345_300_000)
+        );
     }
 
     #[test]
