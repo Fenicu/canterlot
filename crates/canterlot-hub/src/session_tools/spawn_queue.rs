@@ -44,6 +44,11 @@ const STATE_EXPIRED: &str = "expired";
 pub(crate) struct QueuedSpawn {
     pub(crate) args: spawn::SpawnArgs,
     pub(crate) chain_depth: i32,
+    /// Разрешённая пара прямого запуска: нужна только для карточки очереди.
+    #[serde(default)]
+    pub(crate) resolved_harness: Option<String>,
+    #[serde(default)]
+    pub(crate) resolved_model: Option<String>,
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -66,10 +71,18 @@ pub struct QueueRow {
 }
 
 /// Элемент очереди для PWA, снимка и события.
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct QueueItemView {
     pub id: Uuid,
     pub parent_id: Uuid,
+    /// Запрошенный заголовок будущей сессии; `null` — автоназвание.
+    pub title: Option<String>,
+    /// Тип задачи маршрута; `null` у прямого запуска.
+    pub task_type: Option<String>,
+    pub level: Option<String>,
+    /// Пара прямого запуска; у маршрута появляется только после старта.
+    pub harness: Option<String>,
+    pub model: Option<String>,
     pub reason: String,
     pub detail: Value,
     pub state: String,
@@ -85,9 +98,43 @@ pub struct QueueItemView {
 
 impl QueueItemView {
     fn of(row: &QueueRow, position: i64) -> Self {
+        let queued = serde_json::from_value::<QueuedSpawn>(row.spec.clone()).ok();
+        let (title, task_type, level, harness, model) = match queued {
+            Some(queued) => {
+                let title = queued.args.title.clone();
+                match queued.args.route.as_ref() {
+                    Some(route) => (
+                        title,
+                        Some(route.task_type.clone()),
+                        route.level.clone(),
+                        None,
+                        None,
+                    ),
+                    None => (
+                        title,
+                        None,
+                        None,
+                        queued
+                            .resolved_harness
+                            .clone()
+                            .or_else(|| queued.args.harness.clone()),
+                        queued
+                            .resolved_model
+                            .clone()
+                            .or_else(|| queued.args.model.clone()),
+                    ),
+                }
+            }
+            None => (None, None, None, None, None),
+        };
         Self {
             id: row.id,
             parent_id: row.parent_id,
+            title,
+            task_type,
+            level,
+            harness,
+            model,
             reason: row.reason.clone(),
             detail: row.detail.clone(),
             state: row.state.clone(),
@@ -170,6 +217,8 @@ pub struct Enqueue {
     pub(crate) reason: &'static str,
     pub(crate) detail: Value,
     pub(crate) not_before: DateTime<Utc>,
+    /// Разрешённая пара прямого запуска, если она уже известна.
+    pub(crate) resolved: Option<(String, String)>,
 }
 
 fn time(at: DateTime<Utc>) -> String {
@@ -363,9 +412,15 @@ pub async fn enqueue_in_tx(
     let id = Uuid::now_v7();
     let expires_at =
         now + TimeDelta::from_std(runtime.spawn_queue.ttl).unwrap_or_else(|_| TimeDelta::days(1));
+    let (resolved_harness, resolved_model) = match request.resolved {
+        Some((harness, model)) => (Some(harness), Some(model)),
+        None => (None, None),
+    };
     let spec = serde_json::to_value(QueuedSpawn {
         args: request.args,
         chain_depth: request.chain_depth,
+        resolved_harness,
+        resolved_model,
     })
     .map_err(|_| ToolError::new(ToolErrorCode::Internal))?;
     let mut tx = conn.begin().await?; // db::begin: savepoint

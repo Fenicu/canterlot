@@ -187,7 +187,14 @@ export class FakeHubApi {
 			throw { status: 404, code: 'task_type_unknown', message: `Unknown task type ${task_type}` };
 		}
 		const candidate = task.candidates[0];
-		if (!candidate) throw { status: 422, code: 'no_executor_available', message: 'No executor available' };
+		if (!candidate) {
+			throw {
+				status: 422,
+				code: 'no_executor_available',
+				message: 'No executor available',
+				details: { candidates: [], nearest_reset: null }
+			};
+		}
 		void level;
 		void workdir;
 		return {
@@ -491,6 +498,11 @@ export class FakeHubApi {
 		const item: QueueItemView = {
 			id: input.id ?? crypto.randomUUID(),
 			parent_id: id,
+			title: input.title ?? null,
+			task_type: input.task_type ?? null,
+			level: input.level ?? null,
+			harness: input.harness ?? null,
+			model: input.model ?? null,
 			reason: input.reason ?? 'rate',
 			detail: input.detail ?? { detail: '10 spawns in the last hour' },
 			state: input.state ?? 'queued',

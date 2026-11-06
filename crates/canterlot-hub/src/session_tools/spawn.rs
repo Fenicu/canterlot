@@ -1125,6 +1125,7 @@ pub async fn spawn(
                 not_before: now
                     + chrono::TimeDelta::from_std(context.spawn_queue.retry_delay)
                         .unwrap_or_else(|_| chrono::TimeDelta::seconds(60)),
+                resolved: None,
             },
             now,
             caller.call_id,
@@ -1218,6 +1219,7 @@ pub async fn spawn(
                 reason,
                 detail,
                 not_before,
+                resolved: Some((spec.harness.clone(), spec.model.clone())),
             },
             now,
             caller.call_id,

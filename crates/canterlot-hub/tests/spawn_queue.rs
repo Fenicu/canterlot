@@ -1670,3 +1670,95 @@ async fn a_queued_start_note_marks_stale_metrics(pool: PgPool) {
         "{notes:?}"
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn queue_views_name_the_future_session(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let direct = f
+        .call(
+            "sessions.spawn",
+            json!({
+                "harness":"opencode","model":"opencode-go/beam-free","brief":"b",
+                "title":"Прямой запуск"
+            }),
+        )
+        .await
+        .unwrap();
+    let direct_id: Uuid = serde_json::from_value(direct["queue_id"].clone()).unwrap();
+    let mut conn = f.pool.acquire().await.unwrap();
+    let views = spawn_queue::snapshot_views(&mut conn, f.parent)
+        .await
+        .unwrap();
+    let view = views.iter().find(|view| view.id == direct_id).unwrap();
+    assert_eq!(view.title.as_deref(), Some("Прямой запуск"));
+    assert_eq!(view.harness.as_deref(), Some("opencode"));
+    assert_eq!(view.model.as_deref(), Some("opencode-go/beam-free"));
+    assert_eq!(view.task_type, None);
+    assert_eq!(view.child_id, None);
+
+    // Окно частоты свободно, но слот занят: маршрут даёт тип задачи и уровень.
+    sqlx::query(
+        "update conversations set created_at=now()-interval '61 minutes'
+          where parent_conversation_id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {"bugfix": {"title": "Починка", "candidates": [
+                {"harness":"opencode","model":"opencode-go/beam-free","effort":"medium"}
+            ]}},
+            "max_parallel": {"opencode/opencode-go/beam-free": 1}
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    child_of(
+        &f.pool,
+        f.parent,
+        "opencode",
+        "opencode-go/beam-free",
+        "working",
+    )
+    .await;
+    let routed = f
+        .call(
+            "sessions.spawn",
+            json!({
+                "route":{"task_type":"bugfix","level":"high"},"brief":"b",
+                "title":"Маршрут"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(routed["status"], "queued", "{routed}");
+    let routed_id: Uuid = serde_json::from_value(routed["queue_id"].clone()).unwrap();
+    let views = spawn_queue::snapshot_views(&mut conn, f.parent)
+        .await
+        .unwrap();
+    let view = views.iter().find(|view| view.id == routed_id).unwrap();
+    assert_eq!(view.title.as_deref(), Some("Маршрут"));
+    assert_eq!(view.task_type.as_deref(), Some("bugfix"));
+    assert_eq!(view.level.as_deref(), Some("high"));
+    assert_eq!(view.harness, None, "routed pair is unknown until start");
+    assert_eq!(view.model, None);
+    assert_eq!(view.child_id, None);
+
+    // Остановим занятого, запустим маршрутный элемент: child_id появляется.
+    sqlx::query("update conversation_derived set activity_state='stopped' where conversation_id in (select id from conversations where parent_conversation_id=$1 and title is not null)")
+        .bind(f.parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    make_due(&f.pool, routed_id).await;
+    f.run_dequeue(routed_id, Utc::now()).await;
+    let views = spawn_queue::snapshot_views(&mut conn, f.parent)
+        .await
+        .unwrap();
+    let view = views.iter().find(|view| view.id == routed_id).unwrap();
+    assert!(view.child_id.is_some(), "{view:?}");
+}

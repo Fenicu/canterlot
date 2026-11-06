@@ -1366,6 +1366,11 @@ export interface SpawnQueueChanged {
   payload: {
     id: Uuid;
     parent_id: Uuid;
+    title: string | null;
+    task_type: string | null;
+    level: ("low" | "medium" | "high" | "xhigh") | null;
+    harness: string | null;
+    model: string | null;
     reason: "rate" | "concurrency" | "limits" | "resources";
     detail: {};
     state: "queued" | "starting" | "started" | "cancelled" | "failed" | "expired";

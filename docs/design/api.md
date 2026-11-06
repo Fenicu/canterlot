@@ -171,7 +171,7 @@
 | `worktree_removed` | 409 | `delivery` | `never` | Рабочая копия уже убрана |
 | `worktree_not_removed` | 409 | `browser` | `after_condition` | Сначала примите результат: рабочая копия ещё на машине |
 
-Строки таблицы совпадают с перечислением `ErrorCode` хаба и со схемой `components.schemas.ErrorCode` в `docs/api/openapi.json`; тест `error_code_table_in_api_md_matches_the_enum_and_openapi` сверяет код, статус, `scope`, `retry` и сообщение. Код, который повторяется тем же ключом (`safe_same_key`), бывает только у 429, 500 и 503: условие проходит само. Отказ с другим статусом оставляет ключ свободным и сообщает в `retry`, что нужно для повтора. Каждая новая задача добавляет свои коды в перечисление и в эту таблицу в одном коммите.
+Строки таблицы совпадают с перечислением `ErrorCode` хаба и со схемой `components.schemas.ErrorCode` в `docs/api/openapi.json`; тест `error_code_table_in_api_md_matches_the_enum_and_openapi` сверяет код, статус, `scope`, `retry` и сообщение. Код, который повторяется тем же ключом (`safe_same_key`), бывает только у 429, 500 и 503: условие проходит само. Отказ с другим статусом оставляет ключ свободным и сообщает в `retry`, что нужно для повтора. Каждая новая задача добавляет свои коды в перечисление и в эту таблицу в одном коммите. `no_executor_available` не подменяет `details.reason` текстом: разбор кандидатов лежит в `details.candidates` (`harness`, `model`, `verdict`, `reason`), ближайший сброс — в `details.nearest_reset`, а `details.reason` остаётся значением `ErrorReason` или отсутствует.
 
 Разбивка по областям: `auth` (вход и источник запроса), `browser` (форма запроса, ключ идемпотентности, размеры), `hub_db` (хаб и PostgreSQL), `delivery` (очередь, разговор, исполнение). Чужой идентификатор неотличим от отсутствующего: оба дают `not_found`.
 
@@ -249,7 +249,7 @@
 | `GET /api/v1/routing-policy` | Политика маршрутизации владельца: `policy` (`null` — встроенная), `revision`, `builtin` |
 | `PUT /api/v1/routing-policy` | Сохранение политики (`policy: null` сбрасывает ко встроенной); `revision` обязательна, устаревшая даёт `409 routing_policy_conflict`, неверная — `422 routing_policy_invalid`; публикует `routing_policy_changed` |
 | `POST /api/v1/routing-policy/preview` | Выбор маршрута для `task_type` (`level?`, `workdir?`): решение, запас машины и вердикт стража; та же форма, что у `route_preview`. Без ключа идемпотентности |
-| `GET /api/v1/conversations/{id}/spawn-queue` | Очередь запусков разговора: ожидающие и недавно завершённые элементы с причиной, сроком и позицией; то же поле `spawn_queue` есть в снимке разговора |
+| `GET /api/v1/conversations/{id}/spawn-queue` | Очередь запусков разговора: ожидающие и недавно завершённые элементы с причиной, сроком и позицией; `title`, `task_type`/`level` маршрута, `harness`/`model` прямого запуска и `child_id` после старта; то же поле `spawn_queue` есть в снимке разговора |
 | `DELETE /api/v1/conversations/{id}/spawn-queue/{queue_id}` | Отмена ожидающего элемента; уже запущенный отвечает `already_started` и идентификатором сессии; ключ идемпотентности обязателен |
 | `POST /api/v1/conversations/{id}/spawn-queue/{queue_id}/start-now` | Запустить элемент сейчас: снимает частоту, занятость, лимиты и страж, но не белый список и не режим разрешений; ключ идемпотентности обязателен |
 | `GET /api/v1/limit-settings` | Пороги лимитов владельца: `settings`, `is_default`, `default_settings`. Проценты — остаток: жёлтый ниже `warn_remaining_pct`, красный ниже `danger_remaining_pct`, недельный резерв `reserve_remaining_pct` (`0` — без резерва) |

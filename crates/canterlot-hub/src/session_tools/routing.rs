@@ -546,7 +546,7 @@ pub struct ProviderView {
 }
 
 /// Кандидат в ответе: пара, вердикт и короткая английская причина.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Considered {
     pub harness: String,
     pub model: String,

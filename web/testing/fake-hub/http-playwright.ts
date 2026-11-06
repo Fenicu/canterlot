@@ -1113,8 +1113,8 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       const answer = api.previewRoutingPolicy(body.task_type, body.level, body.workdir);
       await route.fulfill({ headers: headers(), json: answer });
     } catch (error) {
-      const failure = error as { status: number; code: string; message: string };
-      await route.fulfill({ status: failure.status, headers: headers(), json: errorBody(failure.code, failure.message) });
+      const failure = error as { status: number; code: string; message: string; details?: Record<string, unknown> };
+      await route.fulfill({ status: failure.status, headers: headers(), json: errorBody(failure.code, failure.message, failure.details) });
     }
   });
 

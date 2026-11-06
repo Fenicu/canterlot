@@ -282,7 +282,8 @@ async fn preview(
             ErrorCode::NoExecutorAvailable,
         )
         .with_details(ErrorDetails {
-            reason: Some(routing::no_executor_message(&considered, reset)),
+            candidates: Some(considered),
+            nearest_reset: reset,
             ..Default::default()
         })),
     }
