@@ -4,8 +4,7 @@
   import Icon from '#lib/ui/Icon.svelte';
   import Gauge from '#lib/ui/Gauge.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
-  import { refreshLimits } from '#lib/api/client.js';
-  import { ApiError } from '#lib/api/http.js';
+  import { LimitsRefresh } from '#lib/stores/limitsRefresh.svelte.js';
   import { limitStrip } from './limitsText';
   import type { LimitThresholds, MeterView, ProviderLimits } from '#lib/stores/limits.js';
 
@@ -23,47 +22,13 @@
     compact?: boolean;
   } = $props();
 
-  const WAIT_FOR_READING_MS = 10_000;
   const view = $derived(limitStrip(providers, now, thresholds, { prefer }));
   const shown = $derived(compact ? view.rows.slice(0, 1) : view.rows);
 
-  let pending = $state(false);
-  let note = $state('');
-  let baseline = 0;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  function finish(message: string): void {
-    clearTimeout(timer);
-    pending = false;
-    note = message;
-  }
-
+  const refresher = new LimitsRefresh();
   // Новое показание приходит событием хаба: оно и закрывает ожидание.
-  $effect(() => {
-    if (pending && view.updatedAt > baseline) finish('');
-  });
-
-  async function refresh(): Promise<void> {
-    if (pending) return;
-    pending = true;
-    note = '';
-    baseline = view.updatedAt;
-    try {
-      await refreshLimits();
-    } catch (error) {
-      finish(failure(error));
-      return;
-    }
-    timer = setTimeout(() => finish('Новых данных пока нет'), WAIT_FOR_READING_MS);
-  }
-
-  function failure(error: unknown): string {
-    if (error instanceof ApiError && error.code === 'too_many_requests') return 'Недавно уже обновляли, повторите через несколько секунд';
-    if (error instanceof ApiError && error.code === 'machine_unavailable') return 'Воркер недоступен';
-    return 'Не удалось обновить лимиты';
-  }
-
-  onDestroy(() => clearTimeout(timer));
+  $effect(() => refresher.observe(view.updatedAt));
+  onDestroy(() => refresher.dispose());
 
   /** Полный текст сброса остаётся в title, а по узкой полосе показываем только время. */
   function resetParts(reset: string): { day: string; clock: string } {
@@ -121,10 +86,10 @@
     <div class="open">
       <div class="status">
         <span class="updated">{view.updated || 'данных пока нет'}</span>
-        <span class="refresh" class:pending><IconButton icon="retry" label={pending ? 'Обновляю лимиты' : 'Обновить лимиты'} inert={pending} onclick={refresh} /></span>
+        <span class="refresh" class:pending={refresher.pending}><IconButton icon="retry" label={refresher.pending ? 'Обновляю лимиты' : 'Обновить лимиты'} inert={refresher.pending} onclick={() => refresher.run(view.updatedAt)} /></span>
         <a href={resolve('limits')}>История лимитов</a>
       </div>
-      <p class="note" role="status">{note}</p>
+      <p class="note" role="status">{refresher.note}</p>
     </div>
   </details>
 {/if}
