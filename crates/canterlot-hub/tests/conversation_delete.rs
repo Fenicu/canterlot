@@ -929,6 +929,7 @@ async fn other_devices_learn_through_the_event_flow(pool: PgPool) {
     assert!(
         events[..events.len() - 1]
             .iter()
+            .filter(|event| event["kind"] != "limits_providers_changed")
             .all(|event| event["kind"] == "hidden"),
         "the old rows lose their content but keep the sequence: {events:?}"
     );

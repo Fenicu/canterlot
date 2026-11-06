@@ -5906,7 +5906,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Текущие лимиты */
+            /** @description Текущие лимиты провайдеров, чьи харнессы есть в каталоге машин владельца */
             200: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
