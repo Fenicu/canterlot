@@ -7,6 +7,13 @@ export interface MdRenderer {
   render(text: string): string;
 }
 
+/** Путь внутри документа некуда вести: у просмотрщика нет его каталога. */
+function isRelativeUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed || trimmed.startsWith('//')) return false;
+  return !/^[a-z][a-z0-9+.-]*:/i.test(trimmed);
+}
+
 export function createMarkdown(): MdRenderer {
   const md = new MarkdownIt({
     html: false,
@@ -14,10 +21,55 @@ export function createMarkdown(): MdRenderer {
     typographer: false
   });
 
-  // Строгая валидация схем ссылок в markdown-it
-  md.validateLink = (url: string) => isSafeUrl(url);
+  // Строгая валидация схем ссылок в markdown-it. Относительные адреса разбираем,
+  // чтобы ниже оставить от ссылки текст, а от картинки — подпись.
+  md.validateLink = (url: string) => isSafeUrl(url) || isRelativeUrl(url);
 
-  // Замена изображений на ссылки с их alt-текстом (никаких <img>)
+  // Безопасные адреса идут обычным путём; остальные (относительные) теряют разметку ссылки.
+  md.core.ruler.after('inline', 'neutralize_relative_links', (state) => {
+    for (const token of state.tokens) {
+      if (token.type !== 'inline' || !token.children) continue;
+      const stack: boolean[] = [];
+      for (const child of token.children) {
+        if (child.type === 'link_open') {
+          const plain = !isSafeUrl(String(child.attrGet('href') ?? ''));
+          child.meta = { ...(child.meta ?? {}), plain };
+          stack.push(plain);
+        } else if (child.type === 'link_close') {
+          child.meta = { ...(child.meta ?? {}), plain: stack.pop() ?? false };
+        }
+      }
+    }
+    return true;
+  });
+
+  // Отметки задач GFM: чекбокс заменяем знаком в тексте, чтобы не протаскивать input через очистку.
+  md.core.ruler.after('inline', 'task_list_marks', (state) => {
+    let inItem = false;
+    let seen = false;
+    for (const token of state.tokens) {
+      if (token.type === 'list_item_open') {
+        inItem = true;
+        seen = false;
+        continue;
+      }
+      if (token.type === 'list_item_close') {
+        inItem = false;
+        continue;
+      }
+      if (!inItem || seen || token.type !== 'inline' || !token.children) continue;
+      seen = true;
+      const first = token.children[0];
+      if (!first || first.type !== 'text') continue;
+      const match = /^\[([ xX])\]\s+/.exec(first.content);
+      if (!match) continue;
+      first.content = `${match[1] === ' ' ? '☐' : '☒'} ${first.content.slice(match[0].length)}`;
+    }
+    return true;
+  });
+
+  // Замена изображений на ссылки с их alt-текстом (никаких <img>). Внутренний путь
+  // открыть нельзя, поэтому от такой картинки остаётся только подпись.
   md.renderer.rules.image = (tokens, idx, options, env, self) => {
     const token = tokens[idx];
     if (!token) return '';
@@ -37,11 +89,18 @@ export function createMarkdown(): MdRenderer {
   const defaultLinkOpen = md.renderer.rules.link_open || ((tokens, idx, opt, _env, self) => self.renderToken(tokens, idx, opt));
   md.renderer.rules.link_open = (tokens, idx, opt, env, self) => {
     const token = tokens[idx];
+    if (token?.meta?.plain) return '';
     if (token) {
       token.attrSet('target', '_blank');
       token.attrSet('rel', 'noopener noreferrer nofollow');
     }
     return defaultLinkOpen(tokens, idx, opt, env, self);
+  };
+
+  const defaultLinkClose = md.renderer.rules.link_close || ((tokens, idx, opt, _env, self) => self.renderToken(tokens, idx, opt));
+  md.renderer.rules.link_close = (tokens, idx, opt, env, self) => {
+    if (tokens[idx]?.meta?.plain) return '';
+    return defaultLinkClose(tokens, idx, opt, env, self);
   };
 
   return {

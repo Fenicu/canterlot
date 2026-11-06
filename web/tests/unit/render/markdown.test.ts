@@ -186,6 +186,30 @@ describe('markdown and xss security', () => {
     }
   });
 
+  test('a_relative_path_keeps_its_text_but_loses_the_link', () => {
+    const md = createMarkdown();
+    const output = md.render('[документ](docs/readme.md)');
+    expect(output).toContain('документ');
+    expect(output).not.toContain('<a');
+    expect(output).not.toContain('href=');
+  });
+
+  test('a_relative_image_keeps_its_alt_text_and_never_becomes_an_image', () => {
+    const md = createMarkdown();
+    const output = md.render('![схема сборки](images/scheme.png)');
+    expect(output).toContain('схема сборки');
+    expect(output).not.toContain('<img');
+    expect(output).not.toContain('<a');
+  });
+
+  test('task_list_items_get_readable_marks', () => {
+    const md = createMarkdown();
+    const output = md.render('- [x] Проверки\n- [ ] Выкладка');
+    expect(output).toContain('☒ Проверки');
+    expect(output).toContain('☐ Выкладка');
+    expect(output).not.toContain('[x]');
+  });
+
   test('final_renders_the_whole_block_once_and_matches_a_plain_render', () => {
     const md = createMarkdown();
     const sm = new StreamingMarkdown(md);
