@@ -81,7 +81,7 @@ fn rules(provider: Option<&str>) -> Option<Rules> {
 }
 
 pub fn is_main_agent(agent: &str) -> bool {
-    matches!(agent, "" | "main" | "orchestrator")
+    crate::agents::is_main_agent(agent)
 }
 
 fn ms(from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {

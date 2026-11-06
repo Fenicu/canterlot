@@ -334,7 +334,6 @@ struct Baseline {
     /// Отчёт действительно измерен: провал пробы не считается прогрессом.
     #[serde(default)]
     report_known: bool,
-    run_id: Option<Uuid>,
     tools: i64,
     working_ms: i64,
 }
@@ -357,6 +356,18 @@ struct Facts {
     context_percent: Option<i64>,
 }
 
+/// Последний ответ основного агента: `main` у Claude Code и Codex, `orchestrator`
+/// у OpenCode. Потомки исключены именем агента и отсутствием родителя.
+fn last_answer_sql() -> String {
+    format!(
+        "select content from blocks
+         where conversation_id=$1 and kind='text' and parent_block_id is null
+           and {} and btrim(content) <> ''
+         order by created_seq desc nulls last,created_at desc limit 1",
+        crate::agents::main_agent_filter("agent")
+    )
+}
+
 /// Собирает факты последнего законченного хода: ответ, git, инструменты, метрики.
 async fn facts_in_tx(
     conn: &mut PgConnection,
@@ -365,15 +376,10 @@ async fn facts_in_tx(
     now: DateTime<Utc>,
     report: Option<&PathProbe>,
 ) -> Result<Facts, sqlx::Error> {
-    let answer: Option<String> = sqlx::query_scalar(
-        "select content from blocks
-         where conversation_id=$1 and kind='text' and parent_block_id is null
-           and agent='main' and btrim(content) <> ''
-         order by created_seq desc nulls last,created_at desc limit 1",
-    )
-    .bind(target_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let answer: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(last_answer_sql()))
+        .bind(target_id)
+        .fetch_optional(&mut *conn)
+        .await?;
     let answer = answer.unwrap_or_default();
     let row: Option<AnswerRunFacts> = sqlx::query_as(
             "select r.input_command_id,coalesce(r.duration_ms,
@@ -471,7 +477,6 @@ async fn facts_in_tx(
         report_size: report.size,
         report_mtime: report.mtime,
         report_known: report.known,
-        run_id,
         tools,
         working_ms,
     };
@@ -563,11 +568,15 @@ fn report_signals(report: Option<&PathProbe>) -> ReportFacts {
     }
 }
 
+/// Реальный прогресс с прошлого толчка: новый HEAD, изменённые файлы, `dirty`
+/// или отчёт вырос/изменился. Новый ход сам по себе прогрессом не считается:
+/// иначе счётчик серии сбрасывался бы каждым толчком и предел не держал бы.
 fn still_progress(baseline: Option<&Value>, current: &Baseline) -> bool {
     let Some(baseline) =
         baseline.and_then(|value| serde_json::from_value::<Baseline>(value.clone()).ok())
     else {
-        return true;
+        // Сравнивать не с чем: доказательств прогресса нет, толчок идёт в счёт серии.
+        return false;
     };
     let report_progress = current.report_known
         && baseline.report_known
@@ -577,7 +586,6 @@ fn still_progress(baseline: Option<&Value>, current: &Baseline) -> bool {
         || baseline.dirty != current.dirty
         || baseline.files != current.files
         || report_progress
-        || (baseline.run_id != current.run_id && current.tools > 0 && current.working_ms >= 60_000)
 }
 
 // ---------------------------------------------------------------------------
@@ -689,15 +697,10 @@ pub async fn asks_in_text_in_tx(
     conn: &mut PgConnection,
     target_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let answer: Option<String> = sqlx::query_scalar(
-        "select content from blocks
-         where conversation_id=$1 and kind='text' and parent_block_id is null
-           and agent='main' and btrim(content) <> ''
-         order by created_seq desc nulls last,created_at desc limit 1",
-    )
-    .bind(target_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let answer: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(last_answer_sql()))
+        .bind(target_id)
+        .fetch_optional(&mut *conn)
+        .await?;
     Ok(answer.is_some_and(|text| asks_in_text(&text)))
 }
 
@@ -2298,7 +2301,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_compares_head_files_and_tool_turns() {
+    fn progress_is_only_a_new_head_changed_files_or_the_report() {
         let current = Baseline {
             head: "bbb".into(),
             dirty: true,
@@ -2306,21 +2309,27 @@ mod tests {
             report_size: 0,
             report_mtime: None,
             report_known: false,
-            run_id: Some(Uuid::nil()),
             tools: 2,
             working_ms: 90_000,
         };
         let same = json!({
             "head":"bbb","dirty":true,"files":"f","report_size":0,
-            "run_id":Uuid::nil(),"tools":2,"working_ms":90_000
+            "report_known":false,"tools":2,"working_ms":90_000
         });
         assert!(!still_progress(Some(&same), &current));
+        // Новый ход с инструментами дольше минуты, но без нового HEAD — не прогресс.
+        let new_turn = json!({
+            "head":"bbb","dirty":true,"files":"f","report_size":0,
+            "report_known":false,"tools":5,"working_ms":600_000
+        });
+        assert!(!still_progress(Some(&new_turn), &current));
         let moved = json!({
             "head":"aaa","dirty":true,"files":"e","report_size":0,
-            "run_id":Uuid::nil(),"tools":2,"working_ms":90_000
+            "report_known":false,"tools":2,"working_ms":90_000
         });
         assert!(still_progress(Some(&moved), &current));
-        assert!(still_progress(None, &current));
+        // Нет базы — нет доказательств прогресса.
+        assert!(!still_progress(None, &current));
     }
 
     #[test]

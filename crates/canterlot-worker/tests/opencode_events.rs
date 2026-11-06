@@ -1036,6 +1036,20 @@ fn child_with_an_unknown_lane_still_shows_its_blocks() {
 }
 
 #[test]
+fn child_named_like_the_main_agent_stays_a_subagent() {
+    let root = "ses_root";
+    let mut translator = Translator::new(root, HashMap::new());
+    translator.feed(&json!({"type": "session.created", "data": {
+        "sessionID": "ses_a", "parentID": root, "agent": "orchestrator"}}));
+    let out = flat_events(
+        translator.feed(&json!({"type": "session.text.started", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_2", "ordinal": 0}})),
+    );
+    let blocks = started(&out);
+    assert_eq!(blocks[0].agent, "subagent");
+}
+
+#[test]
 fn background_child_keeps_its_open_blocks_over_the_end_of_the_run() {
     let root = "ses_root";
     let mut translator = Translator::new(root, HashMap::new());

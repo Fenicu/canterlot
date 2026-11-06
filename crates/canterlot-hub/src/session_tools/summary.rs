@@ -423,27 +423,29 @@ pub async fn build_bounded(
             let commands: &[Uuid] = boundary
                 .map(|boundary| boundary.command_ids.as_slice())
                 .unwrap_or(run_ids.as_slice());
-            sqlx::query_as::<_, (Uuid, String, i64)>(
+            let query = format!(
                 "select block_id,left(content,$5::int),octet_length(content)::bigint from blocks
                  where conversation_id=$1 and kind='text' and parent_block_id is null
-                   and agent='main' and btrim(content) <> '' and block_id<>$2
+                   and {} and btrim(content) <> '' and block_id<>$2
                    and octet_length(content)>=512
                    and (input_command_id = any($3)
                         or ($4::timestamptz is not null and created_at >= $4))
                  order by created_seq desc,created_at desc limit 1",
-            )
-            .bind(target_id)
-            .bind(latest.block_id)
-            .bind(commands)
-            .bind(armed_at)
-            .bind(ANSWER_LIMIT as i32)
-            .fetch_optional(&mut *conn)
-            .await?
-            .map(|(block_id, head, total)| Answer {
-                block_id,
-                head,
-                total_bytes: total.max(0) as usize,
-            })
+                crate::agents::main_agent_filter("agent")
+            );
+            sqlx::query_as::<_, (Uuid, String, i64)>(sqlx::AssertSqlSafe(query))
+                .bind(target_id)
+                .bind(latest.block_id)
+                .bind(commands)
+                .bind(armed_at)
+                .bind(ANSWER_LIMIT as i32)
+                .fetch_optional(&mut *conn)
+                .await?
+                .map(|(block_id, head, total)| Answer {
+                    block_id,
+                    head,
+                    total_bytes: total.max(0) as usize,
+                })
         }
         _ => None,
     };
@@ -778,7 +780,7 @@ pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
         if summary.nudge_exhausted {
             let _ = writeln!(
                 head,
-                "Auto-nudge gave up after {nudges} {noun} without progress{signals}."
+                "Auto-nudge gave up after {nudges} {noun}: the limit of nudges in a row without real progress was reached{signals}."
             );
         } else {
             let _ = writeln!(head, "Auto-nudge: {nudges} {noun}{signals}.");

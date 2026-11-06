@@ -89,6 +89,10 @@ async fn prime_idle(pool: &PgPool, f: &Fx, now: DateTime<Utc>) {
 }
 
 async fn answer(pool: &PgPool, f: &Fx, text: &str) -> Uuid {
+    answer_as(pool, f, text, "main").await
+}
+
+async fn answer_as(pool: &PgPool, f: &Fx, text: &str, agent: &str) -> Uuid {
     let command = Uuid::now_v7();
     sqlx::query(
         "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state)
@@ -104,17 +108,45 @@ async fn answer(pool: &PgPool, f: &Fx, text: &str) -> Uuid {
     .unwrap();
     sqlx::query(
         "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,input_command_id,agent,model,created_seq,created_at,updated_at)
-         values($1,$2,$3,'text','final',1,$4,$5,'main','m',(select coalesce(max(created_seq),0)+1 from blocks where conversation_id=$3),clock_timestamp()-interval '10 minutes',clock_timestamp()-interval '10 minutes')",
+         values($1,$2,$3,'text','final',1,$4,$5,$6,'m',(select coalesce(max(created_seq),0)+1 from blocks where conversation_id=$3),clock_timestamp()-interval '10 minutes',clock_timestamp()-interval '10 minutes')",
     )
     .bind(Uuid::now_v7())
     .bind(f.execution.execution_id)
     .bind(f.child)
     .bind(text)
     .bind(command)
+    .bind(agent)
     .execute(pool)
     .await
     .unwrap();
     command
+}
+
+/// Текст суб-агента без дорожки: он не становится ответом основного агента.
+async fn subagent_text(pool: &PgPool, f: &Fx, text: &str, agent: &str) {
+    sqlx::query(
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,agent,model,created_seq,created_at,updated_at)
+         values($1,$2,$3,'text','final',1,$4,$5,'m',(select coalesce(max(created_seq),0)+1 from blocks where conversation_id=$3),clock_timestamp()-interval '10 minutes',clock_timestamp()-interval '10 minutes')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(f.execution.execution_id)
+    .bind(f.child)
+    .bind(text)
+    .bind(agent)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Ход с инструментами не короче 60 с: без нового HEAD это всё равно не прогресс.
+async fn worked_for(pool: &PgPool, command: Uuid, minutes: i64) {
+    let ms = minutes * 60_000;
+    sqlx::query("update runs set duration_ms=$2,working_ms=$2 where input_command_id=$1")
+        .bind(command)
+        .bind(ms)
+        .execute(pool)
+        .await
+        .unwrap();
 }
 
 async fn finish_run(
@@ -262,6 +294,235 @@ fn caller(f: &Fx) -> Caller {
         machine_id: f.machine,
         call_id: Uuid::now_v7(),
     }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn opencode_orchestrator_answer_with_marker_is_not_nudged(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+
+    // Первый ход без маркера: обычный толчок.
+    let first = answer_as(&pool, &f, "Halfway through the parser.", "orchestrator").await;
+    finish_run(
+        &pool,
+        &f,
+        first,
+        now - TimeDelta::minutes(1),
+        "oc1",
+        true,
+        &["bash"],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(4))
+        .await
+        .unwrap();
+    accept_inputs(&pool, f.child).await;
+
+    // OpenCode подписывает ответ основного агента `orchestrator`: маркер виден,
+    // второго толчка нет, серия сбрасывается событием `marker_seen`.
+    let second = answer_as(&pool, &f, "All done.\nSTATUS: DONE", "orchestrator").await;
+    finish_run(
+        &pool,
+        &f,
+        second,
+        now + TimeDelta::minutes(4),
+        "oc1",
+        false,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now + TimeDelta::minutes(5)).await;
+
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from scheduled_jobs where state='pending'
+           and conversation_id=$1 and payload->>'action'='nudge'",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0, "the marker is seen, no second nudge");
+    let outcome: String = sqlx::query_scalar(
+        "select outcome from nudge_events where conversation_id=$1
+         order by at desc,id desc limit 1",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outcome, "marker_seen");
+    assert_eq!(rule_row(&pool, f.child).await, ("watching".into(), 0, 1));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn claude_main_answer_with_marker_is_not_nudged(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+
+    let first = answer_as(&pool, &f, "Halfway through the parser.", "main").await;
+    finish_run(
+        &pool,
+        &f,
+        first,
+        now - TimeDelta::minutes(1),
+        "cc1",
+        true,
+        &["bash"],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(4))
+        .await
+        .unwrap();
+    accept_inputs(&pool, f.child).await;
+
+    let second = answer_as(&pool, &f, "All done.\nSTATUS: DONE", "main").await;
+    finish_run(
+        &pool,
+        &f,
+        second,
+        now + TimeDelta::minutes(4),
+        "cc1",
+        false,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now + TimeDelta::minutes(5)).await;
+
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from scheduled_jobs where state='pending'
+           and conversation_id=$1 and payload->>'action'='nudge'",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0, "the marker is seen, no second nudge");
+    let outcome: String = sqlx::query_scalar(
+        "select outcome from nudge_events where conversation_id=$1
+         order by at desc,id desc limit 1",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outcome, "marker_seen");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_subagent_marker_does_not_finish_the_main_agent(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let command = answer_as(&pool, &f, "Still working on the parser.", "main").await;
+    finish_run(
+        &pool,
+        &f,
+        command,
+        now - TimeDelta::minutes(1),
+        "sub1",
+        true,
+        &["bash"],
+    )
+    .await;
+    // Потомок закончил свою часть и поставил маркер: это не итог основного агента.
+    subagent_text(&pool, &f, "Child finished.\nSTATUS: DONE", "general").await;
+    refresh_at(&pool, f.child, now).await;
+
+    let held = jobs(&pool, f.child).await;
+    assert_eq!(held.len(), 1, "the subagent marker is not the main answer");
+    assert_eq!(held[0]["signals"]["no_marker"], true);
+    assert!(jobs(&pool, f.parent).await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn max_consecutive_two_without_progress_sends_exactly_two_nudges(pool: PgPool) {
+    let f = fx(&pool).await;
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 2, 3, 10).await;
+
+    // Первый ход: новый HEAD, толчок №1.
+    let first = answer(&pool, &f, "Working.").await;
+    finish_run(
+        &pool,
+        &f,
+        first,
+        now - TimeDelta::minutes(1),
+        "same",
+        true,
+        &["bash"],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(4))
+        .await
+        .unwrap();
+    assert_eq!(rule_row(&pool, f.child).await, ("watching".into(), 1, 1));
+    accept_inputs(&pool, f.child).await;
+
+    // Второй ход: новый run_id и инструменты дольше минуты, но HEAD и файлы те же.
+    // Это не прогресс: новый ход сам по себе счётчик не сбрасывает.
+    let second = answer(&pool, &f, "Still working.").await;
+    finish_run(
+        &pool,
+        &f,
+        second,
+        now + TimeDelta::minutes(4),
+        "same",
+        true,
+        &["bash"],
+    )
+    .await;
+    worked_for(&pool, second, 2).await;
+    refresh_at(&pool, f.child, now + TimeDelta::minutes(5)).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(9))
+        .await
+        .unwrap();
+    assert_eq!(rule_row(&pool, f.child).await, ("watching".into(), 2, 2));
+    accept_inputs(&pool, f.child).await;
+
+    // Третий ход без прогресса: лимит 2 исчерпан, третьего толчка нет.
+    let third = answer(&pool, &f, "Still working.").await;
+    finish_run(
+        &pool,
+        &f,
+        third,
+        now + TimeDelta::minutes(9),
+        "same",
+        true,
+        &["bash"],
+    )
+    .await;
+    worked_for(&pool, third, 2).await;
+    refresh_at(&pool, f.child, now + TimeDelta::minutes(10)).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(14))
+        .await
+        .unwrap();
+
+    let nudges: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1 and origin->>'kind'='nudge'",
+    )
+    .bind(f.child)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(nudges, 2, "exactly max_consecutive nudges without progress");
+    assert_eq!(rule_row(&pool, f.child).await, ("exhausted".into(), 3, 2));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -1499,6 +1760,71 @@ async fn a_nudged_summary_keeps_the_substantive_report(pool: PgPool) {
     assert!(text.contains("Auto-nudge: 1 nudge"), "{text}");
     assert!(text.contains("Answer before the nudges"), "{text}");
     assert!(text.contains("DETAILED-REPORT-MARKER"), "{text}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn opencode_summary_keeps_the_answer_before_the_nudges(pool: PgPool) {
+    let f = fx(&pool).await;
+    subscribe(&pool, &f).await;
+    sqlx::query(
+        "update session_subscriptions set armed_at=clock_timestamp()-interval '2 hours'
+         where subscriber_id=$1 and target_id=$2",
+    )
+    .bind(f.parent)
+    .bind(f.child)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let now = Utc::now();
+    prime_idle(&pool, &f, now).await;
+    rule(&pool, &f, f.parent, 3, 3, 10).await;
+    let report = format!("OPENCODE-REPORT-MARKER\n{}", "r".repeat(700));
+    let first = answer_as(&pool, &f, &report, "orchestrator").await;
+    finish_run(
+        &pool,
+        &f,
+        first,
+        now - TimeDelta::minutes(1),
+        "sum2",
+        true,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(4))
+        .await
+        .unwrap();
+    accept_inputs(&pool, f.child).await;
+
+    let done = answer_as(&pool, &f, "STATUS: DONE", "orchestrator").await;
+    finish_run(
+        &pool,
+        &f,
+        done,
+        now + TimeDelta::minutes(4),
+        "sum2",
+        false,
+        &[],
+    )
+    .await;
+    refresh_at(&pool, f.child, now + TimeDelta::minutes(5)).await;
+    scheduler(&pool)
+        .tick(now + TimeDelta::minutes(6))
+        .await
+        .unwrap();
+
+    let text: String = sqlx::query_scalar(
+        "select content->0->>'text' from inputs where conversation_id=$1
+           and origin->>'kind'='event' order by input_seq desc limit 1",
+    )
+    .bind(f.parent)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(text.contains("Auto-nudge: 1 nudge"), "{text}");
+    assert!(text.contains("Answer before the nudges"), "{text}");
+    assert!(text.contains("OPENCODE-REPORT-MARKER"), "{text}");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

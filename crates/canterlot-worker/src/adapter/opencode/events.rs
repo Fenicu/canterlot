@@ -835,7 +835,13 @@ impl Translator {
             self.children.get_mut(session),
             data.get("agent").and_then(Value::as_str),
         ) {
-            agent.clone_into(&mut child.agent);
+            // Хаб отличает основной агент по имени: потомок с именем основного
+            // был бы принят за его итог. Такой потомок остаётся безымянным.
+            if agent == MAIN_AGENT {
+                child.agent = UNNAMED_CHILD.to_owned();
+            } else {
+                agent.clone_into(&mut child.agent);
+            }
         }
     }
 

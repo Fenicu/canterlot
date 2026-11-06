@@ -205,7 +205,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "List your armed alarms with their conditions and times; with include_finished, also the last finished ones. Do not call it in a loop to wait: alarms arrive as messages."
         }
         "nudge_set" => {
-            "Let canterlot nudge a session you started when it stops without a done marker, so you are not woken just to say \"continue\". You are woken once: when it finishes with a marker, asks, fails, or when the nudges run out (nudge_exhausted). Only for sessions you or your delegates started. Do not set a rule on anyone else. Pass enabled=false to turn it off. With report_file, a report that appears, grows or changes counts as progress, and a missing report is named in the nudge text."
+            "Let canterlot nudge a session you started when it stops without a done marker, so you are not woken just to say \"continue\". You are woken once: when it finishes with a marker, asks, fails, or when the nudges run out (nudge_exhausted). Only for sessions you or your delegates started. Do not set a rule on anyone else. Pass enabled=false to turn it off. max_nudges limits nudges in a row without real progress: new commits, changed files or a report that grew or changed; a new turn alone is not progress. With report_file, a missing report is named in the nudge text."
         }
         "nudge_clear" => {
             "Turn off auto-nudge for a session you started and release any result it was holding back. The subscription stays. Idempotent: a session without a rule answers none. Do not call it in a loop; it is idempotent."
@@ -380,7 +380,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "session_id": id,
                 "enabled": {"type": "boolean", "description": "Default true."},
                 "idle_minutes": {"type": "integer", "minimum": 1, "maximum": 120},
-                "max_nudges": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Consecutive nudges without progress before giving up. Default 3."},
+                "max_nudges": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Nudges in a row before giving up when the session makes no real progress (new commits, changed files, a report that grew or changed). Default 3. A new turn alone is not progress."},
                 "done_markers": {"type": "array", "items": {"type": "string"}, "maxItems": 5, "description": "Lines that mean the task is over. Default STATUS: DONE and STATUS: BLOCKED."},
                 "text_preset": {"type": "string", "description": "Nudge text preset id; default built-in."},
                 "context_warn_percent": {"type": "integer", "minimum": 50, "maximum": 99},
