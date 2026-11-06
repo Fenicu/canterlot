@@ -405,6 +405,21 @@ pub async fn enqueue_in_tx(
 }
 
 /// Задание на ближайший готовый элемент; текущее задание не считается.
+/// Родитель остановлен владельцем или родителем: очередь не растёт и не запускается.
+pub async fn parent_stopped_in_tx(
+    conn: &mut PgConnection,
+    parent: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let stopped: Option<bool> = sqlx::query_scalar(
+        "select pause_reasons @> '[{\"reason\":\"user_stop\"}]'::jsonb
+           from queue_state where conversation_id=$1",
+    )
+    .bind(parent)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(stopped.unwrap_or(false))
+}
+
 pub async fn wake_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -638,6 +653,8 @@ pub async fn start_now_in_tx(
         .fetch_optional(&mut *conn)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
+    crate::session_tools::send::lock_queue(conn, parent).await?;
+    let stopped = parent_stopped_in_tx(&mut *conn, parent).await?;
     let mut row: QueueRow = sqlx::query_as(
         "select * from spawn_queue where id=$1 and parent_id=$2 and owner_id=$3 for update",
     )
@@ -648,6 +665,12 @@ pub async fn start_now_in_tx(
     .await?
     .ok_or_else(|| ToolError::new(ToolErrorCode::NotParent))?;
     if row.state != STATE_QUEUED {
+        return Ok(existing_outcome(&row));
+    }
+    if stopped {
+        row.result = Some(json!({"reason": "parent_stopped"}));
+        let result = row.result.clone();
+        set_state_in_tx(conn, &mut row, STATE_CANCELLED, result, now, correlation_id).await?;
         return Ok(existing_outcome(&row));
     }
     if row.expires_at <= now {
@@ -1028,9 +1051,23 @@ pub(crate) async fn run_job_in_tx(
     correlation_id: Uuid,
 ) -> Result<JobOutcome, SubmitError> {
     conversations::lock_owner(&mut *conn, job.owner_id).await?;
+    crate::session_tools::send::lock_queue(conn, parent).await?;
     let Some(parent_session) = access::session_in_tx(conn, job.owner_id, parent).await? else {
         return Ok(JobOutcome::Done(json!({"skipped": "parent_missing"})));
     };
+    if parent_stopped_in_tx(&mut *conn, parent).await? {
+        cancel_for_parent_in_tx(
+            conn,
+            job.owner_id,
+            parent,
+            "parent_stopped",
+            correlation_id,
+            now,
+            false,
+        )
+        .await?;
+        return Ok(JobOutcome::Done(json!({"cancelled": "parent_stopped"})));
+    }
     if parent_session.archived {
         cancel_for_parent_in_tx(
             conn,

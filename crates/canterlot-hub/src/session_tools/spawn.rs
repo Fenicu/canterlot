@@ -1014,11 +1014,16 @@ pub async fn spawn(
     }
     // Владелец раньше строки разговора: тот же порядок у удаления и создания.
     conversations::lock_owner(&mut tx, caller.owner_id).await?;
+    // Очередь родителя: остановка и постановка идут через одну блокировку.
+    send::lock_queue(&mut tx, caller.conversation_id).await?;
     // Повтор вызова, который уже встал в очередь, отвечает тем же элементом.
     if let Some(row) = spawn_queue::find_by_call(&mut tx, caller.owner_id, caller.call_id).await? {
         let answer = spawn_queue::answer_replay(&mut tx, &row).await?;
         tx.commit().await?;
         return Ok(answer);
+    }
+    if spawn_queue::parent_stopped_in_tx(&mut tx, caller.conversation_id).await? {
+        return Err(ToolError::new(ToolErrorCode::ConversationClosed));
     }
     let parent = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if parent.spawn_depth >= context.config.max_spawn_depth as i32 {

@@ -202,11 +202,20 @@ impl Fx {
     }
 
     async fn run_dequeue(&self, queue_id: Uuid, now: DateTime<Utc>) -> JobOutcome {
+        self.run_dequeue_for(self.parent, queue_id, now).await
+    }
+
+    async fn run_dequeue_for(
+        &self,
+        parent: Uuid,
+        queue_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> JobOutcome {
         let job = ClaimedJob {
             id: Uuid::now_v7(),
             kind: JobKind::SessionTask,
             owner_id: self.owner,
-            conversation_id: Some(self.parent),
+            conversation_id: Some(parent),
             run_at: now,
             payload: json!({"action":"spawn_dequeue","queue_id":queue_id}),
             attempts: 0,
@@ -1232,4 +1241,83 @@ async fn http_start_now_commits_a_permanent_failure_and_its_note(pool: PgPool) {
         replay.json::<Value>()["error"]["details"]["reason"],
         "harness_unknown"
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_after_stop_is_refused_and_does_not_queue(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let target = child_of(
+        &f.pool,
+        f.parent,
+        "opencode",
+        "opencode-go/beam-free",
+        "working",
+    )
+    .await;
+    let execution = canterlot_hub::executions::start(&f.pool, f.owner, target, Uuid::now_v7())
+        .await
+        .unwrap();
+    let stopped = f
+        .call("sessions.stop", json!({"session_id": target}))
+        .await
+        .unwrap();
+    assert_eq!(stopped["status"], "stopping", "{stopped}");
+    let caller = Caller {
+        owner_id: f.owner,
+        conversation_id: target,
+        execution_id: execution.execution_id,
+        machine_id: f.machine,
+        call_id: Uuid::now_v7(),
+    };
+    let error = session_tools::call(
+        &f.context,
+        &caller,
+        "sessions.spawn",
+        json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, Code::ConversationClosed, "{}", error.message);
+    let queued: i64 = sqlx::query_scalar("select count(*) from spawn_queue where parent_id=$1")
+        .bind(target)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn dequeue_cancels_items_of_a_stopped_parent(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let target = child_of(
+        &f.pool,
+        f.parent,
+        "opencode",
+        "opencode-go/beam-free",
+        "working",
+    )
+    .await;
+    canterlot_hub::executions::start(&f.pool, f.owner, target, Uuid::now_v7())
+        .await
+        .unwrap();
+    f.call("sessions.stop", json!({"session_id": target}))
+        .await
+        .unwrap();
+    let queue_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,$5,'rate',now())",
+    )
+    .bind(queue_id)
+    .bind(f.owner)
+    .bind(target)
+    .bind(Uuid::now_v7())
+    .bind(json!({"chain_depth":1,"args":{"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}}))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    f.run_dequeue_for(target, queue_id, Utc::now()).await;
+    let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "cancelled");
+    assert!(child.is_none());
 }
