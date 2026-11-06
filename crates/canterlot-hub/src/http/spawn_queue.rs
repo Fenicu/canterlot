@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::{
     AppState,
     auth::{Correlation, IdempotencyKey, Owner},
-    error::{ApiError, ErrorCode, ErrorDetails},
+    error::{ApiError, ErrorCode, ErrorDetails, ErrorReason},
     extract::ApiPath,
 };
 use crate::{
@@ -153,8 +153,7 @@ async fn cancel(
 #[utoipa::path(post,path="/api/v1/conversations/{id}/spawn-queue/{queue_id}/start-now",tag="spawn_queue",params(("id"=Uuid,Path,description="Разговор"),("queue_id"=Uuid,Path,description="Элемент очереди"),("Idempotency-Key"=String,Header,description="Ключ операции")),responses(
     (status=200,description="Сессия запущена",body=SpawnQueueActionView),
     (status=404,description="Элемент не найден",body=super::error::ErrorEnvelope),
-    (status=409,description="Элемент уже завершён",body=super::error::ErrorEnvelope),
-    (status=422,description="Белый список или режим не пропускают запуск",body=super::error::ErrorEnvelope)
+    (status=409,description="Элемент уже завершён или запуск отклонён: `details.reason` = `spawn_refused`, разбор в `details.spawn_refusal`",body=super::error::ErrorEnvelope)
 ))]
 async fn start_now(
     State(state): State<AppState>,
@@ -209,19 +208,10 @@ async fn start_now(
     let outcome = outcome.value;
     match outcome.status.as_str() {
         "started" | "already_started" => Ok(Json(SpawnQueueActionView::from(outcome))),
-        "queued" => Err(
-            ApiError::new(ErrorCode::InvalidState).with_details(ErrorDetails {
-                reason: outcome
-                    .detail
-                    .clone()
-                    .or(outcome.reason.clone())
-                    .or_else(|| Some("the machine is still busy".to_owned())),
-                ..Default::default()
-            }),
-        ),
         _ => Err(
             ApiError::new(ErrorCode::InvalidState).with_details(ErrorDetails {
-                reason: outcome.reason.clone(),
+                reason: Some(ErrorReason::SpawnRefused.as_str().to_owned()),
+                spawn_refusal: outcome.refusal,
                 ..Default::default()
             }),
         ),

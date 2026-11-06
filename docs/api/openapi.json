@@ -4138,26 +4138,7 @@
             }
           },
           "409": {
-            "description": "Элемент уже завершён",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Белый список или режим не пропускают запуск",
+            "description": "Элемент уже завершён или запуск отклонён: `details.reason` = `spawn_refused`, разбор в `details.spawn_refusal`",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -9130,6 +9111,10 @@
               "$ref": "#/components/schemas/ArchiveReason"
             }
           },
+          "spawn_refusal": {
+            "$ref": "#/components/schemas/SpawnRefusal",
+            "description": "Отказ «Запустить сейчас» (`spawn_refused`): код, сообщение и состояние элемента."
+          },
           "winner_decision": {
             "$ref": "#/components/schemas/DecisionBody"
           }
@@ -9168,7 +9153,8 @@
           "run_in_progress",
           "no_live_execution",
           "conversation_closed",
-          "nul_character"
+          "nul_character",
+          "spawn_refused"
         ]
       },
       "ErrorScope": {
@@ -13498,6 +13484,60 @@
             }
           }
         }
+      },
+      "SpawnRefusal": {
+        "type": "object",
+        "description": "Структурный отказ «Запустить сейчас»: код, сообщение и состояние элемента.",
+        "required": [
+          "code",
+          "message",
+          "state"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/SpawnRefusalCode"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retry_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Когда элемент снова попробуют запустить (`queued`)."
+          },
+          "state": {
+            "type": "string",
+            "description": "Состояние элемента после отказа: `queued`, `failed`, `cancelled` или `expired`."
+          }
+        }
+      },
+      "SpawnRefusalCode": {
+        "type": "string",
+        "description": "Код отказа «Запустить сейчас». Замкнутое перечисление: `details.spawn_refusal.code`\nне превращается в свободный текст. Значения совпадают с кодами инструментов запуска\nи состояниями элемента очереди.",
+        "enum": [
+          "not_in_whitelist",
+          "permission_mode_too_wide",
+          "machine_unavailable",
+          "capability_missing",
+          "no_executor_available",
+          "invalid_arguments",
+          "harness_unknown",
+          "model_unknown",
+          "effort_not_allowed",
+          "workdir_not_allowed",
+          "profile_unknown",
+          "conversation_closed",
+          "queue_full",
+          "rate_limited",
+          "machine_busy",
+          "parent_stopped",
+          "parent_archived",
+          "cancelled",
+          "expired",
+          "job_failed",
+          "internal_error",
+          "unknown"
+        ]
       },
       "SpeedStats": {
         "type": "object",

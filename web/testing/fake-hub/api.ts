@@ -560,8 +560,8 @@ export class FakeHubApi {
 		return { status: 'cancelled', queue_id: queueId, session_id: null };
 	}
 
-	/** Причина отказа «Запустить сейчас»: хаб записывает исход (элемент снова ждёт) и отвечает `409 invalid_state`. */
-	startNowRefusal: string | null = null;
+	/** Отказ «Запустить сейчас»: хаб записывает исход и отвечает `409 invalid_state` со структурой. */
+	startNowRefusal: components['schemas']['SpawnRefusal'] | null = null;
 
 	startSpawnQueueNow(id: string, queueId: string): components['schemas']['SpawnQueueActionView'] {
 		const item = (this.spawnQueue.get(id) ?? []).find((known) => known.id === queueId);
@@ -570,7 +570,12 @@ export class FakeHubApi {
 			// Исход уже записан хабом: событие не публикуется, клиент перечитывает очередь сам.
 			const list = this.spawnQueue.get(id) ?? [];
 			list[list.indexOf(item)] = { ...item, attempts: item.attempts + 1, not_before: new Date(Date.now() + 60_000).toISOString(), updated_at: new Date().toISOString() };
-			throw { status: 409, code: 'invalid_state', message: 'Элемент не запущен', details: { reason: this.startNowRefusal } };
+			throw {
+				status: 409,
+				code: 'invalid_state',
+				message: 'Элемент не запущен',
+				details: { reason: 'spawn_refused', spawn_refusal: this.startNowRefusal }
+			};
 		}
 		if (item.state === 'queued') {
 			const child = crypto.randomUUID();

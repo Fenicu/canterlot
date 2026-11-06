@@ -4,7 +4,7 @@
   import { ApiError } from '#lib/api/http.js';
   import { getRuntime } from '#lib/app/runtime.js';
   import { catalogTitles } from '#lib/routing/decision.js';
-  import { detailText } from '#lib/routing/reasons.js';
+  import { refusalText } from '#lib/routing/reasons.js';
   import { routingTitles } from '#lib/routing/titles.svelte.js';
   import { intents } from '#lib/ops/intent.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -68,8 +68,8 @@
       if (note) notes = { ...notes, [id]: note };
     } catch (err) {
       if (err instanceof ApiError && err.code === 'invalid_state') {
-        const raw = (err.details as { reason?: unknown } | undefined)?.reason;
-        const why = typeof raw === 'string' ? detailText(raw) : '';
+        const refusal = err.details?.spawn_refusal;
+        const why = refusal ? refusalText(refusal.code, refusal.message) : '';
         notes = { ...notes, [id]: why ? `Запустить сейчас не удалось: ${why}` : 'Запустить сейчас не удалось: запуск уже завершён или снова ждёт' };
         await refresh();
       } else notes = { ...notes, [id]: errorText(err, 'Запустить не удалось') };

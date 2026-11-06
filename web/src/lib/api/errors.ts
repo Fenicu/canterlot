@@ -321,6 +321,7 @@ export const REASON_TEXT: Record<ErrorReason, string> = {
   no_live_execution: "Сессия не запущена",
   conversation_closed: "Разговор закрыт",
   nul_character: "В сообщении недопустимый нулевой символ",
+  spawn_refused: "Запуск сейчас отклонён",
 };
 
 /** Причина отказа, если хаб её прислал и она известна вкладке. */

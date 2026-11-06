@@ -140,6 +140,36 @@ export function detailText(raw: string | null | undefined, now: number = Date.no
   return tail ? `${head}. ${tail}` : head;
 }
 
+/** Коды структурного отказа «Запустить сейчас» (`details.spawn_refusal.code`). */
+const REFUSAL_TEXT: Record<string, string> = {
+  not_in_whitelist: 'не в белом списке владельца',
+  permission_mode_too_wide: 'режим разрешений шире родительского',
+  machine_unavailable: 'машина недоступна',
+  capability_missing: 'требуется обновление воркера',
+  no_executor_available: 'нет доступного исполнителя',
+  invalid_arguments: 'некорректные параметры запуска',
+  harness_unknown: 'агент не установлен на машине',
+  model_unknown: 'модель отсутствует в каталоге агента',
+  effort_not_allowed: 'усилие недоступно для модели',
+  workdir_not_allowed: 'рабочий каталог вне разрешённых',
+  profile_unknown: 'инструкции не найдены',
+  conversation_closed: 'разговор закрыт',
+  queue_full: 'очередь запусков заполнена',
+  rate_limited: 'слишком много запусков',
+  machine_busy: 'машина занята',
+  parent_stopped: 'сессия-родитель остановлена',
+  parent_archived: 'сессия-родитель в архиве',
+  cancelled: 'запуск отменён',
+  expired: 'срок ожидания вышел',
+  job_failed: 'задание запуска сорвалось',
+  internal_error: 'внутренняя ошибка хаба'
+};
+
+/** Отказ «Запустить сейчас»: русский текст по коду, иначе сообщение хаба. */
+export function refusalText(code: string, message: string): string {
+  return REFUSAL_TEXT[code] ?? message.trim();
+}
+
 const QUEUE_REASONS: Record<string, string> = {
   rate: 'частота запусков',
   concurrency: 'исполнители заняты',

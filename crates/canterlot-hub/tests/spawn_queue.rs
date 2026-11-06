@@ -587,7 +587,10 @@ async fn start_now_bypasses_the_guard_but_not_the_whitelist(pool: PgPool) {
         .unwrap();
     let refused = f.runtime_call(queue_id, true).await.unwrap();
     assert_eq!(refused.status, "failed", "{refused:?}");
-    assert_eq!(refused.reason.as_deref(), Some("not_in_whitelist"));
+    let refusal = refused.refusal.expect("structured refusal");
+    assert_eq!(refusal.code, spawn_queue::SpawnRefusalCode::NotInWhitelist);
+    assert_eq!(refusal.state, "failed");
+    assert!(!refusal.message.is_empty());
     let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, queue_id).await;
     assert_eq!(state, "failed");
     assert!(
@@ -1240,10 +1243,87 @@ async fn http_start_now_commits_a_permanent_failure_and_its_note(pool: PgPool) {
         .send(Method::POST, &path, Some("start-fail"), None)
         .await;
     assert_eq!(replay.status, 409);
-    assert_eq!(
-        replay.json::<Value>()["error"]["details"]["reason"],
-        "harness_unknown"
+    let replay = replay.json::<Value>();
+    assert_structured_refusal(&replay, "harness_unknown", "failed");
+}
+
+fn assert_structured_refusal(body: &Value, code: &str, state: &str) {
+    let details = &body["error"]["details"];
+    let reason = details["reason"].as_str().expect("details.reason");
+    assert!(
+        canterlot_hub::http::error::ErrorReason::parse(reason).is_some(),
+        "details.reason stays an ErrorReason enum: {body}"
     );
+    assert_eq!(reason, "spawn_refused", "{body}");
+    let refusal = &details["spawn_refusal"];
+    assert_eq!(refusal["code"], code, "{body}");
+    assert_eq!(refusal["state"], state, "{body}");
+    assert!(
+        refusal["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "the refusal carries a message: {body}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn http_start_now_refusal_is_structured_for_the_whitelist(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'synthetic')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    testkit::seed_catalog(&pool, machine).await;
+    let parent = testkit::seed_conversation(&pool, owner, machine).await;
+    sqlx::query(
+        "update conversations set harness='synthetic',permission_mode='bypass',
+           model='synthetic-small' where id=$1",
+    )
+    .bind(parent)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Пара синтетического харнесса не входит во встроенный белый список владельца.
+    let queue_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,$5,'resources',now())",
+    )
+    .bind(queue_id)
+    .bind(owner)
+    .bind(parent)
+    .bind(Uuid::now_v7())
+    .bind(json!({
+        "chain_depth": 0,
+        "args": {"harness": "synthetic", "model": "synthetic-small", "brief": "b"}
+    }))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let registry = deps.registry.clone();
+    let _session = testkit::fake_session(&registry, machine, &CAPABILITIES, true);
+    let client = TestClient::in_process(http::router(http::AppState::new(deps))).as_owner();
+    let path = format!("/api/v1/conversations/{parent}/spawn-queue/{queue_id}/start-now");
+    let refused = client
+        .send(Method::POST, &path, Some("start-whitelist"), None)
+        .await;
+    assert_eq!(refused.status, 409, "{:?}", refused.body);
+    let body = refused.json::<Value>();
+    assert_structured_refusal(&body, "not_in_whitelist", "failed");
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&pool, queue_id).await;
+    assert_eq!(state, "failed", "the refusal is committed");
+
+    // Повтор читает исход из `result`: причина остаётся той же структурой.
+    let replay = client
+        .send(Method::POST, &path, Some("start-whitelist-replay"), None)
+        .await;
+    assert_eq!(replay.status, 409);
+    assert_structured_refusal(&replay.json::<Value>(), "not_in_whitelist", "failed");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

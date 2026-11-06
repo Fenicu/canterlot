@@ -202,6 +202,7 @@ error_reasons! {
     NoLiveExecution => "no_live_execution", InvalidState;
     ConversationClosed => "conversation_closed", ConversationClosed;
     NulCharacter => "nul_character", InvalidRequest;
+    SpawnRefused => "spawn_refused", InvalidState;
 }
 
 /// Отказ команды управления: код по причине, сама причина в `details.reason`.
@@ -321,6 +322,10 @@ pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub nearest_reset: Option<chrono::DateTime<chrono::Utc>>,
+    /// Отказ «Запустить сейчас» (`spawn_refused`): код, сообщение и состояние элемента.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub spawn_refusal: Option<crate::session_tools::spawn_queue::SpawnRefusal>,
 }
 
 impl ErrorDetails {

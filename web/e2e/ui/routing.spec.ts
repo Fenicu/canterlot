@@ -274,7 +274,11 @@ test.describe('очередь запусков и маршрут в чате', (
     const { hub, api, id } = await bootOrchestrator(page);
     const item = api.queueItem(id, { title: 'Ждёт машину', reason: 'resources', detail: { detail: 'disk 12 GB free < 30 GB.' } });
     hub.flush();
-    api.startNowRefusal = 'disk 10 GB free < 30 GB.';
+    api.startNowRefusal = {
+      code: 'not_in_whitelist',
+      message: "This pair is not in the owner's spawn whitelist",
+      state: 'failed'
+    };
     const plaque = page.locator('[data-role="spawn-queue"]');
     await plaque.getByRole('button', { name: /В очереди запуска/ }).click();
     const row = plaque.locator(`[data-queue-item="${item.id}"]`);
@@ -282,7 +286,8 @@ test.describe('очередь запусков и маршрут в чате', (
     const reread = page.waitForRequest((request) => request.method() === 'GET' && /\/spawn-queue$/.test(new URL(request.url()).pathname));
     await page.getByRole('dialog').getByRole('button', { name: 'Запустить сейчас' }).click();
     await reread;
-    await expect(row.getByRole('alert')).toHaveText(`Запустить сейчас не удалось: диск: свободно 10${N}ГБ при минимуме 30${N}ГБ`);
+    // Русский текст берётся из кода отказа, а не из английского message хаба.
+    await expect(row.getByRole('alert')).toHaveText('Запустить сейчас не удалось: не в белом списке владельца');
     expect(api.spawnQueue.get(id)![0]!.attempts).toBe(1);
   });
 });

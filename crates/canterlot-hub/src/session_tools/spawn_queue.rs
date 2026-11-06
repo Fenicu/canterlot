@@ -150,6 +150,145 @@ impl QueueItemView {
     }
 }
 
+/// Код отказа «Запустить сейчас». Замкнутое перечисление: `details.spawn_refusal.code`
+/// не превращается в свободный текст. Значения совпадают с кодами инструментов запуска
+/// и состояниями элемента очереди.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnRefusalCode {
+    NotInWhitelist,
+    PermissionModeTooWide,
+    MachineUnavailable,
+    CapabilityMissing,
+    NoExecutorAvailable,
+    InvalidArguments,
+    HarnessUnknown,
+    ModelUnknown,
+    EffortNotAllowed,
+    WorkdirNotAllowed,
+    ProfileUnknown,
+    ConversationClosed,
+    QueueFull,
+    RateLimited,
+    MachineBusy,
+    ParentStopped,
+    ParentArchived,
+    Cancelled,
+    Expired,
+    JobFailed,
+    InternalError,
+    Unknown,
+}
+
+impl SpawnRefusalCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotInWhitelist => "not_in_whitelist",
+            Self::PermissionModeTooWide => "permission_mode_too_wide",
+            Self::MachineUnavailable => "machine_unavailable",
+            Self::CapabilityMissing => "capability_missing",
+            Self::NoExecutorAvailable => "no_executor_available",
+            Self::InvalidArguments => "invalid_arguments",
+            Self::HarnessUnknown => "harness_unknown",
+            Self::ModelUnknown => "model_unknown",
+            Self::EffortNotAllowed => "effort_not_allowed",
+            Self::WorkdirNotAllowed => "workdir_not_allowed",
+            Self::ProfileUnknown => "profile_unknown",
+            Self::ConversationClosed => "conversation_closed",
+            Self::QueueFull => "queue_full",
+            Self::RateLimited => "rate_limited",
+            Self::MachineBusy => "machine_busy",
+            Self::ParentStopped => "parent_stopped",
+            Self::ParentArchived => "parent_archived",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+            Self::JobFailed => "job_failed",
+            Self::InternalError => "internal_error",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [
+            Self::NotInWhitelist,
+            Self::PermissionModeTooWide,
+            Self::MachineUnavailable,
+            Self::CapabilityMissing,
+            Self::NoExecutorAvailable,
+            Self::InvalidArguments,
+            Self::HarnessUnknown,
+            Self::ModelUnknown,
+            Self::EffortNotAllowed,
+            Self::WorkdirNotAllowed,
+            Self::ProfileUnknown,
+            Self::ConversationClosed,
+            Self::QueueFull,
+            Self::RateLimited,
+            Self::MachineBusy,
+            Self::ParentStopped,
+            Self::ParentArchived,
+            Self::Cancelled,
+            Self::Expired,
+            Self::JobFailed,
+            Self::InternalError,
+            Self::Unknown,
+        ]
+        .into_iter()
+        .find(|code| code.as_str() == value)
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::NotInWhitelist => "The harness and model are not in the owner's spawn whitelist",
+            Self::PermissionModeTooWide => "The permission mode is wider than the parent session's",
+            Self::MachineUnavailable => "The machine is not available",
+            Self::CapabilityMissing => "The worker does not support this yet",
+            Self::NoExecutorAvailable => "No executor available for this task type",
+            Self::InvalidArguments => "Invalid spawn arguments",
+            Self::HarnessUnknown => "Unknown harness",
+            Self::ModelUnknown => "Unknown model",
+            Self::EffortNotAllowed => "This effort is not available for the model",
+            Self::WorkdirNotAllowed => "This working directory is not allowed",
+            Self::ProfileUnknown => "Unknown instruction preset",
+            Self::ConversationClosed => "The session is closed",
+            Self::QueueFull => "Too many spawns are already queued for this session",
+            Self::RateLimited => "Too many requests, try later",
+            Self::MachineBusy => "The machine is too busy for a new session",
+            Self::ParentStopped => "The parent session stopped",
+            Self::ParentArchived => "The parent session was archived",
+            Self::Cancelled => "The queued spawn was cancelled",
+            Self::Expired => "The queued spawn expired",
+            Self::JobFailed => "The spawn job failed",
+            Self::InternalError => "The hub could not complete the call, try later",
+            Self::Unknown => "The queued spawn could not be started",
+        }
+    }
+}
+
+/// Структурный отказ «Запустить сейчас»: код, сообщение и состояние элемента.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SpawnRefusal {
+    pub code: SpawnRefusalCode,
+    pub message: String,
+    /// Состояние элемента после отказа: `queued`, `failed`, `cancelled` или `expired`.
+    pub state: String,
+    /// Когда элемент снова попробуют запустить (`queued`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub retry_at: Option<DateTime<Utc>>,
+}
+
+impl SpawnRefusal {
+    fn new(code: SpawnRefusalCode, message: impl Into<String>, state: &str) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            state: state.to_owned(),
+            retry_at: None,
+        }
+    }
+}
+
 /// Итог «Запустить сейчас»: обычный исход всегда коммитится, чтобы переход
 /// `failed`/`expired` не откатывался вместе с ответом.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -160,11 +299,21 @@ pub struct StartNowOutcome {
     pub title: Option<String>,
     pub harness: Option<String>,
     pub model: Option<String>,
-    pub reason: Option<String>,
-    pub detail: Option<String>,
+    pub refusal: Option<SpawnRefusal>,
 }
 
 fn existing_outcome(row: &QueueRow) -> StartNowOutcome {
+    let refusal = (row.state != STATE_STARTED).then(|| {
+        let wire = row
+            .result
+            .as_ref()
+            .and_then(|value| value.get("code").or_else(|| value.get("reason")))
+            .and_then(Value::as_str);
+        let code = wire
+            .and_then(SpawnRefusalCode::parse)
+            .unwrap_or(SpawnRefusalCode::Unknown);
+        SpawnRefusal::new(code, code.message(), &row.state)
+    });
     StartNowOutcome {
         status: row.state.clone(),
         queue_id: row.id,
@@ -172,17 +321,7 @@ fn existing_outcome(row: &QueueRow) -> StartNowOutcome {
         title: None,
         harness: None,
         model: None,
-        reason: row
-            .result
-            .as_ref()
-            .and_then(|value| value.get("code").or_else(|| value.get("reason")))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        detail: row
-            .detail
-            .get("detail")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        refusal,
     }
 }
 
@@ -785,8 +924,7 @@ pub async fn start_now_in_tx(
                 title: Some(child.title),
                 harness: Some(spec.harness),
                 model: Some(spec.model),
-                reason: None,
-                detail: None,
+                refusal: None,
             })
         }
         Attempt::Blocked { reason, detail, at } => {
@@ -796,6 +934,13 @@ pub async fn start_now_in_tx(
             row.attempts += 1;
             set_state_in_tx(conn, &mut row, STATE_QUEUED, None, now, correlation_id).await?;
             wake_in_tx(conn, owner_id, parent, now, None).await?;
+            let code = match reason {
+                REASON_RATE => SpawnRefusalCode::RateLimited,
+                "concurrency" => SpawnRefusalCode::MachineBusy,
+                "limits" => SpawnRefusalCode::NoExecutorAvailable,
+                REASON_RESOURCES => SpawnRefusalCode::MachineUnavailable,
+                _ => SpawnRefusalCode::Unknown,
+            };
             Ok(StartNowOutcome {
                 status: "queued".to_owned(),
                 queue_id: row.id,
@@ -803,11 +948,15 @@ pub async fn start_now_in_tx(
                 title: None,
                 harness: None,
                 model: None,
-                reason: Some(reason.to_owned()),
-                detail: Some(detail),
+                refusal: Some(SpawnRefusal {
+                    code,
+                    message: detail,
+                    state: STATE_QUEUED.to_owned(),
+                    retry_at: Some(at),
+                }),
             })
         }
-        Attempt::Failed { code } => {
+        Attempt::Failed { code, message } => {
             row.result = Some(json!({"code": code}));
             let result = row.result.clone();
             set_state_in_tx(conn, &mut row, STATE_FAILED, result, now, correlation_id).await?;
@@ -825,6 +974,7 @@ pub async fn start_now_in_tx(
             )
             .await?;
             wake_in_tx(conn, owner_id, parent, now, None).await?;
+            let refusal = SpawnRefusalCode::parse(code).unwrap_or(SpawnRefusalCode::Unknown);
             Ok(StartNowOutcome {
                 status: "failed".to_owned(),
                 queue_id: row.id,
@@ -832,12 +982,7 @@ pub async fn start_now_in_tx(
                 title: None,
                 harness: None,
                 model: None,
-                reason: Some(code.to_owned()),
-                detail: row
-                    .detail
-                    .get("detail")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                refusal: Some(SpawnRefusal::new(refusal, message, STATE_FAILED)),
             })
         }
     }
@@ -864,6 +1009,7 @@ enum Attempt {
     },
     Failed {
         code: &'static str,
+        message: String,
     },
 }
 
@@ -898,6 +1044,7 @@ async fn try_start(
     let Ok(queued) = serde_json::from_value::<QueuedSpawn>(row.spec.clone()) else {
         return Ok(Attempt::Failed {
             code: "invalid_arguments",
+            message: SpawnRefusalCode::InvalidArguments.message().to_owned(),
         });
     };
     let args = queued.args;
@@ -920,6 +1067,7 @@ async fn try_start(
             Err(spawn::RouteFailure::Tool(error)) => {
                 return Ok(Attempt::Failed {
                     code: error.code.as_str(),
+                    message: error.message,
                 });
             }
             Err(spawn::RouteFailure::NoExecutor { considered, reset }) => {
@@ -936,6 +1084,7 @@ async fn try_start(
                     _ => {
                         return Ok(Attempt::Failed {
                             code: "no_executor_available",
+                            message: detail,
                         });
                     }
                 }
@@ -955,6 +1104,7 @@ async fn try_start(
             Err(error) => {
                 return Ok(Attempt::Failed {
                     code: error.code.as_str(),
+                    message: error.message,
                 });
             }
         },
@@ -974,6 +1124,7 @@ async fn try_start(
     {
         return Ok(Attempt::Failed {
             code: "not_in_whitelist",
+            message: SpawnRefusalCode::NotInWhitelist.message().to_owned(),
         });
     }
     let mut metrics_stale = false;
@@ -986,6 +1137,7 @@ async fn try_start(
             if at >= row.expires_at {
                 return Ok(Attempt::Failed {
                     code: "rate_limited",
+                    message: SpawnRefusalCode::RateLimited.message().to_owned(),
                 });
             }
             return Ok(Attempt::Blocked {
@@ -1110,6 +1262,7 @@ async fn try_start(
             } else {
                 Ok(Attempt::Failed {
                     code: error.code.as_str(),
+                    message: error.message,
                 })
             }
         }
@@ -1214,7 +1367,7 @@ pub(crate) async fn run_job_in_tx(
                 row.not_before = at;
                 set_state_in_tx(conn, &mut row, STATE_QUEUED, None, now, correlation_id).await?;
             }
-            Attempt::Failed { code } => {
+            Attempt::Failed { code, .. } => {
                 row.result = Some(json!({"code": code}));
                 let result = row.result.clone();
                 set_state_in_tx(conn, &mut row, STATE_FAILED, result, now, correlation_id).await?;

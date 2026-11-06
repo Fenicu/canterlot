@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { detailText, queueReasonLabel, reasonText, utcClock, verdictLabel } from '#lib/routing/reasons.js';
+import { detailText, queueReasonLabel, reasonText, refusalText, utcClock, verdictLabel } from '#lib/routing/reasons.js';
 import { asDecision, routeLine, skippedText } from '#lib/routing/decision.js';
 
 const NOW = Date.UTC(2026, 10, 6, 12, 0);
@@ -55,6 +55,15 @@ describe('reason translation', () => {
     expect(detailText('memory 2 GB available < 4 GB; disk 4% free < 10%')).toBe(
       `память: доступно 2${N}ГБ при минимуме 4${N}ГБ; диск: свободно 4${N}% при минимуме 10${N}%`
     );
+  });
+
+  test('start-now refusal names the code in Russian and falls back to the message', () => {
+    expect(refusalText('not_in_whitelist', "This pair is not in the owner's spawn whitelist")).toBe(
+      'не в белом списке владельца'
+    );
+    expect(refusalText('machine_unavailable', 'The machine is not available')).toBe('машина недоступна');
+    expect(refusalText('brand_new_code', 'Новое объяснение')).toBe('Новое объяснение');
+    expect(refusalText('brand_new_code', '')).toBe('');
   });
 
   test('queue reasons and verdicts have Russian labels', () => {

@@ -1712,13 +1712,15 @@ export interface components {
             question_id?: string;
             reason?: components["schemas"]["ErrorReason"];
             reasons?: components["schemas"]["ArchiveReason"][];
+            /** @description Отказ «Запустить сейчас» (`spawn_refused`): код, сообщение и состояние элемента. */
+            spawn_refusal?: components["schemas"]["SpawnRefusal"];
             winner_decision?: components["schemas"]["DecisionBody"];
         };
         ErrorEnvelope: {
             error: components["schemas"]["ErrorBody"];
         };
         /** @enum {string} */
-        ErrorReason: "closed_without_decision" | "generation_advanced" | "invalid_idempotency_key" | "input_not_queued" | "no_running_turn" | "request_open" | "compacting" | "unsupported_harness" | "capability_missing" | "revision_conflict" | "steer_in_flight" | "empty_content" | "content_too_long" | "attachment_unavailable" | "attachment_not_ready" | "attachment_not_found" | "run_in_progress" | "no_live_execution" | "conversation_closed" | "nul_character";
+        ErrorReason: "closed_without_decision" | "generation_advanced" | "invalid_idempotency_key" | "input_not_queued" | "no_running_turn" | "request_open" | "compacting" | "unsupported_harness" | "capability_missing" | "revision_conflict" | "steer_in_flight" | "empty_content" | "content_too_long" | "attachment_unavailable" | "attachment_not_ready" | "attachment_not_found" | "run_in_progress" | "no_live_execution" | "conversation_closed" | "nul_character" | "spawn_refused";
         /** @enum {string} */
         ErrorScope: "browser" | "auth" | "hub_db" | "delivery" | "worker_disk" | "cli_start" | "adapter_protocol" | "agent_service";
         Evidence: {
@@ -2901,6 +2903,25 @@ export interface components {
         SpawnQueueView: {
             items: components["schemas"]["QueueItemView"][];
         };
+        /** @description Структурный отказ «Запустить сейчас»: код, сообщение и состояние элемента. */
+        SpawnRefusal: {
+            code: components["schemas"]["SpawnRefusalCode"];
+            message: string;
+            /**
+             * Format: date-time
+             * @description Когда элемент снова попробуют запустить (`queued`).
+             */
+            retry_at?: string;
+            /** @description Состояние элемента после отказа: `queued`, `failed`, `cancelled` или `expired`. */
+            state: string;
+        };
+        /**
+         * @description Код отказа «Запустить сейчас». Замкнутое перечисление: `details.spawn_refusal.code`
+         *     не превращается в свободный текст. Значения совпадают с кодами инструментов запуска
+         *     и состояниями элемента очереди.
+         * @enum {string}
+         */
+        SpawnRefusalCode: "not_in_whitelist" | "permission_mode_too_wide" | "machine_unavailable" | "capability_missing" | "no_executor_available" | "invalid_arguments" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "workdir_not_allowed" | "profile_unknown" | "conversation_closed" | "queue_full" | "rate_limited" | "machine_busy" | "parent_stopped" | "parent_archived" | "cancelled" | "expired" | "job_failed" | "internal_error" | "unknown";
         SpeedStats: {
             /**
              * Format: int64
@@ -5387,19 +5408,8 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description Элемент уже завершён */
+            /** @description Элемент уже завершён или запуск отклонён: `details.reason` = `spawn_refused`, разбор в `details.spawn_refusal` */
             409: {
-                headers: {
-                    /** @description Часы хаба: целые миллисекунды Unix */
-                    "X-Server-Time-Ms"?: number;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Белый список или режим не пропускают запуск */
-            422: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
