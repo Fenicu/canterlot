@@ -31,7 +31,7 @@ struct Fx {
     machine: Uuid,
     parent: Uuid,
     execution: Uuid,
-    _session: FakeSession,
+    session: Option<FakeSession>,
 }
 
 fn model(id: &str, efforts: &[&str]) -> Value {
@@ -138,7 +138,7 @@ impl Fx {
             machine: seed.machine_id,
             parent: seed.conversation_id,
             execution: started.execution_id,
-            _session: session,
+            session: Some(session),
         }
     }
 
@@ -1320,4 +1320,52 @@ async fn dequeue_cancels_items_of_a_stopped_parent(pool: PgPool) {
     let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
     assert_eq!(state, "cancelled");
     assert!(child.is_none());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_disconnected_machine_keeps_an_isolated_item_queued(pool: PgPool) {
+    let mut f = Fx::new(pool).await;
+    let queue_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,$5,'resources',now()-interval '1 second')",
+    )
+    .bind(queue_id)
+    .bind(f.owner)
+    .bind(f.parent)
+    .bind(Uuid::now_v7())
+    .bind(json!({
+        "chain_depth": 0,
+        "args": {
+            "harness": "opencode",
+            "model": "opencode-go/beam-free",
+            "brief": "b",
+            "isolated": true
+        }
+    }))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    // Воркер отключился до первого тика после перезапуска хаба.
+    f.session.take();
+    f.run_dequeue(queue_id, Utc::now()).await;
+    let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(
+        state, "queued",
+        "connectivity loss is not a permanent failure"
+    );
+    assert!(child.is_none());
+
+    // Воркер вернулся: тот же элемент запускается.
+    f.session = Some(testkit::fake_session(
+        &f.context.registry,
+        f.machine,
+        &CAPABILITIES,
+        true,
+    ));
+    make_due(&f.pool, queue_id).await;
+    f.run_dequeue(queue_id, Utc::now()).await;
+    let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "started");
+    assert!(child.is_some());
 }

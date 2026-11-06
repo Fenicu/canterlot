@@ -823,6 +823,15 @@ async fn try_start(
             at: retry_at(runtime.spawn_queue, now),
         });
     };
+    // После перезапуска хаба тик может обогнать повторное подключение воркера:
+    // отсутствие связи — не постоянная нехватка возможности.
+    if registry.session_info(caller.machine_id).is_none() {
+        return Ok(Attempt::Blocked {
+            reason: "resources",
+            detail: "the machine is not connected".to_owned(),
+            at: retry_at(runtime.spawn_queue, now),
+        });
+    }
     let Ok(queued) = serde_json::from_value::<QueuedSpawn>(row.spec.clone()) else {
         return Ok(Attempt::Failed {
             code: "invalid_arguments",
