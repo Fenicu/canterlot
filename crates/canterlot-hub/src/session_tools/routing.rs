@@ -1063,7 +1063,7 @@ pub async fn live_counts(
     let rows: Vec<(String, String, i64)> = sqlx::query_as(
         "select c.harness,c.model,count(*) from conversations c
           join conversation_derived d on d.conversation_id=c.id
-          where c.owner_id=$1 and c.parent_conversation_id is not null
+          where c.owner_id=$1 and c.parent_conversation_id is not null and c.trashed_at is null
             and (d.activity_state in ('working','stalled')
               or (d.activity_state='idle' and d.queue_queued > 0)
               or exists(select 1 from nudge_rules r
