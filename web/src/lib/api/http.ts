@@ -225,6 +225,8 @@ const CONTENT_PATCH = /^\/api\/v1\/attachments\/[^/]+\/content$/;
 const DRAFT_PUT = /^\/api\/v1\/conversations\/[^/]+\/draft$/;
 const MARK_READ = /^\/api\/v1\/conversations\/[^/]+\/read$/;
 const LIMITS_REFRESH = /^\/api\/v1\/limits\/refresh$/;
+// Предпросмотр маршрута только читает: хаб принимает его без ключа идемпотентности.
+const ROUTING_PREVIEW = /^\/api\/v1\/routing-policy\/preview$/;
 
 export function requestPathname(path: string): string {
   const bare = path.split("#")[0]?.split("?")[0] ?? path;
@@ -241,6 +243,7 @@ function isMutationExempt(method: HttpMethod, path: string): boolean {
   if (method === "PATCH" && CONTENT_PATCH.test(pathname)) return true;
   if (method === "POST" && MARK_READ.test(pathname)) return true;
   if (method === "POST" && LIMITS_REFRESH.test(pathname)) return true;
+  if (method === "POST" && ROUTING_PREVIEW.test(pathname)) return true;
   // Полная замена черновика идемпотентна: повтор того же тела даёт тот же текст.
   if (method === "PUT" && DRAFT_PUT.test(pathname)) return true;
   return false;

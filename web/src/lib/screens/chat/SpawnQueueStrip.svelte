@@ -85,12 +85,11 @@
 {/if}
 
 {#if confirming}
-  {@const id = confirming}
   <ConfirmDialog
     title="Запустить сейчас?"
     body={START_NOW_WARNING}
     confirmLabel="Запустить сейчас"
-    onconfirm={() => { confirming = null; void startNow(id); }}
+    onconfirm={() => { const id = confirming; confirming = null; if (id) void startNow(id); }}
     onclose={() => (confirming = null)}
   />
 {/if}

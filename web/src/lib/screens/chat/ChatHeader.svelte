@@ -27,6 +27,7 @@
 	import { asDecision } from '#lib/routing/decision.js';
 	import { routingTitles } from '#lib/routing/titles.svelte.js';
 	import { getRuntime } from '#lib/app/runtime.js';
+	import { pendingItems } from '#lib/routing/queue.js';
 
 	interface DetailLike {
 		title?: string;
@@ -88,7 +89,7 @@
 	} = $props();
 
 	let menuOpen = $state(false);
-	const delegated = $derived(hasChildren || chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
+	const delegated = $derived(hasChildren || pendingItems(chat.spawnQueue).length > 0 || chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
 	const alarmCount = $derived(
 		chat.alarms.filter((alarm) => alarm.state === 'armed' || alarm.state === 'failed').length
 	);

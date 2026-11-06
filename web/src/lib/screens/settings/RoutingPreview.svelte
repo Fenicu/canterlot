@@ -57,6 +57,13 @@
     return `Страж: запуск встанет в очередь — ${why}`;
   });
 
+  /** Лимит уже называет провайдера («Codex — неделя…»), остальные причины — после имени агента. */
+  function refusedLine(entry: { harness: string; reason: string }): string {
+    const reason = reasonText(entry.reason);
+    const name = entry.harness ? harnessName(entry.harness) : '';
+    return !name || reason.startsWith(`${name} — `) ? reason : `${name} — ${reason}`;
+  }
+
   async function check() {
     if (!taskType || busy) return;
     busy = true;
@@ -105,7 +112,7 @@
       <p><strong>Ни один кандидат сейчас не подходит</strong></p>
       <ol class="refused">
         {#each refused.entries as entry, index (index)}
-          <li>{entry.harness ? `${harnessName(entry.harness)} — ` : ''}{reasonText(entry.reason)}</li>
+          <li>{refusedLine(entry)}</li>
         {/each}
       </ol>
       {#if refused.reset}<p class="note">Ближайший сброс лимита в {utcClock(refused.reset)}: запуск встанет в очередь, если сброс не дальше 6 часов</p>{/if}

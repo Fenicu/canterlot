@@ -1113,8 +1113,8 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       const answer = api.previewRoutingPolicy(body.task_type, body.level, body.workdir);
       await route.fulfill({ headers: headers(), json: answer });
     } catch (error) {
-      const failure = error as { status: number; code: string; message: string };
-      await route.fulfill({ status: failure.status, headers: headers(), json: errorBody(failure.code, failure.message) });
+      const failure = error as { status: number; code: string; message: string; details?: Record<string, unknown> };
+      await route.fulfill({ status: failure.status, headers: headers(), json: errorBody(failure.code, failure.message, failure.details) });
     }
   });
 
@@ -1129,8 +1129,9 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const parts = new URL(route.request().url()).pathname.split('/');
     const id = parts[4] ?? '';
     const queueId = parts.at(-1) ?? '';
+    const answer = api.cancelSpawnQueue(id, queueId);
     hub.flush();
-    await route.fulfill({ headers: headers(), json: api.cancelSpawnQueue(id, queueId) });
+    await route.fulfill({ headers: headers(), json: answer });
   });
 
   await page.route(/\/api\/v1\/conversations\/[^/]+\/spawn-queue\/[^/]+\/start-now$/, async (route) => {
@@ -1138,8 +1139,9 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const parts = new URL(route.request().url()).pathname.split('/');
     const id = parts[4] ?? '';
     const queueId = parts.at(-2) ?? '';
+    const answer = api.startSpawnQueueNow(id, queueId);
     hub.flush();
-    await route.fulfill({ headers: headers(), json: api.startSpawnQueueNow(id, queueId) });
+    await route.fulfill({ headers: headers(), json: answer });
   });
 
   await page.route('**/api/v1/limit-settings', async (route) => {

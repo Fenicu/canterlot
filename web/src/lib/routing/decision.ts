@@ -54,16 +54,14 @@ export function asDecision(value: unknown): RouteDecision | null {
   };
 }
 
-/** Причина пропуска без повтора имени провайдера: «Codex — неделя 83 %…» уже называет его. */
+/**
+ * Причина пропуска: лимит принадлежит провайдеру, и строка «Codex — неделя 83 %…» уже
+ * называет его; остальные причины идут после имени пары.
+ */
 export function skippedText(entry: Considered, titles?: ModelTitles, now?: number): string {
-  const name = pairName(entry.harness, entry.model, titles);
   const reason = reasonText(entry.reason, now) || verdictLabel(entry.verdict);
-  const provider = harnessName(entry.harness);
-  if (reason.startsWith(`${provider} — `)) {
-    const rest = reason.slice(provider.length + 3);
-    return name === provider ? `${provider} — ${rest}` : `${name} — ${rest}`;
-  }
-  return `${name} — ${reason}`;
+  if (reason.startsWith(`${harnessName(entry.harness)} — `)) return reason;
+  return `${pairName(entry.harness, entry.model, titles)} — ${reason}`;
 }
 
 export function skipped(decision: RouteDecision): Considered[] {

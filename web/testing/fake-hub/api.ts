@@ -177,33 +177,55 @@ export class FakeHubApi {
 		return true;
 	}
 
-	/** Предпросмотр выбора для C3: первый кандидат типа или ошибка вида хаба. */
-	previewRoutingPolicy(task_type: string, level?: string, workdir?: string): { decision: unknown; machine: unknown } {
+	/** Причины пропуска для предпросмотра: ключ `harness/model`, значение — вердикт и английская причина хаба. */
+	readonly routingSkips = new Map<string, { verdict: string; reason: string }>();
+	/** Вердикт стража в предпросмотре. */
+	routingGuard: { stale: boolean; blocked: boolean; violations: string[]; detail: string | null } = { stale: false, blocked: false, violations: [], detail: null };
+	/** Строка `no_executor_available` хаба: предпросмотр отказывает с ней в `details.reason`. */
+	routingRefusal: string | null = null;
+	readonly routingPreviews: { task_type: string; level?: string; workdir?: string }[] = [];
+
+	/** Предпросмотр выбора: кандидаты по порядку, первый не пропущенный выбран, как у хаба. */
+	previewRoutingPolicy(task_type: string, level?: string, workdir?: string): { decision: unknown; machine: unknown; guard: unknown; considered: unknown[] } {
+		this.routingPreviews.push({ task_type, level, workdir });
 		const policy = (this.routingPolicy ?? this.builtinRoutingPolicy) as {
-			task_types: Record<string, { title: string; candidates: { harness: string; model: string; effort?: string }[] }>;
+			task_types: Record<string, { title: string; candidates: { harness: string; model: string; effort?: string | null; nudge?: unknown; watchdog_minutes?: number | null }[] }>;
 		};
 		const task = policy.task_types[task_type];
 		if (!task) {
 			throw { status: 404, code: 'task_type_unknown', message: `Unknown task type ${task_type}` };
 		}
-		const candidate = task.candidates[0];
-		if (!candidate) throw { status: 422, code: 'no_executor_available', message: 'No executor available' };
-		void level;
-		void workdir;
+		if (this.routingRefusal) throw { status: 422, code: 'no_executor_available', message: 'No executor available', details: { reason: this.routingRefusal } };
+		const considered: { harness: string; model: string; verdict: string; reason: string }[] = [];
+		let chosen: (typeof task.candidates)[number] | undefined;
+		for (const candidate of task.candidates) {
+			const skip = this.routingSkips.get(`${candidate.harness}/${candidate.model}`);
+			if (skip) {
+				considered.push({ harness: candidate.harness, model: candidate.model, ...skip });
+				continue;
+			}
+			considered.push({ harness: candidate.harness, model: candidate.model, verdict: 'chosen', reason: '' });
+			chosen = candidate;
+			break;
+		}
+		if (!chosen) throw { status: 422, code: 'no_executor_available', message: 'No executor available' };
+		const decision = {
+			policy_revision: this.routingPolicyRevision,
+			task_type,
+			level: level ?? null,
+			harness: chosen.harness,
+			model: chosen.model,
+			effort: chosen.effort ?? level ?? 'medium',
+			preset: null,
+			nudge: chosen.nudge ?? false,
+			watchdog_minutes: chosen.watchdog_minutes ?? null,
+			considered
+		};
 		return {
-			decision: {
-				policy_revision: this.routingPolicyRevision,
-				task_type,
-				level: level ?? null,
-				harness: candidate.harness,
-				model: candidate.model,
-				effort: candidate.effort ?? 'medium',
-				preset: null,
-				nudge: false,
-				watchdog_minutes: null,
-				considered: [{ harness: candidate.harness, model: candidate.model, verdict: 'chosen', reason: '' }]
-			},
-			machine: { free_disk_gb: 72, load_per_core: 0.6, mem_available_gb: 41, observed_at: '2026-11-05T12:00:00.000Z', stale: false }
+			decision,
+			machine: { free_disk_gb: 72, load_per_core: 0.6, mem_available_gb: 41, observed_at: '2026-11-05T12:00:00.000Z', stale: false },
+			guard: this.routingGuard,
+			considered
 		};
 	}
 

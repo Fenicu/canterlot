@@ -102,9 +102,12 @@ describe('route line', () => {
     expect(routeLine({ ...decision, considered: [] }, '')).toBe('Маршрут «bugfix»: deepseek-v4.1-flash · высокое');
   });
 
-  test('skipped text puts the model name before a provider-prefixed reason', () => {
+  test('skipped text names the provider for limits and the pair otherwise', () => {
     expect(skippedText({ harness: 'claude_code', model: 'opus', verdict: 'limits_over', reason: 'claude weekly 91% > 90%' })).toBe(
-      `opus — неделя 91${N}% при пороге 90${N}%`
+      `Claude — неделя 91${N}% при пороге 90${N}%`
+    );
+    expect(skippedText({ harness: 'claude_code', model: 'opus', verdict: 'skipped', reason: "not in the owner's list" })).toBe(
+      'opus — не в белом списке владельца'
     );
   });
 
