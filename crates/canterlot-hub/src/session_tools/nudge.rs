@@ -15,8 +15,9 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use super::{
-    Caller, ToolContext, ToolError, ToolErrorCode, access, origin, parse_arguments, send,
-    settle::{SettleConfig, Settled},
+    Caller, ToolContext, ToolError, ToolErrorCode, access, origin, parse_arguments, paths,
+    probe::PathProbe,
+    send, settle::{SettleConfig, Settled},
     subs, summary,
 };
 use crate::{
@@ -69,6 +70,8 @@ pub struct NudgeRuleView {
     pub max_total: i32,
     pub done_markers: Vec<String>,
     pub context_warn_percent: Option<i32>,
+    /// Файл отчёта: путь и рост считаются прогрессом.
+    pub report_file: Option<String>,
     pub set_by: String,
     pub set_by_session: Option<Uuid>,
     pub notify_session_id: Option<Uuid>,
@@ -103,7 +106,6 @@ struct RuleRow {
     #[allow(dead_code)]
     text_preset_id: Option<String>,
     context_warn_percent: Option<i32>,
-    #[allow(dead_code)]
     report_file: Option<String>,
     #[allow(dead_code)]
     classifier: Option<Value>,
@@ -131,6 +133,7 @@ impl RuleRow {
             max_total: self.max_total,
             done_markers: self.done_markers.clone(),
             context_warn_percent: self.context_warn_percent,
+            report_file: self.report_file.clone(),
             set_by: self.set_by.clone(),
             set_by_session: self.set_by_conversation,
             notify_session_id: self.notify_conversation_id,
@@ -151,6 +154,10 @@ pub struct Signals {
     pub uncommitted: bool,
     pub short_turn: bool,
     pub context_high: bool,
+    /// Файл отчёта ещё не появился: это сигнал текста толчка.
+    pub report_missing: bool,
+    /// Пробу отчёта снять не удалось: сигнал только записывается, толчок не блокирует.
+    pub report_probe_failed: bool,
     pub idle_minutes: i64,
     pub last_turn_seconds: i64,
     pub tools: i64,
@@ -183,6 +190,12 @@ impl Signals {
         }
         if self.context_high {
             out.push("context almost full".to_owned());
+        }
+        if self.report_missing {
+            out.push("report file does not exist yet".to_owned());
+        }
+        if self.report_probe_failed {
+            out.push("report file was not probed".to_owned());
         }
         out
     }
@@ -315,6 +328,11 @@ struct Baseline {
     dirty: bool,
     files: String,
     report_size: i64,
+    #[serde(default)]
+    report_mtime: Option<DateTime<Utc>>,
+    /// Отчёт действительно измерен: провал пробы не считается прогрессом.
+    #[serde(default)]
+    report_known: bool,
     run_id: Option<Uuid>,
     tools: i64,
     working_ms: i64,
@@ -344,6 +362,7 @@ async fn facts_in_tx(
     target_id: Uuid,
     rule: &RuleRow,
     now: DateTime<Utc>,
+    report: Option<&PathProbe>,
 ) -> Result<Facts, sqlx::Error> {
     let answer: Option<String> = sqlx::query_scalar(
         "select content from blocks
@@ -427,6 +446,9 @@ async fn facts_in_tx(
         (Some(percent), Some(threshold)) => percent >= i64::from(threshold),
         _ => false,
     };
+    // Отчёт: есть ли он и насколько вырос с прошлого толчка. Провал пробы не мешает
+    // толчку: сигнал только записывается, а базой остаётся прошлое наблюдение.
+    let report = report_signals(report);
     let signals = Signals {
         no_marker,
         question_in_text,
@@ -435,6 +457,8 @@ async fn facts_in_tx(
         uncommitted: git.available && git.dirty,
         short_turn,
         context_high,
+        report_missing: report.missing,
+        report_probe_failed: report.failed,
         idle_minutes,
         last_turn_seconds: duration_ms / 1000,
         tools,
@@ -443,7 +467,9 @@ async fn facts_in_tx(
         head: git.head_after.clone(),
         dirty: git.dirty,
         files: hex_digest(files.join("\n").as_bytes()),
-        report_size: 0,
+        report_size: report.size,
+        report_mtime: report.mtime,
+        report_known: report.known,
         run_id,
         tools,
         working_ms,
@@ -488,16 +514,68 @@ async fn machine_busy_after(
     Ok(busy.unwrap_or(false))
 }
 
+/// Факты отчёта: размер, время изменения, известен ли он и два сигнала.
+/// Провал пробы не делает вид, что файла нет: он не влияет на прогресс.
+struct ReportFacts {
+    size: i64,
+    mtime: Option<DateTime<Utc>>,
+    known: bool,
+    missing: bool,
+    failed: bool,
+}
+
+fn report_signals(report: Option<&PathProbe>) -> ReportFacts {
+    match report {
+        Some(PathProbe::Exists { size, mtime, .. }) => ReportFacts {
+            size: i64::try_from(*size).unwrap_or(i64::MAX),
+            mtime: *mtime,
+            known: true,
+            missing: false,
+            failed: false,
+        },
+        Some(PathProbe::Missing) => ReportFacts {
+            size: 0,
+            mtime: None,
+            known: true,
+            missing: true,
+            failed: false,
+        },
+        Some(
+            PathProbe::Unavailable
+            | PathProbe::CapabilityMissing
+            | PathProbe::Error(_)
+            | PathProbe::NotAllowed(_),
+        ) => ReportFacts {
+            size: 0,
+            mtime: None,
+            known: false,
+            missing: false,
+            failed: true,
+        },
+        None => ReportFacts {
+            size: 0,
+            mtime: None,
+            known: false,
+            missing: false,
+            failed: false,
+        },
+    }
+}
+
 fn still_progress(baseline: Option<&Value>, current: &Baseline) -> bool {
     let Some(baseline) =
         baseline.and_then(|value| serde_json::from_value::<Baseline>(value.clone()).ok())
     else {
         return true;
     };
+    let report_progress = current.report_known
+        && baseline.report_known
+        && (current.report_size != baseline.report_size
+            || current.report_mtime != baseline.report_mtime);
     baseline.head != current.head
         || baseline.dirty != current.dirty
         || baseline.files != current.files
-        || current.report_size > baseline.report_size
+        || report_progress
         || (baseline.run_id != current.run_id && current.tools > 0 && current.working_ms >= 60_000)
 }
 
@@ -678,7 +756,7 @@ pub async fn gate_in_tx(
     if state != Settled::Idle || !matches!(rule.state.as_str(), "watching" | "pending") {
         return Ok(false);
     }
-    let facts = facts_in_tx(conn, target_id, &rule, now).await?;
+    let facts = facts_in_tx(conn, target_id, &rule, now, None).await?;
     if facts.signals.context_high {
         warn_context_in_tx(conn, &mut rule, &facts, now).await?;
     }
@@ -822,7 +900,7 @@ pub async fn would_hold_in_tx(
     if !rule.enabled || !matches!(rule.state.as_str(), "watching" | "pending") {
         return Ok(false);
     }
-    let facts = facts_in_tx(conn, target_id, &rule, now).await?;
+    let facts = facts_in_tx(conn, target_id, &rule, now, None).await?;
     Ok(facts.signals.no_marker && !facts.signals.question_in_text)
 }
 
@@ -847,6 +925,7 @@ pub async fn run_job_in_tx(
     correlation_id: Uuid,
     settle_config: &SettleConfig,
     thresholds: &crate::activity::Thresholds,
+    probe: Option<PathProbe>,
 ) -> Result<JobOutcome, SubmitError> {
     let Some(target) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -951,7 +1030,7 @@ pub async fn run_job_in_tx(
             json!({"state":"exhausted","reason":reason}),
         ));
     }
-    let facts = facts_in_tx(conn, target, &rule, now).await?;
+    let facts = facts_in_tx(conn, target, &rule, now, probe.as_ref()).await?;
     let progress = still_progress(rule.progress_baseline.as_ref(), &facts.baseline);
     let consecutive = if progress { 1 } else { rule.consecutive + 1 };
     if consecutive > rule.max_consecutive || rule.total >= rule.max_total {
@@ -1519,6 +1598,11 @@ fn nudge_text(rule: &RuleRow, template: &str, signals: &Signals, background: boo
              Check its output now; if it is still running, wait for it inside your turn, then continue.",
         );
     }
+    if signals.report_missing
+        && let Some(path) = rule.report_file.as_deref()
+    {
+        text.push_str(&format!("\nThe report file {path} does not exist yet."));
+    }
     text
 }
 
@@ -1536,6 +1620,8 @@ struct SetArgs {
     done_markers: Option<Vec<String>>,
     text_preset: Option<String>,
     context_warn_percent: Option<i32>,
+    /// Файл отчёта: путь от рабочего каталога цели; рост считается прогрессом.
+    report_file: Option<String>,
 }
 
 fn validate_set(args: &SetArgs) -> Result<(), ToolError> {
@@ -1841,6 +1927,7 @@ async fn upsert_rule_in_tx(
     author: &access::Session,
     target_id: Uuid,
     args: &SetArgs,
+    report_file: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<RuleRow, sqlx::Error> {
     let enabled = args.enabled.unwrap_or(true);
@@ -1851,10 +1938,10 @@ async fn upsert_rule_in_tx(
     sqlx::query_as(
         "insert into nudge_rules(conversation_id,owner_id,set_by,set_by_conversation,
              notify_conversation_id,enabled,idle_minutes,background_minutes,max_consecutive,
-             max_total,done_markers,text_preset_id,context_warn_percent,state,created_at,updated_at)
+             max_total,done_markers,text_preset_id,context_warn_percent,report_file,state,created_at,updated_at)
          values($1,$2,'agent',$3,$3,$4,
              coalesce($5,3),greatest(coalesce($5,3),10),coalesce($6,3),20,$7,$10,
-             coalesce($8,80),'watching',$9,$9)
+             coalesce($8,80),$11,'watching',$9,$9)
          on conflict(conversation_id) do update set
              enabled=excluded.enabled,
              idle_minutes=excluded.idle_minutes,
@@ -1863,6 +1950,7 @@ async fn upsert_rule_in_tx(
              done_markers=excluded.done_markers,
              text_preset_id=excluded.text_preset_id,
              context_warn_percent=excluded.context_warn_percent,
+             report_file=coalesce($11,nudge_rules.report_file),
              notify_conversation_id=excluded.notify_conversation_id,
              set_by='agent',set_by_conversation=$3,
              state=case when nudge_rules.state='exhausted' and excluded.enabled
@@ -1882,6 +1970,7 @@ async fn upsert_rule_in_tx(
     .bind(args.context_warn_percent)
     .bind(now)
     .bind(&args.text_preset)
+    .bind(report_file)
     .fetch_one(&mut *conn)
     .await
 }
@@ -1902,6 +1991,49 @@ pub async fn set(
     if args.enabled == Some(false) {
         return clear(context, caller, json!({"session_id": args.session_id})).await;
     }
+    // Файл отчёта: путь проверяется и пробуется до транзакции, чтобы RPC не держал
+    // очередь автора и цели. Проба тем же путём отвечает, что файла ещё нет.
+    let report_file = match args.report_file.as_deref() {
+        Some(raw) => {
+            let row: Option<(String, Option<Uuid>)> = sqlx::query_as(
+                "select workdir,machine_id from conversations where id=$1 and owner_id=$2",
+            )
+            .bind(args.session_id)
+            .bind(caller.owner_id)
+            .fetch_optional(&context.pool)
+            .await?;
+            let Some((workdir, machine)) = row else {
+                return Err(ToolError::new(ToolErrorCode::SessionNotFound));
+            };
+            let Some(machine) = machine else {
+                return Err(ToolError::new(ToolErrorCode::MachineUnavailable));
+            };
+            let resolved = paths::resolve(raw, Some(&workdir))?;
+            match crate::session_tools::probe::ask(&context.registry, machine, &resolved, 0).await {
+                PathProbe::Missing | PathProbe::Exists { .. } => {}
+                PathProbe::NotAllowed(reason) => {
+                    return Err(ToolError::with_message(
+                        ToolErrorCode::PathNotAllowed,
+                        format!("The path was refused: {reason}"),
+                    ));
+                }
+                PathProbe::CapabilityMissing => {
+                    return Err(ToolError::new(ToolErrorCode::CapabilityMissing));
+                }
+                PathProbe::Unavailable => {
+                    return Err(ToolError::new(ToolErrorCode::MachineUnavailable));
+                }
+                PathProbe::Error(reason) => {
+                    return Err(ToolError::with_message(
+                        ToolErrorCode::MachineUnavailable,
+                        format!("The machine could not probe the path: {reason}"),
+                    ));
+                }
+            }
+            Some(resolved)
+        }
+        None => None,
+    };
     let now = Utc::now();
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
@@ -1913,7 +2045,16 @@ pub async fn set(
     access::check_read_only(&author, &target)?;
     check_text_preset_in_tx(&mut tx, caller.owner_id, args.text_preset.as_deref()).await?;
     send::lock_queue(&mut tx, target.id).await?;
-    let rule = upsert_rule_in_tx(&mut tx, caller.owner_id, &author, target.id, &args, now).await?;
+    let rule = upsert_rule_in_tx(
+        &mut tx,
+        caller.owner_id,
+        &author,
+        target.id,
+        &args,
+        report_file.as_deref(),
+        now,
+    )
+    .await?;
     changed_in_tx(&mut tx, &rule, caller.call_id, Some("set")).await?;
     tx.commit().await?;
     if let Some(dispatcher) = &context.dispatcher {
@@ -1987,6 +2128,12 @@ pub fn validate_spawn_arg(value: &Option<Value>) -> Result<(), ToolError> {
             }
             let args: SetArgs = parse_arguments(value)?;
             validate_set(&args)?;
+            if args.report_file.is_some() {
+                return Err(ToolError::with_message(
+                    ToolErrorCode::InvalidArguments,
+                    "report_file is set by nudge_set once the session exists: the path is relative to its workdir",
+                ));
+            }
             Ok(())
         }
         Some(_) => Err(ToolError::new(ToolErrorCode::InvalidArguments)),
@@ -2017,7 +2164,7 @@ pub async fn set_for_child_in_tx(
     let args: SetArgs = parse_arguments(value)?;
     validate_set(&args)?;
     check_text_preset_in_tx(conn, owner_id, args.text_preset.as_deref()).await?;
-    let rule = upsert_rule_in_tx(conn, owner_id, author, child, &args, now).await?;
+    let rule = upsert_rule_in_tx(conn, owner_id, author, child, &args, None, now).await?;
     changed_in_tx(conn, &rule, Uuid::now_v7(), Some("set")).await?;
     Ok(())
 }
@@ -2156,6 +2303,8 @@ mod tests {
             dirty: true,
             files: "f".into(),
             report_size: 0,
+            report_mtime: None,
+            report_known: false,
             run_id: Some(Uuid::nil()),
             tools: 2,
             working_ms: 90_000,

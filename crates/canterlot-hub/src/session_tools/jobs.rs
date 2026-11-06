@@ -119,6 +119,7 @@ pub async fn run_in_tx(
     settle: &crate::session_tools::settle::SettleConfig,
     thresholds: &crate::activity::Thresholds,
     spawn_runtime: Option<&crate::session_tools::spawn_queue::Runtime<'_>>,
+    probe: Option<crate::session_tools::probe::PathProbe>,
 ) -> Result<JobOutcome, SubmitError> {
     let Some(subscriber) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -193,8 +194,14 @@ pub async fn run_in_tx(
         }
         Action::AlarmProbe => {
             Ok(
-                crate::session_tools::alarms::probe_job_in_tx(conn, job, now, correlation_id)
-                    .await?,
+                crate::session_tools::alarms::probe_job_in_tx(
+                    conn,
+                    job,
+                    now,
+                    correlation_id,
+                    probe,
+                )
+                .await?,
             )
         }
         Action::Nudge => {
@@ -205,6 +212,7 @@ pub async fn run_in_tx(
                 correlation_id,
                 settle,
                 thresholds,
+                probe,
             )
             .await
         }

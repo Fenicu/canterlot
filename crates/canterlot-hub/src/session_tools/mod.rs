@@ -16,6 +16,8 @@ pub mod jobs;
 pub mod nudge;
 pub mod origin;
 pub mod outage;
+pub mod paths;
+pub mod probe;
 pub mod read;
 pub mod report;
 pub mod routing;
@@ -98,12 +100,13 @@ pub enum ToolErrorCode {
     NoExecutorAvailable,
     MachineBusy,
     SpawnQueueFull,
+    PathNotAllowed,
     InvalidArguments,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -131,6 +134,7 @@ impl ToolErrorCode {
         Self::NoExecutorAvailable,
         Self::MachineBusy,
         Self::SpawnQueueFull,
+        Self::PathNotAllowed,
         Self::InvalidArguments,
         Self::Internal,
     ];
@@ -164,6 +168,7 @@ impl ToolErrorCode {
             Self::NoExecutorAvailable => "no_executor_available",
             Self::MachineBusy => "machine_busy",
             Self::SpawnQueueFull => "spawn_queue_full",
+            Self::PathNotAllowed => "path_not_allowed",
             Self::InvalidArguments => "invalid_arguments",
             Self::Internal => "internal_error",
         }
@@ -198,6 +203,7 @@ impl ToolErrorCode {
             Self::NoExecutorAvailable => "No executor available for this task type",
             Self::MachineBusy => "The machine is too busy for a new session",
             Self::SpawnQueueFull => "Too many spawns are already queued for this session",
+            Self::PathNotAllowed => "The path is not allowed",
             Self::InvalidArguments => "Invalid arguments",
             Self::Internal => "The hub could not complete the call, try later",
         }

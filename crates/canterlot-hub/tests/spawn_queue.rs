@@ -240,6 +240,7 @@ impl Fx {
             &self.context.settle,
             &thresholds,
             Some(&runtime),
+            None,
         )
         .await
         .unwrap();
@@ -1152,6 +1153,7 @@ async fn a_queued_start_publishes_attributes_from_a_separate_job(pool: PgPool) {
         Some(&f.context.registry),
         &f.context.settle,
         &thresholds,
+        None,
         None,
     )
     .await

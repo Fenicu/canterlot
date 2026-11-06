@@ -120,6 +120,11 @@ pub struct HubEvent {
     pub alarm_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fired_reason: Option<String>,
+    /// `alarm` с условием `file`: путь и наблюдённый размер файла.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alarm_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alarm_size: Option<i64>,
     /// Сколько автоматических толчков получила цель до этого итога.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nudges: Option<i64>,

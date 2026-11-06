@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 use super::{
     Caller, ToolContext, ToolError, ToolErrorCode, access, completion, origin, parse_arguments,
+    paths,
+    probe::{self, PathProbe},
     send, settle, subs, summary,
 };
 use crate::{
@@ -40,6 +42,8 @@ const MAX_DEADLINE_SECONDS: i64 = 7 * 86400;
 const PROBE_VERIFY_WINDOW: TimeDelta = TimeDelta::minutes(30);
 /// Повтор задания `alarm_probe`, пока не истекло окно проверки.
 const PROBE_RETRY: TimeDelta = TimeDelta::seconds(30);
+/// Условие `file` опрашивается раз в 30 с.
+const FILE_PROBE_INTERVAL: TimeDelta = TimeDelta::seconds(30);
 /// Показания машины старше этого не доказывают условие: их заменит следующий отчёт.
 const MACHINE_METRICS_MAX_AGE: TimeDelta = TimeDelta::seconds(90);
 const BYTES_PER_GB: f64 = 1e9;
@@ -57,7 +61,19 @@ const ALL_STATES: [&str; 7] = [
 
 const HINT_ARMED: &str = "Alarm armed. End your turn; a [canterlot] message wakes you. Do not use sleep commands or polling for this wait.";
 const HINT_SATISFIED: &str = "The condition already holds; nothing was armed.";
+const HINT_FIRED: &str = "The condition already holds; the alarm fires now. End your turn; a [canterlot] message is waiting.";
 const AUTOMATION: &str = "This is canterlot automation, not the owner.";
+
+/// Какое задание опроса ставит взвод: лимиты к сроку сброса или файл раз в 30 с.
+enum ProbeJob {
+    Limits {
+        at: DateTime<Utc>,
+        provider: String,
+    },
+    File {
+        at: DateTime<Utc>,
+    },
+}
 
 /// Состояние условия `session_state`: отметки целей снимаются при взводе.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,6 +118,73 @@ type LimitReading = (
     Option<DateTime<Utc>>,
     String,
 );
+
+/// Условие `file`: файл на машине вызывающей сессии. `fresh` сравнивает время
+/// изменения с отметкой взвода, снятой той же пробой, — часы машины и хаба не важны.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FileCondition {
+    kind: String,
+    path: String,
+    #[serde(default = "default_min_bytes")]
+    min_bytes: u64,
+    #[serde(default = "default_fresh")]
+    fresh: bool,
+    #[serde(default)]
+    read_head: bool,
+    armed_at: DateTime<Utc>,
+    /// Отметки файла на момент взвода: файл уже был, но до взвода не менялся.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    armed_mtime: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    armed_size: Option<u64>,
+    /// Наблюдение, на котором условие выполнилось.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_mtime: Option<DateTime<Utc>>,
+    /// Первые байты для сообщения: только если просили и файл текстовый.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_head: Option<String>,
+    /// Почему `head` не отдан: `binary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head_omitted: Option<String>,
+    /// Машина не отвечает с этого момента: срок называет её в причине.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unavailable_since: Option<DateTime<Utc>>,
+    /// Последняя проба не смогла прочитать путь: короткий код воркера.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    probe_error: Option<String>,
+}
+
+fn default_min_bytes() -> u64 {
+    1
+}
+
+fn default_fresh() -> bool {
+    true
+}
+
+impl FileCondition {
+    /// Файл есть, не меньше `min_bytes` и, при `fresh`, изменён после взвода.
+    fn holds(&self, size: u64, mtime: Option<DateTime<Utc>>) -> bool {
+        size >= self.min_bytes
+            && (!self.fresh || mtime.is_none() || mtime != self.armed_mtime)
+    }
+
+    fn as_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    fn parse(value: &Value) -> Option<Self> {
+        serde_json::from_value(value.clone()).ok()
+    }
+}
+
+/// Запрос пробы файла по условию будильника: путь и нужно ли начало файла.
+pub(crate) fn file_probe_request(condition: &Value) -> Option<(String, bool)> {
+    let condition = FileCondition::parse(condition)?;
+    Some((condition.path, condition.read_head))
+}
 
 /// Условие `machine`: все заданные пороги должны выполняться одновременно.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -254,6 +337,10 @@ struct WhenArgs {
     provider: Option<String>,
     window: Option<String>,
     below_percent: Option<f64>,
+    path: Option<String>,
+    min_bytes: Option<u64>,
+    fresh: Option<bool>,
+    read_head: Option<bool>,
     free_disk_gb_above: Option<f64>,
     load_per_core_below: Option<f64>,
     mem_available_gb_above: Option<f64>,
@@ -329,6 +416,11 @@ pub struct AlarmView {
     pub free_disk_gb_above: Option<f64>,
     pub load_per_core_below: Option<f64>,
     pub mem_available_gb_above: Option<f64>,
+    /// Разобранное условие `file` для подписей PWA на русском.
+    pub path: Option<String>,
+    pub min_bytes: Option<u64>,
+    pub fresh: Option<bool>,
+    pub read_head: Option<bool>,
     pub session_ids: Vec<Uuid>,
     pub states: Vec<String>,
     pub fires_at: Option<String>,
@@ -444,6 +536,30 @@ fn machine_condition_text(
     )
 }
 
+fn file_condition_text(
+    condition: &FileCondition,
+    deadline: DateTime<Utc>,
+    only_on_timeout: bool,
+) -> String {
+    let fresh = if condition.fresh {
+        ", written after arming"
+    } else {
+        ""
+    };
+    let head = if condition.read_head {
+        ", head included"
+    } else {
+        ""
+    };
+    let watchdog = if only_on_timeout { "; watchdog" } else { "" };
+    format!(
+        "file {} appears (at least {} bytes{fresh}{head}); deadline {}{watchdog}",
+        condition.path,
+        condition.min_bytes,
+        clock(deadline)
+    )
+}
+
 /// Разобранное условие: вид решает, что снимать при взводе и где оценивать.
 enum ParsedWhen {
     Session(SessionCondition, Vec<String>),
@@ -451,6 +567,12 @@ enum ParsedWhen {
         provider: String,
         window: Window,
         below_percent: Option<f64>,
+    },
+    File {
+        path: String,
+        min_bytes: u64,
+        fresh: bool,
+        read_head: bool,
     },
     Machine {
         free_disk_gb_above: Option<f64>,
@@ -484,9 +606,13 @@ fn parse_when(when: &WhenArgs) -> Result<ParsedWhen, ToolError> {
     let session_fields = when.session_ids.is_some() || when.states.is_some() || when.all.is_some();
     let limit_fields =
         when.provider.is_some() || when.window.is_some() || when.below_percent.is_some();
+    let file_fields = when.path.is_some()
+        || when.min_bytes.is_some()
+        || when.fresh.is_some()
+        || when.read_head.is_some();
     match when.kind.as_str() {
         "session_state" => {
-            if limit_fields || machine_fields {
+            if limit_fields || machine_fields || file_fields {
                 return Err(invalid());
             }
             let ids = when.session_ids.clone().unwrap_or_default();
@@ -521,7 +647,7 @@ fn parse_when(when: &WhenArgs) -> Result<ParsedWhen, ToolError> {
             ))
         }
         "limit_reset" => {
-            if session_fields || machine_fields {
+            if session_fields || machine_fields || file_fields {
                 return Err(invalid());
             }
             let provider = when.provider.clone().ok_or_else(invalid)?;
@@ -545,7 +671,7 @@ fn parse_when(when: &WhenArgs) -> Result<ParsedWhen, ToolError> {
             })
         }
         "machine" => {
-            if session_fields || limit_fields {
+            if session_fields || limit_fields || file_fields {
                 return Err(invalid());
             }
             let free_disk_gb_above = threshold(when.free_disk_gb_above)?;
@@ -564,6 +690,22 @@ fn parse_when(when: &WhenArgs) -> Result<ParsedWhen, ToolError> {
                 free_disk_gb_above,
                 load_per_core_below,
                 mem_available_gb_above,
+            })
+        }
+        "file" => {
+            if session_fields || limit_fields || machine_fields {
+                return Err(invalid());
+            }
+            let path = when
+                .path
+                .clone()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(invalid)?;
+            Ok(ParsedWhen::File {
+                path,
+                min_bytes: when.min_bytes.unwrap_or(1),
+                fresh: when.fresh.unwrap_or(true),
+                read_head: when.read_head.unwrap_or(false),
             })
         }
         other => Err(ToolError::with_message(
@@ -609,6 +751,13 @@ fn view(row: &AlarmRow) -> AlarmView {
     } else {
         None
     };
+    let file = if kind == Some("file") {
+        row.condition
+            .as_ref()
+            .and_then(FileCondition::parse)
+    } else {
+        None
+    };
     let condition = match kind {
         Some("session_state") => parsed.as_ref().and_then(|condition| {
             row.deadline_at
@@ -621,6 +770,10 @@ fn view(row: &AlarmRow) -> AlarmView {
         Some("machine") => machine.as_ref().and_then(|condition| {
             row.deadline_at
                 .map(|deadline| machine_condition_text(condition, deadline, row.only_on_timeout))
+        }),
+        Some("file") => file.as_ref().and_then(|condition| {
+            row.deadline_at
+                .map(|deadline| file_condition_text(condition, deadline, row.only_on_timeout))
         }),
         _ => None,
     }
@@ -649,6 +802,10 @@ fn view(row: &AlarmRow) -> AlarmView {
         mem_available_gb_above: machine
             .as_ref()
             .and_then(|condition| condition.mem_available_gb_above),
+        path: file.as_ref().map(|condition| condition.path.clone()),
+        min_bytes: file.as_ref().map(|condition| condition.min_bytes),
+        fresh: file.as_ref().map(|condition| condition.fresh),
+        read_head: file.as_ref().map(|condition| condition.read_head),
         session_ids: parsed
             .as_ref()
             .map(|condition| condition.session_ids.clone())
@@ -798,6 +955,34 @@ async fn insert_probe_job_in_tx(
         "alarm_id": alarm_id,
         "provider": provider,
         "probe_at": time(probe_at),
+    }))
+    .execute(conn)
+    .await?;
+    Ok(id)
+}
+
+/// Задание опроса файла: путь и размер лежат в условии будильника, задание несёт
+/// только идентификатор. Следующий тик возьмёт готовую пробу из кэша планировщика.
+async fn insert_file_probe_job_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    run_at: DateTime<Utc>,
+    alarm_id: Uuid,
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
+         values($1,'session_task',$2,$3,$4,$5)",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .bind(conversation_id)
+    .bind(run_at)
+    .bind(json!({
+        "action": "alarm_probe",
+        "alarm_id": alarm_id,
+        "file": true,
     }))
     .execute(conn)
     .await?;
@@ -1302,11 +1487,13 @@ pub(crate) async fn evaluate_machine_in_tx(
 
 /// Задание `alarm_probe`: к `resets_at + reset_grace` просит опрос провайдера, повторяет
 /// его до окна проверки и без свежего показания срабатывает по часам (`by_clock`).
+/// Для условия `file` пробу уже снял планировщик: здесь только решение по её ответу.
 pub(crate) async fn probe_job_in_tx(
     conn: &mut PgConnection,
     job: &ClaimedJob,
     now: DateTime<Utc>,
     correlation_id: Uuid,
+    prefetched: Option<PathProbe>,
 ) -> Result<crate::crunch::JobOutcome, sqlx::Error> {
     let Some(alarm_id) = job
         .payload
@@ -1340,6 +1527,15 @@ pub(crate) async fn probe_job_in_tx(
     }
     if row.deadline_at.is_some_and(|deadline| now >= deadline) {
         return Ok(crate::crunch::JobOutcome::Cancelled("alarm_settled"));
+    }
+    if row
+        .condition
+        .as_ref()
+        .and_then(|value| value.get("kind"))
+        .and_then(Value::as_str)
+        == Some("file")
+    {
+        return file_probe_in_tx(conn, job, now, correlation_id, row, prefetched).await;
     }
     let Some(mut condition) =
         serde_json::from_value::<LimitCondition>(row.condition.clone().unwrap_or(Value::Null)).ok()
@@ -1386,6 +1582,94 @@ pub(crate) async fn probe_job_in_tx(
         at: now + PROBE_RETRY,
         poll: true,
     })
+}
+
+/// Решение по готовой пробе файла: сработать, отменить сторожа или ждать ещё 30 с.
+/// Недоступная машина запоминается отметкой, чтобы срок назвал её; отказ пути —
+/// коротким кодом, чтобы срок объяснил, почему условие не могло выполниться.
+async fn file_probe_in_tx(
+    conn: &mut PgConnection,
+    job: &ClaimedJob,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+    mut row: AlarmRow,
+    prefetched: Option<PathProbe>,
+) -> Result<crate::crunch::JobOutcome, sqlx::Error> {
+    let Some(mut condition) = row.condition.as_ref().and_then(FileCondition::parse) else {
+        return Ok(crate::crunch::JobOutcome::Cancelled("invalid_payload"));
+    };
+    let Some(probe) = prefetched else {
+        // Планировщик не нашёл готового ответа: задание повторится после новой пробы.
+        return Ok(crate::crunch::JobOutcome::Retry {
+            at: now + TimeDelta::seconds(1),
+            poll: false,
+        });
+    };
+    let mut fired = None;
+    match probe {
+        PathProbe::Exists {
+            size,
+            mtime,
+            head,
+            head_omitted,
+        } => {
+            condition.observed_size = Some(size);
+            condition.observed_mtime = mtime;
+            condition.observed_head = head;
+            condition.head_omitted = head_omitted;
+            condition.unavailable_since = None;
+            condition.probe_error = None;
+            if condition.holds(size, mtime) {
+                fired = Some(());
+            }
+        }
+        PathProbe::Missing => {
+            condition.unavailable_since = None;
+            condition.probe_error = None;
+        }
+        PathProbe::Unavailable => {
+            condition.unavailable_since.get_or_insert(now);
+        }
+        PathProbe::CapabilityMissing => {
+            condition.probe_error = Some("capability_missing".into());
+        }
+        PathProbe::NotAllowed(reason) | PathProbe::Error(reason) => {
+            condition.probe_error = Some(reason);
+        }
+    }
+    row.condition = Some(condition.as_value());
+    sqlx::query("update alarms set condition=$2,updated_at=$3 where id=$1")
+        .bind(row.id)
+        .bind(&row.condition)
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
+    if fired.is_none() {
+        return Ok(crate::crunch::JobOutcome::Retry {
+            at: now + FILE_PROBE_INTERVAL,
+            poll: false,
+        });
+    }
+    if row.only_on_timeout {
+        cancel_in_tx(conn, row.id, "condition_met", now, correlation_id).await?;
+        return Ok(crate::crunch::JobOutcome::Done(
+            json!({"cancelled": "condition_met"}),
+        ));
+    }
+    fire_in_tx(
+        conn,
+        &mut row,
+        "condition",
+        now,
+        now,
+        correlation_id,
+        true,
+        Some(job.id),
+    )
+    .await?;
+    Ok(crate::crunch::JobOutcome::Done(
+        json!({"alarm_id": row.id, "fired": "condition"}),
+    ))
 }
 
 /// Подписка уже отдала это устоявшееся состояние обычным событием: отпечаток совпал.
@@ -1595,6 +1879,59 @@ pub async fn set(
     }
 
     let now = Utc::now();
+    let parsed_when = args.when.as_ref().map(parse_when).transpose()?;
+    // Условие `file`: путь и проба до транзакции, чтобы RPC не держал очередь
+    // вызывающего. Проба при взводе же проверяет правила пути на машине.
+    let file_arming = match &parsed_when {
+        Some(ParsedWhen::File {
+            path,
+            read_head,
+            ..
+        }) => {
+            let workdir = paths::workdir(&context.pool, caller.conversation_id).await?;
+            let resolved = paths::resolve(path, workdir.as_deref())?;
+            let machine: Option<Uuid> = sqlx::query_scalar(
+                "select machine_id from conversations where id=$1 and owner_id=$2",
+            )
+            .bind(caller.conversation_id)
+            .bind(caller.owner_id)
+            .fetch_optional(&context.pool)
+            .await?
+            .flatten();
+            let Some(machine) = machine else {
+                return Err(ToolError::new(ToolErrorCode::MachineUnavailable));
+            };
+            let read_head_bytes = if *read_head {
+                probe::ALARM_HEAD_BYTES
+            } else {
+                0
+            };
+            let probe = probe::ask(&context.registry, machine, &resolved, read_head_bytes).await;
+            match &probe {
+                PathProbe::Missing | PathProbe::Exists { .. } => {}
+                PathProbe::NotAllowed(reason) => {
+                    return Err(ToolError::with_message(
+                        ToolErrorCode::PathNotAllowed,
+                        format!("The path was refused: {reason}"),
+                    ));
+                }
+                PathProbe::CapabilityMissing => {
+                    return Err(ToolError::new(ToolErrorCode::CapabilityMissing));
+                }
+                PathProbe::Unavailable => {
+                    return Err(ToolError::new(ToolErrorCode::MachineUnavailable));
+                }
+                PathProbe::Error(reason) => {
+                    return Err(ToolError::with_message(
+                        ToolErrorCode::MachineUnavailable,
+                        format!("The machine could not probe the path: {reason}"),
+                    ));
+                }
+            }
+            Some((resolved, probe))
+        }
+        _ => None,
+    };
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     if let Some(stored) = sqlx::query_scalar::<_, Value>(
@@ -1611,7 +1948,7 @@ pub async fn set(
     // Порядок блокировок (docs/design/delivery.md): строки `conversations` по возрастанию ID
     // берутся до правки старого будильника. Иначе замена держит будильник и ждёт разговор,
     // пока удаление цели держит разговор и ждёт будильник.
-    let when = args.when.as_ref().map(parse_when).transpose()?;
+    let when = parsed_when;
     let mut conversation_ids = vec![caller.conversation_id];
     if let Some(ParsedWhen::Session(condition, _)) = &when {
         conversation_ids.extend(condition.session_ids.iter().copied());
@@ -1909,7 +2246,7 @@ pub async fn set(
                         response,
                         deadline + COALESCE,
                         true,
-                        probe_at.map(|at| (at, provider)),
+                        probe_at.map(|at| ProbeJob::Limits { at, provider }),
                     )
                 }
                 ParsedWhen::Machine {
@@ -1956,6 +2293,86 @@ pub async fn set(
                         None,
                     )
                 }
+                ParsedWhen::File {
+                    min_bytes,
+                    fresh,
+                    read_head,
+                    ..
+                } => {
+                    let (path, probe) =
+                        file_arming.ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
+                    let (armed_mtime, armed_size) = match &probe {
+                        PathProbe::Exists { size, mtime, .. } => (*mtime, Some(*size)),
+                        _ => (None, None),
+                    };
+                    let mut condition = FileCondition {
+                        kind: "file".into(),
+                        path: path.clone(),
+                        min_bytes,
+                        fresh,
+                        read_head,
+                        armed_at: now,
+                        armed_mtime,
+                        armed_size,
+                        observed_size: None,
+                        observed_mtime: None,
+                        observed_head: None,
+                        head_omitted: None,
+                        unavailable_since: None,
+                        probe_error: None,
+                    };
+                    let satisfied = matches!(&probe, PathProbe::Exists { size, mtime, .. }
+                        if condition.holds(*size, *mtime));
+                    if satisfied
+                        && let PathProbe::Exists {
+                            size,
+                            mtime,
+                            head,
+                            head_omitted,
+                        } = probe
+                    {
+                        condition.observed_size = Some(size);
+                        condition.observed_mtime = mtime;
+                        condition.observed_head = head;
+                        condition.head_omitted = head_omitted;
+                    }
+                    let text = file_condition_text(&condition, deadline, only_on_timeout);
+                    let (state, hint) = if !satisfied {
+                        ("armed", HINT_ARMED)
+                    } else if only_on_timeout {
+                        ("satisfied", HINT_SATISFIED)
+                    } else {
+                        ("fired", HINT_FIRED)
+                    };
+                    let response = json!({
+                        "state": state,
+                        "alarm_id": Uuid::now_v7(),
+                        "deadline_at": time(deadline),
+                        "fired_at": (state == "fired").then(|| time(now)),
+                        "condition": text,
+                        "replaced": replaced,
+                        "hint": hint,
+                    });
+                    let probe = (state == "armed").then(|| ProbeJob::File {
+                        at: now + FILE_PROBE_INTERVAL,
+                    });
+                    let run_at = if state == "fired" {
+                        now + COALESCE
+                    } else {
+                        deadline + COALESCE
+                    };
+                    (
+                        "condition",
+                        None,
+                        Some(deadline),
+                        Some(condition.as_value()),
+                        Collected::default(),
+                        response,
+                        run_at,
+                        state == "armed",
+                        probe,
+                    )
+                }
             }
         };
 
@@ -1963,6 +2380,8 @@ pub async fn set(
         .as_str()
         .and_then(|value| value.parse::<Uuid>().ok())
         .unwrap_or_else(Uuid::now_v7);
+    let fired_now = response["state"] == "fired";
+    let satisfied = response["state"] == "satisfied";
     insert_alarm_in_tx(
         &mut tx,
         id,
@@ -1979,34 +2398,61 @@ pub async fn set(
         collected,
         args.note.as_deref(),
         chain_depth,
-        "armed",
-        None,
+        if fired_now {
+            "fired"
+        } else if satisfied {
+            "cancelled"
+        } else {
+            "armed"
+        },
+        if fired_now {
+            Some("condition")
+        } else if satisfied {
+            Some("satisfied")
+        } else {
+            None
+        },
         None,
         caller.call_id,
         &response,
         now,
     )
     .await?;
-    insert_job_in_tx(
-        &mut tx,
-        caller.owner_id,
-        caller.conversation_id,
-        run_at,
-        id,
-        timeout,
-    )
-    .await?;
-    if let Some((probe_at, provider)) = probe {
-        insert_probe_job_in_tx(
+    if !satisfied {
+        insert_job_in_tx(
             &mut tx,
             caller.owner_id,
             caller.conversation_id,
-            probe_at.max(now),
+            run_at,
             id,
-            &provider,
-            probe_at,
+            timeout,
         )
         .await?;
+    }
+    match probe {
+        Some(ProbeJob::Limits { at, provider }) => {
+            insert_probe_job_in_tx(
+                &mut tx,
+                caller.owner_id,
+                caller.conversation_id,
+                at.max(now),
+                id,
+                &provider,
+                at,
+            )
+            .await?;
+        }
+        Some(ProbeJob::File { at }) => {
+            insert_file_probe_job_in_tx(
+                &mut tx,
+                caller.owner_id,
+                caller.conversation_id,
+                at.max(now),
+                id,
+            )
+            .await?;
+        }
+        None => {}
     }
     if let Some(row) = row_in_tx(&mut tx, id).await? {
         changed_in_tx(&mut tx, &row, caller.call_id).await?;
@@ -2417,6 +2863,19 @@ pub fn snapshot_views(rows: &[AlarmRow]) -> Vec<AlarmView> {
 
 /// Задание доставки: сливает все сработавшие и не доставленные будильники получателя
 /// в один ввод. Дедупликация идёт по будильнику: у него один `delivered_input_id`.
+/// Файловые факты сработавшего будильника для PWA: путь и размер наблюдения.
+fn file_facts(row: &AlarmRow) -> (Option<String>, Option<i64>) {
+    let Some(condition) = row.condition.as_ref().and_then(FileCondition::parse) else {
+        return (None, None);
+    };
+    (
+        Some(condition.path),
+        condition
+            .observed_size
+            .and_then(|size| i64::try_from(size).ok()),
+    )
+}
+
 pub async fn deliver_job_in_tx(
     conn: &mut PgConnection,
     job: &ClaimedJob,
@@ -2573,6 +3032,7 @@ pub async fn deliver_job_in_tx(
     let input_id = if let Some(input_id) = existing {
         input_id
     } else {
+        let (alarm_path, alarm_size) = file_facts(first);
         let submitted = submit_input_in_tx(
             conn,
             &SubmitInput {
@@ -2593,6 +3053,8 @@ pub async fn deliver_job_in_tx(
                         alarm_id: Some(first.id),
                         alarm_key: first.key.clone(),
                         fired_reason: first.fired_reason.clone(),
+                        alarm_path,
+                        alarm_size,
                         ..Default::default()
                     },
                 })),
@@ -3120,6 +3582,67 @@ fn render_machine_text(row: &AlarmRow, condition: &MachineCondition, now: DateTi
     )
 }
 
+fn render_file_text(row: &AlarmRow, condition: &FileCondition, now: DateTime<Utc>) -> String {
+    let name = name_of(row.key.as_deref());
+    let late = late_text(row, now);
+    let path = &condition.path;
+    if row.fired_reason.as_deref() == Some("timed_out") {
+        let age = coarse(row.fired_at.unwrap_or(now) - row.created_at);
+        if let Some(since) = condition.unavailable_since {
+            return format!(
+                "[canterlot] Alarm {name}timed out after {age}: machine unavailable since {}{late}.",
+                clock(since)
+            );
+        }
+        if let Some(reason) = &condition.probe_error {
+            return format!(
+                "[canterlot] Alarm {name}timed out after {age}: file {path} could not be probed ({reason}){late}."
+            );
+        }
+        return match condition.observed_size {
+            Some(size) if size < condition.min_bytes => format!(
+                "[canterlot] Alarm {name}timed out after {age}: file {path} stayed smaller than {} bytes{late}.",
+                condition.min_bytes
+            ),
+            Some(_) => format!(
+                "[canterlot] Alarm {name}timed out after {age}: file {path} was not written after arming{late}."
+            ),
+            None => format!(
+                "[canterlot] Alarm {name}timed out after {age}: file {path} never appeared{late}."
+            ),
+        };
+    }
+    let size = condition.observed_size.unwrap_or(0);
+    let written = condition
+        .observed_mtime
+        .map(|at| format!(", written {}", clock(at)))
+        .unwrap_or_default();
+    let head = match (&condition.observed_head, &condition.head_omitted) {
+        (Some(head), _) => format!(" Head: \"{}\".", escaped_head(head)),
+        (None, Some(reason)) => format!(" Head omitted: {reason}."),
+        (None, None) => String::new(),
+    };
+    format!(
+        "[canterlot] Alarm {name}fired: file {path} appeared ({size} bytes{written}){late}.{head}"
+    )
+}
+
+/// Начало файла в одну строку: перевод строки в сообщении не должен выглядеть новой частью.
+fn escaped_head(head: &str) -> String {
+    let mut out = String::with_capacity(head.len());
+    for character in head.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn render_one(row: &AlarmRow, now: DateTime<Utc>) -> String {
     let name = name_of(row.key.as_deref());
     let fired_at = row.fired_at.unwrap_or(now);
@@ -3150,6 +3673,12 @@ fn render_one(row: &AlarmRow, now: DateTime<Utc>) -> String {
                         serde_json::from_value::<MachineCondition>(value.clone()).ok()
                     })
                     .map(|condition| render_machine_text(row, &condition, now))
+                    .unwrap_or_else(|| render_condition_text(row, now)),
+                Some("file") => row
+                    .condition
+                    .as_ref()
+                    .and_then(FileCondition::parse)
+                    .map(|condition| render_file_text(row, &condition, now))
                     .unwrap_or_else(|| render_condition_text(row, now)),
                 _ => render_condition_text(row, now),
             }
@@ -3217,6 +3746,10 @@ mod tests {
             provider: None,
             window: None,
             below_percent: None,
+            path: None,
+            min_bytes: None,
+            fresh: None,
+            read_head: None,
             free_disk_gb_above: None,
             load_per_core_below: None,
             mem_available_gb_above: None,

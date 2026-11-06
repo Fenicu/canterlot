@@ -814,6 +814,7 @@ async fn deleted_event_after_trash_has_only_the_minimal_notice(pool: PgPool) {
         &SettleConfig::default(),
         &Thresholds::from(&ActivityConfig::default()),
         None,
+        None,
     )
     .await
     .unwrap();

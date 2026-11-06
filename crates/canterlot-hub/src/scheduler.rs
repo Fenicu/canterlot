@@ -423,6 +423,93 @@ pub async fn list_messages(
     jobs.iter().map(JobRow::message).collect()
 }
 
+/// Шаг пробы пути перед исполнением задания.
+enum ProbeStep {
+    NotNeeded,
+    Ready(crate::session_tools::probe::PathProbe),
+    /// Проба запущена или ещё идёт: задание вернётся следующим тиком.
+    Waiting,
+}
+
+/// Что спросить у машины для этого задания.
+struct ProbeRequest {
+    machine_id: Uuid,
+    path: String,
+    read_head_bytes: u32,
+}
+
+/// Условие `file` будильника или файл отчёта автопинка: путь уже абсолютный.
+async fn probe_request(
+    conn: &mut PgConnection,
+    job: &JobRow,
+) -> Result<Option<ProbeRequest>, sqlx::Error> {
+    let action = job
+        .payload
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(conversation) = job.conversation_id else {
+        return Ok(None);
+    };
+    match action {
+        "alarm_probe" => {
+            let Some(alarm_id) = job
+                .payload
+                .get("alarm_id")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<Uuid>().ok())
+            else {
+                return Ok(None);
+            };
+            let row: Option<(Option<Value>, Option<Uuid>)> = sqlx::query_as(
+                "select a.condition,c.machine_id from alarms a
+                 join conversations c on c.id=a.conversation_id
+                 where a.id=$1 and a.conversation_id=$2 and a.state='armed'",
+            )
+            .bind(alarm_id)
+            .bind(conversation)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let Some((Some(condition), Some(machine_id))) = row else {
+                return Ok(None);
+            };
+            let Some((path, read_head)) =
+                crate::session_tools::alarms::file_probe_request(&condition)
+            else {
+                return Ok(None);
+            };
+            Ok(Some(ProbeRequest {
+                machine_id,
+                path,
+                read_head_bytes: if read_head {
+                    crate::session_tools::probe::ALARM_HEAD_BYTES
+                } else {
+                    0
+                },
+            }))
+        }
+        "nudge" => {
+            let row: Option<(Option<String>, Option<Uuid>)> = sqlx::query_as(
+                "select r.report_file,c.machine_id from nudge_rules r
+                 join conversations c on c.id=r.conversation_id
+                 where r.conversation_id=$1",
+            )
+            .bind(conversation)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let Some((Some(path), Some(machine_id))) = row else {
+                return Ok(None);
+            };
+            Ok(Some(ProbeRequest {
+                machine_id,
+                path,
+                read_head_bytes: 0,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct TickReport {
     pub fired: usize,
@@ -494,6 +581,8 @@ pub struct Scheduler {
     settle: crate::session_tools::settle::SettleConfig,
     /// Пороги активности: задание не верит устаревшей проекции цели.
     thresholds: crate::activity::Thresholds,
+    /// Пробы пути: задание не ждёт RPC в транзакции, ответ забирается следующим тиком.
+    probes: std::sync::Arc<crate::session_tools::probe::Prefetch>,
     blobs: Option<Arc<dyn BlobStore>>,
     /// Когда уборке принятых делегаций снова можно работать: не чаще раза в несколько часов.
     retention_next: Arc<AtomicI64>,
@@ -528,6 +617,7 @@ impl Scheduler {
             trash_retention: Duration::from_secs(24 * 3600),
             settle: crate::session_tools::settle::SettleConfig::default(),
             thresholds: crate::activity::Thresholds::from(&crate::config::ActivityConfig::default()),
+            probes: std::sync::Arc::default(),
             blobs: None,
             retention_next: Arc::new(AtomicI64::new(0)),
             #[cfg(feature = "fault-injection")]
@@ -585,6 +675,45 @@ impl Scheduler {
         self.service.notify.notify_one();
     }
 
+    /// Готовая проба пути для этого задания, если она ему нужна.
+    async fn prepare_probe(
+        &self,
+        conn: &mut PgConnection,
+        job: &JobRow,
+    ) -> Result<ProbeStep, sqlx::Error> {
+        let Some(request) = probe_request(conn, job).await? else {
+            return Ok(ProbeStep::NotNeeded);
+        };
+        if let Some(result) = self.probes.take(job.id) {
+            return Ok(ProbeStep::Ready(result));
+        }
+        if self.probes.claim(job.id) {
+            match self.registry.clone() {
+                Some(registry) => {
+                    let cache = self.probes.clone();
+                    let pool = self.pool.clone();
+                    let job_id = job.id;
+                    tokio::spawn(async move {
+                        let result = crate::session_tools::probe::ask(
+                            &registry,
+                            request.machine_id,
+                            &request.path,
+                            request.read_head_bytes,
+                        )
+                        .await;
+                        cache.finish(job_id, result);
+                        notify_pool(&pool);
+                    });
+                }
+                None => {
+                    // Без реестра спросить некого: задание решит, что машина недоступна.
+                    self.probes.finish(job.id, crate::session_tools::probe::PathProbe::Unavailable);
+                }
+            }
+        }
+        Ok(ProbeStep::Waiting)
+    }
+
     pub async fn tick(&self, now: DateTime<Utc>) -> Result<TickReport, sqlx::Error> {
         crunch::expire_pending(&self.pool, now).await?;
         let mut report = TickReport::default();
@@ -603,10 +732,44 @@ impl Scheduler {
                 break;
             };
             let claimed = job.clone();
+            let mut probe = None;
+            if job.kind == "session_task" {
+                match self.prepare_probe(&mut tx, &job).await {
+                    Ok(ProbeStep::Ready(result)) => probe = Some(result),
+                    Ok(ProbeStep::NotNeeded) => {}
+                    Ok(ProbeStep::Waiting) => {
+                        // Проба идёт отдельной задачей: задание возвращается через секунду,
+                        // остальные задания тика продолжают работать.
+                        if let Err(error) = sqlx::query(
+                            "update scheduled_jobs set run_at=$2,updated_at=clock_timestamp()
+                             where id=$1 and state='pending'",
+                        )
+                        .bind(job.id)
+                        .bind(now + TimeDelta::seconds(1))
+                        .execute(&mut *tx)
+                        .await
+                        {
+                            let _ = tx.rollback().await;
+                            return Err(error);
+                        }
+                        tx.commit().await?;
+                        report.retried += 1;
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        if crate::db::is_transient(&error) {
+                            self.defer_transient_job(&claimed, now, &mut report).await?;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
             let outcome = if job.kind == "message" {
                 self.fire_message(tx, job, now, &mut report).await
             } else {
-                self.fire_limit_job(tx, job, now, &mut report).await
+                self.fire_limit_job(tx, job, now, &mut report, probe).await
             };
             if let Err(error) = outcome {
                 // Взаимоблокировка и сбой сериализации не тратят бюджет отказов:
@@ -987,6 +1150,7 @@ impl Scheduler {
         job: JobRow,
         now: DateTime<Utc>,
         report: &mut TickReport,
+        probe: Option<crate::session_tools::probe::PathProbe>,
     ) -> Result<(), sqlx::Error> {
         let kind = match job.kind.as_str() {
             "wake" => JobKind::Wake,
@@ -1082,6 +1246,7 @@ impl Scheduler {
                     &self.settle,
                     &self.thresholds,
                     Some(&runtime),
+                    probe,
                 )
                 .await
                 {

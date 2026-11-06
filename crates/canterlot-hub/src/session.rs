@@ -10,8 +10,8 @@ use std::{
 use canterlot_proto::{
     limits::{MAX_CLAUDE_HISTORIES, MAX_WORKDIR_SUGGESTIONS},
     worker::v1::{
-        ClaudeHistories, ClaudeHistory, ControlDown, ListClaudeHistories, ReadOwnerInstructions,
-        SuggestWorkdirs, WorkdirSuggestions, control_down,
+        ClaudeHistories, ClaudeHistory, ControlDown, ListClaudeHistories, ProbePath,
+        ReadOwnerInstructions, SuggestWorkdirs, WorkdirSuggestions, control_down,
     },
 };
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
@@ -33,6 +33,7 @@ pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";
 pub const CAPABILITY_OWNER_INSTRUCTIONS_V1: &str = "owner_instructions_v1";
 pub const CAPABILITY_CLAUDE_HISTORIES_V1: &str = "claude_histories_v1";
+pub const CAPABILITY_PATH_PROBE_V1: &str = "path_probe_v1";
 pub const CAPABILITY_ALARMS_V1: &str = "alarms_v1";
 pub const CAPABILITY_NUDGE_V1: &str = "nudge_v1";
 
@@ -42,6 +43,8 @@ pub const MAX_SUGGESTS_PER_MACHINE: usize = 4;
 pub const MAX_OWNER_READS_PER_MACHINE: usize = 4;
 /// Списков историй на машину одновременно.
 pub const MAX_HISTORY_REQUESTS_PER_MACHINE: usize = 4;
+/// Проб пути на машину одновременно: взвод, опрос будильника, автопинок.
+pub const MAX_PATH_PROBES_PER_MACHINE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
@@ -75,6 +78,8 @@ struct SessionEntry {
 
 type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String>>>>>;
 type ClaudeHistoryWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<ClaudeHistory>>>>>;
+type PathProbeWaiters =
+    Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::PathProbe>>>>;
 type OwnerOverviewWaiters = Arc<
     Mutex<
         HashMap<
@@ -96,6 +101,7 @@ pub struct Registry {
     changes: broadcast::Sender<(Uuid, Availability)>,
     suggests: SuggestWaiters,
     histories: ClaudeHistoryWaiters,
+    probes: PathProbeWaiters,
     owner_overview: OwnerOverviewWaiters,
     owner_files: OwnerFileWaiters,
 }
@@ -125,6 +131,20 @@ impl Drop for ClaudeHistorySlot {
         self.waiters
             .lock()
             .expect("history waiters lock")
+            .remove(&self.key);
+    }
+}
+
+struct PathProbeSlot {
+    waiters: PathProbeWaiters,
+    key: (Uuid, Uuid),
+}
+
+impl Drop for PathProbeSlot {
+    fn drop(&mut self) {
+        self.waiters
+            .lock()
+            .expect("probe waiters lock")
             .remove(&self.key);
     }
 }
@@ -171,6 +191,14 @@ pub enum OwnerReadError {
     CapabilityMissing,
 }
 
+/// Итог пробы пути: ответ машины, отсутствие возможности или пропавший сеанс.
+#[derive(Debug)]
+pub enum ProbeReply {
+    Answered(canterlot_proto::worker::v1::PathProbe),
+    CapabilityMissing,
+    Unavailable,
+}
+
 impl Registry {
     pub fn new(timers: HubTimers) -> Self {
         Self {
@@ -179,6 +207,7 @@ impl Registry {
             changes: broadcast::channel(256).0,
             suggests: Arc::default(),
             histories: Arc::default(),
+            probes: Arc::default(),
             owner_overview: Arc::default(),
             owner_files: Arc::default(),
         }
@@ -477,6 +506,72 @@ impl Registry {
                 Uuid::parse_str(&item.id).is_ok() && item.preview.chars().count() <= 120
             });
             let _ = waiter.send(items);
+        }
+    }
+
+    /// Проба пути на машине: тот же срок и корреляция по `request_id`, что у подсказок.
+    /// Возможность не согласована — `CapabilityMissing`, нет живого сеанса или срок
+    /// вышел — `Unavailable`; и то и другое вызывающий решает сам.
+    pub async fn probe_path(
+        &self,
+        machine_id: Uuid,
+        path: &str,
+        read_head_bytes: u32,
+        wait: std::time::Duration,
+    ) -> ProbeReply {
+        if self.session_info(machine_id).is_none() {
+            return ProbeReply::Unavailable;
+        }
+        if !self.has_capability(machine_id, CAPABILITY_PATH_PROBE_V1) {
+            return ProbeReply::CapabilityMissing;
+        }
+        let Some(sender) = self.command_sender(machine_id) else {
+            return ProbeReply::Unavailable;
+        };
+        let request_id = Uuid::now_v7();
+        let key = (machine_id, request_id);
+        let (answer, answered) = oneshot::channel();
+        {
+            let mut waiters = self.probes.lock().expect("probe waiters lock");
+            let busy = waiters.keys().filter(|(id, _)| *id == machine_id).count();
+            if busy >= MAX_PATH_PROBES_PER_MACHINE {
+                return ProbeReply::Unavailable;
+            }
+            waiters.insert(key, answer);
+        }
+        let _slot = PathProbeSlot {
+            waiters: self.probes.clone(),
+            key,
+        };
+        let message = ControlDown {
+            msg: Some(control_down::Msg::ProbePath(ProbePath {
+                request_id: request_id.to_string(),
+                path: path.to_owned(),
+                read_head_bytes,
+            })),
+        };
+        if sender.try_send(message).is_err() {
+            return ProbeReply::Unavailable;
+        }
+        tokio::time::timeout(wait, answered)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map_or(ProbeReply::Unavailable, ProbeReply::Answered)
+    }
+
+    /// Ответ принимается только от машины, которую спросили.
+    pub fn finish_probe(&self, machine_id: Uuid, reply: canterlot_proto::worker::v1::PathProbe) {
+        let Ok(request_id) = Uuid::parse_str(&reply.request_id) else {
+            return;
+        };
+        let waiter = self
+            .probes
+            .lock()
+            .expect("probe waiters lock")
+            .remove(&(machine_id, request_id));
+        if let Some(waiter) = waiter {
+            let _ = waiter.send(reply);
         }
     }
 

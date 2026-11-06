@@ -1026,6 +1026,7 @@ async fn deliver_event(
             &canterlot_hub::config::ActivityConfig::default(),
         ),
         None,
+        None,
     )
     .await
     .unwrap();

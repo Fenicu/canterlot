@@ -196,7 +196,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Stop the process of a session you started but keep its worktree and branch, unlike session_accept. Only the direct parent may do this; the owner's root sessions are untouchable. Do not call it on a session you did not start. Idempotent: a second call says already_stopping or nothing_running."
         }
         "alarm_set" => {
-            "Wake yourself later with a [canterlot] message: at a time (`at` or `in_seconds`) or when a condition holds (`when`): sessions settle (`session_state`), a limit window resets (`limit_reset`), or the machine frees up (`machine`). Survives restarts of the hub and of your session. Use it instead of sleep commands or polling, then end your turn. Do not poll. You already get a message when a session you started settles: use `all` to wait for every target, `batch` to hold their summaries into one message, or `only_on_timeout` as a watchdog."
+            "Wake yourself later with a [canterlot] message: at a time (`at` or `in_seconds`) or when a condition holds (`when`): sessions settle (`session_state`), a limit window resets (`limit_reset`), a file appears on your machine (`file`), or the machine frees up (`machine`). Survives restarts of the hub and of your session. Use it instead of sleep commands or polling, then end your turn. Do not poll. You already get a message when a session you started settles: use `all` to wait for every target, `batch` to hold their summaries into one message, or `only_on_timeout` as a watchdog."
         }
         "alarm_cancel" => {
             "Cancel one of your armed alarms by id or key. Idempotent: a finished alarm answers already_fired or already_cancelled. Do not pass both id and key."
@@ -205,7 +205,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "List your armed alarms with their conditions and times; with include_finished, also the last finished ones. Do not call it in a loop to wait: alarms arrive as messages."
         }
         "nudge_set" => {
-            "Let canterlot nudge a session you started when it stops without a done marker, so you are not woken just to say \"continue\". You are woken once: when it finishes with a marker, asks, fails, or when the nudges run out (nudge_exhausted). Only for sessions you or your delegates started. Do not set a rule on anyone else. Pass enabled=false to turn it off."
+            "Let canterlot nudge a session you started when it stops without a done marker, so you are not woken just to say \"continue\". You are woken once: when it finishes with a marker, asks, fails, or when the nudges run out (nudge_exhausted). Only for sessions you or your delegates started. Do not set a rule on anyone else. Pass enabled=false to turn it off. With report_file, a report that appears, grows or changes counts as progress, and a missing report is named in the nudge text."
         }
         "nudge_clear" => {
             "Turn off auto-nudge for a session you started and release any result it was holding back. The subscription stays. Idempotent: a session without a rule answers none. Do not call it in a loop; it is idempotent."
@@ -337,13 +337,17 @@ fn session_input_schema(mcp_name: &str) -> Value {
                     "additionalProperties": false,
                     "required": ["kind"],
                     "properties": {
-                        "kind": {"enum": ["session_state", "limit_reset", "machine"]},
+                        "kind": {"enum": ["session_state", "limit_reset", "file", "machine"]},
                         "session_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20},
                         "states": {"type": "array", "items": {"enum": ["idle", "waiting_for_user", "stalled", "quota_paused", "failed", "stopped", "deleted"]}},
                         "all": {"type": "boolean", "description": "Wait until every listed session settles (default: any)."},
                         "provider": {"enum": ["claude", "codex", "opencode"]},
                         "window": {"enum": ["five_hour", "weekly", "monthly"]},
                         "below_percent": {"type": "number", "minimum": 0, "maximum": 100},
+                        "path": {"type": "string", "description": "Absolute or relative to your workdir."},
+                        "min_bytes": {"type": "integer", "minimum": 0},
+                        "fresh": {"type": "boolean", "description": "Only a file written after this call counts (default true)."},
+                        "read_head": {"type": "boolean", "description": "Include the first 256 bytes of the file in the message."},
                         "free_disk_gb_above": {"type": "number", "minimum": 0},
                         "load_per_core_below": {"type": "number", "minimum": 0},
                         "mem_available_gb_above": {"type": "number", "minimum": 0},
@@ -380,6 +384,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "done_markers": {"type": "array", "items": {"type": "string"}, "maxItems": 5, "description": "Lines that mean the task is over. Default STATUS: DONE and STATUS: BLOCKED."},
                 "text_preset": {"type": "string", "description": "Nudge text preset id; default built-in."},
                 "context_warn_percent": {"type": "integer", "minimum": 50, "maximum": 99},
+                "report_file": {"type": "string", "description": "Report file, absolute or relative to the session workdir: a report that appeared, grew or changed counts as progress."},
             },
             "required": ["session_id"],
             "additionalProperties": false,
@@ -1011,6 +1016,19 @@ mod tests {
         assert!(when["free_disk_gb_above"].is_object());
         assert!(when["load_per_core_below"].is_object());
         assert!(when["mem_available_gb_above"].is_object());
+        assert_eq!(
+            when["kind"]["enum"],
+            json!(["session_state", "limit_reset", "file", "machine"])
+        );
+        assert_eq!(when["path"]["type"], json!("string"));
+        assert_eq!(when["min_bytes"]["minimum"], json!(0));
+        assert_eq!(when["fresh"]["type"], json!("boolean"));
+        assert_eq!(when["read_head"]["type"], json!("boolean"));
+        assert!(alarm("alarm_set")["description"]
+            .as_str()
+            .unwrap()
+            .contains("a file appears"));
+        assert!(alarm("nudge_set")["inputSchema"]["properties"]["report_file"].is_object());
         assert!(alarm("alarm_set")["inputSchema"]["properties"]["batch"].is_object());
         assert!(alarm("alarm_set")["inputSchema"]["properties"]["only_on_timeout"].is_object());
         assert_eq!(
