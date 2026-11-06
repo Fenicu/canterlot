@@ -1942,6 +1942,16 @@ fn path_probe_uses_new_control_fields_and_old_decoders_skip_them() {
     };
     assert_roundtrip(reply.clone());
     assert!(!format!("{reply:?}").contains("\"0\""));
+    // Часы воркера — поле 6: старые декодеры его пропускают, новые читают.
+    assert_eq!(
+        PathProbe {
+            now_ms: 42,
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        [0x30, 42],
+        "PathProbe.now_ms is field 6"
+    );
     let message = ControlUp {
         msg: Some(control_up::Msg::PathProbe(reply)),
     };

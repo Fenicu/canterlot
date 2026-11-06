@@ -1006,6 +1006,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_probe_reply_is_correlated_by_machine_and_request_id() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let other = Uuid::now_v7();
+        let request = Uuid::now_v7();
+        let (answer, mut waiter) = oneshot::channel();
+        registry
+            .probes
+            .lock()
+            .unwrap()
+            .insert((machine, request), answer);
+        let reply = |request_id: Uuid| canterlot_proto::worker::v1::PathProbe {
+            request_id: request_id.to_string(),
+            outcome: Some(canterlot_proto::worker::v1::path_probe::Outcome::Missing(
+                Default::default(),
+            )),
+            now_ms: 0,
+        };
+        registry.finish_probe(other, reply(request));
+        assert!(waiter.try_recv().is_err(), "another machine cannot answer");
+        registry.finish_probe(machine, reply(Uuid::now_v7()));
+        assert!(waiter.try_recv().is_err(), "an unknown request is ignored");
+        registry.finish_probe(machine, reply(request));
+        assert!(waiter.try_recv().is_ok(), "the asked machine answers");
+        // Поздний повтор уже снятого ожидания ничего не ломает.
+        registry.finish_probe(machine, reply(request));
+    }
+
+    #[tokio::test]
     async fn accepted_requires_reconciliation_only_with_exec_v1() {
         for capabilities in [vec![], vec![CAPABILITY_EXEC_V1.to_string()]] {
             let registry = Registry::new(HubTimers::default());

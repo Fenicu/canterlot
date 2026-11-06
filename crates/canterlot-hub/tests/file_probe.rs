@@ -142,6 +142,10 @@ impl FakeWorker {
         self.paused.store(true, Ordering::SeqCst);
     }
 
+    fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+    }
+
     fn seen(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
     }
@@ -494,6 +498,67 @@ async fn an_unknown_mtime_is_not_fresh(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cancelling_a_file_alarm_cleans_up_its_probe_job(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    let now = Utc::now();
+    worker.push(missing());
+    tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
+    assert_eq!(f.pending_probe_jobs().await, 1);
+
+    tool(
+        session_tools::call(
+            &f.context(),
+            &f.caller(),
+            "alarms.cancel",
+            json!({"key": "gate"}),
+        )
+        .await,
+    )?;
+    assert_eq!(
+        f.pending_probe_jobs().await,
+        0,
+        "the probe job is cancelled"
+    );
+    let seen = worker.seen().len();
+    f.scheduler().tick(now + TimeDelta::seconds(31)).await?;
+    assert_eq!(worker.seen().len(), seen, "a cancelled alarm is not probed");
+    f.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delayed_reply_is_not_polled_again_on_every_tick(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    let now = Utc::now();
+    worker.push(missing());
+    tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
+    worker.pause();
+    let seen_after_arming = worker.seen().len();
+
+    let scheduler = f.scheduler();
+    for second in [31, 32, 33, 34] {
+        scheduler.tick(now + TimeDelta::seconds(second)).await?;
+        assert_eq!(
+            worker.seen().len(),
+            seen_after_arming + 1,
+            "one probe is in flight; tick {second} must not start another"
+        );
+        assert_eq!(f.pending_probe_jobs().await, 1);
+    }
+    worker.resume();
+    f.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn min_bytes_waits_for_a_larger_file(pool: PgPool) -> TestResult {
     let f = Fx::new(pool).await;
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
@@ -632,11 +697,19 @@ async fn a_hung_probe_does_not_block_another_scheduler_job(pool: PgPool) -> Test
     )?;
     worker.pause();
 
-    let report = f
-        .scheduler()
-        .tick(now + TimeDelta::seconds(36))
-        .await
-        .unwrap();
+    let started = std::time::Instant::now();
+    let report = tokio::time::timeout(
+        Duration::from_secs(3),
+        f.scheduler().tick(now + TimeDelta::seconds(36)),
+    )
+    .await
+    .expect("the scheduler tick must not wait for the probe deadline")
+    .unwrap();
+    assert!(
+        started.elapsed() < canterlot_hub::session_tools::probe::RPC_DEADLINE,
+        "tick took {:?}, which is not well before the RPC deadline",
+        started.elapsed()
+    );
     assert_eq!(report.fired, 1, "the time alarm is delivered");
     let probe_still_pending: bool = sqlx::query_scalar(
         "select exists(select 1 from scheduled_jobs where state='pending'
@@ -858,11 +931,16 @@ async fn pending_nudge(
     .unwrap();
 }
 
+/// Отпечаток пустого списка изменённых файлов: так его считает продукт.
+const EMPTY_FILES: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 fn baseline(size: i64, mtime: DateTime<Utc>) -> Value {
+    // Проба отдаёт время с точностью до миллисекунды: база должна совпадать.
+    let mtime = DateTime::from_timestamp_millis(mtime.timestamp_millis()).unwrap();
     json!({
         "head": "aaa",
         "dirty": false,
-        "files": "f",
+        "files": EMPTY_FILES,
         "report_size": size,
         "report_mtime": mtime.to_rfc3339(),
         "report_known": true,
@@ -937,6 +1015,57 @@ async fn report_growth_counts_as_progress_and_prevents_exhaustion(pool: PgPool) 
     );
     assert_eq!(nudge_inputs(&f.pool, f.child).await.len(), 1);
     assert_eq!(nudge_events(&f.pool, f.child).await[0].0, "nudged");
+    f.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_unchanged_report_is_not_progress(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    let now = Utc::now();
+    prime_idle(&f.pool, &f, now).await;
+    answer_and_run(
+        &f.pool,
+        &f,
+        "Still working on the parser.",
+        now - TimeDelta::minutes(1),
+    )
+    .await;
+    activity::refresh(&f.pool, f.child, now, &thresholds(), Uuid::now_v7())
+        .await
+        .unwrap();
+    let at = now + TimeDelta::minutes(3);
+    let fingerprint = idle_fingerprint(&f.pool, f.child, at + TimeDelta::seconds(1)).await;
+    let report_time = now - TimeDelta::minutes(5);
+    // Все неотчётные поля — как в продукте: меняется только отчёт, и он тот же.
+    pending_nudge(
+        &f.pool,
+        &f,
+        Some("/tmp/w/report.md"),
+        baseline(20, report_time),
+        2,
+        at,
+        &fingerprint,
+    )
+    .await;
+    worker.push(exists(20, report_time, None));
+
+    let scheduler = f.scheduler();
+    scheduler.tick(at).await?;
+    worker.wait(1).await;
+    scheduler.tick(at + TimeDelta::seconds(1)).await?;
+
+    let (state, consecutive): (String, i32) =
+        sqlx::query_as("select state,consecutive from nudge_rules where conversation_id=$1")
+            .bind(f.child)
+            .fetch_one(&f.pool)
+            .await?;
+    assert_eq!(state, "watching");
+    assert_eq!(
+        consecutive, 3,
+        "an unchanged report must not look like progress"
+    );
     f.stop().await;
     Ok(())
 }

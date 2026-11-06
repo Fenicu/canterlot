@@ -512,6 +512,17 @@ mod tests {
     }
 
     #[test]
+    fn a_head_larger_than_four_kib_is_clamped_to_the_protocol_limit() {
+        let dir = dir();
+        fs::write(dir.path().join("big.txt"), vec![b'x'; 8 * 1024]).unwrap();
+        let Outcome::Exists { head, .. } = probe_in(dir.path(), "big.txt", 32 * 1024) else {
+            panic!()
+        };
+        let head = head.expect("text head");
+        assert_eq!(head.len(), MAX_PROBE_HEAD_BYTES as usize);
+    }
+
+    #[test]
     fn a_binary_head_is_omitted_with_a_note() {
         let dir = dir();
         fs::write(dir.path().join("blob"), [0u8, 1, 2, 3]).unwrap();
