@@ -105,14 +105,14 @@ test('expanded_strip_puts_resets_beside_meters_and_offers_the_refresh_button', a
   await expect(strip.getByRole('link', { name: 'История лимитов' })).toBeVisible();
   // Проценты второй раз не повторяются.
   await expect(strip.locator('.open')).not.toContainText('%');
-  // Раскрытая полоса — обычная карточка: скругление не режет текст по краям.
-  const summaryStyle = await strip.locator('summary').evaluate((node) => {
+  // Раскрытая полоса — обычная карточка: скругление строки не режет текст по краям.
+  const rowStyle = await strip.locator('.row').first().evaluate((node) => {
     const style = getComputedStyle(node);
     return { radius: parseFloat(style.borderTopLeftRadius), paddingLeft: parseFloat(style.paddingLeft), paddingRight: parseFloat(style.paddingRight) };
   });
-  expect(summaryStyle.radius).toBeLessThanOrEqual(28);
-  expect(summaryStyle.paddingLeft).toBeGreaterThanOrEqual(8);
-  expect(summaryStyle.paddingRight).toBeGreaterThanOrEqual(8);
+  expect(rowStyle.radius).toBeLessThanOrEqual(28);
+  expect(rowStyle.paddingLeft).toBeGreaterThanOrEqual(8);
+  expect(rowStyle.paddingRight).toBeGreaterThanOrEqual(8);
   // Строка «обновлено» начинается там же, где названия провайдеров, без зигзага.
   const updated = (await strip.locator('.updated').boundingBox())!;
   const provider = (await strip.locator('.pname').first().boundingBox())!;
@@ -647,3 +647,118 @@ for (const motion of ['full', 'reduced'] as const) {
     expect(after.x).toBeLessThan(before.x);
   });
 }
+
+interface StripGeometry {
+  strip: { left: number; right: number; top: number };
+  rows: { left: number; right: number; striped: boolean; nameInset: number; contentRight: number }[];
+  chevron: { left: number; right: number; top: number; bottom: number; centerY: number };
+  firstLine: { top: number; bottom: number };
+  updatedLeft: number | null;
+  linkRight: number | null;
+  overflow: number;
+}
+
+async function stripGeometry(page: Page): Promise<StripGeometry> {
+  return page.locator('.limits').first().evaluate((root) => {
+    const box = (el: Element) => el.getBoundingClientRect();
+    const summary = box(root.querySelector('summary')!);
+    const rows = [...root.querySelectorAll<HTMLElement>('.row')].map((row) => {
+      const r = box(row);
+      const name = box(row.querySelector('.pname')!);
+      // Правый край содержимого: самая правая видимая ячейка строки, кроме стрелки.
+      const cells = [...row.querySelectorAll<HTMLElement>('.tag, .bar, .pct, .reset, .none, .reserve, .estimated')]
+        .filter((cell) => cell.getClientRects().length > 0)
+        .map((cell) => box(cell).right);
+      return {
+        left: r.left,
+        right: r.right,
+        striped: getComputedStyle(row).backgroundColor !== getComputedStyle(root.querySelector('.rows')!).backgroundColor,
+        nameInset: name.left - r.left,
+        contentRight: Math.max(...cells)
+      };
+    });
+    const chevron = box(root.querySelector('.chevron svg')!);
+    const firstName = box(root.querySelector('.row .pname')!);
+    const updated = root.querySelector('.updated');
+    const link = root.querySelector('.status a');
+    const visible = (el: Element | null) => (el && el.getClientRects().length > 0 ? el : null);
+    return {
+      strip: { left: summary.left, right: summary.right, top: summary.top },
+      rows,
+      chevron: { left: chevron.left, right: chevron.right, top: chevron.top, bottom: chevron.bottom, centerY: chevron.top + chevron.height / 2 },
+      firstLine: { top: firstName.top, bottom: firstName.bottom },
+      updatedLeft: visible(updated) ? box(updated!).left : null,
+      linkRight: visible(link) ? box(link!).right : null,
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth
+    };
+  });
+}
+
+/** Фон чередующихся строк идёт на всю ширину полосы, текст отступает от его края, стрелка стоит в первой строке. */
+function expectStripGeometry(g: StripGeometry): void {
+  expect(g.overflow).toBeLessThanOrEqual(0);
+  expect(g.rows.some((row) => row.striped)).toBe(true);
+  for (const row of g.rows) {
+    expect(Math.abs(row.left - g.strip.left), 'stripe starts at the strip edge').toBeLessThanOrEqual(1);
+    expect(Math.abs(row.right - g.strip.right), 'stripe ends at the strip edge').toBeLessThanOrEqual(1);
+    expect(row.nameInset, 'name is inset from the stripe').toBeGreaterThanOrEqual(8);
+    // Значения не заходят под колонку стрелки и не касаются края полосы.
+    expect(row.contentRight, 'values stay left of the chevron').toBeLessThanOrEqual(g.chevron.left + 0.5);
+  }
+  const insets = g.rows.map((row) => row.nameInset);
+  for (const inset of insets) expect(Math.abs(inset - insets[0]!), 'striped and plain rows share columns').toBeLessThanOrEqual(1);
+  const rightInset = g.strip.right - g.chevron.right;
+  expect(rightInset, 'chevron is inset like the text').toBeGreaterThanOrEqual(insets[0]! - 4);
+  expect(Math.abs(rightInset - insets[0]!), 'chevron inset matches the text inset').toBeLessThanOrEqual(4);
+  expect(g.chevron.centerY, 'chevron sits on the first row').toBeGreaterThanOrEqual(g.firstLine.top);
+  expect(g.chevron.centerY, 'chevron sits on the first row').toBeLessThanOrEqual(g.firstLine.bottom);
+}
+
+test('stripes_span_the_strip_and_the_chevron_keeps_its_place_in_both_states', async ({ page }) => {
+  await boot(page, fourProviders);
+  const strip = page.locator('.limits').first();
+  const widths = test.info().project.name === 'phone' ? [320, 360, 390] : [1280, 1440];
+  // Поворот стрелки и смена темы идут переходами: геометрию меряем после них.
+  const settled = () => expect.poll(() => strip.evaluate((node) => node.getAnimations({ subtree: true }).length)).toBe(0);
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const theme of ['dark', 'light']) {
+      if ((await page.locator('html').getAttribute('data-theme')) !== theme) {
+        await page.getByRole('button', { name: 'Сменить тему' }).click();
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      }
+      if (await strip.evaluate((node) => (node as HTMLDetailsElement).open)) await strip.locator('summary').click();
+      await expect(strip.locator('.reset').first()).toBeHidden();
+      await settled();
+      const collapsed = await stripGeometry(page);
+      expectStripGeometry(collapsed);
+      await strip.locator('summary').click();
+      await expect(strip.locator('.reset').first()).toBeVisible();
+      await settled();
+      const expanded = await stripGeometry(page);
+      expectStripGeometry(expanded);
+      // Стрелка не прыгает при раскрытии: то же место относительно полосы.
+      expect(Math.abs(expanded.chevron.left - collapsed.chevron.left), `${width} chevron x`).toBeLessThanOrEqual(1);
+      expect(Math.abs((expanded.chevron.top - expanded.strip.top) - (collapsed.chevron.top - collapsed.strip.top)), `${width} chevron y`).toBeLessThanOrEqual(1);
+      // Подвал стоит по тем же краям, что и строки.
+      expect(Math.abs(expanded.updatedLeft! - (expanded.rows[0]!.left + expanded.rows[0]!.nameInset)), `${width} footer left`).toBeLessThanOrEqual(1);
+      expect(Math.abs(expanded.linkRight! - expanded.chevron.right), `${width} footer right`).toBeLessThanOrEqual(1);
+      await shot(page, `strip-geometry-${width}`);
+    }
+  }
+});
+
+  hub.flush();
+  await expect(strip.locator('.row')).toHaveCount(3);
+  await expect(strip.locator('.row').filter({ hasText: 'Antigravity' })).toHaveCount(0);
+  await expect(strip.locator('.row').filter({ hasText: 'OpenCode' })).toHaveCount(1);
+  const observed = new Date().toISOString();
+  hub.append('conversations', { kind: 'limits_providers_changed', payload: { providers: ['antigravity', 'claude', 'codex', 'opencode'] } });
+  hub.append('conversations', {
+    kind: 'limits_changed',
+    payload: { provider: 'antigravity', window: 'weekly', used_permille: 250, resets_at: new Date(Date.now() + 86_400_000).toISOString(), observed_at: observed, weekly_reserve_active: false, weekly_reserve_resets_at: null }
+  });
+  hub.flush();
+  await expect(strip.locator('.row').filter({ hasText: 'Antigravity' })).toHaveCount(1);
+  await expect(strip.locator('.row').filter({ hasText: 'Antigravity' }).locator('.meter[data-window="week"]')).toContainText('75%');
+});

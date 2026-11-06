@@ -94,8 +94,10 @@
   <details class="limits" data-tone={view.tone}>
     <summary>
       <span class="rows">
-        {#each shown as row (row.provider)}
+        {#each shown as row, index (row.provider)}
           <span class="row">
+            <!-- Стрелка живёт в первой строке: в свёрнутой и раскрытой полосе она стоит на одном месте. -->
+            {#if index === 0}<span class="chevron"><Icon name="down" /></span>{/if}
             {#if row.empty}
               <span class="meter empty">
                 <span class="name pname">{compact ? 'Лимиты' : row.label}</span>
@@ -115,7 +117,6 @@
           </span>
         {/each}
       </span>
-      <span class="chevron"><Icon name="down" /></span>
     </summary>
     <div class="open">
       <div class="status">
@@ -136,13 +137,9 @@
     container-type: inline-size;
   }
   summary {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--s4);
+    display: block;
     min-height: var(--target);
     padding-block: var(--s2);
-    padding-inline: var(--s6);
     border-radius: var(--radius-card);
     color: var(--secondary);
     cursor: pointer;
@@ -150,22 +147,25 @@
   }
   summary::-webkit-details-marker { display: none; }
   summary::marker { content: ''; }
-  /* Одна сетка на все состояния: имя, метка окна, полоса, значение, сброс. */
+  /* Одна сетка на все состояния: имя, метка окна, полоса, значение, сброс и колонка стрелки. */
   .rows {
+    /* max-content, а не размер значка: отступ строки достаётся крайним колонкам как поле, и колонка стрелки растёт на него. */
+    --chevron-column: max-content;
     display: grid;
-    grid-template-columns: minmax(0, max-content) minmax(calc(var(--s4) * 3), max-content) var(--gauge-width) max-content minmax(0, 1fr);
+    grid-template-columns: minmax(0, max-content) minmax(calc(var(--s4) * 3), max-content) var(--gauge-width) max-content minmax(0, 1fr) var(--chevron-column);
     column-gap: var(--s2);
-    row-gap: var(--s2);
     align-items: baseline;
-    flex: 1;
     min-width: 0;
   }
+  /* Полоса строки идёт на всю ширину полосы лимитов, текст отступает от её края.
+     Отступ есть у каждой строки, поэтому колонки совпадают у строк с фоном и без. */
   .row {
     display: grid;
     grid-template-columns: subgrid;
     grid-column: 1 / -1;
     row-gap: var(--s1);
     align-items: baseline;
+    padding: var(--s2) var(--s6);
     border-radius: var(--radius-sm);
   }
   .row:nth-child(even) { background: var(--raised); }
@@ -173,13 +173,13 @@
   .meter {
     display: grid;
     grid-template-columns: subgrid;
-    grid-column: 1 / -1;
+    grid-column: 1 / -2;
     align-items: baseline;
     min-width: 0;
   }
   /* Свёрнутая полоса компактна: одна строка на провайдера, 5ч и нед рядом, месяц скрыт. */
   .limits:not([open]) .rows {
-    grid-template-columns: minmax(0, 1fr) minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content;
+    grid-template-columns: minmax(0, 1fr) minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content var(--chevron-column);
     column-gap: var(--s1);
   }
   .limits:not([open]) .meter { display: contents; }
@@ -194,24 +194,34 @@
   .limits:not([open]) .meter[data-window='week'] > .bar { grid-column: 6; }
   .limits:not([open]) .meter[data-window='week'] > .pct { grid-column: 7; }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Длинное имя («Antigravity», «OpenCode») не прилипает к метке окна. */
+  .limits[open] .pname { padding-inline-end: var(--s2); }
   .tag { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
   .bar { display: inline-flex; }
   .pct { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .pct[data-tone='warning'], .reserve { color: var(--warning); }
   .pct[data-tone='danger'] { color: var(--danger); }
   .meter[data-stale] .pct, .meter[data-known='false'] .pct { color: var(--muted); font-weight: var(--weight-normal); }
-  .reset { display: none; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .reset { display: none; padding-inline-start: var(--s2); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .limits[open] .reset { display: inline; }
-  .none { grid-column: 2 / -1; justify-self: start; color: var(--muted); white-space: nowrap; }
-  .reserve { grid-column: 2 / -1; justify-self: start; }
-  .estimated { grid-column: 2 / -1; justify-self: start; color: var(--muted); font-size: var(--fs-xs); }
+  .none { grid-column: 2 / span 4; justify-self: start; color: var(--muted); white-space: nowrap; }
+  .reserve { grid-column: 2 / -2; justify-self: start; }
+  .estimated { grid-column: 2 / -2; justify-self: start; color: var(--muted); font-size: var(--fs-xs); }
   /* В узкой полосе сброс укорачивается, но никогда не переносится. */
-  @container (max-width: 24em) { .reset-prefix { display: none; } }
+  @container (max-width: 26em) { .reset-prefix { display: none; } }
   @container (max-width: 16em) { .reset-day { display: none; } }
-  .chevron { flex: none; color: var(--secondary); transition: transform var(--duration-fast) var(--ease); }
+  .chevron {
+    grid-row: 1;
+    grid-column: -2 / -1;
+    align-self: center;
+    display: inline-flex;
+    margin-inline-start: var(--s2);
+    color: var(--secondary);
+    transition: transform var(--duration-fast) var(--ease);
+  }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .limits[open] .chevron { transform: rotate(180deg); }
-  .open { padding: var(--s0) var(--s6) var(--s4); }
+  .open { padding: var(--s2) var(--s6) var(--s4); }
   .status { display: flex; align-items: center; gap: var(--s4); color: var(--secondary); }
   .status a { margin-inline-start: auto; }
   .refresh.pending :global(svg) { animation: spin var(--duration-stage-spin) var(--ease-stage-spin) infinite; }
