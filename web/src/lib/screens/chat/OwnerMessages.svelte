@@ -3,6 +3,7 @@
 	import { fmt } from '#lib/format/ru.js';
 	import type { ChatStore, OwnerInputView } from '#lib/stores/chat.svelte.js';
 	import { messagePreview, ownerMessageOrigin, sortOwnerMessages } from '#lib/timeline/ownerMessages.js';
+	import { timeTip } from '#lib/ui/time-tip.js';
 	import Icon from '#lib/ui/Icon.svelte';
 
 	let {
@@ -118,6 +119,7 @@
 		<div class="list" bind:this={list} onscroll={onscroll} aria-label="Мои сообщения" data-owner-list>
 			<div class="pad" style:height={`${range.padTop}px`}></div>
 			{#each visible as item (item.id)}
+				{@const at = Date.parse(item.created_at)}
 				<button
 					type="button"
 					class="item"
@@ -127,7 +129,7 @@
 				>
 					<span class="preview">{messagePreview(item.preview, item.attachments_count)}</span>
 					<span class="meta">
-						<span class="time">{fmt.messageTime(Date.parse(item.created_at), now)}</span>
+						<time class="time" datetime={item.created_at} use:timeTip={at}>{fmt.messageTime(at, now)}</time>
 						{#if ownerMessageOrigin(item.origin)}
 							<span class="origin">{ownerMessageOrigin(item.origin)}</span>
 						{/if}

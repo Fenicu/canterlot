@@ -19,6 +19,7 @@
   import SpawnRouteLine from '#lib/timeline/SpawnRouteLine.svelte';
   import { isSpawnCall } from '#lib/routing/spawnAnswer.js';
   import IconButton from '#lib/ui/IconButton.svelte';
+  import { timeTip } from '#lib/ui/time-tip.js';
 
   let {
     cardKey,
@@ -118,7 +119,7 @@
   {/if}
   {#if head}
     <footer class="byline" data-role="answer-footer">
-      <p><strong>{agent}</strong><time datetime={new Date(head.createdAt).toISOString()}>{fmt.clock(head.createdAt)}</time></p>
+      <p><strong>{agent}</strong><time datetime={new Date(head.createdAt).toISOString()} use:timeTip={head.createdAt}>{fmt.clock(head.createdAt)}</time></p>
       <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(head.inputCommandId || head.id)} />
     </footer>
   {/if}

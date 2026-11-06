@@ -3,6 +3,7 @@
   import { fmt } from '#lib/format/ru.js';
   import { modelLabel } from '#lib/format/labels.js';
   import Icon from '#lib/ui/Icon.svelte';
+  import { timeTip } from '#lib/ui/time-tip.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import { activityLine, type Activity } from './activityText';
   import { colorVar, toneVar } from './colors';
@@ -24,8 +25,12 @@
   const line = $derived(activityLine(item.activity as Activity, { now }));
   // Как в шапке чата: точка показывает состояние, а цвет владельца — только у спокойной сессии.
   const mark = $derived(line.tone === 'default' && item.color ? colorVar(item.color) : toneVar(line.tone));
-  const stamp = $derived(item.last_activity_at ? fmt.clock(Date.parse(item.last_activity_at)) : '');
-  const tail = $derived(item.unread_count > 0 && stamp ? ` · ${stamp}` : '');
+  const stampTs = $derived.by(() => {
+    const parsed = item.last_activity_at ? Date.parse(item.last_activity_at) : Number.NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  });
+  const stamp = $derived(stampTs !== null ? fmt.clock(stampTs) : '');
+  const tail = $derived(item.unread_count > 0 && stamp !== '');
   let timer = 0;
   let held = false;
 
@@ -55,12 +60,12 @@
         <span class="sr-only">Непрочитанных: {item.unread_count}</span><span class="count" aria-hidden="true">{item.unread_count}</span>
       {:else if item.unread_count === 1}
         <span class="sr-only">Есть непрочитанное</span><span class="unread" aria-hidden="true"></span>
-      {:else if stamp}
-        <time datetime={item.last_activity_at ?? undefined}>{stamp}</time>
+      {:else if stamp && stampTs !== null}
+        <time datetime={item.last_activity_at ?? undefined} use:timeTip={stampTs}>{stamp}</time>
       {/if}
     </span>
     <span class="meta">{item.harness.title} · {modelLabel(item.model)} · {item.machine.name}</span>
-    <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{tail}</span>
+    <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{#if tail && stampTs !== null}&#32;·&#32;<time datetime={item.last_activity_at ?? undefined} use:timeTip={stampTs}>{stamp}</time>{/if}</span>
     {#if depth > 0 && item.working_ms}
       <span class="worked" data-worked>работала {fmt.durationCoarse(item.working_ms)}</span>
     {/if}

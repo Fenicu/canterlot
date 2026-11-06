@@ -7,6 +7,7 @@
   import Button from '#lib/ui/Button.svelte';
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
+  import { timeTip } from '#lib/ui/time-tip.js';
 
   let { chat, onclose }: { chat: ChatStore; onclose: () => void } = $props();
 
@@ -65,9 +66,8 @@
     }
   }
 
-  function stamp(at: string): string {
-    const value = Date.parse(at);
-    return Number.isFinite(value) ? fmt.clock(value) : at;
+  function stampTs(at: string): number {
+    return Date.parse(at);
   }
 </script>
 
@@ -91,8 +91,9 @@
         <h3>История</h3>
         <ul class="history">
           {#each chat.nudgeEvents as event (event.id)}
+            {@const at = stampTs(event.at)}
             <li>
-              <time datetime={event.at}>{stamp(event.at)}</time>
+              <time datetime={event.at} use:timeTip={at}>{Number.isFinite(at) ? fmt.clock(at) : event.at}</time>
               <span>{OUTCOME[event.outcome] ?? event.outcome}</span>
               {#if signalLabels(event.signals).length > 0}
                 <span class="signals">{signalLabels(event.signals).join(', ')}</span>

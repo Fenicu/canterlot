@@ -20,6 +20,7 @@
   import { deliveryIndex, deliveryLabel } from '#lib/timeline/present.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { originLabel } from '#lib/timeline/origin.js';
+  import { timeTip } from '#lib/ui/time-tip.js';
 
   let { input, chat, agentWorking = false, highlight = false }: { input: InputView; chat: ChatStore; agentWorking?: boolean; highlight?: boolean } = $props();
   let ask = $state<string | null>(null);
@@ -83,7 +84,7 @@
     );
   }
   const from = $derived(originLabel(input.origin));
-  const stamp = $derived(input.state === 'accepted' && input.createdAt !== null ? ` · ${fmt.clock(input.createdAt)}` : '');
+  const stampAt = $derived(input.state === 'accepted' && input.createdAt !== null ? input.createdAt : null);
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
   const steerSupported = $derived(harnessId === 'claude_code' || harnessId === 'codex' || harnessId === 'opencode' || harnessId === 'antigravity');
   const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
@@ -198,7 +199,7 @@
   {#if input.revision > 1 && !editing}<p class="edited">Изменено</p>{/if}
   {#if editClosedNote && !editing && input.state === 'queued'}<p class="reason">{editClosedNote}</p>{/if}
   {#if settled}
-    <p class="status">{label}{stamp}</p>
+    <p class="status">{label}{#if stampAt !== null}&#32;·&#32;<time datetime={new Date(stampAt).toISOString()} use:timeTip={stampAt}>{fmt.clock(stampAt)}</time>{/if}</p>
   {:else}
     <StageTrack {stages} {index} state="active" form="compact" label="Доставка сообщения" status={label} />
   {/if}

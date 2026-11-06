@@ -17,6 +17,7 @@
   } from '#lib/timeline/hubEvent.js';
   import { nudgeEntryLine, nudgeExhaustedLine } from '#lib/timeline/nudge.js';
   import Icon from '#lib/ui/Icon.svelte';
+  import { timeTip } from '#lib/ui/time-tip.js';
 
   let { input, open, onToggle }: { input: InputView; open: boolean; onToggle: () => void } = $props();
 
@@ -71,7 +72,7 @@
     {/if}
     {#if input.createdAt !== null}
       <footer class="stamp" data-role="event-footer">
-        <time datetime={new Date(input.createdAt).toISOString()}>{fmt.clock(input.createdAt)}</time>
+        <time datetime={new Date(input.createdAt).toISOString()} use:timeTip={input.createdAt}>{fmt.clock(input.createdAt)}</time>
       </footer>
     {/if}
   </article>
