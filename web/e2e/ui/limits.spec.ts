@@ -206,6 +206,30 @@ test('current_limits_show_only_existing_windows_in_compact_one_line_rows', async
   await shot(page, 'limits-cards');
 });
 
+test('current_limits_rows_stay_inside_their_card_at_narrow_widths', async ({ page }) => {
+  await bootSecondary(page, '/limits');
+  const cards = page.locator('main .current section');
+  await expect(cards).toHaveCount(2);
+  const widths = test.info().project.name === 'phone' ? [320, 360, 390] : [1440];
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: 844 });
+    const rows = await page.locator('main .current .row').evaluateAll((items) => items.map((row) => {
+      const card = row.closest('section')!.getBoundingClientRect();
+      return [...row.children].map((cell) => {
+        const box = cell.getBoundingClientRect();
+        return { text: cell.textContent?.trim() ?? '', left: box.left - card.left, right: card.right - box.right };
+      });
+    }));
+    expect(rows.length).toBeGreaterThan(0);
+    for (const cells of rows) {
+      for (const cell of cells) {
+        expect(cell.left, `${cell.text} at ${width}px`).toBeGreaterThanOrEqual(-0.5);
+        expect(cell.right, `${cell.text} at ${width}px`).toBeGreaterThanOrEqual(-0.5);
+      }
+    }
+  }
+});
+
 test('history_error_keeps_the_current_limits_and_names_the_cause', async ({ page }) => {
   await bootSecondary(page, '/limits');
   // Свой ответ истории перекрывает маршрут стенда, поэтому ставится после него и страница перечитывается.

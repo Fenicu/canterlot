@@ -23,7 +23,7 @@
 </div>
 <style>
   .current { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--gauge-width) * 3)), 1fr)); align-items: start; gap: var(--s4); margin-block: var(--s4) var(--s8); }
-  .provider { min-width: 0; padding: var(--s6) var(--s8); background: var(--surface); border-radius: var(--radius-card); }
+  .provider { min-width: 0; container-type: inline-size; padding: var(--s6) var(--s8); background: var(--surface); border-radius: var(--radius-card); }
   h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s4); margin: var(--s0) var(--s0) var(--s3); font-size: var(--fs-body); font-weight: var(--weight-semibold); }
   .marker { color: var(--muted); font-size: var(--fs-sm); font-weight: var(--weight-normal); }
   .marker.reserve { color: var(--warning); }
@@ -38,4 +38,10 @@
   [data-tone='danger'] .value { color: var(--danger); }
   [data-stale] .value { color: var(--muted); font-weight: var(--weight-normal); }
   .none { margin: var(--s0); color: var(--muted); font-size: var(--fs-meta); }
+  /* В узкой карточке сброс уходит на вторую строку под значение: иначе он вылезает за край. */
+  @container (max-width: 20em) {
+    .rows { grid-template-columns: minmax(calc(var(--s4) * 6), max-content) minmax(var(--s13), 1fr) minmax(calc(var(--s4) * 12), max-content); }
+    .row { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; align-items: center; column-gap: var(--s4); row-gap: var(--s1); }
+    .reset { grid-column: 2 / -1; grid-row: 2; justify-self: end; padding-inline-start: 0; }
+  }
 </style>
