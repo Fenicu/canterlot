@@ -918,3 +918,56 @@ async fn a_failed_probe_is_recorded_and_does_not_block_the_nudge(pool: PgPool) -
     f.stop().await;
     Ok(())
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nudge_set_resolves_the_report_path_and_refuses_a_denied_one(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    worker.push(missing());
+    tool(
+        session_tools::call(
+            &f.context(),
+            &f.caller(),
+            "nudge.set",
+            json!({"session_id": f.child, "report_file": "reports/out.md"}),
+        )
+        .await,
+    )?;
+    let stored: String =
+        sqlx::query_scalar("select report_file from nudge_rules where conversation_id=$1")
+            .bind(f.child)
+            .fetch_one(&f.pool)
+            .await?;
+    assert_eq!(stored, "/tmp/w/reports/out.md");
+    assert_eq!(worker.seen(), ["/tmp/w/reports/out.md"]);
+
+    worker.push(denied("denied"));
+    let error = session_tools::call(
+        &f.context(),
+        &f.caller(),
+        "nudge.set",
+        json!({"session_id": f.child, "report_file": "/tmp/w/.env"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, session_tools::ToolErrorCode::PathNotAllowed);
+    f.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nudge_set_needs_path_probe_v1_for_a_report(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let _worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1"]).await;
+    let error = session_tools::call(
+        &f.context(),
+        &f.caller(),
+        "nudge.set",
+        json!({"session_id": f.child, "report_file": "/tmp/w/report.md"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, session_tools::ToolErrorCode::CapabilityMissing);
+    f.stop().await;
+    Ok(())
+}
