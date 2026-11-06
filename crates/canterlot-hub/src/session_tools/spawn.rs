@@ -911,7 +911,11 @@ fn native_request_id(caller: &Caller) -> String {
 }
 
 /// Этот вызов уже прошёл: повтор транспорта получает тот же ответ, вторая сессия не создаётся.
-async fn replayed(conn: &mut PgConnection, caller: &Caller) -> Result<Option<Value>, sqlx::Error> {
+async fn replayed(
+    conn: &mut PgConnection,
+    caller: &Caller,
+    guards: &crate::config::GuardsConfig,
+) -> Result<Option<Value>, sqlx::Error> {
     let child: Option<(Uuid, String, Option<Value>, bool)> = sqlx::query_as(
         "select c.id,c.permission_mode,c.worktree,exists(
            select 1 from session_subscriptions s
@@ -925,12 +929,14 @@ async fn replayed(conn: &mut PgConnection, caller: &Caller) -> Result<Option<Val
     .fetch_optional(&mut *conn)
     .await?;
     if let Some((id, mode, worktree, subscribed)) = child {
-        return Ok(Some(started_answer(
-            id,
-            &mode,
-            worktree.as_ref(),
-            subscribed,
-        )));
+        let mut answer = started_answer(id, &mode, worktree.as_ref(), subscribed);
+        let verdict =
+            guard::check_in_tx(conn, caller.owner_id, caller.machine_id, guards, Utc::now())
+                .await?;
+        if verdict.stale {
+            answer["machine_metrics"] = serde_json::json!("stale");
+        }
+        return Ok(Some(answer));
     }
     let request: Option<Uuid> = sqlx::query_scalar(
         "select id from requests where conversation_id=$1 and native_request_id=$2",
@@ -1010,7 +1016,7 @@ pub async fn spawn(
     check_arguments(&args)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
-    if let Some(answer) = replayed(&mut tx, caller).await? {
+    if let Some(answer) = replayed(&mut tx, caller, &context.guards).await? {
         return Ok(answer);
     }
     // Владелец раньше строки разговора: тот же порядок у удаления и создания.
@@ -1247,6 +1253,9 @@ pub async fn spawn(
         started.worktree.as_ref(),
         spec.subscribe,
     );
+    if guard.stale {
+        answer["machine_metrics"] = serde_json::json!("stale");
+    }
     if let Some(routing) = spec.routing.as_ref()
         && let Ok(decision) = serde_json::from_value::<super::routing::Decision>(routing.clone())
     {

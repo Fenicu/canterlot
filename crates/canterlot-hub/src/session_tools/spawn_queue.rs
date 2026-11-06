@@ -921,6 +921,7 @@ async fn try_start(
             code: "not_in_whitelist",
         });
     }
+    let mut metrics_stale = false;
     if !start_now {
         let rate = access::rate_state(&mut *conn, runtime.session_tools, parent.id, now).await?;
         if rate.blocked {
@@ -950,6 +951,7 @@ async fn try_start(
             now,
         )
         .await?;
+        metrics_stale = verdict.stale;
         if verdict.blocked() {
             return Ok(Attempt::Blocked {
                 reason: REASON_RESOURCES,
@@ -1009,12 +1011,17 @@ async fn try_start(
             } else {
                 "You are not subscribed."
             };
+            let stale = if metrics_stale {
+                " Machine metrics are stale."
+            } else {
+                ""
+            };
             note_in_tx(
                 conn,
                 caller.owner_id,
                 row.parent_id,
                 format!(
-                    "[canterlot] Queued spawn q-{} started as session \"{}\" ({}, {}, model {}). {follow}",
+                    "[canterlot] Queued spawn q-{} started as session \"{}\" ({}, {}, model {}). {follow}{stale}",
                     &row.id.to_string()[..8],
                     origin::clean_title(&child.title),
                     child.session_id,

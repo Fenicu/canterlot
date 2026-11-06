@@ -1597,3 +1597,76 @@ async fn guard_uses_the_sample_time_not_the_arrival_time(pool: PgPool) {
     );
     assert!(!verdict.blocked());
 }
+
+async fn stale_metrics(pool: &PgPool, owner: Uuid, machine: Uuid) {
+    let old = Utc::now() - chrono::TimeDelta::minutes(10);
+    let metrics = canterlot_proto::worker::v1::MachineMetrics {
+        machine_time_ms: old.timestamp_millis() as u64,
+        cpu_cores: 4,
+        cpu_permille: 50,
+        mem_total_bytes: 16_000_000_000,
+        mem_available_bytes: 12_000_000_000,
+        disks: vec![canterlot_proto::worker::v1::DiskUsage {
+            label: "data".into(),
+            total_bytes: 100_000_000_000,
+            free_bytes: 12_000_000_000,
+        }],
+        load1_centi: 40,
+        ..Default::default()
+    };
+    canterlot_hub::machine_info::apply_metrics(pool, owner, machine, &metrics, Uuid::now_v7())
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_start_answer_marks_stale_metrics_and_replays_identically(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    stale_metrics(&f.pool, f.owner, f.machine).await;
+    let call_id = Uuid::now_v7();
+    let first = session_tools::call(
+        &f.context,
+        &f.caller_with(call_id),
+        "sessions.spawn",
+        json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["status"], "started", "{first}");
+    assert_eq!(first["machine_metrics"], "stale", "{first}");
+    let replay = session_tools::call(
+        &f.context,
+        &f.caller_with(call_id),
+        "sessions.spawn",
+        json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay, first, "transport replay stays byte-identical");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_queued_start_note_marks_stale_metrics(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    stale_metrics(&f.pool, f.owner, f.machine).await;
+    let answer = f.spawn_direct().await.unwrap();
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+    sqlx::query(
+        "update conversations set created_at=now()-interval '61 minutes'
+          where parent_conversation_id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    make_due(&f.pool, queue_id).await;
+    f.run_dequeue(queue_id, Utc::now()).await;
+    let notes = notes_for(&f.pool, f.parent).await;
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("Machine metrics are stale")),
+        "{notes:?}"
+    );
+}
