@@ -144,6 +144,24 @@ export const fmt = {
 	tokens(n: number): string {
 		return grouped(n);
 	},
+	/**
+	 * Компактные токены для узких таблиц: до миллиона как есть, дальше «516,7 млн»
+	 * и «1,32 млрд». Три значащие цифры, но не меньше одной после запятой.
+	 */
+	tokensCompact(n: number): string {
+		const abs = Math.abs(n);
+		if (abs < 1_000_000) return grouped(n);
+		const compact = (value: number, divisor: number, unit: string): string => {
+			const scaled = value / divisor;
+			const decimals = Math.abs(scaled) < 10 ? 2 : 1;
+			const text = scaled.toFixed(decimals).replace('.', ',').replace(/(,\d*?)0+$/, '$1').replace(/,$/, '');
+			return `${text} ${unit}`;
+		};
+		if (abs >= 1_000_000_000) return compact(n, 1_000_000_000, 'млрд');
+		// 999 999 999 млн после округления становится «1000», а это уже миллиард.
+		if (Math.abs(Number((n / 1_000_000).toFixed(1))) >= 1000) return compact(n, 1_000_000_000, 'млрд');
+		return compact(n, 1_000_000, 'млн');
+	},
 	/** Число в русской записи: «50», «0,5». */
 	number(value: number): string {
 		return grouped(value);
