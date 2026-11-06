@@ -71,11 +71,13 @@ enum Action {
     AlarmDeliver,
     AlarmProbe,
     Nudge,
+    SpawnDequeue,
+    SpawnAttributes,
 }
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
         Self::Event,
         Self::MachineEvent,
         Self::Note,
@@ -85,6 +87,8 @@ impl Action {
         Self::AlarmDeliver,
         Self::AlarmProbe,
         Self::Nudge,
+        Self::SpawnDequeue,
+        Self::SpawnAttributes,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -98,11 +102,14 @@ impl Action {
             "alarm_deliver" => Some(Self::AlarmDeliver),
             "alarm_probe" => Some(Self::AlarmProbe),
             "nudge" => Some(Self::Nudge),
+            "spawn_dequeue" => Some(Self::SpawnDequeue),
+            "spawn_attributes" => Some(Self::SpawnAttributes),
             _ => None,
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_in_tx(
     conn: &mut PgConnection,
     job: &ClaimedJob,
@@ -111,6 +118,7 @@ pub async fn run_in_tx(
     registry: Option<&Registry>,
     settle: &crate::session_tools::settle::SettleConfig,
     thresholds: &crate::activity::Thresholds,
+    spawn_runtime: Option<&crate::session_tools::spawn_queue::Runtime<'_>>,
 ) -> Result<JobOutcome, SubmitError> {
     let Some(subscriber) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -200,6 +208,43 @@ pub async fn run_in_tx(
             )
             .await
         }
+        Action::SpawnAttributes => {
+            let Some(target) = job
+                .payload
+                .get("conversation_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+            else {
+                return Ok(JobOutcome::Cancelled("invalid_payload"));
+            };
+            let owned: bool = sqlx::query_scalar(
+                "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
+            )
+            .bind(target)
+            .bind(job.owner_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if !owned {
+                return Ok(JobOutcome::Cancelled("target_deleted"));
+            }
+            crate::conversations::emit_attributes(conn, job.owner_id, target, correlation_id)
+                .await?;
+            Ok(JobOutcome::Done(json!({"conversation_id": target})))
+        }
+        Action::SpawnDequeue => match spawn_runtime {
+            Some(runtime) => {
+                crate::session_tools::spawn_queue::run_job_in_tx(
+                    conn,
+                    job,
+                    subscriber,
+                    runtime,
+                    now,
+                    correlation_id,
+                )
+                .await
+            }
+            None => Ok(JobOutcome::Cancelled("runtime_missing")),
+        },
     }
 }
 
@@ -433,6 +478,13 @@ pub async fn abandon_in_tx(
         Action::Nudge => {
             crate::session_tools::nudge::abandon_in_tx(conn, conversation, payload, now).await
         }
+        Action::SpawnDequeue => {
+            crate::session_tools::spawn_queue::abandon_in_tx(conn, conversation, payload, now)
+                .await
+                .map(|_| false)
+        }
+        // Обновление атрибутов нечего закрывать: следующее изменение опубликует их снова.
+        Action::SpawnAttributes => Ok(false),
     }
 }
 
@@ -473,6 +525,13 @@ mod tests {
                     json!({"action": "alarm_probe", "alarm_id": Uuid::now_v7()})
                 }
                 Action::Nudge => json!({"action": "nudge", "fingerprint": "f"}),
+                Action::SpawnDequeue => {
+                    json!({"action": "spawn_dequeue", "queue_id": Uuid::now_v7()})
+                }
+                Action::SpawnAttributes => json!({
+                    "action": "spawn_attributes",
+                    "conversation_id": Uuid::now_v7(),
+                }),
             };
             abandon_in_tx(
                 &mut conn,

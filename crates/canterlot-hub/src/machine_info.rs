@@ -325,8 +325,10 @@ pub(crate) async fn apply_metrics_with_registry(
         }
         row
     }).collect();
-    let stored=sqlx::query("insert into machine_metrics(machine_id,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict(machine_id) do update set observed_at=clock_timestamp(),machine_time_ms=excluded.machine_time_ms,cpu_cores=excluded.cpu_cores,cpu_permille=excluded.cpu_permille,mem_total_bytes=excluded.mem_total_bytes,mem_available_bytes=excluded.mem_available_bytes,load1_centi=excluded.load1_centi,load5_centi=excluded.load5_centi,load15_centi=excluded.load15_centi,disks=excluded.disks,executions=excluded.executions where machine_metrics.machine_time_ms<excluded.machine_time_ms")
- .bind(machine_id).bind(m.machine_time_ms as i64).bind(m.cpu_cores as i32).bind(m.cpu_permille as i32).bind(m.mem_total_bytes as i64).bind(m.mem_available_bytes as i64).bind(m.load1_centi as i32).bind(m.load5_centi as i32).bind(m.load15_centi as i32).bind(json!(disks)).bind(json!(executions)).execute(&mut *conn).await?.rows_affected();
+    // Свежесть стража и будильников — время самой выборки, а не приёма:
+    // задержанный отчёт не должен выглядеть свежим.
+    let stored=sqlx::query("insert into machine_metrics(machine_id,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions,observed_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) on conflict(machine_id) do update set observed_at=excluded.observed_at,machine_time_ms=excluded.machine_time_ms,cpu_cores=excluded.cpu_cores,cpu_permille=excluded.cpu_permille,mem_total_bytes=excluded.mem_total_bytes,mem_available_bytes=excluded.mem_available_bytes,load1_centi=excluded.load1_centi,load5_centi=excluded.load5_centi,load15_centi=excluded.load15_centi,disks=excluded.disks,executions=excluded.executions where machine_metrics.machine_time_ms<excluded.machine_time_ms")
+ .bind(machine_id).bind(m.machine_time_ms as i64).bind(m.cpu_cores as i32).bind(m.cpu_permille as i32).bind(m.mem_total_bytes as i64).bind(m.mem_available_bytes as i64).bind(m.load1_centi as i32).bind(m.load5_centi as i32).bind(m.load15_centi as i32).bind(json!(disks)).bind(json!(executions)).bind(observed_at).execute(&mut *conn).await?.rows_affected();
     if stored == 0 {
         return Ok(ignored("stale_sample"));
     }

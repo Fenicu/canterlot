@@ -546,7 +546,7 @@ pub struct ProviderView {
 }
 
 /// Кандидат в ответе: пара, вердикт и короткая английская причина.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Considered {
     pub harness: String,
     pub model: String,
@@ -639,6 +639,8 @@ pub struct RouteInputs<'a> {
     pub stale: Duration,
     pub now: DateTime<Utc>,
     pub request: &'a RouteRequest,
+    /// «Запустить сейчас»: лимиты провайдеров не оцениваются вовсе.
+    pub bypass_limits: bool,
 }
 
 /// Чистая функция выбора (§5.2 + §C1 пп. 5–7): уровень, канонизация через каталог,
@@ -655,6 +657,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
         stale,
         now,
         request,
+        bypass_limits,
     } = inputs;
     let task = policy.task_types.get(&request.task_type).ok_or_else(|| {
         let mut available: Vec<String> = policy.task_types.keys().cloned().collect();
@@ -743,7 +746,8 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
         let unlimited = policy.unlimited_models.iter().any(|entry| {
             entry == &resolved.id || *entry == format!("{}/{}", candidate.harness, resolved.id)
         });
-        if !unlimited
+        if !bypass_limits
+            && !unlimited
             && let Some((verdict, reason)) = limits_verdict(
                 policy,
                 &provider,
@@ -962,9 +966,10 @@ fn ago(age: chrono::TimeDelta) -> String {
 }
 
 /// Шов очереди (C2): причина постановки — параллельность или лимиты со сбросом
-/// не позже горизонта. C1 всегда отвечает ошибкой, но решение уже размечено.
+/// не позже горизонта. Пара вне белого списка и неизвестный харнесс очередью не лечатся.
 pub fn queue_reason(
     considered: &[Considered],
+    reset: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
     horizon: Duration,
 ) -> Option<&'static str> {
@@ -976,8 +981,10 @@ pub fn queue_reason(
             _ => {}
         }
     }
-    if limits {
-        let _ = (now, horizon);
+    if limits
+        && reset
+            .is_some_and(|at| at <= now + chrono::TimeDelta::from_std(horizon).unwrap_or_default())
+    {
         return Some("limits");
     }
     None
@@ -1067,7 +1074,18 @@ pub async fn live_counts(
             and (d.activity_state in ('working','stalled')
               or (d.activity_state='idle' and d.queue_queued > 0)
               or exists(select 1 from nudge_rules r
-                        where r.conversation_id=c.id and r.state='pending'))
+                        where r.conversation_id=c.id and r.state='pending')
+              -- Проекция отстаёт на мгновение: только что созданный делегат с ещё
+              -- не принятым вводом уже занимает слот параллельности. Остановленная
+              -- сессия с замершим вводом слот не держит: нужен живой процесс.
+              or (exists(select 1 from executions e
+                         where e.conversation_id=c.id
+                           and e.state not in ('stopped','failed','owner_lost'))
+                  and (exists(select 1 from inputs i
+                              where i.conversation_id=c.id and i.feed_seq is null
+                                and i.state in ('queued','dispatched','on_machine'))
+                       or exists(select 1 from queue_state q
+                                 where q.conversation_id=c.id and q.run_slot <> 'free'))))
           group by c.harness,c.model",
     )
     .bind(owner)
@@ -1241,6 +1259,14 @@ pub async fn preview(
         std::time::Duration::from_secs(120),
     )
     .await?;
+    let guard = crate::session_tools::guard::check_in_tx(
+        &mut tx,
+        caller.owner_id,
+        caller.machine_id,
+        &context.guards,
+        now,
+    )
+    .await?;
     let existing = policy.task_types.contains_key(task_type);
     match route(RouteInputs {
         policy: &policy,
@@ -1252,12 +1278,14 @@ pub async fn preview(
         stale: context.routing_stale,
         now,
         request: &request,
+        bypass_limits: false,
     }) {
         Ok(decision) => {
             tx.commit().await?;
             Ok(serde_json::json!({
                 "decision": decision,
                 "machine": headroom,
+                "guard": guard.to_value(),
                 "hint": "Read-only preview; to start the session, call session_spawn with route.",
             }))
         }
@@ -1416,6 +1444,47 @@ mod tests {
     }
 
     #[test]
+    fn bypass_limits_ignores_unknown_and_over_thresholds() {
+        let mut policy = policy();
+        policy.unknown_limits = UnknownLimits::Skip;
+        let empty = HashMap::new();
+        let empty_live: HashMap<(String, String), i64> = HashMap::new();
+        let req = request("bugfix");
+        assert!(
+            matches!(
+                route(RouteInputs {
+                    policy: &policy,
+                    revision: 1,
+                    whitelist: &entries(),
+                    catalogs: &catalogs(),
+                    limits: &empty,
+                    live: &empty_live,
+                    stale: Duration::from_secs(1800),
+                    now: now(),
+                    request: &req,
+                    bypass_limits: false,
+                }),
+                Err(RouteError::NoExecutor { .. })
+            ),
+            "unknown limits skip the candidate without a bypass"
+        );
+        let decision = route(RouteInputs {
+            policy: &policy,
+            revision: 1,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &empty,
+            live: &empty_live,
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &req,
+            bypass_limits: true,
+        })
+        .unwrap();
+        assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
+    }
+
+    #[test]
     fn first_passing_candidate_wins() {
         let decision = route(RouteInputs {
             policy: &policy(),
@@ -1427,6 +1496,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.harness, "opencode");
@@ -1455,6 +1525,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &with_level,
+            bypass_limits: false,
         })
         .unwrap();
         // Beam пропущен по уровню; DeepSeek без effort берёт уровень как усилие.
@@ -1475,6 +1546,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         });
         let error = decision.unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
@@ -1502,6 +1574,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("review"),
+            bypass_limits: false,
         })
         .unwrap();
         // claude_code нет в каталоге: выбран codex, а не отсутствующий opus.
@@ -1540,6 +1613,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("probe"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1576,6 +1650,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("probe"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opus[1m]");
@@ -1613,6 +1688,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("probe"),
+            bypass_limits: false,
         })
         .unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
@@ -1633,6 +1709,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         // DeepSeek и Muse упёрлись в лимит opencode; у claude показаний нет —
@@ -1679,6 +1756,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap_err();
         let RouteError::NoExecutor { considered, reset } = error else {
@@ -1727,6 +1805,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("fast"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/beam-free");
@@ -1753,6 +1832,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1779,6 +1859,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         });
         let decision = error_or_next.unwrap();
         assert_ne!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1810,6 +1891,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         // Первый два кандидата на паузе; выбран opus.
@@ -1841,6 +1923,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         // DeepSeek занят 4 из 4; Muse исключён workdir? Нет: workdir /tmp/w.
@@ -1867,6 +1950,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &with_home,
+            bypass_limits: false,
         })
         .unwrap();
         // Muse исключён каталогом; DeepSeek первый и проходит.
@@ -1892,6 +1976,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &shop,
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/muse-spark-1.3-contributor");
@@ -1920,7 +2005,7 @@ mod tests {
             reason: "1 of 1 sessions busy".to_owned(),
         }];
         assert_eq!(
-            queue_reason(&busy, now(), Duration::from_secs(6 * 3600)),
+            queue_reason(&busy, None, now(), Duration::from_secs(6 * 3600)),
             Some("concurrency")
         );
         let limited = vec![Considered {
@@ -1930,7 +2015,12 @@ mod tests {
             reason: "codex weekly 83% > 80%".to_owned(),
         }];
         assert_eq!(
-            queue_reason(&limited, now(), Duration::from_secs(6 * 3600)),
+            queue_reason(
+                &limited,
+                Some(now() + chrono::TimeDelta::hours(4)),
+                now(),
+                Duration::from_secs(6 * 3600)
+            ),
             Some("limits")
         );
         let skipped = vec![Considered {
@@ -1940,7 +2030,22 @@ mod tests {
             reason: "not in the owner's list".to_owned(),
         }];
         assert_eq!(
-            queue_reason(&skipped, now(), Duration::from_secs(6 * 3600)),
+            queue_reason(&skipped, None, now(), Duration::from_secs(6 * 3600)),
+            None
+        );
+        // Сброс дальше горизонта — не очередь, а ошибка.
+        assert_eq!(
+            queue_reason(
+                &limited,
+                Some(now() + chrono::TimeDelta::hours(9)),
+                now(),
+                Duration::from_secs(6 * 3600)
+            ),
+            None
+        );
+        // Пауза квоты без срока сброса тоже не лечится очередью.
+        assert_eq!(
+            queue_reason(&limited, None, now(), Duration::from_secs(6 * 3600)),
             None
         );
     }
@@ -1957,6 +2062,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("nope"),
+            bypass_limits: false,
         })
         .unwrap_err();
         let RouteError::UnknownTask { available } = error else {

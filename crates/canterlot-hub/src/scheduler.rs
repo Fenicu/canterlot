@@ -482,6 +482,12 @@ pub struct Scheduler {
     registry: Option<Registry>,
     limits: Arc<LimitsConfig>,
     session_tools: SessionToolsConfig,
+    /// Маршрут и страж для запуска элементов очереди.
+    routing_enabled: bool,
+    routing_stale: std::time::Duration,
+    routing_queue_horizon: std::time::Duration,
+    spawn_queue: crate::config::SpawnQueueConfig,
+    guards: crate::config::GuardsConfig,
     /// Срок хранения корзины: через него уборка удаляет сессию окончательно.
     trash_retention: Duration,
     /// Пороги устоявшегося состояния для перепроверки задания `nudge`.
@@ -514,6 +520,11 @@ impl Scheduler {
             registry: None,
             limits: Arc::new(LimitsConfig::default()),
             session_tools: SessionToolsConfig::default(),
+            routing_enabled: true,
+            routing_stale: Duration::from_secs(30 * 60),
+            routing_queue_horizon: Duration::from_secs(6 * 3600),
+            spawn_queue: Default::default(),
+            guards: Default::default(),
             trash_retention: Duration::from_secs(24 * 3600),
             settle: crate::session_tools::settle::SettleConfig::default(),
             thresholds: crate::activity::Thresholds::from(&crate::config::ActivityConfig::default()),
@@ -537,6 +548,15 @@ impl Scheduler {
     /// Срок хранения принятых делегаций и пределы межсессионных инструментов.
     pub fn with_session_tools(mut self, config: SessionToolsConfig) -> Self {
         self.session_tools = config;
+        self
+    }
+    /// Выключатели и пороги оркестратора: очередь запусков и страж машины.
+    pub fn with_orchestrator(mut self, config: &crate::config::OrchestratorConfig) -> Self {
+        self.routing_enabled = config.routing.enabled;
+        self.routing_stale = config.routing.stale_limits;
+        self.routing_queue_horizon = config.routing.queue_horizon;
+        self.spawn_queue = config.spawn_queue.clone();
+        self.guards = config.guards.clone();
         self
     }
     pub fn with_trash_retention(mut self, retention: Duration) -> Self {
@@ -1044,6 +1064,15 @@ impl Scheduler {
                     .map_err(|e| sqlx::Error::Encode(Box::new(e)))
             }),
             JobKind::SessionTask => {
+                let runtime = crate::session_tools::spawn_queue::Runtime {
+                    registry: self.registry.as_ref(),
+                    session_tools: &self.session_tools,
+                    spawn_queue: &self.spawn_queue,
+                    guards: &self.guards,
+                    routing_enabled: self.routing_enabled,
+                    routing_stale: self.routing_stale,
+                    routing_queue_horizon: self.routing_queue_horizon,
+                };
                 match crate::session_tools::jobs::run_in_tx(
                     &mut tx,
                     &claimed,
@@ -1052,6 +1081,7 @@ impl Scheduler {
                     self.registry.as_ref(),
                     &self.settle,
                     &self.thresholds,
+                    Some(&runtime),
                 )
                 .await
                 {
@@ -1466,6 +1496,83 @@ mod tests {
             .fetch_one(&pool)
             .await?;
         assert_eq!(state, "failed", "сутки терпения от первого blocked истекли");
+        Ok(())
+    }
+
+    /// Исчерпание попыток задания очереди: элемент `failed`, следующий снова доступен.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn exhausted_spawn_dequeue_fails_the_item_and_wakes_the_next(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let seed = crate::testkit::seed(&pool).await;
+        let now = chrono::Utc::now();
+        let failed_item = uuid::Uuid::now_v7();
+        let next_item = uuid::Uuid::now_v7();
+        for id in [failed_item, next_item] {
+            sqlx::query(
+                "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+                 values($1,$2,$3,$4,'{\"chain_depth\":0,\"args\":{\"brief\":\"b\"}}','rate',$5)",
+            )
+            .bind(id)
+            .bind(seed.owner_id)
+            .bind(seed.conversation_id)
+            .bind(uuid::Uuid::now_v7())
+            .bind(now - chrono::TimeDelta::seconds(1))
+            .execute(&pool)
+            .await?;
+        }
+        let job_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "insert into scheduled_jobs (id, owner_id, conversation_id, kind, run_at, payload)
+             values ($1, $2, $3, 'session_task', $4, $5)",
+        )
+        .bind(job_id)
+        .bind(seed.owner_id)
+        .bind(seed.conversation_id)
+        .bind(now - chrono::TimeDelta::seconds(1))
+        .bind(serde_json::json!({
+            "action": "spawn_dequeue",
+            "queue_id": failed_item,
+        }))
+        .execute(&pool)
+        .await?;
+        let scheduler = super::Scheduler::new(
+            pool.clone(),
+            crate::dispatcher::Dispatcher::channel().0,
+            crate::config::SchedulerConfig {
+                max_attempts: 1,
+                ..Default::default()
+            },
+        );
+        let attempt: super::JobRow = sqlx::query_as("select * from scheduled_jobs where id=$1")
+            .bind(job_id)
+            .fetch_one(&pool)
+            .await?;
+        let mut report = super::TickReport::default();
+        scheduler
+            .record_failure(&attempt, now, "job_error", false, &mut report)
+            .await?;
+        let (state, result): (String, Option<serde_json::Value>) =
+            sqlx::query_as("select state,result from spawn_queue where id=$1")
+                .bind(failed_item)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(state, "failed");
+        assert_eq!(result.unwrap()["code"], "job_failed");
+        let next_state: String = sqlx::query_scalar("select state from spawn_queue where id=$1")
+            .bind(next_item)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(next_state, "queued");
+        let wake: bool = sqlx::query_scalar(
+            "select exists(select 1 from scheduled_jobs
+              where conversation_id=$1 and kind='session_task' and state='pending'
+                and payload->>'action'='spawn_dequeue')",
+        )
+        .bind(seed.conversation_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(wake, "the next item has a job");
         Ok(())
     }
 

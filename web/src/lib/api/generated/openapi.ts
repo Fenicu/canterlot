@@ -576,6 +576,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/spawn-queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_conversations__id__spawn_queue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{id}/spawn-queue/{queue_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete__api_v1_conversations__id__spawn_queue__queue_id_"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{id}/spawn-queue/{queue_id}/start-now": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_conversations__id__spawn_queue__queue_id__start_now"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/spend-reserve": {
         parameters: {
             query?: never;
@@ -1485,6 +1533,8 @@ export interface components {
             open_requests: components["schemas"]["RequestView"][];
             queue: components["schemas"]["SnapshotQueueView"];
             scheduled: components["schemas"]["ScheduledMessage"][];
+            /** @description Очередь запусков этого разговора: ожидающие и недавно завершённые. */
+            spawn_queue: components["schemas"]["QueueItemView"][];
             /** @description Списки задач агента по дорожкам, основной агент первым. */
             todos: components["schemas"]["TodoListView"][];
         };
@@ -1644,6 +1694,8 @@ export interface components {
         ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
+            /** @description Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`. */
+            candidates?: components["schemas"]["Considered"][];
             /**
              * Format: int64
              * @description Текущая версия пресета (`preset_revision_conflict`).
@@ -1652,6 +1704,11 @@ export interface components {
             current_state?: string;
             /** @description Поле запроса, которое не прошло проверку (`preset_invalid`). */
             field?: string;
+            /**
+             * Format: date-time
+             * @description Ближайший сброс лимита провайдера (`no_executor_available`).
+             */
+            nearest_reset?: string;
             question_id?: string;
             reason?: components["schemas"]["ErrorReason"];
             reasons?: components["schemas"]["ArchiveReason"][];
@@ -1755,6 +1812,17 @@ export interface components {
         };
         GroupsBody: {
             group_ids: string[];
+        };
+        /** @description Вердикт стража: измерения, нарушившие пороги, и строка для `detail`. */
+        GuardVerdict: {
+            /** @description Хотя бы один порог нарушен (старение отменяет блокировку). */
+            blocked: boolean;
+            /** @description Одна английская строка для ответа и элемента очереди. */
+            detail?: string | null;
+            /** @description Метрики старше `metrics_max_age`: страж не включается. */
+            stale: boolean;
+            /** @description Человеческие имена нарушенных порогов (пусто — машина свободна). */
+            violations: string[];
         };
         HarnessRef: {
             id: string;
@@ -2534,6 +2602,39 @@ export interface components {
             device_id?: string | null;
             text: string;
         };
+        /** @description Элемент очереди для PWA, снимка и события. */
+        QueueItemView: {
+            /** Format: int32 */
+            attempts: number;
+            /** Format: uuid */
+            child_id?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            detail: unknown;
+            /** Format: date-time */
+            expires_at: string;
+            /** @description Пара прямого запуска; у маршрута появляется только после старта. */
+            harness?: string | null;
+            /** Format: uuid */
+            id: string;
+            level?: string | null;
+            model?: string | null;
+            /** Format: date-time */
+            not_before: string;
+            /** Format: uuid */
+            parent_id: string;
+            /** Format: int64 */
+            position: number;
+            reason: string;
+            result?: unknown;
+            state: string;
+            /** @description Тип задачи маршрута; `null` у прямого запуска. */
+            task_type?: string | null;
+            /** @description Запрошенный заголовок будущей сессии; `null` — автоназвание. */
+            title?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
         QueueView: {
             hold_reasons: components["schemas"]["HoldView"][];
             pause_reasons: components["schemas"]["PauseReason"][];
@@ -2632,6 +2733,7 @@ export interface components {
         RoutingPreviewView: {
             considered: components["schemas"]["Considered"][];
             decision: components["schemas"]["Decision"];
+            guard: components["schemas"]["GuardVerdict"];
             machine: components["schemas"]["MachineHeadroom"];
         };
         RunInfo: {
@@ -2760,6 +2862,8 @@ export interface components {
                 open_requests: components["schemas"]["RequestView"][];
                 queue: components["schemas"]["SnapshotQueueView"];
                 scheduled: components["schemas"]["ScheduledMessage"][];
+                /** @description Очередь запусков этого разговора: ожидающие и недавно завершённые. */
+                spawn_queue: components["schemas"]["QueueItemView"][];
                 /** @description Списки задач агента по дорожкам, основной агент первым. */
                 todos: components["schemas"]["TodoListView"][];
             };
@@ -2783,6 +2887,19 @@ export interface components {
                 items: components["schemas"]["MachineView"][];
             };
             scope: string;
+        };
+        SpawnQueueActionView: {
+            harness?: string | null;
+            model?: string | null;
+            /** Format: uuid */
+            queue_id: string;
+            /** Format: uuid */
+            session_id?: string | null;
+            status: string;
+            title?: string | null;
+        };
+        SpawnQueueView: {
+            items: components["schemas"]["QueueItemView"][];
         };
         SpeedStats: {
             /**
@@ -5117,6 +5234,179 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Snapshot_ConversationSnapshot"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__spawn_queue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Разговор */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Очередь запусков разговора */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpawnQueueView"];
+                };
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_conversations__id__spawn_queue__queue_id_: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path: {
+                /** @description Разговор */
+                id: string;
+                /** @description Элемент очереди */
+                queue_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Элемент отменён или уже завершён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpawnQueueActionView"];
+                };
+            };
+            /** @description Элемент не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_conversations__id__spawn_queue__queue_id__start_now: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path: {
+                /** @description Разговор */
+                id: string;
+                /** @description Элемент очереди */
+                queue_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сессия запущена */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpawnQueueActionView"];
+                };
+            };
+            /** @description Элемент не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Элемент уже завершён */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Белый список или режим не пропускают запуск */
+            422: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

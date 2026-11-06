@@ -104,6 +104,9 @@ pub struct HubGrpc {
     pub nudge_enabled: bool,
     pub routing_enabled: bool,
     pub routing_stale: std::time::Duration,
+    pub routing_queue_horizon: std::time::Duration,
+    pub spawn_queue: Arc<crate::config::SpawnQueueConfig>,
+    pub guards: Arc<crate::config::GuardsConfig>,
     pub settle: crate::session_tools::settle::SettleConfig,
     pub dispatcher: Option<crate::dispatcher::Dispatcher>,
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
@@ -310,6 +313,9 @@ impl HubGrpc {
             nudge_enabled: true,
             routing_enabled: true,
             routing_stale: std::time::Duration::from_secs(1800),
+            routing_queue_horizon: std::time::Duration::from_secs(6 * 3600),
+            spawn_queue: Default::default(),
+            guards: Default::default(),
             settle: (&crate::config::ActivityConfig::default()).into(),
             dispatcher: None,
             blobs: None,
@@ -336,6 +342,9 @@ impl HubGrpc {
         self.nudge_enabled = config.nudge.enabled;
         self.routing_enabled = config.routing.enabled;
         self.routing_stale = config.routing.stale_limits;
+        self.routing_queue_horizon = config.routing.queue_horizon;
+        self.spawn_queue = Arc::new(config.spawn_queue.clone());
+        self.guards = Arc::new(config.guards.clone());
         self
     }
 

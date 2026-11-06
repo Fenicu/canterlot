@@ -161,6 +161,9 @@
     },
     {
       "$ref": "#/$defs/routing_policy_changed"
+    },
+    {
+      "$ref": "#/$defs/spawn_queue_changed"
     }
   ],
   "$defs": {
@@ -4123,6 +4126,80 @@
       ],
       "additionalProperties": false
     },
+    "spawn_queue_changed": {
+      "type": "object",
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/Uuid" },
+        "scope": { "$ref": "#/$defs/Scope" },
+        "scope_seq": { "$ref": "#/$defs/Seq" },
+        "scope_seq_from": { "$ref": "#/$defs/Seq" },
+        "committed_at": { "$ref": "#/$defs/Time" },
+        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "conversation_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "execution_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "correlation_id": { "$ref": "#/$defs/Uuid" },
+        "kind": { "const": "spawn_queue_changed" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id", "parent_id", "title", "task_type", "level", "harness", "model",
+            "reason", "detail", "state", "not_before", "expires_at", "attempts",
+            "child_id", "result", "created_at", "updated_at", "position"
+          ],
+          "properties": {
+            "id": { "$ref": "#/$defs/Uuid" },
+            "parent_id": { "$ref": "#/$defs/Uuid" },
+            "title": {
+              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+            },
+            "task_type": {
+              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+            },
+            "level": {
+              "anyOf": [
+                { "enum": ["low", "medium", "high", "xhigh"] },
+                { "type": "null" }
+              ]
+            },
+            "harness": {
+              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+            },
+            "model": {
+              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+            },
+            "reason": { "enum": ["rate", "concurrency", "limits", "resources"] },
+            "detail": { "type": "object" },
+            "state": {
+              "enum": ["queued", "starting", "started", "cancelled", "failed", "expired"]
+            },
+            "not_before": { "$ref": "#/$defs/Time" },
+            "expires_at": { "$ref": "#/$defs/Time" },
+            "attempts": { "type": "integer", "minimum": 0 },
+            "child_id": {
+              "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+            },
+            "result": {
+              "anyOf": [ { "type": "object" }, { "type": "null" } ]
+            },
+            "created_at": { "$ref": "#/$defs/Time" },
+            "updated_at": { "$ref": "#/$defs/Time" },
+            "position": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "required": [
+        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
+        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
+        "kind", "payload"
+      ],
+      "additionalProperties": false
+    },
     "limits_changed": {
       "type": "object",
       "properties": {
@@ -5739,6 +5816,9 @@
                 },
                 {
                   "$ref": "#/$defs/routing_policy_changed"
+                },
+                {
+                  "$ref": "#/$defs/spawn_queue_changed"
                 },
                 {
                   "$ref": "#/$defs/limits_changed"

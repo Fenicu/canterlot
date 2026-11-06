@@ -11,6 +11,7 @@ pub mod alarms;
 pub mod completion;
 pub mod control;
 pub mod disk;
+pub mod guard;
 pub mod jobs;
 pub mod nudge;
 pub mod origin;
@@ -21,6 +22,7 @@ pub mod routing;
 pub mod send;
 pub mod settle;
 pub mod spawn;
+pub mod spawn_queue;
 pub mod subs;
 pub mod summary;
 pub mod wait;
@@ -59,6 +61,7 @@ pub const TOOLS: &[&str] = &[
     "nudge.set",
     "nudge.clear",
     "routing.preview",
+    "spawn_queue.cancel",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -93,12 +96,14 @@ pub enum ToolErrorCode {
     AlarmNotFound,
     TaskTypeUnknown,
     NoExecutorAvailable,
+    MachineBusy,
+    SpawnQueueFull,
     InvalidArguments,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 29] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -124,6 +129,8 @@ impl ToolErrorCode {
         Self::AlarmNotFound,
         Self::TaskTypeUnknown,
         Self::NoExecutorAvailable,
+        Self::MachineBusy,
+        Self::SpawnQueueFull,
         Self::InvalidArguments,
         Self::Internal,
     ];
@@ -155,6 +162,8 @@ impl ToolErrorCode {
             Self::AlarmNotFound => "alarm_not_found",
             Self::TaskTypeUnknown => "task_type_unknown",
             Self::NoExecutorAvailable => "no_executor_available",
+            Self::MachineBusy => "machine_busy",
+            Self::SpawnQueueFull => "spawn_queue_full",
             Self::InvalidArguments => "invalid_arguments",
             Self::Internal => "internal_error",
         }
@@ -187,6 +196,8 @@ impl ToolErrorCode {
             Self::AlarmNotFound => "No such alarm",
             Self::TaskTypeUnknown => "Unknown routing task type",
             Self::NoExecutorAvailable => "No executor available for this task type",
+            Self::MachineBusy => "The machine is too busy for a new session",
+            Self::SpawnQueueFull => "Too many spawns are already queued for this session",
             Self::InvalidArguments => "Invalid arguments",
             Self::Internal => "The hub could not complete the call, try later",
         }
@@ -238,6 +249,11 @@ pub struct ToolContext {
     pub nudge_enabled: bool,
     pub routing_enabled: bool,
     pub routing_stale: std::time::Duration,
+    pub routing_queue_horizon: std::time::Duration,
+    /// Очередь запусков: срок элемента, предел ожидающих, пауза повтора.
+    pub spawn_queue: Arc<crate::config::SpawnQueueConfig>,
+    /// Пороги стража машины перед запуском.
+    pub guards: Arc<crate::config::GuardsConfig>,
     pub dispatcher: Option<Dispatcher>,
     pub registry: Registry,
     /// Останов хаба: долгие вызовы (`sessions.wait`) возвращаются, не дожидаясь срока.
@@ -279,6 +295,7 @@ pub async fn call(
         "nudge.set" => nudge::set(context, caller, arguments).await,
         "nudge.clear" => nudge::clear(context, caller, arguments).await,
         "routing.preview" => routing::preview(context, caller, arguments).await,
+        "spawn_queue.cancel" => spawn_queue::cancel(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

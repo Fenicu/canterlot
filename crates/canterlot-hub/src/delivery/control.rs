@@ -1,3 +1,4 @@
+use chrono::Utc;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
@@ -556,6 +557,21 @@ async fn stop_locked_in_tx(
         return Ok(StopExecutionOutcome::OwnerLost);
     }
     mark_owner_stop(&mut *conn, conversation_id, true).await?;
+    // Остановка родителя отменяет его ожидающие запуски; возобновление их не возвращает.
+    let owner_id: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(conversation_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    crate::session_tools::spawn_queue::cancel_for_parent_in_tx(
+        &mut *conn,
+        owner_id,
+        conversation_id,
+        "parent_stopped",
+        correlation_id,
+        Utc::now(),
+        true,
+    )
+    .await?;
     crate::crunch::clear_resume_in_tx(&mut *conn, conversation_id, None, correlation_id).await?;
     if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
         queue.pause_reasons.0.push(PauseReason::UserStop);

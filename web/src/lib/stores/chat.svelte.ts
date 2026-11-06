@@ -173,6 +173,7 @@ export function executionLive(execution: ChatExecution | null): boolean {
 type QueuedInput = QueueSnapshot["queued"][number];
 export type ScheduledMessage = components["schemas"]["ScheduledMessage"];
 export type AlarmView = components["schemas"]["AlarmView"];
+export type SpawnQueueItemView = components["schemas"]["QueueItemView"];
 export type NudgeRule = components["schemas"]["NudgeRuleView"];
 export type NudgeEvent = components["schemas"]["NudgeEventView"];
 
@@ -195,6 +196,7 @@ export interface SnapshotData {
   scheduled?: ScheduledMessage[];
   draft?: DraftRecord | null;
   alarms?: AlarmView[];
+  spawn_queue?: SpawnQueueItemView[];
   nudge?: NudgeRule | null;
   nudge_events?: NudgeEvent[];
   open_requests?: unknown[];

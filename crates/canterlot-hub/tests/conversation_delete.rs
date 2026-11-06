@@ -222,6 +222,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,'{}','rate',now())",
+        &[Uuid::now_v7(), owner, conversation, Uuid::now_v7()],
+    )
+    .await;
+    exec(
+        pool,
         "insert into nudge_rules(conversation_id,owner_id,set_by,set_by_conversation,notify_conversation_id)
          values($1,$2,'agent',$1,$1)",
         &[conversation, owner],
@@ -585,6 +592,9 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
         nudge_enabled: true,
         routing_enabled: true,
         routing_stale: std::time::Duration::from_secs(1800),
+        routing_queue_horizon: std::time::Duration::from_secs(6 * 3600),
+        spawn_queue: Default::default(),
+        guards: Default::default(),
         dispatcher: None,
         registry: canterlot_hub::session::Registry::new(Default::default()),
         shutdown: tokio_util::sync::CancellationToken::new(),

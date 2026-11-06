@@ -143,6 +143,9 @@ impl Fx {
                 nudge_enabled: true,
                 routing_enabled: true,
                 routing_stale: std::time::Duration::from_secs(1800),
+                routing_queue_horizon: std::time::Duration::from_secs(6 * 3600),
+                spawn_queue: Default::default(),
+                guards: Default::default(),
                 dispatcher: None,
                 registry: registry.clone(),
                 shutdown: tokio_util::sync::CancellationToken::new(),
@@ -554,6 +557,13 @@ async fn routing_preview_http_matches_tool(pool: PgPool) {
         "preview equals tool answer"
     );
     assert_eq!(http_body["decision"]["harness"], "opencode");
+    // Метрик машины нет: страж помечен устаревшим и не мешает.
+    assert_eq!(tool["guard"]["stale"], true, "{tool}");
+    assert_eq!(tool["guard"]["blocked"], false, "{tool}");
+    assert_eq!(
+        http_body["guard"], tool["guard"],
+        "guard equals tool answer"
+    );
 
     // Список типов без task_type.
     let list = f.call("routing.preview", json!({})).await.unwrap();
@@ -581,4 +591,44 @@ async fn routing_preview_http_matches_tool(pool: PgPool) {
         )
         .await;
     assert_eq!(http_unknown.status, 404, "{:?}", http_unknown.body);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn routing_preview_no_executor_has_structured_details(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let f = Fx::for_owner(pool, owner).await;
+    for provider in ["opencode", "claude", "codex"] {
+        sqlx::query(
+            "insert into provider_limits(provider,weekly_used_permille,weekly_observed_at,weekly_resets_at)
+             values($1,990,now(),now()+interval '1 hour') on conflict(provider) do update
+             set weekly_used_permille=990,weekly_observed_at=now(),weekly_resets_at=now()+interval '1 hour'",
+        )
+        .bind(provider)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+    let http_client = TestClient::in_process(http::router(http::AppState::new(deps))).as_owner();
+    let response = http_client
+        .send(
+            Method::POST,
+            "/api/v1/routing-policy/preview",
+            None,
+            Some(json!({"task_type":"bugfix"})),
+        )
+        .await;
+    assert_eq!(response.status, 422, "{:?}", response.body);
+    let body = response.json::<Value>();
+    let details = &body["error"]["details"];
+    let candidates = details["candidates"].as_array().expect("candidates");
+    assert!(!candidates.is_empty(), "{body}");
+    assert!(candidates[0]["harness"].is_string(), "{body}");
+    assert!(candidates[0]["verdict"].is_string(), "{body}");
+    assert!(details["nearest_reset"].is_string(), "{body}");
+    assert!(
+        details.get("reason").is_none(),
+        "details.reason stays an ErrorReason enum or absent: {body}"
+    );
 }

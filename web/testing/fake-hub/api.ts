@@ -16,6 +16,7 @@ type PresetSummary = components['schemas']['PresetSummary'];
 type QueueSnapshot = components['schemas']['SnapshotQueueView'];
 export type NudgeRuleView = components['schemas']['NudgeRuleView'];
 export type NudgeEventView = components['schemas']['NudgeEventView'];
+type QueueItemView = components['schemas']['QueueItemView'];
 
 export const NUDGE_BUILTIN_TEXT =
 	'[canterlot] Automatic reminder from canterlot, not the owner: you ended your turn without a final status. If the task is finished, give your report and end it with the line {markers}. If you are blocked, explain why and end with STATUS: BLOCKED. Otherwise continue from where you stopped. Do not end your turn while anything is still running or uncommitted.\nObserved: {signals}.';
@@ -84,6 +85,8 @@ export class FakeHubApi {
 	presets = new Map<string, FakePreset>();
 	readonly nudgeRules = new Map<string, NudgeRuleView>();
 	readonly nudgeEvents = new Map<string, NudgeEventView[]>();
+	/** Очередь запусков разговора: ожидающие и недавно завершённые элементы. */
+	readonly spawnQueue = new Map<string, QueueItemView[]>();
 	ownerOverview = {
 		files: [
 			{ kind: 'claude_user', harness: 'claude', path: '/home/owner/.claude/CLAUDE.md', present: true, size: 24, mtime: '2026-10-28T12:00:00.000Z', reason: '' },
@@ -184,7 +187,14 @@ export class FakeHubApi {
 			throw { status: 404, code: 'task_type_unknown', message: `Unknown task type ${task_type}` };
 		}
 		const candidate = task.candidates[0];
-		if (!candidate) throw { status: 422, code: 'no_executor_available', message: 'No executor available' };
+		if (!candidate) {
+			throw {
+				status: 422,
+				code: 'no_executor_available',
+				message: 'No executor available',
+				details: { candidates: [], nearest_reset: null }
+			};
+		}
 		void level;
 		void workdir;
 		return {
@@ -472,6 +482,7 @@ export class FakeHubApi {
 			scheduled: [],
 			draft: this.drafts.get(id) ?? null,
 			alarms: [...alarms.values()],
+			spawn_queue: this.spawnQueue.get(id) ?? [],
 			nudge: this.nudgeRules.get(id) ?? null,
 			nudge_events: this.nudgeEvents.get(id) ?? [],
 			open_requests,
@@ -479,6 +490,75 @@ export class FakeHubApi {
 			background: [...background.values()],
 			context
 		};
+	}
+
+	/** Элемент очереди запусков для снимка и HTTP владельца. */
+	queueItem(id: string, input: Partial<QueueItemView> = {}): QueueItemView {
+		const now = new Date().toISOString();
+		const item: QueueItemView = {
+			id: input.id ?? crypto.randomUUID(),
+			parent_id: id,
+			title: input.title ?? null,
+			task_type: input.task_type ?? null,
+			level: input.level ?? null,
+			harness: input.harness ?? null,
+			model: input.model ?? null,
+			reason: input.reason ?? 'rate',
+			detail: input.detail ?? { detail: '10 spawns in the last hour' },
+			state: input.state ?? 'queued',
+			not_before: input.not_before ?? now,
+			expires_at: input.expires_at ?? new Date(Date.now() + 86_400_000).toISOString(),
+			attempts: input.attempts ?? 0,
+			child_id: input.child_id ?? null,
+			result: input.result ?? null,
+			created_at: input.created_at ?? now,
+			updated_at: input.updated_at ?? now,
+			position: input.position ?? 1
+		};
+		this.pushQueueItem(id, item);
+		return item;
+	}
+
+	private pushQueueItem(conversation: string, item: QueueItemView): void {
+		const list = this.spawnQueue.get(conversation) ?? [];
+		const index = list.findIndex((known) => known.id === item.id);
+		if (index >= 0) list[index] = item;
+		else list.push(item);
+		this.spawnQueue.set(conversation, list);
+		this.hub.append(`conversation:${conversation}`, {
+			kind: 'spawn_queue_changed',
+			conversation_id: conversation,
+			payload: item
+		});
+	}
+
+	spawnQueueView(id: string): { items: QueueItemView[] } {
+		return { items: this.spawnQueue.get(id) ?? [] };
+	}
+
+	cancelSpawnQueue(id: string, queueId: string): { status: string; queue_id: string; session_id: string | null } {
+		const item = (this.spawnQueue.get(id) ?? []).find((known) => known.id === queueId);
+		if (!item) return { status: 'already_cancelled', queue_id: queueId, session_id: null };
+		if (item.state === 'started') return { status: 'already_started', queue_id: queueId, session_id: item.child_id ?? null };
+		if (item.state !== 'queued') return { status: 'already_cancelled', queue_id: queueId, session_id: null };
+		this.pushQueueItem(id, { ...item, state: 'cancelled', updated_at: new Date().toISOString() });
+		return { status: 'cancelled', queue_id: queueId, session_id: null };
+	}
+
+	startSpawnQueueNow(id: string, queueId: string): components['schemas']['SpawnQueueActionView'] {
+		const item = (this.spawnQueue.get(id) ?? []).find((known) => known.id === queueId);
+		if (!item) return { status: 'already_cancelled', queue_id: queueId, session_id: null };
+		if (item.state === 'queued') {
+			const child = crypto.randomUUID();
+			this.pushQueueItem(id, {
+				...item,
+				state: 'started',
+				child_id: child,
+				updated_at: new Date().toISOString()
+			});
+			return { status: 'started', queue_id: queueId, session_id: child, title: 'Очередной запуск', harness: 'opencode', model: 'opencode-go/beam-free' };
+		}
+		return { status: item.state, queue_id: queueId, session_id: item.child_id ?? null };
 	}
 
 	/** Как `todo_updated` хаба: список целиком, ревизия дорожки растёт с каждым обновлением. */

@@ -250,6 +250,7 @@ async fn serve(
     )
     .with_limits(registry.clone(), limits.clone())
     .with_session_tools(session_tools.clone())
+    .with_orchestrator(&orchestrator)
     .with_trash_retention(sessions.trash_retention)
     .with_settle(canterlot_hub::session_tools::settle::SettleConfig {
         nudge_enabled: orchestrator.nudge.enabled,
@@ -326,6 +327,10 @@ async fn serve(
             activity,
             nudge_enabled: orchestrator.nudge.enabled,
             routing_stale: orchestrator.routing.stale_limits,
+            guards: orchestrator.guards.clone(),
+            session_tools: session_tools.clone(),
+            spawn_queue: orchestrator.spawn_queue.clone(),
+            routing_queue_horizon: orchestrator.routing.queue_horizon,
             machines,
             attachments,
             blobs,

@@ -100,7 +100,7 @@ pub enum ToolKind {
 }
 
 /// Агентские инструменты: имя MCP → имя инструмента хаба.
-pub const AGENT_TOOLS: [(&str, &str); 19] = [
+pub const AGENT_TOOLS: [(&str, &str); 20] = [
     ("canterlot_presets_list", "presets.list"),
     ("canterlot_preset_save", "presets.save"),
     ("canterlot_preset_apply", "presets.apply"),
@@ -120,6 +120,7 @@ pub const AGENT_TOOLS: [(&str, &str); 19] = [
     ("nudge_set", "nudge.set"),
     ("nudge_clear", "nudge.clear"),
     ("route_preview", "routing.preview"),
+    ("spawn_cancel", "spawn_queue.cancel"),
 ];
 
 fn is_session_tool(mcp_name: &str) -> bool {
@@ -141,6 +142,7 @@ fn is_session_tool(mcp_name: &str) -> bool {
             | "nudge_set"
             | "nudge_clear"
             | "route_preview"
+            | "spawn_cancel"
     )
 }
 
@@ -173,7 +175,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Queue a text message for another session; it reads it as a message from an agent, not from the owner. `attachment_ids` passes on files of this session's own conversation. By default you are subscribed to its completion. Do not use it to ask the owner anything (use your own question flow) and do not send the same text twice. After sending, end your turn instead of polling."
         }
         "session_spawn" => {
-            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir; `attachment_ids` passes on files of this session's own conversation. With `route` instead of `harness`, canterlot picks the executor by the owner's policy and current limits and tells you why. The child never gets wider permissions than yours without the owner: a mode that is stronger in the child's CLI than yours (Codex `ask` runs commands without asking) answers pending_approval, and an omitted mode falls back to the widest one that is not stronger. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
+            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir; `attachment_ids` passes on files of this session's own conversation. With `route` instead of `harness`, canterlot picks the executor by the owner's policy and current limits and tells you why. Spawns blocked by the hourly limit, busy executors or a busy machine are queued, not refused: the start arrives as a message. The child never gets wider permissions than yours without the owner: a mode that is stronger in the child's CLI than yours (Codex `ask` runs commands without asking) answers pending_approval, and an omitted mode falls back to the widest one that is not stronger. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
         }
         "session_subscribe" => {
             "Ask for a [canterlot] message when another session finishes, asks or stalls. Sending to or spawning a session already subscribes you. Do not call it for a session you just sent to or spawned."
@@ -210,6 +212,9 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
         }
         "route_preview" => {
             "Show which executor the owner's routing policy would pick right now for a task type, with the reason for every candidate, current limits and machine headroom. Without task_type, lists the task types. Read-only; to start the session, call session_spawn with route. Do not call it in a loop or before every spawn: session_spawn with route already explains its choice."
+        }
+        "spawn_cancel" => {
+            "Cancel one of your queued spawns. Idempotent; a spawn that already started answers its session id. Do not use it for a running session (session_stop does that) and do not retry a queued spawn with different arguments: cancel it instead."
         }
         _ => "Session tool.",
     }
@@ -282,6 +287,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "attachment_ids": attachments,
                 "nudge": {"description": "true, false or nudge_set fields without session_id."},
                 "watchdog_minutes": {"type": "integer", "minimum": 5, "maximum": 1440, "description": "Wake you if the session has not settled by then."},
+                "queue": {"type": "boolean", "default": true, "description": "Queue the spawn when a limit or the machine is busy (default true); false answers an error instead."},
             },
             "required": ["brief"],
             "additionalProperties": false,
@@ -292,6 +298,12 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "task_type": {"type": "string"},
                 "level": {"type": "string", "enum": ["low", "medium", "high", "xhigh"]},
             },
+            "additionalProperties": false,
+        }),
+        "spawn_cancel" => json!({
+            "type": "object",
+            "properties": {"queue_id": {"type": "string", "description": "Queued spawn id (UUID)."}},
+            "required": ["queue_id"],
             "additionalProperties": false,
         }),
         "session_wait" => json!({

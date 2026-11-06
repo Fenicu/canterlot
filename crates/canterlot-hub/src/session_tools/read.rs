@@ -94,12 +94,14 @@ pub async fn list(
         },
     )
     .await?;
+    let queued_spawns =
+        crate::session_tools::spawn_queue::waiting_summary(&mut tx, caller.conversation_id).await?;
     tx.commit().await?;
     let sessions: Vec<Value> = items
         .iter()
         .map(|item| session_row(item, caller.conversation_id))
         .collect();
-    Ok(json!({"sessions": sessions}))
+    Ok(json!({"sessions": sessions, "queued_spawns": queued_spawns}))
 }
 
 /// Обрезка по границе символа; `total_bytes` говорит о полном размере.

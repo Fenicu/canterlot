@@ -1105,7 +1105,8 @@ async fn metrics(f: &Fixture, free: u64, ms: u64) {
         f.owner,
         f.machine,
         &MachineMetrics {
-            machine_time_ms: ms,
+            // Свежесть считается по времени выборки, а `ms` задаёт её порядок.
+            machine_time_ms: Utc::now().timestamp_millis() as u64 + ms,
             cpu_cores: 4,
             cpu_permille: 123,
             mem_total_bytes: 10000,

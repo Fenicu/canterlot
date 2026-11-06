@@ -451,6 +451,16 @@ async fn delete_in_tx(
     .bind(&execution_ids)
     .execute(&mut *conn)
     .await?;
+    crate::session_tools::spawn_queue::cancel_for_parent_in_tx(
+        conn,
+        owner_id,
+        id,
+        "parent_trashed",
+        correlation_id,
+        Utc::now(),
+        false,
+    )
+    .await?;
     crate::session_tools::alarms::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
     if mode == DeleteMode::Manual {
         subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
@@ -519,6 +529,16 @@ async fn trash_in_tx(
     )
     .bind(id)
     .execute(&mut *conn)
+    .await?;
+    crate::session_tools::spawn_queue::cancel_for_parent_in_tx(
+        conn,
+        owner_id,
+        id,
+        "parent_trashed",
+        correlation_id,
+        Utc::now(),
+        false,
+    )
     .await?;
     crate::session_tools::alarms::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
     subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;

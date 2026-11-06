@@ -1113,9 +1113,33 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       const answer = api.previewRoutingPolicy(body.task_type, body.level, body.workdir);
       await route.fulfill({ headers: headers(), json: answer });
     } catch (error) {
-      const failure = error as { status: number; code: string; message: string };
-      await route.fulfill({ status: failure.status, headers: headers(), json: errorBody(failure.code, failure.message) });
+      const failure = error as { status: number; code: string; message: string; details?: Record<string, unknown> };
+      await route.fulfill({ status: failure.status, headers: headers(), json: errorBody(failure.code, failure.message, failure.details) });
     }
+  });
+
+  await page.route(/\/api\/v1\/conversations\/[^/]+\/spawn-queue$/, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/')[4] ?? '';
+    await route.fulfill({ headers: headers(), json: api.spawnQueueView(id) });
+  });
+
+  await page.route(/\/api\/v1\/conversations\/[^/]+\/spawn-queue\/[^/]+$/, async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback();
+    const parts = new URL(route.request().url()).pathname.split('/');
+    const id = parts[4] ?? '';
+    const queueId = parts.at(-1) ?? '';
+    hub.flush();
+    await route.fulfill({ headers: headers(), json: api.cancelSpawnQueue(id, queueId) });
+  });
+
+  await page.route(/\/api\/v1\/conversations\/[^/]+\/spawn-queue\/[^/]+\/start-now$/, async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const parts = new URL(route.request().url()).pathname.split('/');
+    const id = parts[4] ?? '';
+    const queueId = parts.at(-2) ?? '';
+    hub.flush();
+    await route.fulfill({ headers: headers(), json: api.startSpawnQueueNow(id, queueId) });
   });
 
   await page.route('**/api/v1/limit-settings', async (route) => {

@@ -17,7 +17,10 @@ use utoipa_axum::router::OpenApiRouter;
 
 use crate::{
     attachments::BlobStore,
-    config::{ActivityConfig, AttachmentsConfig, HttpConfig, LimitsConfig, MachinesConfig},
+    config::{
+        ActivityConfig, AttachmentsConfig, GuardsConfig, HttpConfig, LimitsConfig, MachinesConfig,
+        SessionToolsConfig,
+    },
     dispatcher::Dispatcher,
     installation::Installation,
     session::Registry,
@@ -47,6 +50,7 @@ pub mod routing;
 pub mod scheduled;
 pub mod session_tools;
 pub mod snapshot;
+pub mod spawn_queue;
 pub mod ws;
 
 pub use crate::attachments::UPLOAD_CHUNK_BYTES;
@@ -68,6 +72,14 @@ pub struct AppDeps {
     pub nudge_enabled: bool,
     /// Свежесть показаний лимитов для предпросмотра маршрута.
     pub routing_stale: std::time::Duration,
+    /// Пороги стража машины перед запуском.
+    pub guards: GuardsConfig,
+    /// Пределы межсессионных инструментов: пуск из очереди владельцем.
+    pub session_tools: SessionToolsConfig,
+    /// Очередь запусков: срок элемента и пауза повтора.
+    pub spawn_queue: crate::config::SpawnQueueConfig,
+    /// Горизонт ожидания лимита для маршрута.
+    pub routing_queue_horizon: Duration,
     pub machines: MachinesConfig,
     pub attachments: AttachmentsConfig,
     pub blobs: Arc<dyn BlobStore>,
@@ -88,6 +100,10 @@ pub struct AppState {
     pub activity: Arc<ActivityConfig>,
     pub nudge_enabled: bool,
     pub routing_stale: std::time::Duration,
+    pub guards: GuardsConfig,
+    pub session_tools: SessionToolsConfig,
+    pub spawn_queue: crate::config::SpawnQueueConfig,
+    pub routing_queue_horizon: Duration,
     pub machines: Arc<MachinesConfig>,
     pub attachments: Arc<AttachmentsConfig>,
     pub blobs: Arc<dyn BlobStore>,
@@ -117,6 +133,10 @@ impl AppState {
             activity: Arc::new(deps.activity),
             nudge_enabled: deps.nudge_enabled,
             routing_stale: deps.routing_stale,
+            guards: deps.guards,
+            session_tools: deps.session_tools,
+            spawn_queue: deps.spawn_queue,
+            routing_queue_horizon: deps.routing_queue_horizon,
             machines: Arc::new(deps.machines),
             upload_slots: Arc::new(tokio::sync::Semaphore::new(
                 deps.attachments.max_concurrent_uploads.max(1),
@@ -158,6 +178,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(groups::routes())
         .merge(presets::routes())
         .merge(session_tools::routes())
+        .merge(spawn_queue::routes())
         .merge(limit_settings::routes())
         .merge(machines::routes())
         .merge(limits::routes())
