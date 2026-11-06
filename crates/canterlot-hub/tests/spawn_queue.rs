@@ -1553,3 +1553,47 @@ async fn start_now_ignores_unknown_limits(pool: PgPool) {
     let started = f.runtime_call(queue_id, true).await.unwrap();
     assert_eq!(started.status, "started", "{started:?}");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn guard_uses_the_sample_time_not_the_arrival_time(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let old = Utc::now() - chrono::TimeDelta::minutes(10);
+    let metrics = canterlot_proto::worker::v1::MachineMetrics {
+        machine_time_ms: old.timestamp_millis() as u64,
+        cpu_cores: 4,
+        cpu_permille: 50,
+        mem_total_bytes: 16_000_000_000,
+        mem_available_bytes: 12_000_000_000,
+        disks: vec![canterlot_proto::worker::v1::DiskUsage {
+            label: "data".into(),
+            total_bytes: 100_000_000_000,
+            free_bytes: 90_000_000_000,
+        }],
+        load1_centi: 40,
+        ..Default::default()
+    };
+    canterlot_hub::machine_info::apply_metrics(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &metrics,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let mut conn = f.pool.acquire().await.unwrap();
+    let verdict = canterlot_hub::session_tools::guard::check_in_tx(
+        &mut conn,
+        f.owner,
+        f.machine,
+        &Default::default(),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        verdict.stale,
+        "a delayed sample must not look fresh: {verdict:?}"
+    );
+    assert!(!verdict.blocked());
+}
