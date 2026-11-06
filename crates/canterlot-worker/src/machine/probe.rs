@@ -7,6 +7,7 @@
 //! и, если попросили, начало текста: путь и содержимое — данные уровня сообщения.
 
 use std::{
+    collections::VecDeque,
     fs,
     io::{ErrorKind, Read},
     os::unix::fs::MetadataExt,
@@ -18,7 +19,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use canterlot_proto::{
     limits::{MAX_PROBE_HEAD_BYTES, MAX_PROBE_PATH_BYTES},
-    worker::v1::{PathProbe, PathProbeError, PathProbeExists, PathProbeNotAllowed, path_probe},
+    worker::v1::{
+        PathProbe, PathProbeError, PathProbeExists, PathProbeNotAllowed, ProbePath, path_probe,
+    },
 };
 
 use super::share::{self, ShareError};
@@ -47,6 +50,42 @@ pub const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5
 /// Столько файловых проб может висеть в потоках одновременно. Разрешение
 /// освобождается только вместе с блокирующей задачей, а не по сроку ответа.
 pub const MAX_CONCURRENT_PROBES: usize = 4;
+
+/// Очередь запросов пробы: меньше предела — ждут ответа по порядку, сверх —
+/// сразу получают явный `busy` со своим `request_id`, а не теряются.
+#[derive(Default)]
+pub(crate) struct PendingProbes {
+    queued: VecDeque<ProbePath>,
+    running: usize,
+    cap: usize,
+}
+
+impl PendingProbes {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            ..Self::default()
+        }
+    }
+
+    pub fn submit(&mut self, request: ProbePath) -> Result<(), ProbePath> {
+        if self.running.saturating_add(self.queued.len()) >= self.cap {
+            return Err(request);
+        }
+        self.queued.push_back(request);
+        Ok(())
+    }
+
+    pub fn start_next(&mut self) -> Option<ProbePath> {
+        let request = self.queued.pop_front()?;
+        self.running += 1;
+        Some(request)
+    }
+
+    pub fn finish(&mut self) {
+        self.running = self.running.saturating_sub(1);
+    }
+}
 
 /// Проверить путь и, если файл есть, отдать его факты. Работа блокирующая:
 /// вызывающий уводит её в отдельный поток.
@@ -493,6 +532,35 @@ mod tests {
 
     fn permits() -> Arc<Semaphore> {
         Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES))
+    }
+
+    fn request(id: &str) -> ProbePath {
+        ProbePath {
+            request_id: id.into(),
+            path: "/tmp/gate.rc".into(),
+            read_head_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn probe_requests_wait_in_a_bounded_fifo() {
+        let mut queue = PendingProbes::new(2);
+        assert!(queue.submit(request("a")).is_ok());
+        assert!(queue.submit(request("b")).is_ok());
+        let overflow = queue.submit(request("c")).unwrap_err();
+        assert_eq!(
+            overflow.request_id, "c",
+            "the busy reply keeps its request id"
+        );
+        assert_eq!(queue.start_next().unwrap().request_id, "a");
+        queue.finish();
+        assert!(
+            queue.submit(request("c")).is_ok(),
+            "a finished probe frees its slot"
+        );
+        assert_eq!(queue.start_next().unwrap().request_id, "b");
+        assert_eq!(queue.start_next().unwrap().request_id, "c");
+        assert!(queue.start_next().is_none());
     }
 
     #[tokio::test]

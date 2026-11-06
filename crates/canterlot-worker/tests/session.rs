@@ -1849,6 +1849,58 @@ async fn path_probe_answers_with_the_same_protection_as_share_file() {
     stop_worker(stop, join).await;
 }
 
+#[tokio::test]
+async fn concurrent_path_probes_are_all_answered_or_explicitly_busy() {
+    use canterlot_proto::worker::v1::{
+        ProbePath, control_up::Msg, path_probe::Outcome as ProbeReply,
+    };
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["pilot_v1".into(), "path_probe_v1".into()],
+        ..Default::default()
+    })
+    .await;
+    let root = hub.config.data_dir.join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("gate.rc"), b"0\n").unwrap();
+    hub.config.execution.allowed_workdir_roots = vec![root.clone()];
+    let (stop, _, join) = start(hub.config.clone(), store);
+    next_pilot(&mut hub, |m| matches!(m, Msg::MachineReport(_))).await;
+
+    let mut asked = Vec::new();
+    for index in 0..12 {
+        let request_id = format!("probe-{index}");
+        asked.push(request_id.clone());
+        hub.send(ControlDown {
+            msg: Some(control_down::Msg::ProbePath(ProbePath {
+                request_id,
+                path: root.join("gate.rc").display().to_string(),
+                read_head_bytes: 0,
+            })),
+        })
+        .await;
+    }
+    let mut answered = Vec::new();
+    for _ in 0..asked.len() {
+        let Msg::PathProbe(reply) = next_pilot(&mut hub, |m| matches!(m, Msg::PathProbe(_))).await
+        else {
+            panic!()
+        };
+        assert!(
+            matches!(
+                reply.outcome,
+                Some(ProbeReply::Exists(_) | ProbeReply::Error(_))
+            ),
+            "every probe gets a result or an explicit busy error: {}",
+            reply.request_id
+        );
+        answered.push(reply.request_id);
+    }
+    asked.sort();
+    answered.sort();
+    assert_eq!(answered, asked, "no request is dropped");
+    stop_worker(stop, join).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn report_is_resent_after_reconnect_and_metrics_resume() {
     frozen_clock::run(async {

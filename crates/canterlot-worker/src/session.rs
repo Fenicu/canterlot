@@ -1265,8 +1265,9 @@ impl Worker {
         type HistoriesFuture = Pin<Box<dyn Future<Output = ClaudeHistories> + Send>>;
         let mut histories_operation: Option<HistoriesFuture> = None;
         // Проба пути: тоже только последний запрос; чтение файла идёт в отдельном потоке.
-        let mut probe_next: Option<ProbePath> = None;
-        let mut probe_outbound = None;
+        let mut probe_queue =
+            crate::machine::probe::PendingProbes::new(crate::machine::probe::MAX_CONCURRENT_PROBES);
+        let mut probe_outbound: VecDeque<ControlUp> = VecDeque::new();
         let probe_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::machine::probe::MAX_CONCURRENT_PROBES,
         ));
@@ -1446,8 +1447,7 @@ impl Worker {
                 }));
             }
             if probe_operation.is_none()
-                && probe_outbound.is_none()
-                && let Some(request) = probe_next.take()
+                && let Some(request) = probe_queue.start_next()
             {
                 let roots = self.config.execution.allowed_workdir_roots.clone();
                 let permits = probe_permits.clone();
@@ -1545,7 +1545,7 @@ impl Worker {
                 || suggest_outbound.is_some()
                 || histories_outbound.is_some()
                 || owner_outbound.is_some()
-                || probe_outbound.is_some()
+                || !probe_outbound.is_empty()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
@@ -1568,7 +1568,14 @@ impl Worker {
                         Some(control_down::Msg::SuggestWorkdirs(request)) if suggest_enabled => {suggest_next = Some(request);}
                         Some(control_down::Msg::ListClaudeHistories(request)) if histories_enabled => {histories_next = Some(request);}
                         Some(control_down::Msg::ReadOwner(request)) if owner_enabled => {owner_next = Some(request);}
-                        Some(control_down::Msg::ProbePath(request)) if probe_enabled => {probe_next = Some(request);}
+                        Some(control_down::Msg::ProbePath(request)) if probe_enabled => {
+                            if let Err(request) = probe_queue.submit(request) {
+                                let request_id = request.request_id;
+                                probe_outbound.push_back(ControlUp{msg:Some(control_up::Msg::PathProbe(
+                                    crate::machine::probe::reply(request_id, crate::machine::probe::Outcome::Error("busy")),
+                                ))});
+                            }
+                        }
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
                         Some(control_down::Msg::CjAck(ack)) => {
                             if ack.journal_id != journal_id { return Err(WorkerError::Protocol); }
@@ -1635,7 +1642,7 @@ impl Worker {
                     else if let Some(message)=suggest_outbound.take() {message}
                     else if let Some(message)=histories_outbound.take() {message}
                     else if let Some(message)=owner_outbound.take() {message}
-                    else if let Some(message)=probe_outbound.take() {message}
+                    else if let Some(message)=probe_outbound.pop_front() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
                         activate_data.send_replace(true);
@@ -1694,7 +1701,8 @@ impl Worker {
                     owner_operation=None;owner_outbound=Some(owned);
                 }
                 reply=async{probe_operation.as_mut().unwrap().await}, if probe_operation.is_some()=>{
-                    probe_operation=None;probe_outbound=Some(ControlUp{msg:Some(control_up::Msg::PathProbe(reply))});
+                    probe_operation=None;probe_queue.finish();
+                    probe_outbound.push_back(ControlUp{msg:Some(control_up::Msg::PathProbe(reply))});
                 }
                 result = &mut data_loop => return result,
                 changed = data_attached.changed() => {
