@@ -929,6 +929,7 @@ async fn session_tools_follow_the_mode() {
             "canterlot_session_accept",
             "canterlot_session_interrupt",
             "canterlot_session_stop",
+            "canterlot_spawn_cancel",
         ] {
             assert_eq!(effect(tool), default, "{mode} {tool}");
         }
@@ -4827,7 +4828,8 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "alarm_list",
             "nudge_set",
             "nudge_clear",
-            "route_preview"
+            "route_preview",
+            "spawn_cancel"
         ]
     );
     bench.close(CloseMode::Graceful).await;

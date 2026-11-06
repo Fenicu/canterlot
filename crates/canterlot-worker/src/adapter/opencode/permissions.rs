@@ -98,6 +98,33 @@ mod tests {
         }
     }
 
+    fn effect(mode: PermissionMode, tool: &str) -> Option<String> {
+        // Действует последнее совпавшее правило.
+        mode.ruleset()?
+            .as_array()?
+            .iter()
+            .rev()
+            .find(|rule| rule["action"] == tool || rule["action"] == "*")
+            .and_then(|rule| rule["effect"].as_str())
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn spawn_cancel_is_a_card_in_ask_and_forbidden_in_read_only() {
+        assert_eq!(
+            effect(PermissionMode::Ask, "canterlot_spawn_cancel").as_deref(),
+            Some("ask")
+        );
+        assert_eq!(
+            effect(PermissionMode::ReadOnly, "canterlot_spawn_cancel").as_deref(),
+            Some("deny")
+        );
+        assert_eq!(
+            effect(PermissionMode::Bypass, "canterlot_spawn_cancel").as_deref(),
+            Some("allow")
+        );
+    }
+
     #[test]
     fn alarms_are_allowed_in_ask_and_read_only() {
         for mode in [PermissionMode::Ask, PermissionMode::ReadOnly] {

@@ -19,7 +19,7 @@ const PROVIDERS: [(ToolSet, &str); 3] = [
     (ToolSet::LimitsOnly, "opencode"),
 ];
 
-const SESSION_TOOLS: [(&str, &str); 16] = [
+const SESSION_TOOLS: [(&str, &str); 17] = [
     ("sessions_list", "sessions.list"),
     ("session_inspect", "sessions.inspect"),
     ("session_send", "sessions.send"),
@@ -36,6 +36,7 @@ const SESSION_TOOLS: [(&str, &str); 16] = [
     ("nudge_set", "nudge.set"),
     ("nudge_clear", "nudge.clear"),
     ("route_preview", "routing.preview"),
+    ("spawn_cancel", "spawn_queue.cancel"),
 ];
 
 fn tools_of(tool_set: ToolSet, provider: &str) -> Vec<Value> {
@@ -382,11 +383,12 @@ fn no_tool_touches_the_whitelist() {
                 || hub_name.starts_with("sessions.")
                 || hub_name.starts_with("alarms.")
                 || hub_name.starts_with("nudge.")
-                || hub_name.starts_with("routing."),
+                || hub_name.starts_with("routing.")
+                || hub_name.starts_with("spawn_queue."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 19);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 20);
 }
 
 #[tokio::test]
@@ -524,5 +526,32 @@ fn local_value(result: &AgentCallResult) -> Value {
     match result {
         AgentCallResult::Ok(value) => value.clone(),
         AgentCallResult::Err { .. } => panic!("expected ok"),
+    }
+}
+
+#[test]
+fn spawn_cancel_is_a_session_tool_and_spawn_takes_queue() {
+    for (tool_set, provider) in PROVIDERS {
+        let tools = tools_of(tool_set, provider);
+        let cancel = tools
+            .iter()
+            .find(|tool| tool["name"] == "spawn_cancel")
+            .unwrap_or_else(|| panic!("{provider}: spawn_cancel"));
+        assert_eq!(
+            cancel["inputSchema"]["required"],
+            json!(["queue_id"]),
+            "{provider}"
+        );
+        assert!(cancel["annotations"].get("readOnlyHint").is_none());
+        let spawn = tools
+            .iter()
+            .find(|tool| tool["name"] == "session_spawn")
+            .unwrap();
+        assert_eq!(
+            spawn["inputSchema"]["properties"]["queue"]["default"],
+            json!(true)
+        );
+        let description = spawn["description"].as_str().unwrap();
+        assert!(description.contains("queued, not refused"), "{provider}");
     }
 }
