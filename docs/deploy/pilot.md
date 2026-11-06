@@ -471,6 +471,8 @@ chat.example.com {
         # 4. Проксирование API, WebSocket и healthcheck на хаб (за forward_auth, как и всё остальное)
         @api path /api/* /healthz
         handle @api {
+            # Сжатие ответов хаба; WebSocket-апгрейды Caddy не сжимает.
+            encode zstd gzip
             reverse_proxy 10.0.0.10:8080 {
                 header_up X-Canterlot-Proxy {file./etc/caddy/secrets/canterlot-proxy}
             }
@@ -491,11 +493,15 @@ chat.example.com {
             header @fresh Cache-Control "no-cache"
             root * /var/www/canterlot/build
             try_files {path} /200.html
-            file_server
+            file_server {
+                precompressed zstd br gzip
+            }
         }
     }
 }
 ```
+
+`file_server { precompressed zstd br gzip }` отдаёт заранее сжатые соседние файлы `<name>.br`, `<name>.zst` и `<name>.gz`, которые создаёт `npm run build`; каталог статики переносится на сервер целиком, вместе с ними. `encode zstd gzip` внутри `@api` сжимает ответы хаба, но не трогает WebSocket-апгрейды.
 
 В `redir` матчер `*` обязателен: единственный аргумент, начинающийся с `/`, Caddy читает как матчер пути, а не как адрес перехода (`redir /share?error=sw_inactive 303` даёт `302` с заголовком `Location: 303`).
 

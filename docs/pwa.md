@@ -111,7 +111,7 @@ Cargo-команды, которые обращаются к базе, нужн�
 
 ## Статическая публикация
 
-После `npm run build` Caddy обслуживает `web/build`, глубокие ссылки получают `200.html`. Весь origin защищён одним `forward_auth`, включая HTML, JS, manifest, API и WSS. Перед аутентификацией удаляются присланные клиентом `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`; секрет к хабу добавляет только `header_up`. Заголовок CSP формируется из `web/csp.mjs` с точными hashes bootstrap-скрипта текущей сборки и единственным `wss://<origin-host>`:
+После `npm run build` Caddy обслуживает `web/build`, глубокие ссылки получают `200.html`. Последний шаг сборки — `web/scripts/precompress.mjs`: рядом с каждым сжимаемым файлом (`.js`, `.mjs`, `.css`, `.html`, `.json`, `.svg`, `.webmanifest`, `.txt`, `.xml`, `.map`; от 1 КиБ) лежат готовые `<name>.br` (Brotli 11, режим текста), `<name>.zst` (zstd 22) и `<name>.gz` (gzip 9, mtime 0), если сосед меньше оригинала. Эти файлы детерминированы и входят в архив выпуска; `file_server` отдаёт их вместо сжатия на лету. Весь origin защищён одним `forward_auth`, включая HTML, JS, manifest, API и WSS. Перед аутентификацией удаляются присланные клиентом `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`; секрет к хабу добавляет только `header_up`. Заголовок CSP формируется из `web/csp.mjs` с точными hashes bootstrap-скрипта текущей сборки и единственным `wss://<origin-host>`:
 
 ```bash
 node web/scripts/print-csp.mjs https://chat.example
@@ -133,6 +133,7 @@ chat.example {
         header X-Content-Type-Options "nosniff"
         @api path /api/* /healthz
         handle @api {
+            encode zstd gzip
             reverse_proxy hub:8080 {
                 header_up X-Canterlot-Proxy {file./run/secrets/canterlot-proxy}
             }
@@ -149,13 +150,15 @@ chat.example {
             header @fresh Cache-Control "no-cache"
             root * /srv/canterlot/web/build
             try_files {path} /200.html
-            file_server
+            file_server {
+                precompressed zstd br gzip
+            }
         }
     }
 }
 ```
 
-WSS проходит через тот же reverse_proxy. В `redir` матчер `*` обязателен: единственный аргумент, начинающийся с `/`, Caddy читает как матчер пути, а не как адрес перехода. `POST /_share` остаётся переходным ответом `303` на `/share?error=sw_inactive` для старых установок; manifest больше не объявляет share target, потому что системный приём «Поделиться» требует service worker с обработчиком fetch, а service worker не публикуется. Для manifest используется `crossorigin="use-credentials"` и MIME `application/manifest+json` с `Cache-Control: no-cache`. Приёмка настроенной публикации включает `scripts/check-proxy.sh` (параметры в [разделе HTTP](http.md)); хаб сохраняет проверку trusted_proxies, Origin и proxy_secret_file. Реальный деплой эта задача не выполняет.
+WSS проходит через тот же reverse_proxy. `encode zstd gzip` стоит только внутри `@api`: Caddy не сжимает WebSocket-апгрейды, а статику сборка сжимает заранее, поэтому `file_server` берёт готовые соседние файлы и не тратит процессор на каждый запрос. В `redir` матчер `*` обязателен: единственный аргумент, начинающийся с `/`, Caddy читает как матчер пути, а не как адрес перехода. `POST /_share` остаётся переходным ответом `303` на `/share?error=sw_inactive` для старых установок; manifest больше не объявляет share target, потому что системный приём «Поделиться» требует service worker с обработчиком fetch, а service worker не публикуется. Для manifest используется `crossorigin="use-credentials"` и MIME `application/manifest+json` с `Cache-Control: no-cache`. Приёмка настроенной публикации включает `scripts/check-proxy.sh` (параметры в [разделе HTTP](http.md)); хаб сохраняет проверку trusted_proxies, Origin и proxy_secret_file. Реальный деплой эта задача не выполняет.
 
 ## Установка и обновление
 
