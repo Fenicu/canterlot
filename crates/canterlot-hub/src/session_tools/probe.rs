@@ -102,6 +102,8 @@ pub async fn ask(
 }
 
 struct Entry {
+    /// Поколение попытки: ответ старой задачи не должен заполнить новую.
+    generation: u64,
     started: Instant,
     result: Option<PathProbe>,
 }
@@ -113,49 +115,59 @@ pub struct Prefetch {
 }
 
 impl Prefetch {
-    /// `true` — записи нет или она протухла: пробу надо запустить заново.
-    pub fn claim(&self, job_id: Uuid) -> bool {
+    /// Номер поколения новой попытки: `None` — запись жива, второй пробы не надо.
+    /// Протухшая незавершённая запись заменяется новым поколением.
+    pub fn claim(&self, job_id: Uuid) -> Option<u64> {
         let mut entries = self.entries.lock().expect("probe cache lock");
         match entries.get(&job_id) {
             None => {
                 entries.insert(
                     job_id,
                     Entry {
+                        generation: 1,
                         started: Instant::now(),
                         result: None,
                     },
                 );
-                true
+                Some(1)
             }
             Some(entry)
                 if entry.result.is_none()
                     && entry.started.elapsed() >= RPC_DEADLINE + STALE_GRACE =>
             {
+                let generation = entry.generation.wrapping_add(1);
                 entries.insert(
                     job_id,
                     Entry {
+                        generation,
                         started: Instant::now(),
                         result: None,
                     },
                 );
-                true
+                Some(generation)
             }
-            Some(_) => false,
+            Some(_) => None,
         }
     }
 
-    /// Забрать готовый ответ: запись снимается, задание применяет его в транзакции.
+    /// Забрать готовый ответ; незавершённая запись остаётся ждать свою задачу.
     pub fn take(&self, job_id: Uuid) -> Option<PathProbe> {
-        self.entries
-            .lock()
-            .expect("probe cache lock")
-            .remove(&job_id)
-            .and_then(|entry| entry.result)
+        let mut entries = self.entries.lock().expect("probe cache lock");
+        if entries
+            .get(&job_id)
+            .is_some_and(|entry| entry.result.is_some())
+        {
+            return entries.remove(&job_id).and_then(|entry| entry.result);
+        }
+        None
     }
 
-    pub fn finish(&self, job_id: Uuid, result: PathProbe) {
+    /// Ответ принимается только от той попытки, которую запустили для задания.
+    pub fn finish(&self, job_id: Uuid, generation: u64, result: PathProbe) {
         let mut entries = self.entries.lock().expect("probe cache lock");
-        if let Some(entry) = entries.get_mut(&job_id) {
+        if let Some(entry) = entries.get_mut(&job_id)
+            && entry.generation == generation
+        {
             entry.result = Some(result);
         }
     }
@@ -231,12 +243,53 @@ mod tests {
     fn an_unfinished_probe_is_claimed_once_and_then_taken() {
         let cache = Prefetch::default();
         let job = Uuid::now_v7();
-        assert!(cache.claim(job));
-        assert!(!cache.claim(job));
-        assert_eq!(cache.take(job), None);
-        assert!(cache.claim(job));
-        cache.finish(job, PathProbe::Missing);
+        let generation = cache.claim(job).expect("first attempt");
+        assert_eq!(
+            cache.claim(job),
+            None,
+            "an unfinished probe is not re-polled"
+        );
+        assert_eq!(
+            cache.take(job),
+            None,
+            "an unfinished entry stays for the running task"
+        );
+        cache.finish(job, generation, PathProbe::Missing);
         assert_eq!(cache.take(job), Some(PathProbe::Missing));
         assert_eq!(cache.take(job), None);
+    }
+
+    #[test]
+    fn a_stale_attempt_does_not_fill_the_next_one() {
+        let cache = Prefetch::default();
+        let job = Uuid::now_v7();
+        let first = cache.claim(job).expect("first attempt");
+        // Попытка зависла дольше срока: её запись считается протухшей.
+        {
+            let mut entries = cache.entries.lock().unwrap();
+            let entry = entries.get_mut(&job).unwrap();
+            entry.started = Instant::now() - RPC_DEADLINE - STALE_GRACE;
+        }
+        let second = cache.claim(job).expect("stale attempt is replaced");
+        assert_ne!(first, second);
+        cache.finish(job, first, PathProbe::Error("late".into()));
+        assert_eq!(
+            cache.take(job),
+            None,
+            "a late reply of the old attempt is ignored"
+        );
+        cache.finish(job, second, PathProbe::Missing);
+        assert_eq!(cache.take(job), Some(PathProbe::Missing));
+    }
+
+    #[test]
+    fn an_unrelated_generation_does_not_fill_the_entry() {
+        let cache = Prefetch::default();
+        let job = Uuid::now_v7();
+        let generation = cache.claim(job).expect("first attempt");
+        cache.finish(job, generation + 7, PathProbe::Missing);
+        assert_eq!(cache.take(job), None);
+        cache.finish(job, generation, PathProbe::Missing);
+        assert_eq!(cache.take(job), Some(PathProbe::Missing));
     }
 }

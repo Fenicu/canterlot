@@ -687,7 +687,7 @@ impl Scheduler {
         if let Some(result) = self.probes.take(job.id) {
             return Ok(ProbeStep::Ready(result));
         }
-        if self.probes.claim(job.id) {
+        if let Some(generation) = self.probes.claim(job.id) {
             match self.registry.clone() {
                 Some(registry) => {
                     let cache = self.probes.clone();
@@ -701,14 +701,17 @@ impl Scheduler {
                             request.read_head_bytes,
                         )
                         .await;
-                        cache.finish(job_id, result);
+                        cache.finish(job_id, generation, result);
                         notify_pool(&pool);
                     });
                 }
                 None => {
                     // Без реестра спросить некого: задание решит, что машина недоступна.
-                    self.probes
-                        .finish(job.id, crate::session_tools::probe::PathProbe::Unavailable);
+                    self.probes.finish(
+                        job.id,
+                        generation,
+                        crate::session_tools::probe::PathProbe::Unavailable,
+                    );
                 }
             }
         }
