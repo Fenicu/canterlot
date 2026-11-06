@@ -33,6 +33,29 @@
 .prose :is(ul, ol) { padding-left: var(--s9); }
 .prose li + li { margin-top: var(--s2); }
 .prose li::marker { color: var(--muted); }
+/* Задачи: обычный маркер списка уступает место квадрату, который рисует CSS. */
+.prose li.task-item { list-style: none; }
+.prose li.task-item--done { color: var(--secondary); }
+.prose .task-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--s8);
+  height: var(--s8);
+  margin-inline-end: var(--s3);
+  vertical-align: text-bottom;
+  background: var(--chip);
+  clip-path: inset(0 round var(--s2));
+}
+.prose .task-marker--done { background: var(--accent); }
+.prose .task-marker--done::before {
+  content: '';
+  width: var(--s5);
+  height: var(--s5);
+  background: var(--accent-ink);
+  clip-path: polygon(20% 52%, 40% 72%, 82% 20%, 92% 30%, 42% 88%, 10% 62%);
+}
 .prose hr { height: var(--hairline); margin-block: var(--s8); border: var(--s0); background: var(--line); }
 .prose code { font-size: var(--fs-meta); }
 .prose :not(pre) > code { padding-inline: var(--s1); border-radius: var(--radius-sm); background: var(--raised); -webkit-box-decoration-break: clone; box-decoration-break: clone; }

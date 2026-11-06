@@ -167,7 +167,13 @@ test('an_agent_shared_markdown_opens_rendered_with_a_source_toggle_copy_and_down
   await expect(dialog.locator('h1')).toHaveText('Отчёт по сборке');
   await expect(dialog.locator('table')).toContainText('Сборка');
   await expect(dialog.locator('table')).toContainText('40 с');
-  await expect(dialog).toContainText('☒ Проверки');
+  await expect(dialog).toContainText('Проверки');
+  const doneTask = dialog.getByRole('checkbox', { name: 'выполнено', exact: true });
+  await expect(doneTask).toHaveAttribute('aria-checked', 'true');
+  await expect(doneTask).toHaveAttribute('aria-readonly', 'true');
+  await expect(dialog.getByRole('checkbox', { name: 'не выполнено', exact: true })).toHaveAttribute('aria-checked', 'false');
+  await expect(dialog.locator('li.task-item--done')).toContainText('Проверки');
+  expect(await dialog.textContent()).not.toMatch(/[\u2610\u2611\u2612\u2713\u2714]/u);
   await expect(dialog.locator('pre code.hljs')).toContainText('println!');
 
   // Локальный путь некуда вести; безопасная внешняя ссылка открывается в новой вкладке.

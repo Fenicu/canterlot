@@ -43,30 +43,41 @@ export function createMarkdown(): MdRenderer {
     return true;
   });
 
-  // Отметки задач GFM: чекбокс заменяем знаком в тексте, чтобы не протаскивать input через очистку.
+  // Отметки задач GFM: маркер рисует CSS, состояние остаётся в aria у самого маркера.
   md.core.ruler.after('inline', 'task_list_marks', (state) => {
-    let inItem = false;
+    let open: (typeof state.tokens)[number] | null = null;
     let seen = false;
     for (const token of state.tokens) {
       if (token.type === 'list_item_open') {
-        inItem = true;
+        open = token;
         seen = false;
         continue;
       }
       if (token.type === 'list_item_close') {
-        inItem = false;
+        open = null;
         continue;
       }
-      if (!inItem || seen || token.type !== 'inline' || !token.children) continue;
+      if (!open || seen || token.type !== 'inline' || !token.children) continue;
       seen = true;
       const first = token.children[0];
       if (!first || first.type !== 'text') continue;
       const match = /^\[([ xX])\]\s+/.exec(first.content);
       if (!match) continue;
-      first.content = `${match[1] === ' ' ? '☐' : '☒'} ${first.content.slice(match[0].length)}`;
+
+      const done = match[1] !== ' ';
+      first.content = first.content.slice(match[0].length);
+      open.attrJoin('class', done ? 'task-item task-item--done' : 'task-item');
+      const marker = new state.Token('task_mark', '', 0);
+      marker.meta = { done };
+      token.children.unshift(marker);
     }
     return true;
   });
+
+  md.renderer.rules.task_mark = (tokens, idx) => {
+    const done = tokens[idx]?.meta?.done === true;
+    return `<span class="task-marker${done ? ' task-marker--done' : ''}" role="checkbox" aria-checked="${done}" aria-readonly="true" aria-label="${done ? 'выполнено' : 'не выполнено'}"></span>`;
+  };
 
   // Замена изображений на ссылки с их alt-текстом (никаких <img>). Внутренний путь
   // открыть нельзя, поэтому от такой картинки остаётся только подпись.

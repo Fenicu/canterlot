@@ -202,12 +202,25 @@ describe('markdown and xss security', () => {
     expect(output).not.toContain('<a');
   });
 
-  test('task_list_items_get_readable_marks', () => {
+  test('task_list_items_get_a_drawn_marker_and_expose_their_state', () => {
     const md = createMarkdown();
     const output = md.render('- [x] Проверки\n- [ ] Выкладка');
-    expect(output).toContain('☒ Проверки');
-    expect(output).toContain('☐ Выкладка');
-    expect(output).not.toContain('[x]');
+    const parsed = new DOMParser().parseFromString(output, 'text/html');
+    const items = parsed.body.querySelectorAll('li.task-item');
+    expect(items).toHaveLength(2);
+    expect(items[0]!.classList.contains('task-item--done')).toBe(true);
+    expect(items[1]!.classList.contains('task-item--done')).toBe(false);
+    expect(items[0]!.textContent).toContain('Проверки');
+    expect(items[0]!.textContent).not.toContain('[x]');
+
+    const marks = parsed.body.querySelectorAll('[role="checkbox"]');
+    expect(marks).toHaveLength(2);
+    expect(marks[0]!.getAttribute('aria-checked')).toBe('true');
+    expect(marks[0]!.getAttribute('aria-readonly')).toBe('true');
+    expect(marks[0]!.getAttribute('aria-label')).toBe('выполнено');
+    expect(marks[1]!.getAttribute('aria-checked')).toBe('false');
+    expect(marks[1]!.getAttribute('aria-label')).toBe('не выполнено');
+    expect(output).not.toMatch(/[\u2610\u2611\u2612\u2713\u2714]/u);
   });
 
   test('final_renders_the_whole_block_once_and_matches_a_plain_render', () => {

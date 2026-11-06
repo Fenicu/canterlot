@@ -7,7 +7,7 @@ export const ALLOWED_TAGS = [
   'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'br', 'span'
 ];
 
-export const ALLOWED_ATTR = ['href', 'title', 'class', 'rel', 'target', 'start'];
+export const ALLOWED_ATTR = ['href', 'title', 'class', 'rel', 'target', 'start', 'role', 'aria-checked', 'aria-readonly', 'aria-label'];
 
 function decodeScheme(url: string): string {
   let s = url.trim();
@@ -52,7 +52,7 @@ function getPurify(): DOMPurifyInstance {
       const rawClass = node.getAttribute('class') || '';
       const allowed = rawClass
         .split(/\s+/)
-        .filter(cls => cls.startsWith('hljs') || cls.startsWith('language-'));
+        .filter(cls => cls.startsWith('hljs') || cls.startsWith('language-') || cls.startsWith('task-'));
       if (allowed.length > 0) {
         node.setAttribute('class', allowed.join(' '));
       } else {
@@ -72,6 +72,6 @@ export function sanitizeRendered(html: string, kind: 'markdown' | 'highlight'): 
     // DOMPurify проверяет этим выражением значения всех атрибутов, кроме безопасных, а номер списка не ссылка.
     ADD_URI_SAFE_ATTR: ['start'],
     ALLOW_DATA_ATTR: false,
-    ALLOW_ARIA_ATTR: false
+    ALLOW_ARIA_ATTR: true
   });
 }
