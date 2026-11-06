@@ -29,7 +29,7 @@ const policy: Policy = {
       ]
     }
   },
-  providers: { codex: { max_weekly_percent: 80 } },
+  providers: { codex: { max_weekly_percent: 80, max_five_hour_percent: null, max_monthly_percent: null } },
   unlimited_models: ['opencode-go/beam-free'],
   max_parallel: { 'codex/default': 1 },
   unknown_limits: 'allow'
@@ -49,7 +49,7 @@ describe('routing policy editor model', () => {
     const saved = toPolicy(d);
     expect(saved.task_types!.bugfix!.candidates[0]).toMatchObject({ nudge: { max_nudges: 2 }, watchdog_minutes: 90, effort: 'high' });
     expect(saved.task_types!.bugfix!.candidates[1]).toMatchObject({ nudge: true, exclude_workdirs: ['/srv/prod'] });
-    expect(saved.providers).toEqual({ codex: { max_weekly_percent: 80 } });
+    expect(saved.providers).toEqual({ codex: { max_weekly_percent: 80, max_five_hour_percent: null, max_monthly_percent: null } });
   });
 
   test('reorder makes the draft dirty and moving back makes it clean', () => {

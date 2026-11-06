@@ -10,6 +10,7 @@
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
+	import SpawnQueueStrip from './SpawnQueueStrip.svelte';
 	import RequestCard from '#lib/requests/RequestCard.svelte';
 	import { isDocked } from '#lib/stores/requests.svelte.js';
 	import DelegationSheet from './DelegationSheet.svelte';
@@ -236,6 +237,8 @@
 	{/if}
 
 	<PauseCards {chat} {now} />
+
+	<SpawnQueueStrip {chat} />
 
 	<PendingStrip {chat} />
 

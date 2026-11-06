@@ -158,9 +158,9 @@ export function toPolicy(draft: Draft): Policy {
   for (const item of draft.providers) {
     if (item.weekly === null && item.fiveHour === null && item.monthly === null) continue;
     providers[item.provider] = {
-      ...(item.weekly !== null ? { max_weekly_percent: item.weekly } : {}),
-      ...(item.fiveHour !== null ? { max_five_hour_percent: item.fiveHour } : {}),
-      ...(item.monthly !== null ? { max_monthly_percent: item.monthly } : {})
+      max_weekly_percent: item.weekly,
+      max_five_hour_percent: item.fiveHour,
+      max_monthly_percent: item.monthly
     };
   }
   const max_parallel: Record<string, number> = {};
