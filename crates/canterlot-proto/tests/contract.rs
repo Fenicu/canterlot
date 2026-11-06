@@ -1938,6 +1938,7 @@ fn path_probe_uses_new_control_fields_and_old_decoders_skip_them() {
             head: "0".into(),
             head_omitted: String::new(),
         })),
+        now_ms: 1_762_345_300_000,
     };
     assert_roundtrip(reply.clone());
     assert!(!format!("{reply:?}").contains("\"0\""));

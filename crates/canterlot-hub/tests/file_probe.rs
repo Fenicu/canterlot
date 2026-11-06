@@ -54,8 +54,14 @@ fn thresholds() -> Thresholds {
 }
 
 /// Поддельный воркер: отвечает на `ProbePath` по сценарию, умеет молчать.
+struct Scripted {
+    outcome: path_probe::Outcome,
+    /// Часы воркера; `None` — текущее время теста.
+    now_ms: Option<u64>,
+}
+
 struct FakeWorker {
-    script: Arc<Mutex<VecDeque<path_probe::Outcome>>>,
+    script: Arc<Mutex<VecDeque<Scripted>>>,
     seen: Arc<Mutex<Vec<String>>>,
     answered: Arc<AtomicUsize>,
     paused: Arc<AtomicBool>,
@@ -71,7 +77,7 @@ impl FakeWorker {
         let client = connect_with(hub, seed, Uuid::now_v7(), capabilities, 1000).await;
         let tx = client.tx.clone();
         let mut stream = client.stream;
-        let script: Arc<Mutex<VecDeque<path_probe::Outcome>>> = Arc::default();
+        let script: Arc<Mutex<VecDeque<Scripted>>> = Arc::default();
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
         let answered = Arc::new(AtomicUsize::new(0));
         let paused = Arc::new(AtomicBool::new(false));
@@ -89,17 +95,20 @@ impl FakeWorker {
                     if paused.load(Ordering::SeqCst) {
                         continue;
                     }
-                    let outcome = script
-                        .lock()
-                        .unwrap()
-                        .pop_front()
-                        .unwrap_or(path_probe::Outcome::Missing(PathProbeMissing {}));
+                    let scripted = script.lock().unwrap().pop_front().unwrap_or(Scripted {
+                        outcome: path_probe::Outcome::Missing(PathProbeMissing {}),
+                        now_ms: None,
+                    });
+                    let now_ms = scripted.now_ms.unwrap_or_else(|| {
+                        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0)
+                    });
                     answered.fetch_add(1, Ordering::SeqCst);
                     let _ = tx
                         .send(ControlUp {
                             msg: Some(control_up::Msg::PathProbe(PathProbe {
                                 request_id: request.request_id,
-                                outcome: Some(outcome),
+                                outcome: Some(scripted.outcome),
+                                now_ms,
                             })),
                         })
                         .await;
@@ -116,7 +125,17 @@ impl FakeWorker {
     }
 
     fn push(&self, outcome: path_probe::Outcome) {
-        self.script.lock().unwrap().push_back(outcome);
+        self.script.lock().unwrap().push_back(Scripted {
+            outcome,
+            now_ms: None,
+        });
+    }
+
+    fn push_at(&self, outcome: path_probe::Outcome, now_ms: u64) {
+        self.script.lock().unwrap().push_back(Scripted {
+            outcome,
+            now_ms: Some(now_ms),
+        });
     }
 
     fn pause(&self) {
@@ -160,6 +179,15 @@ fn exists(size: u64, mtime: DateTime<Utc>, head: Option<&str>) -> path_probe::Ou
 
 fn missing() -> path_probe::Outcome {
     path_probe::Outcome::Missing(PathProbeMissing {})
+}
+
+fn exists_raw(size: u64, mtime_ms: u64, head: Option<&str>) -> path_probe::Outcome {
+    path_probe::Outcome::Exists(PathProbeExists {
+        size,
+        mtime_ms,
+        head: head.unwrap_or_default().into(),
+        head_omitted: String::new(),
+    })
 }
 
 fn denied(reason: &str) -> path_probe::Outcome {
@@ -375,6 +403,92 @@ async fn fresh_file_is_not_rewritten_until_its_mtime_changes(pool: PgPool) -> Te
     let inputs = f.files_inputs().await;
     assert_eq!(inputs.len(), 1);
     assert!(inputs[0].0.contains("appeared (2 bytes"), "{}", inputs[0].0);
+    f.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn fresh_compares_mtime_with_the_worker_clock(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    // Часы воркера далеко от часов хаба: граница взвода живёт на машине.
+    let worker_now = 1_000_000_000_000u64;
+    worker.push_at(missing(), worker_now);
+    tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
+    let scheduler = f.scheduler();
+
+    // Старый артефакт вернули после взвода: его время раньше границы.
+    worker.push_at(exists_raw(2, worker_now - 60_000, None), worker_now + 1_000);
+    scheduler.tick(Utc::now() + TimeDelta::seconds(31)).await?;
+    worker.wait(2).await;
+    scheduler.tick(Utc::now() + TimeDelta::seconds(32)).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("select state from alarms where key='gate'")
+            .fetch_one(&f.pool)
+            .await?,
+        "armed",
+        "an older artifact restored after arming is not fresh"
+    );
+
+    // Файл написан после взвода: время позже границы, срабатывает.
+    worker.push_at(exists_raw(2, worker_now + 5_000, None), worker_now + 2_000);
+    scheduler.tick(Utc::now() + TimeDelta::seconds(63)).await?;
+    worker.wait(3).await;
+    scheduler.tick(Utc::now() + TimeDelta::seconds(64)).await?;
+    scheduler.tick(Utc::now() + TimeDelta::seconds(70)).await?;
+    assert_eq!(f.files_inputs().await.len(), 1);
+    f.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_file_at_the_arming_cutoff_is_not_fresh(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    let cutoff = 1_500_000_000_000u64;
+    // Файл существует ровно на границе: `fresh` требует строго позже.
+    worker.push_at(exists_raw(2, cutoff, None), cutoff);
+    let armed = tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
+    assert_eq!(armed["state"], "armed");
+
+    let scheduler = f.scheduler();
+    worker.push_at(exists_raw(2, cutoff + 1, None), cutoff + 1);
+    scheduler.tick(Utc::now() + TimeDelta::seconds(31)).await?;
+    worker.wait(2).await;
+    scheduler.tick(Utc::now() + TimeDelta::seconds(32)).await?;
+    scheduler.tick(Utc::now() + TimeDelta::seconds(70)).await?;
+    assert_eq!(f.files_inputs().await.len(), 1, "one millisecond is enough");
+    f.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_unknown_mtime_is_not_fresh(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    worker.push(missing());
+    tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
+    // `mtime_ms` вне `i64` не превращается в дату: неизвестное время не свежее.
+    worker.push(exists_raw(2, u64::MAX, None));
+    let scheduler = f.scheduler();
+    scheduler.tick(Utc::now() + TimeDelta::seconds(31)).await?;
+    worker.wait(2).await;
+    scheduler.tick(Utc::now() + TimeDelta::seconds(32)).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("select state from alarms where key='gate'")
+            .fetch_one(&f.pool)
+            .await?,
+        "armed"
+    );
     f.stop().await;
     Ok(())
 }

@@ -115,7 +115,8 @@ type LimitReading = (
 );
 
 /// Условие `file`: файл на машине вызывающей сессии. `fresh` сравнивает время
-/// изменения с отметкой взвода, снятой той же пробой, — часы машины и хаба не важны.
+/// изменения с часами воркера в момент взвода: расхождение часов хаба и машины
+/// не важно, а старый файл, восстановленный после взвода, не считается свежим.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FileCondition {
     kind: String,
@@ -127,7 +128,10 @@ struct FileCondition {
     #[serde(default)]
     read_head: bool,
     armed_at: DateTime<Utc>,
-    /// Отметки файла на момент взвода: файл уже был, но до взвода не менялся.
+    /// Граница взвода в часовом домене воркера, мс от эпохи.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    armed_worker_ms: Option<u64>,
+    /// Отметки файла на момент взвода: старый воркер без часов отвечает по ним.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     armed_mtime: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,9 +164,23 @@ fn default_fresh() -> bool {
 }
 
 impl FileCondition {
-    /// Файл есть, не меньше `min_bytes` и, при `fresh`, изменён после взвода.
+    /// Файл есть, не меньше `min_bytes` и, при `fresh`, написан после взвода
+    /// по часам воркера. Неизвестное время изменения свежим не считается.
     fn holds(&self, size: u64, mtime: Option<DateTime<Utc>>) -> bool {
-        size >= self.min_bytes && (!self.fresh || mtime.is_none() || mtime != self.armed_mtime)
+        if size < self.min_bytes {
+            return false;
+        }
+        if !self.fresh {
+            return true;
+        }
+        match (mtime, self.armed_worker_ms) {
+            (Some(mtime), Some(cutoff)) => {
+                u64::try_from(mtime.timestamp_millis()).is_ok_and(|mtime_ms| mtime_ms > cutoff)
+            }
+            // Старый воркер без часов: прежнее сравнение с отметкой взвода.
+            (Some(mtime), None) => self.armed_mtime != Some(mtime),
+            (None, _) => false,
+        }
     }
 
     fn as_value(&self) -> Value {
@@ -1907,7 +1925,8 @@ pub async fn set(
             } else {
                 0
             };
-            let probe = probe::ask(&context.registry, machine, &resolved, read_head_bytes).await;
+            let (probe, worker_now) =
+                probe::ask_clock(&context.registry, machine, &resolved, read_head_bytes).await;
             match &probe {
                 PathProbe::Missing | PathProbe::Exists { .. } => {}
                 PathProbe::NotAllowed(reason) => {
@@ -1929,7 +1948,7 @@ pub async fn set(
                     ));
                 }
             }
-            Some((resolved, probe))
+            Some((resolved, probe, worker_now))
         }
         _ => None,
     };
@@ -2300,12 +2319,14 @@ pub async fn set(
                     read_head,
                     ..
                 } => {
-                    let (path, probe) = file_arming
+                    let (path, probe, worker_now) = file_arming
                         .ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
                     let (armed_mtime, armed_size) = match &probe {
                         PathProbe::Exists { size, mtime, .. } => (*mtime, Some(*size)),
                         _ => (None, None),
                     };
+                    let armed_worker_ms =
+                        worker_now.and_then(|at| u64::try_from(at.timestamp_millis()).ok());
                     let mut condition = FileCondition {
                         kind: "file".into(),
                         path: path.clone(),
@@ -2313,6 +2334,7 @@ pub async fn set(
                         fresh,
                         read_head,
                         armed_at: now,
+                        armed_worker_ms,
                         armed_mtime,
                         armed_size,
                         observed_size: None,

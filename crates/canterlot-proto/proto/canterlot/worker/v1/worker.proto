@@ -690,6 +690,9 @@ message PathProbe {
     PathProbeNotAllowed not_allowed = 4;
     PathProbeError error = 5;
   }
+  // Часы воркера в момент ответа: граница «написано после взвода» не зависит
+  // от расхождения часов хаба и машины.
+  uint64 now_ms = 6;
 }
 
 message PathProbeExists {

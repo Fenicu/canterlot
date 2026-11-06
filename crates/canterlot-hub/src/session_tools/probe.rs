@@ -95,13 +95,30 @@ pub async fn ask(
     path: &str,
     read_head_bytes: u32,
 ) -> PathProbe {
+    ask_clock(registry, machine_id, path, read_head_bytes)
+        .await
+        .0
+}
+
+/// То же, но с часами воркера: граница взвода живёт в часовом домене машины.
+pub async fn ask_clock(
+    registry: &Registry,
+    machine_id: Uuid,
+    path: &str,
+    read_head_bytes: u32,
+) -> (PathProbe, Option<DateTime<Utc>>) {
     match registry
         .probe_path(machine_id, path, read_head_bytes, RPC_DEADLINE)
         .await
     {
-        ProbeReply::Answered(reply) => PathProbe::from(reply),
-        ProbeReply::CapabilityMissing => PathProbe::CapabilityMissing,
-        ProbeReply::Unavailable => PathProbe::Unavailable,
+        ProbeReply::Answered(reply) => {
+            let worker_now = i64::try_from(reply.now_ms)
+                .ok()
+                .and_then(DateTime::from_timestamp_millis);
+            (PathProbe::from(reply), worker_now)
+        }
+        ProbeReply::CapabilityMissing => (PathProbe::CapabilityMissing, None),
+        ProbeReply::Unavailable => (PathProbe::Unavailable, None),
     }
 }
 
@@ -216,6 +233,7 @@ mod tests {
                 head: head.unwrap_or_default().into(),
                 head_omitted: String::new(),
             })),
+            now_ms: 1_762_345_300_000,
         }
     }
 
@@ -244,6 +262,7 @@ mod tests {
             outcome: Some(path_probe::Outcome::NotAllowed(v1::PathProbeNotAllowed {
                 reason: "denied".into(),
             })),
+            now_ms: 0,
         };
         assert_eq!(
             PathProbe::from(reply),
@@ -254,6 +273,7 @@ mod tests {
             outcome: Some(path_probe::Outcome::Error(v1::PathProbeError {
                 reason: "unreadable".into(),
             })),
+            now_ms: 0,
         };
         assert_eq!(
             PathProbe::from(reply),

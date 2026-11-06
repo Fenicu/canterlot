@@ -180,6 +180,7 @@ pub fn reply(request_id: String, outcome: Outcome) -> PathProbe {
     PathProbe {
         request_id,
         outcome: Some(outcome),
+        now_ms: super::now_ms(),
     }
 }
 
