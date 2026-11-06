@@ -337,6 +337,43 @@ mod tests {
     }
 
     #[test]
+    fn the_shared_secret_policy_covers_new_names_and_directories() {
+        let dir = dir();
+        for relative in [
+            ".cursor/mcp.json",
+            ".codexbar/config.json",
+            ".config/codexbar/config.json",
+            ".config/forgejo/app.ini",
+            ".config/canterlot/token",
+            "id_rsa",
+            "deploy.pem",
+            "api.token",
+            "credentials.json",
+            "auth.json",
+        ] {
+            let path = dir.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"secret").unwrap();
+            assert_eq!(
+                probe(&path.to_string_lossy(), &roots(dir.path()), 0),
+                Outcome::NotAllowed("denied"),
+                "{relative}"
+            );
+        }
+        fs::create_dir(dir.path().join("private")).unwrap();
+        fs::write(dir.path().join("private").join("auth.json"), b"secret").unwrap();
+        symlink(dir.path().join("private"), dir.path().join("alias")).unwrap();
+        assert_eq!(
+            probe_in(dir.path(), "alias/auth.json", 0),
+            Outcome::NotAllowed("denied")
+        );
+        assert_eq!(
+            probe_in(dir.path(), "alias/missing.pem", 0),
+            Outcome::NotAllowed("denied")
+        );
+    }
+
+    #[test]
     fn a_denied_secret_path_is_refused_even_when_it_does_not_exist() {
         let dir = dir();
         for relative in [".env", ".gemini/oauth_creds.json", ".ssh/id_ed25519"] {

@@ -102,28 +102,63 @@ pub struct Prepared {
 fn denied_dir(part: &str) -> bool {
     matches!(
         part,
-        ".ssh" | ".gnupg" | ".claude" | ".codex" | ".gemini" | ".docker" | ".kube" | ".aws"
+        ".ssh"
+            | ".gnupg"
+            | ".claude"
+            | ".codex"
+            | ".gemini"
+            | ".cursor"
+            | ".codexbar"
+            | ".docker"
+            | ".kube"
+            | ".aws"
     )
 }
 
 /// Секретные каталоги внутри `.config`.
 fn denied_config_dir(part: &str) -> bool {
-    matches!(part, "opencode" | "canterlot" | "gh" | "rclone")
+    matches!(
+        part,
+        "opencode" | "canterlot" | "gh" | "rclone" | "codexbar" | "forgejo"
+    )
+}
+
+/// Закрытые ключи и токены: имена действуют в любом каталоге, вне `.ssh` тоже.
+fn denied_secret_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "id_rsa"
+            | "id_ed25519"
+            | "id_ecdsa"
+            | "id_dsa"
+            | "token"
+            | "credentials.json"
+            | "auth.json"
+            | ".credentials.json"
+            | ".codexbar"
+    ) || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+        || lower.contains("token")
 }
 
 /// Файлы с токенами и паролями инструментов, где бы они ни лежали.
 fn denied_share_name(name: &str) -> bool {
-    matches!(
-        name,
-        ".git-credentials"
-            | ".netrc"
-            | ".npmrc"
-            | ".pypirc"
-            | ".pgpass"
-            | "credentials.toml"
-            | ".bash_history"
-            | ".zsh_history"
-    ) || name.starts_with(".claude.json")
+    denied_secret_name(name)
+        || matches!(
+            name,
+            ".git-credentials"
+                | ".netrc"
+                | ".npmrc"
+                | ".pypirc"
+                | ".pgpass"
+                | "credentials.toml"
+                | ".bash_history"
+                | ".zsh_history"
+        )
+        || name.starts_with(".claude.json")
 }
 
 /// Разрешённый путь после раскрытия ссылок в родителях: секретные каталоги
@@ -863,6 +898,82 @@ mod tests {
                 .mode()
                 & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn refuses_new_secret_directories_and_key_names() {
+        let home = dir();
+        for relative in [
+            ".cursor/mcp.json",
+            ".codexbar/config.json",
+            ".config/codexbar/config.json",
+            ".config/forgejo/app.ini",
+            ".config/canterlot/token",
+            "id_rsa",
+            "id_ed25519",
+            "id_ecdsa",
+            "deploy.pem",
+            "signing.key",
+            "bundle.p12",
+            "cert.pfx",
+            "token",
+            "api.token",
+            "some-token-file",
+            "credentials.json",
+            "auth.json",
+        ] {
+            let path = home.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"secret").unwrap();
+            assert_eq!(
+                share(&path, None).unwrap_err(),
+                ShareError::Denied,
+                "{relative}"
+            );
+        }
+        // Отсутствующие имена того же вида уже запрещены: ответ не зависит от файла.
+        for relative in [
+            ".cursor/absent",
+            ".config/forgejo/absent",
+            "missing.pem",
+            "missing-token",
+            "credentials.json",
+        ] {
+            assert_eq!(
+                share(&home.path().join(relative), None).unwrap_err(),
+                ShareError::Denied,
+                "{relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_new_secret_names_through_a_parent_alias() {
+        let home = dir();
+        let private = home.path().join("private");
+        fs::create_dir(&private).unwrap();
+        fs::write(private.join("auth.json"), b"secret").unwrap();
+        symlink(&private, home.path().join("alias")).unwrap();
+        assert_eq!(
+            share(&home.path().join("alias").join("auth.json"), None).unwrap_err(),
+            ShareError::Denied
+        );
+        assert_eq!(
+            share(&home.path().join("alias").join("missing.pem"), None).unwrap_err(),
+            ShareError::Denied
+        );
+        let cursor = home.path().join(".cursor");
+        fs::create_dir(&cursor).unwrap();
+        fs::write(cursor.join("mcp.json"), b"secret").unwrap();
+        symlink(&cursor, home.path().join("cursor-alias")).unwrap();
+        assert_eq!(
+            share(&home.path().join("cursor-alias").join("mcp.json"), None).unwrap_err(),
+            ShareError::Denied
+        );
+        assert_eq!(
+            share(&home.path().join("cursor-alias").join("absent"), None).unwrap_err(),
+            ShareError::Denied
         );
     }
 
