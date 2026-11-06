@@ -86,8 +86,10 @@ test('detached_window_stays_live_and_the_jump_button_returns_to_the_tail', async
   api.histories.get(id)!.push({ ...textBlock(api, 'свежий ответ', opened.scope_seq, 'streaming'), id: blockId });
   api.blocks.set(blockId, { text: 'свежий ответ', rev: 1, state: 'streaming' });
   hub.flush();
-  // Состояние хода живёт, пока читают старое: кнопка прерывания видна сразу.
-  await expect(page.getByRole('button', { name: 'Прервать' })).toBeVisible();
+  // Состояние хода живёт, пока читают старое: пункт прерывания в меню сессии есть сразу.
+  await page.getByRole('button', { name: 'Меню сессии' }).click();
+  await expect(page.getByRole('menuitem', { name: 'Прервать ход' })).toBeVisible();
+  await page.keyboard.press('Escape');
   const jump = page.getByRole('button', { name: 'К последним сообщениям' });
   await jump.click();
   await expect(jump).toBeHidden();

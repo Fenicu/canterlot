@@ -43,14 +43,18 @@ test.describe('поле ввода', () => {
     await expect(field).toHaveAccessibleDescription('Введите сообщение или прикрепите файл');
   });
 
-  test('send_stays_on_one_row_with_attach_when_interrupt_appears', async ({ page }) => {
+  test('send_stays_on_one_row_with_attach_when_a_turn_starts', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     const { hub, api, id } = await boot(page);
     await page.getByRole('textbox', { name: 'Сообщение' }).fill('уточнение');
     const send = page.getByRole('button', { name: 'Отправить', exact: true });
     const before = await send.boundingBox();
     startTurn(hub, api, id);
-    await expect(page.getByRole('button', { name: 'Прервать' })).toBeVisible();
+    await page.getByRole('button', { name: 'Меню сессии' }).click();
+    await expect(page.getByRole('menuitem', { name: 'Прервать ход' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    // Прервать ход можно в ленте и в меню сессии, но не рядом с «Отправить».
+    await expect(page.locator('[data-composer]').getByRole('button', { name: /Прерв/ })).toHaveCount(0);
     const after = await send.boundingBox();
     const attach = await page.getByRole('button', { name: 'Прикрепить файл' }).boundingBox();
     expect(after!.x).toBeCloseTo(before!.x, 0);

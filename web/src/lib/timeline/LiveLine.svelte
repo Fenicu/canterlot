@@ -1,14 +1,48 @@
 <script lang="ts">
+  import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
+  import Icon from '#lib/ui/Icon.svelte';
   import { liveLineText } from '#lib/timeline/present.js';
-  let { phase = 'working', tool = '', startedAt, now }: { phase?: string; tool?: string; startedAt: number; now: number } = $props();
+  let {
+    phase = 'working',
+    tool = '',
+    startedAt,
+    now,
+    interrupt = null
+  }: { phase?: string; tool?: string; startedAt: number; now: number; interrupt?: InterruptControl | null } = $props();
   const text = $derived(liveLineText(phase, Math.max(0, now - startedAt), tool));
 </script>
 
-<p class="live" data-working><span class="write" aria-hidden="true"><i></i><i></i><i></i></span><span class="text">{text}</span></p>
+<div class="live" data-working>
+  <span class="write" aria-hidden="true"><i></i><i></i><i></i></span><span class="text">{text}</span>
+  <!-- Прервать ход можно здесь, вдали от «Отправить»: промах по кнопке отправки не прерывает работу. -->
+  {#if interrupt}
+    <button type="button" class="stop" data-interrupt aria-busy={interrupt.running} onclick={() => void interrupt.interrupt()}><Icon name="stop" /><span>{interrupt.label}</span></button>
+  {/if}
+</div>
 
 <style>
   .live { display: flex; align-items: center; gap: var(--s3); margin: 0; color: var(--secondary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Цель нажатия 44 px, а строка хода остаётся своей высоты: лишнее уходит в отрицательные поля. */
+  .stop {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    min-height: var(--target);
+    margin-block: var(--icon-hang);
+    margin-inline-start: auto;
+    padding-inline: var(--s6);
+    border: var(--s0);
+    border-radius: var(--radius-pill);
+    background: var(--transparent);
+    color: var(--secondary);
+    font-size: var(--fs-sm);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+  .stop:hover { background: var(--hover); color: var(--text); }
+  .stop :global(svg) { width: var(--icon-small); height: var(--icon-small); }
 
   /* Три слова одной строки, разной длины. Без движения они стоят написанными. */
   .write {

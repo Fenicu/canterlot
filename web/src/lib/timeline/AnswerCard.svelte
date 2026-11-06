@@ -9,6 +9,7 @@
   import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import { foldSteps } from '#lib/timeline/steps.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
+  import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
   import ReasoningBlock from '#lib/timeline/ReasoningBlock.svelte';
   import StepGroupRow from '#lib/timeline/StepGroupRow.svelte';
@@ -30,7 +31,8 @@
     conversationId,
     now,
     onInfo,
-    load
+    load,
+    interrupt = null
   }: {
     cardKey: string;
     laneRoot?: string;
@@ -44,6 +46,7 @@
     now: number;
     onInfo?: (runId: string) => void;
     load: (blockId: string, offset: number) => Promise<BlockPage>;
+    interrupt?: InterruptControl | null;
   } = $props();
 
   const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
@@ -111,7 +114,7 @@
     </div>
   {/each}
   {#if live && head}
-    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} />
+    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} />
   {/if}
   {#if head}
     <footer class="byline" data-role="answer-footer">

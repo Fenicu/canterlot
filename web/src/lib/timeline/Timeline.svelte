@@ -10,6 +10,7 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import type { TimelineSource } from '#lib/stores/timeline.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
+  import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import CompactionRow from '#lib/timeline/CompactionRow.svelte';
   import EventEntry from '#lib/timeline/EventEntry.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
@@ -33,9 +34,12 @@
     onInfo,
     now = Date.now(),
     laneRoot,
-    feed
+    feed,
+    interrupt = null
   }: {
     chat: ChatStore;
+    /** Прерывание идущего хода: кнопка в живой строке хода. Только у ленты разговора. */
+    interrupt?: InterruptControl | null;
     onInfo?: (runId: string) => void;
     now?: number;
     laneRoot?: string;
@@ -536,7 +540,7 @@
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
           <RequestCard request={row.entries[0].request} onDecision={async () => undefined} {harnessId} {permissionMode} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
-          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
+          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} />
         {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}
           <CompactionRow compaction={row.entries[0].compaction} />
         {/if}

@@ -124,14 +124,14 @@
 	.ctx[data-tone='danger'] {
 		color: var(--danger);
 	}
+	/* В узкой строке уступает шкала, а не подпись: «Контекст 63%» и «Сжимает контекст» видны целиком. */
 	.track {
-		width: var(--gauge-width);
-		max-width: var(--gauge-width);
-		min-width: 0;
+		display: flex;
+		flex: 0 1 var(--gauge-width);
+		min-width: var(--s13);
 	}
 	.label {
-		overflow: hidden;
-		text-overflow: ellipsis;
+		flex: none;
 	}
 	/* Пока идёт сжатие, заполнение шкалы сжимается к началу и возвращается в такт строке ленты. */
 	.ctx[data-compacting='true'] .track :global([role='meter'] > span) {
@@ -172,9 +172,9 @@
 		color: var(--muted);
 	}
 	:global(.capsule):has([data-details]) {
-		grid-template-areas: 'input input input input input' 'attach context extras clock send' 'details details details details details';
+		grid-template-areas: 'input input input input' 'attach context clock send' 'details details details details';
 	}
 	:global(.capsule):has(:global(.tray)):has([data-details]) {
-		grid-template-areas: 'tray tray tray tray tray' 'input input input input input' 'attach context extras clock send' 'details details details details details';
+		grid-template-areas: 'tray tray tray tray' 'input input input input' 'attach context clock send' 'details details details details';
 	}
 </style>

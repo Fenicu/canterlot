@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { browserRuntime } from '#lib/app/browser.js';
 	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
 	import { loadConfig } from '#lib/api/config.js';
 	import Composer from '#lib/composer/Composer.svelte';
+	import { InterruptControl } from '#lib/composer/interrupt.svelte.js';
+	import { turnIsLive } from '#lib/composer/sendRules.js';
 	import type { ChatStore, OwnerInputView } from '#lib/stores/chat.svelte.js';	import PendingStrip from '#lib/timeline/PendingStrip.svelte';
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
@@ -64,6 +66,22 @@
 			runtime = rt;
 			rt.machines.open();
 		});
+	});
+
+	// Прервать ход можно из живой строки хода и из меню сессии: у них одно состояние.
+	const interrupt = untrack(() => new InterruptControl({ conversationId: chat.id }));
+	const turn = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
+	let armReset = false;
+	$effect(() => {
+		const status = chat.interrupt && typeof chat.interrupt.status === 'string' ? chat.interrupt.status : '';
+		if (status) interrupt.applyStatus(status);
+	});
+	$effect(() => {
+		if (!turn) armReset = true;
+		else if (armReset && !interrupt.running) {
+			armReset = false;
+			interrupt.reset();
+		}
 	});
 
 	// Лимиты берутся из хранилища списка на каждый рендер: копия при открытии застывала бы до выхода из чата.
@@ -174,6 +192,7 @@
 <section class="screen" data-ready>
 	<ChatHeader
 		{chat}
+		interrupt={turn ? interrupt : null}
 		providers={limitProviders}
 		{now}
 		machine={resolvedMachine}
@@ -202,6 +221,7 @@
 
 	<Timeline
 		{chat}
+		interrupt={turn ? interrupt : null}
 		onInfo={(runId) => {
 			infoRunId = runId;
 			onInfo?.(runId);

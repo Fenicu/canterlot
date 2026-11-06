@@ -2,6 +2,7 @@
 	import { errorText } from '#lib/api/errors.js';
 	import { resolve } from '$app/paths';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import StateChip from './StateChip.svelte';
 	import { chatStateLine } from './stateLine';
@@ -50,6 +51,7 @@
 
 	let {
 		chat,
+		interrupt = null,
 		providers = [],
 		now = Date.now(),
 		machine = null,
@@ -86,6 +88,8 @@
 		childRunning?: number;
 		/** У сессии есть делегированные: вход в делегирование виден и без субагентов. */
 		hasChildren?: boolean;
+		/** Прерывание идущего хода; есть, только пока ход идёт. */
+		interrupt?: InterruptControl | null;
 	} = $props();
 
 	let menuOpen = $state(false);
@@ -381,6 +385,10 @@
 				{/if}
 
 				<div class="menu-divider" role="separator"></div>
+
+				{#if interrupt}
+					<MenuItem icon="stop" onclick={() => { menuOpen = false; void interrupt.interrupt(); }}>{interrupt.running ? interrupt.label : 'Прервать ход'}</MenuItem>
+				{/if}
 
 				{#if accept.available && onAccept}
 					<MenuItem icon="trash" onclick={() => { menuOpen = false; onAccept(); }}>{ACCEPT_LABEL}</MenuItem>

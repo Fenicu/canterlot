@@ -9,7 +9,6 @@ import type { ConnectionStatus } from "#lib/sync/connection.js";
 import type { LimitsView } from "#lib/api/config.js";
 import type { AttachmentRef } from "#lib/stores/inputs.js";
 import { freshInput } from "#lib/stores/inputs.js";
-import { intents } from "#lib/ops/intent.js";
 import { utf8Length } from "#lib/stores/blocks.js";
 import { attachmentKind } from "#lib/timeline/attachments.js";
 import { UploadLimitError } from "#lib/uploads/uploader.js";
@@ -40,8 +39,6 @@ export interface ComposerDeps {
   connection(): ConnectionStatus;
   probe?: { mark(name: string): void };
   serverNow?(): number;
-  /** Возвращает ответ хаба `StopOutcome`. */
-  interruptApi?(conversationId: string, key: string): Promise<unknown>;
   /** Общий черновик на хабе; без него остаётся только локальный буфер. */
   serverDrafts?: {
     put(
@@ -63,9 +60,6 @@ export interface ComposerDeps {
   online?(): boolean;
 }
 
-/** Сколько ждать итога прерывания от машины, прежде чем вернуть кнопку владельцу. */
-export const INTERRUPT_DEADLINE_MS = 20_000;
-
 interface Accepted {
   op: Op;
   key: string;
@@ -77,13 +71,10 @@ export class ComposerModel {
   readonly deps: ComposerDeps;
   text = $state("");
   errorMessage = $state<string | null>(null);
-  interruptLabel = $state("Прервать");
-  interruptRunning = $state(false);
   /** Нажатие в работе: повторное во время проверки сети не создаёт второе сообщение. */
   sending = $state(false);
   /** Номер применённого чужого черновика: по нему экран ставит курсор в конец. */
   draftApplied = $state(0);
-  #interruptTimer: ReturnType<typeof setTimeout> | null = null;
   #draft: DraftSync | null = null;
   #attachmentsInFlight = 0;
   #draftAttachmentIds: string[] = [];
@@ -466,61 +457,4 @@ export class ComposerModel {
       }
     }
   }
-
-  async interrupt(): Promise<void> {
-    if (this.interruptRunning) return;
-    this.interruptRunning = true;
-    this.interruptLabel = "Прерываю…";
-
-    let outcome: unknown;
-    const conversationId = this.deps.conversationId;
-    try {
-      // Повтор после обрыва идёт тем же ключом: хаб не заведёт второе прерывание.
-      outcome = await intents.run(`interrupt:${conversationId}`, async (key) => {
-        if (this.deps.interruptApi)
-          return this.deps.interruptApi(conversationId, key);
-        const { interrupt } = await import("#lib/api/client.js");
-        return (await interrupt(conversationId, key)).data;
-      });
-    } catch {
-      // Кнопка остаётся на виду с причиной: молча вернуть «Прервать» значит скрыть сбой.
-      this.interruptLabel = "Не прервано, повторить";
-      this.interruptRunning = false;
-      return;
-    }
-    if (!this.interruptRunning) return;
-    // Живого исполнения нет: хаб поставил очередь на паузу, а прерывать на машине нечего.
-    const requested = (outcome as { requested?: { interrupt_command_id?: unknown } } | null)?.requested;
-    if (requested && requested.interrupt_command_id == null) {
-      this.applyInterruptStatus("not_applicable");
-      return;
-    }
-    // Итог приходит событием от машины; машина могла пропасть, и кнопка не ждёт вечно.
-    this.#interruptTimer = setTimeout(() => {
-      this.#interruptTimer = null;
-      if (!this.interruptRunning) return;
-      this.interruptLabel = "Прерывание не подтверждено";
-      this.interruptRunning = false;
-    }, INTERRUPT_DEADLINE_MS);
-  }
-
-  applyInterruptStatus(status: string): void {
-    const label = terminalInterruptLabel(status);
-    if (!label) return;
-    if (this.#interruptTimer) clearTimeout(this.#interruptTimer);
-    this.#interruptTimer = null;
-    this.interruptLabel = label;
-    this.interruptRunning = false;
-  }
-}
-
-const TERMINAL_INTERRUPT: Record<string, string> = {
-  completed: "Прервано",
-  not_applicable: "Прерывание не требуется",
-  superseded: "Прерывание заменено",
-  rejected_stale: "Прерывание устарело",
-};
-
-export function terminalInterruptLabel(status: string): string | null {
-  return TERMINAL_INTERRUPT[status] ?? null;
 }

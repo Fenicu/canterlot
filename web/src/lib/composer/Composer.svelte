@@ -7,14 +7,13 @@
   import { ticker } from '#lib/ticker.svelte.js';
   import AttachmentTray from '#lib/composer/AttachmentTray.svelte';
   import ContextIndicator from '#lib/composer/ContextIndicator.svelte';
-  import InterruptButton from '#lib/composer/InterruptButton.svelte';
   import { filesFromPayload, hasFileDrag } from '#lib/composer/intake.js';
   import { ComposerModel, EMPTY_DRAFT_REASON, type Limits } from '#lib/composer/model.svelte.js';
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
   import { getEnterPref } from '#lib/composer/prefs.js';
   import { bindComposerRestore } from '#lib/composer/restore.js';
   import { bindReturned } from '#lib/composer/returned.js';
-  import { decideEnter, isTouchPrimary, turnIsLive } from '#lib/composer/sendRules.js';
+  import { decideEnter, isTouchPrimary } from '#lib/composer/sendRules.js';
   import { getRuntime } from '#lib/app/runtime.js';
   import { sessionUploads } from '#lib/screens/chat/open.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -91,9 +90,6 @@
   const reasonId = $props.id();
   const laterId = `${reasonId}-later`;
 
-  const turn = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
-  let armReset = false;
-  const showInterrupt = $derived(turn || model.interruptLabel !== 'Прервать');
   const uploadsPending = $derived.by(() => {
     void ticker.now;
     return uploads
@@ -113,19 +109,6 @@
     if (fitsContent || !node) return;
     node.style.height = 'auto';
     node.style.height = `${node.scrollHeight}px`;
-  });
-
-  $effect(() => {
-    const status = chat.interrupt && typeof chat.interrupt.status === 'string' ? chat.interrupt.status : '';
-    if (status) model.applyInterruptStatus(status);
-  });
-
-  $effect(() => {
-    if (!turn) armReset = true;
-    else if (armReset && !model.interruptRunning) {
-      armReset = false;
-      if (model.interruptLabel !== 'Прервать') model.interruptLabel = 'Прервать';
-    }
   });
 
   let readySignature = '';
@@ -372,7 +355,6 @@
     ></textarea>
     <span class="attach"><IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} /></span>
     <ContextIndicator {chat} />
-    <span class="extras"><InterruptButton show={showInterrupt} label={model.interruptLabel} onclick={() => model.interrupt()} /></span>
     {#if !touch}
       <button
         type="button"
@@ -423,8 +405,8 @@
   .composer { display: flex; flex-direction: column; gap: var(--s2); max-height: var(--composer-limit); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
   .capsule {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
-    grid-template-areas: 'input input input input input' 'attach context extras clock send';
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: 'input input input input' 'attach context clock send';
     align-items: center;
     gap: var(--s2);
     min-width: 0;
@@ -437,7 +419,7 @@
   .capsule.receiving { outline: var(--focus-width) dashed var(--accent); outline-offset: var(--s1); background: var(--accent-soft); }
   .dropzone { position: absolute; inset: var(--s1); z-index: 1; display: flex; align-items: center; justify-content: center; margin: 0; border-radius: var(--radius-card); background: var(--accent-soft); color: var(--text); font-size: var(--fs-meta); pointer-events: none; }
   .capsule:has(:global(.tray)) {
-    grid-template-areas: 'tray tray tray tray tray' 'input input input input input' 'attach context extras clock send';
+    grid-template-areas: 'tray tray tray tray' 'input input input input' 'attach context clock send';
   }
   .capsule:has(textarea:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
   textarea {
@@ -462,7 +444,6 @@
   }
   textarea:focus-visible { outline: none; }
   .attach { grid-area: attach; display: inline-flex; }
-  .extras { grid-area: extras; display: inline-flex; min-width: 0; }
   .file { position: absolute; width: var(--s1); height: var(--s1); overflow: hidden; clip-path: inset(50%); }
   .clock, .send {
     width: var(--target);
