@@ -4,6 +4,28 @@ const dayFmt = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long' 
 const shortDayFmt = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' });
 const weekdayFmt = new Intl.DateTimeFormat('ru-RU', { weekday: 'short' });
 const numberFmt = new Intl.NumberFormat('ru-RU');
+const fullStampFmts = new Map<string, Intl.DateTimeFormat>();
+
+/** Полная подпись времени: дата, год и секунды. Форматтер кэшируется по часовому поясу. */
+function fullStampFormat(timeZone?: string): Intl.DateTimeFormat {
+	const key = timeZone ?? '';
+	let format = fullStampFmts.get(key);
+	if (!format) {
+		format = new Intl.DateTimeFormat('ru-RU', {
+			weekday: 'long',
+			day: 'numeric',
+			month: 'long',
+			year: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			hourCycle: 'h23',
+			...(timeZone ? { timeZone } : {})
+		});
+		fullStampFmts.set(key, format);
+	}
+	return format;
+}
 
 function sameDay(a: Date, b: Date): boolean {
 	return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
@@ -78,6 +100,16 @@ export const fmt = {
 	/** Дата и время: «28 октября, 15:00», с годом, если он не текущий. */
 	stamp(ts: number, now: number): string {
 		return `${fmt.date(ts, now)}, ${clockFmt.format(ts)}`;
+	},
+	/**
+	 * Полная дата и точное время: «пятница, 6 ноября 2026, 16:35:12».
+	 * Часовой пояс — местный, если не задан явно.
+	 */
+	fullStamp(ts: number, timeZone?: string): string {
+		if (!Number.isFinite(ts)) return '';
+		const parts = fullStampFormat(timeZone).formatToParts(ts);
+		const value = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
+		return `${value('weekday')}, ${value('day')} ${value('month')} ${value('year')}, ${value('hour')}:${value('minute')}:${value('second')}`;
 	},
 	/** Диапазон дат ISO: «24–30 октября» или «28 октября – 2 ноября». */
 	dayRange(from: string | undefined, to: string | undefined): string {
