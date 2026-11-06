@@ -228,6 +228,46 @@ export const SCREENS: Screen[] = [
     await opened.setInputFiles('input[type=file]', { name: 'hub.log', mimeType: 'text/plain', buffer: Buffer.from('журнал') });
     await expect(opened.locator('.tray')).toBeVisible();
   })),
+  screen('markdown-viewer', false, PHONE, 'dark', async (page) => {
+    const { hub, api } = fresh();
+    const id = seedConversation(api);
+    const blockId = api.id();
+    api.blocks.set(blockId, { text: '', rev: 1, state: 'final' });
+    api.histories.set(id, [{
+      kind: 'block',
+      id: blockId,
+      block_kind: 'tool_call',
+      content: '',
+      content_bytes: 0,
+      content_truncated: false,
+      created_seq: '1',
+      created_at: '2026-11-05T12:00:00.000Z',
+      rev: 1,
+      state: 'final',
+      agent: 'агент',
+      model: 'opus',
+      tool_name: 'share_file',
+      summary: 'Документы',
+      parent_block_id: null,
+      input_command_id: null,
+      line_count: 0,
+      files: [{ attachment_id: 'parity-doc', name: 'report.md', mime: 'text/markdown', size: 1024, title: 'Отчёт', note: '', width: null, height: null }]
+    }]);
+    api.bindConversation(id);
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.route('**/api/v1/attachments/*/content', async (route) => {
+      await route.fulfill({
+        contentType: 'text/markdown; charset=utf-8',
+        body: '# Отчёт по сборке\n\nСборка прошла успешно.\n\n| Шаг | Время |\n| --- | --- |\n| Сборка | 12 с |\n| Тесты | 40 с |\n\n- [x] Проверки\n- [ ] Выкладка\n\n```rust\nfn main() {\n    println!("готово");\n}\n```\n\n[Локальный файл](docs/readme.md)'
+      });
+    });
+    await page.goto(`/c/${id}`);
+    await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('button', { name: 'Открыть документ report.md' }).click();
+    const dialog = page.getByRole('dialog', { name: 'report.md' });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator('h1')).toBeVisible();
+  }),
   screen('permission-request', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, hub, api, id) => {
     openRequest(hub, api, id, 'permission', { tool_name: 'Bash', description: 'Запустить тесты', command: 'cargo test' });
     await expect(opened.locator('.permission-card')).toBeVisible();
