@@ -144,6 +144,11 @@ export const SCREENS: Screen[] = [
     await bootSecondary(page, '/limits');
     await expect(page.locator('[data-secondary-ready]')).toBeVisible();
   }),
+  // Широкий экран лимитов: карточки, недели и расход стоят рядами, а не колонкой телефона.
+  screen('limits-desktop', false, DESKTOP, 'dark', async (page) => {
+    await bootSecondary(page, '/limits');
+    await expect(page.locator('[data-secondary-ready]')).toBeVisible();
+  }),
   screen('11-desktop', true, DESKTOP, 'dark', async (page) => {
     const { hub, api } = fresh();
     const { id } = seedMockup11(api);
