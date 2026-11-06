@@ -1235,6 +1235,9 @@ pub async fn spawn(
         started.worktree.as_ref(),
         spec.subscribe,
     );
+    if guard.stale {
+        answer["machine_metrics"] = serde_json::json!("stale");
+    }
     if let Some(routing) = spec.routing.as_ref()
         && let Ok(decision) = serde_json::from_value::<super::routing::Decision>(routing.clone())
     {

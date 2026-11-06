@@ -952,3 +952,69 @@ async fn trash_cancels_waiting_spawns(pool: PgPool) {
     let (state, _reason, _detail, _child, _not_before) = queue_row(&pool, queue_id).await;
     assert_eq!(state, "cancelled");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_blocked_head_does_not_hold_a_ready_later_item(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {
+                "slow": {"title": "Медленный", "candidates": [
+                    {"harness":"opencode","model":"opencode-go/deepseek-v4.1-flash","effort":"high"}
+                ]},
+                "fast": {"title": "Быстрый", "candidates": [
+                    {"harness":"opencode","model":"opencode-go/beam-free","effort":"medium"}
+                ]}
+            },
+            "providers": {"opencode": {"max_weekly_percent": 95}},
+            "unlimited_models": ["opencode-go/beam-free"]
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into provider_limits(provider,weekly_used_permille,weekly_observed_at,weekly_resets_at)
+         values('opencode',990,now(),now()+interval '4 hours') on conflict(provider) do update
+         set weekly_used_permille=990,weekly_observed_at=now(),weekly_resets_at=now()+interval '4 hours'",
+    )
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let insert = |id: Uuid, route: &str, created: DateTime<Utc>| {
+        let query = sqlx::query(
+            "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before,created_at)
+             values($1,$2,$3,$4,$5,'limits',now(),$6)",
+        );
+        (id, query, route.to_owned(), created)
+    };
+    let slow = Uuid::now_v7();
+    let fast = Uuid::now_v7();
+    for (id, query, route, created) in [
+        insert(slow, "slow", Utc::now() - chrono::TimeDelta::minutes(2)),
+        insert(fast, "fast", Utc::now() - chrono::TimeDelta::minutes(1)),
+    ] {
+        query
+            .bind(id)
+            .bind(f.owner)
+            .bind(f.parent)
+            .bind(Uuid::now_v7())
+            .bind(json!({"chain_depth":0,"args":{"route":{"task_type":route},"brief":"b"}}))
+            .bind(created)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    let outcome = f.run_dequeue(fast, Utc::now()).await;
+    assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
+    let (slow_state, _r, _d, _c, _n) = queue_row(&f.pool, slow).await;
+    assert_eq!(slow_state, "queued", "blocked head stays queued");
+    let (fast_state, _r, _d, child, _n) = queue_row(&f.pool, fast).await;
+    assert_eq!(fast_state, "started");
+    let model: String = sqlx::query_scalar("select model from conversations where id=$1")
+        .bind(child.unwrap())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(model, "opencode-go/beam-free");
+}
