@@ -456,6 +456,11 @@ async fn facts_in_tx(
     // Отчёт: есть ли он и насколько вырос с прошлого толчка. Провал пробы не мешает
     // толчку: сигнал только записывается, а базой остаётся прошлое наблюдение.
     let report = report_signals(report);
+    let previous = rule
+        .progress_baseline
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<Baseline>(value.clone()).ok());
+    let (report_size, report_mtime, report_known) = report_baseline(report, previous.as_ref());
     let signals = Signals {
         no_marker,
         question_in_text,
@@ -474,9 +479,9 @@ async fn facts_in_tx(
         head: git.head_after.clone(),
         dirty: git.dirty,
         files: hex_digest(files.join("\n").as_bytes()),
-        report_size: report.size,
-        report_mtime: report.mtime,
-        report_known: report.known,
+        report_size,
+        report_mtime,
+        report_known,
         tools,
         working_ms,
     };
@@ -522,6 +527,7 @@ async fn machine_busy_after(
 
 /// Факты отчёта: размер, время изменения, известен ли он и два сигнала.
 /// Провал пробы не делает вид, что файла нет: он не влияет на прогресс.
+#[derive(Clone, Copy)]
 struct ReportFacts {
     size: i64,
     mtime: Option<DateTime<Utc>>,
@@ -565,6 +571,21 @@ fn report_signals(report: Option<&PathProbe>) -> ReportFacts {
             missing: false,
             failed: false,
         },
+    }
+}
+
+/// Факты отчёта для новой базы. Провал пробы не стирает последнее успешное
+/// наблюдение: иначе следующий рост не с чем сравнить.
+fn report_baseline(
+    report: ReportFacts,
+    previous: Option<&Baseline>,
+) -> (i64, Option<DateTime<Utc>>, bool) {
+    if report.known {
+        (report.size, report.mtime, true)
+    } else if let Some(previous) = previous.filter(|baseline| baseline.report_known) {
+        (previous.report_size, previous.report_mtime, true)
+    } else {
+        (report.size, report.mtime, false)
     }
 }
 
@@ -2219,6 +2240,58 @@ mod tests {
 
     fn markers() -> Vec<String> {
         vec!["STATUS: DONE".into(), "STATUS: BLOCKED".into()]
+    }
+
+    #[test]
+    fn a_failed_report_probe_keeps_the_last_good_report_facts() {
+        let before = Utc::now() - TimeDelta::minutes(5);
+        let previous = Baseline {
+            report_size: 20,
+            report_mtime: Some(before),
+            report_known: true,
+            ..Baseline::default()
+        };
+        let failed = report_signals(Some(&PathProbe::Error("unreadable".into())));
+        assert!(failed.failed);
+        let (size, mtime, known) = report_baseline(failed, Some(&previous));
+        assert_eq!((size, mtime, known), (20, Some(before), true));
+        let after_failure = Baseline {
+            report_size: size,
+            report_mtime: mtime,
+            report_known: known,
+            ..previous.clone()
+        };
+        assert!(
+            !still_progress(
+                Some(&serde_json::to_value(&previous).unwrap()),
+                &after_failure
+            ),
+            "the failed probe itself is not progress"
+        );
+
+        // Следующий успешный отчёт вырос: это прогресс, хотя перед ним был провал.
+        let grown = Baseline {
+            report_size: 30,
+            report_mtime: Some(before + TimeDelta::minutes(1)),
+            report_known: true,
+            ..after_failure.clone()
+        };
+        assert!(still_progress(
+            Some(&serde_json::to_value(&after_failure).unwrap()),
+            &grown
+        ));
+
+        // Неизменившийся отчёт прогрессом не считается.
+        let same = Baseline {
+            report_size: 20,
+            report_mtime: Some(before),
+            report_known: true,
+            ..after_failure
+        };
+        assert!(!still_progress(
+            Some(&serde_json::to_value(&previous).unwrap()),
+            &same
+        ));
     }
 
     #[test]
