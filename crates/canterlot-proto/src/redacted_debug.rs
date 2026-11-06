@@ -134,6 +134,27 @@ impl fmt::Debug for crate::worker::v1::WorkdirSuggestions {
     }
 }
 
+impl fmt::Debug for crate::worker::v1::ProbePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProbePath")
+            .field("request_id", &self.request_id)
+            .field("path_bytes", &self.path.len())
+            .field("read_head_bytes", &self.read_head_bytes)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::PathProbeExists {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PathProbeExists")
+            .field("size", &self.size)
+            .field("mtime_ms", &self.mtime_ms)
+            .field("head_bytes", &self.head.len())
+            .field("head_omitted", &self.head_omitted)
+            .finish()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::ReadOwnerInstructions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReadOwnerInstructions")

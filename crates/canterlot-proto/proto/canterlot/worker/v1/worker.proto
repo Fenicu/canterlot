@@ -91,6 +91,8 @@ message ControlUp {
     OwnerInstructionsOverview owner_overview = 9;
     OwnerInstructionsFile owner_file = 10;
     ClaudeHistories claude_histories = 11;
+    // Только при согласованной возможности path_probe_v1.
+    PathProbe path_probe = 12;
   }
 }
 
@@ -118,6 +120,8 @@ message ControlDown {
     SuggestWorkdirs suggest_workdirs = 7;
     ReadOwnerInstructions read_owner = 8;
     ListClaudeHistories list_claude_histories = 9;
+    // Только при согласованной возможности path_probe_v1.
+    ProbePath probe_path = 10;
   }
 }
 
@@ -666,6 +670,45 @@ message ClaudeHistory {
 message ClaudeHistories {
   string request_id = 1;
   repeated ClaudeHistory items = 2;
+}
+
+// Необязательная возможность path_probe_v1: проверка пути на машине вызывающей
+// сессии. Путь абсолютный (относительный разрешает хаб), сначала проверяется
+// защитой `share_file`, затем отдаётся только факт о файле. Потолок `head` —
+// MAX_PROBE_HEAD_BYTES, `0` значит «не читать».
+message ProbePath {
+  string request_id = 1;
+  string path = 2;
+  uint32 read_head_bytes = 3;
+}
+
+message PathProbe {
+  string request_id = 1;
+  oneof outcome {
+    PathProbeExists exists = 2;
+    PathProbeMissing missing = 3;
+    PathProbeNotAllowed not_allowed = 4;
+    PathProbeError error = 5;
+  }
+}
+
+message PathProbeExists {
+  uint64 size = 1;
+  uint64 mtime_ms = 2;
+  // Первые байты файла: только по просьбе и только если это текст.
+  string head = 3;
+  // Пусто, `binary` (не текст) или `not_requested`.
+  string head_omitted = 4;
+}
+
+message PathProbeMissing {}
+
+message PathProbeNotAllowed {
+  string reason = 1;
+}
+
+message PathProbeError {
+  string reason = 1;
 }
 
 // Чтение глобальных инструкций владельца: запрос называет только вид,

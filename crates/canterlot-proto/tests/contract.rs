@@ -1912,3 +1912,63 @@ fn isolate_mcp_is_additive_on_both_hops() {
         "StartCli.send_now_v1 is field 15"
     );
 }
+
+#[test]
+fn path_probe_uses_new_control_fields_and_old_decoders_skip_them() {
+    use canterlot_proto::worker::v1::*;
+    let request = ProbePath {
+        request_id: "request".into(),
+        path: "/tmp/private-gate.rc".into(),
+        read_head_bytes: 256,
+    };
+    assert_roundtrip(request.clone());
+    // Путь — данные уровня сообщения: в Debug остаётся только длина.
+    assert!(!format!("{request:?}").contains("private-gate"));
+    let message = ControlDown {
+        msg: Some(control_down::Msg::ProbePath(request)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 10 << 3 | 2);
+    assert_roundtrip(message);
+
+    let reply = PathProbe {
+        request_id: "request".into(),
+        outcome: Some(path_probe::Outcome::Exists(PathProbeExists {
+            size: 2,
+            mtime_ms: 1_762_345_260_000,
+            head: "0".into(),
+            head_omitted: String::new(),
+        })),
+    };
+    assert_roundtrip(reply.clone());
+    assert!(!format!("{reply:?}").contains("\"0\""));
+    let message = ControlUp {
+        msg: Some(control_up::Msg::PathProbe(reply)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 12 << 3 | 2);
+    assert_roundtrip(message);
+
+    // Форма ControlDown до этой правки: поля до 9, десятого нет. Незнакомое
+    // сообщение пропускается, как и раньше, и сеанс не рвётся.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct OldListClaudeHistories {
+        #[prost(string, tag = "1")]
+        request_id: String,
+        #[prost(string, tag = "2")]
+        workdir: String,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct OldControlDown {
+        #[prost(message, optional, tag = "9")]
+        list_claude_histories: Option<OldListClaudeHistories>,
+    }
+    let encoded = ControlDown {
+        msg: Some(control_down::Msg::ProbePath(ProbePath {
+            request_id: "request".into(),
+            path: "/tmp/gate.rc".into(),
+            read_head_bytes: 0,
+        })),
+    }
+    .encode_to_vec();
+    let old = OldControlDown::decode(encoded.as_slice()).unwrap();
+    assert!(old.list_claude_histories.is_none());
+}

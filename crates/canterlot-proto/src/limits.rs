@@ -23,6 +23,10 @@ pub const MAX_WORKDIR_BYTES: usize = 2048;
 pub const MAX_WORKDIR_SUGGESTIONS: usize = 30;
 /// Историй Claude Code в одном ответе формы.
 pub const MAX_CLAUDE_HISTORIES: usize = 50;
+/// Путь пробы: данные уровня сообщения, длиннее не принимается и не отвечается.
+pub const MAX_PROBE_PATH_BYTES: usize = 4096;
+/// Столько байт начала файла проба отдаёт, когда просят больше.
+pub const MAX_PROBE_HEAD_BYTES: u32 = 4096;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1_048_576;
