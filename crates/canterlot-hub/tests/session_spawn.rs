@@ -133,6 +133,8 @@ impl Fx {
                 nudge_enabled: true,
                 routing_enabled: true,
                 routing_stale: std::time::Duration::from_secs(1800),
+                spawn_queue: Default::default(),
+                guards: Default::default(),
                 dispatcher: None,
                 registry: registry.clone(),
                 shutdown: tokio_util::sync::CancellationToken::new(),

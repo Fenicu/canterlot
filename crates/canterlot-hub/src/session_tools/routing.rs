@@ -1241,6 +1241,14 @@ pub async fn preview(
         std::time::Duration::from_secs(120),
     )
     .await?;
+    let guard = crate::session_tools::guard::check_in_tx(
+        &mut tx,
+        caller.owner_id,
+        caller.machine_id,
+        &context.guards,
+        now,
+    )
+    .await?;
     let existing = policy.task_types.contains_key(task_type);
     match route(RouteInputs {
         policy: &policy,
@@ -1258,6 +1266,7 @@ pub async fn preview(
             Ok(serde_json::json!({
                 "decision": decision,
                 "machine": headroom,
+                "guard": guard.to_value(),
                 "hint": "Read-only preview; to start the session, call session_spawn with route.",
             }))
         }

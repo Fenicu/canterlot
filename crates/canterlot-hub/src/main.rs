@@ -326,6 +326,8 @@ async fn serve(
             activity,
             nudge_enabled: orchestrator.nudge.enabled,
             routing_stale: orchestrator.routing.stale_limits,
+            guards: orchestrator.guards.clone(),
+            session_tools: session_tools.clone(),
             machines,
             attachments,
             blobs,

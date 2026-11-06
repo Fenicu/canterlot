@@ -11,6 +11,7 @@ pub mod alarms;
 pub mod completion;
 pub mod control;
 pub mod disk;
+pub mod guard;
 pub mod jobs;
 pub mod nudge;
 pub mod origin;
@@ -238,6 +239,10 @@ pub struct ToolContext {
     pub nudge_enabled: bool,
     pub routing_enabled: bool,
     pub routing_stale: std::time::Duration,
+    /// Очередь запусков: срок элемента, предел ожидающих, пауза повтора.
+    pub spawn_queue: Arc<crate::config::SpawnQueueConfig>,
+    /// Пороги стража машины перед запуском.
+    pub guards: Arc<crate::config::GuardsConfig>,
     pub dispatcher: Option<Dispatcher>,
     pub registry: Registry,
     /// Останов хаба: долгие вызовы (`sessions.wait`) возвращаются, не дожидаясь срока.

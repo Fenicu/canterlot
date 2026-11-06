@@ -164,6 +164,7 @@ pub struct RoutingPreviewBody {
 pub struct RoutingPreviewView {
     pub decision: Decision,
     pub machine: MachineHeadroom,
+    pub guard: crate::session_tools::guard::GuardVerdict,
     pub considered: Vec<Considered>,
 }
 
@@ -250,6 +251,14 @@ async fn preview(
     let now = chrono::Utc::now();
     let headroom =
         routing::machine_headroom(&mut conn, machine, std::time::Duration::from_secs(120)).await?;
+    let guard = crate::session_tools::guard::check_in_tx(
+        &mut conn,
+        o.owner_id,
+        machine,
+        &s.guards,
+        now,
+    )
+    .await?;
     match routing::route(routing::RouteInputs {
         policy: &policy,
         revision,
@@ -266,6 +275,7 @@ async fn preview(
             Ok(Json(RoutingPreviewView {
                 decision,
                 machine: headroom,
+                guard,
                 considered,
             }))
         }
