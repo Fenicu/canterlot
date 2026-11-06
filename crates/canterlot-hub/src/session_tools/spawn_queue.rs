@@ -827,6 +827,7 @@ async fn try_start(
             key: format!("spawnq:{}", row.id),
             correlation_id,
         },
+        false,
     )
     .await;
     match started {
@@ -850,6 +851,14 @@ async fn try_start(
                 row.parent_id,
                 &QueueItemView::of(row, position),
                 correlation_id,
+            )
+            .await?;
+            subs::insert_job(
+                conn,
+                caller.owner_id,
+                row.parent_id,
+                now,
+                &json!({"action": "spawn_attributes", "conversation_id": child.session_id}),
             )
             .await?;
             let follow = if spec.subscribe {

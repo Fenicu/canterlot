@@ -768,6 +768,7 @@ pub(crate) struct Launch<'a> {
 pub(crate) async fn start_child(
     conn: &mut PgConnection,
     launch: Launch<'_>,
+    publish_attributes: bool,
 ) -> Result<Started, ToolError> {
     let Launch {
         registry,
@@ -813,7 +814,7 @@ pub(crate) async fn start_child(
     .await
     .map_err(create_error)?;
     let child = created.conversation_id;
-    if conversations::auto_title_in_tx(conn, owner, child, &brief).await? {
+    if conversations::auto_title_in_tx(conn, owner, child, &brief).await? && publish_attributes {
         conversations::emit_attributes(conn, owner, child, correlation_id).await?;
     }
     let (title, worktree): (String, Option<Value>) =
@@ -1223,6 +1224,7 @@ pub async fn spawn(
             key: input_key(caller),
             correlation_id: caller.call_id,
         },
+        true,
     )
     .await?;
     tx.commit().await?;
@@ -1398,7 +1400,7 @@ async fn allow(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Started, T
     }
     // Вложенная точка сохранения на уже открытой транзакции, не новое соединение.
     let mut attempt = conn.begin().await?; // db::begin: savepoint
-    match start_child(&mut attempt, launch).await {
+    match start_child(&mut attempt, launch, true).await {
         Ok(child) => {
             attempt.commit().await?;
             Ok(child)

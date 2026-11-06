@@ -72,11 +72,12 @@ enum Action {
     AlarmProbe,
     Nudge,
     SpawnDequeue,
+    SpawnAttributes,
 }
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Event,
         Self::MachineEvent,
         Self::Note,
@@ -87,6 +88,7 @@ impl Action {
         Self::AlarmProbe,
         Self::Nudge,
         Self::SpawnDequeue,
+        Self::SpawnAttributes,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -101,6 +103,7 @@ impl Action {
             "alarm_probe" => Some(Self::AlarmProbe),
             "nudge" => Some(Self::Nudge),
             "spawn_dequeue" => Some(Self::SpawnDequeue),
+            "spawn_attributes" => Some(Self::SpawnAttributes),
             _ => None,
         }
     }
@@ -204,6 +207,29 @@ pub async fn run_in_tx(
                 thresholds,
             )
             .await
+        }
+        Action::SpawnAttributes => {
+            let Some(target) = job
+                .payload
+                .get("conversation_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+            else {
+                return Ok(JobOutcome::Cancelled("invalid_payload"));
+            };
+            let owned: bool = sqlx::query_scalar(
+                "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
+            )
+            .bind(target)
+            .bind(job.owner_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if !owned {
+                return Ok(JobOutcome::Cancelled("target_deleted"));
+            }
+            crate::conversations::emit_attributes(conn, job.owner_id, target, correlation_id)
+                .await?;
+            Ok(JobOutcome::Done(json!({"conversation_id": target})))
         }
         Action::SpawnDequeue => match spawn_runtime {
             Some(runtime) => {
@@ -457,6 +483,8 @@ pub async fn abandon_in_tx(
                 .await
                 .map(|_| false)
         }
+        // Обновление атрибутов нечего закрывать: следующее изменение опубликует их снова.
+        Action::SpawnAttributes => Ok(false),
     }
 }
 
@@ -500,6 +528,10 @@ mod tests {
                 Action::SpawnDequeue => {
                     json!({"action": "spawn_dequeue", "queue_id": Uuid::now_v7()})
                 }
+                Action::SpawnAttributes => json!({
+                    "action": "spawn_attributes",
+                    "conversation_id": Uuid::now_v7(),
+                }),
             };
             abandon_in_tx(
                 &mut conn,

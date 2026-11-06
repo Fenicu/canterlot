@@ -1082,3 +1082,68 @@ async fn a_blocked_item_is_rescheduled_and_the_tick_returns(pool: PgPool) {
     .unwrap();
     assert!(pending <= 1, "bounded jobs, got {pending}");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_queued_start_publishes_attributes_from_a_separate_job(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let answer = f.spawn_direct().await.unwrap();
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+    sqlx::query(
+        "update conversations set created_at=now()-interval '61 minutes'
+          where parent_conversation_id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    make_due(&f.pool, queue_id).await;
+    f.run_dequeue(queue_id, Utc::now()).await;
+    let (_state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
+    let child = child.expect("child");
+    // Обновление атрибутов идёт отдельным заданием: порядок счётчиков событий
+    // не переворачивается внутри транзакции создания сессии.
+    let payload: Option<Value> = sqlx::query_scalar(
+        "select payload from scheduled_jobs
+          where conversation_id=$1 and state='pending' and payload->>'action'='spawn_attributes'",
+    )
+    .bind(f.parent)
+    .fetch_optional(&f.pool)
+    .await
+    .unwrap();
+    let payload = payload.expect("attribute job");
+    assert_eq!(payload["conversation_id"], child.to_string());
+    let job = ClaimedJob {
+        id: Uuid::now_v7(),
+        kind: JobKind::SessionTask,
+        owner_id: f.owner,
+        conversation_id: Some(f.parent),
+        run_at: Utc::now(),
+        payload: payload.clone(),
+        attempts: 0,
+    };
+    let thresholds = Thresholds::from(&ActivityConfig::default());
+    let mut tx = f.pool.begin().await.unwrap();
+    jobs::run_in_tx(
+        &mut tx,
+        &job,
+        Utc::now(),
+        Uuid::now_v7(),
+        Some(&f.context.registry),
+        &f.context.settle,
+        &thresholds,
+        None,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let updated: bool = sqlx::query_scalar(
+        "select exists(select 1 from events
+          where scope='conversation:'||$1::text and kind='conversation_updated')",
+    )
+    .bind(child)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(updated, "attributes published after the separate job");
+}
