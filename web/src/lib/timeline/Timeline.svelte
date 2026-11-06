@@ -157,6 +157,10 @@
   function layout(list: Row[], top: number, viewport: number): void {
     ix.setCount(list.length);
     list.forEach((row, index) => ix.set(index, known.get(row.key) ?? guess(row)));
+    // Прижатая лента показывает хвост, где бы ни стоял scrollTop: браузер на миг поджимает его,
+    // когда оценки сменяются замерами, и окно, посчитанное от поджатого места, качалось бы
+    // между двумя наборами строк, а высота ленты прыгала бы вместе с ним.
+    if (controller?.pinned) top = Math.max(0, ix.total() - viewport);
     let next = visibleRange(ix, top, viewport, viewport * overscan);
     if (next.end - next.start > 80) {
       const focus = ix.indexAt(top + viewport / 2);
@@ -225,11 +229,25 @@
           controller?.onContentChange('resize');
           continue;
         }
+        if (spacers.has(node)) {
+          if (controller?.pinned) controller.onContentChange('resize');
+          continue;
+        }
         const key = node.dataset.key;
         if (key) applyHeight(key, node.getBoundingClientRect().height);
       }
     });
     return observer;
+  }
+
+  // Распорки окна и живые строки под ним меняются не замером строки: без наблюдения прижатая
+  // лента не узнала бы, что после последней прокрутки к низу содержимое выросло.
+  const spacers = new WeakSet<Element>();
+  function spacer(node: HTMLElement): { destroy: () => void } {
+    const current = watch();
+    spacers.add(node);
+    current.observe(node);
+    return { destroy: () => current.unobserve(node) };
   }
 
   function measure(node: HTMLElement): { destroy: () => void } {
@@ -528,7 +546,7 @@
     data-renders="0"
   >
     <div class="sentinel" use:sentinel></div>
-    <div class="pad" style:height={`${range.padTop}px`}></div>
+    <div class="pad" style:height={`${range.padTop}px`} use:spacer></div>
     {#each windowRows as row (row.key)}
       <div class="row" data-row data-kind={row.kind} data-key={row.key} use:measure>
         {#if row.kind === 'day'}
@@ -546,14 +564,14 @@
         {/if}
       </div>
     {/each}
-    <div class="pad" style:height={`${range.padBottom}px`}></div>
+    <div class="pad" style:height={`${range.padBottom}px`} use:spacer></div>
     {#if compacting}
-      <div class="row" data-row data-kind="compaction" data-key="compaction-live">
+      <div class="row" data-row data-kind="compaction" data-key="compaction-live" use:spacer>
         <CompactionRow compaction={{ id: 'live', trigger: 'auto', preTokens: null, ok: null, createdAt: now, finishedAt: null }} />
       </div>
     {/if}
     {#if interruptDone}
-      <div class="row" data-row data-kind="interrupt" data-key="interrupt-aborted">
+      <div class="row" data-row data-kind="interrupt" data-key="interrupt-aborted" use:spacer>
         <p class="aborted">Ход прерван</p>
       </div>
     {/if}
