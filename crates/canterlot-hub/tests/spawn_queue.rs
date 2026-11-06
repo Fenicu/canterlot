@@ -5,11 +5,11 @@ use std::sync::Arc;
 use axum::http::Method;
 use canterlot_hub::{
     activity::Thresholds,
-    config::{ActivityConfig, SessionToolsConfig},
+    config::{ActivityConfig, LimitsConfig, SchedulerConfig, SessionToolsConfig},
     crunch::JobOutcome,
     dispatcher::Dispatcher,
     http,
-    scheduler::{ClaimedJob, JobKind},
+    scheduler::{ClaimedJob, JobKind, Scheduler},
     session::Registry,
     session_tools::{
         self, Caller, TOOLS, ToolContext, ToolErrorCode as Code, jobs, settle::SettleConfig,
@@ -1017,4 +1017,68 @@ async fn a_blocked_head_does_not_hold_a_ready_later_item(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(model, "opencode-go/beam-free");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_blocked_item_is_rescheduled_and_the_tick_returns(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    low_disk(&f.pool, f.machine).await;
+    let queue_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,$5,'resources',now()-interval '1 second')",
+    )
+    .bind(queue_id)
+    .bind(f.owner)
+    .bind(f.parent)
+    .bind(Uuid::now_v7())
+    .bind(json!({"chain_depth":0,"args":{"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}}))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into scheduled_jobs(id,owner_id,conversation_id,kind,run_at,payload)
+         values($1,$2,$3,'session_task',now()-interval '1 second',$4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(f.owner)
+    .bind(f.parent)
+    .bind(json!({"action":"spawn_dequeue","queue_id":queue_id}))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let scheduler = Scheduler::new(
+        f.pool.clone(),
+        Dispatcher::channel().0,
+        SchedulerConfig::default(),
+    )
+    .with_limits(f.context.registry.clone(), LimitsConfig::default())
+    .with_session_tools((*f.context.config).clone())
+    .with_orchestrator(&Default::default());
+    let tick = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        scheduler.tick(Utc::now()),
+    )
+    .await;
+    assert!(tick.is_ok(), "the scheduler tick must return, not spin");
+    tick.unwrap().unwrap();
+    let (state, not_before, attempts): (String, DateTime<Utc>, i32) =
+        sqlx::query_as("select state,not_before,attempts from spawn_queue where id=$1")
+            .bind(queue_id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "queued");
+    assert!(attempts >= 1);
+    assert!(not_before > Utc::now() - chrono::TimeDelta::seconds(5));
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from scheduled_jobs
+          where conversation_id=$1 and kind='session_task' and state='pending'
+            and payload->>'action'='spawn_dequeue'",
+    )
+    .bind(f.parent)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(pending <= 1, "bounded jobs, got {pending}");
 }

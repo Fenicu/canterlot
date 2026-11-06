@@ -425,7 +425,9 @@ async fn set_state_in_tx(
     row.result = result;
     row.updated_at = now;
     sqlx::query(
-        "update spawn_queue set state=$2,result=$3,attempts=$4,child_id=$5,updated_at=$6
+        "update spawn_queue
+            set state=$2,result=$3,attempts=$4,child_id=$5,updated_at=$6,
+                reason=$7,detail=$8,not_before=$9
           where id=$1",
     )
     .bind(row.id)
@@ -434,6 +436,9 @@ async fn set_state_in_tx(
     .bind(row.attempts)
     .bind(row.child_id)
     .bind(row.updated_at)
+    .bind(&row.reason)
+    .bind(&row.detail)
+    .bind(row.not_before)
     .execute(&mut *conn)
     .await?;
     let position = if row.state == STATE_QUEUED {
