@@ -27,6 +27,7 @@ pub enum ShareError {
     Unreadable,
     NotOwned,
     OutsideWorkdir,
+    Missing,
 }
 
 impl ShareError {
@@ -40,6 +41,7 @@ impl ShareError {
             Self::Unreadable => "share_unreadable",
             Self::NotOwned => "share_not_owned",
             Self::OutsideWorkdir => "share_outside_workdir",
+            Self::Missing => "share_missing",
         }
     }
 
@@ -55,6 +57,22 @@ impl ShareError {
             Self::OutsideWorkdir => {
                 "Only files under the session workdir or the temp directory can be shared; copy the file there first"
             }
+            Self::Missing => "The file does not exist",
+        }
+    }
+
+    /// Короткий код для пробы пути: наружу хаб отдаёт только его, не английский текст.
+    pub fn probe_reason(self) -> &'static str {
+        match self {
+            Self::Symlink => "symlink",
+            Self::HardLink => "hard_link",
+            Self::NotRegular => "not_regular",
+            Self::Denied => "denied",
+            Self::TooLarge => "too_large",
+            Self::Unreadable => "unreadable",
+            Self::NotOwned => "not_owned",
+            Self::OutsideWorkdir => "outside_roots",
+            Self::Missing => "missing",
         }
     }
 }
@@ -136,14 +154,21 @@ fn temp_roots() -> Vec<std::path::PathBuf> {
     roots
 }
 
-/// Раскрытый путь лежит под рабочим каталогом сессии или под временным каталогом.
-fn inside_allowed(resolved: &Path, workdir: Option<&Path>) -> bool {
-    workdir
-        .into_iter()
-        .map(Path::to_path_buf)
-        .chain(temp_roots())
+/// Раскрытый путь лежит под одним из разрешённых корней.
+fn inside_roots(resolved: &Path, roots: &[std::path::PathBuf]) -> bool {
+    roots
+        .iter()
         .filter_map(|root| fs::canonicalize(root).ok())
         .any(|root| resolved.starts_with(root))
+}
+
+/// Корни `share_file`: рабочий каталог сессии и временные каталоги.
+fn share_roots(workdir: Option<&Path>) -> Vec<std::path::PathBuf> {
+    workdir
+        .map(Path::to_path_buf)
+        .into_iter()
+        .chain(temp_roots())
+        .collect()
 }
 
 fn denied_resolved(path: &Path) -> bool {
@@ -236,31 +261,45 @@ pub fn mime_for(name: &str, head: &[u8]) -> String {
 /// Открыть файл в уже проверенном раскрытом каталоге: каталог открывается от корня
 /// без ссылок, финал от его дескриптора. Подмена каталога ссылкой после проверки даёт отказ.
 fn open_resolved(resolved_parent: &Path, name: &str) -> Result<fs::File, ShareError> {
-    let link_or = |error, otherwise| {
-        if nofollow::is_link_error(error) {
-            ShareError::Symlink
-        } else {
-            otherwise
-        }
-    };
-    let parent = nofollow::open_dir(resolved_parent)
-        .map_err(|error| link_or(error, ShareError::Unreadable))?;
-    nofollow::open_file(&parent, name).map_err(|error| link_or(error, ShareError::Unreadable))
+    let parent = nofollow::open_dir(resolved_parent).map_err(open_error)?;
+    nofollow::open_file(&parent, name).map_err(open_error)
 }
 
-/// Скопировать проверенный файл в `exec_dir/media/<id>` и посчитать SHA-256.
-/// Отдаются только файлы под рабочим каталогом сессии `workdir` и под временными каталогами.
-pub fn prepare(
-    exec_dir: &Path,
-    id: Uuid,
-    path: &Path,
-    title: String,
-    note: String,
-    workdir: Option<&Path>,
-) -> Result<Prepared, ShareError> {
-    if !valid_title(&title) || note.len() > canterlot_proto::limits::MAX_SHARE_NOTE_BYTES {
-        return Err(ShareError::Unreadable);
+/// Проверенный файл: родители раскрыты, финал открыт от дескриптора без ссылок.
+pub(crate) struct Checked {
+    pub file: fs::File,
+    pub meta: fs::Metadata,
+    pub name: String,
+}
+
+/// Ссылка или пропавший путь в раскрытии родителя: первое — отказ, второе — «нет файла».
+fn resolve_error(error: std::io::Error) -> ShareError {
+    match error.raw_os_error() {
+        Some(code) if code == rustix::io::Errno::NOENT.raw_os_error() => ShareError::Missing,
+        Some(code) if code == rustix::io::Errno::NOTDIR.raw_os_error() => ShareError::Missing,
+        Some(code) if code == rustix::io::Errno::LOOP.raw_os_error() => ShareError::Symlink,
+        _ => ShareError::Unreadable,
     }
+}
+
+fn open_error(error: rustix::io::Errno) -> ShareError {
+    if nofollow::is_link_error(error) {
+        ShareError::Symlink
+    } else if error == rustix::io::Errno::NOENT {
+        ShareError::Missing
+    } else {
+        ShareError::Unreadable
+    }
+}
+
+/// Общая защита `share_file` и пробы пути: путь как задан и после раскрытия не
+/// секретный, не в `/proc`, `/sys`, `/dev`, лежит под одним из `roots`, финал —
+/// обычный файл этого пользователя с одной жёсткой ссылкой.
+pub(crate) fn open_checked(
+    path: &Path,
+    roots: &[std::path::PathBuf],
+    outside: ShareError,
+) -> Result<Checked, ShareError> {
     let name = name_of(path)?;
     // Родитель раскрывается первым: ссылка в нём не должна прятать секретный каталог.
     // Финал открывается строго с O_NOFOLLOW от дескриптора родителя.
@@ -268,13 +307,13 @@ pub fn prepare(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let resolved_parent = fs::canonicalize(parent).map_err(|_| ShareError::Unreadable)?;
+    let resolved_parent = fs::canonicalize(parent).map_err(resolve_error)?;
     let resolved = resolved_parent.join(&name);
     if denied_lexical(path) || denied_resolved(&resolved) || denied_system(&resolved) {
         return Err(ShareError::Denied);
     }
-    if !inside_allowed(&resolved, workdir) {
-        return Err(ShareError::OutsideWorkdir);
+    if !inside_roots(&resolved, roots) {
+        return Err(outside);
     }
     let file = open_resolved(&resolved_parent, &name)?;
     let meta = file.metadata().map_err(|_| ShareError::Unreadable)?;
@@ -290,6 +329,24 @@ pub fn prepare(
     if meta.uid() != rustix::process::getuid().as_raw() {
         return Err(ShareError::NotOwned);
     }
+    Ok(Checked { file, meta, name })
+}
+
+/// Скопировать проверенный файл в `exec_dir/media/<id>` и посчитать SHA-256.
+/// Отдаются только файлы под рабочим каталогом сессии `workdir` и под временными каталогами.
+pub fn prepare(
+    exec_dir: &Path,
+    id: Uuid,
+    path: &Path,
+    title: String,
+    note: String,
+    workdir: Option<&Path>,
+) -> Result<Prepared, ShareError> {
+    if !valid_title(&title) || note.len() > canterlot_proto::limits::MAX_SHARE_NOTE_BYTES {
+        return Err(ShareError::Unreadable);
+    }
+    let roots = share_roots(workdir);
+    let Checked { file, meta, name } = open_checked(path, &roots, ShareError::OutsideWorkdir)?;
     if meta.len() > MAX_SHARE_BYTES {
         return Err(ShareError::TooLarge);
     }
@@ -419,7 +476,7 @@ mod tests {
     #[test]
     fn shares_only_from_the_workdir_or_the_temp_directory() {
         let place = outside_tmp();
-        if inside_allowed(&fs::canonicalize(place.path()).unwrap(), None) {
+        if inside_roots(&fs::canonicalize(place.path()).unwrap(), &share_roots(None)) {
             // Исходники сами лежат во временном каталоге: проверить «снаружи» нечем.
             return;
         }

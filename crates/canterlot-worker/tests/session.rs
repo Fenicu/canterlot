@@ -1771,6 +1771,84 @@ async fn workdir_suggestions_are_answered_over_the_control_stream() {
     assert_eq!(reply.directories, [format!("{}/project", root.display())]);
     stop_worker(stop, join).await;
 }
+#[tokio::test]
+async fn path_probe_answers_with_the_same_protection_as_share_file() {
+    use canterlot_proto::worker::v1::{
+        ProbePath, control_up::Msg, path_probe::Outcome as ProbeReply,
+    };
+    assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"path_probe_v1"));
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["pilot_v1".into(), "path_probe_v1".into()],
+        ..Default::default()
+    })
+    .await;
+    let root = hub.config.data_dir.join("root");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("gate.rc"), b"0\n").unwrap();
+    fs::write(root.join(".env"), b"TOKEN=1").unwrap();
+    hub.config.execution.allowed_workdir_roots = vec![root.clone()];
+    let (stop, _, join) = start(hub.config.clone(), store);
+    next_pilot(&mut hub, |m| matches!(m, Msg::MachineReport(_))).await;
+
+    let ask = |request_id: &str, path: String, read_head_bytes: u32| ProbePath {
+        request_id: request_id.into(),
+        path,
+        read_head_bytes,
+    };
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::ProbePath(ask(
+            "head",
+            root.join("gate.rc").display().to_string(),
+            256,
+        ))),
+    })
+    .await;
+    let Msg::PathProbe(reply) = next_pilot(&mut hub, |m| matches!(m, Msg::PathProbe(_))).await
+    else {
+        panic!()
+    };
+    assert_eq!(reply.request_id, "head");
+    let Some(ProbeReply::Exists(exists)) = reply.outcome else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(exists.size, 2);
+    assert_eq!(exists.head, "0\n");
+    assert_eq!(exists.head_omitted, "");
+
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::ProbePath(ask(
+            "secret",
+            root.join(".env").display().to_string(),
+            0,
+        ))),
+    })
+    .await;
+    let Msg::PathProbe(reply) = next_pilot(&mut hub, |m| matches!(m, Msg::PathProbe(_))).await
+    else {
+        panic!()
+    };
+    assert_eq!(reply.request_id, "secret");
+    let Some(ProbeReply::NotAllowed(reason)) = reply.outcome else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(reason.reason, "denied");
+
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::ProbePath(ask(
+            "missing",
+            root.join("absent.rc").display().to_string(),
+            0,
+        ))),
+    })
+    .await;
+    let Msg::PathProbe(reply) = next_pilot(&mut hub, |m| matches!(m, Msg::PathProbe(_))).await
+    else {
+        panic!()
+    };
+    assert!(matches!(reply.outcome, Some(ProbeReply::Missing(_))));
+    stop_worker(stop, join).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn report_is_resent_after_reconnect_and_metrics_resume() {
     frozen_clock::run(async {

@@ -59,6 +59,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "send_now_v1",
     "alarms_v1",
     "nudge_v1",
+    "path_probe_v1",
 ];
 
 #[derive(Clone)]
@@ -1154,6 +1155,10 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "claude_histories_v1");
+        let probe_enabled = accepted
+            .capabilities
+            .iter()
+            .any(|cap| cap == "path_probe_v1");
         self.manager
             .as_ref()
             .unwrap()
@@ -1259,6 +1264,11 @@ impl Worker {
         let mut histories_outbound = None;
         type HistoriesFuture = Pin<Box<dyn Future<Output = ClaudeHistories> + Send>>;
         let mut histories_operation: Option<HistoriesFuture> = None;
+        // Проба пути: тоже только последний запрос; чтение файла идёт в отдельном потоке.
+        let mut probe_next: Option<ProbePath> = None;
+        let mut probe_outbound = None;
+        type ProbeFuture = Pin<Box<dyn Future<Output = PathProbe> + Send>>;
+        let mut probe_operation: Option<ProbeFuture> = None;
         // Чтение инструкций владельца: тоже только последний запрос.
         let mut owner_next: Option<ReadOwnerInstructions> = None;
         let mut owner_outbound: Option<ControlUp> = None;
@@ -1432,6 +1442,21 @@ impl Worker {
                     })
                 }));
             }
+            if probe_operation.is_none()
+                && probe_outbound.is_none()
+                && let Some(request) = probe_next.take()
+            {
+                let roots = self.config.execution.allowed_workdir_roots.clone();
+                probe_operation = Some(Box::pin(async move {
+                    let request_id = request.request_id.clone();
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        crate::machine::probe::probe(&request.path, &roots, request.read_head_bytes)
+                    })
+                    .await
+                    .unwrap_or(crate::machine::probe::Outcome::Error("internal"));
+                    crate::machine::probe::reply(request_id, outcome)
+                }));
+            }
             if !report_created && acknowledged >= replay_end {
                 report_created = true;
                 if exec_enabled {
@@ -1514,6 +1539,7 @@ impl Worker {
                 || suggest_outbound.is_some()
                 || histories_outbound.is_some()
                 || owner_outbound.is_some()
+                || probe_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
@@ -1536,6 +1562,7 @@ impl Worker {
                         Some(control_down::Msg::SuggestWorkdirs(request)) if suggest_enabled => {suggest_next = Some(request);}
                         Some(control_down::Msg::ListClaudeHistories(request)) if histories_enabled => {histories_next = Some(request);}
                         Some(control_down::Msg::ReadOwner(request)) if owner_enabled => {owner_next = Some(request);}
+                        Some(control_down::Msg::ProbePath(request)) if probe_enabled => {probe_next = Some(request);}
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
                         Some(control_down::Msg::CjAck(ack)) => {
                             if ack.journal_id != journal_id { return Err(WorkerError::Protocol); }
@@ -1602,6 +1629,7 @@ impl Worker {
                     else if let Some(message)=suggest_outbound.take() {message}
                     else if let Some(message)=histories_outbound.take() {message}
                     else if let Some(message)=owner_outbound.take() {message}
+                    else if let Some(message)=probe_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
                         activate_data.send_replace(true);
@@ -1658,6 +1686,9 @@ impl Worker {
                 }
                 owned=async{owner_operation.as_mut().unwrap().await}, if owner_operation.is_some()=>{
                     owner_operation=None;owner_outbound=Some(owned);
+                }
+                reply=async{probe_operation.as_mut().unwrap().await}, if probe_operation.is_some()=>{
+                    probe_operation=None;probe_outbound=Some(ControlUp{msg:Some(control_up::Msg::PathProbe(reply))});
                 }
                 result = &mut data_loop => return result,
                 changed = data_attached.changed() => {
