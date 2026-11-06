@@ -172,7 +172,7 @@ impl Fx {
         &self,
         queue_id: Uuid,
         start_now: bool,
-    ) -> Result<Value, session_tools::ToolError> {
+    ) -> Result<spawn_queue::StartNowOutcome, session_tools::ToolError> {
         let runtime = spawn_queue::Runtime {
             registry: Some(&self.context.registry),
             session_tools: &self.context.config,
@@ -562,8 +562,8 @@ async fn start_now_bypasses_the_guard_but_not_the_whitelist(pool: PgPool) {
     let answer = f.spawn_direct().await.unwrap();
     let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
     let started = f.runtime_call(queue_id, true).await.unwrap();
-    assert_eq!(started["status"], "started", "{started}");
-    assert!(started["session_id"].is_string(), "{started}");
+    assert_eq!(started.status, "started", "{started:?}");
+    assert!(started.session_id.is_some(), "{started:?}");
 
     // Второй элемент встаёт в очередь при низком диске, затем пара пропадает из
     // белого списка: «Запустить сейчас» не обходит список.
@@ -576,10 +576,18 @@ async fn start_now_bypasses_the_guard_but_not_the_whitelist(pool: PgPool) {
         .execute(&f.pool)
         .await
         .unwrap();
-    let refused = f.runtime_call(queue_id, true).await.unwrap_err();
-    assert_eq!(refused.code, Code::InvalidArguments, "{}", refused.message);
+    let refused = f.runtime_call(queue_id, true).await.unwrap();
+    assert_eq!(refused.status, "failed", "{refused:?}");
+    assert_eq!(refused.reason.as_deref(), Some("not_in_whitelist"));
     let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, queue_id).await;
     assert_eq!(state, "failed");
+    assert!(
+        notes_for(&f.pool, f.parent)
+            .await
+            .iter()
+            .any(|note| note.contains("not_in_whitelist")),
+        "failure note"
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -1146,4 +1154,82 @@ async fn a_queued_start_publishes_attributes_from_a_separate_job(pool: PgPool) {
     .await
     .unwrap();
     assert!(updated, "attributes published after the separate job");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_now_expires_a_past_item(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let answer = f.spawn_direct().await.unwrap();
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+    sqlx::query("update spawn_queue set expires_at=now()-interval '1 second' where id=$1")
+        .bind(queue_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let outcome = f.runtime_call(queue_id, true).await.unwrap();
+    assert_eq!(outcome.status, "expired", "{outcome:?}");
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "expired");
+    assert!(
+        notes_for(&f.pool, f.parent)
+            .await
+            .iter()
+            .any(|note| note.contains("expired")),
+        "expiry note"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn http_start_now_commits_a_permanent_failure_and_its_note(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'synthetic')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let parent = testkit::seed_conversation(&pool, owner, machine).await;
+    let queue_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,$5,'resources',now())",
+    )
+    .bind(queue_id)
+    .bind(owner)
+    .bind(parent)
+    .bind(Uuid::now_v7())
+    .bind(json!({"chain_depth":0,"args":{"harness":"nope","brief":"b"}}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let client = TestClient::in_process(http::router(http::AppState::new(deps))).as_owner();
+    let path = format!("/api/v1/conversations/{parent}/spawn-queue/{queue_id}/start-now");
+    let first = client
+        .send(Method::POST, &path, Some("start-fail"), None)
+        .await;
+    assert_eq!(first.status, 409, "{:?}", first.body);
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&pool, queue_id).await;
+    assert_eq!(state, "failed", "the terminal transition is committed");
+    let note: bool = sqlx::query_scalar(
+        "select exists(select 1 from scheduled_jobs
+          where conversation_id=$1 and payload->>'action'='note'
+            and payload->>'text' like '%harness_unknown%')",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(note, "the failure note is committed");
+    let replay = client
+        .send(Method::POST, &path, Some("start-fail"), None)
+        .await;
+    assert_eq!(replay.status, 409);
+    assert_eq!(
+        replay.json::<Value>()["error"]["details"]["reason"],
+        "harness_unknown"
+    );
 }

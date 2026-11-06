@@ -39,6 +39,19 @@ pub struct SpawnQueueActionView {
     pub model: Option<String>,
 }
 
+impl From<spawn_queue::StartNowOutcome> for SpawnQueueActionView {
+    fn from(value: spawn_queue::StartNowOutcome) -> Self {
+        Self {
+            status: value.status,
+            queue_id: value.queue_id,
+            session_id: value.session_id,
+            title: value.title,
+            harness: value.harness,
+            model: value.model,
+        }
+    }
+}
+
 fn action_of(value: &serde_json::Value) -> SpawnQueueActionView {
     SpawnQueueActionView {
         status: value["status"].as_str().unwrap_or_default().to_owned(),
@@ -117,6 +130,7 @@ async fn cancel(
         Some(id),
         move |conn| {
             Box::pin(async move {
+                crate::conversations::lock_owner(&mut *conn, owner_id).await?;
                 let value = spawn_queue::cancel_in_tx(
                     conn,
                     owner_id,
@@ -176,7 +190,7 @@ async fn start_now(
                     routing_stale,
                     routing_queue_horizon,
                 };
-                let value = spawn_queue::start_now_in_tx(
+                let outcome = spawn_queue::start_now_in_tx(
                     conn,
                     &runtime,
                     owner_id,
@@ -187,10 +201,29 @@ async fn start_now(
                 )
                 .await
                 .map_err(tool_error)?;
-                Ok::<_, ApiError>(action_of(&value))
+                Ok::<_, ApiError>(outcome)
             })
         },
     )
     .await?;
-    Ok(Json(outcome.value))
+    let outcome = outcome.value;
+    match outcome.status.as_str() {
+        "started" | "already_started" => Ok(Json(SpawnQueueActionView::from(outcome))),
+        "queued" => Err(
+            ApiError::new(ErrorCode::InvalidState).with_details(ErrorDetails {
+                reason: outcome
+                    .detail
+                    .clone()
+                    .or(outcome.reason.clone())
+                    .or_else(|| Some("the machine is still busy".to_owned())),
+                ..Default::default()
+            }),
+        ),
+        _ => Err(
+            ApiError::new(ErrorCode::InvalidState).with_details(ErrorDetails {
+                reason: outcome.reason.clone(),
+                ..Default::default()
+            }),
+        ),
+    }
 }
