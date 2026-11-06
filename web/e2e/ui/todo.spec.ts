@@ -49,7 +49,16 @@ test('cancelled_item_is_named_in_words_and_leaves_the_progress', async ({ page }
 	await expect(item).toContainText('Снятый пункт');
 	const word = item.locator('.word');
 	await expect(word).toHaveText('отменено');
-	await expect(word).toHaveCSS('color', 'rgb(231, 191, 132)');
+	// Цвет — токен предупреждения текущей палитры, а не значение одной из них.
+	const warning = await page.evaluate(() => {
+		const probe = document.createElement('span');
+		probe.style.color = 'var(--warning)';
+		document.body.append(probe);
+		const value = getComputedStyle(probe).color;
+		probe.remove();
+		return value;
+	});
+	await expect(word).toHaveCSS('color', warning);
 });
 
 test('panel_is_absent_without_a_list_and_appears_with_the_first_one', async ({ page }) => {

@@ -33,6 +33,9 @@ test('settings_screen_shows_login_connection_theme_enter_install_and_signout', a
 });
 
 test('chosen_palette_and_mode_stand_out_in_every_palette_and_mode', async ({ page }) => {
+  // Тридцать смен темы: проверяется контраст, а не анимация смены, поэтому без перехода вида.
+  test.setTimeout(60_000);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await bootSecondary(page, '/settings');
   const main = page.locator('main');
   const palettes = main.getByRole('radiogroup', { name: 'Тема' });
