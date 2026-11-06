@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { limitsSubtitle, speedRows, usageRows } from "#lib/screens/limits/model.js";
+import { alignCharts, limitsSubtitle, speedRows, usageGroups, usageRows } from "#lib/screens/limits/model.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
 type Usage = components["schemas"]["UsageDay"];
@@ -111,6 +111,22 @@ describe("screens/limits current blocks", () => {
     expect(blocks[1]!.empty).toBe(true);
   });
 
+  it("the_lead_is_the_tightest_fresh_window_and_says_so_in_words", () => {
+    const old = new Date(NOW - 3 * 3600_000).toISOString();
+    const blocks = currentBlocks([
+      { provider: "claude", weekly_reserve_active: false, five_hour: win(620), weekly: win(962) },
+      { provider: "codex", weekly_reserve_active: false, five_hour: win(90, undefined, old), weekly: win(410, undefined, old) },
+      { provider: "opencode", weekly_reserve_active: false, five_hour: win(125), weekly: win(340), monthly: win(507) },
+      { provider: "antigravity", weekly_reserve_active: false, five_hour: win(850), weekly: win(500) },
+    ], NOW, cfg);
+    expect(blocks[0]).toMatchObject({ lead: { key: "week", pct: "4%", caption: "осталось на неделю", tone: "danger" }, status: "на исходе", stale: false });
+    // Все окна устарели: крупного числа нет, есть время последнего показания.
+    expect(blocks[1]).toMatchObject({ lead: null, stale: true, status: "", seen: "показание 09:00" });
+    expect(blocks[2]!.lead).toMatchObject({ key: "month", pct: "49%", caption: "осталось на месяц", tone: "normal" });
+    expect(blocks[2]!.status).toBe("");
+    expect(blocks[3]).toMatchObject({ lead: { key: "five", pct: "15%", tone: "warning" }, status: "заканчивается" });
+  });
+
   it("estimated_stale_and_reserve_are_quiet_markers", () => {
     const old = new Date(NOW - 3 * 3600_000).toISOString();
     const [block] = currentBlocks([{ provider: "claude", weekly_reserve_active: true, data_confidence: "estimated", five_hour: win(200, undefined, old), weekly: win(960) }], NOW, cfg);
@@ -144,5 +160,31 @@ describe("screens/limits history charts", () => {
     expect(charts).toHaveLength(1);
     expect(charts[0]!.today).toBe("");
     expect(charts[0]!.summary).toBe("Claude: от 50 до 50%, сегодня нет данных");
+  });
+});
+
+describe("screens/limits layout helpers", () => {
+  const chart = (provider: string, label: string) => ({ provider, label, known: true as const, days: [], today: "", summary: "" });
+
+  it("charts_follow_the_card_order_with_a_slot_for_a_provider_without_snapshots", () => {
+    const slots = alignCharts([chart("antigravity", "Antigravity"), chart("claude", "Claude")], [
+      { provider: "claude", label: "Claude" },
+      { provider: "codex", label: "Codex" },
+    ]);
+    expect(slots.map((slot) => [slot.provider, slot.known])).toEqual([["claude", true], ["codex", false], ["antigravity", true]]);
+    // Без снимков вовсе пустых мест нет: экран говорит об этом одной строкой.
+    expect(alignCharts([], [{ provider: "claude", label: "Claude" }])).toEqual([]);
+  });
+
+  it("usage_groups_total_each_week_and_scale_bars_inside_the_group", () => {
+    const groups = usageGroups(usageRows([
+      usage({ provider: "codex", model: "gpt-6.1-sol", weekly_delta_permille: 38 }),
+      usage({ provider: "claude", model: "claude-opus-5-5", weekly_delta_permille: 74 }),
+      usage({ provider: "claude", agent: "agent-1", model: "claude-haiku-5-5", weekly_delta_permille: 9 }),
+      usage({ provider: "opencode", model: "beam", weekly_delta_permille: 15 }),
+    ], "2026-10-29", new Map(), new Set(["claude", "codex"])));
+    expect(groups.map((group) => [group.label, group.total])).toEqual([["Claude", "≈ 8,3%"], ["Codex", "≈ 3,8%"], ["OpenCode", "—"]]);
+    expect(groups[0]!.rows.map((row) => [row.detail, Math.round(row.share * 100)])).toEqual([["Opus 5.5", 100], ["Субагент · Haiku 5.5", 12]]);
+    expect(groups[2]!.rows[0]!.share).toBe(0);
   });
 });

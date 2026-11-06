@@ -1,7 +1,7 @@
 import { modelLabel, providerLabel } from '#lib/format/labels.js';
 import { fmt } from '#lib/format/ru.js';
 import type { components } from '#lib/api/generated/openapi.js';
-import { remainingPct, remainingText, type LimitThresholds, type MeterTone, type MeterView, type ProviderLimits } from '#lib/stores/limits.js';
+import { dayClock, remainingPct, remainingText, shortWeekday, type LimitThresholds, type MeterTone, type MeterView, type ProviderLimits } from '#lib/stores/limits.js';
 import { limitStrip, providerRank } from '#lib/screens/sessions/limitsText.js';
 type Series = components['schemas']['ProviderSeries'];
 type Usage = components['schemas']['UsageDay'];
@@ -27,6 +27,29 @@ export interface WindowRow {
   stale: boolean;
   /** «сброс чт 18:34»; у устаревшего окна пусто. */
   reset: string;
+  /** Остаток без слова: «4%», «<1%» или «устарело». */
+  pct: string;
+}
+
+/** Самое тесное свежее окно провайдера: его остаток стоит крупно в шапке карточки. */
+export interface LeadWindow {
+  key: WindowKey;
+  pct: string;
+  caption: string;
+  tone: MeterTone;
+}
+
+const LEAD_CAPTION: Record<WindowKey, string> = { five: 'осталось на 5 часов', week: 'осталось на неделю', month: 'осталось на месяц' };
+const WINDOW_SPAN: Record<WindowKey, number> = { five: 0, week: 1, month: 2 };
+/** Тон словом, а не только цветом: красное и жёлтое различимы и без цвета. */
+const TONE_WORD: Record<MeterTone, string> = { normal: '', warning: 'заканчивается', danger: 'на исходе' };
+
+function leadWindow(windows: WindowRow[]): LeadWindow | null {
+  const fresh = windows.filter(row => !row.stale);
+  if (!fresh.length) return null;
+  // При равном остатке тесней длинное окно: его не переждать.
+  const lead = fresh.reduce((best, row) => row.fill < best.fill || (row.fill === best.fill && WINDOW_SPAN[row.key] > WINDOW_SPAN[best.key]) ? row : best);
+  return { key: lead.key, pct: lead.pct, caption: LEAD_CAPTION[lead.key], tone: lead.tone };
 }
 
 /** Текущие лимиты по провайдерам: строка на каждое окно, которое у провайдера есть. */
@@ -38,10 +61,18 @@ export function currentBlocks(providers: ProviderLimits[], now: number, cfg: Lim
       .map(([key, meter]) => ({
         key, label: WINDOW_LABEL[key], fill: meter.fill,
         value: meter.stale ? meter.text : `осталось ${meter.text}`,
-        tone: meter.tone, stale: meter.stale, reset: meter.reset
+        tone: meter.tone, stale: meter.stale, reset: meter.reset, pct: meter.text
       }));
     const markers = [row.estimated ? 'оценка' : '', row.reserve ? 'резерв недели' : ''].filter(Boolean);
-    return { provider: row.provider, label: row.label, windows, empty: windows.length === 0, markers, reserve: row.reserve };
+    const lead = leadWindow(windows);
+    const seenAt = Math.max(...meters.flatMap(([, meter]) => meter && Number.isFinite(meter.observedAt) ? [meter.observedAt] : []));
+    return {
+      provider: row.provider, label: row.label, windows, empty: windows.length === 0, markers, reserve: row.reserve, lead,
+      /** Все окна устарели: крупного числа нет, вместо него время последнего показания. */
+      stale: windows.length > 0 && !lead,
+      seen: Number.isFinite(seenAt) ? `показание ${dayClock(seenAt, now)}` : '',
+      status: lead ? TONE_WORD[lead.tone] : ''
+    };
   });
 }
 
@@ -57,7 +88,7 @@ export function historyCharts(series: Series[], days: string[], zone: string) {
       for (const point of [...item.weekly].sort((a, b) => Date.parse(a.observed_at) - Date.parse(b.observed_at))) last.set(localDay(new Date(point.observed_at), zone), point.used_permille);
       const points = days.map(day => {
         const used = last.get(day);
-        return { day, mark: String(Number(day.slice(-2))), value: used === undefined ? null : remainingPct(used), text: used === undefined ? '' : remainingText(used) };
+        return { day, mark: String(Number(day.slice(-2))), weekday: shortWeekday(new Date(`${day}T12:00:00`).getTime()), value: used === undefined ? null : remainingPct(used), text: used === undefined ? '' : remainingText(used) };
       });
       const known = points.flatMap(p => p.value === null ? [] : [p.value]);
       const pct = (value: number) => `${Math.round(value).toLocaleString('ru-RU')}`;
@@ -71,6 +102,21 @@ export function historyCharts(series: Series[], days: string[], zone: string) {
     .filter(chart => chart.known);
 }
 export { providerLabel as providerName } from '#lib/format/labels.js';
+
+type Chart = ReturnType<typeof historyCharts>[number];
+export type ChartSlot = Chart | { provider: string; label: string; known: false };
+
+/**
+ * Графики в порядке карточек «Сейчас»: на широком экране неделя провайдера стоит под его карточкой.
+ * Провайдеру без снимков достаётся пустое место, графики провайдеров без карточки идут следом.
+ */
+export function alignCharts(charts: Chart[], providers: { provider: string; label: string }[]): ChartSlot[] {
+  if (!charts.length) return [];
+  const byProvider = new Map(charts.map(chart => [chart.provider, chart]));
+  const slots: ChartSlot[] = providers.map(({ provider, label }) => byProvider.get(provider) ?? { provider, label, known: false });
+  const placed = new Set(providers.map(item => item.provider));
+  return [...slots, ...charts.filter(chart => !placed.has(chart.provider))];
+}
 
 /** Подзаголовок страницы перечисляет ровно те провайдеры, чьи карточки видны. */
 export function limitsSubtitle(providers: { provider: string }[]): string {
@@ -92,7 +138,9 @@ export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<str
         id: `${row.provider}:${row.conversation_id}:${row.agent}:${row.model}`,
         conversationId: row.conversation_id,
         title: sessions.get(row.conversation_id)?.title ?? `Сессия ${row.conversation_id.slice(0, 8)}`,
-        detail: `${row.agent === 'main' ? providerLabel(row.provider) : 'Субагент'} · ${row.model}`,
+        provider: row.provider,
+        // Провайдер назван заголовком группы, в строке остаются модель и роль.
+        detail: row.agent === 'main' ? modelLabel(row.model) : `Субагент · ${modelLabel(row.model)}`,
         input,
         output: row.output_tokens, delta: row.weekly_delta_permille,
         // Без недельного окна долю показать нечем: «≈ 0%» читалось бы как настоящее измерение.
@@ -108,6 +156,29 @@ export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<str
       if (a.weekly && a.delta !== b.delta) return b.delta - a.delta;
       return b.tokens - a.tokens;
     });
+}
+
+type UsageRow = ReturnType<typeof usageRows>[number];
+
+/**
+ * Расход за сегодня по провайдерам: у каждой недели своя квота, поэтому доли разных провайдеров
+ * не сравниваются в одном списке. Итог группы — сумма приблизительных долей её строк.
+ */
+export function usageGroups(rows: UsageRow[]) {
+  const groups = new Map<string, UsageRow[]>();
+  for (const row of rows) groups.set(row.provider, [...(groups.get(row.provider) ?? []), row]);
+  return [...groups.entries()]
+    .map(([provider, items]) => {
+      const weekly = items[0]!.weekly;
+      const total = items.reduce((sum, row) => sum + row.delta, 0);
+      const top = Math.max(...items.map(row => row.delta));
+      return {
+        provider, label: providerLabel(provider), weekly,
+        total: weekly ? fmt.pctApprox(total) : '—',
+        rows: items.map(row => ({ ...row, share: weekly && top > 0 ? row.delta / top : 0 }))
+      };
+    })
+    .sort((a, b) => (a.weekly === b.weekly ? 0 : a.weekly ? -1 : 1) || providerRank(a.provider) - providerRank(b.provider));
 }
 
 type Speed = components['schemas']['ModelSpeedSummary'];

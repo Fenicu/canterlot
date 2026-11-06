@@ -36,10 +36,13 @@ test('limits_page_puts_current_first_and_draws_one_weekly_chart_per_provider', a
   // Приблизительность сказана один раз заголовком «≈» и примечанием, а не в каждой строке.
   await expect(main.getByText('приблизительно', { exact: true })).toHaveCount(0);
   const usage = main.getByRole('table', { name: 'Сегодня по сессиям' });
+  // Расход сгруппирован по провайдерам: у каждого своя неделя и свой итог за сегодня.
+  await expect(usage.locator('tbody .group th')).toHaveText(['Claude', 'Codex', 'Antigravity']);
+  await expect(usage.locator('tbody[data-provider="claude"] .group .total')).toHaveText('≈ 3,4%');
   // Провайдер без недельного окна всё равно виден, но вместо выдуманного «≈ 0%» стоит прочерк.
-  const antigravity = usage.locator('tbody tr').filter({ hasText: 'Antigravity' });
-  await expect(antigravity).toHaveCount(1);
-  await expect(antigravity.locator('td').nth(2)).toHaveText('—');
+  const antigravity = usage.locator('tbody[data-provider="antigravity"]');
+  await expect(antigravity.locator('.group .total')).toHaveText('—');
+  await expect(antigravity.locator('tr:not(.group) td:nth-child(3)')).toHaveText(['—', '—']);
   await expect(usage.locator('tbody tr').last().locator('td').nth(2)).toHaveText('—');
   // Числа токенов не рвутся посреди разрядов, а ссылка на сессию — полноценная цель нажатия.
   for (const count of await usage.locator('.count').all()) expect(await count.evaluate((node) => node.getClientRects().length)).toBe(1);
@@ -149,10 +152,10 @@ test('estimated_reading_is_called_out_on_the_limits_page', async ({ page }) => {
     if (claude) claude.data_confidence = 'estimated';
   });
   const card = page.locator('main .current section').first();
-  await expect(card.locator('h3')).toContainText('оценка');
+  await expect(card.locator('.status')).toContainText('оценка');
 });
 
-test('current_limits_show_only_existing_windows_in_compact_one_line_rows', async ({ page }) => {
+test('current_limits_show_only_existing_windows_with_the_text_on_one_line_over_the_gauge', async ({ page }) => {
   const phone = test.info().project.name === 'phone';
   if (phone) await page.setViewportSize({ width: 390, height: 900 });
   await bootSecondary(page, '/limits', null, (api) => {
@@ -179,7 +182,7 @@ test('current_limits_show_only_existing_windows_in_compact_one_line_rows', async
   await expect(cards.nth(0).locator('.value')).toHaveText('осталось 21%');
   await expect(cards.nth(2).locator('.label')).toHaveText(['5 часов', 'неделя', 'месяц']);
   await expect(cards.nth(2).locator('.value').last()).toHaveText('осталось 91%');
-  // Подпись окна, полоска, остаток и сброс — одна строка, без переносов внутри значений.
+  // Подпись окна, остаток и сброс — одна строка над полосой, без переносов внутри значений.
   for (const row of await page.locator('main .current .row').all()) {
     const parts = await Promise.all(['.label', '.value', '.reset'].map((part) => row.locator(part).boundingBox()));
     for (const box of parts) {
