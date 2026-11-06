@@ -54,6 +54,76 @@ test('limits_page_puts_current_first_and_draws_one_weekly_chart_per_provider', a
   for (const query of historyRequests) { expect(query.get('tz')).toBeTruthy(); expect(query.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}T/); expect(query.get('to')).toMatch(/^\d{4}-\d{2}-\d{2}T/); }
 });
 
+test('huge_token_counts_stay_inside_their_cells_at_every_width', async ({ page }) => {
+  const { ids } = await bootSecondary(page, '/limits');
+  // Свой ответ истории перекрывает маршрут стенда: огромные числа не влезают в колонку целиком.
+  await page.route('**/api/v1/limits/history?*', (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    const provider = query.get('provider') ?? 'claude';
+    if (provider !== 'claude') return route.fulfill({ json: { series: [], usage: [], speed: [] } });
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone: query.get('tz') ?? 'UTC' }).format(new Date());
+    const row = (model: string, input_tokens: number, output_tokens: number, weekly_delta_permille: number) => ({
+      day, conversation_id: ids.pinned, provider, agent: 'main', model, input_tokens, output_tokens,
+      cache_read_tokens: 0, cache_write_tokens: 0, weekly_delta_permille, runs: 1, overlapped_runs: 0
+    });
+    return route.fulfill({ json: { series: [], usage: [
+      row('opus', 1_319_435_536, 4_120_998, 1000),
+      row('haiku', 123_456_789_012, 9_876_543_210, 1),
+      row('sonnet', 516_733_981, 2_031_449, 0)
+    ], speed: [] } });
+  });
+  await page.reload();
+  const table = page.getByRole('table', { name: 'Сегодня по сессиям' });
+  await expect(table).toBeVisible();
+  const counts = table.locator('.count');
+  await expect(counts).toHaveCount(9);
+  // Миллионы и миллиарды сокращены, полное число осталось в подсказке.
+  await expect(counts.nth(0)).toHaveText('вх. 1,32 млрд');
+  await expect(counts.nth(0)).toHaveAttribute('title', 'вх. 1 319 435 536');
+  await expect(table.locator('.sr-only').nth(0)).toHaveText('вх. 1 319 435 536');
+  await expect(counts.nth(1)).toHaveText('вых. 4,12 млн');
+  await expect(counts.nth(2)).toHaveText('≈ 100,0%');
+  await expect(counts.nth(3)).toHaveText('вх. 123,5 млрд');
+  await expect(counts.nth(3)).toHaveAttribute('title', 'вх. 123 456 789 012');
+  await expect(counts.nth(4)).toHaveText('вых. 9,88 млрд');
+  await expect(counts.nth(5)).toHaveText('≈ 0,1%');
+  await expect(counts.nth(6)).toHaveText('вх. 516,7 млн');
+  await expect(counts.nth(6)).toHaveAttribute('title', 'вх. 516 733 981');
+  await expect(counts.nth(7)).toHaveText('вых. 2,03 млн');
+  await expect(counts.nth(8)).toHaveText('≈ 0,0%');
+  for (const index of [0, 1, 3, 4, 6, 7]) await expect(counts.nth(index)).toHaveAttribute('title', /^(вх|вых)\. [\d ]+$/);
+  const widths = test.info().project.name === 'phone' ? [320, 360, 390] : [1440];
+  for (const width of widths) {
+    await page.setViewportSize({ width, height: 844 });
+    const fits = await counts.evaluateAll((nodes) => nodes.map((node) => {
+      const cell = node.closest('td');
+      if (!cell) return null;
+      const box = node.getBoundingClientRect();
+      const td = cell.getBoundingClientRect();
+      const next = cell.nextElementSibling;
+      return {
+        left: box.left - td.left,
+        right: td.right - box.right,
+        overlap: next ? box.right - next.getBoundingClientRect().left : -1,
+        scroll: node.scrollWidth - node.clientWidth
+      };
+    }));
+    for (const fit of fits) {
+      expect(fit).not.toBeNull();
+      expect(fit!.left).toBeGreaterThanOrEqual(-0.5);
+      expect(fit!.right).toBeGreaterThanOrEqual(-0.5);
+      expect(fit!.overlap).toBeLessThanOrEqual(0.5);
+      expect(fit!.scroll).toBeLessThanOrEqual(1);
+    }
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+    if (SHOTS && test.info().project.name === 'phone') {
+      await table.scrollIntoViewIfNeeded();
+      await shot(page, `limits-huge-tokens-${width}`);
+    }
+  }
+});
+
 test('antigravity_is_one_named_provider_on_the_limits_page', async ({ page }) => {
   await bootSecondary(page, '/limits', null, (api) => {
     const observed = new Date(Date.now() - 60_000).toISOString();
