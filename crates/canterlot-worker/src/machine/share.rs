@@ -123,6 +123,31 @@ fn denied_config_dir(part: &str) -> bool {
     )
 }
 
+/// Имя без хвоста `.txt`/`.json`: эти расширения не меняют смысл имени токена.
+fn token_stem(lower: &str) -> &str {
+    lower
+        .strip_suffix(".txt")
+        .or_else(|| lower.strip_suffix(".json"))
+        .unwrap_or(lower)
+}
+
+/// Настоящие хранилища токенов, а не всякое имя со словом `token`:
+/// `tokens-report.md` и `tokenizer.rs` остаются обычными файлами.
+fn denied_token_name(lower: &str) -> bool {
+    let stem = token_stem(lower);
+    matches!(lower, "token" | ".token" | "token.json" | "tokens.json")
+        || lower.ends_with(".token")
+        || stem.ends_with("_token")
+        || stem.ends_with("-token")
+        || lower.starts_with("access_token")
+        || lower.starts_with("refresh_token")
+        || lower.starts_with("api_token")
+        || lower.starts_with("api-key")
+        || lower.starts_with("apikey")
+        || lower.ends_with(".secret")
+        || lower.starts_with("secrets.")
+}
+
 /// Закрытые ключи и токены: имена действуют в любом каталоге, вне `.ssh` тоже.
 fn denied_secret_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -132,7 +157,6 @@ fn denied_secret_name(name: &str) -> bool {
             | "id_ed25519"
             | "id_ecdsa"
             | "id_dsa"
-            | "token"
             | "credentials.json"
             | "auth.json"
             | ".credentials.json"
@@ -141,7 +165,7 @@ fn denied_secret_name(name: &str) -> bool {
         || lower.ends_with(".key")
         || lower.ends_with(".p12")
         || lower.ends_with(".pfx")
-        || lower.contains("token")
+        || denied_token_name(&lower)
 }
 
 /// Файлы с токенами и паролями инструментов, где бы они ни лежали.
@@ -918,7 +942,7 @@ mod tests {
             "cert.pfx",
             "token",
             "api.token",
-            "some-token-file",
+            "service-token",
             "credentials.json",
             "auth.json",
         ] {
@@ -936,7 +960,7 @@ mod tests {
             ".cursor/absent",
             ".config/forgejo/absent",
             "missing.pem",
-            "missing-token",
+            "missing_token",
             "credentials.json",
         ] {
             assert_eq!(
@@ -974,6 +998,56 @@ mod tests {
             share(&home.path().join("cursor-alias").join("absent"), None).unwrap_err(),
             ShareError::Denied
         );
+    }
+
+    #[test]
+    fn refuses_token_stores_but_allows_files_that_mention_tokens() {
+        let home = dir();
+        for name in [
+            "token",
+            ".token",
+            "api.token",
+            "token.json",
+            "tokens.json",
+            "my_token",
+            "my_token.txt",
+            "my_token.json",
+            "my-token",
+            "my-token.txt",
+            "my-token.json",
+            "access_token",
+            "access_token.txt",
+            "refresh_token.json",
+            "api_token",
+            "api-key",
+            "api-key-v2.txt",
+            "apikey",
+            "apikey.json",
+            "deploy.secret",
+            "secrets.json",
+            "secrets.env",
+        ] {
+            let path = home.path().join(name);
+            fs::write(&path, b"secret").unwrap();
+            assert_eq!(
+                share(&path, Some(home.path())).unwrap_err(),
+                ShareError::Denied,
+                "{name}"
+            );
+        }
+        for name in [
+            "tokens-report.md",
+            "token-usage.png",
+            "tokenizer.rs",
+            "tokens-compact.test.ts",
+        ] {
+            let path = home.path().join(name);
+            fs::write(&path, b"report").unwrap();
+            assert!(
+                share(&path, Some(home.path())).is_ok(),
+                "{name} must stay shareable"
+            );
+        }
     }
 
     #[test]

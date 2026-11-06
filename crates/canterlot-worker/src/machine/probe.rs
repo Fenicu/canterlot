@@ -468,6 +468,44 @@ mod tests {
     }
 
     #[test]
+    fn token_stores_are_refused_but_token_reports_are_allowed() {
+        let dir = dir();
+        for relative in [
+            "token",
+            "api.token",
+            "my_token.txt",
+            "access_token.json",
+            "apikey",
+            "deploy.secret",
+            "secrets.json",
+        ] {
+            let path = dir.path().join(relative);
+            fs::write(&path, b"secret").unwrap();
+            assert_eq!(
+                probe(&path.to_string_lossy(), &roots(dir.path()), 0),
+                Outcome::NotAllowed("denied"),
+                "{relative}"
+            );
+        }
+        for relative in [
+            "tokens-report.md",
+            "token-usage.png",
+            "tokenizer.rs",
+            "tokens-compact.test.ts",
+        ] {
+            let path = dir.path().join(relative);
+            fs::write(&path, b"report").unwrap();
+            assert!(
+                matches!(
+                    probe(&path.to_string_lossy(), &roots(dir.path()), 0),
+                    Outcome::Exists { .. }
+                ),
+                "{relative} must stay probeable"
+            );
+        }
+    }
+
+    #[test]
     fn a_denied_secret_path_is_refused_even_when_it_does_not_exist() {
         let dir = dir();
         for relative in [".env", ".gemini/oauth_creds.json", ".ssh/id_ed25519"] {
