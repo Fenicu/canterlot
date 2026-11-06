@@ -949,12 +949,6 @@ pub(crate) async fn run_job_in_tx(
             machine_id: machine,
             call_id: row.call_id,
         };
-        let start_now = row
-            .result
-            .as_ref()
-            .and_then(|result| result.get("start_now"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         match try_start(
             conn,
             runtime,
@@ -963,7 +957,7 @@ pub(crate) async fn run_job_in_tx(
             &mut row,
             now,
             correlation_id,
-            start_now,
+            false,
         )
         .await?
         {
