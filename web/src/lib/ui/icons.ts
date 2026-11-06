@@ -16,6 +16,7 @@ export const icons = {
   retry: 'M4 12a8 8 0 1 0 2.5-5.8M4 4v5h5',
   clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 4v5l3 2',
   list: 'M8 6h13M8 12h13M8 18h13M3 6h1M3 12h1M3 18h1',
-  play: 'M8 5v14l11-7Z'
+  play: 'M8 5v14l11-7Z',
+  grip: 'M7 8h10M7 12h10M7 16h10'
 } as const;
 export type IconName = keyof typeof icons;
