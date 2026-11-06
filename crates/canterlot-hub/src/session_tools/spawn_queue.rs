@@ -387,13 +387,16 @@ pub async fn wake_in_tx(
     let Some(next) = next else {
         return Ok(());
     };
+    let at = next.max(now);
     let exists: bool = sqlx::query_scalar(
         "select exists(select 1 from scheduled_jobs
           where conversation_id=$1 and kind='session_task' and state='pending'
-            and payload->>'action'='spawn_dequeue' and id is distinct from $2)",
+            and payload->>'action'='spawn_dequeue' and run_at <= $3
+            and id is distinct from $2)",
     )
     .bind(parent)
     .bind(exclude_job)
+    .bind(at)
     .fetch_one(&mut *conn)
     .await?;
     if exists {
@@ -403,7 +406,7 @@ pub async fn wake_in_tx(
         conn,
         owner_id,
         parent,
-        next.max(now),
+        at,
         &json!({"action": "spawn_dequeue"}),
     )
     .await?;
