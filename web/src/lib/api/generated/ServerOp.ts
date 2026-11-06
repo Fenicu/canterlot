@@ -43,6 +43,7 @@ export type ServerOp =
         | RoutingPolicyChanged
         | SpawnQueueChanged
         | LimitsChanged
+        | LimitsProvidersChanged
         | LimitReached
         | AttachmentStateChanged
         | RequestOpened
@@ -1024,6 +1025,22 @@ export interface LimitsChanged {
     weekly_reserve_active: boolean;
     weekly_reserve_resets_at: Time | null;
     data_confidence?: "exact" | "estimated";
+  };
+}
+export interface LimitsProvidersChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "limits_providers_changed";
+  payload: {
+    providers: string[];
   };
 }
 export interface LimitReached {

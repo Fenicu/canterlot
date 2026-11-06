@@ -503,6 +503,18 @@ pub async fn seed(pool: &PgPool) -> Seed {
     }
 }
 
+/// Харнесс провайдера в каталоге машины: лимиты провайдера без него клиентам не показываются.
+pub async fn offer_provider(pool: &PgPool, machine_id: Uuid, provider: &str) {
+    sqlx::query(
+        "insert into machine_harnesses(machine_id,harness,provider,title) values($1,$2,$2,$2) on conflict do nothing",
+    )
+    .bind(machine_id)
+    .bind(provider)
+    .execute(pool)
+    .await
+    .expect("seed harness");
+}
+
 pub async fn seed_conversation(pool: &PgPool, owner_id: Uuid, machine_id: Uuid) -> Uuid {
     let conversation_id = Uuid::now_v7();
     let mut transaction = crate::db::begin(pool)

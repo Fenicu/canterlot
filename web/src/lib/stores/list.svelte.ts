@@ -291,6 +291,12 @@ export class ListStore {
       this.limits = next;
       return;
     }
+    if (kind === "limits_providers_changed" && event.kind === "limits_providers_changed") {
+      // Харнесс провайдера ушёл из каталога машин: его лимиты больше не показываются.
+      const offered = event.payload.providers;
+      this.limits = this.limits.filter((item) => offered.includes(item.provider));
+      return;
+    }
     if (kind === "routing_policy_changed" && event.kind === "routing_policy_changed") {
       this.routingRevision = event.payload.revision ?? (this.routingRevision ?? 0) + 1;
       return;

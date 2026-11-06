@@ -748,6 +748,12 @@ test('stripes_span_the_strip_and_the_chevron_keeps_its_place_in_both_states', as
   }
 });
 
+test('a_provider_gone_from_the_machine_catalog_leaves_the_strip_and_returns_with_it', async ({ page }) => {
+  const { hub } = await boot(page, fourProviders);
+  const strip = page.locator('.limits').first();
+  await expect(strip.locator('.row')).toHaveCount(4);
+  await expect(strip.locator('.row').filter({ hasText: 'Antigravity' })).toHaveCount(1);
+  hub.append('conversations', { kind: 'limits_providers_changed', payload: { providers: ['claude', 'codex', 'opencode'] } });
   hub.flush();
   await expect(strip.locator('.row')).toHaveCount(3);
   await expect(strip.locator('.row').filter({ hasText: 'Antigravity' })).toHaveCount(0);

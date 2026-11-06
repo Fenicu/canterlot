@@ -645,6 +645,7 @@ async fn limit_observed_updates_provider_state_and_emits_limits_changed_once(
     pool: PgPool,
 ) -> TestResult {
     let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let at = Utc::now();
     let result = record(&pool, &s, &obs(&s, 960, at)).await;
     assert!(result.provider_changed);
@@ -670,6 +671,7 @@ async fn limit_observed_updates_provider_state_and_emits_limits_changed_once(
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn estimated_confidence_reaches_current_state_and_event(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let at = Utc::now();
     let mut estimated = obs(&s, 400, at);
     estimated.data_confidence = DataConfidence::Estimated;
@@ -704,6 +706,7 @@ async fn estimated_confidence_reaches_current_state_and_event(pool: PgPool) -> T
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn replayed_stale_observation_never_lowers_the_stored_reading(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let at = Utc::now();
     record(&pool, &s, &obs(&s, 960, at)).await;
     for time in [at - Duration::minutes(1), at] {
@@ -797,6 +800,7 @@ async fn observation_time_is_machine_time_converted_with_the_session_offset(
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn limits_changed_of_a_batch_is_appended_once_at_the_end(pool: PgPool) -> TestResult {
     let mut r = Run::new(&pool).await;
+    testkit::offer_provider(&pool, r.seed.machine_id, "claude").await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     use sha2::{Digest, Sha256};
     let credential = Sha256::digest(r.seed.machine_id.to_string().as_bytes()).to_vec();
@@ -1496,6 +1500,7 @@ async fn an_equal_newer_reading_refreshes_the_time_without_limits_changed(
     pool: PgPool,
 ) -> TestResult {
     let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let at = DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
     record(&pool, &s, &obs(&s, 960, at)).await;
     let later = at + Duration::minutes(1);
@@ -1521,6 +1526,7 @@ async fn an_equal_newer_reading_refreshes_the_time_without_limits_changed(
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_equal_reading_after_a_pause_still_emits_limits_changed(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
     let at = DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
     record(&pool, &s, &obs(&s, 960, at)).await;
     let later = at + Duration::minutes(5);

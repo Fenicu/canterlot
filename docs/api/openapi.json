@@ -5034,7 +5034,7 @@
         "operationId": "get__api_v1_limits",
         "responses": {
           "200": {
-            "description": "Текущие лимиты",
+            "description": "Текущие лимиты провайдеров, чьи харнессы есть в каталоге машин владельца",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {

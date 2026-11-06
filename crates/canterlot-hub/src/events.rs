@@ -296,6 +296,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "routing_policy_changed",
     "spawn_queue_changed",
     "limits_changed",
+    "limits_providers_changed",
     "limit_reached",
     "attachment_state_changed",
     "request_opened",

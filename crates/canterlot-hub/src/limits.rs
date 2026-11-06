@@ -334,6 +334,14 @@ pub(crate) async fn emit_changed(
     window: Window,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    // Провайдер, которого не предлагает ни одна машина владельца, клиентам не показывается.
+    if !offered_providers(&mut *conn, owner_id)
+        .await?
+        .iter()
+        .any(|p| p == provider)
+    {
+        return Ok(());
+    }
     let states = current(conn).await?;
     if let Some(p) = states.into_iter().find(|p| p.provider == provider) {
         let state = match window {
@@ -530,6 +538,62 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
             })
         })
         .collect()
+}
+/// Провайдеры, чей харнесс сейчас есть в каталоге хотя бы одной машины владельца.
+pub async fn offered_providers(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select distinct h.provider from machine_harnesses h join machines m on m.id=h.machine_id where m.owner_id=$1 order by h.provider",
+    )
+    .bind(owner_id)
+    .fetch_all(conn)
+    .await
+}
+/// Текущие лимиты для владельца: только провайдеры из каталога его машин.
+/// Строки остальных провайдеров и их история остаются в базе и возвращаются вместе с харнессом.
+pub async fn shown(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+) -> Result<Vec<ProviderLimits>, sqlx::Error> {
+    let offered = offered_providers(&mut *conn, owner_id).await?;
+    Ok(current(conn)
+        .await?
+        .into_iter()
+        .filter(|p| offered.contains(&p.provider))
+        .collect())
+}
+/// Каталог машин владельца изменил набор провайдеров: клиенты убирают ушедших,
+/// а вернувшиеся получают свои окна событиями `limits_changed`.
+pub(crate) async fn emit_offered_changed(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    before: &[String],
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let after = offered_providers(&mut *conn, owner_id).await?;
+    if after == before {
+        return Ok(());
+    }
+    events::append(
+        &mut *conn,
+        NewEvent {
+            scope: Scope::Conversations { owner_id },
+            kind: "limits_providers_changed",
+            conversation_id: None,
+            execution_id: None,
+            payload: json!({ "providers": after }),
+            correlation_id,
+        },
+    )
+    .await?;
+    for provider in after.iter().filter(|p| !before.contains(p)) {
+        for window in [Window::FiveHour, Window::Weekly, Window::Monthly] {
+            emit_changed(&mut *conn, owner_id, provider, window, correlation_id).await?;
+        }
+    }
+    Ok(())
 }
 async fn stored_provider(
     pool: &PgPool,

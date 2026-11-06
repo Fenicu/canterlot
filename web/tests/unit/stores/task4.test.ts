@@ -1315,6 +1315,41 @@ describe("stores task 4", () => {
     ).toBe(20);
   });
 
+  it("limits_providers_changed_drops_providers_gone_from_the_catalog_and_lets_them_return", () => {
+    const list = listOf();
+    const observed = "2026-10-28T12:00:00.000Z";
+    const window = { used_permille: 10, resets_at: null, observed_at: observed };
+    list.limits = [
+      { provider: "claude", five_hour: window, weekly: window, weekly_reserve_active: false },
+      { provider: "antigravity", five_hour: window, weekly: window, weekly_reserve_active: false },
+    ];
+    list.applier.applyEvents([
+      { event: ev("limits_providers_changed", { providers: ["claude", "codex"] }, "5"), overlap: false },
+    ]);
+    expect(list.limits.map((item) => item.provider)).toEqual(["claude"]);
+    list.applier.applyEvents([
+      { event: ev("limits_providers_changed", { providers: ["antigravity", "claude"] }, "6"), overlap: false },
+      {
+        event: ev(
+          "limits_changed",
+          {
+            provider: "antigravity",
+            window: "weekly",
+            used_permille: 300,
+            resets_at: null,
+            observed_at: observed,
+            weekly_reserve_active: false,
+            weekly_reserve_resets_at: null,
+          },
+          "7",
+        ),
+        overlap: false,
+      },
+    ]);
+    expect(list.limits.map((item) => item.provider)).toEqual(["claude", "antigravity"]);
+    expect(list.unknownKinds).toBe(0);
+  });
+
   it("limits_changed_monthly_updates_the_month_window", () => {
     const list = listOf();
     const observed = "2026-10-28T12:00:00.000Z";

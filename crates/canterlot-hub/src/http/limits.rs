@@ -96,13 +96,10 @@ pub struct History {
     /// Медианы скорости ответа по моделям; Codex не передаёт времени генерации и сюда не попадает.
     pub speed: Vec<crate::speed::ModelSpeedSummary>,
 }
-#[utoipa::path(get,path="/api/v1/limits",tag="limits",responses((status=200,description="Текущие лимиты",body=Vec<ProviderView>)))]
-async fn current(
-    State(s): State<AppState>,
-    _o: Owner,
-) -> Result<Json<Vec<ProviderView>>, ApiError> {
+#[utoipa::path(get,path="/api/v1/limits",tag="limits",responses((status=200,description="Текущие лимиты провайдеров, чьи харнессы есть в каталоге машин владельца",body=Vec<ProviderView>)))]
+async fn current(State(s): State<AppState>, o: Owner) -> Result<Json<Vec<ProviderView>>, ApiError> {
     Ok(Json(
-        limits::current(&mut *s.pool.acquire().await?)
+        limits::shown(&mut *s.pool.acquire().await?, o.owner_id)
             .await?
             .into_iter()
             .map(ProviderView::from)

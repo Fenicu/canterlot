@@ -87,6 +87,7 @@ async fn changes(pool: &PgPool) -> i64 {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn absence_hides_the_window_keeps_history_and_tells_clients(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, Window::FiveHour, 440, at(-30)).await;
     observe(&pool, &s, Window::Weekly, 530, at(-30)).await;
     assert!(!claude(&pool).await.five_hour_absent);
@@ -118,6 +119,7 @@ async fn a_late_reading_from_before_the_absence_does_not_bring_the_window_back(
     pool: PgPool,
 ) -> TestResult {
     let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, Window::Weekly, 530, at(-30)).await;
     assert!(absent(&pool, &s, at(-10)).await);
     observe(&pool, &s, Window::FiveHour, 440, at(-20)).await;
@@ -145,6 +147,7 @@ async fn absence_of_a_window_that_was_never_seen_is_still_recorded(pool: PgPool)
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn monthly_readings_are_stored_and_emitted(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, Window::Monthly, 93, at(-30)).await;
     let state = claude(&pool).await;
     assert_eq!(state.monthly.unwrap().used_permille, 93);

@@ -95,6 +95,7 @@ pub async fn apply_report_with_capabilities(
     ).bind(machine_id).bind(owner_id).fetch_all(&mut *conn).await?;
     sqlx::query("update machines set capabilities=$9,worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,''),worktree_root=nullif($8,'') where id=$1")
  .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).bind(&report.worktree_root).bind(&capabilities).execute(&mut *conn).await?;
+    let offered = crate::limits::offered_providers(&mut *conn, owner_id).await?;
     sqlx::query("delete from machine_harnesses where machine_id=$1")
         .bind(machine_id)
         .execute(&mut *conn)
@@ -141,6 +142,7 @@ pub async fn apply_report_with_capabilities(
         )
         .await?;
     }
+    crate::limits::emit_offered_changed(&mut *conn, owner_id, &offered, correlation_id).await?;
     emit(&mut *conn,owner_id,"machine_report_updated",json!({"machine_id":machine_id,"worker_version":report.worker_version,"capabilities":capabilities,"limits_ok":report.max_attachment_bytes==MAX_ATTACHMENT_BYTES&&report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT,"home_dir":(!report.home_dir.is_empty()).then_some(&report.home_dir)}),correlation_id).await?;
     Ok(())
         })

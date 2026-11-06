@@ -130,7 +130,7 @@ pub async fn conversations(
                 counts: conversations::counts(&mut *conn, owner_id).await?,
                 groups: groups::list(&mut *conn, owner_id).await?,
                 presets: crate::presets::list(&mut *conn, owner_id).await?,
-                limits: crate::limits::current(&mut *conn)
+                limits: crate::limits::shown(&mut *conn, owner_id)
                     .await?
                     .into_iter()
                     .map(ProviderLimits::from)
