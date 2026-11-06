@@ -33,8 +33,7 @@ async function boot(page: Page) {
 }
 
 /** Ведущий запускает субагента на глазах владельца. */
-function spawnSubagent(hub: FakeHub, api: FakeHubApi, id: string, run: string, name: string): string {
-	const blockId = api.id();
+function spawnSubagent(hub: FakeHub, api: FakeHubApi, id: string, run: string, name: string, blockId = api.id()): string {
 	api.blocks.set(blockId, { text: name, rev: 1, state: 'streaming' });
 	hub.append(`conversation:${id}`, {
 		kind: 'block_started', conversation_id: id,
@@ -46,6 +45,30 @@ function spawnSubagent(hub: FakeHub, api: FakeHubApi, id: string, run: string, n
 
 const names = (locator: import('@playwright/test').Locator) => locator.evaluate((node) => node.getAnimations().map((animation) => (animation as CSSAnimation).animationName ?? ''));
 
+/**
+ * Застаёт анимацию узла, пока она ещё идёт: ожидание и пауза выполняются в странице,
+ * в первом же кадре после действия. Иначе загруженная машина успевает доиграть
+ * короткий переход между вызовами Playwright.
+ */
+async function pauseMotion(page: Page, selector: string, act: () => unknown): Promise<string | null> {
+	const caught = page.evaluate((selector) => new Promise<string | null>((resolve) => {
+		const started = performance.now();
+		const look = () => {
+			const node = document.querySelector<HTMLElement>(selector);
+			const [animation] = (node?.getAnimations() ?? []).filter((item) => Number(item.effect?.getComputedTiming().duration) > 0);
+			if (node && animation) {
+				animation.pause();
+				(window as unknown as { __motion: HTMLElement }).__motion = node;
+				resolve((animation as CSSAnimation).animationName ?? '');
+			} else if (performance.now() - started > 8_000) resolve(null);
+			else requestAnimationFrame(look);
+		};
+		look();
+	}), selector);
+	await act();
+	return caught;
+}
+
 for (const motion of ['full', 'reduced'] as const) {
 	test(`new_subagent_grows_out_of_its_branch_in_the_feed_${motion}`, async ({ page }) => {
 		if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -55,27 +78,62 @@ for (const motion of ['full', 'reduced'] as const) {
 		// История стоит сразу.
 		await expect(old).not.toHaveAttribute('data-grows', '');
 
-		spawnSubagent(hub, api, id, run, 'новый');
+		let name: string | null = null;
+		if (motion === 'full') name = await pauseMotion(page, '.feed .sub[data-grows]', () => { spawnSubagent(hub, api, id, run, 'новый'); });
+		else spawnSubagent(hub, api, id, run, 'новый');
 		const fresh = page.locator('.feed .sub').filter({ hasText: 'новый' });
 		await expect(fresh).toHaveAttribute('data-grows', '');
 		const heightBefore = (await fresh.boundingBox())!.height;
-		if (motion === 'reduced') expect(await names(fresh)).toEqual([]);
-		else {
-			expect((await names(fresh)).some((name) => name.endsWith('branch-reveal'))).toBe(true);
-			// Строка открывается от значка ветки: в начале видна только левая часть.
-			const clip = await fresh.evaluate((node) => {
-				const [animation] = node.getAnimations();
-				animation!.pause();
-				animation!.currentTime = 0;
-				const value = getComputedStyle(node).clipPath;
-				animation!.play();
-				return value;
+		if (motion === 'reduced') {
+			expect(name).toBeNull();
+			expect(await names(fresh)).toEqual([]);
+		} else {
+			expect(name?.endsWith('branch-reveal')).toBe(true);
+			// Анимация стоит на паузе: срезы не зависят от того, сколько кадров успел нарисовать браузер.
+			const growth = await page.evaluate(async () => {
+				const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+				const node = (window as unknown as { __motion: HTMLElement }).__motion;
+				const [animation] = node.getAnimations().filter((item) => Number(item.effect?.getComputedTiming().duration) > 0);
+				const total = Number(animation!.effect!.getComputedTiming().duration);
+				const width = node.getBoundingClientRect().width;
+				// Ширину видимой части меряем попаданием в строку: clip-path обрезает и отрисовку, и попадание,
+				// а вычисленный clip в Firefox может остаться неразобранным calc().
+				const visibleWidth = (): number => {
+					const box = node.getBoundingClientRect();
+					const y = Math.min(Math.max(box.top + box.height / 2, 0), window.innerHeight - 1);
+					let low = 0;
+					let high = Math.max(box.width, 0);
+					for (let step = 0; step < 12; step++) {
+						const middle = (low + high) / 2;
+						const hit = document.elementFromPoint(box.left + middle, y);
+						if (hit && node.contains(hit)) low = middle;
+						else high = middle;
+					}
+					return low;
+				};
+				const visible: number[] = [];
+				const heights: number[] = [];
+				for (const share of [0, 0.2, 0.4, 0.6, 1]) {
+					animation!.currentTime = total * share;
+					await frame();
+					await frame();
+					visible.push(visibleWidth());
+					heights.push(node.getBoundingClientRect().height);
+				}
+				animation!.finish();
+				return { visible, heights, width };
 			});
-			expect(clip).toMatch(/^inset\(/);
-			expect(clip).not.toMatch(/^inset\(0px( 0px)*( round|\))/);
+			// Строка открывается от значка ветки: сперва видна только левая часть, дальше — всё шире и до конца.
+			expect(growth.visible[0]!).toBeGreaterThan(0);
+			expect(growth.visible[0]!).toBeLessThan(growth.width * 0.5);
+			for (let index = 1; index < growth.visible.length; index++) {
+				expect(growth.visible[index]!).toBeGreaterThan(growth.visible[index - 1]!);
+			}
+			expect(growth.visible[growth.visible.length - 1]!).toBeGreaterThanOrEqual(growth.width - 1);
+			// Высота строки во время появления не менялась: ленте нечего перемерять.
+			for (const height of growth.heights) expect(Math.abs(height - heightBefore)).toBeLessThanOrEqual(1);
 		}
 		await expect.poll(() => fresh.evaluate((node) => node.getAnimations().length), { timeout: 3_000 }).toBe(0);
-		// Высота строки во время появления не менялась: ленте нечего перемерять.
 		expect((await fresh.boundingBox())!.height).toBe(heightBefore);
 	});
 }
@@ -92,8 +150,14 @@ test('new_subagent_grows_in_the_delegation_tree_while_the_opened_tree_stands', a
 	await page.waitForTimeout(300);
 	expect(await moving()).toEqual([]);
 
-	const blockId = spawnSubagent(hub, api, id, run, 'новый');
+	const blockId = api.id();
+	const caught = await pauseMotion(page, `[data-node="${blockId}"]`, () => { spawnSubagent(hub, api, id, run, 'новый', blockId); });
+	expect(caught).not.toBeNull();
+	// Новый узел — единственный, кто движется; пойманная анимация ещё стоит на паузе.
+	expect(await moving()).toEqual([blockId]);
+	await page.evaluate(() => {
+		for (const animation of (window as unknown as { __motion: HTMLElement }).__motion.getAnimations()) animation.finish();
+	});
 	await expect(scope.locator(`[data-node="${blockId}"]`)).toBeVisible();
-	await expect.poll(moving, { timeout: 1_500 }).toEqual([blockId]);
 	await expect.poll(moving, { timeout: 3_000 }).toEqual([]);
 });
