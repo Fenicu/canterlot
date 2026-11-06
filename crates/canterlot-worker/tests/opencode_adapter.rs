@@ -863,6 +863,7 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_alarm_set", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_alarm_cancel", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_alarm_list", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_route_preview", "resource": "*", "effect": "allow"},
             ]),
         ),
         (
@@ -881,6 +882,7 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_alarm_set", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_alarm_cancel", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_alarm_list", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_route_preview", "resource": "*", "effect": "allow"},
             ]),
         ),
     ] {
@@ -4824,7 +4826,8 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "alarm_cancel",
             "alarm_list",
             "nudge_set",
-            "nudge_clear"
+            "nudge_clear",
+            "route_preview"
         ]
     );
     bench.close(CloseMode::Graceful).await;

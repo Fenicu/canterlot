@@ -209,7 +209,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Turn off auto-nudge for a session you started and release any result it was holding back. The subscription stays. Idempotent: a session without a rule answers none. Do not call it in a loop; it is idempotent."
         }
         "route_preview" => {
-            "Show which executor the owner's routing policy would pick right now for a task type, with the reason for every candidate, current limits and machine headroom. Without task_type, lists the task types. Read-only; to start the session, call session_spawn with route."
+            "Show which executor the owner's routing policy would pick right now for a task type, with the reason for every candidate, current limits and machine headroom. Without task_type, lists the task types. Read-only; to start the session, call session_spawn with route. Do not call it in a loop or before every spawn: session_spawn with route already explains its choice."
         }
         _ => "Session tool.",
     }

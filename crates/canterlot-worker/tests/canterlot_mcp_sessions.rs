@@ -19,7 +19,7 @@ const PROVIDERS: [(ToolSet, &str); 3] = [
     (ToolSet::LimitsOnly, "opencode"),
 ];
 
-const SESSION_TOOLS: [(&str, &str); 15] = [
+const SESSION_TOOLS: [(&str, &str); 16] = [
     ("sessions_list", "sessions.list"),
     ("session_inspect", "sessions.inspect"),
     ("session_send", "sessions.send"),
@@ -35,6 +35,7 @@ const SESSION_TOOLS: [(&str, &str); 15] = [
     ("alarm_list", "alarms.list"),
     ("nudge_set", "nudge.set"),
     ("nudge_clear", "nudge.clear"),
+    ("route_preview", "routing.preview"),
 ];
 
 fn tools_of(tool_set: ToolSet, provider: &str) -> Vec<Value> {
@@ -90,7 +91,8 @@ fn session_tools_listed_for_all_three_providers() {
         assert_eq!(tools.len(), expected, "{provider}");
         for required in [
             ("session_send", vec!["session_id", "text"]),
-            ("session_spawn", vec!["harness", "brief"]),
+            // harness необязателен с маршрутом C1: ровно одно из harness и route.
+            ("session_spawn", vec!["brief"]),
             ("session_inspect", vec!["session_id"]),
             ("session_wait", vec!["session_id"]),
         ] {
@@ -203,7 +205,10 @@ fn read_tools_are_read_only() {
         let tools = tools_of(tool_set, provider);
         for (mcp_name, _) in SESSION_TOOLS {
             let tool = tools.iter().find(|tool| tool["name"] == mcp_name).unwrap();
-            let read_only = matches!(mcp_name, "sessions_list" | "session_inspect" | "alarm_list");
+            let read_only = matches!(
+                mcp_name,
+                "sessions_list" | "session_inspect" | "alarm_list" | "route_preview"
+            );
             assert_eq!(
                 tool["annotations"]["readOnlyHint"] == json!(true),
                 read_only,
@@ -376,11 +381,12 @@ fn no_tool_touches_the_whitelist() {
             hub_name.starts_with("presets.")
                 || hub_name.starts_with("sessions.")
                 || hub_name.starts_with("alarms.")
-                || hub_name.starts_with("nudge."),
+                || hub_name.starts_with("nudge.")
+                || hub_name.starts_with("routing."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 18);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 19);
 }
 
 #[tokio::test]
