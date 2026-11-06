@@ -526,6 +526,8 @@ pub struct OrchestratorConfig {
     pub alarms: AlarmsConfig,
     pub nudge: NudgeConfig,
     pub routing: RoutingConfig,
+    pub spawn_queue: SpawnQueueConfig,
+    pub guards: GuardsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -552,13 +554,16 @@ impl Default for AlarmsConfig {
     }
 }
 
-/// Маршрутизация: выключатель и свежесть показаний лимитов для выбора.
+/// Маршрутизация: выключатель, свежесть показаний лимитов и горизонт очереди.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RoutingConfig {
     pub enabled: bool,
     #[serde(with = "humantime_serde")]
     pub stale_limits: Duration,
+    /// Дальше этого срока освобождение слота не ждут: запуск отвечает ошибкой.
+    #[serde(with = "humantime_serde")]
+    pub queue_horizon: Duration,
 }
 
 impl Default for RoutingConfig {
@@ -566,6 +571,56 @@ impl Default for RoutingConfig {
         Self {
             enabled: true,
             stale_limits: Duration::from_secs(30 * 60),
+            queue_horizon: Duration::from_secs(6 * 3600),
+        }
+    }
+}
+
+/// Очередь запусков: срок жизни элемента, предел ожидающих и пауза повтора.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SpawnQueueConfig {
+    /// Сколько элемент ждёт запуска; после срока он истекает с заметкой.
+    #[serde(with = "humantime_serde")]
+    pub ttl: Duration,
+    /// Больше этого числа ожидающих родитель не ставит: `spawn_queue_full`.
+    pub max_waiting: i64,
+    /// Через сколько повторять проверку занятости (параллельность, лимиты, страж).
+    #[serde(with = "humantime_serde")]
+    pub retry_delay: Duration,
+}
+
+impl Default for SpawnQueueConfig {
+    fn default() -> Self {
+        Self {
+            ttl: Duration::from_secs(24 * 3600),
+            max_waiting: 20,
+            retry_delay: Duration::from_secs(60),
+        }
+    }
+}
+
+/// Страж машины перед запуском: пороги `[orchestrator.guards]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GuardsConfig {
+    pub min_free_disk_gb: f64,
+    pub min_free_disk_percent: f64,
+    pub max_load_per_core: f64,
+    pub min_mem_available_gb: f64,
+    /// Показания старше этого срока страж не включают.
+    #[serde(with = "humantime_serde")]
+    pub metrics_max_age: Duration,
+}
+
+impl Default for GuardsConfig {
+    fn default() -> Self {
+        Self {
+            min_free_disk_gb: 30.0,
+            min_free_disk_percent: 10.0,
+            max_load_per_core: 1.5,
+            min_mem_available_gb: 4.0,
+            metrics_max_age: Duration::from_secs(120),
         }
     }
 }
