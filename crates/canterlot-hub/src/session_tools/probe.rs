@@ -10,8 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
 use canterlot_proto::worker::v1::{self, path_probe};
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::session::{ProbeReply, Registry};
@@ -188,7 +188,10 @@ mod tests {
     #[test]
     fn a_reply_becomes_size_mtime_and_an_optional_head() {
         let probe = PathProbe::from(exists(Some("0")));
-        let PathProbe::Exists { size, mtime, head, .. } = probe else {
+        let PathProbe::Exists {
+            size, mtime, head, ..
+        } = probe
+        else {
             panic!()
         };
         assert_eq!(size, 2);
@@ -208,14 +211,20 @@ mod tests {
                 reason: "denied".into(),
             })),
         };
-        assert_eq!(PathProbe::from(reply), PathProbe::NotAllowed("denied".into()));
+        assert_eq!(
+            PathProbe::from(reply),
+            PathProbe::NotAllowed("denied".into())
+        );
         let reply = v1::PathProbe {
             request_id: String::new(),
             outcome: Some(path_probe::Outcome::Error(v1::PathProbeError {
                 reason: "unreadable".into(),
             })),
         };
-        assert_eq!(PathProbe::from(reply), PathProbe::Error("unreadable".into()));
+        assert_eq!(
+            PathProbe::from(reply),
+            PathProbe::Error("unreadable".into())
+        );
     }
 
     #[test]

@@ -124,7 +124,9 @@ mod tests {
     #[test]
     fn an_escape_after_joining_is_refused() {
         assert_eq!(
-            resolve("../etc/passwd", Some("/srv/work")).unwrap_err().code,
+            resolve("../etc/passwd", Some("/srv/work"))
+                .unwrap_err()
+                .code,
             ToolErrorCode::PathNotAllowed
         );
     }

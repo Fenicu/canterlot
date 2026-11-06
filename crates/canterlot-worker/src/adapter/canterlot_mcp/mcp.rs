@@ -1024,10 +1024,12 @@ mod tests {
         assert_eq!(when["min_bytes"]["minimum"], json!(0));
         assert_eq!(when["fresh"]["type"], json!("boolean"));
         assert_eq!(when["read_head"]["type"], json!("boolean"));
-        assert!(alarm("alarm_set")["description"]
-            .as_str()
-            .unwrap()
-            .contains("a file appears"));
+        assert!(
+            alarm("alarm_set")["description"]
+                .as_str()
+                .unwrap()
+                .contains("a file appears")
+        );
         assert!(alarm("nudge_set")["inputSchema"]["properties"]["report_file"].is_object());
         assert!(alarm("alarm_set")["inputSchema"]["properties"]["batch"].is_object());
         assert!(alarm("alarm_set")["inputSchema"]["properties"]["only_on_timeout"].is_object());

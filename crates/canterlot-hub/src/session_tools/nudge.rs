@@ -17,7 +17,8 @@ use uuid::Uuid;
 use super::{
     Caller, ToolContext, ToolError, ToolErrorCode, access, origin, parse_arguments, paths,
     probe::PathProbe,
-    send, settle::{SettleConfig, Settled},
+    send,
+    settle::{SettleConfig, Settled},
     subs, summary,
 };
 use crate::{

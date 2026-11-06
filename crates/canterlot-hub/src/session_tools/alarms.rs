@@ -66,13 +66,8 @@ const AUTOMATION: &str = "This is canterlot automation, not the owner.";
 
 /// Какое задание опроса ставит взвод: лимиты к сроку сброса или файл раз в 30 с.
 enum ProbeJob {
-    Limits {
-        at: DateTime<Utc>,
-        provider: String,
-    },
-    File {
-        at: DateTime<Utc>,
-    },
+    Limits { at: DateTime<Utc>, provider: String },
+    File { at: DateTime<Utc> },
 }
 
 /// Состояние условия `session_state`: отметки целей снимаются при взводе.
@@ -167,8 +162,7 @@ fn default_fresh() -> bool {
 impl FileCondition {
     /// Файл есть, не меньше `min_bytes` и, при `fresh`, изменён после взвода.
     fn holds(&self, size: u64, mtime: Option<DateTime<Utc>>) -> bool {
-        size >= self.min_bytes
-            && (!self.fresh || mtime.is_none() || mtime != self.armed_mtime)
+        size >= self.min_bytes && (!self.fresh || mtime.is_none() || mtime != self.armed_mtime)
     }
 
     fn as_value(&self) -> Value {
@@ -752,9 +746,7 @@ fn view(row: &AlarmRow) -> AlarmView {
         None
     };
     let file = if kind == Some("file") {
-        row.condition
-            .as_ref()
-            .and_then(FileCondition::parse)
+        row.condition.as_ref().and_then(FileCondition::parse)
     } else {
         None
     };
@@ -1884,9 +1876,7 @@ pub async fn set(
     // вызывающего. Проба при взводе же проверяет правила пути на машине.
     let file_arming = match &parsed_when {
         Some(ParsedWhen::File {
-            path,
-            read_head,
-            ..
+            path, read_head, ..
         }) => {
             let workdir = paths::workdir(&context.pool, caller.conversation_id).await?;
             let resolved = paths::resolve(path, workdir.as_deref())?;
@@ -2299,8 +2289,8 @@ pub async fn set(
                     read_head,
                     ..
                 } => {
-                    let (path, probe) =
-                        file_arming.ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
+                    let (path, probe) = file_arming
+                        .ok_or_else(|| ToolError::new(ToolErrorCode::InvalidArguments))?;
                     let (armed_mtime, armed_size) = match &probe {
                         PathProbe::Exists { size, mtime, .. } => (*mtime, Some(*size)),
                         _ => (None, None),

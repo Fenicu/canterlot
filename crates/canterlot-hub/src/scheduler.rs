@@ -707,7 +707,8 @@ impl Scheduler {
                 }
                 None => {
                     // Без реестра спросить некого: задание решит, что машина недоступна.
-                    self.probes.finish(job.id, crate::session_tools::probe::PathProbe::Unavailable);
+                    self.probes
+                        .finish(job.id, crate::session_tools::probe::PathProbe::Unavailable);
                 }
             }
         }

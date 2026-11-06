@@ -15,9 +15,7 @@ use std::{
 
 use canterlot_proto::{
     limits::{MAX_PROBE_HEAD_BYTES, MAX_PROBE_PATH_BYTES},
-    worker::v1::{
-        PathProbe, PathProbeError, PathProbeExists, PathProbeNotAllowed, path_probe,
-    },
+    worker::v1::{PathProbe, PathProbeError, PathProbeExists, PathProbeNotAllowed, path_probe},
 };
 
 use super::share::{self, ShareError};
@@ -45,7 +43,8 @@ pub const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5
 
 /// Проверить путь и, если файл есть, отдать его факты. Работа блокирующая:
 /// вызывающий уводит её в отдельный поток.
-pub fn probe(path: &str, roots: &[PathBuf], read_head_bytes: u32) -> Outcome {    let invalid = lexical_problem(path);
+pub fn probe(path: &str, roots: &[PathBuf], read_head_bytes: u32) -> Outcome {
+    let invalid = lexical_problem(path);
     if let Some(reason) = invalid {
         return Outcome::NotAllowed(reason);
     }
@@ -73,11 +72,7 @@ pub fn probe(path: &str, roots: &[PathBuf], read_head_bytes: u32) -> Outcome {  
 
 /// Срок пробы: блокирующее чтение уводится в отдельный поток, а ответ приходит
 /// не позже срока. Зависший поток остаётся висеть, но управляющий цикл свободен.
-pub(crate) async fn run(
-    path: String,
-    roots: Vec<PathBuf>,
-    read_head_bytes: u32,
-) -> Outcome {
+pub(crate) async fn run(path: String, roots: Vec<PathBuf>, read_head_bytes: u32) -> Outcome {
     with_deadline(PROBE_DEADLINE, async move {
         match tokio::task::spawn_blocking(move || probe(&path, &roots, read_head_bytes)).await {
             Ok(outcome) => outcome,
@@ -111,12 +106,12 @@ pub fn reply(request_id: String, outcome: Outcome) -> PathProbe {
             head: head.unwrap_or_default(),
             head_omitted: head_omitted.to_owned(),
         }),
-        Outcome::Missing => path_probe::Outcome::Missing(canterlot_proto::worker::v1::PathProbeMissing {}),
-        Outcome::NotAllowed(reason) => {
-            path_probe::Outcome::NotAllowed(PathProbeNotAllowed {
-                reason: reason.to_owned(),
-            })
+        Outcome::Missing => {
+            path_probe::Outcome::Missing(canterlot_proto::worker::v1::PathProbeMissing {})
         }
+        Outcome::NotAllowed(reason) => path_probe::Outcome::NotAllowed(PathProbeNotAllowed {
+            reason: reason.to_owned(),
+        }),
         Outcome::Error(reason) => path_probe::Outcome::Error(PathProbeError {
             reason: reason.to_owned(),
         }),
@@ -195,11 +190,7 @@ mod tests {
     }
 
     fn probe_in(root: &Path, name: &str, head: u32) -> Outcome {
-        probe(
-            &root.join(name).to_string_lossy(),
-            &roots(root),
-            head,
-        )
+        probe(&root.join(name).to_string_lossy(), &roots(root), head)
     }
 
     #[test]
@@ -299,9 +290,7 @@ mod tests {
         let dir = dir();
         fs::write(dir.path().join("gate.rc"), b"0123456789").unwrap();
         let Outcome::Exists {
-            head,
-            head_omitted,
-            ..
+            head, head_omitted, ..
         } = probe_in(dir.path(), "gate.rc", 0)
         else {
             panic!()
@@ -323,9 +312,7 @@ mod tests {
         let dir = dir();
         fs::write(dir.path().join("blob"), [0u8, 1, 2, 3]).unwrap();
         let Outcome::Exists {
-            head,
-            head_omitted,
-            ..
+            head, head_omitted, ..
         } = probe_in(dir.path(), "blob", 16)
         else {
             panic!()

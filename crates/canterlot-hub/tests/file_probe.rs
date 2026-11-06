@@ -39,7 +39,9 @@ use uuid::Uuid;
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 /// `ToolError` не реализует `std::error::Error`: в тестах он становится обычной ошибкой.
-fn tool<T>(result: Result<T, session_tools::ToolError>) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+fn tool<T>(
+    result: Result<T, session_tools::ToolError>,
+) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
     result.map_err(|error| Box::new(std::io::Error::other(format!("{error:?}"))) as Box<_>)
 }
 
@@ -293,14 +295,15 @@ async fn file_alarm_polls_and_fires_with_size_time_and_head(pool: PgPool) -> Tes
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let armed_at = Utc::now();
     worker.push(missing());
-    let armed = tool(f
-        .arm_file(json!({
+    let armed = tool(
+        f.arm_file(json!({
             "kind": "file",
             "path": "/tmp/w/gate.rc",
             "min_bytes": 2,
             "read_head": true,
         }))
-        .await)?;
+        .await,
+    )?;
     assert_eq!(armed["state"], "armed");
     assert_eq!(worker.seen(), ["/tmp/w/gate.rc"]);
     assert_eq!(f.pending_probe_jobs().await, 1);
@@ -345,7 +348,10 @@ async fn fresh_file_is_not_rewritten_until_its_mtime_changes(pool: PgPool) -> Te
     let now = Utc::now();
     let old = now - TimeDelta::minutes(30);
     worker.push(exists(2, old, None));
-    tool(f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"})).await)?;
+    tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
 
     // Файл уже был и не менялся: `fresh` по умолчанию не даёт сработать.
     worker.push(exists(2, old, None));
@@ -379,14 +385,15 @@ async fn min_bytes_waits_for_a_larger_file(pool: PgPool) -> TestResult {
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
     worker.push(missing());
-    tool(f
-        .arm_file(json!({
+    tool(
+        f.arm_file(json!({
             "kind": "file",
             "path": "/tmp/w/gate.rc",
             "min_bytes": 10,
             "fresh": false,
         }))
-        .await)?;
+        .await,
+    )?;
 
     worker.push(exists(5, now, None));
     let scheduler = f.scheduler();
@@ -495,7 +502,10 @@ async fn a_hung_probe_does_not_block_another_scheduler_job(pool: PgPool) -> Test
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
     worker.push(missing());
-    tool(f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"})).await)?;
+    tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
     // Второй будильник по времени: он должен сработать, пока проба висит.
     tool(
         session_tools::call(
@@ -538,7 +548,10 @@ async fn a_file_alarm_is_picked_up_by_a_new_scheduler(pool: PgPool) -> TestResul
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
     worker.push(missing());
-    tool(f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"})).await)?;
+    tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
 
     // «Перезапуск»: новый планировщик с пустым кэшем проб снова спрашивает машину.
     worker.push(exists(2, now + TimeDelta::seconds(20), None));
@@ -558,7 +571,10 @@ async fn a_file_alarm_coalesces_with_a_time_alarm(pool: PgPool) -> TestResult {
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
     worker.push(missing());
-    tool(f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"})).await)?;
+    tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
     tool(
         session_tools::call(
             &f.context(),
@@ -702,7 +718,10 @@ async fn pending_nudge(
     .bind(f.child)
     .bind(f.seed.owner_id)
     .bind(f.seed.conversation_id)
-    .bind(vec!["STATUS: DONE".to_owned(), "STATUS: BLOCKED".to_owned()])
+    .bind(vec![
+        "STATUS: DONE".to_owned(),
+        "STATUS: BLOCKED".to_owned(),
+    ])
     .bind(report_file)
     .bind(consecutive)
     .bind(&baseline)
@@ -763,7 +782,13 @@ async fn report_growth_counts_as_progress_and_prevents_exhaustion(pool: PgPool) 
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
     prime_idle(&f.pool, &f, now).await;
-    answer_and_run(&f.pool, &f, "Still working on the parser.", now - TimeDelta::minutes(1)).await;
+    answer_and_run(
+        &f.pool,
+        &f,
+        "Still working on the parser.",
+        now - TimeDelta::minutes(1),
+    )
+    .await;
     activity::refresh(&f.pool, f.child, now, &thresholds(), Uuid::now_v7())
         .await
         .unwrap();
@@ -786,14 +811,16 @@ async fn report_growth_counts_as_progress_and_prevents_exhaustion(pool: PgPool) 
     worker.wait(1).await;
     scheduler.tick(at + TimeDelta::seconds(1)).await?;
 
-    let (state, consecutive): (String, i32) = sqlx::query_as(
-        "select state,consecutive from nudge_rules where conversation_id=$1",
-    )
-    .bind(f.child)
-    .fetch_one(&f.pool)
-    .await?;
+    let (state, consecutive): (String, i32) =
+        sqlx::query_as("select state,consecutive from nudge_rules where conversation_id=$1")
+            .bind(f.child)
+            .fetch_one(&f.pool)
+            .await?;
     assert_eq!(state, "watching");
-    assert_eq!(consecutive, 1, "growth starts a new series instead of giving up");
+    assert_eq!(
+        consecutive, 1,
+        "growth starts a new series instead of giving up"
+    );
     assert_eq!(nudge_inputs(&f.pool, f.child).await.len(), 1);
     assert_eq!(nudge_events(&f.pool, f.child).await[0].0, "nudged");
     f.stop().await;
@@ -806,7 +833,13 @@ async fn a_missing_report_is_named_in_the_text_and_signals(pool: PgPool) -> Test
     let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
     let now = Utc::now();
     prime_idle(&f.pool, &f, now).await;
-    answer_and_run(&f.pool, &f, "Still working on the parser.", now - TimeDelta::minutes(1)).await;
+    answer_and_run(
+        &f.pool,
+        &f,
+        "Still working on the parser.",
+        now - TimeDelta::minutes(1),
+    )
+    .await;
     activity::refresh(&f.pool, f.child, now, &thresholds(), Uuid::now_v7())
         .await
         .unwrap();
@@ -845,7 +878,13 @@ async fn a_failed_probe_is_recorded_and_does_not_block_the_nudge(pool: PgPool) -
     let f = Fx::new(pool).await;
     let now = Utc::now();
     prime_idle(&f.pool, &f, now).await;
-    answer_and_run(&f.pool, &f, "Still working on the parser.", now - TimeDelta::minutes(1)).await;
+    answer_and_run(
+        &f.pool,
+        &f,
+        "Still working on the parser.",
+        now - TimeDelta::minutes(1),
+    )
+    .await;
     activity::refresh(&f.pool, f.child, now, &thresholds(), Uuid::now_v7())
         .await
         .unwrap();

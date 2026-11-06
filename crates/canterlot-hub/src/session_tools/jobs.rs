@@ -192,18 +192,14 @@ pub async fn run_in_tx(
         Action::AlarmDeliver => {
             crate::session_tools::alarms::deliver_job_in_tx(conn, job, now, correlation_id).await
         }
-        Action::AlarmProbe => {
-            Ok(
-                crate::session_tools::alarms::probe_job_in_tx(
-                    conn,
-                    job,
-                    now,
-                    correlation_id,
-                    probe,
-                )
-                .await?,
-            )
-        }
+        Action::AlarmProbe => Ok(crate::session_tools::alarms::probe_job_in_tx(
+            conn,
+            job,
+            now,
+            correlation_id,
+            probe,
+        )
+        .await?),
         Action::Nudge => {
             crate::session_tools::nudge::run_job_in_tx(
                 conn,
