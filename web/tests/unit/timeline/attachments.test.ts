@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { THUMB_MAX_BYTES, attachmentKind, attachmentUrl, showsThumb } from "#lib/timeline/attachments.js";
+import {
+  DOCUMENT_VIEW_MAX_BYTES,
+  THUMB_MAX_BYTES,
+  attachmentKind,
+  attachmentUrl,
+  documentFitsViewer,
+  showsThumb
+} from "#lib/timeline/attachments.js";
 
 const file = (name: string, mime: string, size = 1000, image = false) => ({ name, mime, size, image });
 
@@ -13,6 +20,17 @@ describe("timeline/attachments", () => {
     expect(attachmentKind(file("scan.png", "application/pdf"))).toBe("file");
   });
 
+  it("markdown_is_told_by_the_mime_or_a_case_insensitive_extension", () => {
+    expect(attachmentKind(file("README.md", ""))).toBe("markdown");
+    expect(attachmentKind(file("README.MD", "application/octet-stream"))).toBe("markdown");
+    expect(attachmentKind(file("guide.Markdown", "text/plain"))).toBe("markdown");
+    expect(attachmentKind(file("notes.mdown", ""))).toBe("markdown");
+    expect(attachmentKind(file("notes.mkd", ""))).toBe("markdown");
+    expect(attachmentKind(file("report", "text/markdown"))).toBe("markdown");
+    expect(attachmentKind(file("report", "text/x-markdown"))).toBe("markdown");
+    expect(attachmentKind(file("notes.txt", "text/plain"))).toBe("file");
+  });
+
   it("video_is_told_by_the_mime_or_the_extension_of_an_untyped_file", () => {
     expect(attachmentKind(file("a", "video/mp4"))).toBe("video");
     expect(attachmentKind(file("clip.mov", ""))).toBe("video");
@@ -24,6 +42,12 @@ describe("timeline/attachments", () => {
     expect(showsThumb(file("a.png", "image/png", THUMB_MAX_BYTES))).toBe(true);
     expect(showsThumb(file("a.png", "image/png", THUMB_MAX_BYTES + 1))).toBe(false);
     expect(showsThumb(file("a.pdf", "application/pdf", 10))).toBe(false);
+  });
+
+  it("a_document_is_previewed_up_to_two_mebibytes", () => {
+    expect(documentFitsViewer(0)).toBe(true);
+    expect(documentFitsViewer(DOCUMENT_VIEW_MAX_BYTES)).toBe(true);
+    expect(documentFitsViewer(DOCUMENT_VIEW_MAX_BYTES + 1)).toBe(false);
   });
 
   it("the_url_is_the_authorised_content_route_of_the_attachment", () => {

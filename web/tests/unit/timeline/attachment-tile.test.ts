@@ -66,6 +66,17 @@ describe("timeline/AttachmentTile", () => {
     expect(target.querySelector("img")).toBeNull();
   });
 
+  it("markdown_gets_a_preview_button_and_a_separate_download", () => {
+    const { target } = render(ref({ name: "README.md", mime: "text/markdown", image: false, size: 2048 }));
+    const open = target.querySelector('button[aria-label="Открыть документ README.md"]');
+    expect(open).not.toBeNull();
+    expect(open!.textContent).toContain("README.md");
+    const save = target.querySelector('a[download]');
+    expect(save!.getAttribute("href")).toBe("/api/v1/attachments/att-1/content");
+    expect(save!.getAttribute("download")).toBe("README.md");
+    expect(save!.getAttribute("aria-label")).toBe("Скачать README.md");
+  });
+
   it("a_file_without_a_known_name_still_gets_a_readable_tile", () => {
     const { target } = render(ref({ name: "", mime: "", image: false, size: 0 }));
     expect(target.textContent).toContain("Вложение");

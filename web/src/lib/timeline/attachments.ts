@@ -1,13 +1,18 @@
 import type { AttachmentRef } from '#lib/stores/inputs.js';
 
-export type AttachmentKind = 'image' | 'video' | 'file';
+export type AttachmentKind = 'image' | 'video' | 'markdown' | 'file';
 
 /** Крупнее картинку в пузыре не раскрывают сами: телефон декодирует её целиком. Открывается по касанию. */
 export const THUMB_MAX_BYTES = 12 * 1024 * 1024;
 
+/** Документ крупнее этого не разбирают в просмотрщике: скачать можно, ждать разметку — нет. */
+export const DOCUMENT_VIEW_MAX_BYTES = 2 * 1024 * 1024;
+
 const IMAGE_MIMES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const IMAGE_EXTENSIONS: ReadonlySet<string> = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
 const VIDEO_EXTENSIONS: ReadonlySet<string> = new Set(['mp4', 'mov', 'm4v', 'webm', 'mkv', '3gp']);
+const MARKDOWN_MIMES: ReadonlySet<string> = new Set(['text/markdown', 'text/x-markdown']);
+const MARKDOWN_EXTENSIONS: ReadonlySet<string> = new Set(['md', 'markdown', 'mdown', 'mkd']);
 
 function extensionOf(name: string): string {
 	const dot = name.lastIndexOf('.');
@@ -18,7 +23,13 @@ export function attachmentKind(file: Pick<AttachmentRef, 'name' | 'mime' | 'imag
 	const generic = file.mime === '' || file.mime === 'application/octet-stream';
 	if (file.image || IMAGE_MIMES.has(file.mime) || (generic && IMAGE_EXTENSIONS.has(extensionOf(file.name)))) return 'image';
 	if (file.mime.startsWith('video/') || (generic && VIDEO_EXTENSIONS.has(extensionOf(file.name)))) return 'video';
+	if (MARKDOWN_MIMES.has(file.mime) || MARKDOWN_EXTENSIONS.has(extensionOf(file.name))) return 'markdown';
 	return 'file';
+}
+
+/** Просмотрщик берёт документ целиком: больше двух мегабайт он не разбирает. */
+export function documentFitsViewer(size: number): boolean {
+	return size <= DOCUMENT_VIEW_MAX_BYTES;
 }
 
 export function showsThumb(file: Pick<AttachmentRef, 'name' | 'mime' | 'image' | 'size'>): boolean {
