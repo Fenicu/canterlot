@@ -41,6 +41,7 @@ export type ServerOp =
         | AlarmChanged
         | NudgeChanged
         | RoutingPolicyChanged
+        | SpawnQueueChanged
         | LimitsChanged
         | LimitReached
         | AttachmentStateChanged
@@ -967,6 +968,34 @@ export interface RoutingPolicyChanged {
   kind: "routing_policy_changed";
   payload: {
     revision?: number;
+  };
+}
+export interface SpawnQueueChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "spawn_queue_changed";
+  payload: {
+    id: Uuid;
+    parent_id: Uuid;
+    reason: "rate" | "concurrency" | "limits" | "resources";
+    detail: {};
+    state: "queued" | "starting" | "started" | "cancelled" | "failed" | "expired";
+    not_before: Time;
+    expires_at: Time;
+    attempts: number;
+    child_id: Uuid | null;
+    result: {} | null;
+    created_at: Time;
+    updated_at: Time;
+    position: number;
   };
 }
 export interface LimitsChanged {
