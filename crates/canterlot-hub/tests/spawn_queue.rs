@@ -1464,3 +1464,60 @@ async fn approval_cards_still_count_toward_the_hourly_limit(pool: PgPool) {
     .unwrap();
     assert_eq!(cards, 0, "a rate-limited parent cannot grow cards");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stopped_delegate_with_a_queued_input_frees_its_slot(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {"bugfix": {"title": "Починка", "candidates": [
+                {"harness":"opencode","model":"opencode-go/beam-free","effort":"medium"}
+            ]}},
+            "max_parallel": {"opencode/opencode-go/beam-free": 1}
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let stopped = child_of(
+        &f.pool,
+        f.parent,
+        "opencode",
+        "opencode-go/beam-free",
+        "stopped",
+    )
+    .await;
+    let command = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands(id,machine_id,conversation_id,kind,payload,delivery_state)
+         values($1,$2,$3,'deliver_input','{}','completed')",
+    )
+    .bind(command)
+    .bind(f.machine)
+    .bind(stopped)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into inputs(id,conversation_id,owner_id,input_seq,idempotency_key,content,state,command_id,received_at)
+         values($1,$2,$3,1,'held-queued','[]','queued',$4,now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(stopped)
+    .bind(f.owner)
+    .bind(command)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"bugfix"},"brief":"b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        answer["status"], "started",
+        "a stopped session must not hold the slot: {answer}"
+    );
+}

@@ -1072,12 +1072,16 @@ pub async fn live_counts(
               or exists(select 1 from nudge_rules r
                         where r.conversation_id=c.id and r.state='pending')
               -- Проекция отстаёт на мгновение: только что созданный делегат с ещё
-              -- не принятым вводом уже занимает слот параллельности.
-              or exists(select 1 from inputs i
-                        where i.conversation_id=c.id and i.feed_seq is null
-                          and i.state in ('queued','dispatched','on_machine'))
-              or exists(select 1 from queue_state q
-                        where q.conversation_id=c.id and q.run_slot <> 'free'))
+              -- не принятым вводом уже занимает слот параллельности. Остановленная
+              -- сессия с замершим вводом слот не держит: нужен живой процесс.
+              or (exists(select 1 from executions e
+                         where e.conversation_id=c.id
+                           and e.state not in ('stopped','failed','owner_lost'))
+                  and (exists(select 1 from inputs i
+                              where i.conversation_id=c.id and i.feed_seq is null
+                                and i.state in ('queued','dispatched','on_machine'))
+                       or exists(select 1 from queue_state q
+                                 where q.conversation_id=c.id and q.run_slot <> 'free'))))
           group by c.harness,c.model",
     )
     .bind(owner)
