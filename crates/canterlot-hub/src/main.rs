@@ -329,6 +329,8 @@ async fn serve(
             routing_stale: orchestrator.routing.stale_limits,
             guards: orchestrator.guards.clone(),
             session_tools: session_tools.clone(),
+            spawn_queue: orchestrator.spawn_queue.clone(),
+            routing_queue_horizon: orchestrator.routing.queue_horizon,
             machines,
             attachments,
             blobs,

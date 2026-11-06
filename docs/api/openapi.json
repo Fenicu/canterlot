@@ -3884,6 +3884,319 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/spawn-queue": {
+      "get": {
+        "tags": [
+          "spawn_queue"
+        ],
+        "operationId": "get__api_v1_conversations__id__spawn_queue",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Разговор",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Очередь запусков разговора",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnQueueView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Разговор не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/spawn-queue/{queue_id}": {
+      "delete": {
+        "tags": [
+          "spawn_queue"
+        ],
+        "operationId": "delete__api_v1_conversations__id__spawn_queue__queue_id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Разговор",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "queue_id",
+            "in": "path",
+            "description": "Элемент очереди",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Ключ операции",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Элемент отменён или уже завершён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnQueueActionView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Элемент не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/spawn-queue/{queue_id}/start-now": {
+      "post": {
+        "tags": [
+          "spawn_queue"
+        ],
+        "operationId": "post__api_v1_conversations__id__spawn_queue__queue_id__start_now",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Разговор",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "queue_id",
+            "in": "path",
+            "description": "Элемент очереди",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Ключ операции",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сессия запущена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnQueueActionView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Элемент не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Элемент уже завершён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Белый список или режим не пропускают запуск",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/spend-reserve": {
       "post": {
         "tags": [
@@ -8028,6 +8341,7 @@
           "todos",
           "background",
           "alarms",
+          "spawn_queue",
           "nudge_events"
         ],
         "properties": {
@@ -8104,6 +8418,13 @@
             "items": {
               "$ref": "#/components/schemas/ScheduledMessage"
             }
+          },
+          "spawn_queue": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueueItemView"
+            },
+            "description": "Очередь запусков этого разговора: ожидающие и недавно завершённые."
           },
           "todos": {
             "type": "array",
@@ -9210,6 +9531,39 @@
           }
         },
         "additionalProperties": false
+      },
+      "GuardVerdict": {
+        "type": "object",
+        "description": "Вердикт стража: измерения, нарушившие пороги, и строка для `detail`.",
+        "required": [
+          "stale",
+          "blocked",
+          "violations"
+        ],
+        "properties": {
+          "blocked": {
+            "type": "boolean",
+            "description": "Хотя бы один порог нарушен (старение отменяет блокировку)."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Одна английская строка для ответа и элемента очереди."
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "Метрики старше `metrics_max_age`: страж не включается."
+          },
+          "violations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Человеческие имена нарушенных порогов (пусто — машина свободна)."
+          }
+        }
       },
       "HarnessRef": {
         "type": "object",
@@ -11970,6 +12324,72 @@
         },
         "additionalProperties": false
       },
+      "QueueItemView": {
+        "type": "object",
+        "description": "Элемент очереди для PWA, снимка и события.",
+        "required": [
+          "id",
+          "parent_id",
+          "reason",
+          "detail",
+          "state",
+          "not_before",
+          "expires_at",
+          "attempts",
+          "created_at",
+          "updated_at",
+          "position"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "child_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "detail": {},
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "not_before": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "parent_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "result": {},
+          "state": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "QueueView": {
         "type": "object",
         "required": [
@@ -12325,6 +12745,7 @@
         "required": [
           "decision",
           "machine",
+          "guard",
           "considered"
         ],
         "properties": {
@@ -12336,6 +12757,9 @@
           },
           "decision": {
             "$ref": "#/components/schemas/Decision"
+          },
+          "guard": {
+            "$ref": "#/components/schemas/GuardVerdict"
           },
           "machine": {
             "$ref": "#/components/schemas/MachineHeadroom"
@@ -12787,6 +13211,7 @@
               "todos",
               "background",
               "alarms",
+              "spawn_queue",
               "nudge_events"
             ],
             "properties": {
@@ -12863,6 +13288,13 @@
                 "items": {
                   "$ref": "#/components/schemas/ScheduledMessage"
                 }
+              },
+              "spawn_queue": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/QueueItemView"
+                },
+                "description": "Очередь запусков этого разговора: ожидающие и недавно завершённые."
               },
               "todos": {
                 "type": "array",
@@ -12964,6 +13396,61 @@
           },
           "scope": {
             "type": "string"
+          }
+        }
+      },
+      "SpawnQueueActionView": {
+        "type": "object",
+        "required": [
+          "status",
+          "queue_id"
+        ],
+        "properties": {
+          "harness": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "queue_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SpawnQueueView": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueueItemView"
+            }
           }
         }
       },

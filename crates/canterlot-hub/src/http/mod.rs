@@ -50,6 +50,7 @@ pub mod routing;
 pub mod scheduled;
 pub mod session_tools;
 pub mod snapshot;
+pub mod spawn_queue;
 pub mod ws;
 
 pub use crate::attachments::UPLOAD_CHUNK_BYTES;
@@ -75,6 +76,10 @@ pub struct AppDeps {
     pub guards: GuardsConfig,
     /// Пределы межсессионных инструментов: пуск из очереди владельцем.
     pub session_tools: SessionToolsConfig,
+    /// Очередь запусков: срок элемента и пауза повтора.
+    pub spawn_queue: crate::config::SpawnQueueConfig,
+    /// Горизонт ожидания лимита для маршрута.
+    pub routing_queue_horizon: Duration,
     pub machines: MachinesConfig,
     pub attachments: AttachmentsConfig,
     pub blobs: Arc<dyn BlobStore>,
@@ -97,6 +102,8 @@ pub struct AppState {
     pub routing_stale: std::time::Duration,
     pub guards: GuardsConfig,
     pub session_tools: SessionToolsConfig,
+    pub spawn_queue: crate::config::SpawnQueueConfig,
+    pub routing_queue_horizon: Duration,
     pub machines: Arc<MachinesConfig>,
     pub attachments: Arc<AttachmentsConfig>,
     pub blobs: Arc<dyn BlobStore>,
@@ -128,6 +135,8 @@ impl AppState {
             routing_stale: deps.routing_stale,
             guards: deps.guards,
             session_tools: deps.session_tools,
+            spawn_queue: deps.spawn_queue,
+            routing_queue_horizon: deps.routing_queue_horizon,
             machines: Arc::new(deps.machines),
             upload_slots: Arc::new(tokio::sync::Semaphore::new(
                 deps.attachments.max_concurrent_uploads.max(1),
@@ -169,6 +178,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(groups::routes())
         .merge(presets::routes())
         .merge(session_tools::routes())
+        .merge(spawn_queue::routes())
         .merge(limit_settings::routes())
         .merge(machines::routes())
         .merge(limits::routes())

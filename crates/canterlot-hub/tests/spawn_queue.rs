@@ -2,18 +2,20 @@
 
 use std::sync::Arc;
 
+use axum::http::Method;
 use canterlot_hub::{
     activity::Thresholds,
     config::{ActivityConfig, SessionToolsConfig},
     crunch::JobOutcome,
     dispatcher::Dispatcher,
+    http,
     scheduler::{ClaimedJob, JobKind},
     session::Registry,
     session_tools::{
         self, Caller, TOOLS, ToolContext, ToolErrorCode as Code, jobs, settle::SettleConfig,
         spawn_queue,
     },
-    testkit::{self, FakeSession},
+    testkit::{self, FakeSession, TestClient},
 };
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -819,4 +821,134 @@ async fn no_tool_writes_policy_or_whitelist_or_modes(pool: PgPool) {
         }
     }
     assert_eq!(snapshot(f.pool.clone()).await, before);
+}
+
+async fn queue_seed(pool: &PgPool, machine: Uuid, parent: Uuid, owner: Uuid, state: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before,state,result)
+         values($1,$2,$3,$4,'{\"chain_depth\":0,\"args\":{\"brief\":\"b\"}}','rate',now(),$5,$6)",
+    )
+    .bind(id)
+    .bind(owner)
+    .bind(parent)
+    .bind(Uuid::now_v7())
+    .bind(state)
+    .bind(if state == "started" {
+        json!({"code": null})
+    } else {
+        Value::Null
+    })
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn http_lists_and_cancels_and_the_snapshot_carries_the_queue(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'synthetic')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let parent = testkit::seed_conversation(&pool, owner, machine).await;
+    let queue_id = queue_seed(&pool, machine, parent, owner, "queued").await;
+    let client = TestClient::in_process(http::router(http::AppState::new(deps))).as_owner();
+
+    let list = client
+        .send(
+            Method::GET,
+            &format!("/api/v1/conversations/{parent}/spawn-queue"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(list.status, 200, "{:?}", list.body);
+    assert_eq!(list.json::<Value>()["items"][0]["id"], queue_id.to_string());
+
+    let snapshot = client
+        .send(
+            Method::GET,
+            &format!("/api/v1/conversations/{parent}/snapshot?history_limit=10"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(snapshot.status, 200, "{:?}", snapshot.body);
+    assert_eq!(
+        snapshot.json::<Value>()["data"]["spawn_queue"][0]["id"],
+        queue_id.to_string()
+    );
+
+    let path = format!("/api/v1/conversations/{parent}/spawn-queue/{queue_id}");
+    let cancelled = client
+        .send(Method::DELETE, &path, Some("cancel-queue"), None)
+        .await;
+    assert_eq!(cancelled.status, 200, "{:?}", cancelled.body);
+    assert_eq!(cancelled.json::<Value>()["status"], "cancelled");
+    // Повтор с тем же ключом отвечает сохранённым ответом.
+    let again = client
+        .send(Method::DELETE, &path, Some("cancel-queue"), None)
+        .await;
+    assert_eq!(again.status, 200);
+    assert_eq!(again.json::<Value>()["status"], "cancelled");
+
+    let started = queue_seed(&pool, machine, parent, owner, "started").await;
+    let missing = client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{parent}/spawn-queue/{started}"),
+            Some("cancel-started"),
+            None,
+        )
+        .await;
+    assert_eq!(missing.status, 200);
+    assert_eq!(missing.json::<Value>()["status"], "already_started");
+
+    let unknown = client
+        .send(
+            Method::POST,
+            &format!(
+                "/api/v1/conversations/{parent}/spawn-queue/{}/start-now",
+                Uuid::now_v7()
+            ),
+            Some("start-unknown"),
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, 404, "{:?}", unknown.body);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn trash_cancels_waiting_spawns(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'synthetic')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let parent = testkit::seed_conversation(&pool, owner, machine).await;
+    let queue_id = queue_seed(&pool, machine, parent, owner, "queued").await;
+    let client = TestClient::in_process(http::router(http::AppState::new(deps))).as_owner();
+    let trashed = client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{parent}"),
+            Some("trash-queue"),
+            None,
+        )
+        .await;
+    assert_eq!(trashed.status, 204, "{:?}", trashed.body);
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&pool, queue_id).await;
+    assert_eq!(state, "cancelled");
 }
