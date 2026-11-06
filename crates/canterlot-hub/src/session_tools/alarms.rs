@@ -1872,6 +1872,17 @@ pub async fn set(
 
     let now = Utc::now();
     let parsed_when = args.when.as_ref().map(parse_when).transpose()?;
+    // Повтор вызова транспортом отвечает сохранённым ответом и не ходит на машину.
+    if let Some(stored) = sqlx::query_scalar::<_, Value>(
+        "select response from alarms where owner_id=$1 and call_id=$2",
+    )
+    .bind(caller.owner_id)
+    .bind(caller.call_id)
+    .fetch_optional(&context.pool)
+    .await?
+    {
+        return Ok(stored);
+    }
     // Условие `file`: путь и проба до транзакции, чтобы RPC не держал очередь
     // вызывающего. Проба при взводе же проверяет правила пути на машине.
     let file_arming = match &parsed_when {

@@ -26,8 +26,11 @@ pub fn resolve(raw: &str, workdir: Option<&str>) -> Result<String, ToolError> {
         return Err(not_allowed("The path contains control characters"));
     }
     let raw = Path::new(raw);
-    let joined = if raw.is_absolute() {
-        raw.to_path_buf()
+    // Относительный путь начинается от рабочего каталога сессии; `..` может увести
+    // только внутри него, за его пределы — отказ.
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    let base_len = if raw.is_absolute() {
+        0
     } else {
         let workdir = workdir
             .filter(|workdir| !workdir.is_empty())
@@ -36,15 +39,21 @@ pub fn resolve(raw: &str, workdir: Option<&str>) -> Result<String, ToolError> {
         if !workdir.is_absolute() {
             return Err(not_allowed("The session workdir is not absolute"));
         }
-        workdir.join(raw)
+        for component in workdir.components() {
+            if let Component::Normal(part) = component {
+                parts.push(part);
+            }
+        }
+        parts.len()
     };
-    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
-    for component in joined.components() {
+    for component in raw.components() {
         match component {
-            Component::RootDir | Component::Prefix(_) => {}
-            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
             Component::ParentDir => {
-                return Err(not_allowed("The path must not contain .."));
+                if parts.len() <= base_len {
+                    return Err(not_allowed("The path escapes the session workdir"));
+                }
+                parts.pop();
             }
             Component::Normal(part) => parts.push(part),
         }
@@ -100,8 +109,8 @@ mod tests {
             "/tmp/gate.rc".to_string()
         );
         assert_eq!(
-            resolve("/tmp/../gate.rc", None).unwrap_err().code,
-            ToolErrorCode::PathNotAllowed
+            resolve("/tmp/../gate.rc", None).unwrap(),
+            "/gate.rc".to_string()
         );
     }
 
@@ -127,6 +136,20 @@ mod tests {
             resolve("../etc/passwd", Some("/srv/work"))
                 .unwrap_err()
                 .code,
+            ToolErrorCode::PathNotAllowed
+        );
+        // `..` внутри рабочего каталога нормализуется и остаётся допустимым.
+        assert_eq!(
+            resolve("reports/../out.md", Some("/srv/work")).unwrap(),
+            "/srv/work/out.md".to_string()
+        );
+        // Абсолютный путь нормализуется лексически: наружу за корень не выйти.
+        assert_eq!(
+            resolve("/srv/work/../../etc/passwd", None).unwrap(),
+            "/etc/passwd".to_string()
+        );
+        assert_eq!(
+            resolve("/../etc/passwd", None).unwrap_err().code,
             ToolErrorCode::PathNotAllowed
         );
     }
