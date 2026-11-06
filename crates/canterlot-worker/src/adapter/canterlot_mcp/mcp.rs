@@ -1026,6 +1026,53 @@ mod tests {
     }
 
     #[test]
+    fn route_preview_is_listed_read_only_and_spawn_takes_route() {
+        let listing = tools_list(ToolSet::ApproveAndLimits, "claude");
+        let tools = listing["tools"].as_array().expect("tools");
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        assert_eq!(
+            tool("route_preview")["annotations"]["readOnlyHint"],
+            json!(true)
+        );
+        assert_eq!(
+            tool("route_preview")["inputSchema"]["properties"]["task_type"],
+            json!({"type": "string"})
+        );
+        let spawn = tool("session_spawn")["inputSchema"].clone();
+        assert!(spawn["properties"]["route"].is_object());
+        assert_eq!(
+            spawn["properties"]["route"]["required"],
+            json!(["task_type"])
+        );
+        assert!(spawn["properties"]["watchdog_minutes"].is_object());
+        assert_eq!(spawn["required"], json!(["brief"]));
+        let call = handle_rpc_with_provider(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {"name": "route_preview", "arguments": {"task_type": "bugfix"}}
+            }),
+            ToolSet::ApproveAndLimits,
+            "claude",
+        );
+        assert!(matches!(
+            call,
+            McpAction::ToolCall {
+                kind: ToolKind::Agent {
+                    tool: "routing.preview"
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn instructions_stay_short() {
         let lines: Vec<&str> = SERVER_INSTRUCTIONS.lines().collect();
         assert!((10..=15).contains(&lines.len()), "{SERVER_INSTRUCTIONS}");

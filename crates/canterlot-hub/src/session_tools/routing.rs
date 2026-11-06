@@ -1181,11 +1181,8 @@ struct PreviewArgs {
     level: Option<String>,
 }
 
-fn preview_description() -> &'static str {
-    "Show which executor the owner's routing policy would pick right now for a task type, with the reason for every candidate, current limits and machine headroom. Without task_type, lists the task types. Read-only; to start the session, call session_spawn with route."
-}
-
 /// `routing.preview`: список типов без `task_type`, иначе решение и запас машины.
+/// Описание инструмента — на стороне воркера (`route_preview` в MCP).
 pub async fn preview(
     context: &ToolContext,
     caller: &Caller,
@@ -1296,10 +1293,6 @@ pub(crate) fn no_executor_message(
         ));
     }
     message.trim_end().to_owned()
-}
-
-pub fn description() -> &'static str {
-    preview_description()
 }
 
 #[cfg(test)]

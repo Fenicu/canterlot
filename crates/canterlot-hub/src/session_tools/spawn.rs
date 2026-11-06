@@ -681,6 +681,8 @@ async fn validate_routed(
     let nudge_arg = args.nudge.unwrap_or(decision.nudge.clone());
     let brief = nudge::brief_with_marker(&args.brief, &nudge_arg);
     let watchdog_minutes = args.watchdog_minutes.or(decision.watchdog_minutes);
+    decision.nudge = nudge_arg.clone();
+    decision.watchdog_minutes = watchdog_minutes;
     let routing_value =
         serde_json::to_value(&decision).map_err(|_| ToolError::new(ToolErrorCode::Internal))?;
     Ok((
