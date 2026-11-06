@@ -404,6 +404,27 @@ async fn spawn_with_route_applies_explicit_overrides(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_without_route_arms_explicit_watchdog(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"Механика","watchdog_minutes":30}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "started", "{answer}");
+    let armed: bool = sqlx::query_scalar(
+        "select exists(select 1 from alarms where conversation_id=$1 and state='armed' and only_on_timeout and key like 'watchdog-%%')",
+    )
+    .bind(f.parent)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(armed, "explicit watchdog arms the parent");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn no_agent_call_changes_routing_policy(pool: PgPool) {
     let f = Fx::new(pool).await;
     let snapshot = |pool: PgPool| async move {
