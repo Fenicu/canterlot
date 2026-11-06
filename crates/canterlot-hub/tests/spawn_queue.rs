@@ -1436,3 +1436,31 @@ async fn wake_jobs_name_the_head_and_a_sweep_job_recovers_on_abandon(pool: PgPoo
     .unwrap();
     assert!(recovered, "a sweep job is recreated");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn approval_cards_still_count_toward_the_hourly_limit(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update owners set spawn_whitelist=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!([{"harness":"opencode","model":"opencode-go/beam-free"}]))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    fill_rate(&f.pool, f.parent).await;
+    let error = f
+        .call(
+            "sessions.spawn",
+            json!({"harness":"claude_code","model":"opus[1m]","brief":"b"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::RateLimited, "{}", error.message);
+    let cards: i64 = sqlx::query_scalar(
+        "select count(*) from requests where conversation_id=$1 and kind='spawn_approval'",
+    )
+    .bind(f.parent)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(cards, 0, "a rate-limited parent cannot grow cards");
+}

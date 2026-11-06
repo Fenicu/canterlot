@@ -1130,16 +1130,20 @@ pub async fn spawn(
         return Ok(answer);
     };
     let list = whitelist::view(&mut tx, caller.owner_id).await?;
-    if spec.wider_than_parent
-        || !whitelist::allows(&list.entries, &spec.harness, &spec.model, &first_model)
-    {
+    let needs_card = spec.wider_than_parent
+        || !whitelist::allows(&list.entries, &spec.harness, &spec.model, &first_model);
+    // Карточки считаются в часовом окне: зацикленный родитель не растит их без предела.
+    let rate = access::rate_state(&mut tx, &context.config, parent.id, now).await?;
+    if needs_card && rate.blocked {
+        return Err(ToolError::new(ToolErrorCode::RateLimited));
+    }
+    if needs_card {
         let request = open_card(&mut tx, caller, &spec).await?;
         tx.commit().await?;
         return Ok(pending_answer(request));
     }
     // Единственные препятствия дальше — частота, страж машины или (у маршрута)
     // занятость и лимит: они ставят запуск в очередь.
-    let rate = access::rate_state(&mut tx, &context.config, parent.id, now).await?;
     let queue_reason = if rate.blocked {
         Some(super::spawn_queue::REASON_RATE)
     } else {
