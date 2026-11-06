@@ -244,7 +244,7 @@
 				</div>
 			{/if}
 			{#if route}
-				<div class="nudge-row">
+				<div class="nudge-row route-row">
 					<button type="button" class="nudge-link" data-role="route-state-line" onclick={onOpenRoute}>Выбрана маршрутом «{routingTitles.title(route.task_type)}»</button>
 				</div>
 			{/if}
@@ -627,6 +627,11 @@
 	}
 	.nudge-row {
 		margin-top: var(--s1);
+	}
+	/* Строка маршрута стоит под ссылкой на родителя и начинается с той же линии. */
+	.route-row {
+		margin-top: var(--s0);
+		padding-left: calc(var(--mark-large) + var(--s3));
 	}
 	.nudge-link {
 		min-height: var(--target);

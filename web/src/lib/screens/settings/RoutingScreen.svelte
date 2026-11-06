@@ -201,7 +201,7 @@
     {#if draft && view}
       <p class="lead">Какой исполнитель берёт задачу каждого типа. Хаб идёт по кандидатам сверху вниз и берёт первого, кому хватает лимитов и свободных мест.</p>
       <p class="status" data-role="policy-status">
-        {#if builtinActive}<Pill color="accent">Встроенная политика</Pill> Действует встроенная политика: правки сохранятся как своя{:else}Своя политика · ревизия {view.revision}{/if}
+        {#if builtinActive}<Pill color="accent">Действует встроенная политика</Pill> Правки сохранятся как своя политика{:else}Своя политика · ревизия {view.revision}{/if}
       </p>
       {#if conflict}
         <div class="conflict" role="alert" data-role="policy-conflict">
@@ -360,7 +360,7 @@
         <p class="note" data-role="guard-note">Пороги стража (свободный диск, нагрузка, память) задаются в hub.toml и здесь не меняются; хаб их не отдаёт. Вердикт стража по текущим метрикам показывает проверка ниже</p>
       </section>
 
-      <div class="actions" data-role="policy-actions">
+      <div class="actions" class:sticky={dirty} data-role="policy-actions">
         {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
         {#if notice && !dirty}<p class="note" role="status">{notice}</p>{/if}
         {#if busy}
@@ -436,7 +436,9 @@
   .parallel { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s4); padding: var(--s4) var(--s6); border-radius: var(--radius-card); background: var(--surface); }
   .parallel .field:first-child { flex: 1 1 var(--bar-56); }
   .parallel .error { flex-basis: 100%; }
-  .actions { position: sticky; bottom: var(--s0); z-index: 1; display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s4); margin-inline: calc(-1 * var(--s8)); padding: var(--s6) var(--s8); background: var(--bg); }
+  .actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s4); margin: var(--s0) calc(-1 * var(--s8)) var(--s10); padding: var(--s6) var(--s8); background: var(--bg); }
+  /* С правками кнопка сохранения всегда под рукой: панель липнет к низу и закрывает отступ прокрутки. */
+  .actions.sticky { position: sticky; bottom: calc(-1 * var(--s8)); z-index: 1; padding-bottom: calc(var(--s6) + var(--s8)); }
   .actions .error, .actions .note { flex-basis: 100%; margin: var(--s0); }
   .actions :global(.reason) { margin-block: var(--s0); }
   @media (min-width: 700px) { .add { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; } .grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .levels, .exclude, .nudge { grid-column: 1 / -1; } }
