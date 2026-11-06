@@ -91,6 +91,31 @@ function textContrast(node: Locator): Promise<number> {
 }
 const tip = (page: Page) => page.locator(TIP);
 
+/** Подсказка доиграла вход: до этого её opacity меньше единицы и она просвечивает. */
+async function settle(node: Locator): Promise<void> {
+  await expect.poll(() => node.evaluate((element) => element.getAnimations().length)).toBe(0);
+  await expect(node).toHaveCSS('opacity', '1');
+}
+
+function backgroundAlpha(node: Locator): Promise<number> {
+  return node.evaluate((element) => {
+    const channels = (getComputedStyle(element).backgroundColor.match(/[\d.]+/g) ?? []).map(Number);
+    return channels.length === 4 ? channels[3]! : 1;
+  });
+}
+
+function outline(node: Locator): Promise<{ style: string; width: number; alpha: number }> {
+  return node.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const channels = (style.borderTopColor.match(/[\d.]+/g) ?? []).map(Number);
+    return {
+      style: style.borderTopStyle,
+      width: Number.parseFloat(style.borderTopWidth),
+      alpha: channels.length === 4 ? channels[3]! : 1
+    };
+  });
+}
+
 async function reveal(page: Page, time = answerTimes(page).last()) {
   await time.scrollIntoViewIfNeeded();
   if (test.info().project.name === 'phone') await time.tap();
@@ -109,9 +134,29 @@ test('hover_shows_the_full_date_after_the_delay_and_leave_hides_it', async ({ pa
   await expect(tip(page)).toHaveCount(0);
   await expect(tip(page)).toBeVisible();
   await expect(tip(page)).toHaveText(LAST);
+  await settle(tip(page));
+  expect(await backgroundAlpha(tip(page))).toBe(1);
+  const border = await outline(tip(page));
+  expect(border.style).toBe('solid');
+  expect(border.width).toBeGreaterThan(0);
+  expect(border.alpha).toBe(1);
   expect(await textContrast(tip(page))).toBeGreaterThanOrEqual(4.5);
   await page.mouse.move(2, 2);
   await expect(tip(page)).toHaveCount(0);
+});
+
+test('the_tip_is_opaque_and_outlined_in_the_light_palette', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('canterlot.theme', 'light'));
+  await boot(page);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await reveal(page);
+  await settle(tip(page));
+  expect(await backgroundAlpha(tip(page))).toBe(1);
+  const border = await outline(tip(page));
+  expect(border.style).toBe('solid');
+  expect(border.width).toBeGreaterThan(0);
+  expect(border.alpha).toBe(1);
+  expect(await textContrast(tip(page))).toBeGreaterThanOrEqual(4.5);
 });
 
 test('keyboard_focus_shows_the_date_and_escape_hides_it', async ({ page }) => {

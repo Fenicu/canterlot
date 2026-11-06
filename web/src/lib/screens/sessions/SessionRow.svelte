@@ -31,6 +31,8 @@
   });
   const stamp = $derived(stampTs !== null ? fmt.clock(stampTs) : '');
   const tail = $derived(item.unread_count > 0 && stamp !== '');
+  // Разделитель собирается в скрипте: Svelte срезает пробелы в начале и конце блока.
+  const stampSeparator = ' · ';
   let timer = 0;
   let held = false;
 
@@ -65,7 +67,7 @@
       {/if}
     </span>
     <span class="meta">{item.harness.title} · {modelLabel(item.model)} · {item.machine.name}</span>
-    <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{#if tail && stampTs !== null}&#32;·&#32;<time datetime={item.last_activity_at ?? undefined} use:timeTip={stampTs}>{stamp}</time>{/if}</span>
+    <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{#if tail && stampTs !== null}{stampSeparator}<time datetime={item.last_activity_at ?? undefined} use:timeTip={stampTs}>{stamp}</time>{/if}</span>
     {#if depth > 0 && item.working_ms}
       <span class="worked" data-worked>работала {fmt.durationCoarse(item.working_ms)}</span>
     {/if}

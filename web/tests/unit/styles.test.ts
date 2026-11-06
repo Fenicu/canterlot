@@ -92,7 +92,7 @@ test('root_fallback_is_the_default_palette', () => {
 });
 
 const textPairs: [string, string[]][] = [
-  ['text', ['bg', 'chat-bg', 'surface', 'raised', 'selected', 'accent-soft', 'code']],
+  ['text', ['bg', 'chat-bg', 'surface', 'raised', 'selected', 'accent-soft', 'code', 'popover']],
   ...['secondary', 'muted', 'time'].flatMap(fg => [
     [fg, ['bg', 'chat-bg', 'surface', 'raised', 'selected']] as [string, string[]]
   ]),
@@ -103,6 +103,12 @@ const textPairs: [string, string[]][] = [
     [fg, ['bg', 'surface', `${fg}-soft`]] as [string, string[]]
   ])
 ];
+
+test('popover_surface_is_an_opaque_colour_in_every_palette_and_mode', () => {
+  for (const variant of palettes) {
+    expect(variant.tokens['--popover']!, `${variant.palette}/${variant.theme}`).toMatch(/^#[\da-f]{6}$/i);
+  }
+});
 
 test('text_pairs_meet_wcag_aa_in_every_palette_and_mode', () => {
   for (const variant of palettes) {

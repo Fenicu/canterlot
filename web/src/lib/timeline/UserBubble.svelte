@@ -84,6 +84,8 @@
     );
   }
   const from = $derived(originLabel(input.origin));
+  // Разделитель собирается в скрипте: Svelte срезает пробелы в начале и конце блока.
+  const stampSeparator = ' · ';
   const stampAt = $derived(input.state === 'accepted' && input.createdAt !== null ? input.createdAt : null);
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
   const steerSupported = $derived(harnessId === 'claude_code' || harnessId === 'codex' || harnessId === 'opencode' || harnessId === 'antigravity');
@@ -199,7 +201,7 @@
   {#if input.revision > 1 && !editing}<p class="edited">Изменено</p>{/if}
   {#if editClosedNote && !editing && input.state === 'queued'}<p class="reason">{editClosedNote}</p>{/if}
   {#if settled}
-    <p class="status">{label}{#if stampAt !== null}&#32;·&#32;<time datetime={new Date(stampAt).toISOString()} use:timeTip={stampAt}>{fmt.clock(stampAt)}</time>{/if}</p>
+    <p class="status">{label}{#if stampAt !== null}{stampSeparator}<time datetime={new Date(stampAt).toISOString()} use:timeTip={stampAt}>{fmt.clock(stampAt)}</time>{/if}</p>
   {:else}
     <StageTrack {stages} {index} state="active" form="compact" label="Доставка сообщения" status={label} />
   {/if}
