@@ -55,7 +55,7 @@ export function seedRoutedSpawn(api: FakeHubApi, parent: string): string {
   const queued = api.id();
   api.histories.set(parent, [
     historyBlock(api, '1', { id: call, block_kind: 'tool_call', tool_name: 'mcp__canterlot__session_spawn', summary: 'session_spawn', input_command_id: run, agent: 'orchestrator' }),
-    historyBlock(api, '2', { block_kind: 'tool_result', parent_block_id: call, input_command_id: run, agent: 'orchestrator', content: JSON.stringify({ status: 'started', session_id: child, routing: { task_type: 'bugfix', harness: 'opencode', model: DEEPSEEK, effort: 'high', policy_revision: 0 } }, null, 2) }),
+    historyBlock(api, '2', { block_kind: 'tool_result', parent_block_id: call, input_command_id: run, agent: 'orchestrator', content: JSON.stringify({ status: 'started', session_id: child, machine_metrics: 'stale', routing: { task_type: 'bugfix', harness: 'opencode', model: DEEPSEEK, effort: 'high', policy_revision: 0 } }, null, 2) }),
     historyBlock(api, '3', { id: queued, block_kind: 'tool_call', tool_name: 'mcp__canterlot__session_spawn', summary: 'session_spawn', input_command_id: run, agent: 'orchestrator' }),
     historyBlock(api, '4', { block_kind: 'tool_result', parent_block_id: queued, input_command_id: run, agent: 'orchestrator', content: JSON.stringify({ status: 'queued', queue_id: api.id(), reason: 'rate', detail: '10 spawns in the last hour; the next slot opens at 14:32 UTC' }) })
   ]);
@@ -64,7 +64,7 @@ export function seedRoutedSpawn(api: FakeHubApi, parent: string): string {
 
 /** Два ожидающих запуска: частота и занятые исполнители. */
 export function seedQueue(api: FakeHubApi, parent: string) {
-  const first = api.queueItem(parent, { reason: 'rate', detail: { detail: '10 spawns in the last hour; the next slot opens at 14:32 UTC' }, not_before: new Date(Date.now() + 10 * 60_000).toISOString(), created_at: '2026-11-06T10:00:00.000Z' });
-  const second = api.queueItem(parent, { reason: 'resources', detail: { detail: 'disk 12 GB free < 30 GB. T3 idle 3 h: session_accept frees their worktrees and target dirs' }, not_before: new Date(Date.now() + 20 * 60_000).toISOString(), created_at: '2026-11-06T10:01:00.000Z', position: 2 });
+  const first = api.queueItem(parent, { title: 'Исправить гонку подписок', task_type: 'bugfix', level: 'high', reason: 'rate', detail: { detail: '10 spawns in the last hour; the next slot opens at 14:32 UTC' }, not_before: new Date(Date.now() + 10 * 60_000).toISOString(), created_at: '2026-11-06T10:00:00.000Z' });
+  const second = api.queueItem(parent, { title: null, harness: 'codex', model: 'gpt-6.1-sol', reason: 'resources', detail: { detail: 'disk 12 GB free < 30 GB. T3 idle 3 h: session_accept frees their worktrees and target dirs' }, not_before: new Date(Date.now() + 20 * 60_000).toISOString(), created_at: '2026-11-06T10:01:00.000Z', position: 2 });
   return { first, second };
 }

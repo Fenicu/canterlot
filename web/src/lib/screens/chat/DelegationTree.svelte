@@ -16,7 +16,9 @@
 	import { branchGrow } from '#lib/ui/fold.js';
 	import { liveNodes } from './delegationNodes';
 	import StageTrack from '#lib/ui/StageTrack.svelte';
-	import { QUEUE_STAGES, itemReason, stageIndex, type QueueItem } from '#lib/routing/queue.js';
+	import { QUEUE_STAGES, itemReason, itemTarget, itemTitle, stageIndex, type QueueItem } from '#lib/routing/queue.js';
+	import { catalogTitles } from '#lib/routing/decision.js';
+	import { routingTitles } from '#lib/routing/titles.svelte.js';
 
 	let {
 		chat,
@@ -66,6 +68,10 @@
 			.sort((a, b) => (b.last_activity_at ?? b.created_at).localeCompare(a.last_activity_at ?? a.created_at))
 	);
 	const sessionsLabel = $derived(`Завершённые · ${olderSessions.length}`);
+	const modelTitles = $derived(catalogTitles(runtime?.machines.items.values() ?? []));
+	$effect(() => {
+		if (chat.spawnQueue.some((item) => item.task_type)) routingTitles.ensure(runtime?.list.routingRevision ?? null);
+	});
 	// Элемент очереди — бледный узел, пока не появилась его сессия: тогда вырастает настоящий узел.
 	const queued = $derived(
 		chat.spawnQueue.filter(
@@ -158,8 +164,8 @@
 	<div class="tree-node queue-node">
 		<span class="branch">└</span>
 		<span class="grow node-info session-info">
-			<span class="session-name">Запуск в очереди</span>
-			<small class="node-task queue-reason">{itemReason(item)}</small>
+			<span class="session-name">{itemTitle(item)}</span>
+			<small class="node-task queue-reason">{[itemTarget(item, (key) => routingTitles.title(key), modelTitles), itemReason(item)].filter(Boolean).join(' · ')}</small>
 			<StageTrack stages={QUEUE_STAGES} index={stageIndex(item)} form="compact" label="Запуск из очереди" />
 		</span>
 	</div>

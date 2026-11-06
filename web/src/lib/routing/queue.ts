@@ -1,10 +1,16 @@
 // Очередь запусков родителя: что показать плашкой, списком и бледным узлом дерева.
 import { fmt } from '#lib/format/ru.js';
 import type { Stage } from '#lib/ui/stage-track.js';
+import { effortName, pairName, type ModelTitles } from './decision';
 import { detailText, queueReasonLabel } from './reasons';
 
 export interface QueueItem {
   id: string;
+  title?: string | null;
+  task_type?: string | null;
+  level?: string | null;
+  harness?: string | null;
+  model?: string | null;
   reason: string;
   detail?: unknown;
   state: string;
@@ -49,6 +55,25 @@ export function queueSummary(items: QueueItem[], now: number = Date.now()): stri
   const next = nextStart(items);
   const when = next === null ? '' : next <= now ? ' · следующий сейчас' : ` · следующий в ${fmt.clock(next)}`;
   return `В очереди запуска: ${count}${when}`;
+}
+
+/** Заголовок будущей сессии; без него хаб назовёт её сам. */
+export function itemTitle(item: Pick<QueueItem, 'title'>): string {
+  return item.title?.trim() || 'Запуск без названия';
+}
+
+/** Что запускается: тип задачи маршрута с уровнем или пара прямого запуска. */
+export function itemTarget(
+  item: Pick<QueueItem, 'task_type' | 'level' | 'harness' | 'model'>,
+  taskTitle: (key: string) => string,
+  titles?: ModelTitles
+): string {
+  if (item.task_type) {
+    const level = item.level ? ` · ${effortName(item.level)}` : '';
+    return `маршрут «${taskTitle(item.task_type)}»${level}`;
+  }
+  if (item.harness && item.model) return pairName(item.harness, item.model, titles);
+  return item.harness ? pairName(item.harness, 'default', titles) : '';
 }
 
 /** Причина элемента по-русски: вид и измерения хаба. */

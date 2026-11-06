@@ -140,37 +140,6 @@ export function detailText(raw: string | null | undefined, now: number = Date.no
   return tail ? `${head}. ${tail}` : head;
 }
 
-export interface NoExecutorEntry {
-  harness: string;
-  reason: string;
-}
-
-/**
- * Ошибка `no_executor_available` хаба: «No executor available for this task type:
- * codex: …; opencode: …; nearest limit reset at 14:32 UTC». `null` — другой текст.
- */
-export function parseNoExecutor(raw: string | null | undefined): { entries: NoExecutorEntry[]; reset: string | null } | null {
-  const text = (raw ?? '').trim();
-  const prefix = 'No executor available for this task type:';
-  if (!text.startsWith(prefix)) return null;
-  let rest = text.slice(prefix.length).trim();
-  let reset: string | null = null;
-  const resetMatch = /nearest limit reset at (\d{1,2}:\d{2}) UTC$/.exec(rest);
-  if (resetMatch) {
-    reset = resetMatch[1]!;
-    rest = rest.slice(0, resetMatch.index).trim();
-  }
-  const entries = rest
-    .split(/;\s*/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part) => {
-      const colon = part.indexOf(': ');
-      return colon > 0 ? { harness: part.slice(0, colon), reason: part.slice(colon + 2) } : { harness: '', reason: part };
-    });
-  return { entries, reset };
-}
-
 const QUEUE_REASONS: Record<string, string> = {
   rate: 'частота запусков',
   concurrency: 'исполнители заняты',

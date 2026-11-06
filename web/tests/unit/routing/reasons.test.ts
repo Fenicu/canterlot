@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { detailText, parseNoExecutor, queueReasonLabel, reasonText, utcClock, verdictLabel } from '#lib/routing/reasons.js';
+import { detailText, queueReasonLabel, reasonText, utcClock, verdictLabel } from '#lib/routing/reasons.js';
 import { asDecision, routeLine, skippedText } from '#lib/routing/decision.js';
 
 const NOW = Date.UTC(2026, 10, 6, 12, 0);
@@ -55,20 +55,6 @@ describe('reason translation', () => {
     expect(detailText('memory 2 GB available < 4 GB; disk 4% free < 10%')).toBe(
       `память: доступно 2${N}ГБ при минимуме 4${N}ГБ; диск: свободно 4${N}% при минимуме 10${N}%`
     );
-  });
-
-  test('no executor error splits per candidate and keeps the reset', () => {
-    const parsed = parseNoExecutor(
-      "No executor available for this task type: codex: codex weekly 83% > 80%;  claude_code: not in the owner's list; nearest limit reset at 14:32 UTC"
-    );
-    expect(parsed).toEqual({
-      entries: [
-        { harness: 'codex', reason: 'codex weekly 83% > 80%' },
-        { harness: 'claude_code', reason: "not in the owner's list" }
-      ],
-      reset: '14:32'
-    });
-    expect(parseNoExecutor('Other error')).toBeNull();
   });
 
   test('queue reasons and verdicts have Russian labels', () => {

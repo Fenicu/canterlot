@@ -38,6 +38,9 @@
 {#if line}
   <p class="route" data-role={answer?.status === 'queued' ? 'spawn-queued-line' : 'spawn-route-line'}>{line}</p>
 {/if}
+{#if answer?.status === 'started' && answer.machine_metrics === 'stale'}
+  <p class="route" data-role="spawn-metrics-stale">Метрики машины устарели: страж не проверял запас</p>
+{/if}
 
 <style>
   .route { margin: var(--s0); padding: var(--s1) var(--s6) var(--s2); color: var(--secondary); font-size: var(--fs-sm); overflow-wrap: anywhere; }

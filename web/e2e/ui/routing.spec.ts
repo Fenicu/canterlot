@@ -139,12 +139,13 @@ test.describe('редактор маршрутизации', () => {
     await expect(result.locator('[data-role="preview-machine"]')).toContainText('диск свободно 72');
     expect(api.routingPreviews.at(-1)).toMatchObject({ task_type: 'bugfix', level: 'high' });
 
-    api.routingRefusal = "No executor available for this task type: codex: codex weekly 83% > 80%; nearest limit reset at 14:32 UTC";
+    const reset = new Date(Date.now() + 2 * 3_600_000);
+    api.routingRefusal = { candidates: [{ harness: 'codex', model: 'gpt-6.1-sol', verdict: 'limits_over', reason: 'codex weekly 83% > 80%' }], nearest_reset: reset.toISOString() };
     await preview.getByLabel('Тип задачи').selectOption('review');
     await preview.getByRole('button', { name: 'Проверить' }).click();
     const refused = preview.locator('[data-role="preview-refused"]');
     await expect(refused.locator('li')).toHaveText(`Codex — неделя 83${N}% при пороге 80${N}%`);
-    await expect(refused).toContainText('Ближайший сброс лимита');
+    await expect(refused).toContainText(`Ближайший сброс лимита в ${new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(reset)}`);
   });
 });
 
@@ -166,13 +167,17 @@ test.describe('очередь запусков и маршрут в чате', (
     const plaque = page.locator('[data-role="spawn-queue"]');
     await expect(plaque).toHaveCount(0);
     const soon = new Date(Date.now() + 10 * 60_000);
-    const first = api.queueItem(id, { reason: 'rate', detail: { detail: '10 spawns in the last hour; the next slot opens at 14:32 UTC' }, not_before: soon.toISOString(), created_at: '2026-11-06T10:00:00.000Z' });
-    const second = api.queueItem(id, { reason: 'concurrency', detail: { detail: `2 of 2 ${DEEPSEEK} sessions busy` }, not_before: new Date(Date.now() + 20 * 60_000).toISOString(), created_at: '2026-11-06T10:01:00.000Z', position: 2 });
+    const first = api.queueItem(id, { title: 'Исправить гонку', task_type: 'bugfix', level: 'high', reason: 'rate', detail: { detail: '10 spawns in the last hour; the next slot opens at 14:32 UTC' }, not_before: soon.toISOString(), created_at: '2026-11-06T10:00:00.000Z' });
+    const second = api.queueItem(id, { harness: 'codex', model: 'gpt-6.1-sol', reason: 'concurrency', detail: { detail: `2 of 2 ${DEEPSEEK} sessions busy` }, not_before: new Date(Date.now() + 20 * 60_000).toISOString(), created_at: '2026-11-06T10:01:00.000Z', position: 2 });
     hub.flush();
     const clock = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' }).format(soon);
     await expect(plaque.locator('[data-role="spawn-queue-summary"]')).toHaveText(`В очереди запуска: 2 · следующий в ${clock}`);
     await plaque.getByRole('button', { name: /В очереди запуска/ }).click();
     const one = plaque.locator(`[data-queue-item="${first.id}"]`);
+    await expect(one.locator('[data-role="queue-title"]')).toHaveText('Исправить гонку');
+    await expect(one.locator('[data-role="queue-target"]')).toHaveText('маршрут «Исправление по ясному брифу» · высокое');
+    await expect(plaque.locator(`[data-queue-item="${second.id}"] [data-role="queue-title"]`)).toHaveText('Запуск без названия');
+    await expect(plaque.locator(`[data-queue-item="${second.id}"] [data-role="queue-target"]`)).toHaveText('GPT-6.1 Sol');
     await expect(one.locator('[data-role="queue-reason"]')).toContainText('частота запусков: 10 запусков за час, следующий в');
     await expect(plaque.locator(`[data-queue-item="${second.id}"] [data-role="queue-reason"]`)).toHaveText('исполнители заняты: занято 2 из 2 сессий deepseek-v4.1-flash');
 
@@ -211,7 +216,7 @@ test.describe('очередь запусков и маршрут в чате', (
     if (desktop) await page.getByRole('button', { name: 'Делегирование', exact: true }).click();
     else await page.getByRole('button', { name: 'Делегирование' }).click();
     const pale = page.locator(`[data-queue-node="${item.id}"]`);
-    await expect(pale).toContainText('Запуск в очереди');
+    await expect(pale).toContainText('Запуск без названия');
     await expect(pale).toContainText('лимиты провайдера: квота на паузе до');
     await expect(pale.getByRole('group', { name: 'Запуск из очереди' })).toBeVisible();
     await expect(pale.locator('[aria-current="step"]')).toContainText('В очереди');
@@ -237,6 +242,7 @@ test.describe('очередь запусков и маршрут в чате', (
     });
     await expect(page.locator('[data-role="spawn-route-line"]')).toHaveText(`Маршрут «Исправление по ясному брифу»: DeepSeek · высокое. Пропущен: Codex — неделя 83${N}% при пороге 80${N}%`);
     await expect(page.locator('[data-role="spawn-queued-line"]')).toContainText('Запуск в очереди: частота запусков: 10 запусков за час');
+    await expect(page.locator('[data-role="spawn-metrics-stale"]')).toHaveText('Метрики машины устарели: страж не проверял запас');
 
     await page.goto(`/c/${child}`);
     const line = page.locator('[data-role="route-state-line"]');
@@ -248,5 +254,21 @@ test.describe('очередь запусков и маршрут в чате', (
     await expect(sheet.locator('[data-verdict="limits_over"]')).toContainText(`Codex — неделя 83${N}% при пороге 80${N}%`);
     await expect(sheet).toContainText('до 2 толчков');
     await expect(sheet).toContainText('90 мин');
+  });
+
+  test('start_now_conflict_shows_the_reason_and_rereads_the_queue', async ({ page }) => {
+    const { hub, api, id } = await bootOrchestrator(page);
+    const item = api.queueItem(id, { title: 'Ждёт машину', reason: 'resources', detail: { detail: 'disk 12 GB free < 30 GB.' } });
+    hub.flush();
+    api.startNowRefusal = 'disk 10 GB free < 30 GB.';
+    const plaque = page.locator('[data-role="spawn-queue"]');
+    await plaque.getByRole('button', { name: /В очереди запуска/ }).click();
+    const row = plaque.locator(`[data-queue-item="${item.id}"]`);
+    await row.getByRole('button', { name: 'Запустить сейчас' }).click();
+    const reread = page.waitForRequest((request) => request.method() === 'GET' && /\/spawn-queue$/.test(new URL(request.url()).pathname));
+    await page.getByRole('dialog').getByRole('button', { name: 'Запустить сейчас' }).click();
+    await reread;
+    await expect(row.getByRole('alert')).toHaveText(`Запустить сейчас не удалось: диск: свободно 10${N}ГБ при минимуме 30${N}ГБ`);
+    expect(api.spawnQueue.get(id)![0]!.attempts).toBe(1);
   });
 });

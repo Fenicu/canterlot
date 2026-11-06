@@ -9,6 +9,8 @@ export interface SpawnAnswer {
   reason?: string | null;
   detail?: string | null;
   not_before?: string | null;
+  /** `stale`: метрики машины устарели, страж не включался. */
+  machine_metrics?: string | null;
 }
 
 /** Вызов `session_spawn` любого харнесса: `mcp__canterlot__session_spawn`, `canterlot_session_spawn`. */

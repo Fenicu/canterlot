@@ -4,8 +4,8 @@
   import { ApiError } from '#lib/api/http.js';
   import { effortLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
-  import { asDecision, harnessName, type ModelTitles, type RouteDecision } from '#lib/routing/decision.js';
-  import { detailText, parseNoExecutor, reasonText, utcClock } from '#lib/routing/reasons.js';
+  import { asDecision, skippedText, type Considered, type ModelTitles, type RouteDecision } from '#lib/routing/decision.js';
+  import { detailText, reasonText } from '#lib/routing/reasons.js';
   import Button from '#lib/ui/Button.svelte';
   import Select from '#lib/ui/Select.svelte';
   import RouteDecisionView from '../chat/RouteDecisionView.svelte';
@@ -24,7 +24,7 @@
   let decision = $state<RouteDecision | null>(null);
   let machine = $state<Machine | null>(null);
   let guard = $state<Guard | null>(null);
-  let refused = $state<{ entries: { harness: string; reason: string }[]; reset: string | null } | null>(null);
+  let refused = $state<{ candidates: Considered[]; reset: number | null } | null>(null);
 
   $effect(() => {
     if (!types.some((item) => item.key === taskType)) taskType = types[0]?.key ?? '';
@@ -57,13 +57,6 @@
     return `Страж: запуск встанет в очередь — ${why}`;
   });
 
-  /** Лимит уже называет провайдера («Codex — неделя…»), остальные причины — после имени агента. */
-  function refusedLine(entry: { harness: string; reason: string }): string {
-    const reason = reasonText(entry.reason);
-    const name = entry.harness ? harnessName(entry.harness) : '';
-    return !name || reason.startsWith(`${name} — `) ? reason : `${name} — ${reason}`;
-  }
-
   async function check() {
     if (!taskType || busy) return;
     busy = true;
@@ -78,12 +71,12 @@
       machine = answer.data.machine as Machine;
       guard = answer.data.guard as Guard;
     } catch (err) {
-      // Хаб кладёт разбор по кандидатам строкой в `details.reason`.
-      const raw = err instanceof ApiError ? (err.details as { reason?: unknown } | undefined)?.reason : undefined;
-      const parsed = err instanceof ApiError && err.code === 'no_executor_available' ? parseNoExecutor(typeof raw === 'string' ? raw : '') : null;
-      if (parsed) refused = parsed;
-      else if (err instanceof ApiError && err.code === 'no_executor_available') error = 'Ни один кандидат сейчас не подходит';
-      else error = errorText(err, 'Не удалось проверить маршрут');
+      if (err instanceof ApiError && err.code === 'no_executor_available') {
+        // Разбор по кандидатам и ближайший сброс хаб отдаёт полями `details`.
+        const details = err.details as { candidates?: Considered[] | null; nearest_reset?: string | null } | undefined;
+        const reset = details?.nearest_reset ? Date.parse(details.nearest_reset) : Number.NaN;
+        refused = { candidates: details?.candidates ?? [], reset: Number.isFinite(reset) ? reset : null };
+      } else error = errorText(err, 'Не удалось проверить маршрут');
     } finally {
       busy = false;
     }
@@ -110,12 +103,14 @@
   {#if refused}
     <div class="result" data-role="preview-refused">
       <p><strong>Ни один кандидат сейчас не подходит</strong></p>
-      <ol class="refused">
-        {#each refused.entries as entry, index (index)}
-          <li>{refusedLine(entry)}</li>
-        {/each}
-      </ol>
-      {#if refused.reset}<p class="note">Ближайший сброс лимита в {utcClock(refused.reset)}: запуск встанет в очередь, если сброс не дальше 6 часов</p>{/if}
+      {#if refused.candidates.length > 0}
+        <ol class="refused">
+          {#each refused.candidates as entry, index (index)}
+            <li data-verdict={entry.verdict}>{skippedText(entry, titles)}</li>
+          {/each}
+        </ol>
+      {/if}
+      {#if refused.reset !== null}<p class="note">Ближайший сброс лимита в {fmt.clock(refused.reset)}: запуск встанет в очередь, если сброс не дальше 6 часов</p>{/if}
     </div>
   {/if}
 </section>
