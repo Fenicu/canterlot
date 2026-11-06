@@ -58,6 +58,52 @@ Canterlot — self-hosted хаб для агентов программиров�
   </tr>
 </table>
 
+## Сборка выпуска
+
+Выпуск собирается один раз в контейнере Debian 13 на отдельной машине, а готовый
+каталог затем используют и выкат, и публикация. Собирать напрямую, без контейнера,
+нельзя ни на этой VM, ни на сборочной машине: прод — Debian 13 с glibc 2.41, а
+`mainpc-build` — Arch с glibc 2.44, и собранные там бинарники на проде не запустятся.
+
+```bash
+scripts/build-release.sh v1.16.1            # сборочная машина (CANTERLOT_BUILD_HOST, по умолчанию mainpc-build)
+scripts/build-release.sh v1.16.1 --local    # та же сборка на местном docker, для проверки
+```
+
+Тег должен быть локально и на origin. На сборочной машине нужны ssh-доступ (алиас
+`mainpc-build`), работающий docker и bare-репозиторий `~/canterlot.git`. Скрипт:
+
+1. отправляет тег в bare-репозиторий `~/canterlot.git` на сборочной машине;
+2. создаёт там чистую рабочую копию `~/release/src-<sha12>` на коммите тега;
+3. собирает или переиспользует образ `canterlot-release-build:<hash Dockerfile + rust-toolchain.toml>`
+   из `docker/release-build/Dockerfile`: Debian trixie по digest, Rust из
+   `rust-toolchain.toml`, Node 24 с проверкой sha256;
+4. запускает контейнер от uid хоста с ограничениями `--cpus 24 --memory 40g --pids-limit 4096`
+   (systemd-лимиты сборочной машины на контейнеры dockerd не действуют);
+5. переносит готовый каталог по ssh tar-потоком в
+   `.superpowers/deploy/dist/<sha12>` этой рабочей копии (`CANTERLOT_DIST_ROOT`),
+   проверяет SHA256SUMS, `RELEASE`, `--version` и состав файлов; существующий
+   каталог не перезаписывается;
+6. убирает рабочую копию на сборочной машине через `git worktree remove --force`.
+
+Внутри контейнера `scripts/release-build/in-container.sh` собирает хаб, воркер,
+синтетический воркер и PWA (`npm ci`, `PWA_VERSION=<sha12> npm run build`) и проверяет
+то же, что выкат: отсутствие libssl, `hub openapi` против `docs/api/openapi.json`,
+CSP, `_app/version.json`, `synthetic-cli` только в синтетическом воркере, SHA256SUMS
+и максимальную версию GLIBC не выше 2.41. Тестов здесь нет: полный прогон
+`scripts/check.sh` и `check-web.sh` уже прошёл на этом коммите.
+
+Кэши: на сборочной машине `~/release/cache/{cargo,target,npm}`, локально
+`~/.cache/canterlot-release-build` (`CANTERLOT_BUILD_CACHE`). Повторная сборка того
+же коммита инкрементальная. Сборочный инструмент берётся из этой рабочей копии, а
+не из тега: первый выпуск после появления скрипта собирает тег, в котором его ещё нет.
+
+Публикация — из того же каталога:
+
+```bash
+scripts/publish-release.sh v1.16.1
+```
+
 ## Развёртывание из готовых архивов
 
 В [выпусках на Forgejo](https://git.fenicu.com/Fenicu/canterlot/releases) лежат собранные хаб, воркер и PWA. Хаб и воркер собраны для x86_64 под glibc 2.41 и новее (Debian 13, Ubuntu 25.04 и новее). Подробности каждого шага — в [docs/deploy/pilot.md](docs/deploy/pilot.md), ключи конфигурации — в [docs/configuration.md](docs/configuration.md). Собрать всё из исходников можно по [docs/development.md](docs/development.md).

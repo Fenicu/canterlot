@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Публикует собранный при выкатке выпуск на Forgejo: архивы хаба, воркера и PWA, CSP, SHA256SUMS
+# Публикует собранный заранее выпуск на Forgejo: архивы хаба, воркера и PWA, CSP, SHA256SUMS
 # и раздел CHANGES.rst как описание. Ничего не собирает: берёт готовый каталог
-# .superpowers/deploy/dist/<sha12>/, чтобы тяжёлая сборка шла один раз.
+# .superpowers/deploy/dist/<sha12>/, который кладёт scripts/build-release.sh.
 #
 #   scripts/publish-release.sh v1.11.0             собрать архивы и опубликовать
 #   scripts/publish-release.sh v1.11.0 --dry-run   только собрать архивы и показать описание
@@ -25,7 +25,7 @@ token_file=${FORGEJO_TOKEN_FILE:-$HOME/.config/forgejo/canterlot-release.token}
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 sha=$(git rev-parse --verify "$tag^{commit}")
 dist=${CANTERLOT_DIST_ROOT:-.superpowers/deploy/dist}/${sha:0:12}
-[[ -f "$dist/SHA256SUMS" ]] || { echo "нет сборки $dist: выпуск собирается при выкатке" >&2; exit 1; }
+[[ -f "$dist/SHA256SUMS" ]] || { echo "нет сборки $dist: соберите выпуск scripts/build-release.sh $tag" >&2; exit 1; }
 grep -qx "source=$sha" "$dist/RELEASE" || { echo "$dist/RELEASE собран не из $tag" >&2; exit 1; }
 (cd "$dist" && sha256sum --quiet -c SHA256SUMS) || { echo "$dist не сходится с SHA256SUMS" >&2; exit 1; }
 for bin in hub/bin/canterlot-hub worker/bin/canterlot-worker; do
