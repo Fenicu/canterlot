@@ -1499,6 +1499,83 @@ mod tests {
         Ok(())
     }
 
+    /// Исчерпание попыток задания очереди: элемент `failed`, следующий снова доступен.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn exhausted_spawn_dequeue_fails_the_item_and_wakes_the_next(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let seed = crate::testkit::seed(&pool).await;
+        let now = chrono::Utc::now();
+        let failed_item = uuid::Uuid::now_v7();
+        let next_item = uuid::Uuid::now_v7();
+        for id in [failed_item, next_item] {
+            sqlx::query(
+                "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+                 values($1,$2,$3,$4,'{\"chain_depth\":0,\"args\":{\"brief\":\"b\"}}','rate',$5)",
+            )
+            .bind(id)
+            .bind(seed.owner_id)
+            .bind(seed.conversation_id)
+            .bind(uuid::Uuid::now_v7())
+            .bind(now - chrono::TimeDelta::seconds(1))
+            .execute(&pool)
+            .await?;
+        }
+        let job_id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "insert into scheduled_jobs (id, owner_id, conversation_id, kind, run_at, payload)
+             values ($1, $2, $3, 'session_task', $4, $5)",
+        )
+        .bind(job_id)
+        .bind(seed.owner_id)
+        .bind(seed.conversation_id)
+        .bind(now - chrono::TimeDelta::seconds(1))
+        .bind(serde_json::json!({
+            "action": "spawn_dequeue",
+            "queue_id": failed_item,
+        }))
+        .execute(&pool)
+        .await?;
+        let scheduler = super::Scheduler::new(
+            pool.clone(),
+            crate::dispatcher::Dispatcher::channel().0,
+            crate::config::SchedulerConfig {
+                max_attempts: 1,
+                ..Default::default()
+            },
+        );
+        let attempt: super::JobRow = sqlx::query_as("select * from scheduled_jobs where id=$1")
+            .bind(job_id)
+            .fetch_one(&pool)
+            .await?;
+        let mut report = super::TickReport::default();
+        scheduler
+            .record_failure(&attempt, now, "job_error", false, &mut report)
+            .await?;
+        let (state, result): (String, Option<serde_json::Value>) =
+            sqlx::query_as("select state,result from spawn_queue where id=$1")
+                .bind(failed_item)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(state, "failed");
+        assert_eq!(result.unwrap()["code"], "job_failed");
+        let next_state: String = sqlx::query_scalar("select state from spawn_queue where id=$1")
+            .bind(next_item)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(next_state, "queued");
+        let wake: bool = sqlx::query_scalar(
+            "select exists(select 1 from scheduled_jobs
+              where conversation_id=$1 and kind='session_task' and state='pending'
+                and payload->>'action'='spawn_dequeue')",
+        )
+        .bind(seed.conversation_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(wake, "the next item has a job");
+        Ok(())
+    }
+
     /// Повтор с ядовитой нагрузкой: `record_failure` возвращает ошибку и синхронно
     /// откатывает транзакцию, не оставляя блокировки строки задания.
     #[sqlx::test(migrations = "./migrations")]
