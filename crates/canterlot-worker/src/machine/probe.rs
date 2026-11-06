@@ -11,7 +11,10 @@ use std::{
     io::{ErrorKind, Read},
     os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use canterlot_proto::{
     limits::{MAX_PROBE_HEAD_BYTES, MAX_PROBE_PATH_BYTES},
@@ -40,6 +43,10 @@ pub enum Outcome {
 
 /// Срок пробы на воркере: зависшее чтение отвечает ошибкой, а не ждёт хаб.
 pub const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Столько файловых проб может висеть в потоках одновременно. Разрешение
+/// освобождается только вместе с блокирующей задачей, а не по сроку ответа.
+pub const MAX_CONCURRENT_PROBES: usize = 4;
 
 /// Проверить путь и, если файл есть, отдать его факты. Работа блокирующая:
 /// вызывающий уводит её в отдельный поток.
@@ -71,23 +78,38 @@ pub fn probe(path: &str, roots: &[PathBuf], read_head_bytes: u32) -> Outcome {
 }
 
 /// Срок пробы: блокирующее чтение уводится в отдельный поток, а ответ приходит
-/// не позже срока. Зависший поток остаётся висеть, но управляющий цикл свободен.
-pub(crate) async fn run(path: String, roots: Vec<PathBuf>, read_head_bytes: u32) -> Outcome {
-    with_deadline(PROBE_DEADLINE, async move {
-        match tokio::task::spawn_blocking(move || probe(&path, &roots, read_head_bytes)).await {
-            Ok(outcome) => outcome,
-            Err(_) => Outcome::Error("internal"),
-        }
+/// не позже срока. Разрешение держит сам поток: зависшая проба не копит новые
+/// потоки, а сверх предела отвечает `busy`, не дожидаясь срока.
+pub(crate) async fn run(
+    path: String,
+    roots: Vec<PathBuf>,
+    read_head_bytes: u32,
+    permits: Arc<Semaphore>,
+) -> Outcome {
+    run_with_deadline(PROBE_DEADLINE, permits, move || {
+        probe(&path, &roots, read_head_bytes)
     })
     .await
 }
 
-async fn with_deadline<F: std::future::Future<Output = Outcome>>(
+async fn run_with_deadline<F>(
     deadline: std::time::Duration,
+    permits: Arc<Semaphore>,
     work: F,
-) -> Outcome {
+) -> Outcome
+where
+    F: FnOnce() -> Outcome + Send + 'static,
+{
+    let Ok(permit): Result<OwnedSemaphorePermit, _> = permits.try_acquire_owned() else {
+        return Outcome::Error("busy");
+    };
+    let work = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    });
     match tokio::time::timeout(deadline, work).await {
-        Ok(outcome) => outcome,
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) => Outcome::Error("internal"),
         Err(_) => Outcome::Error("deadline"),
     }
 }
@@ -469,6 +491,10 @@ mod tests {
         );
     }
 
+    fn permits() -> Arc<Semaphore> {
+        Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES))
+    }
+
     #[tokio::test]
     async fn a_probe_is_answered_inside_its_deadline() {
         let dir = dir();
@@ -477,15 +503,49 @@ mod tests {
             dir.path().join("gate.rc").display().to_string(),
             roots(dir.path()),
             16,
+            permits(),
         )
         .await;
         assert!(matches!(outcome, Outcome::Exists { size: 2, .. }));
     }
 
     #[tokio::test]
-    async fn a_hung_probe_answers_with_a_deadline_error() {
-        let outcome =
-            with_deadline(std::time::Duration::from_millis(5), std::future::pending()).await;
-        assert_eq!(outcome, Outcome::Error("deadline"));
+    async fn a_hung_probe_answers_with_a_deadline_error_and_keeps_its_permit() {
+        let permits = permits();
+        let mut hung = Vec::new();
+        for _ in 0..MAX_CONCURRENT_PROBES {
+            let permits = permits.clone();
+            hung.push(tokio::spawn(run_with_deadline(
+                std::time::Duration::from_millis(10),
+                permits,
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    Outcome::Missing
+                },
+            )));
+        }
+        for task in hung {
+            assert_eq!(task.await.unwrap(), Outcome::Error("deadline"));
+        }
+        // Ответы уже ушли, но блокирующие задачи живы и держат разрешения.
+        assert!(
+            permits.clone().try_acquire_owned().is_err(),
+            "a timed-out task must not release its permit"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(permits.clone().try_acquire_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn work_over_the_permit_limit_is_rejected_promptly() {
+        let permits = permits();
+        let held: Vec<_> = (0..MAX_CONCURRENT_PROBES)
+            .map(|_| permits.clone().try_acquire_owned().unwrap())
+            .collect();
+        let started = std::time::Instant::now();
+        let outcome = run("gate.rc".into(), Vec::new(), 0, permits.clone()).await;
+        assert_eq!(outcome, Outcome::Error("busy"));
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        drop(held);
     }
 }

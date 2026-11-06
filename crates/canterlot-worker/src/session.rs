@@ -1267,6 +1267,9 @@ impl Worker {
         // Проба пути: тоже только последний запрос; чтение файла идёт в отдельном потоке.
         let mut probe_next: Option<ProbePath> = None;
         let mut probe_outbound = None;
+        let probe_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::machine::probe::MAX_CONCURRENT_PROBES,
+        ));
         type ProbeFuture = Pin<Box<dyn Future<Output = PathProbe> + Send>>;
         let mut probe_operation: Option<ProbeFuture> = None;
         // Чтение инструкций владельца: тоже только последний запрос.
@@ -1447,11 +1450,16 @@ impl Worker {
                 && let Some(request) = probe_next.take()
             {
                 let roots = self.config.execution.allowed_workdir_roots.clone();
+                let permits = probe_permits.clone();
                 probe_operation = Some(Box::pin(async move {
                     let request_id = request.request_id.clone();
-                    let outcome =
-                        crate::machine::probe::run(request.path, roots, request.read_head_bytes)
-                            .await;
+                    let outcome = crate::machine::probe::run(
+                        request.path,
+                        roots,
+                        request.read_head_bytes,
+                        permits,
+                    )
+                    .await;
                     crate::machine::probe::reply(request_id, outcome)
                 }));
             }
