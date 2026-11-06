@@ -458,6 +458,26 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
     .execute(&pool)
     .await
     .unwrap();
+    let queued_spawn = Uuid::now_v7();
+    let started_spawn = Uuid::now_v7();
+    for (queue_id, state, child) in [
+        (queued_spawn, "queued", None),
+        (started_spawn, "started", Some(delegated)),
+    ] {
+        sqlx::query(
+            "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before,state,child_id)
+             values($1,$2,$3,$4,'{\"chain_depth\":0,\"args\":{\"brief\":\"b\"}}','rate',now(),$5,$6)",
+        )
+        .bind(queue_id)
+        .bind(owner)
+        .bind(id)
+        .bind(Uuid::now_v7())
+        .bind(state)
+        .bind(child)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
     // «Отправить сейчас»: ход идёт, один ввод принят, второй ждёт в очереди.
     let send_now_conversation = testkit::seed_conversation(&pool, owner, machine).await;
     sqlx::query("update conversations set harness = 'codex' where id = $1")
@@ -830,6 +850,20 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Method::DELETE,
             "/api/v1/conversations/{id}/alarms/{alarm_id}",
             format!("/api/v1/conversations/{id}/alarms/{alarm_id}"),
+            None,
+            None,
+        ),
+        case(
+            Method::DELETE,
+            "/api/v1/conversations/{id}/spawn-queue/{queue_id}",
+            format!("/api/v1/conversations/{id}/spawn-queue/{queued_spawn}"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/conversations/{id}/spawn-queue/{queue_id}/start-now",
+            format!("/api/v1/conversations/{id}/spawn-queue/{started_spawn}/start-now"),
             None,
             None,
         ),
