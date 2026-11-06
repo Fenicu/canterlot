@@ -254,6 +254,89 @@ mod tests {
     }
 
     #[test]
+    fn forbidden_paths_answer_not_allowed_whether_the_file_exists_or_not() {
+        let root = dir();
+        let outside = dir();
+        // Секретный родитель есть и файл в нём есть.
+        fs::create_dir(root.path().join(".ssh")).unwrap();
+        fs::write(root.path().join(".ssh").join("id_ed25519"), b"secret").unwrap();
+        // Секретный родитель есть, файла в нём нет.
+        fs::write(root.path().join(".ssh").join("present"), b"secret").unwrap();
+        for name in ["id_ed25519", "absent"] {
+            assert_eq!(
+                probe_in(root.path(), &format!(".ssh/{name}"), 0),
+                Outcome::NotAllowed("denied"),
+                "{name}"
+            );
+        }
+        // Секретного родителя нет вовсе: ответ тот же, без похода в файловую систему.
+        assert_eq!(
+            probe_in(root.path(), ".ssh/missing/sentinel", 0),
+            Outcome::NotAllowed("denied")
+        );
+        // Запретный родитель вне корней: ответ не зависит от существования файла.
+        fs::write(outside.path().join("gate.rc"), b"x").unwrap();
+        for name in ["gate.rc", "absent"] {
+            assert_eq!(
+                probe(
+                    &outside.path().join(name).to_string_lossy(),
+                    &roots(root.path()),
+                    0
+                ),
+                Outcome::NotAllowed("outside_roots"),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            probe(
+                &outside.path().join("missing/sentinel").to_string_lossy(),
+                &roots(root.path()),
+                0
+            ),
+            Outcome::NotAllowed("outside_roots")
+        );
+    }
+
+    #[test]
+    fn a_symlinked_parent_outside_the_roots_is_refused_before_the_target_is_touched() {
+        let root = dir();
+        let outside = dir();
+        symlink(outside.path(), root.path().join("alias")).unwrap();
+        assert_eq!(
+            probe_in(root.path(), "alias/absent.rc", 0),
+            Outcome::NotAllowed("outside_roots")
+        );
+        assert_eq!(
+            probe_in(root.path(), "alias/missing/deep/sentinel", 0),
+            Outcome::NotAllowed("outside_roots")
+        );
+        // Цель ссылки не существует: это всё равно путь вне корней, а не «файла нет».
+        let gone = dir();
+        let target = gone.path().join("gone");
+        symlink(&target, root.path().join("dangling")).unwrap();
+        assert_eq!(
+            probe_in(root.path(), "dangling/sentinel", 0),
+            Outcome::NotAllowed("outside_roots")
+        );
+    }
+
+    #[test]
+    fn a_parent_alias_into_a_secret_directory_is_refused_for_existing_and_missing_files() {
+        let root = dir();
+        fs::create_dir(root.path().join(".ssh")).unwrap();
+        fs::write(root.path().join(".ssh").join("id_ed25519"), b"secret").unwrap();
+        symlink(root.path().join(".ssh"), root.path().join("alias")).unwrap();
+        assert_eq!(
+            probe_in(root.path(), "alias/id_ed25519", 0),
+            Outcome::NotAllowed("denied")
+        );
+        assert_eq!(
+            probe_in(root.path(), "alias/absent", 0),
+            Outcome::NotAllowed("denied")
+        );
+    }
+
+    #[test]
     fn a_denied_secret_path_is_refused_even_when_it_does_not_exist() {
         let dir = dir();
         for relative in [".env", ".gemini/oauth_creds.json", ".ssh/id_ed25519"] {

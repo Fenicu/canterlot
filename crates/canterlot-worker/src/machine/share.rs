@@ -4,10 +4,18 @@
 //! с инструкциями владельца; каталог `.ssh` и файлы больше 50 МиБ запрещены.
 
 use std::{
+    collections::VecDeque,
+    ffi::{OsStr, OsString},
     fs,
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
-    path::{Component, Path},
+    os::{
+        fd::OwnedFd,
+        unix::{
+            ffi::OsStrExt,
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+        },
+    },
+    path::{Component, Path, PathBuf},
 };
 
 use canterlot_proto::limits::MAX_SHARE_BYTES;
@@ -171,14 +179,6 @@ fn share_roots(workdir: Option<&Path>) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-fn denied_resolved(path: &Path) -> bool {
-    let parts: Vec<&str> = path
-        .components()
-        .filter_map(|part| part.as_os_str().to_str())
-        .collect();
-    denied_parts(&parts)
-}
-
 /// Путь как он задан: `.` и `..` нормализуются лексически, ссылки не раскрываются.
 /// Иначе `~/.ssh -> /srv/private-keys` прячет секретное имя от проверки.
 fn denied_lexical(path: &Path) -> bool {
@@ -258,13 +258,6 @@ pub fn mime_for(name: &str, head: &[u8]) -> String {
     .into()
 }
 
-/// Открыть файл в уже проверенном раскрытом каталоге: каталог открывается от корня
-/// без ссылок, финал от его дескриптора. Подмена каталога ссылкой после проверки даёт отказ.
-fn open_resolved(resolved_parent: &Path, name: &str) -> Result<fs::File, ShareError> {
-    let parent = nofollow::open_dir(resolved_parent).map_err(open_error)?;
-    nofollow::open_file(&parent, name).map_err(open_error)
-}
-
 /// Проверенный файл: родители раскрыты, финал открыт от дескриптора без ссылок.
 pub(crate) struct Checked {
     pub file: fs::File,
@@ -292,30 +285,238 @@ fn open_error(error: rustix::io::Errno) -> ShareError {
     }
 }
 
-/// Общая защита `share_file` и пробы пути: путь как задан и после раскрытия не
+/// Лексически нормализованные компоненты абсолютного пути: `.` и `..` не остаются.
+/// Выход выше корня файловой системы — отказ.
+fn lexical_parts(path: &Path) -> Option<Vec<OsString>> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => parts.clear(),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::Normal(part) => parts.push(part.to_os_string()),
+            Component::Prefix(_) => return None,
+        }
+    }
+    path.is_absolute().then_some(parts)
+}
+
+/// Самый длинный корень, под которым путь лежит лексически: `(корень, остаток)`.
+fn lexical_root(path: &Path, roots: &[std::path::PathBuf]) -> Option<(PathBuf, PathBuf)> {
+    let parts = lexical_parts(path)?;
+    let (root, depth) = root_prefix(&parts, roots)?;
+    let rest: PathBuf = parts[depth..].iter().collect();
+    Some((root, rest))
+}
+
+fn root_prefix(parts: &[OsString], roots: &[std::path::PathBuf]) -> Option<(PathBuf, usize)> {
+    let mut best: Option<(PathBuf, usize)> = None;
+    for root in roots {
+        let Some(root_parts) = lexical_parts(root) else {
+            continue;
+        };
+        let depth = root_parts.len();
+        if parts.len() >= depth
+            && parts[..depth] == root_parts[..]
+            && best.as_ref().is_none_or(|(_, found)| depth > *found)
+        {
+            best = Some((root.clone(), depth));
+        }
+    }
+    best
+}
+
+/// Раскрытые компоненты пути как строки: политика запретов работает с именами.
+fn resolved_names(path: &Path) -> Result<Vec<String>, ShareError> {
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(part) => {
+                names.push(part.to_str().ok_or(ShareError::Unreadable)?.to_owned())
+            }
+            Component::ParentDir | Component::Prefix(_) => return Err(ShareError::Unreadable),
+        }
+    }
+    Ok(names)
+}
+
+fn path_of_names(names: &[String]) -> PathBuf {
+    let mut path = PathBuf::from("/");
+    path.extend(names);
+    path
+}
+
+/// Секретное имя или псевдофайловая система в раскрытом префиксе: дальше не идём.
+fn refuse_names(names: &[String]) -> Result<(), ShareError> {
+    let parts: Vec<&str> = names.iter().map(String::as_str).collect();
+    if denied_parts(&parts) || denied_system(&path_of_names(names)) {
+        return Err(ShareError::Denied);
+    }
+    Ok(())
+}
+
+fn open_component(
+    dir: &OwnedFd,
+    name: &str,
+) -> Result<(OwnedFd, rustix::fs::FileType), ShareError> {
+    let fd = rustix::fs::openat(
+        dir,
+        name,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| match error {
+        rustix::io::Errno::NOENT => ShareError::Missing,
+        rustix::io::Errno::NOTDIR => ShareError::Missing,
+        rustix::io::Errno::ACCESS => ShareError::Unreadable,
+        _ => ShareError::Unreadable,
+    })?;
+    let kind = rustix::fs::FileType::from_raw_mode(
+        rustix::fs::fstat(&fd)
+            .map_err(|_| ShareError::Unreadable)?
+            .st_mode,
+    );
+    Ok((fd, kind))
+}
+
+/// Раскрыть ссылку в родителе: ссылка не должна увести из разрешённых корней
+/// и не должна спрятать секретный каталог. Возвращает новые компоненты для обхода.
+fn expand_link(
+    target: &Path,
+    names: &mut Vec<String>,
+    stack: &mut Vec<OwnedFd>,
+    root_depth: &mut usize,
+    roots: &[std::path::PathBuf],
+    outside: ShareError,
+) -> Result<Vec<OsString>, ShareError> {
+    if target.is_absolute() {
+        let parts = lexical_parts(target).ok_or(outside)?;
+        let (root, depth) = root_prefix(&parts, roots).ok_or(outside)?;
+        let canonical = fs::canonicalize(&root).map_err(resolve_error)?;
+        let root_names = resolved_names(&canonical)?;
+        refuse_names(&root_names)?;
+        *root_depth = root_names.len();
+        *names = root_names;
+        *stack = vec![nofollow::open_dir(&canonical).map_err(open_error)?];
+        Ok(parts[depth..].to_vec())
+    } else {
+        // Ссылка относительна каталога, в котором лежит: `..` поднимается не выше корня.
+        let mut depth = names.len();
+        let mut pending: Vec<OsString> = Vec::new();
+        for component in target.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(part) => pending.push(part.to_os_string()),
+                Component::ParentDir => {
+                    if pending.pop().is_none() {
+                        if depth <= *root_depth {
+                            return Err(outside);
+                        }
+                        depth -= 1;
+                    }
+                }
+                Component::RootDir | Component::Prefix(_) => return Err(outside),
+            }
+        }
+        names.truncate(depth);
+        stack.truncate(depth - *root_depth + 1);
+        Ok(pending)
+    }
+}
+
+/// Обход пути от дескриптора разрешённого корня по одному компоненту. Каждый шаг
+/// проверяет запреты до перехода дальше; `..` в ссылке не поднимается выше корня.
+fn open_beneath(
+    path: &Path,
+    roots: &[std::path::PathBuf],
+    outside: ShareError,
+) -> Result<(fs::File, String), ShareError> {
+    let name = name_of(path)?;
+    let (root, rest) = lexical_root(path, roots).ok_or(outside)?;
+    let canonical = fs::canonicalize(&root).map_err(resolve_error)?;
+    let mut names = resolved_names(&canonical)?;
+    let mut root_depth = names.len();
+    refuse_names(&names)?;
+    let mut stack = vec![nofollow::open_dir(&canonical).map_err(open_error)?];
+    let mut pending: VecDeque<OsString> = rest
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_os_string()),
+            _ => None,
+        })
+        .collect();
+    let mut followed = 0usize;
+    loop {
+        let Some(component) = pending.pop_front() else {
+            // Путь называет сам корень: это каталог, а не файл.
+            return Err(ShareError::NotRegular);
+        };
+        let part = component.to_str().ok_or(ShareError::Unreadable)?;
+        if pending.is_empty() {
+            let mut names = names.clone();
+            names.push(part.to_owned());
+            refuse_names(&names)?;
+            if !inside_roots(&path_of_names(&names), roots) {
+                return Err(outside);
+            }
+            let file =
+                nofollow::open_file(stack.last().expect("root fd"), part).map_err(open_error)?;
+            return Ok((file, name));
+        }
+        let (next, kind) = open_component(stack.last().expect("root fd"), part)?;
+        match kind {
+            rustix::fs::FileType::Directory => {
+                names.push(part.to_owned());
+                refuse_names(&names)?;
+                stack.push(next);
+            }
+            rustix::fs::FileType::Symlink => {
+                followed += 1;
+                if followed > 40 {
+                    return Err(ShareError::Symlink);
+                }
+                let target =
+                    rustix::fs::readlinkat(stack.last().expect("root fd"), part, Vec::new())
+                        .map_err(|_| ShareError::Unreadable)?;
+                let target = Path::new(OsStr::from_bytes(target.as_bytes()));
+                let inserted = expand_link(
+                    target,
+                    &mut names,
+                    &mut stack,
+                    &mut root_depth,
+                    roots,
+                    outside,
+                )?;
+                for inserted in inserted.into_iter().rev() {
+                    pending.push_front(inserted);
+                }
+            }
+            _ => return Err(ShareError::Missing),
+        }
+    }
+}
+
+/// Общая защита `share_file` и пробы пути: путь как задан и при раскрытии не
 /// секретный, не в `/proc`, `/sys`, `/dev`, лежит под одним из `roots`, финал —
-/// обычный файл этого пользователя с одной жёсткой ссылкой.
+/// обычный файл этого пользователя с одной жёсткой ссылкой. Лексические запреты
+/// срабатывают до первого обращения к файловой системе: ответ не зависит от того,
+/// существует ли запретный путь.
 pub(crate) fn open_checked(
     path: &Path,
     roots: &[std::path::PathBuf],
     outside: ShareError,
 ) -> Result<Checked, ShareError> {
-    let name = name_of(path)?;
-    // Родитель раскрывается первым: ссылка в нём не должна прятать секретный каталог.
-    // Финал открывается строго с O_NOFOLLOW от дескриптора родителя.
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let resolved_parent = fs::canonicalize(parent).map_err(resolve_error)?;
-    let resolved = resolved_parent.join(&name);
-    if denied_lexical(path) || denied_resolved(&resolved) || denied_system(&resolved) {
-        return Err(ShareError::Denied);
+    if denied_lexical(path) || lexical_root(path, roots).is_none() {
+        return Err(if denied_lexical(path) {
+            ShareError::Denied
+        } else {
+            outside
+        });
     }
-    if !inside_roots(&resolved, roots) {
-        return Err(outside);
-    }
-    let file = open_resolved(&resolved_parent, &name)?;
+    let (file, name) = open_beneath(path, roots, outside)?;
     let meta = file.metadata().map_err(|_| ShareError::Unreadable)?;
     if meta.file_type().is_symlink() {
         return Err(ShareError::Symlink);
@@ -421,25 +622,6 @@ pub fn prepare(
 mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt, symlink};
-
-    #[test]
-    fn a_parent_swapped_for_a_link_between_check_and_open_is_refused() {
-        let dir = dir();
-        let secret = dir.path().join("secret");
-        fs::create_dir(&secret).unwrap();
-        fs::write(secret.join("id_ed25519"), b"private").unwrap();
-        let shared = dir.path().join("d");
-        fs::create_dir(&shared).unwrap();
-        fs::write(shared.join("id_ed25519"), b"public").unwrap();
-        let resolved = fs::canonicalize(&shared).unwrap();
-        assert!(!denied_resolved(&resolved.join("id_ed25519")));
-        fs::rename(&shared, dir.path().join("d.old")).unwrap();
-        symlink(&secret, &shared).unwrap();
-        assert_eq!(
-            open_resolved(&resolved, "id_ed25519").unwrap_err(),
-            ShareError::Symlink
-        );
-    }
 
     fn dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -682,6 +864,14 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn refuses_a_missing_secret_path_without_touching_the_filesystem() {
+        // Родитель `~/.ssh` отсутствует: ответ всё равно «секрет», не «файла нет».
+        let dir = dir();
+        let missing = dir.path().join(".ssh").join("absent");
+        assert_eq!(share(&missing, None).unwrap_err(), ShareError::Denied);
     }
 
     #[test]
