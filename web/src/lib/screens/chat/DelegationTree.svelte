@@ -316,10 +316,8 @@
 		gap: var(--s1);
 		white-space: normal;
 	}
-	/* Узел очереди бледный: сессии ещё нет, есть только намерение её запустить. */
+	/* Узел очереди бледный: приглушённый текст и дорожка этапов, сессии ещё нет. */
 	.queue-node {
-		border: var(--hairline) dashed var(--line);
-		border-radius: var(--radius-card);
 		color: var(--secondary);
 	}
 	.queue-node .branch {

@@ -401,7 +401,7 @@
   .lead { color: var(--secondary); }
   .status { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4); color: var(--secondary); font-size: var(--fs-meta); }
   .conflict { display: grid; gap: var(--s4); justify-items: start; padding: var(--s6) var(--s8); border-radius: var(--radius-card); background: var(--warning-soft); }
-  .conflict p { margin: var(--s0); }
+  .conflict p, .conflict .note { margin: var(--s0); color: var(--warning); }
   .task { display: grid; gap: var(--s4); margin-bottom: var(--s8); padding: var(--s6); border-radius: var(--radius-card); background: var(--surface); }
   .task-head { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--s4); }
   .field { display: grid; gap: var(--s2); min-width: 0; }
@@ -409,7 +409,7 @@
   .field.small input { max-width: var(--bar-56); }
   input { min-width: 0; }
   .candidates { display: grid; gap: var(--s3); margin: var(--s0); padding: var(--s0); list-style: none; }
-  .candidate { display: grid; gap: var(--s2); padding: var(--s3) var(--s4); border-radius: var(--radius-card); background: var(--raised); }
+  .candidate { --field-bg: var(--surface); display: grid; gap: var(--s2); padding: var(--s3) var(--s4); border-radius: var(--radius-card); background: var(--raised); }
   .candidate.dragging { background: var(--selected); }
   .row { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
   .grip { display: inline-flex; align-items: center; justify-content: center; min-width: var(--target); min-height: var(--target); padding: var(--s0); background: var(--transparent); color: var(--muted); cursor: grab; touch-action: none; }
@@ -426,7 +426,7 @@
   .path-chips li { display: inline-flex; align-items: center; gap: var(--s1); padding-left: var(--s6); border-radius: var(--radius-pill); background: var(--chat-bg); font-family: var(--font-mono); font-size: var(--fs-sm); }
   .path-chips :global(button) { padding: var(--s0); background: var(--transparent); }
   .inline { display: flex; flex-wrap: wrap; gap: var(--s3); align-items: center; }
-  .inline input { flex: 1 1 var(--bar-56); }
+  .inline input { flex: 1 1 var(--bar-56); min-height: var(--target); padding: var(--s5) var(--s8); border: 0; border-radius: var(--radius-pill); background: var(--field-bg, var(--raised)); font-size: var(--fs-input); }
   .add { display: grid; gap: var(--s4); }
   .task-foot { display: flex; justify-content: flex-end; color: var(--danger); }
   .providers { display: grid; gap: var(--s4); }

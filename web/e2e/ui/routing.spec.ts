@@ -1,32 +1,20 @@
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
-import { seedConversation, seedMachine } from '../../testing/fake-hub/seed';
-import type { HistoryBlock } from '../../src/lib/stores/chat.svelte';
+import { seedConversation } from '../../testing/fake-hub/seed';
+import { DEEPSEEK, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d3';
 const N = ' ';
-const DEEPSEEK = 'opencode-go/deepseek-v4.1-flash';
 
-function catalog(api: FakeHubApi) {
-  return seedMachine(api, {
-    harnesses: [
-      { id: 'opencode', title: 'OpenCode', provider: 'opencode', models: [{ id: DEEPSEEK, title: 'DeepSeek', efforts: ['low', 'medium', 'high'] }, { id: 'opencode-go/beam-free', title: 'Beam', efforts: [] }], permission_modes: ['owner'] },
-      { id: 'claude_code', title: 'Claude Code', provider: 'claude', models: [{ id: 'opus[1m]', title: 'Opus 1M', efforts: ['high'] }], permission_modes: ['owner'] },
-      { id: 'codex', title: 'Codex', provider: 'codex', models: [{ id: 'gpt-6.1-sol', title: 'GPT-6.1 Sol', efforts: ['high'] }], permission_modes: ['owner'] }
-    ]
-  });
-}
+const catalog = seedRoutingCatalog;
 
 async function bootEditor(page: Page) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   catalog(api);
-  api.spawnWhitelist = [
-    { harness: 'opencode', model: DEEPSEEK },
-    { harness: 'codex', model: 'gpt-6.1-sol' }
-  ];
+  seedRoutingWhitelist(api);
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto('/settings/routing');
   await expect(page.locator('[data-routing-editor][data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
@@ -160,30 +148,6 @@ test.describe('редактор маршрутизации', () => {
   });
 });
 
-function block(api: FakeHubApi, seq: string, partial: Partial<HistoryBlock>): HistoryBlock {
-  const id = partial.id ?? api.id();
-  const content = partial.content ?? '';
-  const at = new Date(Date.now() - 60_000).toISOString();
-  api.blocks.set(id, { text: content, rev: 1, state: 'final' });
-  return { kind: 'block', id, block_kind: 'text', content, content_bytes: content.length, content_truncated: false, created_seq: seq, created_at: at, rev: 1, state: 'final', agent: 'claude', model: 'opus-5.5', tool_name: null, summary: null, parent_block_id: null, input_command_id: null, line_count: 1, started_at: at, finished_at: at, ...partial } as HistoryBlock;
-}
-
-const DECISION = {
-  policy_revision: 0,
-  task_type: 'bugfix',
-  level: null,
-  harness: 'opencode',
-  model: DEEPSEEK,
-  effort: 'high',
-  preset: 'Исполнитель (английский)',
-  nudge: { max_nudges: 2 },
-  watchdog_minutes: 90,
-  considered: [
-    { harness: 'codex', model: 'gpt-6.1-sol', verdict: 'limits_over', reason: 'codex weekly 83% > 80%' },
-    { harness: 'opencode', model: DEEPSEEK, verdict: 'chosen', reason: '' }
-  ]
-};
-
 async function bootOrchestrator(page: Page, prepare?: (api: FakeHubApi, id: string) => void) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
@@ -268,21 +232,9 @@ test.describe('очередь запусков и маршрут в чате', (
 
   test('spawn_line_names_the_route_and_the_delegate_header_opens_the_decision', async ({ page }) => {
     let child = '';
-    const { id } = await bootOrchestrator(page, (api, parent) => {
-      child = seedConversation(api, { title: 'Фикс по маршруту', parent_id: parent, spawn_depth: 1, routing: DECISION });
-      const details = api.details.get(child)!;
-      api.details.set(child, { ...details, routing: DECISION });
-      const call = api.id();
-      const run = api.id();
-      api.histories.set(parent, [
-        block(api, '1', { id: call, block_kind: 'tool_call', tool_name: 'mcp__canterlot__session_spawn', summary: 'session_spawn', input_command_id: run, agent: 'orchestrator' }),
-        block(api, '2', { block_kind: 'tool_result', parent_block_id: call, input_command_id: run, agent: 'orchestrator', content: JSON.stringify({ status: 'started', session_id: child, routing: { task_type: 'bugfix', harness: 'opencode', model: DEEPSEEK, effort: 'high', policy_revision: 0 } }, null, 2) }),
-        block(api, '3', { block_kind: 'tool_call', tool_name: 'mcp__canterlot__session_spawn', summary: 'session_spawn', input_command_id: run, agent: 'orchestrator', id: api.id() })
-      ]);
-      const queuedCall = api.histories.get(parent)![2]!.id as string;
-      api.histories.get(parent)!.push(block(api, '4', { block_kind: 'tool_result', parent_block_id: queuedCall, input_command_id: run, agent: 'orchestrator', content: JSON.stringify({ status: 'queued', queue_id: api.id(), reason: 'rate', detail: '10 spawns in the last hour; the next slot opens at 14:32 UTC' }) }));
+    await bootOrchestrator(page, (api, parent) => {
+      child = seedRoutedSpawn(api, parent);
     });
-    void id;
     await expect(page.locator('[data-role="spawn-route-line"]')).toHaveText(`Маршрут «Исправление по ясному брифу»: DeepSeek · высокое. Пропущен: Codex — неделя 83${N}% при пороге 80${N}%`);
     await expect(page.locator('[data-role="spawn-queued-line"]')).toContainText('Запуск в очереди: частота запусков: 10 запусков за час');
 
