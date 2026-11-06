@@ -22,6 +22,10 @@ pub const RPC_DEADLINE: Duration = Duration::from_secs(10);
 pub const STALE_GRACE: Duration = Duration::from_secs(2);
 /// Столько байт файла несёт сообщение будильника (§3.2).
 pub const ALARM_HEAD_BYTES: u32 = 256;
+/// Запись кэша без задания дольше этого не нужна: задание живёт секунды.
+const PREFETCH_TTL: Duration = Duration::from_secs(120);
+/// Потолок записей кэша: головы файлов не должны копиться без границы.
+const PREFETCH_CAP: usize = 256;
 
 /// Что известно о пути. Ошибки — короткие коды воркера, не английский текст.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +112,21 @@ struct Entry {
     result: Option<PathProbe>,
 }
 
+/// Убрать записи, которые уже некому забрать: по сроку и по потолку.
+fn sweep(entries: &mut HashMap<Uuid, Entry>) {
+    entries.retain(|_, entry| entry.started.elapsed() < PREFETCH_TTL);
+    while entries.len() > PREFETCH_CAP {
+        let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.started)
+            .map(|(id, _)| *id)
+        else {
+            break;
+        };
+        entries.remove(&oldest);
+    }
+}
+
 /// Ответы проб по заданию: запуск отдельной задачей и выборка следующим тиком.
 #[derive(Default)]
 pub struct Prefetch {
@@ -119,7 +138,8 @@ impl Prefetch {
     /// Протухшая незавершённая запись заменяется новым поколением.
     pub fn claim(&self, job_id: Uuid) -> Option<u64> {
         let mut entries = self.entries.lock().expect("probe cache lock");
-        match entries.get(&job_id) {
+        sweep(&mut entries);
+        let claimed = match entries.get(&job_id) {
             None => {
                 entries.insert(
                     job_id,
@@ -147,7 +167,9 @@ impl Prefetch {
                 Some(generation)
             }
             Some(_) => None,
-        }
+        };
+        sweep(&mut entries);
+        claimed
     }
 
     /// Забрать готовый ответ; незавершённая запись остаётся ждать свою задачу.
@@ -291,5 +313,42 @@ mod tests {
         assert_eq!(cache.take(job), None);
         cache.finish(job, generation, PathProbe::Missing);
         assert_eq!(cache.take(job), Some(PathProbe::Missing));
+    }
+
+    #[test]
+    fn entries_left_without_a_job_expire() {
+        let cache = Prefetch::default();
+        let stale = Uuid::now_v7();
+        {
+            let mut entries = cache.entries.lock().unwrap();
+            entries.insert(
+                stale,
+                Entry {
+                    generation: 1,
+                    started: Instant::now() - PREFETCH_TTL - Duration::from_secs(1),
+                    result: None,
+                },
+            );
+        }
+        let _ = cache.claim(Uuid::now_v7());
+        assert!(!cache.entries.lock().unwrap().contains_key(&stale));
+    }
+
+    #[test]
+    fn the_cache_is_bounded() {
+        let cache = Prefetch::default();
+        for _ in 0..PREFETCH_CAP + 50 {
+            let _ = cache.claim(Uuid::now_v7());
+        }
+        assert!(cache.entries.lock().unwrap().len() <= PREFETCH_CAP);
+    }
+
+    #[test]
+    fn a_cancelled_job_drops_its_unfinished_entry() {
+        let cache = Prefetch::default();
+        let job = Uuid::now_v7();
+        let _ = cache.claim(job).expect("attempt");
+        cache.forget(job);
+        assert!(!cache.entries.lock().unwrap().contains_key(&job));
     }
 }

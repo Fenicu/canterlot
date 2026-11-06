@@ -985,6 +985,7 @@ impl Scheduler {
             }
         };
         if let Some(mut current) = current {
+            let job_id = current.id;
             let waits_for_queue = current.kind == "session_task" && reason == "queue_full";
             if waits_for_queue && current.blocked_since.is_none() {
                 current.blocked_since = Some(now);
@@ -1061,6 +1062,7 @@ impl Scheduler {
                     }
                 }
                 report.failed += 1;
+                self.probes.forget(job_id);
             } else {
                 let multiplier = if reason == "queue_full" {
                     1
@@ -1281,6 +1283,7 @@ impl Scheduler {
                     return Err(error);
                 }
                 tx.commit().await?;
+                self.probes.forget(job.id);
                 report.fired += 1;
                 match kind {
                     JobKind::Wake | JobKind::SessionTask => {
@@ -1334,6 +1337,7 @@ impl Scheduler {
                     report.cancelled += 1;
                 }
                 tx.commit().await?;
+                self.probes.forget(job.id);
             }
             JobOutcome::Retry { at, poll } => {
                 // Повтор не раньше следующей секунды: цикл тика не крутит одно задание.
