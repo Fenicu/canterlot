@@ -453,14 +453,22 @@ pub async fn wake_in_tx(
     if exists {
         return Ok(());
     }
-    subs::insert_job(
-        conn,
-        owner_id,
-        parent,
-        at,
-        &json!({"action": "spawn_dequeue"}),
+    // У задания всегда есть durable-идентичность головы: отказ задания знает,
+    // какой элемент закрыть, а обход очереди всё равно идёт по готовности.
+    let head: Option<Uuid> = sqlx::query_scalar(
+        "select id from spawn_queue
+          where parent_id=$1 and state='queued' and expires_at>$2
+          order by created_at, id limit 1",
     )
+    .bind(parent)
+    .bind(now)
+    .fetch_optional(&mut *conn)
     .await?;
+    let mut payload = json!({"action": "spawn_dequeue"});
+    if let Some(head) = head {
+        payload["queue_id"] = json!(head);
+    }
+    subs::insert_job(conn, owner_id, parent, at, &payload).await?;
     Ok(())
 }
 
@@ -1204,43 +1212,47 @@ pub async fn abandon_in_tx(
     payload: &Value,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    let Some(queue_id) = payload
-        .get("queue_id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
+    let Some(owner_id) =
+        sqlx::query_scalar::<_, Uuid>("select owner_id from conversations where id=$1")
+            .bind(parent)
+            .fetch_optional(&mut *conn)
+            .await?
     else {
         return Ok(());
     };
-    let owner_id: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+    let queue_id = payload
+        .get("queue_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    if let Some(queue_id) = queue_id {
+        let mut row: Option<QueueRow> = sqlx::query_as(
+            "select * from spawn_queue where id=$1 and parent_id=$2 and state='queued' for update",
+        )
+        .bind(queue_id)
         .bind(parent)
-        .fetch_one(&mut *conn)
+        .fetch_optional(&mut *conn)
         .await?;
-    let mut row: Option<QueueRow> = sqlx::query_as(
-        "select * from spawn_queue where id=$1 and parent_id=$2 and state='queued' for update",
-    )
-    .bind(queue_id)
-    .bind(parent)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some(mut row) = row.take() else {
-        return Ok(());
-    };
-    row.result = Some(json!({"code": "job_failed"}));
-    let result = row.result.clone();
-    set_state_in_tx(conn, &mut row, STATE_FAILED, result, now, Uuid::now_v7()).await?;
-    note_in_tx(
-        conn,
-        owner_id,
-        parent,
-        format!(
-            "[canterlot] Queued spawn q-{} failed: job_failed. Nothing was started.",
-            &row.id.to_string()[..8]
-        ),
-        spec_depth(&row.spec),
-        queue_event(&row),
-        now,
-    )
-    .await?;
+        if let Some(mut row) = row.take() {
+            row.result = Some(json!({"code": "job_failed"}));
+            let result = row.result.clone();
+            set_state_in_tx(conn, &mut row, STATE_FAILED, result, now, Uuid::now_v7()).await?;
+            note_in_tx(
+                conn,
+                owner_id,
+                parent,
+                format!(
+                    "[canterlot] Queued spawn q-{} failed: job_failed. Nothing was started.",
+                    &row.id.to_string()[..8]
+                ),
+                spec_depth(&row.spec),
+                queue_event(&row),
+                now,
+            )
+            .await?;
+        }
+    }
+    // Задание без идентичности — обход очереди: даже если закрывать нечего,
+    // следующий элемент обязан получить задание.
     wake_in_tx(conn, owner_id, parent, now, None).await?;
     Ok(())
 }

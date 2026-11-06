@@ -1215,6 +1215,9 @@ async fn http_start_now_commits_a_permanent_failure_and_its_note(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
+    // Воркер подключён: неизвестный харнесс — постоянный отказ, а не потеря связи.
+    let registry = deps.registry.clone();
+    let _session = testkit::fake_session(&registry, machine, &CAPABILITIES, true);
     let client = TestClient::in_process(http::router(http::AppState::new(deps))).as_owner();
     let path = format!("/api/v1/conversations/{parent}/spawn-queue/{queue_id}/start-now");
     let first = client
@@ -1368,4 +1371,68 @@ async fn a_disconnected_machine_keeps_an_isolated_item_queued(pool: PgPool) {
     let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
     assert_eq!(state, "started");
     assert!(child.is_some());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn wake_jobs_name_the_head_and_a_sweep_job_recovers_on_abandon(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let queue_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,$5,'rate',now()-interval '1 second')",
+    )
+    .bind(queue_id)
+    .bind(f.owner)
+    .bind(f.parent)
+    .bind(Uuid::now_v7())
+    .bind(json!({"chain_depth":0,"args":{"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}}))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let mut tx = f.pool.begin().await.unwrap();
+    spawn_queue::wake_in_tx(&mut tx, f.owner, f.parent, Utc::now(), None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let payload: Value = sqlx::query_scalar(
+        "select payload from scheduled_jobs
+          where conversation_id=$1 and state='pending' and payload->>'action'='spawn_dequeue'",
+    )
+    .bind(f.parent)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["queue_id"], queue_id.to_string());
+
+    // Задание-обход без queue_id исчерпало попытки: элемент остаётся, но задание
+    // на него снова появляется.
+    sqlx::query("delete from scheduled_jobs where conversation_id=$1")
+        .bind(f.parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let mut tx = f.pool.begin().await.unwrap();
+    jobs::abandon_in_tx(
+        &mut tx,
+        f.owner,
+        Some(f.parent),
+        &json!({"action":"spawn_dequeue"}),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let (state, _r, _d, _c, _n) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "queued");
+    let recovered: bool = sqlx::query_scalar(
+        "select exists(select 1 from scheduled_jobs
+          where conversation_id=$1 and state='pending' and payload->>'action'='spawn_dequeue'
+            and payload->>'queue_id'=$2)",
+    )
+    .bind(f.parent)
+    .bind(queue_id.to_string())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(recovered, "a sweep job is recreated");
 }
