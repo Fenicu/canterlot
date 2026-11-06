@@ -163,6 +163,19 @@ export function eventLine(event: HubEvent, title: string): string | null {
       return title ? `${name} удалена` : 'Сессия удалена';
     case 'alarm':
       return alarmEventLine(event);
+    case 'spawn_queue':
+      switch (event.state) {
+        case 'started':
+          return title ? `Запуск из очереди: ${name} создана` : 'Запуск из очереди: сессия создана';
+        case 'failed':
+          return event.detail ? `Запуск из очереди не удался: ${event.detail}` : 'Запуск из очереди не удался';
+        case 'cancelled':
+          return 'Запуск из очереди отменён, сессия не создана';
+        case 'expired':
+          return 'Срок ожидания запуска вышел, сессия не создана';
+        default:
+          return null;
+      }
     default:
       return null;
   }

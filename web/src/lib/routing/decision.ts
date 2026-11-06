@@ -87,3 +87,17 @@ export function routeLine(decision: RouteDecision, title: string, titles?: Model
   const rest = skipped(decision).map((entry) => skippedText(entry, titles, now));
   return rest.length > 0 ? `${head}. ${rest.length === 1 ? 'Пропущен' : 'Пропущены'}: ${rest.join('; ')}` : head;
 }
+
+/** Названия моделей из каталогов машин: первая машина, знающая пару, называет её. */
+export function catalogTitles(
+  machines: Iterable<{ harnesses?: { id: string; models: { id: string; title: string }[] }[] }>
+): ModelTitles {
+  const titles = new Map<string, string>();
+  for (const machine of machines)
+    for (const harness of machine.harnesses ?? [])
+      for (const model of harness.models) {
+        const key = `${harness.id}/${model.id}`;
+        if (!titles.has(key) && model.title) titles.set(key, model.title);
+      }
+  return (harness, model) => titles.get(`${harness}/${model}`);
+}

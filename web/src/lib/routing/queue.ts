@@ -52,7 +52,7 @@ export function queueSummary(items: QueueItem[], now: number = Date.now()): stri
 }
 
 /** Причина элемента по-русски: вид и измерения хаба. */
-export function itemReason(item: QueueItem, now: number = Date.now()): string {
+export function itemReason(item: Pick<QueueItem, 'reason' | 'detail'>, now: number = Date.now()): string {
   const raw = item.detail && typeof item.detail === 'object' ? (item.detail as { detail?: unknown }).detail : item.detail;
   const detail = typeof raw === 'string' ? detailText(raw, now) : '';
   const label = queueReasonLabel(item.reason);
