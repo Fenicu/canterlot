@@ -106,6 +106,7 @@ impl Action {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_in_tx(
     conn: &mut PgConnection,
     job: &ClaimedJob,

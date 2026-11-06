@@ -823,7 +823,7 @@ async fn no_tool_writes_policy_or_whitelist_or_modes(pool: PgPool) {
     assert_eq!(snapshot(f.pool.clone()).await, before);
 }
 
-async fn queue_seed(pool: &PgPool, machine: Uuid, parent: Uuid, owner: Uuid, state: &str) -> Uuid {
+async fn queue_seed(pool: &PgPool, _machine: Uuid, parent: Uuid, owner: Uuid, state: &str) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
         "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before,state,result)

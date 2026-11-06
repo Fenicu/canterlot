@@ -332,7 +332,7 @@ pub async fn enqueue_in_tx(
         chain_depth: request.chain_depth,
     })
     .map_err(|_| ToolError::new(ToolErrorCode::Internal))?;
-    let mut tx = conn.begin().await?;
+    let mut tx = conn.begin().await?; // db::begin: savepoint
     let row: QueueRow = sqlx::query_as(
         "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,detail,not_before,expires_at)
          values($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *",
@@ -609,7 +609,8 @@ pub async fn start_now_in_tx(
     )
     .await?
     {
-        Attempt::Started { child, spec } => {
+        Attempt::Started(started) => {
+            let AttemptStarted { child, spec } = *started;
             let answer = json!({
                 "status": "started",
                 "queue_id": row.id,
@@ -652,11 +653,13 @@ async fn machine_of(conn: &mut PgConnection, parent: Uuid) -> Result<Uuid, sqlx:
         .await
 }
 
+struct AttemptStarted {
+    child: spawn::Started,
+    spec: spawn::SpawnSpec,
+}
+
 enum Attempt {
-    Started {
-        child: spawn::Started,
-        spec: spawn::SpawnSpec,
-    },
+    Started(Box<AttemptStarted>),
     Blocked {
         reason: &'static str,
         detail: String,
@@ -804,7 +807,7 @@ async fn try_start(
             });
         }
     }
-    let mut attempt = conn.begin().await?;
+    let mut attempt = conn.begin().await?; // db::begin: savepoint
     let started = spawn::start_child(
         &mut attempt,
         spawn::Launch {
@@ -870,7 +873,7 @@ async fn try_start(
             )
             .await?;
             wake_in_tx(conn, caller.owner_id, row.parent_id, now, None).await?;
-            Ok(Attempt::Started { child, spec })
+            Ok(Attempt::Started(Box::new(AttemptStarted { child, spec })))
         }
         Err(error) => {
             attempt.rollback().await?;
@@ -964,7 +967,7 @@ pub(crate) async fn run_job_in_tx(
         )
         .await?
         {
-            Attempt::Started { .. } => {
+            Attempt::Started(_) => {
                 started = true;
                 break;
             }
