@@ -28,7 +28,7 @@ const PREFETCH_TTL: Duration = Duration::from_secs(120);
 const PREFETCH_CAP: usize = 256;
 
 /// Что известно о пути. Ошибки — короткие коды воркера, не английский текст.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum PathProbe {
     Exists {
         size: u64,
@@ -44,6 +44,30 @@ pub enum PathProbe {
     Unavailable,
     /// Воркер без `path_probe_v1`.
     CapabilityMissing,
+}
+
+impl std::fmt::Debug for PathProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exists {
+                size,
+                mtime,
+                head,
+                head_omitted,
+            } => f
+                .debug_struct("Exists")
+                .field("size", size)
+                .field("mtime", mtime)
+                .field("head_bytes", &head.as_ref().map_or(0, String::len))
+                .field("head_omitted", head_omitted)
+                .finish(),
+            Self::Missing => f.write_str("Missing"),
+            Self::NotAllowed(reason) => f.debug_tuple("NotAllowed").field(reason).finish(),
+            Self::Error(reason) => f.debug_tuple("Error").field(reason).finish(),
+            Self::Unavailable => f.write_str("Unavailable"),
+            Self::CapabilityMissing => f.write_str("CapabilityMissing"),
+        }
+    }
 }
 
 impl PathProbe {
@@ -235,6 +259,19 @@ mod tests {
             })),
             now_ms: 1_762_345_300_000,
         }
+    }
+
+    #[test]
+    fn debug_does_not_print_the_head() {
+        let probe = PathProbe::Exists {
+            size: 2,
+            mtime: None,
+            head: Some("secret-token".into()),
+            head_omitted: None,
+        };
+        let text = format!("{probe:?}");
+        assert!(!text.contains("secret-token"), "{text}");
+        assert!(text.contains("head_bytes: 12"), "{text}");
     }
 
     #[test]

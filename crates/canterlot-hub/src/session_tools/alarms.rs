@@ -117,7 +117,7 @@ type LimitReading = (
 /// Условие `file`: файл на машине вызывающей сессии. `fresh` сравнивает время
 /// изменения с часами воркера в момент взвода: расхождение часов хаба и машины
 /// не важно, а старый файл, восстановленный после взвода, не считается свежим.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct FileCondition {
     kind: String,
     path: String,
@@ -153,6 +153,32 @@ struct FileCondition {
     /// Последняя проба не смогла прочитать путь: короткий код воркера.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     probe_error: Option<String>,
+}
+
+/// В журнал и сообщения путь и начало файла не попадают: в `Debug` только длины.
+impl std::fmt::Debug for FileCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileCondition")
+            .field("kind", &self.kind)
+            .field("path_bytes", &self.path.len())
+            .field("min_bytes", &self.min_bytes)
+            .field("fresh", &self.fresh)
+            .field("read_head", &self.read_head)
+            .field("armed_at", &self.armed_at)
+            .field("armed_worker_ms", &self.armed_worker_ms)
+            .field("armed_mtime", &self.armed_mtime)
+            .field("armed_size", &self.armed_size)
+            .field("observed_size", &self.observed_size)
+            .field("observed_mtime", &self.observed_mtime)
+            .field(
+                "observed_head_bytes",
+                &self.observed_head.as_ref().map_or(0, String::len),
+            )
+            .field("head_omitted", &self.head_omitted)
+            .field("unavailable_since", &self.unavailable_since)
+            .field("probe_error", &self.probe_error)
+            .finish()
+    }
 }
 
 fn default_min_bytes() -> u64 {
@@ -3717,6 +3743,32 @@ fn render_one(row: &AlarmRow, now: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_condition_debug_hides_the_path_and_the_head() {
+        let condition = FileCondition {
+            kind: "file".into(),
+            path: "/tmp/private-gate.rc".into(),
+            min_bytes: 1,
+            fresh: true,
+            read_head: true,
+            armed_at: Utc::now(),
+            armed_worker_ms: Some(1),
+            armed_mtime: None,
+            armed_size: None,
+            observed_size: Some(2),
+            observed_mtime: None,
+            observed_head: Some("secret-token".into()),
+            head_omitted: None,
+            unavailable_since: None,
+            probe_error: None,
+        };
+        let text = format!("{condition:?}");
+        assert!(!text.contains("private-gate"), "{text}");
+        assert!(!text.contains("secret-token"), "{text}");
+        assert!(text.contains("path_bytes: 20"), "{text}");
+        assert!(text.contains("observed_head_bytes: 12"), "{text}");
+    }
 
     #[test]
     fn parse_time_args_from_json() {

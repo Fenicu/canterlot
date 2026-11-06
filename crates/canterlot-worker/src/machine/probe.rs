@@ -27,7 +27,7 @@ use canterlot_proto::{
 use super::share::{self, ShareError};
 
 /// Что машина рассказала о пути.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Outcome {
     Exists {
         size: u64,
@@ -42,6 +42,28 @@ pub enum Outcome {
     NotAllowed(&'static str),
     /// Проба не смогла прочитать файл: путь при этом допустим.
     Error(&'static str),
+}
+
+impl std::fmt::Debug for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exists {
+                size,
+                mtime_ms,
+                head,
+                head_omitted,
+            } => f
+                .debug_struct("Exists")
+                .field("size", size)
+                .field("mtime_ms", mtime_ms)
+                .field("head_bytes", &head.as_ref().map_or(0, String::len))
+                .field("head_omitted", head_omitted)
+                .finish(),
+            Self::Missing => f.write_str("Missing"),
+            Self::NotAllowed(reason) => f.debug_tuple("NotAllowed").field(reason).finish(),
+            Self::Error(reason) => f.debug_tuple("Error").field(reason).finish(),
+        }
+    }
 }
 
 /// Срок пробы на воркере: зависшее чтение отвечает ошибкой, а не ждёт хаб.
@@ -541,6 +563,19 @@ mod tests {
             path: "/tmp/gate.rc".into(),
             read_head_bytes: 0,
         }
+    }
+
+    #[test]
+    fn debug_does_not_print_the_head_or_the_path() {
+        let outcome = Outcome::Exists {
+            size: 2,
+            mtime_ms: 1,
+            head: Some("secret-token".into()),
+            head_omitted: "",
+        };
+        let text = format!("{outcome:?}");
+        assert!(!text.contains("secret-token"), "{text}");
+        assert!(text.contains("head_bytes: 12"), "{text}");
     }
 
     #[test]
