@@ -544,12 +544,11 @@ pub(crate) fn open_checked(
     roots: &[std::path::PathBuf],
     outside: ShareError,
 ) -> Result<Checked, ShareError> {
-    if denied_lexical(path) || lexical_root(path, roots).is_none() {
-        return Err(if denied_lexical(path) {
-            ShareError::Denied
-        } else {
-            outside
-        });
+    if denied_lexical(path) {
+        return Err(ShareError::Denied);
+    }
+    if lexical_root(path, roots).is_none() {
+        return Err(outside);
     }
     let (file, name) = open_beneath(path, roots, outside)?;
     let meta = file.metadata().map_err(|_| ShareError::Unreadable)?;

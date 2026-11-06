@@ -1268,9 +1268,7 @@ impl Worker {
         let mut probe_queue =
             crate::machine::probe::PendingProbes::new(crate::machine::probe::MAX_CONCURRENT_PROBES);
         let mut probe_outbound: VecDeque<ControlUp> = VecDeque::new();
-        let probe_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(
-            crate::machine::probe::MAX_CONCURRENT_PROBES,
-        ));
+        let probe_permits = crate::machine::probe::process_permits();
         type ProbeFuture = Pin<Box<dyn Future<Output = PathProbe> + Send>>;
         let mut probe_operation: Option<ProbeFuture> = None;
         // Чтение инструкций владельца: тоже только последний запрос.

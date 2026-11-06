@@ -233,6 +233,7 @@ impl Prefetch {
         {
             entry.result = Some(result);
         }
+        sweep(&mut entries);
     }
 
     /// Задание закрыто или отменено: недоделанная запись больше не нужна.

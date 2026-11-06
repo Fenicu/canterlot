@@ -12,7 +12,7 @@ use std::{
     io::{ErrorKind, Read},
     os::unix::fs::MetadataExt,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -72,6 +72,16 @@ pub const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5
 /// Столько файловых проб может висеть в потоках одновременно. Разрешение
 /// освобождается только вместе с блокирующей задачей, а не по сроку ответа.
 pub const MAX_CONCURRENT_PROBES: usize = 4;
+
+/// Предел общий на процесс: он переживает переподключение управляющего канала,
+/// иначе зависшие задачи старого сеанса копились бы с новыми.
+static PROBE_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+pub(crate) fn process_permits() -> Arc<Semaphore> {
+    PROBE_PERMITS
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_PROBES)))
+        .clone()
+}
 
 /// Очередь запросов пробы: меньше предела — ждут ответа по порядку, сверх —
 /// сразу получают явный `busy` со своим `request_id`, а не теряются.
