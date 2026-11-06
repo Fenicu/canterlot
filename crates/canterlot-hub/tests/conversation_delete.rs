@@ -592,6 +592,7 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
         nudge_enabled: true,
         routing_enabled: true,
         routing_stale: std::time::Duration::from_secs(1800),
+        routing_queue_horizon: std::time::Duration::from_secs(6 * 3600),
         spawn_queue: Default::default(),
         guards: Default::default(),
         dispatcher: None,

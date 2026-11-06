@@ -71,11 +71,12 @@ enum Action {
     AlarmDeliver,
     AlarmProbe,
     Nudge,
+    SpawnDequeue,
 }
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Event,
         Self::MachineEvent,
         Self::Note,
@@ -85,6 +86,7 @@ impl Action {
         Self::AlarmDeliver,
         Self::AlarmProbe,
         Self::Nudge,
+        Self::SpawnDequeue,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -98,6 +100,7 @@ impl Action {
             "alarm_deliver" => Some(Self::AlarmDeliver),
             "alarm_probe" => Some(Self::AlarmProbe),
             "nudge" => Some(Self::Nudge),
+            "spawn_dequeue" => Some(Self::SpawnDequeue),
             _ => None,
         }
     }
@@ -111,6 +114,7 @@ pub async fn run_in_tx(
     registry: Option<&Registry>,
     settle: &crate::session_tools::settle::SettleConfig,
     thresholds: &crate::activity::Thresholds,
+    spawn_runtime: Option<&crate::session_tools::spawn_queue::Runtime<'_>>,
 ) -> Result<JobOutcome, SubmitError> {
     let Some(subscriber) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -200,6 +204,20 @@ pub async fn run_in_tx(
             )
             .await
         }
+        Action::SpawnDequeue => match spawn_runtime {
+            Some(runtime) => {
+                crate::session_tools::spawn_queue::run_job_in_tx(
+                    conn,
+                    job,
+                    subscriber,
+                    runtime,
+                    now,
+                    correlation_id,
+                )
+                .await
+            }
+            None => Ok(JobOutcome::Cancelled("runtime_missing")),
+        },
     }
 }
 
@@ -433,6 +451,11 @@ pub async fn abandon_in_tx(
         Action::Nudge => {
             crate::session_tools::nudge::abandon_in_tx(conn, conversation, payload, now).await
         }
+        Action::SpawnDequeue => {
+            crate::session_tools::spawn_queue::abandon_in_tx(conn, conversation, payload, now)
+                .await
+                .map(|_| false)
+        }
     }
 }
 
@@ -473,6 +496,9 @@ mod tests {
                     json!({"action": "alarm_probe", "alarm_id": Uuid::now_v7()})
                 }
                 Action::Nudge => json!({"action": "nudge", "fingerprint": "f"}),
+                Action::SpawnDequeue => {
+                    json!({"action": "spawn_dequeue", "queue_id": Uuid::now_v7()})
+                }
             };
             abandon_in_tx(
                 &mut conn,

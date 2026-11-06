@@ -99,6 +99,7 @@ fn tool_context(pool: &PgPool) -> ToolContext {
         nudge_enabled: true,
         routing_enabled: true,
         routing_stale: std::time::Duration::from_secs(1800),
+        routing_queue_horizon: std::time::Duration::from_secs(6 * 3600),
         spawn_queue: Default::default(),
         guards: Default::default(),
         dispatcher: None,
@@ -812,6 +813,7 @@ async fn deleted_event_after_trash_has_only_the_minimal_notice(pool: PgPool) {
         None,
         &SettleConfig::default(),
         &Thresholds::from(&ActivityConfig::default()),
+        None,
     )
     .await
     .unwrap();

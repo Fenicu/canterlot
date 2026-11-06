@@ -1,0 +1,822 @@
+//! Очередь запусков C2: постановка, задание `spawn_dequeue`, отмена, страж, сроки.
+
+use std::sync::Arc;
+
+use canterlot_hub::{
+    activity::Thresholds,
+    config::{ActivityConfig, SessionToolsConfig},
+    crunch::JobOutcome,
+    dispatcher::Dispatcher,
+    scheduler::{ClaimedJob, JobKind},
+    session::Registry,
+    session_tools::{
+        self, Caller, TOOLS, ToolContext, ToolErrorCode as Code, jobs, settle::SettleConfig,
+        spawn_queue,
+    },
+    testkit::{self, FakeSession},
+};
+use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+const CAPABILITIES: [&str; 3] = ["pilot_v1", "instructions_v1", "session_tools_v1"];
+
+struct Fx {
+    pool: PgPool,
+    context: ToolContext,
+    owner: Uuid,
+    machine: Uuid,
+    parent: Uuid,
+    execution: Uuid,
+    _session: FakeSession,
+}
+
+fn model(id: &str, efforts: &[&str]) -> Value {
+    json!({"id": id, "title": id, "efforts": efforts})
+}
+
+async fn catalog(pool: &PgPool, machine: Uuid, harness: &str, provider: &str, models: Value) {
+    sqlx::query(
+        "insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,
+                                       permission_modes,models,settings_midsession_effort)
+         values($1,$2,$3,$2,true,true,'[\"owner\",\"ask\",\"bypass\",\"read_only\"]',$4,true)",
+    )
+    .bind(machine)
+    .bind(harness)
+    .bind(provider)
+    .bind(models)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+impl Fx {
+    async fn new(pool: PgPool) -> Self {
+        let seed = testkit::seed(&pool).await;
+        let registry = Registry::new(Default::default());
+        let session = testkit::fake_session(&registry, seed.machine_id, &CAPABILITIES, true);
+        for (harness, provider, models) in [
+            (
+                "opencode",
+                "opencode",
+                json!([
+                    model(
+                        "opencode-go/deepseek-v4.1-flash",
+                        &["low", "medium", "high"]
+                    ),
+                    model("opencode-go/beam-free", &["low", "medium"]),
+                ]),
+            ),
+            (
+                "claude_code",
+                "claude",
+                json!([model("opus[1m]", &["low", "medium", "high"])]),
+            ),
+        ] {
+            catalog(&pool, seed.machine_id, harness, provider, models).await;
+        }
+        sqlx::query(
+            "update machines set availability='available',capabilities=array['pilot_v1'],limits_ok=true,
+               allowed_roots='[\"/tmp\"]',worktree_root='/data/worktrees' where id=$1",
+        )
+        .bind(seed.machine_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "update conversations set title='Родитель',harness='opencode',model='opencode-go/beam-free',
+               effort='medium',permission_mode='bypass',workdir='/tmp/w' where id=$1",
+        )
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let started = canterlot_hub::executions::start(
+            &pool,
+            seed.owner_id,
+            seed.conversation_id,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("update owners set spawn_whitelist=$2 where id=$1")
+            .bind(seed.owner_id)
+            .bind(json!([
+                {"harness":"opencode","model":"opencode-go/deepseek-v4.1-flash"},
+                {"harness":"opencode","model":"opencode-go/beam-free"},
+                {"harness":"claude_code","model":"opus[1m]"},
+            ]))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_dispatcher, _) = Dispatcher::channel();
+        Self {
+            context: ToolContext {
+                pool: pool.clone(),
+                config: Arc::new(SessionToolsConfig::default()),
+                limits: Default::default(),
+                settle: SettleConfig {
+                    idle_quiet: std::time::Duration::from_secs(5),
+                    nudge_enabled: true,
+                },
+                alarms_enabled: true,
+                nudge_enabled: true,
+                routing_enabled: true,
+                routing_stale: std::time::Duration::from_secs(1800),
+                routing_queue_horizon: std::time::Duration::from_secs(6 * 3600),
+                spawn_queue: Default::default(),
+                guards: Default::default(),
+                dispatcher: None,
+                registry,
+                shutdown: tokio_util::sync::CancellationToken::new(),
+            },
+            pool,
+            owner: seed.owner_id,
+            machine: seed.machine_id,
+            parent: seed.conversation_id,
+            execution: started.execution_id,
+            _session: session,
+        }
+    }
+
+    fn caller(&self) -> Caller {
+        self.caller_with(Uuid::now_v7())
+    }
+
+    fn caller_with(&self, call_id: Uuid) -> Caller {
+        Caller {
+            owner_id: self.owner,
+            conversation_id: self.parent,
+            execution_id: self.execution,
+            machine_id: self.machine,
+            call_id,
+        }
+    }
+
+    async fn call(&self, tool: &str, args: Value) -> Result<Value, session_tools::ToolError> {
+        session_tools::call(&self.context, &self.caller(), tool, args).await
+    }
+
+    async fn spawn_direct(&self) -> Result<Value, session_tools::ToolError> {
+        self.call(
+            "sessions.spawn",
+            json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}),
+        )
+        .await
+    }
+
+    async fn runtime_call(
+        &self,
+        queue_id: Uuid,
+        start_now: bool,
+    ) -> Result<Value, session_tools::ToolError> {
+        let runtime = spawn_queue::Runtime {
+            registry: Some(&self.context.registry),
+            session_tools: &self.context.config,
+            spawn_queue: &self.context.spawn_queue,
+            guards: &self.context.guards,
+            routing_enabled: self.context.routing_enabled,
+            routing_stale: self.context.routing_stale,
+            routing_queue_horizon: self.context.routing_queue_horizon,
+        };
+        let mut tx = self.pool.begin().await.unwrap();
+        let result = if start_now {
+            spawn_queue::start_now_in_tx(
+                &mut tx,
+                &runtime,
+                self.owner,
+                self.parent,
+                queue_id,
+                Uuid::now_v7(),
+                Utc::now(),
+            )
+            .await
+        } else {
+            unreachable!()
+        };
+        tx.commit().await.unwrap();
+        result
+    }
+
+    async fn run_dequeue(&self, queue_id: Uuid, now: DateTime<Utc>) -> JobOutcome {
+        let job = ClaimedJob {
+            id: Uuid::now_v7(),
+            kind: JobKind::SessionTask,
+            owner_id: self.owner,
+            conversation_id: Some(self.parent),
+            run_at: now,
+            payload: json!({"action":"spawn_dequeue","queue_id":queue_id}),
+            attempts: 0,
+        };
+        let runtime = spawn_queue::Runtime {
+            registry: Some(&self.context.registry),
+            session_tools: &self.context.config,
+            spawn_queue: &self.context.spawn_queue,
+            guards: &self.context.guards,
+            routing_enabled: self.context.routing_enabled,
+            routing_stale: self.context.routing_stale,
+            routing_queue_horizon: self.context.routing_queue_horizon,
+        };
+        let thresholds = Thresholds::from(&ActivityConfig::default());
+        let mut tx = self.pool.begin().await.unwrap();
+        let outcome = jobs::run_in_tx(
+            &mut tx,
+            &job,
+            now,
+            Uuid::now_v7(),
+            Some(&self.context.registry),
+            &self.context.settle,
+            &thresholds,
+            Some(&runtime),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        outcome
+    }
+}
+
+async fn child_of(pool: &PgPool, parent: Uuid, harness: &str, model: &str, state: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into conversations(id,owner_id,machine_id,harness,workdir,model,effort,parent_conversation_id,spawn_depth)
+         values($1,(select owner_id from conversations where id=$2),$3,$4,'/tmp/w',$5,'high',$2,1)",
+    )
+    .bind(id)
+    .bind(parent)
+    .bind(sqlx::query_scalar::<_, Uuid>("select machine_id from conversations where id=$1").bind(parent).fetch_one(pool).await.unwrap())
+    .bind(harness)
+    .bind(model)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("insert into queue_state(conversation_id) values($1) on conflict do nothing")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into conversation_derived(conversation_id,activity_state,queue_queued) values($1,$2,0)",
+    )
+    .bind(id)
+    .bind(state)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+/// Десять запусков в окне частоты: одиннадцатый встаёт в очередь.
+async fn fill_rate(pool: &PgPool, parent: Uuid) {
+    for _ in 0..10 {
+        child_of(pool, parent, "opencode", "opencode-go/beam-free", "idle").await;
+    }
+}
+
+async fn queue_row(
+    pool: &PgPool,
+    id: Uuid,
+) -> (String, String, Value, Option<Uuid>, DateTime<Utc>) {
+    sqlx::query_as("select state,reason,detail,child_id,not_before from spawn_queue where id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn make_due(pool: &PgPool, id: Uuid) {
+    sqlx::query("update spawn_queue set not_before=now()-interval '1 second' where id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn notes_for(pool: &PgPool, parent: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "select payload->>'text' from scheduled_jobs
+          where conversation_id=$1 and payload->>'action'='note' and payload->>'text' like '%Queued spawn%'",
+    )
+    .bind(parent)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn low_disk(pool: &PgPool, machine: Uuid) {
+    sqlx::query(
+        "insert into machine_metrics(machine_id,machine_time_ms,cpu_cores,cpu_permille,
+              mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions,observed_at)
+         values($1,0,8,100,16000000000,12000000000,40,40,40,
+           '[{\"mount\":\"/\",\"total_bytes\":100000000000,\"free_bytes\":12000000000}]'::jsonb,'[]',now())
+         on conflict (machine_id) do update set machine_time_ms=0,cpu_cores=8,cpu_permille=100,
+           mem_total_bytes=16000000000,mem_available_bytes=12000000000,load1_centi=40,load5_centi=40,load15_centi=40,
+           disks='[{\"mount\":\"/\",\"total_bytes\":100000000000,\"free_bytes\":12000000000}]'::jsonb,
+           executions='[]'::jsonb,observed_at=now()",
+    )
+    .bind(machine)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn eleventh_spawn_queues_and_the_job_starts_it_with_one_note(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let answer = f.spawn_direct().await.unwrap();
+    assert_eq!(answer["status"], "queued", "{answer}");
+    assert_eq!(answer["reason"], "rate", "{answer}");
+    assert_eq!(answer["position"], 1, "{answer}");
+    assert!(
+        answer["detail"]
+            .as_str()
+            .unwrap()
+            .contains("10 spawns in the last hour"),
+        "{answer}"
+    );
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+
+    // Окно частоты освободилось: задание запускает элемент.
+    sqlx::query(
+        "update conversations set created_at=now()-interval '61 minutes'
+          where parent_conversation_id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    make_due(&f.pool, queue_id).await;
+    let outcome = f.run_dequeue(queue_id, Utc::now()).await;
+    assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
+    let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "started");
+    let child = child.expect("child id");
+    let (harness, model): (String, String) =
+        sqlx::query_as("select harness,model from conversations where id=$1")
+            .bind(child)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(harness, "opencode");
+    assert_eq!(model, "opencode-go/beam-free");
+    let notes = notes_for(&f.pool, f.parent).await;
+    assert_eq!(notes.len(), 1, "exactly one note: {notes:?}");
+    assert!(notes[0].contains("Queued spawn q-"), "{}", notes[0]);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn retried_call_id_returns_the_same_item(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let call_id = Uuid::now_v7();
+    let first = session_tools::call(
+        &f.context,
+        &f.caller_with(call_id),
+        "sessions.spawn",
+        json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}),
+    )
+    .await
+    .unwrap();
+    let second = session_tools::call(
+        &f.context,
+        &f.caller_with(call_id),
+        "sessions.spawn",
+        json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["status"], "queued", "{first}");
+    assert_eq!(first["queue_id"], second["queue_id"]);
+    assert_eq!(second["position"], 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_cancel_answers_three_ways_and_refuses_another_parent(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let answer = f.spawn_direct().await.unwrap();
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+
+    let foreign = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let foreign_exec = canterlot_hub::executions::start(&f.pool, f.owner, foreign, Uuid::now_v7())
+        .await
+        .unwrap();
+    let foreign_caller = Caller {
+        owner_id: f.owner,
+        conversation_id: foreign,
+        execution_id: foreign_exec.execution_id,
+        machine_id: f.machine,
+        call_id: Uuid::now_v7(),
+    };
+    let refused = session_tools::call(
+        &f.context,
+        &foreign_caller,
+        "spawn_queue.cancel",
+        json!({"queue_id": queue_id}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code, Code::NotParent);
+
+    let cancelled = f
+        .call("spawn_queue.cancel", json!({"queue_id": queue_id}))
+        .await
+        .unwrap();
+    assert_eq!(cancelled["status"], "cancelled");
+    let again = f
+        .call("spawn_queue.cancel", json!({"queue_id": queue_id}))
+        .await
+        .unwrap();
+    assert_eq!(again["status"], "already_cancelled");
+
+    // Второй элемент встаёт в очередь, затем окно частоты освобождается.
+    let second = f.spawn_direct().await.unwrap();
+    assert_eq!(second["status"], "queued", "{second}");
+    let started_id: Uuid = serde_json::from_value(second["queue_id"].clone()).unwrap();
+    sqlx::query(
+        "update conversations set created_at=now()-interval '61 minutes'
+          where parent_conversation_id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    make_due(&f.pool, started_id).await;
+    f.run_dequeue(started_id, Utc::now()).await;
+    let answer = f
+        .call("spawn_queue.cancel", json!({"queue_id": started_id}))
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "already_started", "{answer}");
+    assert!(answer["session_id"].is_string(), "{answer}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn queue_false_returns_the_old_errors(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let error = f
+        .call(
+            "sessions.spawn",
+            json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b","queue":false}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::RateLimited);
+
+    low_disk(&f.pool, f.machine).await;
+    sqlx::query(
+        "update conversations set created_at=now()-interval '61 minutes'
+          where parent_conversation_id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let error = f
+        .call(
+            "sessions.spawn",
+            json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b","queue":false}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::MachineBusy, "{}", error.message);
+
+    sqlx::query("delete from machine_metrics where machine_id=$1")
+        .bind(f.machine)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn queue_full_at_twenty(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    for _ in 0..20 {
+        sqlx::query(
+            "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+             values($1,$2,$3,$4,'{}','rate',now())",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.owner)
+        .bind(f.parent)
+        .bind(Uuid::now_v7())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+    fill_rate(&f.pool, f.parent).await;
+    let error = f.spawn_direct().await.unwrap_err();
+    assert_eq!(error.code, Code::SpawnQueueFull, "{}", error.message);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn guard_queues_on_low_disk_and_names_cleanup_candidates(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let cleanup = child_of(
+        &f.pool,
+        f.parent,
+        "opencode",
+        "opencode-go/deepseek-v4.1-flash",
+        "idle",
+    )
+    .await;
+    sqlx::query("update conversations set title='T3',worktree=$2 where id=$1")
+        .bind(cleanup)
+        .bind(json!({"path":"/data/worktrees/t3","branch":"canterlot/t3","state":"active"}))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversation_derived set activity_state='idle',activity_since=now()-interval '3 hours' where conversation_id=$1")
+        .bind(cleanup)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    low_disk(&f.pool, f.machine).await;
+    let answer = f.spawn_direct().await.unwrap();
+    assert_eq!(answer["status"], "queued", "{answer}");
+    assert_eq!(answer["reason"], "resources", "{answer}");
+    let detail = answer["detail"].as_str().unwrap();
+    assert!(detail.contains("disk 12 GB free < 30 GB"), "{detail}");
+    assert!(
+        detail.contains("T3 idle 3 h: session_accept frees their worktrees and target dirs"),
+        "{detail}"
+    );
+
+    let preview = f
+        .call("routing.preview", json!({"task_type":"bugfix"}))
+        .await
+        .unwrap();
+    assert_eq!(preview["guard"]["blocked"], true, "{preview}");
+    assert_eq!(preview["guard"]["stale"], false, "{preview}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_now_bypasses_the_guard_but_not_the_whitelist(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    low_disk(&f.pool, f.machine).await;
+    let answer = f.spawn_direct().await.unwrap();
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+    let started = f.runtime_call(queue_id, true).await.unwrap();
+    assert_eq!(started["status"], "started", "{started}");
+    assert!(started["session_id"].is_string(), "{started}");
+
+    // Второй элемент встаёт в очередь при низком диске, затем пара пропадает из
+    // белого списка: «Запустить сейчас» не обходит список.
+    let queued = f.spawn_direct().await.unwrap();
+    assert_eq!(queued["status"], "queued", "{queued}");
+    let queue_id: Uuid = serde_json::from_value(queued["queue_id"].clone()).unwrap();
+    sqlx::query("update owners set spawn_whitelist=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!([{"harness":"claude_code","model":"opus[1m]"}]))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let refused = f.runtime_call(queue_id, true).await.unwrap_err();
+    assert_eq!(refused.code, Code::InvalidArguments, "{}", refused.message);
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "failed");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn expiry_after_expires_at_across_a_restart(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let answer = f.spawn_direct().await.unwrap();
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+    sqlx::query("update spawn_queue set expires_at=now()-interval '1 second',not_before=now()-interval '1 second' where id=$1")
+        .bind(queue_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    // Новый запуск хаба: задание берётся из базы.
+    f.run_dequeue(queue_id, Utc::now()).await;
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "expired");
+    let notes = notes_for(&f.pool, f.parent).await;
+    assert!(
+        notes.iter().any(|note| note.contains("expired")),
+        "{notes:?}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn abandon_fails_the_item_and_frees_the_next(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let first = f.spawn_direct().await.unwrap();
+    let first_id: Uuid = serde_json::from_value(first["queue_id"].clone()).unwrap();
+    let second = f.spawn_direct().await.unwrap();
+    let second_id: Uuid = serde_json::from_value(second["queue_id"].clone()).unwrap();
+    let mut tx = f.pool.begin().await.unwrap();
+    jobs::abandon_in_tx(
+        &mut tx,
+        f.owner,
+        Some(f.parent),
+        &json!({"action":"spawn_dequeue","queue_id":first_id}),
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, first_id).await;
+    assert_eq!(state, "failed");
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, second_id).await;
+    assert_eq!(state, "queued");
+
+    // Следующий элемент запускается тем же путём, что и обычно.
+    sqlx::query(
+        "update conversations set created_at=now()-interval '61 minutes'
+          where parent_conversation_id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    make_due(&f.pool, second_id).await;
+    let outcome = f.run_dequeue(second_id, Utc::now()).await;
+    assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, second_id).await;
+    assert_eq!(state, "started");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn parent_stop_cancels_items_with_a_note(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    // Очередь ведёт делегированная сессия: её и останавливает прямой родитель.
+    let target = child_of(
+        &f.pool,
+        f.parent,
+        "opencode",
+        "opencode-go/beam-free",
+        "working",
+    )
+    .await;
+    canterlot_hub::executions::start(&f.pool, f.owner, target, Uuid::now_v7())
+        .await
+        .unwrap();
+    let queue_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,'{\"chain_depth\":1,\"args\":{\"brief\":\"b\"}}','rate',now())",
+    )
+    .bind(queue_id)
+    .bind(f.owner)
+    .bind(target)
+    .bind(Uuid::now_v7())
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let stopped = f
+        .call("sessions.stop", json!({"session_id": target}))
+        .await
+        .unwrap();
+    assert_eq!(stopped["status"], "stopping", "{stopped}");
+    let (state, _reason, _detail, _child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "cancelled");
+    let notes: Vec<String> = sqlx::query_scalar(
+        "select payload->>'text' from scheduled_jobs
+          where conversation_id=$1 and payload->>'action'='note'",
+    )
+    .bind(target)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert!(
+        notes.iter().any(|note| note.contains("queued spawn")),
+        "{notes:?}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn policy_change_while_waiting_is_recomputed(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {"bugfix": {"title": "Починка", "candidates": [
+                {"harness":"opencode","model":"opencode-go/deepseek-v4.1-flash","effort":"high"}
+            ]}},
+            "max_parallel": {"opencode/opencode-go/deepseek-v4.1-flash": 1}
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let busy = child_of(
+        &f.pool,
+        f.parent,
+        "opencode",
+        "opencode-go/deepseek-v4.1-flash",
+        "working",
+    )
+    .await;
+    let queued = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"bugfix"},"brief":"Почини"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued["status"], "queued", "{queued}");
+    assert_eq!(queued["reason"], "concurrency", "{queued}");
+    let queue_id: Uuid = serde_json::from_value(queued["queue_id"].clone()).unwrap();
+
+    // Политика сменилась: первым идёт beam-free, а занятый исполнитель освободился.
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {"bugfix": {"title": "Починка", "candidates": [
+                {"harness":"opencode","model":"opencode-go/beam-free","effort":"medium"},
+                {"harness":"opencode","model":"opencode-go/deepseek-v4.1-flash","effort":"high"}
+            ]}}
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update conversation_derived set activity_state='stopped' where conversation_id=$1",
+    )
+    .bind(busy)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    make_due(&f.pool, queue_id).await;
+    f.run_dequeue(queue_id, Utc::now()).await;
+    let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "started");
+    let model: String = sqlx::query_scalar("select model from conversations where id=$1")
+        .bind(child.unwrap())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(model, "opencode-go/beam-free");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn two_spawns_racing_for_the_last_slot_start_one_and_queue_one(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {"bugfix": {"title": "Починка", "candidates": [
+                {"harness":"opencode","model":"opencode-go/beam-free","effort":"medium"}
+            ]}},
+            "max_parallel": {"opencode/opencode-go/beam-free": 1}
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let args = json!({"route":{"task_type":"bugfix"},"brief":"Почини"});
+    let first_caller = f.caller();
+    let second_caller = f.caller();
+    let first = session_tools::call(&f.context, &first_caller, "sessions.spawn", args.clone());
+    let second = session_tools::call(&f.context, &second_caller, "sessions.spawn", args);
+    let (first, second) = tokio::join!(first, second);
+    let statuses = [
+        first.unwrap()["status"].clone(),
+        second.unwrap()["status"].clone(),
+    ];
+    assert!(
+        statuses.iter().any(|status| status == "started"),
+        "{statuses:?}"
+    );
+    assert!(
+        statuses.iter().any(|status| status == "queued"),
+        "{statuses:?}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn sessions_list_reports_waiting_spawns(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    fill_rate(&f.pool, f.parent).await;
+    let answer = f.spawn_direct().await.unwrap();
+    assert_eq!(answer["status"], "queued");
+    let list = f.call("sessions.list", json!({})).await.unwrap();
+    assert_eq!(list["queued_spawns"]["count"], 1, "{list}");
+    assert!(list["queued_spawns"]["nearest"].is_string(), "{list}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn no_tool_writes_policy_or_whitelist_or_modes(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let snapshot = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, String>("select string_agg(o::text,',' order by id) from owners o")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = snapshot(f.pool.clone()).await;
+    for tool in TOOLS {
+        for args in [
+            json!({}),
+            json!({"queue_id": Uuid::now_v7()}),
+            json!({"policy":null,"revision":99}),
+        ] {
+            let _ = session_tools::call(&f.context, &f.caller(), tool, args).await;
+        }
+    }
+    assert_eq!(snapshot(f.pool.clone()).await, before);
+}

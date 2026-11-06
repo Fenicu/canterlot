@@ -962,9 +962,10 @@ fn ago(age: chrono::TimeDelta) -> String {
 }
 
 /// Шов очереди (C2): причина постановки — параллельность или лимиты со сбросом
-/// не позже горизонта. C1 всегда отвечает ошибкой, но решение уже размечено.
+/// не позже горизонта. Пара вне белого списка и неизвестный харнесс очередью не лечатся.
 pub fn queue_reason(
     considered: &[Considered],
+    reset: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
     horizon: Duration,
 ) -> Option<&'static str> {
@@ -976,8 +977,10 @@ pub fn queue_reason(
             _ => {}
         }
     }
-    if limits {
-        let _ = (now, horizon);
+    if limits
+        && reset
+            .is_some_and(|at| at <= now + chrono::TimeDelta::from_std(horizon).unwrap_or_default())
+    {
         return Some("limits");
     }
     None
@@ -1067,7 +1070,14 @@ pub async fn live_counts(
             and (d.activity_state in ('working','stalled')
               or (d.activity_state='idle' and d.queue_queued > 0)
               or exists(select 1 from nudge_rules r
-                        where r.conversation_id=c.id and r.state='pending'))
+                        where r.conversation_id=c.id and r.state='pending')
+              -- Проекция отстаёт на мгновение: только что созданный делегат с ещё
+              -- не принятым вводом уже занимает слот параллельности.
+              or exists(select 1 from inputs i
+                        where i.conversation_id=c.id and i.feed_seq is null
+                          and i.state in ('queued','dispatched','on_machine'))
+              or exists(select 1 from queue_state q
+                        where q.conversation_id=c.id and q.run_slot <> 'free'))
           group by c.harness,c.model",
     )
     .bind(owner)
@@ -1929,7 +1939,7 @@ mod tests {
             reason: "1 of 1 sessions busy".to_owned(),
         }];
         assert_eq!(
-            queue_reason(&busy, now(), Duration::from_secs(6 * 3600)),
+            queue_reason(&busy, None, now(), Duration::from_secs(6 * 3600)),
             Some("concurrency")
         );
         let limited = vec![Considered {
@@ -1939,7 +1949,12 @@ mod tests {
             reason: "codex weekly 83% > 80%".to_owned(),
         }];
         assert_eq!(
-            queue_reason(&limited, now(), Duration::from_secs(6 * 3600)),
+            queue_reason(
+                &limited,
+                Some(now() + chrono::TimeDelta::hours(4)),
+                now(),
+                Duration::from_secs(6 * 3600)
+            ),
             Some("limits")
         );
         let skipped = vec![Considered {
@@ -1949,7 +1964,22 @@ mod tests {
             reason: "not in the owner's list".to_owned(),
         }];
         assert_eq!(
-            queue_reason(&skipped, now(), Duration::from_secs(6 * 3600)),
+            queue_reason(&skipped, None, now(), Duration::from_secs(6 * 3600)),
+            None
+        );
+        // Сброс дальше горизонта — не очередь, а ошибка.
+        assert_eq!(
+            queue_reason(
+                &limited,
+                Some(now() + chrono::TimeDelta::hours(9)),
+                now(),
+                Duration::from_secs(6 * 3600)
+            ),
+            None
+        );
+        // Пауза квоты без срока сброса тоже не лечится очередью.
+        assert_eq!(
+            queue_reason(&limited, None, now(), Duration::from_secs(6 * 3600)),
             None
         );
     }

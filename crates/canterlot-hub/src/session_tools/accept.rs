@@ -427,6 +427,17 @@ async fn archive_in_tx(
     child: &Child,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    // Принятый родитель не запускает больше детей из своей очереди.
+    crate::session_tools::spawn_queue::cancel_for_parent_in_tx(
+        conn,
+        child.owner_id,
+        child.id,
+        "parent_accepted",
+        correlation_id,
+        Utc::now(),
+        false,
+    )
+    .await?;
     let marked = sqlx::query(
         "update conversations set accepted_at=coalesce(accepted_at,clock_timestamp()),
            updated_at=clock_timestamp() where id=$1 and accepted_at is null",

@@ -298,10 +298,7 @@ mod tests {
         measurements.free_disk_gb = Some(12.0);
         let verdict = evaluate(&config(), &measurements, false);
         assert!(verdict.blocked());
-        assert_eq!(
-            verdict.detail.as_deref(),
-            Some("disk 12 GB free < 30 GB.")
-        );
+        assert_eq!(verdict.detail.as_deref(), Some("disk 12 GB free < 30 GB."));
     }
 
     #[test]

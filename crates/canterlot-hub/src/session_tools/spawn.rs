@@ -13,8 +13,8 @@ use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
 use super::{
-    Caller, ToolContext, ToolError, ToolErrorCode, access, nudge, origin, parse_arguments, send,
-    subs, whitelist,
+    Caller, ToolContext, ToolError, ToolErrorCode, access, guard, nudge, origin, parse_arguments,
+    routing, send, spawn_queue, subs, whitelist,
 };
 use crate::{
     config::LimitsConfig,
@@ -44,7 +44,7 @@ const MODES: [&str; 4] = ["read_only", "ask", "bypass", OWNER_MODE];
 const REASON_APPLIED: &str = "applied";
 const WIDEST_RANK: u8 = 2;
 
-const HINT_STARTED: &str = "Session created. You are subscribed to its completion; the summary arrives in your queue. Do not poll.";
+pub(crate) const HINT_STARTED: &str = "Session created. You are subscribed to its completion; the summary arrives in your queue. Do not poll.";
 const HINT_NOT_SUBSCRIBED: &str =
     "Session created. You are not subscribed: no [canterlot] message will tell you the result.";
 const HINT_PENDING: &str = "This harness or model is outside the owner's list. The owner decides in the app; the outcome arrives in your queue. Carry on with other work.";
@@ -53,68 +53,75 @@ fn subscribe_by_default() -> bool {
     true
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RouteArg {
-    task_type: String,
-    level: Option<String>,
+fn queue_by_default() -> bool {
+    true
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
-struct SpawnArgs {
-    harness: Option<String>,
+pub(crate) struct RouteArg {
+    pub(crate) task_type: String,
+    pub(crate) level: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SpawnArgs {
+    pub(crate) harness: Option<String>,
     #[serde(default)]
-    route: Option<RouteArg>,
-    brief: String,
-    model: Option<String>,
-    effort: Option<String>,
-    title: Option<String>,
-    workdir: Option<String>,
+    pub(crate) route: Option<RouteArg>,
+    pub(crate) brief: String,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) workdir: Option<String>,
     #[serde(default)]
-    isolated: Option<bool>,
-    base: Option<String>,
-    preset: Option<String>,
-    permission_mode: Option<String>,
+    pub(crate) isolated: Option<bool>,
+    pub(crate) base: Option<String>,
+    pub(crate) preset: Option<String>,
+    pub(crate) permission_mode: Option<String>,
     #[serde(default = "subscribe_by_default")]
-    subscribe: bool,
+    pub(crate) subscribe: bool,
+    /// Ставить в очередь, когда мешает частота, занятость, лимит или машина.
+    #[serde(default = "queue_by_default")]
+    pub(crate) queue: bool,
     #[serde(default)]
-    attachment_ids: Vec<Uuid>,
+    pub(crate) attachment_ids: Vec<Uuid>,
     /// `true`, `false` или поля `nudge_set` без `session_id`.
-    nudge: Option<Value>,
-    watchdog_minutes: Option<i64>,
+    pub(crate) nudge: Option<Value>,
+    pub(crate) watchdog_minutes: Option<i64>,
 }
 
 /// Проверенный запуск с уже выбранным режимом: `request_payload` карточки.
 #[derive(Serialize, Deserialize)]
 pub struct SpawnSpec {
-    harness: String,
-    model: String,
-    effort: String,
-    title: Option<String>,
-    workdir: String,
-    isolated: bool,
-    base: Option<String>,
-    preset: String,
-    permission_mode: String,
-    brief: String,
-    subscribe: bool,
+    pub(crate) harness: String,
+    pub(crate) model: String,
+    pub(crate) effort: String,
+    pub(crate) title: Option<String>,
+    pub(crate) workdir: String,
+    pub(crate) isolated: bool,
+    pub(crate) base: Option<String>,
+    pub(crate) preset: String,
+    pub(crate) permission_mode: String,
+    pub(crate) brief: String,
+    pub(crate) subscribe: bool,
     #[serde(default)]
-    attachment_ids: Vec<Uuid>,
+    pub(crate) attachment_ids: Vec<Uuid>,
     /// Правило автопинка для потомка; `false` — без правила.
     #[serde(default)]
-    nudge: Value,
+    pub(crate) nudge: Value,
     /// Решение маршрута, сохранённое в `conversations.routing` ребёнка.
     #[serde(default)]
-    routing: Option<Value>,
+    pub(crate) routing: Option<Value>,
     /// Сторож-будильник родителя по ребёнку, минуты; взводится после создания.
     #[serde(default)]
-    watchdog_minutes: Option<i64>,
+    pub(crate) watchdog_minutes: Option<i64>,
     /// Глубина хода родителя: с неё подписка и бриф считают цепочку.
-    chain_depth: i32,
+    pub(crate) chain_depth: i32,
     /// Режим у CLI потомка сильнее, чем у родителя: запуск только через карточку.
     #[serde(default)]
-    wider_than_parent: bool,
+    pub(crate) wider_than_parent: bool,
 }
 
 impl fmt::Debug for SpawnSpec {
@@ -322,7 +329,7 @@ fn create_error(error: CreateError) -> ToolError {
 }
 
 /// Каталог харнесса на машине родителя.
-struct Catalog {
+pub(crate) struct Catalog {
     models: Vec<Value>,
     modes: Vec<Value>,
 }
@@ -491,9 +498,27 @@ fn check_isolation(
     Ok(())
 }
 
-async fn validate(
+/// Что нужно проверке запуска, кроме соединения: реестр и настройки маршрута.
+/// Очередь строит его из планировщика, инструмент — из `ToolContext`.
+pub(crate) struct SpawnContext<'a> {
+    pub(crate) registry: &'a Registry,
+    pub(crate) routing_enabled: bool,
+    pub(crate) routing_stale: std::time::Duration,
+}
+
+impl<'a> SpawnContext<'a> {
+    pub(crate) fn of(context: &'a ToolContext) -> Self {
+        Self {
+            registry: &context.registry,
+            routing_enabled: context.routing_enabled,
+            routing_stale: context.routing_stale,
+        }
+    }
+}
+
+pub(crate) async fn validate(
     conn: &mut PgConnection,
-    context: &ToolContext,
+    context: &SpawnContext<'_>,
     caller: &Caller,
     parent: &access::Session,
     args: SpawnArgs,
@@ -521,7 +546,7 @@ async fn validate(
     let isolated = args.isolated.unwrap_or(false);
     let (workdir, parent_branch) = resolve_workdir(args.workdir.as_deref(), isolated, &place)?;
     if isolated {
-        check_isolation(&context.registry, caller.machine_id, &place)?;
+        check_isolation(context.registry, caller.machine_id, &place)?;
     }
     let base = isolated.then(|| args.base.or(parent_branch)).flatten();
     let nudge_arg = args.nudge.unwrap_or(Value::Bool(false));
@@ -550,25 +575,48 @@ async fn validate(
     ))
 }
 
+/// Отказ маршрута: ошибка инструмента или пустой выбор с разбором кандидатов.
+pub(crate) enum RouteFailure {
+    Tool(ToolError),
+    NoExecutor {
+        considered: Vec<super::routing::Considered>,
+        reset: Option<DateTime<Utc>>,
+    },
+}
+
+impl From<ToolError> for RouteFailure {
+    fn from(error: ToolError) -> Self {
+        Self::Tool(error)
+    }
+}
+
+impl From<sqlx::Error> for RouteFailure {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Tool(error.into())
+    }
+}
+
 /// Маршрутизированный запуск: выбор исполнителя по политике владельца (§C1 п. 9).
 #[allow(clippy::too_many_arguments)]
 /// Явные `preset`, `isolated`, `title`, `workdir`, `base`, `permission_mode`,
 /// `nudge` и `watchdog_minutes` важнее политики.
-async fn validate_routed(
+pub(crate) async fn validate_routed(
     conn: &mut PgConnection,
-    context: &ToolContext,
+    context: &SpawnContext<'_>,
     caller: &Caller,
     parent: &access::Session,
     args: SpawnArgs,
     route: RouteArg,
     chain_depth: i32,
     now: DateTime<Utc>,
-) -> Result<(SpawnSpec, String), ToolError> {
+    // «Запустить сейчас»: лимиты и занятость не мешают выбору (белый список и режим — да).
+    bypass_queue: bool,
+) -> Result<(SpawnSpec, String), RouteFailure> {
     if !context.routing_enabled {
-        return Err(ToolError::with_message(
+        return Err(RouteFailure::Tool(ToolError::with_message(
             ToolErrorCode::InvalidArguments,
             "Routing is disabled on this hub",
-        ));
+        )));
     }
     let (policy, revision) = super::routing::load_policy(conn, caller.owner_id).await?;
     let task = policy.task_types.get(&route.task_type).ok_or_else(|| {
@@ -602,43 +650,34 @@ async fn validate_routed(
         explicit_mode: args.permission_mode.clone(),
         workdir,
     };
-    let mut decision = super::routing::route(super::routing::RouteInputs {
+    let no_limits = std::collections::HashMap::new();
+    let no_live = std::collections::HashMap::new();
+    let mut decision = match super::routing::route(super::routing::RouteInputs {
         policy: &policy,
         revision,
         whitelist: &list.entries,
         catalogs: &catalogs,
-        limits: &limits,
-        live: &live,
+        limits: if bypass_queue { &no_limits } else { &limits },
+        live: if bypass_queue { &no_live } else { &live },
         stale: context.routing_stale,
         now,
         request: &request,
-    })
-    .map_err(|error| match error {
-        super::routing::RouteError::UnknownTask { available } => ToolError::with_message(
-            ToolErrorCode::TaskTypeUnknown,
-            format!(
-                "Unknown task type {:?}. Available: {}",
-                route.task_type,
-                available.join(", ")
-            ),
-        ),
-        super::routing::RouteError::NoExecutor { considered, reset } => {
-            let mut message = String::from("No executor available for this task type:");
-            for entry in &considered {
-                message.push_str(&format!(" {}: {}; ", entry.harness, entry.reason));
-            }
-            if let Some(reset) = reset {
-                message.push_str(&format!(
-                    "nearest limit reset at {}",
-                    reset.format("%H:%M UTC")
-                ));
-            }
-            ToolError::with_message(
-                ToolErrorCode::NoExecutorAvailable,
-                message.trim_end().to_owned(),
-            )
+    }) {
+        Ok(decision) => decision,
+        Err(super::routing::RouteError::UnknownTask { available }) => {
+            return Err(RouteFailure::Tool(ToolError::with_message(
+                ToolErrorCode::TaskTypeUnknown,
+                format!(
+                    "Unknown task type {:?}. Available: {}",
+                    route.task_type,
+                    available.join(", ")
+                ),
+            )));
         }
-    })?;
+        Err(super::routing::RouteError::NoExecutor { considered, reset }) => {
+            return Err(RouteFailure::NoExecutor { considered, reset });
+        }
+    };
     let first_model = catalogs
         .get(&decision.harness)
         .and_then(|catalog| catalog.first_model())
@@ -657,7 +696,7 @@ async fn validate_routed(
         .get(&decision.harness)
         .is_some_and(|catalog| catalog.has_mode(&mode))
     {
-        return Err(invalid());
+        return Err(RouteFailure::Tool(invalid()));
     }
     let preset = match args.preset.as_deref() {
         Some(_) => resolve_preset(conn, caller.owner_id, args.preset.as_deref()).await?,
@@ -675,7 +714,7 @@ async fn validate_routed(
     let isolated = args.isolated.or(task.isolated).unwrap_or(false);
     let (workdir, parent_branch) = resolve_workdir(args.workdir.as_deref(), isolated, &place)?;
     if isolated {
-        check_isolation(&context.registry, caller.machine_id, &place)?;
+        check_isolation(context.registry, caller.machine_id, &place)?;
     }
     let base = isolated.then(|| args.base.or(parent_branch)).flatten();
     let nudge_arg = args.nudge.unwrap_or(decision.nudge.clone());
@@ -709,24 +748,27 @@ async fn validate_routed(
     ))
 }
 
-struct Started {
-    session_id: Uuid,
-    title: String,
-    worktree: Option<Value>,
+pub(crate) struct Started {
+    pub(crate) session_id: Uuid,
+    pub(crate) title: String,
+    pub(crate) worktree: Option<Value>,
 }
 
 /// Всё для создания сессии: и у инструмента, и у задания после решения владельца.
-struct Launch<'a> {
-    registry: &'a Registry,
-    owner: Uuid,
-    machine: Uuid,
-    parent: &'a access::Session,
-    spec: &'a SpawnSpec,
-    key: String,
-    correlation_id: Uuid,
+pub(crate) struct Launch<'a> {
+    pub(crate) registry: &'a Registry,
+    pub(crate) owner: Uuid,
+    pub(crate) machine: Uuid,
+    pub(crate) parent: &'a access::Session,
+    pub(crate) spec: &'a SpawnSpec,
+    pub(crate) key: String,
+    pub(crate) correlation_id: Uuid,
 }
 
-async fn start_child(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Started, ToolError> {
+pub(crate) async fn start_child(
+    conn: &mut PgConnection,
+    launch: Launch<'_>,
+) -> Result<Started, ToolError> {
     let Launch {
         registry,
         owner,
@@ -962,7 +1004,7 @@ pub async fn spawn(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let mut args: SpawnArgs = parse_arguments(arguments)?;
+    let args: SpawnArgs = parse_arguments(arguments)?;
     check_arguments(&args)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
@@ -971,25 +1013,115 @@ pub async fn spawn(
     }
     // Владелец раньше строки разговора: тот же порядок у удаления и создания.
     conversations::lock_owner(&mut tx, caller.owner_id).await?;
+    // Повтор вызова, который уже встал в очередь, отвечает тем же элементом.
+    if let Some(row) = spawn_queue::find_by_call(&mut tx, caller.owner_id, caller.call_id).await? {
+        let answer = spawn_queue::answer_replay(&mut tx, &row).await?;
+        tx.commit().await?;
+        return Ok(answer);
+    }
     let parent = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if parent.spawn_depth >= context.config.max_spawn_depth as i32 {
         return Err(ToolError::new(ToolErrorCode::SpawnDepthExceeded));
     }
     let depth = access::current_depth(&mut tx, parent.id).await?;
     access::check_depth(&context.config, depth + 1)?;
-    access::check_spawn_rate(&mut tx, &context.config, parent.id, Utc::now()).await?;
     let now = Utc::now();
-    let (spec, first_model) = match args.route.take() {
-        Some(route) => {
-            let (spec, first_model) =
-                validate_routed(&mut tx, context, caller, &parent, args, route, depth, now).await?;
-            (spec, first_model)
+    let spawn_context = SpawnContext::of(context);
+    let runtime = spawn_queue::Runtime {
+        registry: Some(&context.registry),
+        session_tools: &context.config,
+        spawn_queue: &context.spawn_queue,
+        guards: &context.guards,
+        routing_enabled: context.routing_enabled,
+        routing_stale: context.routing_stale,
+        routing_queue_horizon: context.routing_queue_horizon,
+    };
+    // Маршрут мог упереться только в занятость или лимит: это очередь, а не отказ.
+    let mut queued_by_route: Option<(&'static str, String)> = None;
+    let resolved = match args.route.clone() {
+        Some(route) => match validate_routed(
+            &mut tx,
+            &spawn_context,
+            caller,
+            &parent,
+            args.clone(),
+            route,
+            depth,
+            now,
+            false,
+        )
+        .await
+        {
+            Ok((spec, first_model)) => Some((spec, first_model)),
+            Err(RouteFailure::Tool(error)) => return Err(error),
+            Err(RouteFailure::NoExecutor { considered, reset }) => {
+                let detail = routing::no_executor_message(&considered, reset);
+                match routing::queue_reason(&considered, reset, now, context.routing_queue_horizon)
+                {
+                    Some(reason) => {
+                        queued_by_route = Some((reason, detail));
+                        None
+                    }
+                    None => {
+                        return Err(ToolError::with_message(
+                            ToolErrorCode::NoExecutorAvailable,
+                            detail,
+                        ));
+                    }
+                }
+            }
+        },
+        None => match validate(
+            &mut tx,
+            &spawn_context,
+            caller,
+            &parent,
+            args.clone(),
+            depth,
+        )
+        .await
+        {
+            Ok((spec, catalog)) => {
+                Some((spec, catalog.first_model().unwrap_or_default().to_owned()))
+            }
+            Err(error) => return Err(error),
+        },
+    };
+    let Some((spec, first_model)) = resolved else {
+        // Маршрут не выбрал исполнителя из-за занятости или лимита: элемент повторяет
+        // выбор на момент запуска, поэтому спецификация сейчас не нужна.
+        let (reason, detail) =
+            queued_by_route.unwrap_or((super::spawn_queue::REASON_RESOURCES, String::new()));
+        if !args.queue {
+            return Err(ToolError::with_message(
+                ToolErrorCode::NoExecutorAvailable,
+                detail,
+            ));
         }
-        None => {
-            let (spec, catalog) = validate(&mut tx, context, caller, &parent, args, depth).await?;
-            let first_model = catalog.first_model().unwrap_or_default().to_owned();
-            (spec, first_model)
+        let answer = spawn_queue::enqueue_in_tx(
+            &mut tx,
+            &runtime,
+            spawn_queue::Enqueue {
+                owner_id: caller.owner_id,
+                parent_id: parent.id,
+                call_id: caller.call_id,
+                args,
+                chain_depth: depth,
+                reason,
+                detail: serde_json::json!({"detail": detail}),
+                not_before: now
+                    + chrono::TimeDelta::from_std(context.spawn_queue.retry_delay)
+                        .unwrap_or_else(|_| chrono::TimeDelta::seconds(60)),
+            },
+            now,
+            caller.call_id,
+        )
+        .await?;
+        tx.commit().await?;
+        if let Some(dispatcher) = &context.dispatcher {
+            dispatcher.trigger(parent.id);
         }
+        return Ok(answer);
     };
     let list = whitelist::view(&mut tx, caller.owner_id).await?;
     if spec.wider_than_parent
@@ -998,6 +1130,87 @@ pub async fn spawn(
         let request = open_card(&mut tx, caller, &spec).await?;
         tx.commit().await?;
         return Ok(pending_answer(request));
+    }
+    // Единственные препятствия дальше — частота, страж машины или (у маршрута)
+    // занятость и лимит: они ставят запуск в очередь.
+    let rate = access::rate_state(&mut tx, &context.config, parent.id, now).await?;
+    let queue_reason = if rate.blocked {
+        Some(super::spawn_queue::REASON_RATE)
+    } else {
+        None
+    };
+    let guard = guard::check_in_tx(
+        &mut tx,
+        caller.owner_id,
+        caller.machine_id,
+        &context.guards,
+        now,
+    )
+    .await?;
+    let queue_reason = queue_reason.or_else(|| {
+        guard
+            .blocked()
+            .then_some(super::spawn_queue::REASON_RESOURCES)
+    });
+    if let Some(reason) = queue_reason {
+        if !args.queue {
+            return Err(match reason {
+                super::spawn_queue::REASON_RATE => ToolError::new(ToolErrorCode::RateLimited),
+                _ => ToolError::with_message(
+                    ToolErrorCode::MachineBusy,
+                    guard.detail.clone().unwrap_or_default(),
+                ),
+            });
+        }
+        let (detail, not_before) = match reason {
+            super::spawn_queue::REASON_RATE => {
+                let at = rate
+                    .retry_at
+                    .unwrap_or_else(|| now + chrono::TimeDelta::hours(1));
+                (
+                    serde_json::json!({
+                        "detail": format!(
+                            "{} spawns in the last hour; the next slot opens at {}",
+                            rate.count,
+                            at.format("%H:%M UTC")
+                        ),
+                        "count": rate.count,
+                        "limit": rate.limit,
+                    }),
+                    at,
+                )
+            }
+            _ => (
+                serde_json::json!({
+                    "detail": guard.detail.clone().unwrap_or_default(),
+                    "guard": guard.to_value(),
+                }),
+                now + chrono::TimeDelta::from_std(context.spawn_queue.retry_delay)
+                    .unwrap_or_else(|_| chrono::TimeDelta::seconds(60)),
+            ),
+        };
+        let answer = spawn_queue::enqueue_in_tx(
+            &mut tx,
+            &runtime,
+            spawn_queue::Enqueue {
+                owner_id: caller.owner_id,
+                parent_id: parent.id,
+                call_id: caller.call_id,
+                args,
+                chain_depth: depth,
+                reason,
+                detail,
+                not_before,
+            },
+            now,
+            caller.call_id,
+        )
+        .await?;
+        tx.commit().await?;
+        if let Some(dispatcher) = &context.dispatcher {
+            dispatcher.trigger(parent.id);
+        }
+        return Ok(answer);
     }
     let started = start_child(
         &mut tx,

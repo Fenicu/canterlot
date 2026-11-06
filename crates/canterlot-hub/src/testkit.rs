@@ -137,6 +137,7 @@ pub struct TestHubOptions {
     pub activity: crate::config::ActivityConfig,
     pub scheduler: crate::config::SchedulerConfig,
     pub session_tools: crate::config::SessionToolsConfig,
+    pub orchestrator: crate::config::OrchestratorConfig,
     pub machines: crate::config::MachinesConfig,
     pub attachments: Option<(
         crate::config::AttachmentsConfig,
@@ -237,6 +238,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         activity,
         scheduler: scheduler_config,
         session_tools,
+        orchestrator,
         machines,
         attachments: attachment_store,
         addr,
@@ -257,6 +259,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())
+            .with_orchestrator(&orchestrator)
             .with_activity(&activity)
             .with_dispatcher(dispatcher.clone());
     let ingest = ingest::Ingest::new(pool.clone())
@@ -280,6 +283,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), scheduler_config)
             .with_limits(registry.clone(), limits.clone())
             .with_session_tools(session_tools.clone())
+            .with_orchestrator(&orchestrator)
             .with_blobs(blobs.clone());
     #[cfg(feature = "fault-injection")]
     let scheduler = {

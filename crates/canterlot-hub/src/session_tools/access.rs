@@ -180,25 +180,75 @@ fn window_start(now: DateTime<Utc>, window: std::time::Duration) -> DateTime<Utc
 }
 
 /// Запуски родителя за окно: созданные сессии и карточки, которые сессию не создали.
+fn spawn_count_sql() -> &'static str {
+    "select (select count(*) from conversations
+               where parent_conversation_id=$1 and created_at>$2)
+           + (select count(*) from requests
+               where conversation_id=$1 and kind='spawn_approval' and created_at>$2
+                 and not (state='decision_applied' and decision_payload->>'behavior'='allow'))"
+}
+
+/// Состояние часового окна: сколько запусков уже было и когда освободится слот.
+#[derive(Clone, Debug, Default)]
+pub struct RateState {
+    pub blocked: bool,
+    pub count: i64,
+    pub limit: i64,
+    pub retry_at: Option<DateTime<Utc>>,
+}
+
+pub async fn rate_state(
+    conn: &mut PgConnection,
+    config: &SessionToolsConfig,
+    parent: Uuid,
+    now: DateTime<Utc>,
+) -> Result<RateState, sqlx::Error> {
+    let since = window_start(now, config.spawn_window);
+    let count: i64 = sqlx::query_scalar(spawn_count_sql())
+        .bind(parent)
+        .bind(since)
+        .fetch_one(&mut *conn)
+        .await?;
+    let limit = i64::from(config.parent_spawns);
+    if count < limit {
+        return Ok(RateState {
+            blocked: false,
+            count,
+            limit,
+            retry_at: None,
+        });
+    }
+    // Старейший запуск окна выйдет из него через `spawn_window`.
+    let oldest: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "select least(
+           (select min(created_at) from conversations
+             where parent_conversation_id=$1 and created_at>$2),
+           (select min(created_at) from requests
+             where conversation_id=$1 and kind='spawn_approval' and created_at>$2
+               and not (state='decision_applied' and decision_payload->>'behavior'='allow')))",
+    )
+    .bind(parent)
+    .bind(since)
+    .fetch_one(&mut *conn)
+    .await?;
+    let retry_at = oldest
+        .map(|at| at + TimeDelta::from_std(config.spawn_window).unwrap_or_default())
+        .and_then(|at| (at > now).then_some(at));
+    Ok(RateState {
+        blocked: true,
+        count,
+        limit,
+        retry_at,
+    })
+}
+
 pub async fn check_spawn_rate(
     conn: &mut PgConnection,
     config: &SessionToolsConfig,
     parent: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), ToolError> {
-    let since = window_start(now, config.spawn_window);
-    let spawns: i64 = sqlx::query_scalar(
-        "select (select count(*) from conversations
-                  where parent_conversation_id=$1 and created_at>$2)
-              + (select count(*) from requests
-                  where conversation_id=$1 and kind='spawn_approval' and created_at>$2
-                    and not (state='decision_applied' and decision_payload->>'behavior'='allow'))",
-    )
-    .bind(parent)
-    .bind(since)
-    .fetch_one(conn)
-    .await?;
-    if spawns >= i64::from(config.parent_spawns) {
+    if rate_state(conn, config, parent, now).await?.blocked {
         return Err(ToolError::new(ToolErrorCode::RateLimited));
     }
     Ok(())

@@ -482,6 +482,12 @@ pub struct Scheduler {
     registry: Option<Registry>,
     limits: Arc<LimitsConfig>,
     session_tools: SessionToolsConfig,
+    /// Маршрут и страж для запуска элементов очереди.
+    routing_enabled: bool,
+    routing_stale: std::time::Duration,
+    routing_queue_horizon: std::time::Duration,
+    spawn_queue: crate::config::SpawnQueueConfig,
+    guards: crate::config::GuardsConfig,
     /// Срок хранения корзины: через него уборка удаляет сессию окончательно.
     trash_retention: Duration,
     /// Пороги устоявшегося состояния для перепроверки задания `nudge`.
@@ -514,6 +520,11 @@ impl Scheduler {
             registry: None,
             limits: Arc::new(LimitsConfig::default()),
             session_tools: SessionToolsConfig::default(),
+            routing_enabled: true,
+            routing_stale: Duration::from_secs(30 * 60),
+            routing_queue_horizon: Duration::from_secs(6 * 3600),
+            spawn_queue: Default::default(),
+            guards: Default::default(),
             trash_retention: Duration::from_secs(24 * 3600),
             settle: crate::session_tools::settle::SettleConfig::default(),
             thresholds: crate::activity::Thresholds::from(&crate::config::ActivityConfig::default()),
@@ -537,6 +548,15 @@ impl Scheduler {
     /// Срок хранения принятых делегаций и пределы межсессионных инструментов.
     pub fn with_session_tools(mut self, config: SessionToolsConfig) -> Self {
         self.session_tools = config;
+        self
+    }
+    /// Выключатели и пороги оркестратора: очередь запусков и страж машины.
+    pub fn with_orchestrator(mut self, config: &crate::config::OrchestratorConfig) -> Self {
+        self.routing_enabled = config.routing.enabled;
+        self.routing_stale = config.routing.stale_limits;
+        self.routing_queue_horizon = config.routing.queue_horizon;
+        self.spawn_queue = config.spawn_queue.clone();
+        self.guards = config.guards.clone();
         self
     }
     pub fn with_trash_retention(mut self, retention: Duration) -> Self {
@@ -1044,6 +1064,15 @@ impl Scheduler {
                     .map_err(|e| sqlx::Error::Encode(Box::new(e)))
             }),
             JobKind::SessionTask => {
+                let runtime = crate::session_tools::spawn_queue::Runtime {
+                    registry: self.registry.as_ref(),
+                    session_tools: &self.session_tools,
+                    spawn_queue: &self.spawn_queue,
+                    guards: &self.guards,
+                    routing_enabled: self.routing_enabled,
+                    routing_stale: self.routing_stale,
+                    routing_queue_horizon: self.routing_queue_horizon,
+                };
                 match crate::session_tools::jobs::run_in_tx(
                     &mut tx,
                     &claimed,
@@ -1052,6 +1081,7 @@ impl Scheduler {
                     self.registry.as_ref(),
                     &self.settle,
                     &self.thresholds,
+                    Some(&runtime),
                 )
                 .await
                 {

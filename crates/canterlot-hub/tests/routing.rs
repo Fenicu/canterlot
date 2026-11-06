@@ -143,6 +143,7 @@ impl Fx {
                 nudge_enabled: true,
                 routing_enabled: true,
                 routing_stale: std::time::Duration::from_secs(1800),
+                routing_queue_horizon: std::time::Duration::from_secs(6 * 3600),
                 spawn_queue: Default::default(),
                 guards: Default::default(),
                 dispatcher: None,
@@ -559,7 +560,10 @@ async fn routing_preview_http_matches_tool(pool: PgPool) {
     // Метрик машины нет: страж помечен устаревшим и не мешает.
     assert_eq!(tool["guard"]["stale"], true, "{tool}");
     assert_eq!(tool["guard"]["blocked"], false, "{tool}");
-    assert_eq!(http_body["guard"], tool["guard"], "guard equals tool answer");
+    assert_eq!(
+        http_body["guard"], tool["guard"],
+        "guard equals tool answer"
+    );
 
     // Список типов без task_type.
     let list = f.call("routing.preview", json!({})).await.unwrap();
