@@ -253,10 +253,10 @@
                       <div class="nudge">
                         <Segmented name="nudge-{candidate.uid}" label="Автопинок" options={[{ value: 'off', label: 'Выкл' }, { value: 'on', label: 'Вкл' }, { value: 'max', label: 'С пределом' }]} bind:value={candidate.nudge} />
                         {#if candidate.nudge === 'max'}
-                          <label class="field small"><span>Толчков не больше</span><input type="number" min="1" max="10" bind:value={candidate.maxNudges} /></label>
+                          <label class="field small"><span>Толчков не больше</span><input type="number" inputmode="numeric" min="1" max="10" bind:value={candidate.maxNudges} /></label>
                         {/if}
                       </div>
-                      <label class="field small"><span>Сторож, минут (пусто — без сторожа)</span><input type="number" min="5" max="1440" value={candidate.watchdog ?? ''} oninput={(event) => (candidate.watchdog = numberOrNull(event.currentTarget.value))} /></label>
+                      <label class="field small"><span>Сторож, минут (пусто — без сторожа)</span><input type="number" inputmode="numeric" min="5" max="1440" value={candidate.watchdog ?? ''} oninput={(event) => (candidate.watchdog = numberOrNull(event.currentTarget.value))} /></label>
                       <div class="exclude">
                         <span class="label">Не брать для каталогов</span>
                         {#if candidate.exclude.length > 0}
@@ -307,9 +307,9 @@
           {#each draft.providers as provider (provider.provider)}
             <fieldset data-provider={provider.provider}>
               <legend>{pairName(provider.provider === 'claude' ? 'claude_code' : provider.provider, 'default')}</legend>
-              <label class="field small"><span>Неделя, %</span><input type="number" min="0" max="100" value={provider.weekly ?? ''} oninput={(event) => (provider.weekly = numberOrNull(event.currentTarget.value))} /></label>
-              <label class="field small"><span>5 часов, %</span><input type="number" min="0" max="100" value={provider.fiveHour ?? ''} oninput={(event) => (provider.fiveHour = numberOrNull(event.currentTarget.value))} /></label>
-              <label class="field small"><span>Месяц, %</span><input type="number" min="0" max="100" value={provider.monthly ?? ''} oninput={(event) => (provider.monthly = numberOrNull(event.currentTarget.value))} /></label>
+              <label class="field small"><span>Неделя, %</span><input type="number" inputmode="numeric" min="0" max="100" value={provider.weekly ?? ''} oninput={(event) => (provider.weekly = numberOrNull(event.currentTarget.value))} /></label>
+              <label class="field small"><span>5 часов, %</span><input type="number" inputmode="numeric" min="0" max="100" value={provider.fiveHour ?? ''} oninput={(event) => (provider.fiveHour = numberOrNull(event.currentTarget.value))} /></label>
+              <label class="field small"><span>Месяц, %</span><input type="number" inputmode="numeric" min="0" max="100" value={provider.monthly ?? ''} oninput={(event) => (provider.monthly = numberOrNull(event.currentTarget.value))} /></label>
               {#each issuesAt(issues, `provider:${provider.provider}`) as message (message)}<p class="error" role="alert">{message}</p>{/each}
             </fieldset>
           {/each}
@@ -323,7 +323,7 @@
           {#each draft.parallel as item (item.uid)}
             <li class="parallel" data-parallel={item.pair}>
               <label class="field"><span>Пара</span><input type="text" list="routing-pairs" bind:value={item.pair} spellcheck="false" autocapitalize="off" /></label>
-              <label class="field small"><span>Не больше</span><input type="number" min="1" bind:value={item.limit} /></label>
+              <label class="field small"><span>Не больше</span><input type="number" inputmode="numeric" min="1" bind:value={item.limit} /></label>
               <IconButton icon="trash" label="Убрать предел {item.pair}" onclick={() => (draft!.parallel = draft!.parallel.filter((known) => known.uid !== item.uid))} />
               {#each issuesAt(issues, `parallel:${item.uid}`) as message (message)}<p class="error" role="alert">{message}</p>{/each}
             </li>
@@ -406,7 +406,8 @@
   .task-head { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--s4); }
   .field { display: grid; gap: var(--s2); min-width: 0; }
   .field > span, .label { color: var(--secondary); font-size: var(--fs-meta); }
-  .field.small input { max-width: var(--bar-56); }
+  .field.small input { inline-size: calc(4ch + 2 * var(--s8)); max-inline-size: 100%; font-variant-numeric: tabular-nums; appearance: textfield; -moz-appearance: textfield; }
+  .field.small input::-webkit-inner-spin-button, .field.small input::-webkit-outer-spin-button { appearance: none; margin: 0; }
   input { min-width: 0; }
   .candidates { display: grid; gap: var(--s3); margin: var(--s0); padding: var(--s0); list-style: none; }
   .candidate { --field-bg: var(--surface); display: grid; gap: var(--s2); padding: var(--s3) var(--s4); border-radius: var(--radius-card); background: var(--raised); }

@@ -48,6 +48,20 @@ test.describe('редактор маршрутизации', () => {
     await expect(page.getByRole('button', { name: 'Сохранить' })).toBeDisabled();
   });
 
+  test('number_fields_show_their_whole_value', async ({ page }) => {
+    await bootEditor(page);
+    const fields = page.locator('main input[type="number"]:visible');
+    await expect(fields.first()).toBeVisible();
+    const field = page.getByRole('spinbutton', { name: 'Неделя, %' }).first();
+    await field.fill('100');
+    // Значение видно целиком: поле не прокручивает текст внутри себя.
+    const clipped = await field.evaluate((el: HTMLInputElement) => el.scrollWidth > el.clientWidth + 1);
+    expect(clipped).toBe(false);
+    for (const box of await fields.evaluateAll((els) => els.map((el) => el.getBoundingClientRect().width))) {
+      expect(box).toBeGreaterThanOrEqual(56);
+    }
+  });
+
   test('candidate_drags_by_the_grip_and_the_order_is_saved', async ({ page }) => {
     const { api } = await bootEditor(page);
     const bugfix = page.locator('[data-task-key="bugfix"]');
