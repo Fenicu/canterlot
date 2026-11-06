@@ -1072,3 +1072,61 @@ export function deleteNudge(
     keyed(key, opts),
   );
 }
+
+export function getRoutingPolicy(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_routing_policy"]>>> {
+  return http("GET", "/api/v1/routing-policy", undefined, opts);
+}
+
+// policy: null сбрасывает ко встроенной; устаревшая revision даёт 409 routing_policy_conflict.
+export function putRoutingPolicy(
+  body: Body<operations["put__api_v1_routing_policy"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_routing_policy"]>>> {
+  return http("PUT", "/api/v1/routing-policy", body, keyed(key, opts));
+}
+
+export function previewRouting(
+  body: Body<operations["post__api_v1_routing_policy_preview"]>,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_routing_policy_preview"]>>> {
+  return http("POST", "/api/v1/routing-policy/preview", body, opts);
+}
+
+export function getSpawnQueue(
+  conversationId: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_conversations__id__spawn_queue"]>>> {
+  return http("GET", `/api/v1/conversations/${id(conversationId)}/spawn-queue`, undefined, opts);
+}
+
+export function cancelSpawnQueue(
+  conversationId: string,
+  queueId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["delete__api_v1_conversations__id__spawn_queue__queue_id_"]>>> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/spawn-queue/${id(queueId)}`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+// Снимает частоту, занятость, лимиты и страж, но не белый список и не режим разрешений.
+export function startSpawnQueueNow(
+  conversationId: string,
+  queueId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_conversations__id__spawn_queue__queue_id__start_now"]>>> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/spawn-queue/${id(queueId)}/start-now`,
+    undefined,
+    keyed(key, opts),
+  );
+}

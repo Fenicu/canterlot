@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { resolve } from '$app/paths';
   import { getSpawnWhitelist, listMachines, putSpawnWhitelist } from '#lib/api/client.js';
   import { ApiError } from '#lib/api/http.js';
   import Button from '#lib/ui/Button.svelte';
@@ -85,6 +86,7 @@
   {:else if !error}
     <p>Загружаю список делегирования…</p>
   {/if}
+  <p class="routing"><a href={resolve('/settings/routing')} data-role="routing-link">Маршрутизация</a><span class="note">Кого брать для каждого типа задачи, пороги лимитов и проверка выбора</span></p>
 </section>
 
 <style>
@@ -96,4 +98,6 @@
   .add { display: grid; gap: var(--s4); margin-block: var(--s4); }
   .actions { display: grid; gap: var(--s4); }
   .actions :global(.reason) { margin-block: var(--s0); }
+  .routing { display: grid; gap: var(--s1); margin-top: var(--s8); }
+  .routing a { display: inline-flex; align-items: center; min-height: var(--target); }
 </style>

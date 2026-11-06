@@ -10,6 +10,7 @@
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
+	import SpawnQueueStrip from './SpawnQueueStrip.svelte';
 	import RequestCard from '#lib/requests/RequestCard.svelte';
 	import { isDocked } from '#lib/stores/requests.svelte.js';
 	import DelegationSheet from './DelegationSheet.svelte';
@@ -78,6 +79,7 @@
 	let showMessages = $state(false);
 	let showAlarms = $state(false);
 	let showNudge = $state(false);
+	let showRoute = $state(false);
 	let showSheet = $state(false);
 	let infoRunId = $state<string | null>(null);
 	// Редкие панели не входят в маршрут чата: подгружаются, когда их открывают.
@@ -88,6 +90,7 @@
 	let OwnerMessagesSheet = $state<Component<{ chat: ChatStore; onpick: (item: OwnerInputView) => void; onclose: () => void }> | null>(null);
 	let AlarmsSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	let NudgeSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
+	let RouteSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	const todos = $derived(chat.todos.lane(null));
 
 	$effect(() => {
@@ -105,6 +108,7 @@
 	$effect(() => {
 		if (showAlarms && !AlarmsSheet) import('./AlarmsSheet.svelte').then((m) => { AlarmsSheet = m.default; });
 		if (showNudge && !NudgeSheet) import('./NudgeSheet.svelte').then((m) => { NudgeSheet = m.default; });
+		if (showRoute && !RouteSheet) import('./RouteSheet.svelte').then((m) => { RouteSheet = m.default; });
 	});
 	// Список задач показывается не в каждом ходу: панель догружается вместе с ним.
 	$effect(() => {
@@ -183,6 +187,7 @@
 		onOpenMessages={() => (showMessages = true)}
 		onOpenAlarms={() => (showAlarms = true)}
 		onOpenNudge={() => (showNudge = true)}
+		onOpenRoute={() => (showRoute = true)}
 		onAccept={() => {
 			acceptError = null;
 			showAccept = true;
@@ -236,6 +241,8 @@
 	{/if}
 
 	<PauseCards {chat} {now} />
+
+	<SpawnQueueStrip {chat} />
 
 	<PendingStrip {chat} />
 
@@ -304,6 +311,10 @@
 
 	{#if showNudge && NudgeSheet}
 		<NudgeSheet {chat} onclose={() => (showNudge = false)} />
+	{/if}
+
+	{#if showRoute && RouteSheet}
+		<RouteSheet {chat} onclose={() => (showRoute = false)} />
 	{/if}
 
 	{#if infoRunId && InfoSheet}

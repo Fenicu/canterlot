@@ -114,6 +114,8 @@ export class ListStore {
   counts = $state<Counts>({ all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] });
   limits = $state<ProviderLimits[]>([]);
   presets = $state<PresetSummary[]>([]);
+  /** Ревизия политики маршрутизации по событию: редактор и подписи маршрута перечитывают её. */
+  routingRevision = $state<number | null>(null);
   truncated = $state(false);
   unknownKinds = $state(0);
 
@@ -287,6 +289,10 @@ export class ListStore {
       provider.weekly_reserve_resets_at = payload.weekly_reserve_resets_at;
       if (payload.data_confidence) provider.data_confidence = payload.data_confidence;
       this.limits = next;
+      return;
+    }
+    if (kind === "routing_policy_changed" && event.kind === "routing_policy_changed") {
+      this.routingRevision = event.payload.revision ?? (this.routingRevision ?? 0) + 1;
       return;
     }
     this.unknownKinds += 1;

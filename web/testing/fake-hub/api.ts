@@ -177,40 +177,55 @@ export class FakeHubApi {
 		return true;
 	}
 
-	/** Предпросмотр выбора для C3: первый кандидат типа или ошибка вида хаба. */
-	previewRoutingPolicy(task_type: string, level?: string, workdir?: string): { decision: unknown; machine: unknown } {
+	/** Причины пропуска для предпросмотра: ключ `harness/model`, значение — вердикт и английская причина хаба. */
+	readonly routingSkips = new Map<string, { verdict: string; reason: string }>();
+	/** Вердикт стража в предпросмотре. */
+	routingGuard: { stale: boolean; blocked: boolean; violations: string[]; detail: string | null } = { stale: false, blocked: false, violations: [], detail: null };
+	/** Отказ `no_executor_available`: разбор по кандидатам и ближайший сброс в `details`, как у хаба. */
+	routingRefusal: { candidates: { harness: string; model: string; verdict: string; reason: string }[]; nearest_reset: string | null } | null = null;
+	readonly routingPreviews: { task_type: string; level?: string; workdir?: string }[] = [];
+
+	/** Предпросмотр выбора: кандидаты по порядку, первый не пропущенный выбран, как у хаба. */
+	previewRoutingPolicy(task_type: string, level?: string, workdir?: string): { decision: unknown; machine: unknown; guard: unknown; considered: unknown[] } {
+		this.routingPreviews.push({ task_type, level, workdir });
 		const policy = (this.routingPolicy ?? this.builtinRoutingPolicy) as {
-			task_types: Record<string, { title: string; candidates: { harness: string; model: string; effort?: string }[] }>;
+			task_types: Record<string, { title: string; candidates: { harness: string; model: string; effort?: string | null; nudge?: unknown; watchdog_minutes?: number | null }[] }>;
 		};
 		const task = policy.task_types[task_type];
 		if (!task) {
 			throw { status: 404, code: 'task_type_unknown', message: `Unknown task type ${task_type}` };
 		}
-		const candidate = task.candidates[0];
-		if (!candidate) {
-			throw {
-				status: 422,
-				code: 'no_executor_available',
-				message: 'No executor available',
-				details: { candidates: [], nearest_reset: null }
-			};
+		if (this.routingRefusal) throw { status: 422, code: 'no_executor_available', message: 'No executor available', details: this.routingRefusal };
+		const considered: { harness: string; model: string; verdict: string; reason: string }[] = [];
+		let chosen: (typeof task.candidates)[number] | undefined;
+		for (const candidate of task.candidates) {
+			const skip = this.routingSkips.get(`${candidate.harness}/${candidate.model}`);
+			if (skip) {
+				considered.push({ harness: candidate.harness, model: candidate.model, ...skip });
+				continue;
+			}
+			considered.push({ harness: candidate.harness, model: candidate.model, verdict: 'chosen', reason: '' });
+			chosen = candidate;
+			break;
 		}
-		void level;
-		void workdir;
+		if (!chosen) throw { status: 422, code: 'no_executor_available', message: 'No executor available', details: { candidates: considered, nearest_reset: null } };
+		const decision = {
+			policy_revision: this.routingPolicyRevision,
+			task_type,
+			level: level ?? null,
+			harness: chosen.harness,
+			model: chosen.model,
+			effort: chosen.effort ?? level ?? 'medium',
+			preset: null,
+			nudge: chosen.nudge ?? false,
+			watchdog_minutes: chosen.watchdog_minutes ?? null,
+			considered
+		};
 		return {
-			decision: {
-				policy_revision: this.routingPolicyRevision,
-				task_type,
-				level: level ?? null,
-				harness: candidate.harness,
-				model: candidate.model,
-				effort: candidate.effort ?? 'medium',
-				preset: null,
-				nudge: false,
-				watchdog_minutes: null,
-				considered: [{ harness: candidate.harness, model: candidate.model, verdict: 'chosen', reason: '' }]
-			},
-			machine: { free_disk_gb: 72, load_per_core: 0.6, mem_available_gb: 41, observed_at: '2026-11-05T12:00:00.000Z', stale: false }
+			decision,
+			machine: { free_disk_gb: 72, load_per_core: 0.6, mem_available_gb: 41, observed_at: '2026-11-05T12:00:00.000Z', stale: false },
+			guard: this.routingGuard,
+			considered
 		};
 	}
 
@@ -545,9 +560,18 @@ export class FakeHubApi {
 		return { status: 'cancelled', queue_id: queueId, session_id: null };
 	}
 
+	/** Причина отказа «Запустить сейчас»: хаб записывает исход (элемент снова ждёт) и отвечает `409 invalid_state`. */
+	startNowRefusal: string | null = null;
+
 	startSpawnQueueNow(id: string, queueId: string): components['schemas']['SpawnQueueActionView'] {
 		const item = (this.spawnQueue.get(id) ?? []).find((known) => known.id === queueId);
 		if (!item) return { status: 'already_cancelled', queue_id: queueId, session_id: null };
+		if (item.state === 'queued' && this.startNowRefusal) {
+			// Исход уже записан хабом: событие не публикуется, клиент перечитывает очередь сам.
+			const list = this.spawnQueue.get(id) ?? [];
+			list[list.indexOf(item)] = { ...item, attempts: item.attempts + 1, not_before: new Date(Date.now() + 60_000).toISOString(), updated_at: new Date().toISOString() };
+			throw { status: 409, code: 'invalid_state', message: 'Элемент не запущен', details: { reason: this.startNowRefusal } };
+		}
 		if (item.state === 'queued') {
 			const child = crypto.randomUUID();
 			this.pushQueueItem(id, {

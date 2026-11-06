@@ -272,3 +272,14 @@ test('the_count_phrase_follows_russian_plural_rules', () => {
   expect(alarmEntryLine(origin(5), '')).toBe('Сработали 5 будильников');
   expect(alarmEntryLine(origin(21), '')).toBe('Сработал 21 будильник');
 });
+
+test('spawn_queue_lines_are_quiet_and_name_the_outcome', () => {
+  expect(eventLine({ kind: 'spawn_queue', state: 'started' }, '')).toBe('Запуск из очереди: сессия создана');
+  expect(eventLine({ kind: 'spawn_queue', state: 'started' }, 'Фикс')).toBe('Запуск из очереди: «Фикс» создана');
+  expect(eventLine({ kind: 'spawn_queue', state: 'failed', detail: 'machine_unavailable' }, '')).toBe(
+    'Запуск из очереди не удался: machine_unavailable'
+  );
+  expect(eventLine({ kind: 'spawn_queue', state: 'cancelled' }, '')).toBe('Запуск из очереди отменён, сессия не создана');
+  expect(eventLine({ kind: 'spawn_queue', state: 'expired' }, '')).toBe('Срок ожидания запуска вышел, сессия не создана');
+  expect(eventLine({ kind: 'spawn_queue', state: 'queued' }, '')).toBeNull();
+});

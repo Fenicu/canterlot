@@ -179,13 +179,18 @@ export type NudgeEvent = components["schemas"]["NudgeEventView"];
 
 /**
  * Снимок и повторное событие приходят и без изменений: тот же список будильников
- * не должен заново подписывать и перерисовывать плашку.
+ * не должен заново подписывать и перерисовывать плашку; то же для очереди запусков.
  */
-function sameAlarms(before: AlarmView[], after: AlarmView[]): boolean {
+function sameAlarms<T>(before: T[], after: T[]): boolean {
   return (
     before.length === after.length &&
     JSON.stringify(before) === JSON.stringify(after)
   );
+}
+
+/** Элементы очереди по времени постановки: так их запускает хаб. */
+function queueOrder(a: SpawnQueueItemView, b: SpawnQueueItemView): number {
+  return a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id);
 }
 
 export interface SnapshotData {
@@ -349,6 +354,8 @@ export class ChatStore {
   alarms = $state<AlarmView[]>([]);
   nudge = $state<NudgeRule | null>(null);
   nudgeEvents = $state<NudgeEvent[]>([]);
+  /** Очередь запусков этой сессии-родителя: ожидающие и недавно завершённые элементы. */
+  spawnQueue = $state<SpawnQueueItemView[]>([]);
   phase = $state<Record<string, unknown> | null>(null);
   /** Сжатие попросили с этого устройства, а агент о старте ещё не сообщил. */
   compactRequested = $state(false);
@@ -531,6 +538,7 @@ export class ChatStore {
     this.alarms = [];
     this.nudge = null;
     this.nudgeEvents = [];
+    this.spawnQueue = [];
     this.settings = { effective: null, pending: null, rev: 0 };
     this.crunch = { enabled: false, resume_pending: false };
   }
@@ -1042,6 +1050,15 @@ export class ChatStore {
           if (!sameAlarms(this.alarms, next)) this.alarms = next;
         }
         return;
+      case "spawn_queue_changed":
+        if (event.kind === "spawn_queue_changed") {
+          const item = event.payload as unknown as SpawnQueueItemView;
+          const next = this.spawnQueue.filter((known) => known.id !== item.id);
+          next.push(item);
+          next.sort(queueOrder);
+          if (!sameAlarms(this.spawnQueue, next)) this.spawnQueue = next;
+        }
+        return;
       case "nudge_changed":
         if (event.kind === "nudge_changed") {
           const payload = event.payload as NudgeRule & { detail?: string };
@@ -1453,6 +1470,10 @@ export class ChatStore {
     if (data.alarms && !sameAlarms(this.alarms, data.alarms))
       this.alarms = data.alarms;
     if (data.nudge !== undefined) this.nudge = data.nudge ?? null;
+    if (data.spawn_queue) {
+      const next = [...data.spawn_queue].sort(queueOrder);
+      if (!sameAlarms(this.spawnQueue, next)) this.spawnQueue = next;
+    }
     if (data.nudge_events) this.nudgeEvents = data.nudge_events;
     if (data.open_requests) this.requests.reconcileSnapshot(data.open_requests);
     if (data.todos) this.todos.ingestSnapshot(data.todos);

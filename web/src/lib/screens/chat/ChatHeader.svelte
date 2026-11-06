@@ -24,6 +24,10 @@
 	import { isSubagentCall } from '#lib/timeline/rows.js';
 	import { ACCEPT_LABEL, acceptView, type AcceptDetail } from './accept';
 	import { nudgeStateText } from '#lib/timeline/nudge.js';
+	import { asDecision } from '#lib/routing/decision.js';
+	import { routingTitles } from '#lib/routing/titles.svelte.js';
+	import { getRuntime } from '#lib/app/runtime.js';
+	import { pendingItems } from '#lib/routing/queue.js';
 
 	interface DetailLike {
 		title?: string;
@@ -56,6 +60,7 @@
 		onOpenMessages,
 		onOpenAlarms,
 		onOpenNudge,
+		onOpenRoute,
 		onAccept,
 		parentTitle = null,
 		childRunning = 0,
@@ -72,6 +77,8 @@
 		onOpenMessages?: () => void;
 		onOpenAlarms?: () => void;
 		onOpenNudge?: () => void;
+		/** Решение маршрута, выбравшее исполнителя этой сессии. */
+		onOpenRoute?: () => void;
 		onAccept?: () => void;
 		/** Название сессии, запустившей эту; пусто, пока список её не знает. */
 		parentTitle?: string | null;
@@ -82,7 +89,7 @@
 	} = $props();
 
 	let menuOpen = $state(false);
-	const delegated = $derived(hasChildren || chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
+	const delegated = $derived(hasChildren || pendingItems(chat.spawnQueue).length > 0 || chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
 	const alarmCount = $derived(
 		chat.alarms.filter((alarm) => alarm.state === 'armed' || alarm.state === 'failed').length
 	);
@@ -104,6 +111,17 @@
 	const machineName = $derived(detail?.machine?.name || 'workstation');
 	const provider = $derived(detail?.harness?.provider || 'claude');
 	const nudgeText = $derived(chat.nudge ? nudgeStateText(chat.nudge) : '');
+	const route = $derived(asDecision((chat.detail as { routing?: unknown } | null)?.routing));
+	$effect(() => {
+		if (!route) return;
+		let revision: number | null = null;
+		try {
+			revision = getRuntime().list.routingRevision;
+		} catch {
+			revision = null;
+		}
+		routingTitles.ensure(revision);
+	});
 
 	const effectiveModel = $derived(modelLabel(settings?.effective?.model || detail?.model || 'opus-5.5'));
 	const pendingModel = $derived(settings?.pending?.model && modelLabel(settings.pending.model));
@@ -223,6 +241,11 @@
 			{#if parentId}
 				<div class="parent-row">
 					<a class="parent-link" data-parent-link href={resolve(`c/${parentId}`)}>Запущена сессией {parentTitle || 'без названия'}</a>
+				</div>
+			{/if}
+			{#if route}
+				<div class="nudge-row route-row">
+					<button type="button" class="nudge-link" data-role="route-state-line" onclick={onOpenRoute}>Выбрана маршрутом «{routingTitles.title(route.task_type)}»</button>
 				</div>
 			{/if}
 			{#if nudgeText}
@@ -604,6 +627,11 @@
 	}
 	.nudge-row {
 		margin-top: var(--s1);
+	}
+	/* Строка маршрута стоит под ссылкой на родителя и начинается с той же линии. */
+	.route-row {
+		margin-top: var(--s0);
+		padding-left: calc(var(--mark-large) + var(--s3));
 	}
 	.nudge-link {
 		min-height: var(--target);

@@ -5,6 +5,8 @@ import { seedMockup04, seedMockup05, seedMockup06, seedMockup08, seedMockup11, s
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect } from '../ui/fixtures';
 import { bootSecondary } from '../ui/secondary-fixture';
+import { seedConversation } from '../../testing/fake-hub/seed';
+import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 
 export type Theme = 'dark' | 'light';
 
@@ -82,6 +84,31 @@ async function sessions(page: Page, route: string, ready: string): Promise<void>
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(route);
   await expect(page.locator(ready)).toBeVisible({ timeout: 15_000 });
+}
+
+/** Редактор маршрутизации с подсветкой пары вне белого списка и раскрытым кандидатом. */
+async function routingEditor(page: Page, viewport = PHONE): Promise<{ api: FakeHubApi }> {
+  const { hub, api } = fresh();
+  seedRoutingCatalog(api);
+  seedRoutingWhitelist(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.setViewportSize(viewport);
+  await page.goto('/settings/routing');
+  await expect(page.locator('[data-routing-editor][data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
+  return { api };
+}
+
+/** Оркестратор с лентой запусков, очередью и делегатом, выбранным маршрутом. */
+async function orchestrator(page: Page, afterOpen?: (page: Page, hub: FakeHub, api: FakeHubApi, id: string, child: string) => Promise<void>, open?: 'child'): Promise<void> {
+  const { hub, api } = fresh();
+  seedRoutingCatalog(api);
+  const id = seedConversation(api, { title: 'Оркестратор', harness: { id: 'claude_code', title: 'Claude Code', provider: 'claude' } });
+  const child = seedRoutedSpawn(api, id);
+  seedQueue(api, id);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${open === 'child' ? child : id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await afterOpen?.(page, hub, api, id, child);
 }
 
 const screen = (name: string, mockup: boolean, viewport: Screen['viewport'], theme: Theme, boot: Screen['boot']): Screen => ({ name, mockup, viewport, theme, boot });
@@ -209,6 +236,33 @@ export const SCREENS: Screen[] = [
     openRequest(hub, api, id, 'permission', { tool_name: 'mcp_elicitation', server: 'github', mode: 'url', message: 'Подтвердите доступ', url: 'https://github.com/login/device?code=WDJB' });
     await expect(opened.locator('.permission-card')).toBeVisible();
   })),
+  screen('routing-editor', false, PHONE, 'dark', async (page) => {
+    await routingEditor(page);
+    await page.locator('[data-task-key="bugfix"] details.more').first().locator('summary').click();
+  }),
+  screen('routing-preview', false, PHONE, 'dark', async (page) => {
+    const { api } = await routingEditor(page);
+    api.routingSkips.set(`opencode/${DEEPSEEK}`, { verdict: 'parallel_busy', reason: `4 of 4 ${DEEPSEEK} sessions busy` });
+    api.routingGuard = { stale: false, blocked: true, violations: ['disk 12 GB free < 30 GB'], detail: 'disk 12 GB free < 30 GB.' };
+    const preview = page.locator('[data-role="routing-preview"]');
+    await preview.getByRole('button', { name: 'Проверить' }).click();
+    await expect(preview.locator('[data-role="preview-result"]')).toBeVisible();
+    await preview.scrollIntoViewIfNeeded();
+  }),
+  screen('spawn-queue', false, PHONE, 'dark', (page) => orchestrator(page, async (opened) => {
+    await opened.getByRole('button', { name: /В очереди запуска/ }).click();
+    await expect(opened.locator('[data-queue-item]')).toHaveCount(2);
+  })),
+  screen('delegation-queued', false, PHONE, 'dark', (page) => orchestrator(page, async (opened) => {
+    await opened.getByRole('button', { name: 'Делегирование' }).click();
+    await expect(opened.locator('[data-queue-node]').first()).toBeVisible();
+  })),
+  screen('route-sheet', false, PHONE, 'dark', (page) => orchestrator(page, async (opened) => {
+    await opened.locator('[data-role="route-state-line"]').click();
+    await expect(opened.getByRole('dialog', { name: 'Выбор маршрута' })).toBeVisible();
+    // Строка в шапке под указателем меняет цвет переходом: проверка смотрит на устоявшийся цвет.
+    await opened.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== 'running'));
+  }, 'child')),
   screen('question-request', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, hub, api, id) => {
     openRequest(hub, api, id, 'question', { truncated: true, questions: [{ id: 'q0', text: 'Что делать?', options: ['Да', 'Нет'] }, { id: 'q1', text: 'Какие тесты?', options: ['Сон', 'Сеть'], multi_select: true, allow_custom: true }] });
     await expect(opened.locator('.question-card')).toBeVisible();

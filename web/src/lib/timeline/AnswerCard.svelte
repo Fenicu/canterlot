@@ -15,6 +15,8 @@
   import SubagentRow from '#lib/timeline/SubagentRow.svelte';
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import ToolBlock from '#lib/timeline/ToolBlock.svelte';
+  import SpawnRouteLine from '#lib/timeline/SpawnRouteLine.svelte';
+  import { isSpawnCall } from '#lib/routing/spawnAnswer.js';
   import IconButton from '#lib/ui/IconButton.svelte';
 
   let {
@@ -62,7 +64,9 @@
   const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
   const live = $derived(working || streaming);
   const report = (block: BlockModel) => block.parentId === laneRoot && block.kind === 'tool_result' && isMainAgent(block.agent);
-  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: report }));
+  // Запуск сессии не прячется в свёрнутые шаги: под ним строка маршрута или очереди.
+  const spawn = (block: BlockModel) => block.kind === 'tool_call' && isSpawnCall(block.toolName);
+  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: (block) => report(block) || spawn(block) }));
   const view = $derived(folds.view(cardKey, items, live));
 </script>
 
@@ -80,6 +84,7 @@
       <SubagentRow call={block} nodes={links.children(block.id)} result={links.result(block.id)} background={links.background(block.id)} {working} {now} {conversationId} />
     {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
       <ToolBlock {block} result={links.result(block.id)} background={links.background(block.id)} {working} {now} {load} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
+      {#if spawn(block)}<SpawnRouteLine result={links.result(block.id)} />{/if}
     {:else if block.kind === 'warning' || block.kind === 'error'}
       <NoticeBlock {block} />
     {:else if block.kind === 'reasoning'}

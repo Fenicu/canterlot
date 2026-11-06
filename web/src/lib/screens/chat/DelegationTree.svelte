@@ -15,6 +15,10 @@
 	import Icon from '#lib/ui/Icon.svelte';
 	import { branchGrow } from '#lib/ui/fold.js';
 	import { liveNodes } from './delegationNodes';
+	import StageTrack from '#lib/ui/StageTrack.svelte';
+	import { QUEUE_STAGES, itemReason, itemTarget, itemTitle, stageIndex, type QueueItem } from '#lib/routing/queue.js';
+	import { catalogTitles } from '#lib/routing/decision.js';
+	import { routingTitles } from '#lib/routing/titles.svelte.js';
 
 	let {
 		chat,
@@ -64,6 +68,19 @@
 			.sort((a, b) => (b.last_activity_at ?? b.created_at).localeCompare(a.last_activity_at ?? a.created_at))
 	);
 	const sessionsLabel = $derived(`Завершённые · ${olderSessions.length}`);
+	const modelTitles = $derived(catalogTitles(runtime?.machines.items.values() ?? []));
+	$effect(() => {
+		if (chat.spawnQueue.some((item) => item.task_type)) routingTitles.ensure(runtime?.list.routingRevision ?? null);
+	});
+	// Элемент очереди — бледный узел, пока не появилась его сессия: тогда вырастает настоящий узел.
+	const queued = $derived(
+		chat.spawnQueue.filter(
+			(item) =>
+				item.state === 'queued' ||
+				item.state === 'starting' ||
+				(item.state === 'started' && item.child_id && !sessions.some((row) => row.id === item.child_id))
+		)
+	);
 
 	onMount(async () => {
 		try {
@@ -143,6 +160,17 @@
 	</a>
 {/snippet}
 
+{#snippet queueRow(item: QueueItem)}
+	<div class="tree-node queue-node">
+		<span class="branch">└</span>
+		<span class="grow node-info session-info">
+			<span class="session-name">{itemTitle(item)}</span>
+			<small class="node-task queue-reason">{[itemTarget(item, (key) => routingTitles.title(key), modelTitles), itemReason(item)].filter(Boolean).join(' · ')}</small>
+			<StageTrack stages={QUEUE_STAGES} index={stageIndex(item)} form="compact" label="Запуск из очереди" />
+		</span>
+	</div>
+{/snippet}
+
 <div class="tree">
 	<div class="tree-root">{sessionTitle}</div>
 
@@ -166,13 +194,16 @@
 		{/if}
 	{/if}
 
-	{#if sessions.length > 0}
+	{#if sessions.length > 0 || queued.length > 0}
 		<div class="tree-root sessions-title">Сессии</div>
 		{#key loaded}
 		{#each shownSessions as row (row.id)}
 			<div class="sprout" data-node={row.id} in:branchGrow>{@render sessionRow(row)}</div>
 		{/each}
 		{/key}
+		{#each queued as item (item.id)}
+			<div class="sprout" data-queue-node={item.id} data-state={item.state} in:branchGrow out:branchGrow>{@render queueRow(item)}</div>
+		{/each}
 		{#if olderSessions.length > 0}
 			<button type="button" class="tree-node older-toggle" aria-expanded={sessionsExpanded} onclick={() => (sessionsExpanded = !sessionsExpanded)}>
 				<span class="grow">{sessionsLabel}</span>
@@ -290,6 +321,17 @@
 		flex-direction: column;
 		gap: var(--s1);
 		white-space: normal;
+	}
+	/* Узел очереди бледный: приглушённый текст и дорожка этапов, сессии ещё нет. */
+	.queue-node {
+		color: var(--secondary);
+	}
+	.queue-node .branch {
+		color: var(--muted);
+	}
+	.queue-reason {
+		white-space: normal;
+		overflow-wrap: anywhere;
 	}
 	.session-name,
 	.session-info .node-task {
