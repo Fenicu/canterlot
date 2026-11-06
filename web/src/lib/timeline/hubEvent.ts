@@ -12,6 +12,8 @@ type AlarmFacts = {
   alarm_ids?: string[] | null;
   alarm_key?: string | null;
   fired_reason?: string | null;
+  alarm_path?: string | null;
+  alarm_size?: number | null;
 };
 type AlarmOrigin = InputOrigin & AlarmFacts & { event?: (HubEvent & AlarmFacts) | null };
 
@@ -211,9 +213,13 @@ const alarmLines = new WeakMap<object, { key: string; text: string; line: string
 /** Всё, от чего зависит строка: тот же ввод с тем же текстом не разбирается заново. */
 function alarmLineKey(origin: InputOrigin): string {
   const event = (origin as AlarmOrigin).event;
-  return [...alarmIdentifiers(origin), event?.alarm_key ?? '', event?.fired_reason ?? ''].join(
-    '\u0000'
-  );
+  return [
+    ...alarmIdentifiers(origin),
+    event?.alarm_key ?? '',
+    event?.fired_reason ?? '',
+    event?.alarm_path ?? '',
+    String(event?.alarm_size ?? '')
+  ].join('\u0000');
 }
 
 /** Тихая строка-заголовок будильника: имя одного или число сработавших. */
@@ -236,7 +242,12 @@ function alarmTitleLine(origin: InputOrigin, text: string): string {
       count,
       ['будильник', 'будильника', 'будильников']
     )}`;
-  return alarmEventLine({ alarm_key: event?.alarm_key, fired_reason: event?.fired_reason });
+  return alarmEventLine({
+    alarm_key: event?.alarm_key,
+    fired_reason: event?.fired_reason,
+    alarm_path: event?.alarm_path,
+    alarm_size: event?.alarm_size
+  });
 }
 
 export function isLongText(text: string): boolean {

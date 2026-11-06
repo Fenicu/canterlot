@@ -40,6 +40,9 @@ pub enum Outcome {
     Error(&'static str),
 }
 
+/// Срок пробы на воркере: зависшее чтение отвечает ошибкой, а не ждёт хаб.
+pub const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Проверить путь и, если файл есть, отдать его факты. Работа блокирующая:
 /// вызывающий уводит её в отдельный поток.
 pub fn probe(path: &str, roots: &[PathBuf], read_head_bytes: u32) -> Outcome {    let invalid = lexical_problem(path);
@@ -65,6 +68,32 @@ pub fn probe(path: &str, roots: &[PathBuf], read_head_bytes: u32) -> Outcome {  
         mtime_ms,
         head,
         head_omitted,
+    }
+}
+
+/// Срок пробы: блокирующее чтение уводится в отдельный поток, а ответ приходит
+/// не позже срока. Зависший поток остаётся висеть, но управляющий цикл свободен.
+pub(crate) async fn run(
+    path: String,
+    roots: Vec<PathBuf>,
+    read_head_bytes: u32,
+) -> Outcome {
+    with_deadline(PROBE_DEADLINE, async move {
+        match tokio::task::spawn_blocking(move || probe(&path, &roots, read_head_bytes)).await {
+            Ok(outcome) => outcome,
+            Err(_) => Outcome::Error("internal"),
+        }
+    })
+    .await
+}
+
+async fn with_deadline<F: std::future::Future<Output = Outcome>>(
+    deadline: std::time::Duration,
+    work: F,
+) -> Outcome {
+    match tokio::time::timeout(deadline, work).await {
+        Ok(outcome) => outcome,
+        Err(_) => Outcome::Error("deadline"),
     }
 }
 
@@ -331,5 +360,25 @@ mod tests {
             u64::try_from(meta.mtime()).unwrap() * 1000
                 + u64::try_from(meta.mtime_nsec()).unwrap() / 1_000_000
         );
+    }
+
+    #[tokio::test]
+    async fn a_probe_is_answered_inside_its_deadline() {
+        let dir = dir();
+        fs::write(dir.path().join("gate.rc"), b"0\n").unwrap();
+        let outcome = run(
+            dir.path().join("gate.rc").display().to_string(),
+            roots(dir.path()),
+            16,
+        )
+        .await;
+        assert!(matches!(outcome, Outcome::Exists { size: 2, .. }));
+    }
+
+    #[tokio::test]
+    async fn a_hung_probe_answers_with_a_deadline_error() {
+        let outcome =
+            with_deadline(std::time::Duration::from_millis(5), std::future::pending()).await;
+        assert_eq!(outcome, Outcome::Error("deadline"));
     }
 }

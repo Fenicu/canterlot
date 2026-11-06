@@ -94,6 +94,30 @@ describe('alarm plaques', () => {
     expect(chip).toContain('Сторож · Сброс лимита Claude, окно неделя · до');
   });
 
+  it('shows a file condition in Russian from structured fields', () => {
+    const alarm = {
+      ...base,
+      kind: 'condition',
+      fires_at: null,
+      deadline_at: '2026-11-05T18:00:00.000Z',
+      condition:
+        'file /tmp/gate.rc appears (at least 2 bytes, written after arming); deadline 2026-11-05 18:00 UTC',
+      path: '/tmp/gate.rc',
+      min_bytes: 2,
+      fresh: true,
+      read_head: true
+    };
+    expect(alarmChip(alarm)).toContain(
+      'Будильник · «gate» · когда появится /tmp/gate.rc · до '
+    );
+    expect(alarmDetail(alarm)).toContain(
+      'Условие: появится /tmp/gate.rc, не меньше 2 байт, только после взвода'
+    );
+    expect(
+      alarmChip({ ...alarm, only_on_timeout: true })
+    ).toContain('Сторож · когда появится /tmp/gate.rc · до');
+  });
+
   it('marks a watchdog and a failed delivery', () => {
     expect(alarmChip({ ...base, only_on_timeout: true })).toContain('Сторож');
     expect(alarmChip({ ...base, state: 'failed', failure_reason: 'delivery_failed' })).toContain(
@@ -114,5 +138,20 @@ describe('alarm plaques', () => {
     expect(alarmEventLine({ alarm_key: 'gate', fired_reason: 'by_clock' })).toBe(
       'Будильник «gate»: лимит, вероятно, сброшен (по часам, без подтверждения)'
     );
+    expect(
+      alarmEventLine({
+        alarm_key: 'gate',
+        fired_reason: 'condition',
+        alarm_path: '/tmp/gate.rc',
+        alarm_size: 2
+      })
+    ).toBe('Будильник «gate»: появился /tmp/gate.rc (2 байта)');
+    expect(
+      alarmEventLine({
+        fired_reason: 'condition',
+        alarm_path: '/tmp/gate.rc',
+        alarm_size: 5
+      })
+    ).toBe('Будильник: появился /tmp/gate.rc (5 байт)');
   });
 });

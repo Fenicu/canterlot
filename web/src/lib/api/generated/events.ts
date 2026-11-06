@@ -882,6 +882,10 @@ export interface AlarmChanged {
     fired_at: Time | null;
     note: string | null;
     note_bytes: number;
+    path?: string | null;
+    min_bytes?: number | null;
+    fresh?: boolean | null;
+    read_head?: boolean | null;
     created_at: Time;
   };
 }
@@ -907,6 +911,7 @@ export interface NudgeChanged {
     max_total?: number;
     done_markers?: string[];
     context_warn_percent?: number | null;
+    report_file?: string | null;
     set_by?: string;
     set_by_session?: Uuid | null;
     notify_session_id?: Uuid | null;

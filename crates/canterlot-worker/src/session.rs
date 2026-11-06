@@ -1449,11 +1449,9 @@ impl Worker {
                 let roots = self.config.execution.allowed_workdir_roots.clone();
                 probe_operation = Some(Box::pin(async move {
                     let request_id = request.request_id.clone();
-                    let outcome = tokio::task::spawn_blocking(move || {
-                        crate::machine::probe::probe(&request.path, &roots, request.read_head_bytes)
-                    })
-                    .await
-                    .unwrap_or(crate::machine::probe::Outcome::Error("internal"));
+                    let outcome =
+                        crate::machine::probe::run(request.path, roots, request.read_head_bytes)
+                            .await;
                     crate::machine::probe::reply(request_id, outcome)
                 }));
             }

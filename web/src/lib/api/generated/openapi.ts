@@ -1207,18 +1207,24 @@ export interface components {
              * @description Разобранное условие `machine` для подписей PWA на русском.
              */
             free_disk_gb_above?: number | null;
+            fresh?: boolean | null;
             key?: string | null;
             kind: string;
             /** Format: double */
             load_per_core_below?: number | null;
             /** Format: double */
             mem_available_gb_above?: number | null;
+            /** Format: int64 */
+            min_bytes?: number | null;
             note?: string | null;
             /** Format: int64 */
             note_bytes: number;
             only_on_timeout: boolean;
+            /** @description Разобранное условие `file` для подписей PWA на русском. */
+            path?: string | null;
             /** @description Разобранное условие `limit_reset` для подписей PWA на русском. */
             provider?: string | null;
+            read_head?: boolean | null;
             session_ids: string[];
             state: string;
             states: string[];
@@ -1919,6 +1925,10 @@ export interface components {
              */
             alarm_id?: string | null;
             alarm_key?: string | null;
+            /** @description `alarm` с условием `file`: путь и наблюдённый размер файла. */
+            alarm_path?: string | null;
+            /** Format: int64 */
+            alarm_size?: number | null;
             answer?: string | null;
             /** Format: uuid */
             answer_block_id?: string | null;
@@ -2332,6 +2342,8 @@ export interface components {
             max_total: number;
             /** Format: uuid */
             notify_session_id?: string | null;
+            /** @description Файл отчёта: путь и рост считаются прогрессом. */
+            report_file?: string | null;
             /** Format: uuid */
             session_id: string;
             set_by: string;

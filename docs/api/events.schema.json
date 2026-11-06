@@ -4000,6 +4000,46 @@
             "note_bytes": {
               "type": "integer"
             },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "min_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fresh": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "read_head": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "created_at": {
               "$ref": "#/$defs/Time"
             }
@@ -4074,6 +4114,9 @@
             "done_markers": { "type": "array", "items": { "type": "string" } },
             "context_warn_percent": {
               "anyOf": [ { "type": "integer" }, { "type": "null" } ]
+            },
+            "report_file": {
+              "anyOf": [ { "type": "string" }, { "type": "null" } ]
             },
             "set_by": { "type": "string" },
             "set_by_session": {

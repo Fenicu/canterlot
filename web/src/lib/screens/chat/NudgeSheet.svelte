@@ -79,6 +79,9 @@
       <p class="state" data-role="nudge-state">{stateText}</p>
       <p class="meta" data-role="nudge-counter">{counter} · подряд {rule.consecutive} из {rule.max_consecutive}</p>
       <p class="meta">{setBy}{rule.set_by_session ? ` · сессия ${rule.set_by_session.slice(0, 8)}` : ''}</p>
+      {#if rule.report_file}
+        <p class="meta" data-role="nudge-report">Отчёт: {rule.report_file}</p>
+      {/if}
       <p class="meta">Простой {rule.idle_minutes} мин, с фоновой работой {rule.background_minutes} мин. Маркеры: {rule.done_markers.join(' или ')}.</p>
       {#if last}
         <p class="meta" data-role="nudge-last-signals">

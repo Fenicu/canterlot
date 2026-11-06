@@ -7205,6 +7205,12 @@
             "format": "double",
             "description": "Разобранное условие `machine` для подписей PWA на русском."
           },
+          "fresh": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "key": {
             "type": [
               "string",
@@ -7228,6 +7234,14 @@
             ],
             "format": "double"
           },
+          "min_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
           "note": {
             "type": [
               "string",
@@ -7241,12 +7255,25 @@
           "only_on_timeout": {
             "type": "boolean"
           },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Разобранное условие `file` для подписей PWA на русском."
+          },
           "provider": {
             "type": [
               "string",
               "null"
             ],
             "description": "Разобранное условие `limit_reset` для подписей PWA на русском."
+          },
+          "read_head": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "session_ids": {
             "type": "array",
@@ -9936,6 +9963,20 @@
               "null"
             ]
           },
+          "alarm_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`alarm` с условием `file`: путь и наблюдённый размер файла."
+          },
+          "alarm_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
           "answer": {
             "type": [
               "string",
@@ -11331,6 +11372,13 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "report_file": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Файл отчёта: путь и рост считаются прогрессом."
           },
           "session_id": {
             "type": "string",

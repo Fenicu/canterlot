@@ -72,6 +72,13 @@ describe('nudge signal labels', () => {
     ]);
     expect(signalLabels(null)).toEqual([]);
   });
+
+  test('names the report file signals in Russian', () => {
+    expect(signalLabels({ report_missing: true, report_probe_failed: true })).toEqual([
+      'отчёт ещё не появился',
+      'отчёт не удалось проверить',
+    ]);
+  });
 });
 
 describe('nudge feed line', () => {

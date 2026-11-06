@@ -108,6 +108,74 @@ test('alarm_menu_item_opens_the_list_and_cancel_works', async ({ page }) => {
   await expect(alarmMenuItem(page)).toHaveCount(0);
 });
 
+test('file_alarm_names_the_path_and_deadline_in_russian', async ({ page }) => {
+  const { hub, id } = await boot(page);
+  hub.append(`conversation:${id}`, {
+    kind: 'alarm_changed',
+    conversation_id: id,
+    payload: alarm({
+      conversation_id: id,
+      alarm_id: '00000000-0000-4000-8000-0000000000a4',
+      key: 'gate',
+      kind: 'condition',
+      condition:
+        'file /tmp/gate.rc appears (at least 2 bytes, written after arming); deadline 2026-11-04 18:00 UTC',
+      fires_at: null,
+      deadline_at: '2026-11-04T18:00:00.000Z',
+      path: '/tmp/gate.rc',
+      min_bytes: 2,
+      fresh: true,
+      read_head: true
+    })
+  });
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+  await openAlarms(page);
+  const pill = alarmsList(page).locator('.pill').first();
+  await expect(pill).toContainText('Будильник · «gate» · когда появится /tmp/gate.rc · до ');
+  await pill.locator('.chip').click();
+  await expect(alarmsList(page)).toContainText(
+    'Условие: появится /tmp/gate.rc, не меньше 2 байт, только после взвода'
+  );
+});
+
+test('fired_file_alarm_is_a_quiet_feed_line_with_the_path_and_size', async ({ page }) => {
+  const { api, id } = await boot(page);
+  seedInput(api, id, {
+    kind: 'input',
+    id: api.id(),
+    idempotency_key: 'alarm-file',
+    state: 'accepted',
+    content: [
+      {
+        type: 'text',
+        text: '[canterlot] Alarm "gate" fired: file /tmp/gate.rc appeared (2 bytes, written 14:31 UTC). Head: "0".'
+      }
+    ],
+    attachments: [],
+    created_seq: '1',
+    feed_seq: '1',
+    created_at: AT,
+    origin: {
+      kind: 'alarm',
+      chain_depth: 0,
+      event: {
+        kind: 'alarm',
+        alarm_key: 'gate',
+        fired_reason: 'condition',
+        alarm_path: '/tmp/gate.rc',
+        alarm_size: 2
+      }
+    }
+  });
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+  await expect(page.locator('.line[data-event-kind="alarm"]')).toContainText(
+    'Будильник «gate»: появился /tmp/gate.rc (2 байта)'
+  );
+});
+
 test('machine_alarm_describes_its_thresholds_in_russian_in_the_list', async ({ page }) => {
   const { hub, id } = await boot(page);
   hub.append(`conversation:${id}`, {

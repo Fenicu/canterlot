@@ -45,7 +45,7 @@ async function bootChat(page: Page) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   const id = seedConversation(api, { title: 'Исполнитель' });
-  api.nudgeRules.set(id, rule({ session_id: id }));
+  api.nudgeRules.set(id, rule({ session_id: id, report_file: '/tmp/w/report.md' }));
   api.nudgeEvents.set(id, [
     {
       id: '00000000-0000-4000-8000-0000000000b2',
@@ -139,6 +139,7 @@ test('delegate_header_and_sheet_show_the_rule_and_pause_resume_clear', async ({ 
   await expect(sheet).toBeVisible();
   await expect(sheet.locator('[data-role="nudge-state"]')).toHaveText('Автопинок: следит');
   await expect(sheet.locator('[data-role="nudge-counter"]')).toContainText('толчков 2 из 20');
+  await expect(sheet.locator('[data-role="nudge-report"]')).toHaveText('Отчёт: /tmp/w/report.md');
   await expect(sheet.locator('[data-role="nudge-last-signals"]')).toContainText(
     'нет маркера готовности, обещал продолжить',
   );
