@@ -264,6 +264,7 @@ async fn preview(
         stale: s.routing_stale,
         now,
         request: &request,
+        bypass_limits: false,
     }) {
         Ok(decision) => {
             let considered = decision.considered.clone();

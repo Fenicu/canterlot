@@ -639,6 +639,8 @@ pub struct RouteInputs<'a> {
     pub stale: Duration,
     pub now: DateTime<Utc>,
     pub request: &'a RouteRequest,
+    /// «Запустить сейчас»: лимиты провайдеров не оцениваются вовсе.
+    pub bypass_limits: bool,
 }
 
 /// Чистая функция выбора (§5.2 + §C1 пп. 5–7): уровень, канонизация через каталог,
@@ -655,6 +657,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
         stale,
         now,
         request,
+        bypass_limits,
     } = inputs;
     let task = policy.task_types.get(&request.task_type).ok_or_else(|| {
         let mut available: Vec<String> = policy.task_types.keys().cloned().collect();
@@ -743,7 +746,8 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
         let unlimited = policy.unlimited_models.iter().any(|entry| {
             entry == &resolved.id || *entry == format!("{}/{}", candidate.harness, resolved.id)
         });
-        if !unlimited
+        if !bypass_limits
+            && !unlimited
             && let Some((verdict, reason)) = limits_verdict(
                 policy,
                 &provider,
@@ -1274,6 +1278,7 @@ pub async fn preview(
         stale: context.routing_stale,
         now,
         request: &request,
+        bypass_limits: false,
     }) {
         Ok(decision) => {
             tx.commit().await?;
@@ -1439,6 +1444,47 @@ mod tests {
     }
 
     #[test]
+    fn bypass_limits_ignores_unknown_and_over_thresholds() {
+        let mut policy = policy();
+        policy.unknown_limits = UnknownLimits::Skip;
+        let empty = HashMap::new();
+        let empty_live: HashMap<(String, String), i64> = HashMap::new();
+        let req = request("bugfix");
+        assert!(
+            matches!(
+                route(RouteInputs {
+                    policy: &policy,
+                    revision: 1,
+                    whitelist: &entries(),
+                    catalogs: &catalogs(),
+                    limits: &empty,
+                    live: &empty_live,
+                    stale: Duration::from_secs(1800),
+                    now: now(),
+                    request: &req,
+                    bypass_limits: false,
+                }),
+                Err(RouteError::NoExecutor { .. })
+            ),
+            "unknown limits skip the candidate without a bypass"
+        );
+        let decision = route(RouteInputs {
+            policy: &policy,
+            revision: 1,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &empty,
+            live: &empty_live,
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &req,
+            bypass_limits: true,
+        })
+        .unwrap();
+        assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
+    }
+
+    #[test]
     fn first_passing_candidate_wins() {
         let decision = route(RouteInputs {
             policy: &policy(),
@@ -1450,6 +1496,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.harness, "opencode");
@@ -1478,6 +1525,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &with_level,
+            bypass_limits: false,
         })
         .unwrap();
         // Beam пропущен по уровню; DeepSeek без effort берёт уровень как усилие.
@@ -1498,6 +1546,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         });
         let error = decision.unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
@@ -1525,6 +1574,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("review"),
+            bypass_limits: false,
         })
         .unwrap();
         // claude_code нет в каталоге: выбран codex, а не отсутствующий opus.
@@ -1563,6 +1613,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("probe"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1599,6 +1650,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("probe"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opus[1m]");
@@ -1636,6 +1688,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("probe"),
+            bypass_limits: false,
         })
         .unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
@@ -1656,6 +1709,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         // DeepSeek и Muse упёрлись в лимит opencode; у claude показаний нет —
@@ -1702,6 +1756,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap_err();
         let RouteError::NoExecutor { considered, reset } = error else {
@@ -1750,6 +1805,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("fast"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/beam-free");
@@ -1776,6 +1832,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1802,6 +1859,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         });
         let decision = error_or_next.unwrap();
         assert_ne!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1833,6 +1891,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         // Первый два кандидата на паузе; выбран opus.
@@ -1864,6 +1923,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("bugfix"),
+            bypass_limits: false,
         })
         .unwrap();
         // DeepSeek занят 4 из 4; Muse исключён workdir? Нет: workdir /tmp/w.
@@ -1890,6 +1950,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &with_home,
+            bypass_limits: false,
         })
         .unwrap();
         // Muse исключён каталогом; DeepSeek первый и проходит.
@@ -1915,6 +1976,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &shop,
+            bypass_limits: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/muse-spark-1.3-contributor");
@@ -2000,6 +2062,7 @@ mod tests {
             stale: Duration::from_secs(1800),
             now: now(),
             request: &request("nope"),
+            bypass_limits: false,
         })
         .unwrap_err();
         let RouteError::UnknownTask { available } = error else {

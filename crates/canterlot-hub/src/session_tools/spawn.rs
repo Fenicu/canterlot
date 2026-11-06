@@ -662,6 +662,7 @@ pub(crate) async fn validate_routed(
         stale: context.routing_stale,
         now,
         request: &request,
+        bypass_limits: bypass_queue,
     }) {
         Ok(decision) => decision,
         Err(super::routing::RouteError::UnknownTask { available }) => {

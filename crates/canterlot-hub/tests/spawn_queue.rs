@@ -1521,3 +1521,35 @@ async fn a_stopped_delegate_with_a_queued_input_frees_its_slot(pool: PgPool) {
         "a stopped session must not hold the slot: {answer}"
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_now_ignores_unknown_limits(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {"bugfix": {"title": "Починка", "candidates": [
+                {"harness":"opencode","model":"opencode-go/beam-free","effort":"medium"}
+            ]}},
+            "unknown_limits": "skip"
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from provider_limits")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    fill_rate(&f.pool, f.parent).await;
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"bugfix"},"brief":"b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "queued", "{answer}");
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+    let started = f.runtime_call(queue_id, true).await.unwrap();
+    assert_eq!(started.status, "started", "{started:?}");
+}
