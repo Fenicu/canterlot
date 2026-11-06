@@ -139,7 +139,6 @@
   summary {
     display: block;
     min-height: var(--target);
-    padding-block: var(--s2);
     border-radius: var(--radius-card);
     color: var(--secondary);
     cursor: pointer;
