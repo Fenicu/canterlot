@@ -40,10 +40,14 @@ async function slices(page: Page, selector: string, neighbour: string, act: () =
 		const started = performance.now();
 		const look = () => {
 			// Svelte сперва ставит пустую вводную анимацию нулевой длины: ждём настоящую.
-			const real = (node: Element) => node.getAnimations().filter((animation) => Number(animation.effect?.getComputedTiming().duration) > 0);
-			const slot = [...document.querySelectorAll(selector)].find((node) => real(node).length > 0);
+			// Из нескольких движений строки берём то, что меняет высоту: FLIP едет трансформом.
+			const folds = (node: Element) => node.getAnimations().filter((animation) => {
+				if (!(animation.effect instanceof KeyframeEffect) || Number(animation.effect.getComputedTiming().duration) <= 0) return false;
+				return animation.effect.getKeyframes().some((frame) => 'height' in frame || 'gridTemplateRows' in frame);
+			});
+			const slot = [...document.querySelectorAll(selector)].find((node) => folds(node).length > 0);
 			if (slot) {
-				for (const animation of real(slot)) animation.pause();
+				for (const animation of folds(slot)) animation.pause();
 				(window as unknown as { __slot: Element }).__slot = slot;
 				resolve(true);
 			} else if (performance.now() - started > 8_000) resolve(false);
@@ -53,9 +57,10 @@ async function slices(page: Page, selector: string, neighbour: string, act: () =
 	}), { selector });
 	await act();
 	if (!(await waiting)) return null;
-	return page.evaluate(({ neighbour }) => {
+	return page.evaluate(async ({ neighbour }) => {
 		const slot = (window as unknown as { __slot: Element }).__slot;
-		const [animation] = slot.getAnimations().filter((item) => Number(item.effect?.getComputedTiming().duration) > 0);
+		const [animation] = slot.getAnimations().filter((item) => item.effect instanceof KeyframeEffect
+			&& item.effect.getKeyframes().some((frame) => 'height' in frame || 'gridTemplateRows' in frame));
 		const total = Number(animation!.effect!.getComputedTiming().duration);
 		animation!.currentTime = 0;
 		const out = { start: slot.getBoundingClientRect().height, slot: [] as number[], below: [] as number[] };
@@ -67,6 +72,9 @@ async function slices(page: Page, selector: string, neighbour: string, act: () =
 			out.below.push(next.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop);
 		}
 		animation!.play();
+		// Переход доигрывает до конца: иначе уходящая строка ещё в DOM, когда начинается следующее
+		// действие, и следующий срез может поймать её затухающую анимацию вместо новой.
+		await Promise.race([animation!.finished.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 3_000))]);
 		return out;
 	}, { neighbour });
 }
