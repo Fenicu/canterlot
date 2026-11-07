@@ -2,7 +2,8 @@
   import type { Component } from 'svelte';
   import { fmt } from '#lib/format/ru.js';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
-  import { attachmentUrl } from '#lib/timeline/attachments.js';
+  import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
+  import type { ViewerShot } from '#lib/viewer/shots.js';
   import CardLine from './CardLine.svelte';
   import CardShell from './CardShell.svelte';
   import type { ShareData } from './defs/share';
@@ -10,15 +11,21 @@
 
   let { call, data, line, link, word, env }: CardProps<ShareData> = $props();
   // Просмотрщик открывается так же, как у вложений сообщения и у обычного блока: грузится при первом касании.
-  let Viewer = $state<Component<{ shots: { media_id: string; src: string; mime: string; caption: string }[]; start?: number; title: string; heading: string; onclose: () => void }> | null>(null);
+  let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading: string; onclose: () => void }> | null>(null);
   let viewing = $state<number | null>(null);
-  const shots = $derived(
+  // Картинкой файл считается так же, как в плитке и в обычном блоке: по типу или по расширению.
+  const isImage = (file: { name: string; mime: string }) => attachmentKind({ name: file.name, mime: file.mime, image: false }) === 'image';
+  const shots = $derived<ViewerShot[]>(
     data.files
-      .filter((file) => file.mime.startsWith('image/'))
+      .filter(isImage)
       .map((file) => ({
         media_id: file.attachment_id,
         src: attachmentUrl(file.attachment_id),
         mime: file.mime,
+        name: file.name,
+        size: file.size,
+        width: file.width ?? undefined,
+        height: file.height ?? undefined,
         caption: [file.title || file.name, file.size > 0 ? fmt.bytes(file.size) : ''].filter(Boolean).join(' · ')
       }))
   );
