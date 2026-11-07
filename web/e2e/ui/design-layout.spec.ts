@@ -432,7 +432,7 @@ test.describe('очередь и вложения', () => {
     await expect(page.getByText('Картинка загружается')).toBeVisible();
     await page.getByRole('button', { name: 'Открыть картинку' }).click();
     const dialog = page.getByRole('dialog', { name: 'Картинки ответа' });
-    await expect(dialog.locator('img')).toBeVisible();
+    await expect(dialog.locator('.slide[data-current] img.full')).toBeVisible();
     await expect(dialog.getByRole('link', { name: 'Сохранить' })).toBeVisible();
   });
 });

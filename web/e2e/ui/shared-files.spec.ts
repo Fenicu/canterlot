@@ -85,9 +85,9 @@ test('shared_file_block_opens_an_image_and_downloads_other_files', async ({ page
 
   await expect(files.nth(0).locator('img')).toBeVisible();
   await files.nth(0).locator('button.thumb').click();
-  const dialog = page.locator('dialog[open]');
-  await expect(dialog).toContainText('Файл');
-  await expect(dialog.locator('img')).toBeVisible();
+  const dialog = page.getByRole('dialog', { name: 'Файл' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.slide[data-current] img.full')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
 
