@@ -7,8 +7,10 @@
 
 | Лицензия | Rust | npm (runtime) | npm (dev) | Всего |
 | --- | ---: | ---: | ---: | ---: |
+| `(MIT AND Zlib)` | 0 | 1 | 0 | 1 |
 | `(MIT OR Apache-2.0) AND Unicode-3.0` | 2 | 0 | 0 | 2 |
 | `(MIT OR CC0-1.0)` | 0 | 0 | 1 | 1 |
+| `(MIT OR GPL-3.0-or-later)` | 0 | 1 | 0 | 1 |
 | `(MPL-2.0 OR Apache-2.0)` | 0 | 1 | 0 | 1 |
 | `Apache-2.0` | 7 | 4 | 20 | 31 |
 | `Apache-2.0 / MIT` | 1 | 0 | 0 | 1 |
@@ -19,13 +21,14 @@
 | `Apache-2.0 OR MIT` | 22 | 0 | 0 | 22 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 5 | 0 | 0 | 5 |
 | `Apache-2.0/MIT` | 3 | 0 | 0 | 3 |
-| `BSD-2-Clause` | 0 | 1 | 9 | 10 |
+| `BSD` | 0 | 1 | 0 | 1 |
+| `BSD-2-Clause` | 0 | 5 | 9 | 14 |
 | `BSD-2-Clause OR Apache-2.0 OR MIT` | 2 | 0 | 0 | 2 |
-| `BSD-3-Clause` | 2 | 2 | 3 | 7 |
+| `BSD-3-Clause` | 2 | 3 | 3 | 8 |
 | `BlueOak-1.0.0` | 0 | 0 | 2 | 2 |
 | `CC0-1.0` | 0 | 0 | 1 | 1 |
-| `ISC` | 2 | 1 | 10 | 13 |
-| `MIT` | 64 | 65 | 157 | 286 |
+| `ISC` | 2 | 3 | 10 | 15 |
+| `MIT` | 64 | 86 | 156 | 306 |
 | `MIT AND BSD-3-Clause` | 1 | 0 | 0 | 1 |
 | `MIT OR Apache-2.0` | 208 | 0 | 0 | 208 |
 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | 2 | 0 | 0 | 2 |
@@ -39,7 +42,7 @@
 | `Unlicense OR MIT` | 3 | 0 | 0 | 3 |
 | `Zlib` | 2 | 0 | 0 | 2 |
 | `Zlib OR Apache-2.0 OR MIT` | 1 | 0 | 0 | 1 |
-| **ИТОГО** | **362** | **87** | **209** | **658** |
+| **ИТОГО** | **362** | **118** | **208** | **688** |
 
 ## Требуют внимания
 
@@ -56,6 +59,7 @@
 | Пакет | Версия | Лицензия | Причина / примечание |
 | --- | --- | --- | --- |
 | `argparse` | 3.0.4 | `PSF-2.0` | Лицензия вне allowlist: PSF-2.0 |
+| `duck` | 0.1.12 | `BSD` | Лицензия вне allowlist: BSD |
 
 ### npm (dev-only, не поставляются)
 
@@ -438,7 +442,7 @@
 
 ## Runtime-пакеты npm
 
-Пакеты веб-интерфейса `web/`, поставляемые в составе клиентского приложения. Всего: 87.
+Пакеты веб-интерфейса `web/`, поставляемые в составе клиентского приложения. Всего: 118.
 
 | Пакет | Версия | Лицензия | Выбрано | Репозиторий |
 | --- | --- | --- | --- | --- |
@@ -474,24 +478,37 @@
 | `@types/node` | 24.19.2 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
 | `@types/trusted-types` | 2.0.7 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
 | `@typescript-eslint/types` | 8.72.1 | `MIT` | `MIT` | [https://github.com/typescript-eslint/typescript-eslint](https://github.com/typescript-eslint/typescript-eslint) |
+| `@xmldom/xmldom` | 0.8.15 | `MIT` | `MIT` | [https://github.com/xmldom/xmldom](https://github.com/xmldom/xmldom) |
 | `acorn` | 8.19.0 | `MIT` | `MIT` | [https://github.com/acornjs/acorn](https://github.com/acornjs/acorn) |
+| `argparse` | 1.0.10 | `MIT` | `MIT` | [https://github.com/nodeca/argparse](https://github.com/nodeca/argparse) |
 | `argparse` | 3.0.4 | `PSF-2.0` | — | [https://github.com/nodeca/argparse](https://github.com/nodeca/argparse) |
 | `aria-query` | 5.3.1 | `Apache-2.0` | `Apache-2.0` | [https://github.com/A11yance/aria-query](https://github.com/A11yance/aria-query) |
 | `axobject-query` | 4.1.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/A11yance/axobject-query](https://github.com/A11yance/axobject-query) |
+| `base64-js` | 1.5.1 | `MIT` | `MIT` | [https://github.com/beatgammit/base64-js](https://github.com/beatgammit/base64-js) |
 | `clsx` | 2.1.1 | `MIT` | `MIT` | [https://github.com/lukeed/clsx](https://github.com/lukeed/clsx) |
 | `cookie` | 2.0.1 | `MIT` | `MIT` | [https://github.com/jshttp/cookie](https://github.com/jshttp/cookie) |
+| `core-util-is` | 1.0.3 | `MIT` | `MIT` | [https://github.com/isaacs/core-util-is](https://github.com/isaacs/core-util-is) |
 | `deepmerge` | 4.3.1 | `MIT` | `MIT` | [https://github.com/TehShrike/deepmerge](https://github.com/TehShrike/deepmerge) |
 | `detect-libc` | 2.1.2 | `Apache-2.0` | `Apache-2.0` | [https://github.com/lovell/detect-libc](https://github.com/lovell/detect-libc) |
 | `devalue` | 5.9.4 | `MIT` | `MIT` | [https://github.com/sveltejs/devalue](https://github.com/sveltejs/devalue) |
+| `dingbat-to-unicode` | 1.0.2 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/dingbat-to-unicode](https://github.com/mwilliamson/dingbat-to-unicode) |
 | `dompurify` | 3.4.17 | `(MPL-2.0 OR Apache-2.0)` | `Apache-2.0` | [https://github.com/cure53/DOMPurify](https://github.com/cure53/DOMPurify) |
+| `duck` | 0.1.12 | `BSD` | — | [https://github.com/mwilliamson/duck.js](https://github.com/mwilliamson/duck.js) |
 | `entities` | 8.1.0 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/fb55/entities](https://github.com/fb55/entities) |
 | `esm-env` | 1.2.2 | `MIT` | `MIT` | [https://github.com/benmccann/esm-env](https://github.com/benmccann/esm-env) |
 | `esrap` | 2.4.0 | `MIT` | `MIT` | [https://github.com/sveltejs/esrap](https://github.com/sveltejs/esrap) |
 | `fdir` | 6.5.0 | `MIT` | `MIT` | [https://github.com/thecodrr/fdir](https://github.com/thecodrr/fdir) |
+| `fflate` | 0.8.3 | `MIT` | `MIT` | [https://github.com/101arrowz/fflate](https://github.com/101arrowz/fflate) |
 | `fsevents` | 2.3.3 | `MIT` | `MIT` | - |
+| `graceful-fs` | 4.2.11 | `ISC` | `ISC` | [https://github.com/isaacs/node-graceful-fs](https://github.com/isaacs/node-graceful-fs) |
 | `highlight.js` | 11.12.0 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/highlightjs/highlight.js](https://github.com/highlightjs/highlight.js) |
 | `html-to-image` | 1.11.13 | `MIT` | `MIT` | [https://github.com/bubkoo/html-to-image](https://github.com/bubkoo/html-to-image) |
+| `immediate` | 3.0.6 | `MIT` | `MIT` | [https://github.com/calvinmetcalf/immediate](https://github.com/calvinmetcalf/immediate) |
+| `inherits` | 2.0.4 | `ISC` | `ISC` | [https://github.com/isaacs/inherits](https://github.com/isaacs/inherits) |
 | `is-reference` | 3.0.3 | `MIT` | `MIT` | [https://github.com/Rich-Harris/is-reference](https://github.com/Rich-Harris/is-reference) |
+| `isarray` | 1.0.0 | `MIT` | `MIT` | [https://github.com/juliangruber/isarray](https://github.com/juliangruber/isarray) |
+| `jszip` | 3.10.2 | `(MIT OR GPL-3.0-or-later)` | `MIT` | [https://github.com/Stuk/jszip](https://github.com/Stuk/jszip) |
+| `lie` | 3.3.0 | `MIT` | `MIT` | [https://github.com/calvinmetcalf/lie](https://github.com/calvinmetcalf/lie) |
 | `lightningcss` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | [https://github.com/parcel-bundler/lightningcss](https://github.com/parcel-bundler/lightningcss) |
 | `lightningcss-android-arm64` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | - |
 | `lightningcss-darwin-arm64` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | - |
@@ -506,33 +523,51 @@
 | `lightningcss-win32-x64-msvc` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | - |
 | `linkify-it` | 6.1.0 | `MIT` | `MIT` | [https://github.com/markdown-it/linkify-it](https://github.com/markdown-it/linkify-it) |
 | `locate-character` | 3.0.0 | `MIT` | `MIT` | [https://gitlab.com/Rich-Harris/locate-character](https://gitlab.com/Rich-Harris/locate-character) |
+| `lop` | 0.4.2 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/lop](https://github.com/mwilliamson/lop) |
 | `magic-string` | 0.30.21 | `MIT` | `MIT` | [https://github.com/Rich-Harris/magic-string](https://github.com/Rich-Harris/magic-string) |
 | `magic-string` | 1.4.5 | `MIT` | `MIT` | [https://github.com/Rich-Harris/magic-string](https://github.com/Rich-Harris/magic-string) |
+| `mammoth` | 1.13.0 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/mammoth.js](https://github.com/mwilliamson/mammoth.js) |
 | `markdown-it` | 15.0.3 | `MIT` | `MIT` | [https://github.com/markdown-it/markdown-it](https://github.com/markdown-it/markdown-it) |
 | `mdurl` | 2.1.0 | `MIT` | `MIT` | [https://github.com/markdown-it/mdurl](https://github.com/markdown-it/mdurl) |
 | `mrmime` | 2.0.1 | `MIT` | `MIT` | [https://github.com/lukeed/mrmime](https://github.com/lukeed/mrmime) |
 | `nanoid` | 3.3.20 | `MIT` | `MIT` | [https://github.com/ai/nanoid](https://github.com/ai/nanoid) |
+| `node-int64` | 0.4.0 | `MIT` | `MIT` | [https://github.com/broofa/node-int64](https://github.com/broofa/node-int64) |
 | `obug` | 2.2.1 | `MIT` | `MIT` | [https://github.com/sxzz/obug](https://github.com/sxzz/obug) |
+| `option` | 0.2.4 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/node-options](https://github.com/mwilliamson/node-options) |
+| `pako` | 1.0.11 | `(MIT AND Zlib)` | `MIT AND Zlib` | [https://github.com/nodeca/pako](https://github.com/nodeca/pako) |
 | `picocolors` | 1.1.1 | `ISC` | `ISC` | [https://github.com/alexeyraspopov/picocolors](https://github.com/alexeyraspopov/picocolors) |
 | `picomatch` | 4.0.7 | `MIT` | `MIT` | [https://github.com/micromatch/picomatch](https://github.com/micromatch/picomatch) |
 | `postcss` | 8.5.32 | `MIT` | `MIT` | [https://github.com/postcss/postcss](https://github.com/postcss/postcss) |
+| `process-nextick-args` | 2.0.1 | `MIT` | `MIT` | [https://github.com/calvinmetcalf/process-nextick-args](https://github.com/calvinmetcalf/process-nextick-args) |
 | `punycode.js` | 2.3.1 | `MIT` | `MIT` | [https://github.com/mathiasbynens/punycode.js](https://github.com/mathiasbynens/punycode.js) |
+| `read-excel-file` | 9.3.14 | `MIT` | `MIT` | [https://gitlab.com/catamphetamine/read-excel-file](https://gitlab.com/catamphetamine/read-excel-file) |
+| `readable-stream` | 2.3.8 | `MIT` | `MIT` | [https://github.com/nodejs/readable-stream](https://github.com/nodejs/readable-stream) |
 | `rolldown` | 1.2.15 | `MIT` | `MIT` | [https://github.com/rolldown/rolldown](https://github.com/rolldown/rolldown) |
+| `safe-buffer` | 5.1.2 | `MIT` | `MIT` | [https://github.com/feross/safe-buffer](https://github.com/feross/safe-buffer) |
+| `saxen` | 11.2.0 | `MIT` | `MIT` | [https://github.com/nikku/saxen](https://github.com/nikku/saxen) |
+| `setimmediate` | 1.0.5 | `MIT` | `MIT` | [https://github.com/YuzuJS/setImmediate](https://github.com/YuzuJS/setImmediate) |
 | `sirv` | 3.0.2 | `MIT` | `MIT` | [https://github.com/lukeed/sirv](https://github.com/lukeed/sirv) |
 | `source-map-js` | 1.2.2 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/7rulnik/source-map-js](https://github.com/7rulnik/source-map-js) |
+| `sprintf-js` | 1.0.3 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/alexei/sprintf.js](https://github.com/alexei/sprintf.js) |
+| `string_decoder` | 1.1.1 | `MIT` | `MIT` | [https://github.com/nodejs/string_decoder](https://github.com/nodejs/string_decoder) |
 | `svelte` | 5.57.3 | `MIT` | `MIT` | [https://github.com/sveltejs/svelte](https://github.com/sveltejs/svelte) |
 | `tinyglobby` | 0.2.17 | `MIT` | `MIT` | [https://github.com/SuperchupuDev/tinyglobby](https://github.com/SuperchupuDev/tinyglobby) |
 | `totalist` | 3.0.1 | `MIT` | `MIT` | [https://github.com/lukeed/totalist](https://github.com/lukeed/totalist) |
 | `typescript` | 6.0.3 | `Apache-2.0` | `Apache-2.0` | [https://github.com/microsoft/TypeScript](https://github.com/microsoft/TypeScript) |
 | `uc.micro` | 3.0.0 | `MIT` | `MIT` | [https://github.com/markdown-it/uc.micro](https://github.com/markdown-it/uc.micro) |
+| `underscore` | 1.13.8 | `MIT` | `MIT` | [https://github.com/jashkenas/underscore](https://github.com/jashkenas/underscore) |
 | `undici-types` | 7.24.6 | `MIT` | `MIT` | [https://github.com/nodejs/undici](https://github.com/nodejs/undici) |
+| `unzipper-esm` | 0.13.3 | `MIT` | `MIT` | [https://github.com/catamphetamine/node-unzipper](https://github.com/catamphetamine/node-unzipper) |
+| `util-deprecate` | 1.0.2 | `MIT` | `MIT` | [https://github.com/TooTallNate/util-deprecate](https://github.com/TooTallNate/util-deprecate) |
 | `vite` | 8.3.5 | `MIT` | `MIT` | [https://github.com/vitejs/vite](https://github.com/vitejs/vite) |
 | `vitefu` | 1.1.3 | `MIT` | `MIT` | [https://github.com/svitejs/vitefu](https://github.com/svitejs/vitefu) |
+| `worker-f` | 0.1.21 | `MIT` | `MIT` | [https://gitlab.com/catamphetamine/worker-f](https://gitlab.com/catamphetamine/worker-f) |
+| `xmlbuilder` | 10.1.1 | `MIT` | `MIT` | [https://github.com/oozcitak/xmlbuilder-js](https://github.com/oozcitak/xmlbuilder-js) |
 | `zimmerframe` | 1.1.5 | `MIT` | `MIT` | [https://github.com/sveltejs/zimmerframe](https://github.com/sveltejs/zimmerframe) |
 
 ## Пакеты npm для разработки
 
-Пакеты, используемые только на этапе сборки, линтинга и тестирования (`dev: true`); не поставляются конечным пользователям. Всего записей: 209.
+Пакеты, используемые только на этапе сборки, линтинга и тестирования (`dev: true`); не поставляются конечным пользователям. Всего записей: 208.
 
 - `@apidevtools/json-schema-ref-parser` (11.9.3) — `MIT`
 - `@asamuzakjp/css-color` (7.1.9) — `MIT`
@@ -726,7 +761,6 @@
 - `undici` (8.12.3) — `MIT`
 - `uri-js` (4.4.1) — `BSD-2-Clause`
 - `uri-js-replace` (1.0.2) — `MIT`
-- `util-deprecate` (1.0.2) — `MIT`
 - `vitest` (5.0.5) — `MIT`
 - `w3c-xmlserializer` (6.0.0) — `MIT`
 - `webidl-conversions` (8.0.1) — `BSD-2-Clause`
@@ -749,3 +783,4 @@
 | Палитра | Схема | Лицензия | Источник |
 | --- | --- | --- | --- |
 | «Норд» (`nord`) | Nord, Sven Greb (Arctic Ice Studio) | `MIT` | [github.com/nordtheme/nord](https://github.com/nordtheme/nord) |
+
