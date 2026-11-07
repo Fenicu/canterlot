@@ -52,6 +52,19 @@ export class ScrollController {
     this.#remember();
   }
 
+  /**
+   * Лента только что разложена посреди своей перестройки. Если браузер на этой раскладке прижал
+   * scrollTop к новому, меньшему пределу, это не владелец: подъём ровно к низу ленты прокруткой вверх
+   * не бывает. Без этого высота успевала снова вырасти до события прокрутки, и прижатие читалось как уход вверх.
+   */
+  noteLayout(): void {
+    const top = this.#el.scrollTop;
+    if (top >= this.#last) return;
+    if (top < this.#el.scrollHeight - this.#el.clientHeight - 1) return;
+    this.#last = top;
+    this.#remember();
+  }
+
   /** Владелец раскрыл строку: окно перестаёт следовать за хвостом до возвращения вниз. */
   release(): void {
     this.#pinned.set(false);

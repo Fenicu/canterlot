@@ -38,6 +38,15 @@ function scroller(content: number, view: number, top = 0) {
     shrink(view: number) {
       el.clientHeight = view;
     },
+    /** Промежуточная раскладка без события: высота проседает (браузер прижимает scrollTop), потом снова растёт. */
+    dip(content: number, after: number) {
+      el.scrollHeight = content;
+      el.scrollTop = position;
+      return () => {
+        el.scrollHeight = after;
+      };
+    },
+    fire,
   };
 }
 
@@ -111,5 +120,27 @@ describe("timeline/ScrollController", () => {
     controller.jumpToBottom();
     expect(view.el.scrollTop).toBe(500);
     expect(controller.pinned).toBe(true);
+  });
+
+  it("a_clamp_on_a_passing_layout_that_regrew_before_the_scroll_event_keeps_the_bottom", () => {
+    const view = scroller(18_000, 600, 17_400);
+    const controller = new ScrollController(view.el);
+    controller.jumpToBottom();
+    // Окно перестраивается: на одной из раскладок лента на миг ниже, scrollTop прижат к ней.
+    const regrow = view.dip(15_000, 18_000);
+    controller.noteLayout();
+    regrow();
+    // Событие прокрутки от прижатия приходит, когда высота уже вернулась.
+    view.fire();
+    expect(controller.pinned).toBe(true);
+  });
+
+  it("noting_a_layout_does_not_hide_the_owner_scrolling_up", () => {
+    const view = scroller(18_000, 600, 17_400);
+    const controller = new ScrollController(view.el);
+    view.el.scrollTop = 9_000;
+    controller.noteLayout();
+    view.fire();
+    expect(controller.pinned).toBe(false);
   });
 });
