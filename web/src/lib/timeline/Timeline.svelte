@@ -157,6 +157,14 @@
     const since = Date.parse(String(chat.activity?.since ?? ''));
     return Number.isFinite(since) ? since : null;
   });
+  // Начало хода: снимок очереди может знать время запуска слота, иначе — начало состояния работы.
+  const slotStart = $derived.by(() => {
+    const slot = chat.queue?.run_slot as unknown;
+    if (typeof slot !== 'object' || slot === null || !('running' in slot)) return null;
+    const at = Date.parse(String((slot as { running?: { since?: unknown } }).running?.since ?? ''));
+    return Number.isFinite(at) ? at : null;
+  });
+  const turnStartedAt = $derived(slotStart ?? turnStart);
   const activeRun = $derived.by(() => {
     const state = chat.activity?.state;
     if (state !== 'working' && state !== 'waiting_for_user') return null;
@@ -181,7 +189,7 @@
   // С начала хода и до первого блока строка стоит в хвосте ленты: «Прервать» есть сразу.
   const earlyLive = $derived.by(() => {
     if (feed || laneRoot || !turn || liveAnswer) return null;
-    return activityLiveLine(chat.activity, now);
+    return activityLiveLine(chat.activity, now, turnStartedAt);
   });
 
   const interruptDone = $derived.by(() => {

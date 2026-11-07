@@ -245,6 +245,47 @@ describe("timeline window", () => {
     ).toEqual({ phase: "working", tool: "", startedAt: 9_000 });
   });
 
+  it("activity_line_never_counts_a_phase_from_before_the_current_turn", () => {
+    const turn = Date.parse("2026-11-07T13:23:00.000Z");
+    const stale = "2026-11-07T06:33:00.000Z";
+    const line = activityLiveLine(
+      {
+        state: "working",
+        evidence: { phase: "generating", phase_since: stale },
+        since: new Date(turn).toISOString(),
+      },
+      turn + 3_000,
+      turn,
+    );
+    expect(line).toEqual({ phase: "working", tool: "", startedAt: turn });
+    // Без времени слота опорой остаётся начало состояния работы.
+    expect(
+      activityLiveLine(
+        {
+          state: "working",
+          evidence: { phase: "generating", phase_since: stale },
+          since: new Date(turn).toISOString(),
+        },
+        turn + 3_000,
+      ).startedAt,
+    ).toBe(turn);
+    // Внутри хода отметка фазы уточняет начало.
+    const phaseAt = turn + 60_000;
+    expect(
+      activityLiveLine(
+        {
+          state: "working",
+          evidence: {
+            phase: "generating",
+            phase_since: new Date(phaseAt).toISOString(),
+          },
+          since: new Date(turn).toISOString(),
+        },
+        phaseAt + 2_000,
+        turn,
+      ).startedAt,
+    ).toBe(phaseAt);
+  });
 });
 
 function mulberry(seed: number): () => number {

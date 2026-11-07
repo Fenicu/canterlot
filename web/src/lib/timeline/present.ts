@@ -98,9 +98,15 @@ export interface LiveTurnLine {
 
 /**
  * Строка хода до первого ответа: пока блоков нет, чем занят агент, говорит
- * активность хаба. Время считается от начала фазы, а без неё — от начала хода.
+ * активность хаба. Часы хода считаются от его начала: отметка фазы уточняет
+ * начало внутри хода, но не может стоять раньше него — между ходами исполнение
+ * стоит в прежней фазе, и её отметка относится к прошлому ходу.
  */
-export function activityLiveLine(activity: unknown, now: number): LiveTurnLine {
+export function activityLiveLine(
+  activity: unknown,
+  now: number,
+  turnStartedAt: number | null = null,
+): LiveTurnLine {
   const state = (activity ?? {}) as {
     evidence?: {
       phase?: unknown;
@@ -112,9 +118,17 @@ export function activityLiveLine(activity: unknown, now: number): LiveTurnLine {
   };
   const evidence = state.evidence ?? {};
   const phase = typeof evidence.phase === "string" ? evidence.phase : "";
-  const since = Date.parse(
-    String(evidence.phase_since ?? state.since ?? ""),
-  );
+  const turn = Number.isFinite(turnStartedAt)
+    ? (turnStartedAt as number)
+    : Date.parse(String(state.since ?? ""));
+  const phaseSince = Date.parse(String(evidence.phase_since ?? ""));
+  const startedAt = Number.isFinite(phaseSince)
+    ? Number.isFinite(turn)
+      ? Math.max(phaseSince, turn)
+      : phaseSince
+    : Number.isFinite(turn)
+      ? turn
+      : now;
   return {
     phase:
       phase === "starting"
@@ -126,7 +140,7 @@ export function activityLiveLine(activity: unknown, now: number): LiveTurnLine {
       phase === "running_tool"
         ? String(evidence.summary || evidence.tool_name || "")
         : "",
-    startedAt: Number.isFinite(since) ? since : now,
+    startedAt,
   };
 }
 

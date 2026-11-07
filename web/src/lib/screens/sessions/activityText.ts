@@ -109,6 +109,24 @@ export function turnText(activity: Activity, now: number): string {
   return line.charAt(0).toLocaleLowerCase("ru-RU") + line.slice(1);
 }
 
+/** Сколько идёт фаза: её начало не раньше начала хода, иначе старая отметка тянула бы часы из прошлого хода. */
+function phaseElapsed(
+  phaseSince: string | null | undefined,
+  since: string | undefined,
+  now: number,
+): number {
+  const phase = Date.parse(phaseSince ?? "");
+  const turn = Date.parse(since ?? "");
+  const from = Number.isFinite(phase)
+    ? Number.isFinite(turn)
+      ? Math.max(phase, turn)
+      : phase
+    : Number.isFinite(turn)
+      ? turn
+      : Number.NaN;
+  return Number.isFinite(from) ? Math.max(0, now - from) : 0;
+}
+
 function working(
   evidence: ActivityEvidence,
   since: string | undefined,
@@ -133,10 +151,9 @@ function working(
     return { text: "Передаю файлы на машину", tone: "accent", live: false };
   if (phase === "running_tool") {
     const name = evidence.summary || evidence.tool_name || "инструмент";
-    const from = Date.parse(evidence.phase_since ?? since ?? "");
-    const duration = Number.isFinite(from)
-      ? fmt.durationCoarse(Math.max(0, now - from))
-      : fmt.duration(0);
+    const duration = fmt.durationCoarse(
+      phaseElapsed(evidence.phase_since, since, now),
+    );
     return {
       text: `Выполняет ${name} · ${duration}`,
       tone: "accent",

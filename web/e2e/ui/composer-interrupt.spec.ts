@@ -208,6 +208,53 @@ test('the_live_line_attaches_to_the_answer_without_a_second_one', async ({ page 
   await expect(page.locator('.feed .live[data-working]')).toHaveCount(1);
 });
 
+test('a_message_after_a_long_idle_counts_the_new_turn_not_the_old_phase', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  const scope = `conversation:${id}`;
+  // Прошлый ход оставил отметку фазы много часов назад; сама сессия свободна.
+  const stale = new Date(Date.now() - 7 * 3_600_000).toISOString();
+  hub.append(scope, {
+    kind: 'derived_changed',
+    conversation_id: id,
+    payload: {
+      conversation_id: id,
+      activity: { state: 'idle', evidence: { last_turn_at: stale }, since: stale },
+      unread_count: 0,
+      queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
+      last_activity_at: stale,
+      settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
+      crunch: { enabled: false }
+    }
+  });
+  hub.flush();
+  // Владелец пишет сообщение.
+  await page.getByRole('textbox', { name: 'Сообщение' }).fill('а что ты предлагаешь?');
+  const hits = await watch(page, '**/api/v1/conversations/*/inputs');
+  await page.getByRole('button', { name: 'Отправить', exact: true }).click();
+  await expect.poll(() => hits.length).toBe(1);
+  // Хаб принял ход: состояние работы началось только что, а отметка фазы — из прошлого хода.
+  hub.append(scope, {
+    kind: 'derived_changed',
+    conversation_id: id,
+    payload: {
+      conversation_id: id,
+      activity: { state: 'working', evidence: { phase: 'generating', phase_since: stale }, since: new Date().toISOString() },
+      unread_count: 0,
+      queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
+      last_activity_at: stale,
+      settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
+      crunch: { enabled: false }
+    }
+  });
+  hub.append(scope, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [], hold_reasons: [], run_slot: { running: { input_id: api.id() } } } });
+  hub.flush();
+  const line = page.locator('[data-role="live-turn"]');
+  await expect(line).toBeVisible();
+  // Часы строки начинаются с нового хода: секунды, а не часы прошлой фазы.
+  await expect(line).toContainText(/Генерирует · \d+ с/);
+  await expect(line).not.toContainText('ч');
+});
+
 test('a_wake_up_turn_without_an_answer_shows_the_live_line', async ({ page }) => {
   const { hub, api, id } = await boot(page);
   const hits = await watch(page, '**/api/v1/conversations/*/interrupt');

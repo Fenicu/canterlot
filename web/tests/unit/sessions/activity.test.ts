@@ -53,6 +53,18 @@ describe("sessions/activity", () => {
         },
       }).text,
     ).toBe("Выполняет cargo test · 4 мин");
+    // Отметка фазы из прошлого хода не тянет часы: ход начался 30 секунд назад.
+    expect(
+      line({
+        state: "working",
+        since: new Date(now - 30_000).toISOString(),
+        evidence: {
+          phase: "running_tool",
+          tool_name: "cargo test",
+          phase_since: new Date(now - 7 * 3_600_000).toISOString(),
+        },
+      }).text,
+    ).toBe("Выполняет cargo test · 30 с");
     expect(
       line({ state: "working", evidence: { phase: "starting" } }).text,
     ).toBe("Запускается");
