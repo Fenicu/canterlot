@@ -104,6 +104,8 @@ CSP, `_app/version.json`, `synthetic-cli` только в синтетическ
 scripts/publish-release.sh v1.16.1
 ```
 
+Выкат production — только через `scripts/deploy` (см. §11 `docs/deploy/pilot.md`): он проверяет готовый dist из `build-release.sh`, боевой прогон требует `--execute <id>` и `--confirm <токен>` от dry-run.
+
 ## Развёртывание из готовых архивов
 
 В [выпусках на Forgejo](https://git.fenicu.com/Fenicu/canterlot/releases) лежат собранные хаб, воркер и PWA. Хаб и воркер собраны для x86_64 под glibc 2.41 и новее (Debian 13, Ubuntu 25.04 и новее). Подробности каждого шага — в [docs/deploy/pilot.md](docs/deploy/pilot.md), ключи конфигурации — в [docs/configuration.md](docs/configuration.md). Собрать всё из исходников можно по [docs/development.md](docs/development.md).
