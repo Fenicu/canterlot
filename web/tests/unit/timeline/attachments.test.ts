@@ -5,6 +5,9 @@ import {
   attachmentKind,
   attachmentUrl,
   documentFitsViewer,
+  OFFICE_VIEW_MAX_BYTES,
+  officeFitsViewer,
+  officeLabel,
   showsThumb
 } from "#lib/timeline/attachments.js";
 
@@ -36,6 +39,33 @@ describe("timeline/attachments", () => {
     expect(attachmentKind(file("clip.mov", ""))).toBe("video");
     expect(attachmentKind(file("clip.mov", "application/octet-stream"))).toBe("video");
     expect(attachmentKind(file("clip.mov", "text/plain"))).toBe("file");
+  });
+
+  it("word_documents_are_told_by_the_mime_or_the_extension_including_untyped_files", () => {
+    expect(attachmentKind(file("report", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))).toBe("word");
+    expect(attachmentKind(file("report.docx", "application/octet-stream"))).toBe("word");
+    expect(attachmentKind(file("Отчёт.DOCX", ""))).toBe("word");
+    expect(attachmentKind(file("old", "application/msword"))).toBe("word");
+    expect(attachmentKind(file("old.doc", "application/octet-stream"))).toBe("word");
+    expect(attachmentKind(file("report.docx", "application/zip"))).toBe("word");
+  });
+
+  it("excel_sheets_are_told_by_the_mime_or_the_extension_including_untyped_files", () => {
+    expect(attachmentKind(file("table", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))).toBe("excel");
+    expect(attachmentKind(file("table.xlsx", "application/octet-stream"))).toBe("excel");
+    expect(attachmentKind(file("Таблица.XLSX", ""))).toBe("excel");
+    expect(attachmentKind(file("old", "application/vnd.ms-excel"))).toBe("excel");
+    expect(attachmentKind(file("old.xls", "application/octet-stream"))).toBe("excel");
+    expect(attachmentKind(file("data.csv", "text/csv"))).toBe("file");
+    expect(attachmentKind(file("slides.pptx", "application/octet-stream"))).toBe("file");
+  });
+
+  it("office_files_are_labelled_by_kind_and_previewed_up_to_ten_mebibytes", () => {
+    expect(officeLabel("word")).toBe("Документ Word");
+    expect(officeLabel("excel")).toBe("Таблица Excel");
+    expect(OFFICE_VIEW_MAX_BYTES).toBe(10 * 1024 * 1024);
+    expect(officeFitsViewer(OFFICE_VIEW_MAX_BYTES)).toBe(true);
+    expect(officeFitsViewer(OFFICE_VIEW_MAX_BYTES + 1)).toBe(false);
   });
 
   it("a_huge_original_gets_a_tile_instead_of_a_decoded_thumbnail", () => {
