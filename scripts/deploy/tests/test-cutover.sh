@@ -428,6 +428,7 @@ db_migr_is 41 0 && case_ok "db migrated" || case_fail "db not migrated"
 restore_logged && case_fail "database restore ran on happy path" || case_ok "no dropdb/createdb/pg_restore restore"
 [ "$(compose_up_count)" = "1" ] && case_ok "exactly one caddy recreate" || case_fail "recreate count wrong"
 grep -q "compose run" "${FAKE_ROOT}/state/calls.log" && case_fail "compose run used" || case_ok "no compose run"
+grep -q '^pg_dump -Fc -Z zstd:3 -f ' "${FAKE_ROOT}/state/calls.log" && case_ok "pg_dump uses zstd:3" || case_fail "pg_dump is not zstd:3"
 assert_contains "${FAKE_ROOT}/cutover.log" "verify PASS" "verify passed inside cutover"
 assert_proc_alive "${SUP1}" "session 1 supervisor alive"
 assert_proc_alive "${SUP2}" "session 2 supervisor alive"
@@ -541,6 +542,18 @@ setup_cutover leftovers
 mkdir -p "${WEB_RELEASES}/.stage-cccccccccccc"
 if run_cutover; then case_ok "exit 0 (maintenance is soft)"; else case_fail "exit nonzero"; fi
 assert_contains "${FAKE_ROOT}/cutover.log" "SOFT-FAIL: maintenance: leftovers on hosts: web: releases/.stage-cccccccccccc" "leftover named"
+hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
+teardown_case
+case_end
+
+# --- L7. порог размера по умолчанию: zstd-дамп 65 МБ проходит ---
+case_begin "the default dump size gate accepts a zstd-sized dump"
+setup_cutover dump-size-64
+export FAKE_DUMP_SIZE_BYTES=$((65 * 1024 * 1024))
+unset DUMP_MIN_BYTES
+if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -3 "${FAKE_ROOT}/cutover.log"; fi
+unset FAKE_DUMP_SIZE_BYTES
+assert_contains "${FAKE_ROOT}/cutover.log" "dump fully readable" "65 MB dump accepted by the default gate"
 hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
 teardown_case
 case_end

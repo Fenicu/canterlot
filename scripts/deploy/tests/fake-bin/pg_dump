@@ -24,3 +24,7 @@ fi
     printf 'TOC-LINE-09\nTOC-LINE-10\nTOC-LINE-11\nTOC-LINE-12\n'
     cat "${FAKE_ROOT}/state/db.txt"
 } >"${file}"
+# Детерминированный размер для проверки порога DUMP_MIN_BYTES (TOC остаётся).
+if [ -n "${FAKE_DUMP_SIZE_BYTES:-}" ]; then
+    truncate -s "${FAKE_DUMP_SIZE_BYTES}" "${file}"
+fi

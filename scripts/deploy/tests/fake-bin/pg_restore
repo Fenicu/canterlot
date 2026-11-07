@@ -16,7 +16,8 @@ for arg in "$@"; do
 done
 [ -n "${file}" ] || { echo "fake-pg_restore: no dump file in $*" >&2; exit 99; }
 if [ "${list}" = "1" ]; then
-    grep '^TOC-' "${file}" || true
+    # -a: настоящий custom-format дамп бинарный, но pg_restore --list печатает текст.
+    grep -a '^TOC-' "${file}" || true
     exit 0
 fi
 # pg_restore -f /dev/null — только чтение дампа, база не трогается.
