@@ -244,6 +244,45 @@ test('an_xlsx_from_an_agent_answer_switches_sheets_keeps_the_header_sticky_and_n
   await expect(row).toBeVisible();
 });
 
+test('a_horizontal_touch_swipe_scrolls_the_wide_sheet_and_keeps_the_header_aligned', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'phone', 'настоящее касание проверяется на телефоне');
+  const { answer } = await boot(page);
+  const row = page.locator(`[data-key="block:${answer}"]`);
+  await openTile(page, row, 'Открыть таблицу table.xlsx');
+  const dialog = page.getByRole('dialog', { name: 'table.xlsx' });
+  await dialog.getByRole('tab', { name: 'Журнал' }).click();
+  const grid = dialog.getByRole('tabpanel');
+  await expect(dialog.locator('[data-role="sheet-cap"]')).toBeVisible();
+  await expect(grid.locator('thead th').first()).toHaveText('Дата');
+
+  // Лист не должен быть вторым горизонтальным скроллером поверх сетки: иначе палец достаётся ему,
+  // а он не может прокрутиться, и жест умирает, не дойдя до таблицы.
+  expect(await grid.evaluate((node) => getComputedStyle(node.closest('.body')!).overflowX)).toBe('hidden');
+  const touchAction = await grid.evaluate((node) => getComputedStyle(node).touchAction);
+  expect(touchAction).toContain('pan-x');
+  expect(touchAction).toContain('pan-y');
+
+  const box = (await grid.boundingBox())!;
+  const cdp = await page.context().newCDPSession(page);
+  const y = box.y + Math.min(120, box.height / 2);
+  await grid.evaluate((node) => { node.scrollLeft = 0; });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: box.x + box.width - 30, y }] });
+  for (let step = 1; step <= 12; step++) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: box.x + box.width - 30 - step * 20, y }] });
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await expect.poll(() => grid.evaluate((node) => node.scrollLeft)).toBeGreaterThan(100);
+
+  // Шапка липнет сверху, но едет вбок вместе с колонками; первый столбец остаётся слева.
+  await expect.poll(async () => {
+    const header = (await grid.locator('thead th').nth(3).boundingBox())!;
+    const cell = (await grid.locator('tbody tr[aria-rowindex]').first().locator('td').nth(2).boundingBox())!;
+    return Math.abs(header.x - cell.x);
+  }).toBeLessThanOrEqual(2);
+  const first = (await grid.locator('tbody tr[aria-rowindex]').first().locator('th').boundingBox())!;
+  expect(Math.abs(first.x - box.x)).toBeLessThanOrEqual(2);
+});
+
 test('an_owner_docx_opens_in_the_same_viewer_and_back_closes_it', async ({ page }) => {
   const { requested } = await boot(page);
   await openTile(page, page.locator('main'), 'Открыть документ Заметки.docx');

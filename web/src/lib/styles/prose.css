@@ -69,7 +69,7 @@
 .prose blockquote { position: relative; margin-inline: var(--s0); padding: var(--s4) var(--s6); border-radius: var(--radius-sm); background: var(--raised); color: var(--secondary); }
 .prose blockquote > :first-child { margin-top: var(--s0); }
 .prose blockquote > :last-child { margin-bottom: var(--s0); }
-.prose table { display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; border-collapse: separate; border-spacing: var(--s0); font-size: var(--fs-meta); }
+.prose table { display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; border-collapse: separate; border-spacing: var(--s0); font-size: var(--fs-meta); touch-action: pan-x pan-y; -webkit-overflow-scrolling: touch; }
 .prose :is(th, td) { padding: var(--s3) var(--s5); text-align: left; vertical-align: top; }
 .prose th { color: var(--secondary); font-weight: var(--weight-medium); }
 .prose tbody tr:nth-child(odd) { background: var(--raised); }

@@ -160,7 +160,9 @@
   .tabs button:focus-visible { outline: var(--focus-width) solid var(--accent); outline-offset: calc(-1 * var(--focus-width)); }
   .note { flex: none; margin: var(--s0); color: var(--secondary); font-size: var(--fs-sm); }
   /* Таблица прокручивается в своей рамке в обе стороны; страница и лист остаются на месте. */
-  .grid { flex: 1 1 auto; min-height: 0; max-width: 100%; overflow: auto; overscroll-behavior: contain; border: var(--hairline) solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+  /* Сетка — единственный горизонтальный скроллер листа. `pan-x pan-y` отдаёт ей касание
+     в обе стороны, а инерция нужна и вбок: без неё широкий лист кажется застрявшим. */
+  .grid { flex: 1 1 auto; min-width: 0; min-height: 0; max-width: 100%; overflow: auto; overscroll-behavior: contain; touch-action: pan-x pan-y; -webkit-overflow-scrolling: touch; border: var(--hairline) solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
   .grid:focus-visible { outline: var(--focus-width) solid var(--accent); }
   .empty { margin: var(--s0); padding: var(--s8); color: var(--secondary); }
   /* Раскладка по заданным ширинам: браузер не меряет каждую из тысяч ячеек. */

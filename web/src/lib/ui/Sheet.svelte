@@ -95,7 +95,9 @@
   h2:focus { outline: none; }
   p { margin: var(--s1) var(--s0) var(--s0); color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   /* Запас по бокам вмещает кольцо фокуса полей во всю ширину: прокрутка обрезала бы его. */
-  .body { --ring-room: calc(var(--focus-width) + var(--s1)); flex: 1 1 auto; min-height: 0; padding-block: var(--s6) calc(var(--s8) + env(safe-area-inset-bottom)); padding-inline: var(--ring-room); margin-inline: calc(-1 * var(--ring-room)); overflow-y: auto; overscroll-behavior: contain; mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s6)); }
+  /* Тело листа прокручивается только вниз: иначе `overflow-y: auto` делает его ещё и
+     горизонтальным скроллером, и на телефоне палец достаётся ему вместо широкой таблицы внутри. */
+  .body { --ring-room: calc(var(--focus-width) + var(--s1)); flex: 1 1 auto; min-height: 0; padding-block: var(--s6) calc(var(--s8) + env(safe-area-inset-bottom)); padding-inline: var(--ring-room); margin-inline: calc(-1 * var(--ring-room)); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s6)); }
   :global([data-layout='desktop']) dialog { inset: 0; height: fit-content; margin: auto; padding: var(--s6) var(--s10) var(--s0); border-radius: var(--radius-sheet); }
   :global([data-layout='desktop']) .handle { display: none; }
   .body:has(> :global([data-sheet-flush])) { padding-bottom: var(--s0); }
