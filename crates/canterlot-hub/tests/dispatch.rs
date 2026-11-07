@@ -698,3 +698,50 @@ async fn session_without_instructions_v1_blocks_a_switch_to_clean(pool: PgPool) 
     );
     Ok(())
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn dispatch_after_conversation_deletion_is_benign(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let queued = input(&pool, &seed).await;
+    canterlot_hub::deletion::delete_retained(
+        &pool,
+        None,
+        seed.owner_id,
+        seed.conversation_id,
+        Uuid::now_v7(),
+    )
+    .await?;
+    let error = dispatch_next(
+        &pool,
+        seed.conversation_id,
+        GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .expect_err("deleted conversation must not dispatch");
+    assert!(
+        matches!(error, sqlx::Error::RowNotFound),
+        "queued input {}; unexpected error: {error:?}",
+        queued.input_id
+    );
+    assert_eq!(
+        canterlot_hub::dispatcher::classify_database_error(&error),
+        canterlot_hub::dispatcher::DatabaseErrorClass::ConversationGone,
+        "queued input {}; unexpected error: {error:?}",
+        queued.input_id
+    );
+    let (inputs, queues, commands): (i64, i64, i64) = sqlx::query_as(
+        "select (select count(*) from inputs where conversation_id=$1),
+                (select count(*) from queue_state where conversation_id=$1),
+                (select count(*) from commands where conversation_id=$1)",
+    )
+    .bind(seed.conversation_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((inputs, queues, commands), (0, 0, 0));
+    Ok(())
+}

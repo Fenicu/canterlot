@@ -11,6 +11,94 @@ use crate::{
     session::{Availability, Registry},
 };
 
+/// Отказ базы при работе диспетчера: разговор уже убран другим писателем или
+/// настоящая ошибка, которую нужно разбирать по SQLSTATE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseErrorClass {
+    ConversationGone,
+    Failure,
+}
+
+/// Исчезнувший разговор — штатная гонка удаления: очередь и вводы убраны.
+/// Внешний ключ 23503 означает ту же гонку, если строка разговора уже удалена.
+pub fn classify_database_error(error: &sqlx::Error) -> DatabaseErrorClass {
+    match error {
+        sqlx::Error::RowNotFound => DatabaseErrorClass::ConversationGone,
+        sqlx::Error::Database(database) if database.code().as_deref() == Some("23503") => {
+            DatabaseErrorClass::ConversationGone
+        }
+        _ => DatabaseErrorClass::Failure,
+    }
+}
+
+fn error_kind(error: &sqlx::Error) -> &'static str {
+    match error {
+        sqlx::Error::RowNotFound => "row_not_found",
+        sqlx::Error::Database(database) => match database.kind() {
+            sqlx::error::ErrorKind::UniqueViolation => "unique_violation",
+            sqlx::error::ErrorKind::ForeignKeyViolation => "foreign_key_violation",
+            sqlx::error::ErrorKind::NotNullViolation => "not_null_violation",
+            sqlx::error::ErrorKind::CheckViolation => "check_violation",
+            sqlx::error::ErrorKind::ExclusionViolation => "exclusion_violation",
+            _ => "database",
+        },
+        sqlx::Error::Io(_) => "io",
+        sqlx::Error::PoolTimedOut => "pool_timed_out",
+        sqlx::Error::PoolClosed => "pool_closed",
+        sqlx::Error::WorkerCrashed => "worker_crashed",
+        sqlx::Error::BeginFailed => "begin_failed",
+        _ => "other",
+    }
+}
+
+fn report_dispatch_error(conversation: Uuid, error: &sqlx::Error) {
+    let info = crate::dberr::describe(error);
+    match classify_database_error(error) {
+        DatabaseErrorClass::ConversationGone => tracing::debug!(
+            kind = "dispatcher_conversation_gone",
+            operation = "dispatch_next",
+            conversation_id = %conversation,
+            error_kind = error_kind(error),
+            sqlstate = info.sqlstate.as_deref().unwrap_or("-"),
+            constraint = info.constraint.as_deref().unwrap_or("-"),
+            "conversation disappeared during dispatch"
+        ),
+        DatabaseErrorClass::Failure => tracing::error!(
+            kind = "dispatcher_database_error",
+            operation = "dispatch_next",
+            conversation_id = %conversation,
+            error_kind = error_kind(error),
+            sqlstate = info.sqlstate.as_deref().unwrap_or("-"),
+            constraint = info.constraint.as_deref().unwrap_or("-"),
+            class = info.class,
+            "dispatch failed"
+        ),
+    }
+}
+
+fn report_steer_expiry_error(error: &sqlx::Error) {
+    let info = crate::dberr::describe(error);
+    match classify_database_error(error) {
+        DatabaseErrorClass::ConversationGone => tracing::debug!(
+            kind = "dispatcher_conversation_gone",
+            operation = "expire_steers",
+            error_kind = error_kind(error),
+            sqlstate = info.sqlstate.as_deref().unwrap_or("-"),
+            constraint = info.constraint.as_deref().unwrap_or("-"),
+            "conversation disappeared while expiring steers"
+        ),
+        DatabaseErrorClass::Failure => tracing::error!(
+            kind = "dispatcher_database_error",
+            operation = "expire_steers",
+            error_kind = error_kind(error),
+            sqlstate = info.sqlstate.as_deref().unwrap_or("-"),
+            constraint = info.constraint.as_deref().unwrap_or("-"),
+            class = info.class,
+            "steer expiry failed"
+        ),
+    }
+}
+
 #[derive(Clone)]
 pub struct Dispatcher {
     tx: mpsc::Sender<Uuid>,
@@ -78,11 +166,10 @@ pub async fn run(
             _ = wait_for_shutdown(&mut shutdown) => break,
             _ = async {
                 if machine.is_none()
-                    && crate::delivery::receipts::expire_steers(&pool, timers.steer_outcome)
-                        .await
-                        .is_err()
+                    && let Err(error) =
+                        crate::delivery::receipts::expire_steers(&pool, timers.steer_outcome).await
                 {
-                    eprintln!("dispatcher_database_error");
+                    report_steer_expiry_error(&error);
                 }
                 if let Ok(conversations) = queued_conversations(&pool, machine).await {
                     for conversation in conversations {
@@ -119,7 +206,7 @@ async fn dispatch(pool: &PgPool, registry: &Registry, conversation: Uuid) {
             .fetch_one(pool)
             .await;
     if let Ok(machine) = machine
-        && dispatch_next(
+        && let Err(error) = dispatch_next(
             pool,
             conversation,
             GateInputs {
@@ -130,8 +217,7 @@ async fn dispatch(pool: &PgPool, registry: &Registry, conversation: Uuid) {
             Uuid::now_v7(),
         )
         .await
-        .is_err()
     {
-        eprintln!("dispatcher_database_error");
+        report_dispatch_error(conversation, &error);
     }
 }
