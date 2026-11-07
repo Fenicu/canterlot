@@ -95,19 +95,137 @@ unreserve_releases() {
     esac
 }
 
+# Строка $1 есть среди строк $2 (точное совпадение). Без конвейера в grep -q:
+# ранний выход grep под pipefail давал SIGPIPE слева (урок 1.19.0).
+in_lines() {
+    case $'\n'"$2"$'\n' in
+        *$'\n'"$1"$'\n'*) return 0 ;;
+    esac
+    return 1
+}
+
 # Короткий sha (12 знаков) из полного или короткого.
 short_sha() { printf '%s' "$1" | cut -c1-12; }
 
-# Токен подтверждения боевого прогона: dry-run печатает его, боевой прогон
-# принимает только точное значение за текущие UTC-сутки. Это не секрет, а
-# осознанный барьер между «посмотрел план» и «остановил прод»: случайный запуск
-# без свежего dry-run отказывает. Токен детерминирован, поэтому его можно
-# пересчитать в тестах.
-CONFIRM_LEN="${CONFIRM_LEN:-16}"
-confirm_token() {
-    local id="$1" day="${2:-$(date -u +%Y-%m-%d)}"
-    printf '%s:%s' "${id}" "${day}" | sha256sum | cut -c1-"${CONFIRM_LEN}"
+# Режим записи. real — боевой прогон; rehearse — репетиция: каждая запись идёт
+# через run_write и только печатается, а все чтения, ожидания и разборы
+# выполняются по-настоящему. Единственная точка выхода записи (урок 1.16-1.19:
+# пять выкатов подряд падали на пути записи, который dry-run не исполнял).
+# Правило tests/pipe-lint.py: ни одна пишущая команда в скриптах выката не
+# обходит run_write.
+DEPLOY_MODE="${DEPLOY_MODE:-real}"
+# Счётчик напечатанных записей репетиции — в файле: run_write зовут и из $(…).
+REHEARSE_COUNT_FILE="${REHEARSE_COUNT_FILE:-}"
+_rehearse_note() {
+    local label="$1" n=0
+    shift
+    if [ -n "${REHEARSE_COUNT_FILE}" ]; then
+        printf '%s\n' "${label}" >>"${REHEARSE_COUNT_FILE}"
+        n="$(wc -l <"${REHEARSE_COUNT_FILE}" 2>/dev/null || echo 0)"
+    fi
+    printf '[%s] WOULD-WRITE #%s (%s):%s\n' "$(date -u +%H:%M:%S)" "${n}" "${label}" "$(_quote_args "$@")" >&2
 }
+run_write() {
+    local label="$1"
+    shift
+    case "${DEPLOY_MODE}" in
+        real) "$@" ;;
+        rehearse) _rehearse_note "${label}" "$@" ;;
+        *) die "unknown DEPLOY_MODE=${DEPLOY_MODE}" ;;
+    esac
+}
+# То же для записи, которой данные приходят в stdin (конвейер printf/tar | …):
+# в репетиции stdin дочитывается до конца, чтобы производитель слева не умер
+# от SIGPIPE (pipefail превратил бы это в 141).
+run_write_pipe() {
+    local label="$1"
+    shift
+    case "${DEPLOY_MODE}" in
+        real) "$@" ;;
+        rehearse) cat >/dev/null; _rehearse_note "${label}" "$@" ;;
+        *) die "unknown DEPLOY_MODE=${DEPLOY_MODE}" ;;
+    esac
+}
+is_rehearse() { [ "${DEPLOY_MODE}" = "rehearse" ]; }
+
+# Токен подтверждения боевого прогона: печатают dry-run и репетиция, боевой
+# прогон принимает его CONFIRM_TTL секунд (решение владельца: 2 часа) и только
+# для того же релиза и того же плана. Формат <epoch>-<план>-<проверка>: план —
+# первые 12 знаков sha256 канонического текста плана (plan_text), проверка
+# связывает epoch, план и id релиза. Это не секрет, а осознанный барьер между
+# «посмотрел план» и «остановил прод»: запуск без свежего dry-run или с другим
+# планом (сдвинулся развёрнутый релиз, изменился dist, конфигурация или сам
+# toolkit) отказывает с понятной причиной.
+CONFIRM_TTL="${CONFIRM_TTL:-7200}"
+confirm_token() {
+    local id="$1" plan="$2" epoch="$3" check
+    check="$(printf '%s:%s:%s' "${id}" "${plan}" "${epoch}" | sha256sum | cut -c1-8)"
+    printf '%s-%s-%s' "${epoch}" "${plan}" "${check}"
+}
+# Проверка токена: печатает причину отказа и возвращает 1; 0 — токен годен.
+confirm_token_check() {
+    local token="$1" id="$2" plan="$3" now="${4:-}" epoch tplan age issued
+    [ -n "${now}" ] || now="$(date -u +%s)"
+    if ! [[ "${token}" =~ ^([0-9]{9,11})-([0-9a-f]{12})-([0-9a-f]{8})$ ]]; then
+        printf 'malformed --confirm token (expected <epoch>-<plan>-<check> as printed by --dry-run or --rehearse)'
+        return 1
+    fi
+    epoch="${BASH_REMATCH[1]}"
+    tplan="${BASH_REMATCH[2]}"
+    if [ "$(confirm_token "${id}" "${tplan}" "${epoch}")" != "${token}" ]; then
+        printf 'the --confirm token was not issued for release %s (or was altered)' "${id}"
+        return 1
+    fi
+    issued="$(date -u -d "@${epoch}" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || echo "${epoch}")"
+    age=$((now - epoch))
+    if [ "${age}" -lt -300 ]; then
+        printf 'the --confirm token is dated in the future (%s): check the clock' "${issued}"
+        return 1
+    fi
+    if [ "${age}" -gt "${CONFIRM_TTL}" ]; then
+        printf 'the --confirm token expired: issued %s, %s min ago; a token is valid for %s min after its dry-run or rehearsal: run one again' \
+            "${issued}" "$((age / 60))" "$((CONFIRM_TTL / 60))"
+        return 1
+    fi
+    if [ "${tplan}" != "${plan}" ]; then
+        printf 'the plan changed since the token was issued (token plan %s, current plan %s: deployed releases, dist, config or toolkit differ): run --dry-run or --rehearse again' \
+            "${tplan}" "${plan}"
+        return 1
+    fi
+    return 0
+}
+# Хэш файла для плана: 12 знаков sha256 или missing.
+_plan_file_hash() {
+    if [ -f "$1" ]; then sha256sum <"$1" | cut -c1-12; else printf 'missing'; fi
+}
+# Канонический текст плана выката, общий у dry-run, репетиции и боевого прогона:
+# зависит только от цели, развёрнутой базы, содержимого dist, конфигурации выката
+# и текста самого toolkit. $1 цель, $2 каталог dist/<цель>, $3..$5 развёрнутые
+# hub web worker.
+plan_text() {
+    local sha="$1" dist_dir="$2" b_hub="$3" b_web="$4" b_worker="$5" f toolkit
+    toolkit="$(for f in cutover.sh lib.sh verify.sh retain.sh preflight.sh target-check.sh deploy.conf; do
+        printf '%s %s\n' "$(_plan_file_hash "${DEPLOY_DIR}/${f}")" "${f}"
+    done | sha256sum | cut -c1-12)"
+    printf '%s\n' \
+        "plan v2 target=${sha}" \
+        "baseline hub=${b_hub} web=${b_web} worker=${b_worker}" \
+        "dist SHA256SUMS=$(_plan_file_hash "${dist_dir}/SHA256SUMS") RELEASE=$(_plan_file_hash "${dist_dir}/RELEASE") EXPECT=$(_plan_file_hash "${dist_dir}/EXPECT") csp=$(_plan_file_hash "${dist_dir}/csp.txt")" \
+        "hosts hub=${HUB_SSH} web=${WEB_SSH} proxmox=${PROXMOX_SSH} node=${PROXMOX_NODE} ct=${HUB_CTID} ip=${HUB_IP}" \
+        "paths hub=${HUB_BASE} web=${WEB_SITES_BASE} env=${WEB_ENV} worker=${WORKER_BASE} backups=${HUB_BACKUP_DIR} units=${WORKER_UNIT},${HUB_UNIT},${WEB_CONTAINER}" \
+        "toolkit=${toolkit} retain=${RETAIN_COUNT}" \
+        "steps:" \
+        "  1 preflight snapshot (local state file); reserve ${sha} and the previous releases on every host" \
+        "  2 stop worker ${WORKER_UNIT} (sessions keep running); prove no control worker is left" \
+        "  3 fresh vzdump of CT ${HUB_CTID} + pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable" \
+        "  4 hub flip ${b_hub} -> ${sha} under the host lock, one restart of ${HUB_UNIT}; readyz, migrations, exe, NRestarts" \
+        "  5 PWA: canterlot.env.${sha} from dist csp.txt, build flip ${b_web} -> ${sha}, one recreate of ${WEB_CONTAINER}" \
+        "  6 worker flip ${b_worker} -> ${sha}, start; guarded MainPID/exe wait; state=live wait; NRestarts" \
+        "  7 merge old _app/immutable chunks of the previous web releases into ${sha} (no clobber), verify dist files intact" \
+        "  8 maintenance check (sockets, exec dirs, leftovers, env record); verify.sh twice incl. loopback Caddy probe and harness catalog" \
+        "  9 retention: keep ${RETAIN_COUNT} per component + every live release; literal paths re-checked right before deletion"
+}
+plan_hash() { plan_text "$@" | sha256sum | cut -c1-12; }
 
 # Последнее состояние сессии воркера в журнале юнита после метки since.
 # Журнал печатает голое state="live" (метка времени — префикс journald), поэтому
@@ -129,9 +247,69 @@ live_from_journal() {
             printf '%s' "${last:-none}"
             return 1
         fi
-        sleep 1
+        sleep "${LIVE_POLL:-1}"
         waited=$((waited + 1))
     done
+}
+
+# --- ожидание процесса воркера после старта (урок 1.18.1) ---
+# Пока юнит в activating, MainPID бывает пустым или 0, а readlink /proc/<pid>/exe
+# падает с ENOENT на переходе exec. Каждое чтение здесь защищено: функция никогда
+# не роняет вызывающего под set -e, а только возвращает пустое значение.
+# Репетиция умеет подмешать эти состояния (START_WAIT_FAULT_DIR, только в
+# DEPLOY_MODE=rehearse): файлы pid-empty / pid-zero / exe-enoent в каталоге
+# содержат число оставшихся поддельных ответов. Счётчик — в файлах, потому что
+# функции вызываются из $(…).
+_take_fault() {
+    local f="${START_WAIT_FAULT_DIR:-}/$1" n
+    is_rehearse || return 1
+    [ -n "${START_WAIT_FAULT_DIR:-}" ] && [ -f "${f}" ] || return 1
+    n="$(cat "${f}" 2>/dev/null || echo 0)"
+    case "${n}" in '' | *[!0-9]*) return 1 ;; esac
+    [ "${n}" -gt 0 ] || return 1
+    printf '%s\n' "$((n - 1))" >"${f}"
+    printf '1\n' >>"${START_WAIT_FAULT_DIR}/calls-$1"
+    return 0
+}
+# MainPID юнита воркера: число без мусора или пусто.
+unit_main_pid() {
+    local v=""
+    if _take_fault pid-empty; then return 0; fi
+    if _take_fault pid-zero; then printf '0'; return 0; fi
+    v="$(systemctl --user show "${WORKER_UNIT}" -p MainPID --value 2>/dev/null)" || v=""
+    case "${v}" in '' | *[!0-9]*) v="" ;; esac
+    printf '%s' "${v}"
+}
+# Цель /proc/<pid>/exe или пусто (процесс исчез, переход exec, нет прав).
+proc_exe() {
+    local v=""
+    if _take_fault exe-enoent; then return 0; fi
+    v="$(readlink "/proc/$1/exe" 2>/dev/null)" || v=""
+    printf '%s' "${v}"
+}
+# Ждать, пока у юнита появится MainPID с читаемым exe. $1 — число опросов
+# (по START_POLL секунд). Ставит WAIT_PID и WAIT_EXE; 0 — найдено, 1 — нет.
+START_POLL="${START_POLL:-0.5}"
+# shellcheck disable=SC2034 # WAIT_PID/WAIT_EXE читает вызывающий
+wait_worker_exe() {
+    local max="${1:-60}" i=0 pid="" exe=""
+    WAIT_PID=""
+    WAIT_EXE=""
+    while [ "${i}" -lt "${max}" ]; do
+        pid="$(unit_main_pid)" || pid=""
+        if [ -n "${pid}" ] && [ "${pid}" != "0" ]; then
+            exe="$(proc_exe "${pid}")" || exe=""
+            if [ -n "${exe}" ]; then
+                WAIT_PID="${pid}"
+                WAIT_EXE="${exe}"
+                return 0
+            fi
+        fi
+        sleep "${START_POLL}"
+        i=$((i + 1))
+    done
+    WAIT_PID="${pid}"
+    return 1
 }
 
 # Инвариант живой сессии: каждый ЗАПИСАННЫЙ процесс (sup/cli/relay) обязан быть
@@ -166,7 +344,7 @@ snapshot_drift() {
         done
         # Новые дети — только к сведению. Записанный CLI остаётся главным; если
         # рядом появился второй ребёнок (например, инструмент), это не дрейф.
-        new_cli="$(session_cli_pid "$(printf '%s' "${line}" | grep -o ' sup=[0-9]*' | cut -d= -f2 | head -1)" 2>/dev/null || true)"
+        new_cli="$(session_cli_pid "$(printf '%s' "${line}" | grep -o ' sup=[0-9]*' | cut -d= -f2 | sed -n 1p)" 2>/dev/null || true)"
         if [ -n "${new_cli}" ]; then
             new_pid="${new_cli%% *}"
             case "${line}" in
@@ -296,7 +474,7 @@ proc_ticks() {
         # NUL-разделённый cmdline читается в массив без cat|tr: на машине с сотнями
         # процессов это единственный заметный источник fork'ов в горячем пути.
         argv=()
-        mapfile -d '' -t argv <"${d}/cmdline" 2>/dev/null || true
+        mapfile -d '' -t argv 2>/dev/null <"${d}/cmdline" || true
         [ "${#argv[@]}" -gt 0 ] || continue
         # Встроенное сравнение ([[ ]]), без fork: внешний grep видел бы образец
         # в собственной командной строке и ловил сам себя.
@@ -405,21 +583,31 @@ check_summary() {
 # Чтение курсора журнала (sj/ack, cj/ack): первые 8 байт LE u64, дальше контрольная сумма.
 read_ack() { od -An -tu8 -N8 "$1" 2>/dev/null | tr -d ' \n'; }
 
-# Снимок exec id живых сопровождений из /proc по argv (set -e безопасно: пусто = пусто).
+# Снимок exec id живых сопровождений из /proc по точному argv: argv[0] с
+# basename canterlot-worker, argv[1] ровно supervise, значение --exec-dir.
+# Подстрока по склеенной командной строке ловила бы обёртки (bash -c "… supervise
+# --exec-dir …") — тот же класс, что самосовпадение сканера (урок 1.16.0).
+# Без fork на процесс: mapfile и встроенные сравнения.
 proc_supervisor_ids() {
-    local root="${1:-}" d pid cmdline rest dir
+    local root="${1:-}" d dir prev arg
+    local -a argv=()
     for d in /proc/[0-9]*; do
-        pid="${d#/proc/}"
-        is_zombie "${pid}" && continue
-        # shellcheck disable=SC2002
-        cmdline="$(cat "${d}/cmdline" 2>/dev/null | tr '\0' ' ')"
-        [ -n "${cmdline}" ] || continue
-        case "${cmdline}" in
-            *canterlot-worker*supervise*--exec-dir*) ;;
-            *) continue ;;
-        esac
-        rest="${cmdline##*--exec-dir }"
-        dir="${rest%% *}"
+        argv=()
+        mapfile -d '' -t argv 2>/dev/null <"${d}/cmdline" || continue
+        [ "${#argv[@]}" -ge 3 ] || continue
+        [ "${argv[0]##*/}" = "canterlot-worker" ] || continue
+        [ "${argv[1]}" = "supervise" ] || continue
+        if is_zombie "${d#/proc/}"; then continue; fi
+        dir=""
+        prev=""
+        for arg in "${argv[@]:2}"; do
+            case "${arg}" in
+                --exec-dir=*) dir="${arg#--exec-dir=}" ;;
+                *) if [ "${prev}" = "--exec-dir" ]; then dir="${arg}"; fi ;;
+            esac
+            prev="${arg}"
+        done
+        [ -n "${dir}" ] || continue
         if [ -n "${root}" ]; then
             case "${dir}" in
                 "${root}"/*) ;;
@@ -471,8 +659,9 @@ session_cli_pid() {
     local sup_pid="$1" raw cand tick cmd best="" best_tick=""
     raw="$(ps -o pid= --ppid "${sup_pid}" 2>/dev/null || true)"
     for cand in ${raw}; do
-        is_zombie "${cand}" && continue
-        [ -z "$(proc_relay_exec_id "${cand}")" ] || continue
+        if is_zombie "${cand}"; then continue; fi
+        _relay_exec_id "${cand}"
+        [ -z "${RELAY_ID}" ] || continue
         cmd="$(tr '\0' ' ' <"/proc/${cand}/cmdline" 2>/dev/null | cut -c1-200)"
         case "${cmd}" in
             *supervise*|*mcp-relay*|*executions/*) continue ;;
@@ -491,9 +680,16 @@ session_cli_pid() {
 # Слово mcp-relay в произвольных аргументах (или executions/ в пути CLI) не
 # считается релеем, а argv[1]=run — не считается ни при каких аргументах.
 proc_relay_exec_id() {
-    local pid="$1" argv=() prev="" arg
-    [ -r "/proc/${pid}/cmdline" ] || return 0
-    mapfile -d '' -t argv <"/proc/${pid}/cmdline" || return 0
+    _relay_exec_id "$1"
+    [ -z "${RELAY_ID}" ] || printf '%s\n' "${RELAY_ID}"
+}
+# То же без подоболочки: результат в RELAY_ID (пусто — не релей). Нужен сканам
+# всей таблицы процессов: $(…) на каждый процесс стоил сотни fork'ов.
+_relay_exec_id() {
+    local pid="$1" prev="" arg
+    local -a argv=()
+    RELAY_ID=""
+    mapfile -d '' -t argv 2>/dev/null <"/proc/${pid}/cmdline" || return 0
     [ "${#argv[@]}" -ge 2 ] || return 0
     [ "${argv[1]}" = "mcp-relay" ] || return 0
     for arg in "${argv[@]:2}"; do
@@ -501,7 +697,7 @@ proc_relay_exec_id() {
             case "${arg}" in
                 */executions/*/mcp.sock)
                     arg="${arg#*/executions/}"
-                    printf '%s\n' "${arg%%/*}"
+                    RELAY_ID="${arg%%/*}"
                     return 0 ;;
             esac
         fi
@@ -517,8 +713,9 @@ relay_pids_for_exec() {
     local exec_id="$1" d cand
     for d in /proc/[0-9]*; do
         cand="${d#/proc/}"
-        [ "$(proc_relay_exec_id "${cand}")" = "${exec_id}" ] || continue
-        is_zombie "${cand}" && continue
+        _relay_exec_id "${cand}"
+        [ "${RELAY_ID}" = "${exec_id}" ] || continue
+        if is_zombie "${cand}"; then continue; fi
         printf '%s\n' "${cand}"
     done
 }
@@ -527,7 +724,7 @@ relay_pids_for_exec() {
 # по одному "pid:tick" в строке; none/none:? не выводятся.
 snapshot_role_values() {
     local line="$1" role="$2" token
-    token="$(printf '%s' "${line}" | grep -o " ${role}=[^ ]*" | head -1 | cut -d= -f2 || true)"
+    token="$(printf '%s' "${line}" | grep -o " ${role}=[^ ]*" | sed -n 1p | cut -d= -f2 || true)"
     printf '%s' "${token}" | tr ',' '\n' | grep -vE '^(none|none:\?|)$' || true
 }
 
@@ -615,4 +812,108 @@ if built != declared:
     sys.exit(1)
 print(f"csp.txt script hashes equal the dist web/200.html inline scripts ({len(built)})")
 PY
+}
+
+# --- обслуживание: сокеты, каталоги исполнений, остатки, запись env ---
+# Раньше проверялось руками в журнале выката. Каждая живая сессия обязана иметь
+# свой каталог исполнения и сокет; на хостах не должно остаться current.new,
+# build.new и каталогов .stage-*; запись canterlot.env.<web> обязана быть 0600
+# и совпадать с живым env. Нарушения — мягкие ошибки (soft): записать и идти
+# дальше; dry-run считает их провалом. Лишние каталоги/сокеты без живой строки
+# только печатаются. $1 — живые id (строки), $2 — релиз PWA.
+# shellcheck disable=SC2016 # удалённые скрипты раскрывают свои позиционные аргументы
+LEFTOVER_SCRIPT='cd "$1" || exit 2; shift; for n in "$@" releases/.stage-*; do if [ -e "$n" ] || [ -L "$n" ]; then echo "$n"; fi; done'
+# shellcheck disable=SC2016
+ENV_RECORD_SCRIPT='rec="$1"; live="$2"; if [ ! -f "$rec" ]; then echo missing; exit 0; fi; mode="$(stat -c %a "$rec")"; if cmp -s "$rec" "$live"; then echo "mode=$mode equal"; else echo "mode=$mode differs"; fi'
+maintenance_check() {
+    local live_ids="$1" web_sha="$2" id n_live=0 out leftovers name
+    for id in ${live_ids}; do
+        n_live=$((n_live + 1))
+        if [ -d "${WORKER_DATA}/executions/${id}" ]; then :; else soft "maintenance: live execution ${id} has no exec dir in ${WORKER_DATA}/executions"; fi
+        if [ -S "${WORKER_SOCKET_DIR}/${id}.sock" ]; then :; else soft "maintenance: live execution ${id} has no socket ${WORKER_SOCKET_DIR}/${id}.sock"; fi
+    done
+    for name in "${WORKER_DATA}"/executions/*/; do
+        [ -d "${name}" ] || continue
+        name="${name%/}"; name="${name##*/}"
+        case " ${live_ids//$'\n'/ } " in
+            *" ${name} "*) ;;
+            *) log "maintenance note: exec dir ${name} has no live execution row (left as is)" ;;
+        esac
+    done
+    log "maintenance: ${n_live} live executions, each checked for its exec dir and socket"
+    leftovers=""
+    if out="$(ssh_hub "$(locked_free_cmd "${LEFTOVER_SCRIPT}" "${HUB_BASE}" current.new)")"; then
+        leftovers+="${out:+hub: ${out//$'\n'/ } }"
+    else
+        soft "maintenance: cannot list leftovers on the hub"
+    fi
+    if out="$(ssh_web "$(locked_free_cmd "${LEFTOVER_SCRIPT}" "${WEB_SITES_BASE}" build.new)")"; then
+        leftovers+="${out:+web: ${out//$'\n'/ } }"
+    else
+        soft "maintenance: cannot list leftovers on web"
+    fi
+    if out="$(bash -c "${LEFTOVER_SCRIPT}" -- "${WORKER_BASE}" current.new)"; then
+        leftovers+="${out:+worker: ${out//$'\n'/ } }"
+    else
+        soft "maintenance: cannot list leftovers on the worker"
+    fi
+    if [ -n "${leftovers}" ]; then
+        soft "maintenance: leftovers on hosts: ${leftovers}"
+    else
+        log "maintenance: no current.new/build.new/.stage-* on any host"
+    fi
+    if out="$(ssh_web "$(locked_free_cmd "${ENV_RECORD_SCRIPT}" "${WEB_ENV}.${web_sha}" "${WEB_ENV}")")"; then
+        case "${out}" in
+            "mode=600 equal") log "maintenance: ${WEB_ENV##*/}.${web_sha} is 0600 and equal to the live env" ;;
+            *) soft "maintenance: env record ${WEB_ENV##*/}.${web_sha}: ${out}" ;;
+        esac
+    else
+        soft "maintenance: cannot read the env record on web"
+    fi
+}
+# Текст «bash -c script -- args» без lock: та же цитата, что у locked_cmd_text.
+locked_free_cmd() {
+    local script="$1"
+    shift
+    printf 'bash -c %s --%s' "$(shq "${script}")" "$(_quote_args "$@")"
+}
+
+# --- слияние старых _app/immutable чанков (открытые вкладки PWA) ---
+# Вкладка, открытая на прошлом релизе, догружает свои чанки по старым именам.
+# После старта воркера и ДО любой чистки чанки предыдущих релизов веба
+# копируются в новый релиз без перезаписи (cp -rn). Проверка — отдельным
+# чтением: ни одного пропущенного относительного пути из каждого источника, и
+# каждый файл dist нового релиза байт в байт на месте (sha256sum -c).
+# shellcheck disable=SC2016,SC2034 # используется в cutover
+WEB_MERGE_SCRIPT='rel="$1"; new="$2"; shift 2; test -d "$rel/$new/_app/immutable" || exit 3; for old in "$@"; do src="$rel/$old/_app/immutable"; if [ -d "$src" ]; then cp -rn "$src/." "$rel/$new/_app/immutable/" || true; fi; done'
+# shellcheck disable=SC2016
+WEB_MERGE_COUNT_SCRIPT='rel="$1"; new="$2"; shift 2; for old in "$@"; do src="$rel/$old/_app/immutable"; t=0; m=0; if [ -d "$src" ]; then for f in $(cd "$src" && find . -type f); do t=$((t + 1)); if [ ! -e "$rel/$new/_app/immutable/$f" ]; then m=$((m + 1)); fi; done; fi; echo "$old $t $m"; done'
+# Источники слияния: до RETAIN_COUNT самых свежих релизов веба, кроме цели.
+web_merge_sources() {
+    local target="$1" raw dir name n=0 out=""
+    if ! raw="$(ssh_web "ls -1dt $(shq "${WEB_RELEASES}")/*/")"; then
+        return 1
+    fi
+    for dir in ${raw}; do
+        dir="${dir%/}"
+        name="${dir##*/}"
+        is_release_id "${name}" || continue
+        [ "${name}" != "${target}" ] || continue
+        [ "${n}" -lt "${RETAIN_COUNT}" ] || break
+        out+="${name} "
+        n=$((n + 1))
+    done
+    printf '%s' "${out% }"
+}
+# Пропуски по источникам: строки "<релиз> <файлов> <пропущено>".
+web_merge_counts() {
+    local target="$1"
+    shift
+    ssh_web "$(locked_free_cmd "${WEB_MERGE_COUNT_SCRIPT}" "${WEB_RELEASES}" "${target}" "$@")"
+}
+# Каждый файл dist/<sha>/web на месте в релизе веба. Вызывающий задаёт DIST.
+web_dist_files_intact() {
+    local target="$1"
+    web_expected_sums | ssh -o BatchMode=yes -o ConnectTimeout=10 "${WEB_SSH}" \
+        "cd $(shq "${WEB_RELEASES}/${target}") && sha256sum --quiet --strict -c -"
 }
