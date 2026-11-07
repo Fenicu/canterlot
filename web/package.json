@@ -30,7 +30,9 @@
     "dompurify": "3.4.17",
     "highlight.js": "11.12.0",
     "html-to-image": "1.11.13",
+    "mammoth": "1.13.0",
     "markdown-it": "15.0.3",
+    "read-excel-file": "9.3.14",
     "svelte": "5.57.3"
   },
   "devDependencies": {
