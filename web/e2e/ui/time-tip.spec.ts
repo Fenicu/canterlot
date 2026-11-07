@@ -129,10 +129,19 @@ test('hover_shows_the_full_date_after_the_delay_and_leave_hides_it', async ({ pa
   await boot(page);
   const time = answerTimes(page).last();
   await time.scrollIntoViewIfNeeded();
+  // Задержку меряет сама страница: от входа указателя до появления подсказки. Таймер теста под нагрузкой опаздывает сам.
+  await time.evaluate((node) => {
+    const marks = ((window as unknown as { __tip: { enter?: number; shown?: number } }).__tip = {});
+    node.addEventListener('pointerenter', () => { marks.enter ??= performance.now(); }, { once: true });
+    new MutationObserver((_, observer) => {
+      if (document.querySelector('.time-tip[role="tooltip"]')) { marks.shown ??= performance.now(); observer.disconnect(); }
+    }).observe(document.body, { childList: true, subtree: true });
+  });
   await time.hover();
-  await page.waitForTimeout(180);
-  await expect(tip(page)).toHaveCount(0);
   await expect(tip(page)).toBeVisible();
+  const marks = await page.evaluate(() => (window as unknown as { __tip: { enter?: number; shown?: number } }).__tip);
+  expect(marks.enter).toBeDefined();
+  expect(marks.shown! - marks.enter!).toBeGreaterThanOrEqual(250);
   await expect(tip(page)).toHaveText(LAST);
   await settle(tip(page));
   expect(await backgroundAlpha(tip(page))).toBe(1);
