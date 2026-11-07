@@ -19,6 +19,37 @@ describe('timeline/office/sheet', () => {
     expect(formatCell(new Date(Number.NaN)).text).toBe('');
   });
 
+  it('percent_formats_scale_by_hundred_and_keep_the_requested_decimals', () => {
+    expect(formatCell(0.336, '0%')).toEqual({ text: '34 %', numeric: true });
+    expect(formatCell(0.336, '0.0%').text).toBe('33,6 %');
+    expect(formatCell(0.336, '0.00%').text).toBe('33,60 %');
+  });
+
+  it('currency_formats_use_russian_signs_grouping_and_fixed_decimals', () => {
+    expect(formatCell(1750, '#,##0.00\\ "₽"').text).toBe('1 750,00 ₽');
+    expect(formatCell(1750, '#,##0.00" €"').text).toBe('1 750,00 €');
+    expect(formatCell(1750, '"$"#,##0.00').text).toBe('1 750,00 $');
+    expect(formatCell(1750, '[$$-409]#,##0.00').text).toBe('1 750,00 $');
+    expect(formatCell(1750, '#,##0.00" руб."').text).toBe('1 750,00 руб.');
+  });
+
+  it('thousands_and_fixed_decimals_follow_the_format_code', () => {
+    expect(formatCell(1_234_567, '#,##0').text).toBe('1 234 567');
+    expect(formatCell(1234.5, '0.00').text).toBe('1234,50');
+    expect(formatCell(1234.5, '#,##0.000').text).toBe('1 234,500');
+  });
+
+  it('unknown_or_text_formats_fall_back_to_the_plain_number', () => {
+    expect(formatCell(1234.5, 'General').text).toBe('1 234,5');
+    expect(formatCell(1234.5, '0.0E+00').text).toBe('1 234,5');
+    expect(formatCell(1234.5, '@').text).toBe('1 234,5');
+  });
+
+  it('sheet_view_passes_each_cell_format_to_the_formatter', () => {
+    const view = sheetView('Форматы', [[0.336, 1750]], [['0.0%', '#,##0.00" ₽"']]);
+    expect(view.rows[0]!.map((cell) => cell.text)).toEqual(['33,6 %', '1 750,00 ₽']);
+  });
+
   it('text_booleans_and_empty_cells_keep_their_meaning', () => {
     expect(formatCell('Выручка')).toEqual({ text: 'Выручка', numeric: false });
     expect(formatCell(true).text).toBe('ИСТИНА');

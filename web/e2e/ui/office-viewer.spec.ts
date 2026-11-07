@@ -199,7 +199,7 @@ test('an_xlsx_from_an_agent_answer_switches_sheets_keeps_the_header_sticky_and_n
 
   const dialog = page.getByRole('dialog', { name: 'table.xlsx' });
   const tabs = dialog.getByRole('tab');
-  await expect(tabs).toHaveText(['Сводка', 'Журнал']);
+  await expect(tabs).toHaveText(['Сводка', 'Журнал', 'Форматы']);
   await expect(tabs.first()).toHaveAttribute('aria-selected', 'true');
   const grid = dialog.getByRole('tabpanel');
   // Формула B2-B3 показывает сохранённый результат, даты и логические значения — по-русски.
@@ -237,6 +237,14 @@ test('an_xlsx_from_an_agent_answer_switches_sheets_keeps_the_header_sticky_and_n
   await expect(tabs.first()).toHaveAttribute('aria-selected', 'true');
   await expect(tabs.first()).toBeFocused();
   await expect(grid.locator('thead th').first()).toHaveText('Показатель');
+
+  // Числовые форматы из styles.xml: проценты и валюты в ru-RU, а не сырые доли и суммы.
+  await tabs.nth(2).click();
+  const formatted = grid.locator('tbody tr');
+  await expect(formatted.nth(1).locator('td')).toHaveText(['33,6 %']);
+  await expect(formatted.nth(3).locator('td')).toHaveText(['1 750,00 ₽']);
+  await expect(formatted.nth(5).locator('td')).toHaveText(['1 750,00 $']);
+  await expect(formatted.nth(11).locator('td')).toHaveText(['1 234,5']);
 
   // Системный «назад» закрывает просмотрщик, а не уводит из чата.
   await page.goBack();

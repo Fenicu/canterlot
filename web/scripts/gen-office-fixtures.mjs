@@ -187,6 +187,7 @@ function xlsx() {
     if (typeof value === 'number') return `<c r="${ref}"><v>${value}</v></c>`;
     if (typeof value === 'boolean') return `<c r="${ref}" t="b"><v>${value ? 1 : 0}</v></c>`;
     if ('date' in value) return `<c r="${ref}" s="${value.time ? 2 : 1}"><v>${serial(value.date)}</v></c>`;
+    if ('number' in value) return `<c r="${ref}" s="${value.s}"><v>${value.number}</v></c>`;
     return `<c r="${ref}"${value.s ? ` s="${value.s}"` : ''}><f>${escape(value.f)}</f><v>${value.v}</v></c>`;
   };
   const sheet = (rows) => {
@@ -228,18 +229,46 @@ function xlsx() {
       i % 5 === 0 ? 'Нужна проверка владельца перед выкладкой' : ''
     ]);
   }
-  const sheets = [sheet(summary), sheet(log)];
+  // Отдельный лист форматов: проценты, валюты, разряды и неизвестный код, который показывается как есть.
+  const formatted = [
+    ['Показатель', 'Значение'],
+    ['Процент 0%', { number: 0.336, s: 4 }],
+    ['Процент 0.0%', { number: 0.336, s: 5 }],
+    ['Процент 0.00%', { number: 0.336, s: 3 }],
+    ['Рубли', { number: 1750, s: 6 }],
+    ['Евро', { number: 1750, s: 7 }],
+    ['Доллары', { number: 1750, s: 8 }],
+    ['Рубли прописью', { number: 1750, s: 9 }],
+    ['Тысячи', { number: 1234567, s: 10 }],
+    ['Два знака', { number: 1234.5, s: 11 }],
+    ['Дата', { date: '2026-10-01T00:00:00' }],
+    ['Дата и время', { date: '2026-10-31T18:30:00', time: true }],
+    ['Неизвестный формат', { number: 1234.5, s: 12 }]
+  ];
+  const sheets = [sheet(summary), sheet(log), sheet(formatted)];
   const shared = `${XML}<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${strings.length}" uniqueCount="${strings.length}">${strings.map((value) => `<si><t xml:space="preserve">${escape(value)}</t></si>`).join('')}</sst>`;
-  // 0 — обычный, 1 — дата (14), 2 — дата и время (22), 3 — проценты (10).
-  const styles = `${XML}<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="22" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="10" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>`;
+  // 0 — обычный, 1 — дата (14), 2 — дата и время (22), 3 — проценты (10), 4 — проценты без дробей,
+  // 5 — проценты с одной дробью, 6–9 — валюты, 10–11 — разряды, 12 — неподдерживаемая запись.
+  const formats = [
+    [0, ''], [14, ''], [22, ''], [10, ''], [9, ''], [164, ''], [165, ''], [166, ''], [167, ''], [168, ''], [3, ''], [4, ''], [11, '']
+  ];
+  const numFmts = [
+    [164, '0.0%'],
+    [165, '#,##0.00\\ &quot;₽&quot;'],
+    [166, '#,##0.00\\ &quot;€&quot;'],
+    [167, '&quot;$&quot;#,##0.00'],
+    [168, '#,##0.00&quot; руб.&quot;']
+  ];
+  const styles = `${XML}<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="${numFmts.length}">${numFmts.map(([id, code]) => `<numFmt numFmtId="${id}" formatCode="${code}"/>`).join('')}</numFmts><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="${formats.length}">${formats.map(([id]) => `<xf numFmtId="${id}" fontId="0" fillId="0" borderId="0" xfId="0"${id ? ' applyNumberFormat="1"' : ''}/>`).join('')}</cellXfs></styleSheet>`;
   const S = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   return zip([
-    ['[Content_Types].xml', `${XML}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>`],
+    ['[Content_Types].xml', `${XML}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>`],
     ['_rels/.rels', `${XML}<Relationships xmlns="${PR}"><Relationship Id="rId1" Type="${S}/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
-    ['xl/workbook.xml', `${XML}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="${R}"><sheets><sheet name="Сводка" sheetId="1" r:id="rId1"/><sheet name="Журнал" sheetId="2" r:id="rId2"/></sheets></workbook>`],
-    ['xl/_rels/workbook.xml.rels', `${XML}<Relationships xmlns="${PR}"><Relationship Id="rId1" Type="${S}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${S}/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="${S}/styles" Target="styles.xml"/><Relationship Id="rId4" Type="${S}/sharedStrings" Target="sharedStrings.xml"/></Relationships>`],
+    ['xl/workbook.xml', `${XML}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="${R}"><sheets><sheet name="Сводка" sheetId="1" r:id="rId1"/><sheet name="Журнал" sheetId="2" r:id="rId2"/><sheet name="Форматы" sheetId="3" r:id="rId3"/></sheets></workbook>`],
+    ['xl/_rels/workbook.xml.rels', `${XML}<Relationships xmlns="${PR}"><Relationship Id="rId1" Type="${S}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${S}/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="${S}/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="${S}/styles" Target="styles.xml"/><Relationship Id="rId5" Type="${S}/sharedStrings" Target="sharedStrings.xml"/></Relationships>`],
     ['xl/worksheets/sheet1.xml', sheets[0]],
     ['xl/worksheets/sheet2.xml', sheets[1]],
+    ['xl/worksheets/sheet3.xml', sheets[2]],
     ['xl/styles.xml', styles],
     ['xl/sharedStrings.xml', shared]
   ]);
