@@ -221,7 +221,7 @@
 
 	<Timeline
 		{chat}
-		interrupt={turn ? interrupt : null}
+		{interrupt}
 		onInfo={(runId) => {
 			infoRunId = runId;
 			onInfo?.(runId);

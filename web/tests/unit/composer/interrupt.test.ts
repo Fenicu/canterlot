@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { InterruptControl, type InterruptDeps } from "#lib/composer/interrupt.svelte.js";
+import { INTERRUPT_FAILED, InterruptControl, type InterruptDeps } from "#lib/composer/interrupt.svelte.js";
 
 describe("InterruptControl", () => {
   it("interrupt_label_stays_until_terminal_status", async () => {
@@ -28,6 +28,19 @@ describe("InterruptControl", () => {
     control.applyStatus("rejected_stale");
     expect(control.label).toBe("Прерывание устарело");
   });
+  it("failed_request_keeps_a_retry_label_instead_of_hiding_the_reason", async () => {
+    const deps: InterruptDeps = {
+      conversationId: "conv-1",
+      api: async () => {
+        throw new Error("offline");
+      },
+    };
+    const control = new InterruptControl(deps);
+    await control.interrupt();
+    expect(control.label).toBe(INTERRUPT_FAILED);
+    expect(control.running).toBe(false);
+  });
+
   it("interrupt_without_a_live_execution_finishes_at_once", async () => {
     const deps: InterruptDeps = { conversationId: "conv-1" };
     deps.api = async () => ({ requested: { interrupt_command_id: null, withdraw_command_id: null } });

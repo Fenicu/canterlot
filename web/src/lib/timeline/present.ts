@@ -79,12 +79,55 @@ export function liveLineText(
       ? "Ошибка в ответе"
       : phase === "done"
         ? "Ответ завершён"
-        : phase === "tool"
-          ? `Выполняет ${tool || "инструмент"}`
-          : phase === "thinking"
-            ? "Рассуждает"
-            : "Генерирует";
+        : phase === "starting"
+          ? "Запускается"
+          : phase === "tool"
+            ? `Выполняет ${tool || "инструмент"}`
+            : phase === "thinking"
+              ? "Рассуждает"
+              : "Генерирует";
   return `${label} · ${fmt.duration(whole)}`;
+}
+
+export interface LiveTurnLine {
+  /** Фаза строки хода: `starting`, `tool` или `working`. */
+  phase: string;
+  tool: string;
+  startedAt: number;
+}
+
+/**
+ * Строка хода до первого ответа: пока блоков нет, чем занят агент, говорит
+ * активность хаба. Время считается от начала фазы, а без неё — от начала хода.
+ */
+export function activityLiveLine(activity: unknown, now: number): LiveTurnLine {
+  const state = (activity ?? {}) as {
+    evidence?: {
+      phase?: unknown;
+      tool_name?: unknown;
+      summary?: unknown;
+      phase_since?: unknown;
+    };
+    since?: unknown;
+  };
+  const evidence = state.evidence ?? {};
+  const phase = typeof evidence.phase === "string" ? evidence.phase : "";
+  const since = Date.parse(
+    String(evidence.phase_since ?? state.since ?? ""),
+  );
+  return {
+    phase:
+      phase === "starting"
+        ? "starting"
+        : phase === "running_tool"
+          ? "tool"
+          : "working",
+    tool:
+      phase === "running_tool"
+        ? String(evidence.summary || evidence.tool_name || "")
+        : "",
+    startedAt: Number.isFinite(since) ? since : now,
+  };
 }
 
 export function toolStatusText(opts: {

@@ -1,16 +1,22 @@
 import type { Page } from '@playwright/test';
-import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, seedConversation, seedHistory } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const AT = '2026-10-28T12:00:00.000Z';
 
-async function boot(page: Page, opts: { tokens?: number } = {}) {
+async function boot(page: Page, opts: { tokens?: number; history?: number } = {}) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   const id = seedConversation(api);
   api.pushContext(id, opts.tokens ?? 630_000, 1_000_000);
+  if (opts.history) {
+    const items = seedHistory(api, id, opts.history);
+    // Номера засеянной истории заняты: первое живое событие встаёт после неё.
+    for (let index = 0; index < items.length; index++) items[index]!.created_seq = String(index - items.length);
+    api.bindConversation(id);
+  }
   // Исполнение живо: в шапке есть квадрат остановки сессии.
   (api.details.get(id) as Record<string, unknown>).execution = { state: 'running', generation: 1 };
   await installChatRoutes(page, hub, api, OWNER);
@@ -20,8 +26,28 @@ async function boot(page: Page, opts: { tokens?: number } = {}) {
   return { hub, api, id };
 }
 
-/** Ход идёт и агент пишет ответ: под ответом живая строка хода. */
-function startTurn(hub: FakeHub, api: FakeHubApi, id: string, opts: { answer?: boolean; phase?: string } = {}): void {
+/** Ответ текущего хода: блок, дельта и запись в истории, как их присылает настоящий хаб. */
+function answer(hub: FakeHub, api: FakeHubApi, id: string, inputId: string): string {
+  const scope = `conversation:${id}`;
+  const blockId = api.id();
+  const opened = hub.append(scope, {
+    kind: 'block_started',
+    conversation_id: id,
+    payload: { block_id: blockId, rev: 0, kind: 'text', input_command_id: inputId, parent_block_id: null, agent: 'агент', model: 'opus', tool_name: null, summary: null, approved_by: null }
+  });
+  hub.append(scope, { kind: 'block_delta', conversation_id: id, payload: { block_id: blockId, base_rev: 0, rev: 1, append: 'Смотрю файлы проекта' } });
+  if (!api.histories.has(id)) api.histories.set(id, []);
+  api.histories.get(id)!.push({
+    kind: 'block', id: blockId, block_kind: 'text', content: 'Смотрю файлы проекта', content_bytes: 37, content_truncated: false,
+    created_seq: opened.scope_seq, created_at: AT, rev: 1, state: 'streaming', agent: 'агент', model: 'opus', tool_name: null, summary: null,
+    parent_block_id: null, input_command_id: inputId, line_count: 1
+  });
+  api.blocks.set(blockId, { text: 'Смотрю файлы проекта', rev: 1, state: 'streaming' });
+  return blockId;
+}
+
+/** Ход идёт: по умолчанию агент уже пишет ответ, без ответа остаётся только живая строка. */
+function startTurn(hub: FakeHub, api: FakeHubApi, id: string, opts: { answer?: boolean; phase?: string } = {}): { inputId: string; blockId: string | null } {
   const scope = `conversation:${id}`;
   const inputId = api.id();
   hub.append(scope, {
@@ -29,7 +55,7 @@ function startTurn(hub: FakeHub, api: FakeHubApi, id: string, opts: { answer?: b
     conversation_id: id,
     payload: {
       conversation_id: id,
-      activity: { state: 'working', evidence: opts.phase ? { phase: opts.phase } : {}, since: AT },
+      activity: { state: 'working', evidence: opts.phase ? { phase: opts.phase } : {}, since: new Date().toISOString() },
       unread_count: 0,
       queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
       last_activity_at: AT,
@@ -38,22 +64,29 @@ function startTurn(hub: FakeHub, api: FakeHubApi, id: string, opts: { answer?: b
     }
   });
   hub.append(scope, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [], hold_reasons: [], run_slot: { running: { input_id: inputId } } } });
-  if (opts.answer !== false) {
-    const blockId = api.id();
-    const opened = hub.append(scope, {
-      kind: 'block_started',
+  const blockId = opts.answer === false ? null : answer(hub, api, id, inputId);
+  hub.flush();
+  return { inputId, blockId };
+}
+
+/** Ход закончился: очередь на паузе, активность снова свободна. */
+function finishTurn(hub: FakeHub, api: FakeHubApi, id: string, status = 'completed'): void {
+  const scope = `conversation:${id}`;
+  hub.append(scope, { kind: 'interrupt_state_changed', conversation_id: id, payload: { command_id: api.id(), status } });
+  hub.append(scope, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [{ reason: 'user_stop' }], hold_reasons: [], run_slot: 'free' } });
+  hub.append(scope, {
+    kind: 'derived_changed',
+    conversation_id: id,
+    payload: {
       conversation_id: id,
-      payload: { block_id: blockId, rev: 0, kind: 'text', input_command_id: inputId, parent_block_id: null, agent: 'агент', model: 'opus', tool_name: null, summary: null, approved_by: null }
-    });
-    hub.append(scope, { kind: 'block_delta', conversation_id: id, payload: { block_id: blockId, base_rev: 0, rev: 1, append: 'Смотрю файлы проекта' } });
-    if (!api.histories.has(id)) api.histories.set(id, []);
-    api.histories.get(id)!.push({
-      kind: 'block', id: blockId, block_kind: 'text', content: 'Смотрю файлы проекта', content_bytes: 37, content_truncated: false,
-      created_seq: opened.scope_seq, created_at: AT, rev: 1, state: 'streaming', agent: 'агент', model: 'opus', tool_name: null, summary: null,
-      parent_block_id: null, input_command_id: inputId, line_count: 1
-    });
-    api.blocks.set(blockId, { text: 'Смотрю файлы проекта', rev: 1, state: 'streaming' });
-  }
+      activity: { state: 'idle', evidence: {}, since: new Date().toISOString() },
+      unread_count: 0,
+      queue: { queued: 0, pause_reasons: [{ reason: 'user_stop' }], hold_reasons: [] },
+      last_activity_at: AT,
+      settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
+      crunch: { enabled: false }
+    }
+  });
   hub.flush();
 }
 
@@ -81,7 +114,7 @@ function activity(hub: FakeHub, id: string, state: string, phase: string): void 
     conversation_id: id,
     payload: {
       conversation_id: id,
-      activity: { state, evidence: { phase }, since: AT },
+      activity: { state, evidence: { phase }, since: new Date().toISOString() },
       unread_count: 0,
       queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
       last_activity_at: AT,
@@ -128,11 +161,97 @@ test('the_session_menu_interrupts_a_turn_without_an_answer_yet', async ({ page }
   await page.keyboard.press('Escape');
   // Ход пробуждения не держит слот очереди, но модель уже работает.
   activity(hub, id, 'working', 'generating');
+  const line = page.locator('[data-role="live-turn"]');
+  await expect(line.getByRole('button', { name: 'Прервать' })).toBeVisible();
   await page.getByRole('button', { name: 'Меню сессии' }).click();
   await page.getByRole('menuitem', { name: 'Прервать ход' }).click();
   await expect.poll(() => hits.length).toBe(1);
   await expect(page.getByRole('menu')).toHaveCount(0);
+  // Пункт меню и кнопка строки делят состояние: второй запрос не уходит.
+  await expect(line.getByRole('button', { name: 'Прерываю…' })).toBeVisible();
+  await line.getByRole('button', { name: 'Прерываю…' }).click();
+  await page.waitForTimeout(200);
+  expect(hits).toHaveLength(1);
 });
+
+test('the_live_line_starts_the_turn_before_the_first_answer_and_shows_the_outcome', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  const hits = await watch(page, '**/api/v1/conversations/*/interrupt');
+  startTurn(hub, api, id, { answer: false, phase: 'starting' });
+  const line = page.locator('[data-role="live-turn"]');
+  await expect(line).toBeVisible();
+  await expect(line.locator('.live[data-working]')).toBeVisible();
+  await expect(line).toContainText('Запускается');
+  await expect(line.getByRole('button', { name: 'Прервать' })).toBeVisible();
+  await line.getByRole('button', { name: 'Прервать' }).click();
+  await expect(line.getByRole('button', { name: 'Прерываю…' })).toBeVisible();
+  await expect.poll(() => hits.length).toBe(1);
+  finishTurn(hub, api, id);
+  const outcome = page.locator('[data-role="interrupt-outcome"]');
+  await expect(outcome).toHaveText('Прервано');
+  await expect(line).toHaveCount(0);
+});
+
+test('the_live_line_attaches_to_the_answer_without_a_second_one', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  const { inputId } = startTurn(hub, api, id, { answer: false });
+  await expect(page.locator('[data-role="live-turn"]')).toBeVisible();
+  answer(hub, api, id, inputId);
+  hub.flush();
+  const answerLine = page.locator('[data-kind="answer"] .live[data-working]');
+  await expect(answerLine).toHaveCount(1);
+  await expect(page.locator('[data-role="live-turn"]')).toHaveCount(0);
+  // В ленте ровно одна живая строка, и она стоит в карточке ответа.
+  await expect(page.locator('.feed .live[data-working]')).toHaveCount(1);
+});
+
+test('a_wake_up_turn_without_an_answer_shows_the_live_line', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  const hits = await watch(page, '**/api/v1/conversations/*/interrupt');
+  hub.append(`conversation:${id}`, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [], hold_reasons: [], run_slot: 'free' } });
+  activity(hub, id, 'working', 'generating');
+  const line = page.locator('[data-role="live-turn"]');
+  await expect(line).toBeVisible();
+  await expect(line).toContainText('Генерирует');
+  await line.getByRole('button', { name: 'Прервать' }).click();
+  await expect.poll(() => hits.length).toBe(1);
+  finishTurn(hub, api, id);
+  await expect(page.locator('[data-role="interrupt-outcome"]')).toHaveText('Прервано');
+});
+
+test('the_early_live_line_keeps_the_feed_pinned_to_the_bottom', async ({ page }) => {
+  const { hub, api, id } = await boot(page, { history: 40 });
+  const feed = page.locator('.feed');
+  const gap = () => feed.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+  await expect(feed).toHaveAttribute('data-pinned', '');
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  const { inputId } = startTurn(hub, api, id, { answer: false, phase: 'starting' });
+  await expect(page.locator('[data-role="live-turn"]')).toBeVisible();
+  await expect(feed).toHaveAttribute('data-pinned', '');
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  // Строка уходит в карточку ответа: лента остаётся прижатой и на этом переходе.
+  answer(hub, api, id, inputId);
+  hub.flush();
+  await expect(page.locator('[data-role="live-turn"]')).toHaveCount(0);
+  await expect(page.locator('[data-kind="answer"] .live[data-working]')).toHaveCount(1);
+  await expect(feed).toHaveAttribute('data-pinned', '');
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+});
+
+for (const motion of ['full', 'reduced'] as const) {
+  test(`the_early_live_line_motif_${motion}`, async ({ page }) => {
+    if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
+    const { hub, api, id } = await boot(page);
+    startTurn(hub, api, id, { answer: false, phase: 'starting' });
+    const line = page.locator('[data-role="live-turn"]');
+    await expect(line).toBeVisible();
+    const names = await line.locator('.write i').evaluateAll((nodes) =>
+      nodes.map((node) => getComputedStyle(node).animationName)
+    );
+    if (motion === 'reduced') expect(names).toEqual(['none', 'none', 'none']);
+    else expect(names.every((name) => /work-write-(first|second|third)$/.test(name))).toBe(true);
+  });
+}
 
 test('the_header_stop_button_still_stops_the_session', async ({ page }) => {
   const { hub, api, id } = await boot(page);

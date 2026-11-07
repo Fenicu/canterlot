@@ -6,6 +6,10 @@ export const INTERRUPT_DEADLINE_MS = 20_000;
 /** Надпись кнопки, пока прерывание не просили. */
 export const INTERRUPT_IDLE = "Прервать";
 
+/** Запрос не ушёл: кнопка предлагает повтор, лента называет исход. */
+export const INTERRUPT_FAILED = "Не прервано, повторить";
+export const INTERRUPT_FAILED_OUTCOME = "Прерывание не дошло";
+
 export interface InterruptDeps {
   conversationId: string;
   /** Возвращает ответ хаба `StopOutcome`. */
@@ -39,7 +43,7 @@ export class InterruptControl {
       });
     } catch {
       // Кнопка остаётся на виду с причиной: молча вернуть «Прервать» значит скрыть сбой.
-      this.label = "Не прервано, повторить";
+      this.label = INTERRUPT_FAILED;
       this.running = false;
       return;
     }

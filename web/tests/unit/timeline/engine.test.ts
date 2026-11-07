@@ -12,6 +12,7 @@ import { buildRows } from "#lib/timeline/rows.js";
 import {
   TOOL_DOM_CAP,
   TOOL_PAGE_BYTES,
+  activityLiveLine,
   liveLineText,
   takeToolPage,
   toolStatusText,
@@ -214,6 +215,34 @@ describe("timeline window", () => {
       liveLineText("error", 2_100),
     );
     expect(liveLineText("working", 138_000)).toBe("Генерирует · 2 мин 18 с");
+    expect(liveLineText("starting", 2_000)).toBe("Запускается · 2 с");
+    expect(liveLineText("tool", 2_000, "Bash")).toBe("Выполняет Bash · 2 с");
+  });
+
+  it("activity_line_names_the_phase_before_the_first_answer", () => {
+    const at = "2026-10-28T12:00:00.000Z";
+    expect(
+      activityLiveLine(
+        { state: "working", evidence: { phase: "starting" }, since: at },
+        Date.parse(at) + 2_000,
+      ),
+    ).toEqual({ phase: "starting", tool: "", startedAt: Date.parse(at) });
+    expect(
+      activityLiveLine(
+        {
+          state: "working",
+          evidence: { phase: "running_tool", summary: "Bash", phase_since: at },
+          since: at,
+        },
+        Date.parse(at) + 2_000,
+      ),
+    ).toEqual({ phase: "tool", tool: "Bash", startedAt: Date.parse(at) });
+    expect(
+      activityLiveLine(
+        { state: "working", evidence: { phase: "generating" }, since: "" },
+        9_000,
+      ),
+    ).toEqual({ phase: "working", tool: "", startedAt: 9_000 });
   });
 
 });

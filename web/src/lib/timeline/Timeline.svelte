@@ -10,10 +10,12 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import type { TimelineSource } from '#lib/stores/timeline.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
-  import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
+  import { INTERRUPT_FAILED, INTERRUPT_FAILED_OUTCOME, INTERRUPT_IDLE, type InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import CompactionRow from '#lib/timeline/CompactionRow.svelte';
   import EventEntry from '#lib/timeline/EventEntry.svelte';
+  import LiveLine from '#lib/timeline/LiveLine.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
+  import { activityLiveLine } from '#lib/timeline/present.js';
   import { FeedFolds } from '#lib/timeline/folds.js';
   import { dayStart, shownInCard, tailKey, RowsCache, type Row } from '#lib/timeline/rows.js';
   import { rowIndexOfInput } from '#lib/timeline/ownerMessages.js';
@@ -142,20 +144,62 @@
   // Живая строка закрывает промежуток до строки эпизода: фаза агента или только что принятый запрос.
   const compactingRow = $derived(entries.some((entry) => entry.kind === 'compaction' && entry.compaction.ok === null));
   const compacting = $derived(!feed && !laneRoot && chat.compacting && !compactingRow);
+  const turn = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
+  // Текущий ход узнаётся по слоту очереди: до первого блока последний блок ещё принадлежит прошлому ходу.
+  const runInputId = $derived.by(() => {
+    const slot = chat.queue.run_slot;
+    if (typeof slot !== 'object' || slot === null) return null;
+    if ('running' in slot) return slot.running?.input_id ?? null;
+    return slot.dispatching?.input_id ?? null;
+  });
+  // Ход, начатый самим CLI, места в очереди не занимает: его выдают блоки, созданные после начала активности.
+  const turnStart = $derived.by(() => {
+    const since = Date.parse(String(chat.activity?.since ?? ''));
+    return Number.isFinite(since) ? since : null;
+  });
   const activeRun = $derived.by(() => {
     const state = chat.activity?.state;
     if (state !== 'working' && state !== 'waiting_for_user') return null;
-    return entries.findLast((entry) => entry.kind === 'block')?.block.inputCommandId ?? null;
+    if (runInputId) return runInputId;
+    const own = entries.findLast((entry) =>
+      entry.kind === 'block' &&
+      (entry.block.state === 'streaming' || (turnStart !== null && entry.block.createdAt >= turnStart))
+    );
+    return own?.kind === 'block' ? own.block.inputCommandId : null;
+  });
+  // Живой строкой хода владеет карточка ответа, как только у текущего хода есть блок.
+  const liveAnswer = $derived.by(() => {
+    if (feed || laneRoot) return false;
+    return rows.some((row) =>
+      row.kind === 'answer' &&
+      row.entries.some((entry) =>
+        entry.kind === 'block' &&
+        (entry.block.state === 'streaming' || (activeRun !== null && entry.block.inputCommandId === activeRun))
+      )
+    );
+  });
+  // С начала хода и до первого блока строка стоит в хвосте ленты: «Прервать» есть сразу.
+  const earlyLive = $derived.by(() => {
+    if (feed || laneRoot || !turn || liveAnswer) return null;
+    return activityLiveLine(chat.activity, now);
   });
 
   const interruptDone = $derived.by(() => {
     if (feed || laneRoot) return false;
     const status = (chat.interrupt as { status?: string } | null)?.status;
     if (status !== 'acknowledged' && status !== 'completed') return false;
-    if (turnIsLive(chat.activity, chat.queue.run_slot)) return false;
+    if (turn) return false;
     const pauses = chat.queue.pause_reasons as { reason?: string }[];
     return pauses.some((pause) => pause?.reason === 'user_stop');
   });
+  // Итог прерывания живёт там же, где была живая строка, и после хода без ответа.
+  const interruptOutcome = $derived.by(() => {
+    if (feed || laneRoot || !interrupt || turn || interrupt.running) return null;
+    if (interrupt.label === INTERRUPT_IDLE) return null;
+    if (interrupt.label === INTERRUPT_FAILED) return INTERRUPT_FAILED_OUTCOME;
+    return interrupt.label;
+  });
+  const abortText = $derived(interruptOutcome ?? (interruptDone ? 'Ход прерван' : null));
 
   // Оценка непромеренной строки назначается один раз: иначе каждый замер живой карточки сдвигал бы все строки выше экрана и сбивал прокрутку.
   function guess(row: Row): number {
@@ -578,14 +622,19 @@
       </div>
     {/each}
     <div class="pad" style:height={`${range.padBottom}px`} use:spacer></div>
+    {#if earlyLive}
+      <div class="row" data-row data-kind="live" data-key="live-turn" data-role="live-turn" use:spacer>
+        <LiveLine phase={earlyLive.phase} tool={earlyLive.tool} startedAt={earlyLive.startedAt} {now} {interrupt} />
+      </div>
+    {/if}
     {#if compacting}
       <div class="row" data-row data-kind="compaction" data-key="compaction-live" use:spacer>
         <CompactionRow compaction={{ id: 'live', trigger: 'auto', preTokens: null, ok: null, createdAt: now, finishedAt: null }} />
       </div>
     {/if}
-    {#if interruptDone}
-      <div class="row" data-row data-kind="interrupt" data-key="interrupt-aborted" use:spacer>
-        <p class="aborted">Ход прерван</p>
+    {#if abortText}
+      <div class="row" data-row data-kind="interrupt" data-key="interrupt-outcome" data-role="interrupt-outcome" use:spacer>
+        <p class="aborted">{abortText}</p>
       </div>
     {/if}
     {#if rows.length === 0 && !navigator.onLine}<p class="day">История недоступна без связи</p>

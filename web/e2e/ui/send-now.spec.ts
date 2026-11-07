@@ -232,7 +232,7 @@ test('interrupted_turn_line_is_shown_for_a_live_execution', async ({ page }) => 
     }
   });
   hub.flush();
-  await expect(page.getByText('Ход прерван')).toBeVisible();
+  await expect(page.getByText('Прервано')).toBeVisible();
   await expect(page.getByText('Очередь остановлена')).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Сообщение' })).toBeEnabled();
 });
