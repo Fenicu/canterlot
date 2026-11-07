@@ -51,6 +51,22 @@ phase() { printf '\n==> %s\n' "$1"; phase_started=$SECONDS; }
 phase_done() { printf '    %s: %ds\n' "$1" $((SECONDS - phase_started)); }
 die() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 
+# Содержимое EXPECT по выводу `canterlot-worker capabilities`: что предлагает
+# воркер выпуска. Выкладка сверяет с ним развёрнутый воркер.
+expect_of() {
+    local listing kind name rest capabilities="" harnesses=""
+    listing=$("$1" capabilities) || die "$1 capabilities завершился с ошибкой"
+    while read -r kind name rest; do
+        [[ -n "$name" && -z "$rest" ]] || die "неожиданная строка capabilities: $kind $name $rest"
+        case "$kind" in
+            capability) capabilities+="${capabilities:+ }$name" ;;
+            harness) harnesses+="${harnesses:+ }$name" ;;
+            *) die "неожиданная строка capabilities: $kind $name" ;;
+        esac
+    done <<<"$listing"
+    printf 'format=1\ncapabilities=%s\nharnesses=%s\n' "$capabilities" "$harnesses"
+}
+
 sha=$want_sha
 commit=$want_commit
 
@@ -97,6 +113,7 @@ migrations_last=$(find "$src/crates/canterlot-hub/migrations" -maxdepth 1 -name 
     printf 'migrations_last=%s\n' "$migrations_last"
     printf 'source=%s\n' "$commit"
 } >"$out/RELEASE"
+expect_of "$out/worker/bin/canterlot-worker" >"$out/EXPECT"
 (
     cd "$out"
     find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS.new
@@ -120,6 +137,11 @@ syn_prod=$(strings "$out/worker/bin/canterlot-worker" | grep -c 'synthetic-cli' 
 [[ "$syn_prod" = "0" ]] || die "в боевом воркере есть synthetic-cli"
 syn_synth=$(strings "$out/synthetic/bin/canterlot-worker" | grep -c 'synthetic-cli' || true)
 [[ "$syn_synth" -ge 1 ]] || die "в синтетическом воркере нет synthetic-cli"
+grep -qx 'format=1' "$out/EXPECT" || die "в EXPECT нет format=1"
+grep -qx 'capabilities=[^ ].*' "$out/EXPECT" || die "в EXPECT нет или пуст capabilities="
+grep -qx 'harnesses=[^ ].*' "$out/EXPECT" || die "в EXPECT нет или пуст harnesses="
+expect_of "$out/worker/bin/canterlot-worker" | cmp -s - "$out/EXPECT" \
+    || die "EXPECT отличается от вывода боевого воркера capabilities"
 (cd "$out" && sha256sum --quiet -c SHA256SUMS) || die "SHA256SUMS не сходится"
 
 # Максимальная версия символа GLIBC: прод — Debian 13 с glibc 2.41, новее нельзя.
