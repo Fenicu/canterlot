@@ -3,9 +3,15 @@
 #[path = "support/task7.rs"]
 mod support;
 
+use canterlot_hub::{
+    config::LimitsConfig,
+    limits::{self, DataConfidence, Observation, ObservationSource, Window},
+};
 use chrono::{DateTime, TimeDelta, Utc};
+use serde_json::Value;
 use sqlx::PgPool;
 use support::Fixture;
+use uuid::Uuid;
 
 async fn seed_window(
     f: &Fixture,
@@ -143,4 +149,88 @@ async fn the_forecast_runs_out_before_the_reset(pool: PgPool) {
     );
     assert_eq!(forecast["before_reset"].as_bool(), Some(true), "{forecast}");
     assert!(forecast["exhausts_at"].is_string(), "{forecast}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_new_observation_emits_the_recomputed_forecast(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::days(6);
+    for (at, used) in [
+        (now - TimeDelta::days(1), 100),
+        (now - TimeDelta::hours(3), 800),
+    ] {
+        sqlx::query(
+            "insert into limit_snapshots(provider,window_kind,used_permille,resets_at,
+               observed_at,source,machine_id)
+             values('claude','weekly',$1,$2,$3,'poll',$4)",
+        )
+        .bind(used)
+        .bind(reset)
+        .bind(at)
+        .bind(f.seed.machine_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,
+           weekly_observed_at)
+         values('claude',800,$1,$2)",
+    )
+    .bind(reset)
+    .bind(now - TimeDelta::hours(3))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let mut tx = f.pool.begin().await.unwrap();
+    let recorded = limits::record_observation_in_tx(
+        &mut tx,
+        f.seed.owner_id,
+        &Observation {
+            provider: "claude".into(),
+            window: Window::Weekly,
+            used_permille: 900,
+            resets_at: Some(reset),
+            observed_at: now,
+            source: ObservationSource::Poll,
+            data_confidence: DataConfidence::Exact,
+            machine_id: f.seed.machine_id,
+            execution_id: None,
+        },
+        now,
+        &LimitsConfig::default(),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(recorded.provider_changed);
+    tx.commit().await.unwrap();
+    let payload: Value = sqlx::query_scalar(
+        "select payload from events where kind='limits_changed' order by scope_seq desc limit 1",
+    )
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["window"], "weekly");
+    let forecast = payload["forecast"].as_object().expect("forecast object");
+    let mut keys: Vec<&str> = forecast.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "before_reset",
+            "exhausts_at",
+            "rate_permille_per_hour",
+            "recent_rate_permille_per_hour"
+        ],
+        "{payload}"
+    );
+    assert_eq!(forecast["rate_permille_per_hour"].as_i64(), Some(38));
+    assert_eq!(forecast["recent_rate_permille_per_hour"].as_i64(), Some(33));
+    assert_eq!(forecast["before_reset"].as_bool(), Some(true));
+    assert!(forecast["exhausts_at"].is_string(), "{payload}");
+    // Снимок списка несёт тот же прогноз, что и событие.
+    let view = f.get("/api/v1/limits").await;
+    assert_eq!(view[0]["weekly"]["forecast"], payload["forecast"]);
 }
