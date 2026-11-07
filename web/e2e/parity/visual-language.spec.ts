@@ -128,6 +128,13 @@ for (const screen of SCREENS) {
       const problems: string[] = [];
       const observed = new Map<string, string>();
       await bootScreen(page, screen, theme);
+      // Срез не должен попасть в середину движения: переход цвета или размера даёт промежуточное
+      // значение, которого нет среди токенов. Бесконечные пульсации не ждём — у них нет конца.
+      await page.waitForFunction(() => document.getAnimations().every((animation) => {
+        const timing = animation.effect?.getComputedTiming();
+        const finite = typeof timing?.duration === 'number' && Number.isFinite(timing.duration) && timing.iterations !== Infinity;
+        return animation.playState !== 'running' || !finite;
+      }));
       const found: Audit[] = await page.evaluate((colorTokens) => {
         const rules = new Map<string, Audit>();
         const note = (rule: string, el: Element, detail: string) => {
