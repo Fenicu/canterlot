@@ -117,7 +117,8 @@ export class FakeHubApi {
 					{ harness: 'opencode', model: 'opencode-go/deepseek-v4.1-flash', effort: 'high', nudge: { max_nudges: 2 }, watchdog_minutes: 90, exclude_workdirs: [] },
 					{ harness: 'claude_code', model: 'opus[1m]', effort: 'high', nudge: false, exclude_workdirs: [] }
 				],
-				isolated: true
+				isolated: true,
+				expected_minutes: 90
 			},
 			review: {
 				title: 'Взгляд со стороны',
@@ -166,6 +167,19 @@ export class FakeHubApi {
 
 	routingPolicyView(): { policy: unknown | null; revision: number; builtin: unknown } {
 		return { policy: this.routingPolicy, revision: this.routingPolicyRevision, builtin: this.builtinRoutingPolicy };
+	}
+
+	/** Проверка полей, которые хаб отклоняет с `routing_policy_invalid`: пока это `expected_minutes` (5..1440). */
+	routingPolicyIssue(policy: unknown | null): string | null {
+		const tasks = (policy as { task_types?: Record<string, { expected_minutes?: unknown }> } | null)?.task_types ?? {};
+		for (const [key, task] of Object.entries(tasks)) {
+			const minutes = task.expected_minutes;
+			if (minutes === undefined) continue;
+			if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 5 || minutes > 1440) {
+				return `task_types.${key}.expected_minutes must be 5..1440`;
+			}
+		}
+		return null;
 	}
 
 	/** Сохранение политики: `false` — устаревшая ревизия, как `409` у хаба. */

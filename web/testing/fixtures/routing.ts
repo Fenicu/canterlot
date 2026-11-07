@@ -68,3 +68,6 @@ export function seedQueue(api: FakeHubApi, parent: string) {
   const second = api.queueItem(parent, { title: null, harness: 'codex', model: 'gpt-6.1-sol', reason: 'resources', detail: { detail: 'disk 12 GB free < 30 GB. T3 idle 3 h: session_accept frees their worktrees and target dirs' }, not_before: new Date(Date.now() + 20 * 60_000).toISOString(), created_at: '2026-11-06T10:01:00.000Z', position: 2 });
   return { first, second };
 }
+
+/** Пропуск по прогнозу: за ожидаемое время задачи недельный расход перейдёт порог. */
+export const PROJECTED_SKIP = { verdict: 'projected_over_threshold', reason: 'weekly 72% now, projected 84% in 60 min > 80%' } as const;

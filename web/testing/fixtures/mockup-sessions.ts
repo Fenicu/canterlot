@@ -1,7 +1,7 @@
 import type { MachineRecord } from '../../src/lib/stores/machines.svelte';
 import type { ProviderLimits } from '../../src/lib/stores/limits';
 import type { FakeHubApi } from '../fake-hub/api';
-import { seedConversation, seedPresets as seedPresetList } from '../fake-hub/seed';
+import { limitForecast, seedConversation, seedPresets as seedPresetList } from '../fake-hub/seed';
 
 const AT = '2026-10-28T12:00:00.000Z';
 
@@ -112,14 +112,15 @@ export function seedMockupSessions(api: FakeHubApi): MockupSessions {
 		{
 			provider: 'claude',
 			weekly_reserve_active: false,
-			five_hour: { used_permille: 340, resets_at: new Date(Date.now() + 3_600_000).toISOString(), observed_at: observed },
-			weekly: { used_permille: 960, resets_at: new Date(Date.now() + 86_400_000).toISOString(), observed_at: observed }
+			five_hour: { used_permille: 340, resets_at: new Date(Date.now() + 3_600_000).toISOString(), observed_at: observed, forecast: limitForecast({ rate: 120, exhaustsInMs: 5.5 * 3_600_000, beforeReset: false }) },
+			// Неделя кончится через 3 часа, задолго до сброса: полоса предупреждает.
+			weekly: { used_permille: 960, resets_at: new Date(Date.now() + 86_400_000).toISOString(), observed_at: observed, forecast: limitForecast({ rate: 13, recent: 30, exhaustsInMs: 3 * 3_600_000 + 5 * 60_000, beforeReset: true }) }
 		},
 		{
 			provider: 'codex',
 			weekly_reserve_active: false,
 			five_hour: { used_permille: 90, resets_at: new Date(Date.now() + 3_600_000).toISOString(), observed_at: observed },
-			weekly: { used_permille: 150, resets_at: new Date(Date.now() + 86_400_000).toISOString(), observed_at: observed }
+			weekly: { used_permille: 150, resets_at: new Date(Date.now() + 86_400_000).toISOString(), observed_at: observed, forecast: limitForecast({ rate: 4, exhaustsInMs: 212 * 3_600_000, beforeReset: false }) }
 		}
 	];
 	api.limits = limits;

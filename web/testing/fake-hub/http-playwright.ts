@@ -1098,6 +1098,11 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       return;
     }
     const body = route.request().postDataJSON() as { policy: unknown | null; revision: number };
+    const issue = api.routingPolicyIssue(body.policy ?? null);
+    if (issue) {
+      await route.fulfill({ status: 422, headers: headers(), json: errorBody('routing_policy_invalid', issue) });
+      return;
+    }
     if (!api.saveRoutingPolicy(body.policy ?? null, body.revision)) {
       await route.fulfill({ status: 409, headers: headers(), json: errorBody('routing_policy_conflict', 'Политика уже изменена') });
       return;

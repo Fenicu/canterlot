@@ -1,6 +1,7 @@
 import { sha256Hex } from '../../src/lib/stores/blocks';
 import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelte';
 import type { DelegationNode } from '../../src/lib/stores/delegation';
+import type { WindowForecast } from '../../src/lib/stores/limits';
 import type { ListRow } from '../../src/lib/stores/list.svelte';
 import type { MachineRecord } from '../../src/lib/stores/machines.svelte';
 import { FakeHubApi, type FakePreset } from './api';
@@ -221,4 +222,18 @@ export function seedPresets(api: FakeHubApi): void {
 		used_by: 1
 	};
 	api.presets.set(agentDraft.id, agentDraft);
+}
+
+/**
+ * Прогноз окна, как его считает хаб: средняя скорость в промилле за час и момент исчерпания.
+ * `exhaustsInMs: null` — скорость нулевая; `before_reset` задаётся явно, как в поле хаба.
+ */
+export function limitForecast(opts: { rate: number; recent?: number | null; exhaustsInMs: number | null; beforeReset: boolean; now?: number }): WindowForecast {
+	const now = opts.now ?? Date.now();
+	return {
+		rate_permille_per_hour: opts.rate,
+		recent_rate_permille_per_hour: opts.recent ?? null,
+		exhausts_at: opts.exhaustsInMs === null ? null : new Date(now + opts.exhaustsInMs).toISOString(),
+		before_reset: opts.beforeReset
+	};
 }
