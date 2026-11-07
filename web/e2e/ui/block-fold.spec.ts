@@ -57,28 +57,44 @@ async function pickMiddleHead(page: Page): Promise<string> {
 	});
 }
 
-/** Верх шапки и высота тела на срезах перехода: переход стоит на паузе, лента успевает перемерить строку. */
-async function slices(page: Page, key: string): Promise<{ head: number[]; fold: number[] } | null> {
+/**
+ * Срезы движения: переход ищется и ставится на паузу одним кадром вместе с действием, а не отдельным
+ * запросом после него. Иначе между ожиданием и снятием кадров проходит лишний круг, и под нагрузкой
+ * переход успевает кончиться — срез остаётся пустым.
+ */
+async function slices(page: Page, key: string, act: () => Promise<unknown>, budgetMs: number): Promise<{ head: number[]; fold: number[] } | null> {
 	const row = `[data-row][data-key="${key}"]`;
-	const found = await page
-		.waitForFunction((row) => (document.querySelector(`${row} .fold`)?.getAnimations().length ?? 0) > 0, row, { timeout: 1_500 })
-		.then(() => true, () => false);
-	if (!found) return null;
+	const waiting = page.evaluate(({ row, budgetMs }) => new Promise<boolean>((resolve) => {
+		const started = performance.now();
+		const look = () => {
+			const fold = document.querySelector<HTMLElement>(`${row} .fold`);
+			const [animation] = (fold?.getAnimations() ?? []).filter((item) => Number(item.effect?.getComputedTiming().duration) > 0);
+			if (fold && animation) {
+				animation.pause();
+				(window as unknown as { __fold: [HTMLElement, Animation] }).__fold = [fold, animation];
+				resolve(true);
+			} else if (performance.now() - started > budgetMs) resolve(false);
+			else requestAnimationFrame(look);
+		};
+		look();
+	}), { row, budgetMs });
+	await act();
+	if (!(await waiting)) return null;
 	return page.evaluate(async (row) => {
 		const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
-		const fold = document.querySelector(`${row} .fold`)!;
-		const [animation] = fold.getAnimations();
-		animation!.pause();
-		const total = Number(animation!.effect!.getComputedTiming().duration);
+		const [fold, animation] = (window as unknown as { __fold: [HTMLElement, Animation] }).__fold;
+		const total = Number(animation.effect!.getComputedTiming().duration);
 		const out = { head: [] as number[], fold: [] as number[] };
 		for (const share of [0.1, 0.3, 0.6]) {
-			animation!.currentTime = total * share;
+			animation.currentTime = total * share;
 			await frame();
 			await frame();
 			out.head.push(document.querySelector(`${row} .head`)!.getBoundingClientRect().top);
 			out.fold.push(fold.getBoundingClientRect().height);
 		}
-		animation!.play();
+		animation.play();
+		// Переход доигрывает до конца: следующее действие не должно попасть в его середину.
+		await Promise.race([animation.finished.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 3_000))]);
 		return out;
 	}, row);
 }
@@ -94,8 +110,7 @@ for (const motion of ['full', 'reduced'] as const) {
 		const head = page.locator(`[data-row][data-key="${key}"] .head`);
 		const top = await headTop(page, key);
 
-		await head.click();
-		const opening = await slices(page, key);
+		const opening = await slices(page, key, () => head.click(), motion === 'reduced' ? 1_500 : 8_000);
 		if (motion === 'reduced') expect(opening).toBeNull();
 		else {
 			expect(opening).not.toBeNull();
@@ -115,8 +130,7 @@ for (const motion of ['full', 'reduced'] as const) {
 		}, key);
 		expect(Math.abs(gap)).toBeLessThanOrEqual(1);
 
-		await head.click();
-		const closing = await slices(page, key);
+		const closing = await slices(page, key, () => head.click(), motion === 'reduced' ? 1_500 : 8_000);
 		if (motion === 'reduced') expect(closing).toBeNull();
 		else {
 			expect(closing).not.toBeNull();
