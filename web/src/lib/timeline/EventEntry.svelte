@@ -141,7 +141,8 @@
     font-weight: var(--weight-semibold);
     overflow-wrap: anywhere;
   }
-  .title[href] { color: var(--accent-link); text-decoration: none; }
+  /* Цель касания не меньше --target, а строка шапки той же высоты: поле съедается отрицательным отступом. */
+  .title[href] { display: inline-flex; align-items: center; min-height: var(--target); margin-block: calc((var(--target) - var(--fs-body) * var(--lh-body)) / -2); color: var(--accent-link); text-decoration: none; }
   .title[href]:hover, .title[href]:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
   .status { color: var(--secondary); font-size: var(--fs-sm); white-space: nowrap; }
   .status[data-state='idle'] { color: var(--success); }
