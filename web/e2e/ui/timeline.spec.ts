@@ -223,21 +223,35 @@ test('expanding_a_tool_above_the_viewport_keeps_the_anchor', async ({ page }) =>
   const feed = page.locator('.feed');
   await feed.evaluate((el) => { el.scrollTop = 280; });
   // Строка из запаса за окном может уйти из DOM при пересчёте высот; якорь проверяется по видимой строке.
-  const key = await feed.evaluate((el) => {
+  // Выбор делается по устоявшейся раскладке: прокрутка и виртуализатор перемеряют строки не в тот же кадр.
+  const anchor = () => feed.evaluate((el) => {
     const box = el.getBoundingClientRect();
     const rows = [...el.querySelectorAll<HTMLElement>('[data-row]')].filter((row) => {
       const rect = row.getBoundingClientRect();
       return rect.top >= box.top && rect.bottom <= box.bottom;
     });
-    return rows.at(-1)?.dataset.key ?? null;
+    const last = rows.at(-1);
+    return last ? { key: last.dataset.key!, y: last.getBoundingClientRect().top } : null;
   });
-  expect(key).not.toBeNull();
-  const before = await page.locator(`[data-key="${key}"]`).boundingBox();
-  await page.locator('.head').evaluate((node) => (node as HTMLButtonElement).click());
+  let picked = await anchor();
   await expect.poll(async () => {
-    const box = await page.locator(`[data-key="${key}"]`).boundingBox();
-    return box && before ? Math.abs(box.y - before.y) : 99;
-  }).toBeLessThanOrEqual(1);
+    const next = await anchor();
+    const stable = next !== null && picked !== null && next.key === picked.key && Math.abs(next.y - picked.y) <= 0.5;
+    picked = next;
+    return stable;
+  }).toBe(true);
+  expect(picked).not.toBeNull();
+  const key = picked!.key;
+  const before = picked!.y;
+  await page.locator('.head').evaluate((node) => (node as HTMLButtonElement).click());
+  // Раскрытие выше окна сдвигает высоты строк: якорь сверяется, когда переход доиграл и лента перемерила строки.
+  await expect.poll(() => page.locator('.fold').first().evaluate((el) => el.getAnimations().length)).toBe(0);
+  // Прокрутка в Firefox целочисленная, а высоты строк дробные: восстановленный якорь может встать
+  // на пиксель прокрутки плюс дробный остаток раскладки (до 1.8 px). Прыжок здесь — это десятки пикселей.
+  await expect.poll(() => page.evaluate(({ key, before }) => {
+    const el = document.querySelector<HTMLElement>(`[data-key="${key}"]`);
+    return el ? Math.abs(el.getBoundingClientRect().top - before) : 99;
+  }, { key, before }), { timeout: 15_000 }).toBeLessThanOrEqual(2);
 });
 
 test('keyboard_resize_keeps_a_pinned_chat_at_the_bottom', async ({ page }) => {
@@ -339,6 +353,9 @@ test('tool_blocks_are_collapsed_by_default_and_full_output_loads_lazily', async 
   expect(hits).toEqual([]);
   await page.locator('.head').click();
   expect(hits).toEqual([]);
+  // Кнопка не должна нажиматься в движении: пока раскрытие доигрывает, лента перемеряет высоту
+  // строки и подтягивает прокрутку, и нажатие теряется между mousedown и mouseup.
+  await expect.poll(() => page.locator('.fold').first().evaluate((el) => el.getAnimations().length)).toBe(0);
   await page.getByRole('button', { name: /Показать полностью/ }).click();
   await expect.poll(() => hits.length).toBeGreaterThan(0);
 });
