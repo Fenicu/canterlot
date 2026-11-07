@@ -26,7 +26,7 @@ import sys, os, json, subprocess, re
 from collections import Counter
 
 sys.path.insert(0, os.path.abspath('scripts'))
-from spdx import parse_spdx, ALLOWLIST, rust_allowlist_dependency_phrase
+from spdx import parse_spdx, ALLOWLIST, apply_license_override, rust_allowlist_dependency_phrase
 
 def clean_repo(repo_val):
     if not repo_val:
@@ -118,6 +118,7 @@ for path_key, entry in packages.items():
         lic = entry.get('license')
     if not lic:
         lic = '-'
+    lic = apply_license_override(name, version, lic)
 
     repo = clean_repo(repo_raw)
     is_dev = entry.get('dev', False)

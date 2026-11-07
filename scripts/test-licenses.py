@@ -7,7 +7,7 @@ import unittest
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(__file__))
-from spdx import parse_spdx, ALLOWLIST, rust_allowlist_dependency_phrase
+from spdx import parse_spdx, ALLOWLIST, LICENSE_OVERRIDES, apply_license_override, rust_allowlist_dependency_phrase
 
 
 class TestRussianDependencyPhrase(unittest.TestCase):
@@ -31,6 +31,31 @@ class TestRussianDependencyPhrase(unittest.TestCase):
         for n, expected in cases.items():
             with self.subTest(n=n):
                 self.assertEqual(rust_allowlist_dependency_phrase(n), expected)
+
+
+class TestLicenseOverrides(unittest.TestCase):
+    def test_duck_bsd_is_corrected_to_bsd_2_clause(self):
+        self.assertIn('duck@0.1.12', LICENSE_OVERRIDES)
+        # «BSD» не идентификатор SPDX и не проходит allowlist; LICENSE пакета — BSD-2-Clause.
+        ok, _chosen, _unallowed = parse_spdx('BSD')
+        self.assertFalse(ok)
+        corrected = apply_license_override('duck', '0.1.12', 'BSD')
+        self.assertEqual(corrected, 'BSD-2-Clause')
+        ok, chosen, unallowed = parse_spdx(corrected)
+        self.assertTrue(ok)
+        self.assertEqual(chosen, 'BSD-2-Clause')
+        self.assertEqual(unallowed, [])
+
+    def test_override_is_scoped_to_the_exact_package_version_and_declaration(self):
+        self.assertEqual(apply_license_override('duck', '0.1.13', 'BSD'), 'BSD')
+        self.assertEqual(apply_license_override('another', '0.1.12', 'BSD'), 'BSD')
+        self.assertEqual(apply_license_override('duck', '0.1.12', 'MIT'), 'MIT')
+
+    def test_override_never_replaces_an_allowlisted_license(self):
+        # Если пакет исправит метаданные на разрешённую лицензию, таблица не должна её подменять.
+        for declared in ['MIT', 'Apache-2.0', 'BSD-2-Clause']:
+            with self.subTest(declared=declared):
+                self.assertEqual(apply_license_override('duck', '0.1.12', declared), declared)
 
 
 class TestSpdxLicenseEvaluation(unittest.TestCase):

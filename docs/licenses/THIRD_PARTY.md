@@ -21,8 +21,7 @@
 | `Apache-2.0 OR MIT` | 22 | 0 | 0 | 22 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 5 | 0 | 0 | 5 |
 | `Apache-2.0/MIT` | 3 | 0 | 0 | 3 |
-| `BSD` | 0 | 1 | 0 | 1 |
-| `BSD-2-Clause` | 0 | 5 | 9 | 14 |
+| `BSD-2-Clause` | 0 | 6 | 9 | 15 |
 | `BSD-2-Clause OR Apache-2.0 OR MIT` | 2 | 0 | 0 | 2 |
 | `BSD-3-Clause` | 2 | 3 | 3 | 8 |
 | `BlueOak-1.0.0` | 0 | 0 | 2 | 2 |
@@ -59,7 +58,6 @@
 | Пакет | Версия | Лицензия | Причина / примечание |
 | --- | --- | --- | --- |
 | `argparse` | 3.0.4 | `PSF-2.0` | Лицензия вне allowlist: PSF-2.0 |
-| `duck` | 0.1.12 | `BSD` | Лицензия вне allowlist: BSD |
 
 ### npm (dev-only, не поставляются)
 
@@ -493,7 +491,7 @@
 | `devalue` | 5.9.4 | `MIT` | `MIT` | [https://github.com/sveltejs/devalue](https://github.com/sveltejs/devalue) |
 | `dingbat-to-unicode` | 1.0.2 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/dingbat-to-unicode](https://github.com/mwilliamson/dingbat-to-unicode) |
 | `dompurify` | 3.4.17 | `(MPL-2.0 OR Apache-2.0)` | `Apache-2.0` | [https://github.com/cure53/DOMPurify](https://github.com/cure53/DOMPurify) |
-| `duck` | 0.1.12 | `BSD` | — | [https://github.com/mwilliamson/duck.js](https://github.com/mwilliamson/duck.js) |
+| `duck` | 0.1.12 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/duck.js](https://github.com/mwilliamson/duck.js) |
 | `entities` | 8.1.0 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/fb55/entities](https://github.com/fb55/entities) |
 | `esm-env` | 1.2.2 | `MIT` | `MIT` | [https://github.com/benmccann/esm-env](https://github.com/benmccann/esm-env) |
 | `esrap` | 2.4.0 | `MIT` | `MIT` | [https://github.com/sveltejs/esrap](https://github.com/sveltejs/esrap) |

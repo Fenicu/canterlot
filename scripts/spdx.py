@@ -8,6 +8,14 @@ ALLOWLIST = {
     'BSL-1.0', 'Unlicense', 'MIT-0'
 }
 
+# Исправления пакетов, чья заявленная лицензия — не идентификатор SPDX. SPDX-id взят из
+# LICENSE-файла пакета; владелец согласовал исключение. Таблица привязана к версии и к
+# исходному значению: если пакет исправит метаданные, исправление перестанет применяться.
+LICENSE_OVERRIDES = {
+    # duck 0.1.12 заявляет «BSD», а его LICENSE — текст BSD-2-Clause.
+    'duck@0.1.12': {'declared': 'BSD', 'spdx': 'BSD-2-Clause'},
+}
+
 
 def preference_score(chosen_str):
     """Rank chosen alternatives: MIT (0) > Apache-2.0 (1) > others (2)."""
@@ -199,6 +207,21 @@ def parse_spdx(expr_str, allowlist=None):
         return ast.evaluate(allowlist)
     except Exception as e:
         return False, None, [f'Ошибка разбора: {e}']
+
+
+def apply_license_override(name, version, declared):
+    """Подменяет не-SPDX заявку на проверенный SPDX-id из таблицы исправлений.
+
+    Применяется только к точной паре «пакет@версия» и к тому же исходному значению.
+    Если заявленная лицензия уже проходит allowlist, она остаётся как есть.
+    """
+    entry = LICENSE_OVERRIDES.get(f'{name}@{version}')
+    if not entry or str(declared).strip() != entry['declared']:
+        return declared
+    ok, _chosen, _unallowed = parse_spdx(str(declared))
+    if ok:
+        return declared
+    return entry['spdx']
 
 
 def rust_allowlist_dependency_phrase(count: int) -> str:
