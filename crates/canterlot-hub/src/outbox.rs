@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
@@ -576,11 +579,13 @@ pub async fn run(
         return;
     }
     let mut changes = registry.subscribe_changes();
+    let restarts = Arc::new(Mutex::new(HashMap::new()));
     let context = SenderContext {
         pool: pool.clone(),
         registry,
         timers: timers.clone(),
         shutdown: shutdown.clone(),
+        restarts,
     };
     let mut sweep = tokio::time::interval(timers.dispatch_sweep);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -639,12 +644,18 @@ async fn listen(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
     Ok(listener)
 }
 
+type RestartKey = (Uuid, Uuid, i32);
+
 #[derive(Clone)]
 struct SenderContext {
     pool: PgPool,
     registry: Registry,
     timers: HubTimers,
     shutdown: watch::Receiver<bool>,
+    /// Сколько раз хабу пришлось перезапускать сеанс машины из-за одной
+    /// попытки команды. Живёт дольше задачи машины: иначе повтор после
+    /// переподключения выглядел бы первым, а новая попытка — повтором.
+    restarts: Arc<Mutex<HashMap<RestartKey, u32>>>,
 }
 
 fn wake_machine(
@@ -673,6 +684,7 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
         registry,
         timers,
         mut shutdown,
+        restarts,
     } = context;
     if *shutdown.borrow() {
         return;
@@ -749,6 +761,15 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             .map(|row| (row.id, row.dispatch_attempt))
             .collect();
         sent.retain(|id, item| pending.contains(&(*id, item.attempt)));
+        restarts
+            .lock()
+            .expect("restart counter lock")
+            .retain(|(owner, id, attempt), _| {
+                *owner != machine
+                    || rows
+                        .iter()
+                        .any(|row| row.id == *id && row.dispatch_attempt == *attempt)
+            });
         let Some(sender) = current else {
             continue;
         };
@@ -758,7 +779,34 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
                     continue;
                 }
                 if item.resent {
-                    tracing::warn!(kind = "outbox_restart", command_id = %row.id, machine_id = %machine, "command receipt timeout");
+                    let restarted = {
+                        let mut counts = restarts.lock().expect("restart counter lock");
+                        let count = counts
+                            .entry((machine, row.id, row.dispatch_attempt))
+                            .or_insert(0);
+                        *count += 1;
+                        *count
+                    };
+                    // Первый обрыв квитанции — транзиент: медленный, но живой
+                    // воркер; рестарт сеанса уже восстановил доставку, поэтому
+                    // не будим страж выката. Повтор той же попытки после
+                    // рестарта — признак застрявшей доставки.
+                    if restarted > 1 {
+                        tracing::warn!(
+                            kind = "outbox_restart",
+                            command_id = %row.id,
+                            machine_id = %machine,
+                            restarts = restarted,
+                            "command receipt timeout repeats"
+                        );
+                    } else {
+                        tracing::info!(
+                            kind = "outbox_restart",
+                            command_id = %row.id,
+                            machine_id = %machine,
+                            "command receipt timeout"
+                        );
+                    }
                     // Пустое сообщение закрывает сеанс внутри gRPC и не попадает в сеть.
                     tokio::select! {
                         biased;

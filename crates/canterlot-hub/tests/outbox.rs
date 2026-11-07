@@ -908,6 +908,54 @@ async fn diagnostics_cover_sessions_ingest_resend_and_restart_without_secrets(po
             .unwrap()
             .is_none()
     );
+    // Первый обрыв квитанции — пережитый транзиент: восстановление уже
+    // состоялось рестартом сеанса, поэтому это не WARN для стража выката.
+    let first_restart = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    let restart_line = first_restart
+        .lines()
+        .find(|line| {
+            line.contains("command receipt timeout") && line.contains("kind=\"outbox_restart\"")
+        })
+        .expect("the first receipt timeout is logged");
+    assert!(
+        restart_line.contains(" INFO "),
+        "the first receipt timeout must be logged at INFO: {restart_line}"
+    );
+    assert!(
+        !restart_line.contains(" WARN "),
+        "the first receipt timeout must not become a WARN: {restart_line}"
+    );
+    // Повтор того же обрыва уже не транзиент: рестарт сеанса не помог,
+    // доставка той же команды застряла. Это остаётся WARN.
+    let journal = worker.journal;
+    drop(worker);
+    let mut worker = Worker::connect_with_journal(&hub, &machine, journal).await;
+    let replay = worker.command().await;
+    assert_eq!(replay.command_id, command.command_id);
+    assert_eq!(worker.command().await, replay);
+    assert!(
+        timeout(Duration::from_secs(2), worker.down.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let repeated = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+    let repeated_line = repeated
+        .lines()
+        .find(|line| {
+            line.contains("command receipt timeout repeats")
+                && line.contains("kind=\"outbox_restart\"")
+        })
+        .expect("a repeated receipt timeout is logged");
+    assert!(
+        repeated_line.contains(" WARN "),
+        "a repeated receipt timeout must be logged at WARN: {repeated_line}"
+    );
+    assert!(
+        repeated_line.contains("restarts=2"),
+        "the repeat counts restarts: {repeated_line}"
+    );
     let ingest = canterlot_hub::ingest::Ingest::new(pool.clone());
     let journal = Uuid::now_v7();
     assert!(
