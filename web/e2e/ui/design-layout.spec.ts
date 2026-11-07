@@ -111,7 +111,7 @@ test.describe('строки инструментов и сессий', () => {
     await page.goto('/sessions');
     await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
     const rows = await page.locator('[data-session]').evaluateAll((nodes) => nodes.map((node) => {
-      const time = node.querySelector('time')?.getBoundingClientRect();
+      const time = node.querySelector('.side time')?.getBoundingClientRect();
       const meta = node.querySelector('.meta')!.getBoundingClientRect();
       const title = node.querySelector('.title')!.getBoundingClientRect();
       return { time: time ? { top: time.top, bottom: time.bottom, left: time.left } : null, metaTop: meta.top, titleRight: title.right, unread: node.querySelector('.unread, .count') !== null };

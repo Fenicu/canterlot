@@ -60,18 +60,19 @@ test('limits_page_lists_median_speed_per_model_for_today_and_the_week', async ({
   // Быстрая модель за неделю идёт первой; без ходов сегодня ячейка так и говорит.
   await expect(rows.nth(0)).toContainText('beam');
   await expect(rows.nth(0)).toContainText('OpenCode');
-  await expect(rows.nth(0).locator('td').nth(1)).toHaveText('нет ходов');
-  await expect(rows.nth(0).locator('td').nth(2)).toContainText('1 240 ток/с');
-  await expect(rows.nth(0).locator('td').nth(2)).toContainText('старт 0,4 с');
+  // Модель стоит заголовком строки (th), поэтому ячейки «Сегодня» и «За неделю» — первые две td.
+  await expect(rows.nth(0).locator('td').nth(0)).toHaveText('нет ходов');
+  await expect(rows.nth(0).locator('td').nth(1)).toContainText('1 240 ток/с');
+  await expect(rows.nth(0).locator('td').nth(1)).toContainText('старт 0,4 с');
   await expect(rows.nth(1)).toContainText('Opus 5.5');
-  await expect(rows.nth(1).locator('td').nth(1)).toContainText('68 ток/с');
-  await expect(rows.nth(1).locator('td').nth(1)).toContainText('старт 2,1 с');
-  await expect(rows.nth(1).locator('td').nth(2)).toContainText('71 ток/с');
+  await expect(rows.nth(1).locator('td').nth(0)).toContainText('68 ток/с');
+  await expect(rows.nth(1).locator('td').nth(0)).toContainText('старт 2,1 с');
+  await expect(rows.nth(1).locator('td').nth(1)).toContainText('71 ток/с');
   await expect(page.getByText(/Codex не передаёт время рассуждений/)).toBeVisible();
-  // Сводка стоит рядом с расходом по сессиям, ниже него.
+  // Сводка стоит рядом с расходом по сессиям (на широком экране сбоку, на узком ниже), но не выше него.
   const usage = await page.getByRole('table', { name: 'Сегодня по сессиям' }).boundingBox();
   const speed = await table.boundingBox();
-  expect(speed!.y).toBeGreaterThan(usage!.y);
+  expect(speed!.y).toBeGreaterThanOrEqual(usage!.y - 2);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await table.scrollIntoViewIfNeeded();
