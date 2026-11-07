@@ -485,13 +485,15 @@ for enc in $ENCS; do
 done'
 PROBE_LIFETIME="${PROBE_LIFETIME:-60}"
 check_precompressed() {
+    # Мягкая проверка, как всё PWA: недоступная кодировка не должна валить выкат
+    # после flip хаба и тем более гасить воркер, на котором живут отчёты.
     local asset enc got out list
     if [ "${DRY_RUN}" = "1" ]; then
         log "SKIPPED: precompressed Content-Encoding (dry-run: would start a one-off loopback Caddy inside the container)"
         return 0
     fi
     if ! list="$(ssh_web "cd '${WEB_RELEASES}/${WEB_SHA}' && find _app/immutable -type f")"; then
-        hard "precompressed check: cannot pick an asset from release ${WEB_SHA}"
+        soft "precompressed check: cannot pick an asset from release ${WEB_SHA}"
         return
     fi
     # Проба идёт по первому по LC_ALL=C *.js, у которого в релизе есть все три
@@ -510,13 +512,13 @@ check_precompressed() {
             print found
         }')"
     if [ -z "${asset}" ]; then
-        hard "precompressed check: no JS asset with br/zstd/gzip siblings in release ${WEB_SHA}"
+        soft "precompressed check: no JS asset with br/zstd/gzip siblings in release ${WEB_SHA}"
         return
     fi
     case "${asset}" in
         _app/immutable/*) ;;
         *)
-            hard "precompressed check: unexpected asset path '${asset}' in release ${WEB_SHA}"
+            soft "precompressed check: unexpected asset path '${asset}' in release ${WEB_SHA}"
             return
             ;;
     esac
@@ -526,7 +528,7 @@ check_precompressed() {
     if ! out="$(printf '%s\n' "${PROBE_SCRIPT}" | run_write_pipe "loopback caddy probe" \
             ssh -o BatchMode=yes -o ConnectTimeout=10 "${WEB_SSH}" \
             "docker exec -i -e ASSET=$(shq "${asset}") -e ENCS='br zstd gzip' -e LIFETIME=$(shq "${PROBE_LIFETIME}") $(shq "${WEB_CONTAINER}") sh -s")"; then
-        hard "precompressed check: probe failed ($(printf '%s\n' "${out}" | grep '^probe:' | tr '\n' ' '))"
+        soft "precompressed check: probe failed ($(printf '%s\n' "${out}" | grep '^probe:' | tr '\n' ' '))"
         return
     fi
     if is_rehearse; then
@@ -542,18 +544,18 @@ check_precompressed() {
         if [ "${got}" = "${enc}" ]; then
             log "precompressed ${enc}: Content-Encoding ${got} on ${asset}"
         else
-            hard "precompressed ${enc}: got '${got:-none}' on ${asset}"
+            soft "precompressed ${enc}: got '${got:-none}' on ${asset}"
         fi
     done
     case "${out}" in
         *"probe: loopback caddy pid "*" stopped"*) ;;
-        *) hard "precompressed check: the loopback Caddy did not report its stop" ;;
+        *) soft "precompressed check: the loopback Caddy did not report its stop" ;;
     esac
     if out="$(ssh_web "docker exec $(shq "${WEB_CONTAINER}") sh -c 'if curl -s -o /dev/null http://127.0.0.1:18080/ 2>/dev/null; then echo open; else echo closed; fi'")" \
             && [ "${out}" = "closed" ]; then
         log "precompressed probe: port 18080 closed again inside ${WEB_CONTAINER}"
     else
-        hard "precompressed check: port 18080 still answers inside ${WEB_CONTAINER} after the probe (${out:-unreadable})"
+        soft "precompressed check: port 18080 still answers inside ${WEB_CONTAINER} after the probe (${out:-unreadable})"
     fi
 }
 

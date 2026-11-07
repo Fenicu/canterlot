@@ -472,6 +472,43 @@ if run_cutover; then case_fail "exit 0 with NRestarts=2"; else case_ok "exit non
 unset FAKE_WORKER_NRESTARTS
 assert_contains "${FAKE_ROOT}/cutover.log" "worker NRestarts is '2', expected 0" "NRestarts reported"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "post-flip stop-and-report"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_fail "worker running (not proven good: must stop)" || case_ok "worker stays stopped"
+teardown_case
+case_end
+
+# --- L3b. проверка после доказанно живого воркера: воркер не гасим ---
+case_begin "a verifying-phase failure leaves hub, PWA and worker running"
+setup_cutover verify-keeps-running
+export FAKE_SITE_FAIL=meeting.fenicu.com
+if run_cutover; then case_fail "exit 0 despite a broken site"; else case_ok "exit nonzero"; fi
+unset FAKE_SITE_FAIL
+assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT (phase verifying)" "stop-and-report in the verifying phase"
+assert_contains "${FAKE_ROOT}/cutover.log" "site meeting.fenicu.com: 500, expected 200" "failure named"
+assert_contains "${FAKE_ROOT}/cutover.log" "leaving hub, PWA and worker running" "kept the deployment running"
+hub_is "${SHA_NEW}" && case_ok "hub stays new" || case_fail "hub moved"
+web_is "${SHA_NEW}" && case_ok "PWA stays new" || case_fail "web moved"
+worker_is "${SHA_NEW}" && case_ok "worker stays new" || case_fail "worker moved"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker left running" || case_fail "worker was stopped after it was proven live"
+assert_not_contains "${FAKE_ROOT}/cutover.log" "retain done" "retention skipped"
+teardown_case
+case_end
+
+# --- L3c. precompressed — мягкая ошибка: выкат доходит до конца ---
+case_begin "a missing precompressed encoding is soft and the cutover completes"
+setup_cutover encoding-soft
+export FAKE_ENCODING_FAIL=zstd
+if run_cutover; then case_ok "exit 0 (precompressed is soft)"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
+unset FAKE_ENCODING_FAIL
+assert_contains "${FAKE_ROOT}/cutover.log" "SOFT-FAIL: precompressed zstd: got 'none'" "encoding failure recorded softly"
+assert_contains "${FAKE_ROOT}/cutover.log" "cutover done:" "cutover finished"
+assert_not_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "no stop-and-report"
+hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
+web_is "${SHA_NEW}" && case_ok "PWA on new" || case_fail "web not new"
+worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker running" || case_fail "worker stopped"
 teardown_case
 case_end
 

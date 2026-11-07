@@ -116,7 +116,7 @@ assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
 
-# --- Q. сигнал во время verify: СТОП, воркер остановлен, хаб новый, без действий ---
+# --- Q. сигнал во время verify: СТОП-и-доклад, воркер остаётся работать ---
 case_begin "signal during verify"
 setup_cutover sigverify
 run_cutover_bg
@@ -128,15 +128,16 @@ hub_is "${SHA_NEW}" && case_ok "hub stays new" || case_fail "hub moved"
 worker_is "${SHA_NEW}" && case_ok "worker was started on the new release" || case_fail "worker not on new"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
+assert_contains "${FAKE_ROOT}/cutover.log" "leaving hub, PWA and worker running" "worker left running after proof"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
-    && case_fail "worker running after signal during verify" || case_ok "worker stopped by the handler"
+    && case_ok "worker stays running" || case_fail "worker was stopped after it was proven live"
 assert_proc_alive "${SUP1}" "session 1 alive"
 assert_proc_alive "${SUP2}" "session 2 alive"
 teardown_case
 
 case_end
 
-# --- R. TERM после старта воркера: СТОП, воркер остановлен, хаб новый, без действий ---
+# --- R. TERM после старта воркера: СТОП-и-доклад, воркер остаётся работать ---
 case_begin "TERM after worker start"
 setup_cutover sigterm-workerstarted
 run_cutover_bg
@@ -149,8 +150,9 @@ hub_is "${SHA_NEW}" && case_ok "hub stays new" || case_fail "hub moved"
 worker_is "${SHA_NEW}" && case_ok "worker stays flipped (no auto flip-back)" || case_fail "worker flipped back"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
+assert_contains "${FAKE_ROOT}/cutover.log" "leaving hub, PWA and worker running" "worker left running after proof"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
-    && case_fail "worker running after post-start signal" || case_ok "worker stopped by the handler"
+    && case_ok "worker stays running" || case_fail "worker was stopped after it was proven live"
 assert_proc_alive "${SUP1}" "session 1 alive"
 assert_proc_alive "${SUP2}" "session 2 alive"
 teardown_case
@@ -184,9 +186,9 @@ assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
 
-# --- T. сигнал после flip при activating/auto-restart: воркер всё равно остановлен ---
+# --- T. сигнал после flip при activating/auto-restart: воркер не гасим ---
 for state in activating auto-restart; do
-    case_begin "signal during verify with worker ${state}"
+    case_begin "signal during verify keeps the worker unit ${state}"
     setup_cutover "verify-${state}"
     run_cutover_bg
     wait_for_log "${FAKE_ROOT}/cutover.log" "running verification" || case_fail "no verify marker"
@@ -196,13 +198,14 @@ for state in activating auto-restart; do
     [ "${rc}" = "1" ] && case_ok "exit 1" || case_fail "exit ${rc}"
     hub_is "${SHA_NEW}" && case_ok "hub stays new" || case_fail "hub moved"
     worker_is "${SHA_NEW}" && case_ok "worker was on the new release" || case_fail "worker not new"
-    STOP_STATE="$(FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" show canterlot-worker -p ActiveState --value)"
+    STOP_STATE="$(cat "${FAKE_ROOT}/state/unit-local-canterlot-worker.active" 2>/dev/null || echo none)"
     STOP_PID="$(FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" show canterlot-worker -p MainPID --value)"
-    [ "${STOP_STATE}" = "inactive" ] && case_ok "worker ActiveState inactive" || case_fail "worker state ${STOP_STATE}"
-    [ "${STOP_PID}" = "0" ] && case_ok "worker has no MainPID" || case_fail "worker MainPID ${STOP_PID}"
+    [ "${STOP_STATE}" = "${state}" ] && case_ok "worker unit left as it was (${state})" || case_fail "worker state ${STOP_STATE}"
+    [ "${STOP_PID}" != "0" ] && case_ok "worker keeps its MainPID ${STOP_PID}" || case_fail "worker lost its MainPID"
     restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
     assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
-    assert_contains "${FAKE_ROOT}/cutover.log" "worker verified stopped" "stop verified in the handler"
+    assert_contains "${FAKE_ROOT}/cutover.log" "leaving hub, PWA and worker running" "worker left running after proof"
+    assert_not_contains "${FAKE_ROOT}/cutover.log" "worker verified stopped" "the handler did not stop the worker"
     assert_proc_alive "${SUP1}" "session 1 alive"
     teardown_case
     case_end

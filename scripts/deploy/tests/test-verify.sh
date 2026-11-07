@@ -619,16 +619,17 @@ teardown_case
 case_end
 
 for scenario in busy no-stop port-open; do
-    case_begin "the loopback Caddy probe fails loudly: ${scenario}"
+    case_begin "the loopback Caddy probe reports problems softly: ${scenario}"
     setup_verify "probe-${scenario}"
     case "${scenario}" in
-        busy) export FAKE_PROBE_BUSY=1; want="port 18080 already in use" ;;
-        no-stop) export FAKE_PROBE_NO_STOP=1; want="did not report its stop" ;;
-        port-open) export FAKE_PROBE_PORT_OPEN=1; want="port 18080 still answers" ;;
+        busy) export FAKE_PROBE_BUSY=1; want="SOFT-FAIL: precompressed check: probe failed" ;;
+        no-stop) export FAKE_PROBE_NO_STOP=1; want="SOFT-FAIL: precompressed check: the loopback Caddy did not report its stop" ;;
+        port-open) export FAKE_PROBE_PORT_OPEN=1; want="SOFT-FAIL: precompressed check: port 18080 still answers" ;;
     esac
-    if run_verify; then case_fail "verify passed"; else case_ok "verify failed"; fi
+    if run_verify; then case_ok "verify PASS (soft)"; else case_fail "verify failed (must be soft)"; fi
     unset FAKE_PROBE_BUSY FAKE_PROBE_NO_STOP FAKE_PROBE_PORT_OPEN
-    assert_contains "${FAKE_ROOT}/verify.log" "${want}" "${scenario} reported"
+    assert_contains "${FAKE_ROOT}/verify.log" "${want}" "${scenario} reported softly"
+    assert_not_contains "${FAKE_ROOT}/verify.log" "HARD-FAIL" "${scenario} not hard"
     teardown_case
     case_end
 done
@@ -650,13 +651,24 @@ assert_not_contains "${FAKE_ROOT}/verify.log" "chunks/--a.js" "asset without sib
 teardown_case
 case_end
 
-case_begin "the precompressed probe hard-fails when no JS asset has all three siblings"
+case_begin "the precompressed probe reports a missing fully precompressed asset softly"
 setup_verify probe-asset-missing
 rm -f "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.br" \
       "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.zst" \
       "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.gz"
-if run_verify; then case_fail "verify passed without a fully precompressed asset"; else case_ok "verify failed"; fi
-assert_contains "${FAKE_ROOT}/verify.log" "no JS asset with br/zstd/gzip siblings in release ${SHA_PREV}" "missing precompressed asset reported"
+if run_verify; then case_ok "verify PASS (soft)"; else case_fail "verify failed (must be soft)"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "SOFT-FAIL: precompressed check: no JS asset with br/zstd/gzip siblings in release ${SHA_PREV}" "missing precompressed asset reported softly"
+assert_not_contains "${FAKE_ROOT}/verify.log" "HARD-FAIL" "no hard failure"
+teardown_case
+case_end
+
+case_begin "the precompressed probe reports a missing encoding softly"
+setup_verify probe-encoding-soft
+export FAKE_ENCODING_FAIL=br
+if run_verify; then case_ok "verify PASS (soft)"; else case_fail "verify failed (must be soft)"; fi
+unset FAKE_ENCODING_FAIL
+assert_contains "${FAKE_ROOT}/verify.log" "SOFT-FAIL: precompressed br: got 'none'" "missing encoding reported softly"
+assert_not_contains "${FAKE_ROOT}/verify.log" "HARD-FAIL" "no hard failure"
 teardown_case
 case_end
 

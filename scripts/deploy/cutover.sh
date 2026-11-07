@@ -425,6 +425,7 @@ if is_rehearse; then MIGR_EXPECT="${PREV_MIGR_MAX}"; else MIGR_EXPECT="${EXPECTE
 # С flip хаба: остановить воркер и только доложить (см. report_and_stop).
 PHASE="early"
 WORKER_WAS_ACTIVE=0
+WORKER_PROVEN=0
 DONE=0
 ROLLING_BACK=0
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -579,6 +580,16 @@ on_end() {
             fi
             ;;
         *)
+            # Воркер уже доказанно жив на новом релизе (state="live", exe из
+            # релиза, NRestarts=0, инвариант сессий): гасить его нельзя — на этой
+            # же машине живут оркестратор и отчёты, остановка глушит их все
+            # (инцидент после 1.19.1: отчёт некому было доставить 25 минут).
+            # Хаб, PWA и воркер остаются работать, retention пропускается.
+            if [ "${WORKER_PROVEN}" = "1" ]; then
+                log "failure after the worker was verified live on ${SHA}: leaving hub, PWA and worker running (retention skipped)"
+                report_and_stop
+                exit 1
+            fi
             post_flip_stop
             ;;
     esac
@@ -956,6 +967,7 @@ PHASE="worker-started"
 # Записанные процессы сессий живы с теми же тиками; новые дети допустимы.
 snapshot_drift "${STATE_FILE}" "after worker start" \
     || cutover_hard "a recorded session process disappeared or changed its start tick after the worker start"
+WORKER_PROVEN=1
 log "recorded session PIDs and ticks unchanged after worker start (new transient children allowed)"
 
 # Старые чанки PWA: после старта воркера и ДО любой чистки (открытые вкладки
