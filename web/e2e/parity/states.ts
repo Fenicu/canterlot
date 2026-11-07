@@ -1,4 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Page } from '@playwright/test';
+import type { HistoryBlock } from '../../src/lib/stores/chat.svelte';
 import { FakeHub, FakeHubApi, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockup04, seedMockup05, seedMockup06, seedMockup08, seedMockup11, seedMockupChat } from '../../testing/fixtures/mockup-chat';
@@ -141,6 +144,64 @@ async function imageViewer(page: Page): Promise<void> {
   await settled(page);
   await page.keyboard.press('Tab');
   await expect(viewer(page).getByRole('button', { name: 'Закрыть' })).toBeFocused();
+}
+
+const OFFICE_DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const OFFICE_XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const officeFixture = (name: string) => readFileSync(resolve(import.meta.dirname, '../../testing/fixtures/office', name));
+
+/** Просмотрщик Word или Excel из вложения share_file: документ и таблица лежат в одной карточке. */
+async function officeViewer(page: Page, kind: 'word' | 'excel'): Promise<void> {
+  const { hub, api } = fresh();
+  const id = seedConversation(api);
+  const blockId = api.id();
+  const content = JSON.stringify({ path: '/tmp/office/report.docx', title: 'Документы проверки' });
+  api.blocks.set(blockId, { text: content, rev: 1, state: 'final' });
+  const share: HistoryBlock = {
+    kind: 'block',
+    id: blockId,
+    block_kind: 'tool_call',
+    content,
+    content_bytes: content.length,
+    content_truncated: false,
+    created_seq: '1',
+    created_at: '2026-11-07T12:00:00.000Z',
+    rev: 1,
+    state: 'final',
+    agent: 'агент',
+    model: 'opus',
+    tool_name: 'mcp__canterlot__share_file',
+    summary: 'mcp__canterlot__share_file',
+    parent_block_id: null,
+    input_command_id: null,
+    line_count: 0,
+    files: [
+      { attachment_id: 'parity-docx', name: 'report.docx', mime: OFFICE_DOCX, size: officeFixture('report.docx').length, title: '', note: '', width: null, height: null },
+      { attachment_id: 'parity-xlsx', name: 'table.xlsx', mime: OFFICE_XLSX, size: officeFixture('table.xlsx').length, title: '', note: '', width: null, height: null }
+    ]
+  };
+  api.histories.set(id, [share]);
+  api.bindConversation(id);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.route('**/api/v1/attachments/*/content', async (route) => {
+    const attachment = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[4] ?? '');
+    if (attachment === 'parity-docx') return route.fulfill({ contentType: OFFICE_DOCX, body: officeFixture('report.docx') });
+    if (attachment === 'parity-xlsx') return route.fulfill({ contentType: OFFICE_XLSX, body: officeFixture('table.xlsx') });
+    return route.fulfill({ status: 404 });
+  });
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+  const card = page.locator(`[data-key="block:${blockId}"]`);
+  const tile = card.getByRole('button', { name: kind === 'word' ? 'Открыть документ report.docx' : 'Открыть таблицу table.xlsx' });
+  await tile.scrollIntoViewIfNeeded();
+  await tile.click();
+  const dialog = page.getByRole('dialog', { name: kind === 'word' ? 'report.docx' : 'table.xlsx' });
+  await expect(dialog).toBeVisible();
+  if (kind === 'word') {
+    await expect(dialog.locator('.document-text h1')).toBeVisible();
+  } else {
+    await expect(dialog.getByRole('tabpanel').locator('thead th').first()).toBeVisible();
+  }
 }
 
 export const SCREENS: Screen[] = [
@@ -343,6 +404,12 @@ export const SCREENS: Screen[] = [
   screen('feed-cards', false, PHONE, 'dark', (page) => feedCards(page, 'bottom')),
   screen('feed-cards-top', false, PHONE, 'dark', (page) => feedCards(page, 'top')),
   screen('feed-cards-desktop', false, DESKTOP, 'light', (page) => feedCards(page, 'bottom')),
+  screen('docx-viewer', false, PHONE, 'dark', (page) => officeViewer(page, 'word')),
+  screen('docx-viewer-light', false, PHONE, 'light', (page) => officeViewer(page, 'word')),
+  screen('docx-viewer-desktop', false, DESKTOP, 'light', (page) => officeViewer(page, 'word')),
+  screen('xlsx-viewer', false, PHONE, 'dark', (page) => officeViewer(page, 'excel')),
+  screen('xlsx-viewer-light', false, PHONE, 'light', (page) => officeViewer(page, 'excel')),
+  screen('xlsx-viewer-desktop', false, DESKTOP, 'light', (page) => officeViewer(page, 'excel')),
   screen('question-request', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, hub, api, id) => {
     openRequest(hub, api, id, 'question', { truncated: true, questions: [{ id: 'q0', text: 'Что делать?', options: ['Да', 'Нет'] }, { id: 'q1', text: 'Какие тесты?', options: ['Сон', 'Сеть'], multi_select: true, allow_custom: true }] });
     await expect(opened.locator('.question-card')).toBeVisible();

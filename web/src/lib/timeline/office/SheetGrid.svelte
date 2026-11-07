@@ -135,7 +135,7 @@
         <tbody>
           {#if start > 0}<tr class="spacer" aria-hidden="true"><td colspan={head.length} style:height={`${start * step}px`}></td></tr>{/if}
           {#each visible as row, index (start + index)}
-            <tr aria-rowindex={start + index + 2}>
+            <tr aria-rowindex={start + index + 2} class:zebra={(start + index) % 2 === 1}>
               {#each row as cell, column (column)}
                 {#if column === 0}
                   <th scope="row" data-numeric={cell.numeric || undefined} title={long(cell.text)}>{cell.text}</th>
@@ -162,16 +162,20 @@
   /* Таблица прокручивается в своей рамке в обе стороны; страница и лист остаются на месте. */
   /* Сетка — единственный горизонтальный скроллер листа. `pan-x pan-y` отдаёт ей касание
      в обе стороны, а инерция нужна и вбок: без неё широкий лист кажется застрявшим. */
-  .grid { flex: 1 1 auto; min-width: 0; min-height: 0; max-width: 100%; overflow: auto; overscroll-behavior: contain; touch-action: pan-x pan-y; -webkit-overflow-scrolling: touch; border: var(--hairline) solid var(--line); border-radius: var(--radius-sm); background: var(--surface); }
+  .grid { flex: 1 1 auto; min-width: 0; min-height: 0; max-width: 100%; overflow: auto; overscroll-behavior: contain; touch-action: pan-x pan-y; -webkit-overflow-scrolling: touch; border-radius: var(--radius-sm); background: var(--surface); }
   .grid:focus-visible { outline: var(--focus-width) solid var(--accent); }
   .empty { margin: var(--s0); padding: var(--s8); color: var(--secondary); }
   /* Раскладка по заданным ширинам: браузер не меряет каждую из тысяч ячеек. */
   table { table-layout: fixed; border-collapse: separate; border-spacing: var(--s0); font-size: var(--fs-meta); line-height: var(--lh-tight); font-variant-numeric: tabular-nums; }
   /* Всё в одну строку: у строк одна высота, и окно прокрутки считается без замеров каждой. */
-  th, td { padding: var(--s3) var(--s5); overflow: hidden; border-right: var(--hairline) solid var(--line); border-bottom: var(--hairline) solid var(--line); text-align: left; vertical-align: top; white-space: nowrap; text-overflow: ellipsis; }
+  th, td { padding: var(--s3) var(--s5); overflow: hidden; text-align: left; vertical-align: top; white-space: nowrap; text-overflow: ellipsis; }
   [data-numeric] { text-align: right; }
-  .spacer td { padding: var(--s0); border: var(--s0); }
+  .spacer td { padding: var(--s0); }
+  /* Полосы не зависят от места в DOM: окно видимых строк сдвигается при прокрутке. */
+  tbody tr { background: var(--surface); }
+  tbody tr.zebra { background: var(--raised); }
   thead th { position: sticky; top: var(--s0); z-index: 2; background: var(--raised); color: var(--text); font-weight: var(--weight-medium); }
-  tbody th { position: sticky; left: var(--s0); z-index: 1; background: var(--surface); color: var(--text); font-weight: var(--weight-normal); }
+  /* Заливка строки повторяется в липком столбце: иначе он станет прозрачным при прокрутке. */
+  tbody th { position: sticky; left: var(--s0); z-index: 1; background: inherit; color: var(--text); font-weight: var(--weight-normal); }
   thead th:first-child { left: var(--s0); z-index: 3; }
 </style>

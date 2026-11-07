@@ -125,6 +125,25 @@ test('text_pairs_meet_wcag_aa_in_every_palette_and_mode', () => {
   }
 });
 
+test('office_viewers_meet_contrast_in_every_palette_and_mode', () => {
+  // Просмотрщики Word и Excel: шапка и полосы сетки, тело и липкий столбец, ссылки и линии-разделители.
+  // Пары те же, что видит пользователь на экранах docx-viewer и xlsx-viewer.
+  const pairs: [string, string, string, number][] = [
+    ['text', 'raised', 'sheet header and zebra rows', 4.5],
+    ['text', 'surface', 'sheet body and sticky column', 4.5],
+    ['text', 'surface', 'docx body text', 4.5],
+    ['accent-link', 'surface', 'docx link on body', 4.5],
+    ['accent-link', 'raised', 'docx link on table stripe', 4.5],
+    ['line', 'surface', 'table and grid separators', 1.3]
+  ];
+  for (const variant of palettes) {
+    const label = `${variant.palette}/${variant.theme}`;
+    for (const [fg, bg, what, minimum] of pairs) {
+      expect(contrast(variant.tokens[`--${fg}`]!, variant.tokens[`--${bg}`]!), `${label} ${what}: ${fg}/${bg}`).toBeGreaterThanOrEqual(minimum);
+    }
+  }
+});
+
 test('high_contrast_palette_keeps_text_at_seven_to_one', () => {
   for (const theme of ['dark', 'light'] as const) {
     const tokens = byName('high-contrast', theme).tokens;
