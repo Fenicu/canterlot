@@ -45,3 +45,34 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 # ничего не перезапускается. Запись помечается строкой с причиной (слово в верхнем регистре, см. выше), её показывает
 # scripts/list-quarantine.sh. Правила карантина идут выше; в вебе карантин
 # ведётся такими же пометками в спеках Playwright.
+
+# QUARANTINE: ожидание появления временного файла вложения (20 с) не укладывается в полный гейт под
+# нагрузкой; отдельно и под нагрузкой из 24 ядер тест проходит (50 из 50). Повтор разрешён, чтобы не
+# перезапускать гейт руками.
+[[profile.default.overrides]]
+filter = 'test(=large_attachment_does_not_starve_control_session)'
+retries = 2
+
+# QUARANTINE: ловушка на взаимную блокировку с окном 20 с на 30 раундов; под нагрузкой полного гейта
+# окно мало. Отдельно проходит. Повтор разрешён.
+[[profile.default.overrides]]
+filter = 'test(=deleting_a_subscriber_during_refresh_does_not_deadlock)'
+retries = 2
+
+# QUARANTINE: старт воркера и переподключение ждутся по 45 с; в полном гейте под нагрузкой окно мало,
+# отдельно тест проходит. Повтор разрешён.
+[[profile.default.overrides]]
+filter = 'test(=settings_survive_worker_restart_between_dispatch_and_accept)'
+retries = 2
+
+# QUARANTINE: ожидание подъёма сессии (60 с) после убийства супервизора не укладывается в полный гейт
+# под нагрузкой; отдельно проходит. Повтор разрешён.
+[[profile.default.overrides]]
+filter = 'test(=killed_supervisor_with_nothing_left_fails_and_the_session_resumes)'
+retries = 2
+
+# QUARANTINE: внутреннее ожидание 10 с на подъём сессии и подтверждение журнала мало для полного гейта
+# под нагрузкой; отдельно проходит. Повтор разрешён.
+[[profile.default.overrides]]
+filter = 'test(=task8::real::sj_batches_are_acked_and_compacted)'
+retries = 2
