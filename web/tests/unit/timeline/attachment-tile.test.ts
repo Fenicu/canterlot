@@ -77,6 +77,23 @@ describe("timeline/AttachmentTile", () => {
     expect(save!.getAttribute("aria-label")).toBe("Скачать README.md");
   });
 
+  it("word_and_excel_files_name_their_kind_and_keep_the_extension_glyph_and_download", () => {
+    const { target } = render(ref({ name: "Отчёт.docx", mime: "application/octet-stream", image: false, size: 4096 }));
+    const open = target.querySelector('button[aria-label="Открыть документ Отчёт.docx"]')!;
+    expect(open.getAttribute("data-kind")).toBe("word");
+    expect(open.querySelector(".glyph")!.textContent).toBe("DOCX");
+    expect(open.querySelector(".meta")!.textContent).toBe("Документ Word · 4 КиБ");
+    expect(target.querySelector('a[download]')!.getAttribute("aria-label")).toBe("Скачать Отчёт.docx");
+    void unmount(instance!);
+    instance = undefined;
+    document.body.textContent = "";
+
+    const sheet = render(ref({ name: "table.xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", image: false, size: 2048 }));
+    const tile = sheet.target.querySelector('button[aria-label="Открыть таблицу table.xlsx"]')!;
+    expect(tile.querySelector(".glyph")!.textContent).toBe("XLSX");
+    expect(tile.querySelector(".meta")!.textContent).toBe("Таблица Excel · 2 КиБ");
+  });
+
   it("a_file_without_a_known_name_still_gets_a_readable_tile", () => {
     const { target } = render(ref({ name: "", mime: "", image: false, size: 0 }));
     expect(target.textContent).toContain("Вложение");

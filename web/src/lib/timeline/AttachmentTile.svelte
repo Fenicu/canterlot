@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fmt } from '#lib/format/ru.js';
   import type { AttachmentRef } from '#lib/stores/inputs.js';
-  import { attachmentKind, attachmentUrl, showsThumb } from '#lib/timeline/attachments.js';
+  import { attachmentKind, attachmentUrl, isOfficeKind, officeLabel, showsThumb, type OfficeKind } from '#lib/timeline/attachments.js';
   import Icon from '#lib/ui/Icon.svelte';
   import type { Component } from 'svelte';
 
@@ -10,12 +10,16 @@
   // Просмотрщик документа грузится при первом открытии: в ленте он нужен редко.
   let DocViewer = $state<Component<{ file: AttachmentRef; onclose: () => void }> | null>(null);
   let reading = $state(false);
+  // Word и Excel — свой просмотрщик: разборщики тяжелее, грузятся ещё позже, в фоновом потоке.
+  let OfficeViewer = $state<Component<{ file: AttachmentRef; kind: OfficeKind; onclose: () => void }> | null>(null);
 
   const kind = $derived(attachmentKind(file));
   const name = $derived(file.name || 'Вложение');
   const url = $derived(attachmentUrl(file.attachment_id));
   const thumb = $derived(showsThumb(file) && !broken);
   const size = $derived(file.size > 0 ? fmt.bytes(file.size) : '');
+  const office = $derived(isOfficeKind(kind) ? kind : null);
+  const meta = $derived([office ? officeLabel(office) : '', size].filter(Boolean).join(' · '));
   const extension = $derived.by(() => {
     const dot = name.lastIndexOf('.');
     return dot > 0 ? name.slice(dot + 1, dot + 5).toLocaleUpperCase('ru-RU') : 'ФАЙЛ';
@@ -23,6 +27,11 @@
 
   async function openDocument(): Promise<void> {
     DocViewer ??= (await import('#lib/timeline/DocumentViewer.svelte')).default;
+    reading = true;
+  }
+
+  async function openOffice(): Promise<void> {
+    OfficeViewer ??= (await import('#lib/timeline/office/OfficeViewer.svelte')).default;
     reading = true;
   }
 </script>
@@ -36,17 +45,19 @@
     <span class="glyph" aria-hidden="true">{extension}</span>
     <span class="info"><span class="name">{name}</span>{#if size}<span class="meta">{size}</span>{/if}</span>
   </button>
-{:else if kind === 'markdown'}
+{:else if kind === 'markdown' || office}
   <span class="document-tile">
-    <button type="button" class="tile" data-kind={kind} aria-label={`Открыть документ ${name}`} onclick={() => void openDocument()}>
+    <button type="button" class="tile" data-kind={kind} aria-label={`${kind === 'excel' ? 'Открыть таблицу' : 'Открыть документ'} ${name}`} onclick={() => void (office ? openOffice() : openDocument())}>
       <span class="glyph" aria-hidden="true">{extension}</span>
-      <span class="info"><span class="name">{name}</span>{#if size}<span class="meta">{size}</span>{/if}</span>
+      <span class="info"><span class="name">{name}</span>{#if meta}<span class="meta">{meta}</span>{/if}</span>
     </button>
     <!-- Адрес служебный, маршрутизатор здесь не участвует. -->
     <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
     <a class="save" href={url} download={name} aria-label={`Скачать ${name}`}><Icon name="download" /></a>
   </span>
-  {#if reading && DocViewer}
+  {#if reading && office && OfficeViewer}
+    <OfficeViewer {file} kind={office} onclose={() => { reading = false; }} />
+  {:else if reading && !office && DocViewer}
     <DocViewer {file} onclose={() => { reading = false; }} />
   {/if}
 {:else}
