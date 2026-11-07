@@ -10,6 +10,7 @@
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
   import type { Component } from 'svelte';
+  import type { ViewerShot } from '#lib/viewer/shots.js';
   import StageTrack from '#lib/ui/StageTrack.svelte';
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
   import type { Stage } from '#lib/ui/stage-track.js';
@@ -56,13 +57,15 @@
   );
   // Просмотрщик грузится при первом открытии: в ленте он нужен редко.
   let viewing = $state<number | null>(null);
-  let Viewer = $state<Component<{ shots: { media_id: string; src: string; mime: string; caption: string }[]; start?: number; title: string; heading: string; onclose: () => void }> | null>(null);
+  let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading: string; onclose: () => void }> | null>(null);
   const images = $derived(input.attachments.filter((file) => attachmentKind(file) === 'image'));
   const shots = $derived(
     images.map((file) => ({
       media_id: file.attachment_id,
       src: attachmentUrl(file.attachment_id),
       mime: file.mime,
+      name: file.name,
+      size: file.size,
       caption: [file.name, file.size > 0 ? fmt.bytes(file.size) : ''].filter(Boolean).join(' · ')
     }))
   );

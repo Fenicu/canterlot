@@ -2,13 +2,14 @@
   import { blockFold } from '#lib/ui/fold.js';
   import type { Component } from 'svelte';
   import type { BackgroundFact } from '#lib/stores/background.svelte.js';
-  import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
+  import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
   import { stripAnsi } from '#lib/render/ansi.js';
   import { fmt } from '#lib/format/ru.js';
   import { callCaption, firstLine, toolBackground, toolError, toolLabel, toolPillText, toolTiming, toolTitle } from '#lib/timeline/present.js';
   import StepHead from '#lib/timeline/StepHead.svelte';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
-  import { attachmentUrl } from '#lib/timeline/attachments.js';
+  import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
+  import type { ViewerShot } from '#lib/viewer/shots.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
   let {
@@ -31,8 +32,7 @@
     load: (blockId: string, offset: number) => Promise<BlockPage>;
   } = $props();
   let viewing = $state<number | null>(null);
-  let Viewer = $state<Component<{ shots: BlockMedia[]; start?: number; title: string; onclose: () => void }> | null>(null);
-  let FileViewer = $state<Component<{ shots: { media_id: string; src: string; mime: string; caption: string }[]; start?: number; title: string; heading: string; onclose: () => void }> | null>(null);
+  let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading?: string; onclose: () => void }> | null>(null);
 
   async function view(index: number): Promise<void> {
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
@@ -57,21 +57,27 @@
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));
   const files = $derived(block.files);
-  const fileShots = $derived(
+  // Картинкой файл считается так же, как в плитке: по типу или по расширению файла без типа.
+  const isImage = (file: { name: string; mime: string }) => attachmentKind({ name: file.name, mime: file.mime, image: false }) === 'image';
+  const fileShots = $derived<ViewerShot[]>(
     files
-      .filter((file) => file.mime.startsWith('image/'))
+      .filter(isImage)
       .map((file) => ({
         media_id: file.attachment_id,
         src: attachmentUrl(file.attachment_id),
         mime: file.mime,
+        name: file.name,
+        size: file.size,
+        width: file.width,
+        height: file.height,
         caption: [file.title || file.name, file.size > 0 ? fmt.bytes(file.size) : ''].filter(Boolean).join(' · ')
       }))
   );
   let fileViewing: number | null = $state(null);
 
-  async function viewFile(file: { attachment_id: string; mime: string }): Promise<void> {
-    if (!file.mime.startsWith('image/')) return;
-    FileViewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
+  async function viewFile(file: { attachment_id: string; name: string; mime: string }): Promise<void> {
+    if (!isImage(file)) return;
+    Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
     fileViewing = Math.max(0, fileShots.findIndex((shot) => shot.media_id === file.attachment_id));
   }
   const isCliPolicy = $derived(block.approvedBy === 'cli_policy');
@@ -95,7 +101,7 @@
               mime: file.mime,
               size: file.size,
               sha256: '',
-              image: file.mime.startsWith('image/')
+              image: isImage(file)
             }}
             onopen={() => void viewFile(file)}
           />
@@ -109,7 +115,7 @@
         <figure class="shot" data-state={shot.ready ? 'ready' : shot.failed ? 'failed' : 'loading'} style:max-width={`${shot.width}px`} style:aspect-ratio={`${shot.width} / ${shot.height}`}>
           {#if shot.ready}
             <button type="button" aria-label="Открыть картинку" onclick={() => void view(readyShots.indexOf(shot))}>
-              <img src={`/api/v1/media/${shot.media_id}`} alt="" width={shot.width} height={shot.height} loading="lazy" />
+              <img src={`/api/v1/media/${shot.media_id}`} alt="" width={shot.width} height={shot.height} loading="lazy" data-viewer-thumb={shot.media_id} />
             </button>
           {:else if shot.failed}
             <span>Картинка недоступна</span>
@@ -132,8 +138,8 @@
 {#if viewing !== null && Viewer}
   <Viewer shots={readyShots} start={viewing} title={title.argument || title.name || 'инструмент'} onclose={() => { viewing = null; }} />
 {/if}
-{#if fileViewing !== null && FileViewer}
-  <FileViewer shots={fileShots} start={fileViewing} title={title.argument || title.name || 'файл'} heading="Файл" onclose={() => { fileViewing = null; }} />
+{#if fileViewing !== null && Viewer}
+  <Viewer shots={fileShots} start={fileViewing} title={title.argument || title.name || 'файл'} heading="Файл" onclose={() => { fileViewing = null; }} />
 {/if}
 
 <style>

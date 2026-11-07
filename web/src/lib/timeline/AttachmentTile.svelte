@@ -29,7 +29,7 @@
 
 {#if thumb}
   <button type="button" class="thumb" aria-label={`Открыть картинку ${name}`} onclick={onopen}>
-    <img src={url} alt="" loading="lazy" decoding="async" fetchpriority="low" onerror={() => { broken = true; }} />
+    <img src={url} alt="" loading="lazy" decoding="async" fetchpriority="low" data-viewer-thumb={file.attachment_id} onerror={() => { broken = true; }} />
   </button>
 {:else if kind === 'image'}
   <button type="button" class="tile" aria-label={`Открыть картинку ${name}`} onclick={onopen}>
