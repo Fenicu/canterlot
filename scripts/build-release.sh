@@ -242,9 +242,9 @@ phase "проверка на этой машине"
 grep -qx "sha=$sha12" "$staging/RELEASE" || die "$staging/RELEASE собран не из $sha12"
 grep -qx "source=$commit" "$staging/RELEASE" || die "$staging/RELEASE собран не из $commit"
 top=$(find "$staging" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
-[[ "$(printf '%s\n' "$top" | wc -l)" == "7" ]] || die "неожиданный состав $staging: $(printf '%s' "$top" | tr '\n' ' ')"
+[[ "$(printf '%s\n' "$top" | wc -l)" == "8" ]] || die "неожиданный состав $staging: $(printf '%s' "$top" | tr '\n' ' ')"
 for f in hub/bin/canterlot-hub worker/bin/canterlot-worker synthetic/bin/canterlot-worker \
-    web/200.html web/_app/version.json csp.txt; do
+    web/200.html web/_app/version.json csp.txt EXPECT; do
     [[ -f "$staging/$f" ]] || die "в $staging нет $f"
 done
 [[ ! -e "$staging/web/web" ]] || die "в $staging/web лишний уровень web/"

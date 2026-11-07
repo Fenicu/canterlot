@@ -86,6 +86,9 @@ sums_line=$(grep -nF 'sha256sum >SHA256SUMS.new' "$ic" | cut -d: -f1)
 [[ -n "$expect_line" && -n "$sums_line" ]] || fail "в in-container.sh нет записи EXPECT или SHA256SUMS"
 ((expect_line < sums_line)) || fail "EXPECT пишется после SHA256SUMS"
 
+# Проверка на этой машине знает про каждый файл, который пишет контейнер: иначе готовый выпуск отбраковывается.
+grep -qF 'csp.txt EXPECT; do' "$build" || fail "build-release.sh не требует EXPECT в выпуске"
+
 # expect_of из in-container.sh на поддельном воркере: формат EXPECT и отказ на чужой строке.
 expect_of_with() {
     printf '#!/bin/sh\nprintf "%s"\n' "$1" >"$tmp/fake-worker"
