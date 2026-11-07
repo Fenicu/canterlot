@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Подмена systemctl для тестов: состояние юнитов в файлах FAKE_ROOT/state.
+# Игнорирует --user и --quiet. MainPID — настоящий PID sleep-копии в каталоге
+# текущего релиза компонента, чтобы readlink /proc/PID/exe резолвился туда.
+set -euo pipefail
+[ -n "${FAKE_ROOT:-}" ] || { echo "fake-systemctl: FAKE_ROOT unset" >&2; exit 99; }
+
+STATE_DIR="${FAKE_ROOT}/state"
+LOG="${STATE_DIR}/calls.log"
+unit=""
+prop=""
+show_value=0
+op=""
+args=("$@")
+i=0
+quiet=0
+while [ "${i}" -lt "${#args[@]}" ]; do
+    arg="${args[${i}]}"
+    case "${arg}" in
+        --user | --no-pager) ;;
+        --quiet) quiet=1 ;;
+        --value) show_value=1 ;;
+        -p) i=$((i + 1)); prop="${args[${i}]:-}" ;;
+        -p*) prop="${arg#-p}" ;;
+        is-active | is-enabled | start | stop | restart | show | mask | unmask | daemon-reload) op="${arg}" ;;
+        *) if [[ "${arg}" != -* ]]; then unit="${arg}"; fi ;;
+    esac
+    i=$((i + 1))
+done
+# shellcheck disable=SC2034
+_ignored="${prop} ${show_value}"
+
+hostpart="${FAKE_HOST:-local}"
+stfile="${STATE_DIR}/unit-${hostpart}-${unit}"
+active_file="${stfile}.active"
+pid_file="${stfile}.pid"
+
+svc_exe_dir() {
+    local cur link
+    case "${unit}" in
+        canterlot-hub) link="${HUB_CURRENT:?}" ;;
+        canterlot-worker) link="${WORKER_CURRENT:?}" ;;
+        *) echo "fake-systemctl: unknown unit ${unit}" >&2; exit 99 ;;
+    esac
+    cur="$(readlink "${link}")"
+    case "${cur}" in
+        /*) ;;
+        *) cur="$(dirname "${link}")/${cur}" ;;
+    esac
+    printf '%s/bin/' "${cur}"
+    case "${unit}" in
+        canterlot-hub) printf 'canterlot-hub' ;;
+        canterlot-worker) printf 'canterlot-worker' ;;
+        *) printf 'canterlot-svc' ;;
+    esac
+}
+
+# Загруженные drop-in'ы: как у настоящего systemd, правка файла вступает в силу
+# только после daemon-reload (до него действует прежний снимок).
+loaded_dropins="${STATE_DIR}/loaded-dropins-${unit:-none}"
+loaded_has() { [ -d "${loaded_dropins}" ] && cat "${loaded_dropins}"/*.conf 2>/dev/null | grep -qxF "$1"; }
+
+echo "systemctl ${FAKE_HOST:-local} $* active=$(cat "${active_file}" 2>/dev/null || echo none)" >>"${LOG}"
+
+case "${op}" in
+    is-active)
+        state="$(cat "${active_file}" 2>/dev/null || echo 0)"
+        case "${state}" in
+            1) label=active ;;
+            activating) label=activating ;;
+            auto-restart) label=activating ;;
+            failed) label=failed ;;
+            *) label=inactive ;;
+        esac
+        if [ "${state}" = "1" ]; then
+            [ "${quiet}" = "0" ] && echo "${label}"
+            exit 0
+        else
+            [ "${quiet}" = "0" ] && echo "${label}"
+            exit 1
+        fi
+        ;;
+    show)
+        [ "${FAKE_FAIL_SYSTEMCTL_SHOW:-0}" = "1" ] && {
+            echo "fake-systemctl: injected show failure" >&2; exit 1; }
+        state="$(cat "${active_file}" 2>/dev/null || echo 0)"
+        case "${state}" in
+            1) active_state=active; sub_state=running ;;
+            activating) active_state=activating; sub_state=start ;;
+            auto-restart) active_state=activating; sub_state=auto-restart ;;
+            failed) active_state=failed; sub_state=failed ;;
+            *) active_state=inactive; sub_state=dead ;;
+        esac
+        props="${prop//,/ }"
+        [ -n "${props}" ] || { echo "fake-systemctl: show needs -p" >&2; exit 99; }
+        for one in ${props}; do
+            case "${one}" in
+                MainPID) value="$(cat "${pid_file}" 2>/dev/null || echo 0)"; [ "${state}" = "1" ] || [ -f "${pid_file}" ] || value=0 ;;
+                KillMode) value=process ;;
+                NRestarts) value=0 ;;
+                ActiveEnterTimestamp) value="$(cat "${stfile}.since" 2>/dev/null || true)" ;;
+                ActiveState) value="${active_state}" ;;
+                SubState) value="${sub_state}" ;;
+                RefuseManualStart) if loaded_has "RefuseManualStart=yes"; then value=yes; else value=no; fi ;;
+                ExecCondition) if loaded_has "ExecCondition=/bin/false"; then value="{ path=/bin/false ; argv[]=/bin/false ; ignore_errors=no }"; else value=""; fi ;;
+                *) echo "fake-systemctl: unsupported show property ${one}" >&2; exit 99 ;;
+            esac
+            if [ "${show_value}" = "1" ]; then
+                printf '%s\n' "${value}"
+            else
+                printf '%s=%s\n' "${one}" "${value}"
+            fi
+        done
+        ;;
+    stop)
+        if [ -n "${FAKE_SYSTEMCTL_STOP_DELAY:-}" ]; then command sleep "${FAKE_SYSTEMCTL_STOP_DELAY}"; fi
+        echo 0 >"${active_file}"
+        if [ -f "${pid_file}" ]; then kill "$(cat "${pid_file}")" 2>/dev/null || true; rm -f "${pid_file}"; fi
+        # Сценарий гонки: воркер пытается подняться между ранней проверкой и dropdb.
+        if [ "${unit}" = "canterlot-hub" ] && [ -n "${FAKE_SPAWN_WORKER_ON_HUB_STOP:-}" ]; then
+            setsid "${FAKE_SPAWN_WORKER_ON_HUB_STOP}" run >/dev/null 2>&1 <&- &
+        fi
+        ;;
+    daemon-reload)
+        # Сценарий «reload не подействовал» (старый снимок остаётся).
+        [ -z "${FAKE_SYSTEMCTL_IGNORE_RELOAD:-}" ] || exit 0
+        # Без юнита в аргументах: перечитываем drop-in'ы пользовательского юнита воркера.
+        rm -rf "${STATE_DIR}/loaded-dropins-${WORKER_UNIT:-canterlot-worker}"
+        if [ -d "${WORKER_UNIT_DIR:?}/${WORKER_UNIT:-canterlot-worker}.service.d" ]; then
+            cp -r "${WORKER_UNIT_DIR}/${WORKER_UNIT:-canterlot-worker}.service.d" "${STATE_DIR}/loaded-dropins-${WORKER_UNIT:-canterlot-worker}"
+        fi
+        ;;
+    mask)
+        # Как настоящий systemd: нельзя замаскировать юнит, чей файл лежит в
+        # каталоге юнитов (symlink на /dev/null поверх него не создаётся).
+        if [ -e "${WORKER_UNIT_DIR:?}/${unit}.service" ]; then
+            echo "Failed to mask unit: File ${WORKER_UNIT_DIR}/${unit}.service already exists and is a regular file." >&2
+            exit 1
+        fi
+        : >"${stfile}.masked"
+        ;;
+    unmask)
+        rm -f "${stfile}.masked"
+        ;;
+    start)
+        if loaded_has "RefuseManualStart=yes"; then
+            echo "Failed to start ${unit}.service: Operation refused, unit ${unit}.service may be requested by dependency only (it is configured to refuse manual start/stop)." >&2
+            exit 1
+        fi
+        # ExecCondition=/bin/false: запуск пропущен, systemctl start при этом успешен.
+        if loaded_has "ExecCondition=/bin/false"; then exit 0; fi
+        if [ -f "${stfile}.masked" ]; then
+            echo "fake-systemctl: ${unit} is masked" >&2
+            exit 1
+        fi
+        if [ -n "${FAKE_SYSTEMCTL_START_DELAY:-}" ]; then command sleep "${FAKE_SYSTEMCTL_START_DELAY}"; fi
+        if [ "${FAKE_FAIL_WORKER_START:-0}" = "1" ] && [ "${unit}" = "canterlot-worker" ]; then
+            echo "fake-systemctl: injected worker start failure" >&2
+            exit 1
+        fi
+        if [ "${FAKE_FAIL_WORKER_START:-}" = "once" ] && [ "${unit}" = "canterlot-worker" ] \
+            && [ ! -f "${STATE_DIR}/worker-start-failed" ]; then
+            : >"${STATE_DIR}/worker-start-failed"
+            echo "fake-systemctl: injected one-shot worker start failure" >&2
+            exit 1
+        fi
+        exe="$(svc_exe_dir)"
+        # Как настоящий systemd: отсутствующий исполняемый файл — провал старта
+        # (раньше фейк создавал его сам и скрывал dangling current).
+        if [ ! -x "${exe}" ]; then
+            echo "fake-systemctl: Failed to start ${unit}.service: ${exe}: No such file or directory" >&2
+            exit 1
+        fi
+        setsid "${exe}" 1000 >/dev/null 2>&1 <&- &
+        echo "$!" >"${pid_file}"
+        date -u '+%a %Y-%m-%d %H:%M:%S UTC' >"${stfile}.since"
+        echo 1 >"${active_file}"
+        ;;
+    restart)
+        "$0" stop "${unit}"
+        # Перезапуск хаба накатывает миграции нового релиза (симуляция serve).
+        if [ "${unit}" = "canterlot-hub" ] && [ -n "${FAKE_HUB_MIGRATE_TO:-}" ]; then
+            printf 'MIGR_MAX=%s\nFAILED=%s\n' "${FAKE_HUB_MIGRATE_TO}" "${FAKE_MIGR_FAILED_AFTER:-0}" >"${STATE_DIR}/db.txt"
+        fi
+        "$0" start "${unit}"
+        ;;
+    *)
+        echo "fake-systemctl: unsupported op '${op}' ($*)" >&2
+        exit 99
+        ;;
+esac

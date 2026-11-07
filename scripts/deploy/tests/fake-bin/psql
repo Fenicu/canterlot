@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Подмена psql: отвечает на запросы скриптов по шаблонам из файлов состояния.
+# Ничего, кроме чтения state/db.txt и сценарных файлов.
+set -euo pipefail
+[ -n "${FAKE_ROOT:-}" ] || { echo "fake-psql: FAKE_ROOT unset" >&2; exit 99; }
+echo "psql $*" >>"${FAKE_ROOT}/state/calls.log"
+
+sql="${*: -1}"
+if [ -n "${FAKE_PSQL_FAIL_MATCH:-}" ] && [[ "${sql}" == *"${FAKE_PSQL_FAIL_MATCH}"* ]]; then
+    echo "fake-psql: injected failure for query" >&2
+    exit 1
+fi
+db="${FAKE_ROOT}/state/db.txt"
+migr_max=0
+failed=0
+if [ -f "${db}" ]; then
+    migr_max="$(grep '^MIGR_MAX=' "${db}" | cut -d= -f2 || echo 0)"
+    failed="$(grep '^FAILED=' "${db}" | cut -d= -f2 || echo 0)"
+fi
+case "${sql}" in
+    *"select count(*) from executions where state='running'"* | *"select count(*) from executions where state = 'running'"*)
+        tr ' ' '\n' <"${FAKE_ROOT}/state/live-ids" 2>/dev/null | grep -c . || true ;;
+    *"select id::text from executions where state='running'"*)
+        cat "${FAKE_ROOT}/state/live-ids" 2>/dev/null || true ;;
+    *"select distinct conversation_id"*)
+        cat "${FAKE_ROOT}/state/live-convs" 2>/dev/null || true ;;
+    *"from commands where conversation_id in"*)
+        printf '%s' "${FAKE_OPEN_SI:-0}" ;;
+    *"information_schema.tables where table_name='compactions'"*)
+        printf '%s' "${FAKE_HAS_COMPACTIONS:-1}" ;;
+    *"from compactions where finished_at is null"*)
+        printf '%s' "${FAKE_OPEN_COMP:-0}" ;;
+    *"coalesce(max(version),0) from _sqlx_migrations"*)
+        printf '%s' "${migr_max}" ;;
+    *"from _sqlx_migrations where not success"*)
+        printf '%s' "${failed}" ;;
+    *"array_to_string(capabilities"*)
+        printf '%s' "${FAKE_CAPABILITIES:-claude_histories_v1,path_probe_v1,pilot_v1,session_tools_v1}" ;;
+    *"from machine_harnesses"*)
+        printf '%s' "${FAKE_HARNESSES:-claude_code,codex,opencode}" ;;
+    *"string_agg"*)
+        awk '{printf "%s:running ", substr($1,1,8)}' "${FAKE_ROOT}/state/live-ids" 2>/dev/null || true ;;
+    *"from machines where id ="*)
+        # "<availability>:<возраст reported_at в секундах>" как отдаёт настоящий запрос.
+        printf '%s' "${FAKE_MACHINE_ROW:-available:1}" ;;
+    *"from executions where id ="*)
+        id="$(printf '%s' "${sql}" | grep -o "'[0-9a-f-]*'" | tr -d "'" | tail -1)"
+        if grep -qx "${id}" "${FAKE_ROOT}/state/live-ids" 2>/dev/null; then
+            printf 'running:null'
+        elif grep -q "^${id} " "${FAKE_ROOT}/state/ended-ids" 2>/dev/null; then
+            grep "^${id} " "${FAKE_ROOT}/state/ended-ids" | head -1 | cut -d' ' -f2
+        else
+            printf 'missing:null'
+        fi ;;
+    *) echo "fake-psql: unmocked query: ${sql}" >&2; exit 99 ;;
+esac

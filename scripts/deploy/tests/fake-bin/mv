@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Подмена mv для тестов: по FAKE_MV_DELAY замедляет mv -T (flip ссылки), чтобы
+# окно «ссылка ещё не переключена, lock уже удержан» было детерминированным.
+set -euo pipefail
+if [ -n "${FAKE_MV_DELAY:-}" ] && [ "${1:-}" = "-T" ]; then command sleep "${FAKE_MV_DELAY}"; fi
+exec /bin/mv "$@"

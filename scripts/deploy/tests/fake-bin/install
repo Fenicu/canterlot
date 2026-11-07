@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Подмена install: mkdir -p для -d, cp+chmod для файлов (владельцы игнорируются).
+set -euo pipefail
+mode=""
+isdir=0
+mode_next=0
+skip_next=0
+args=()
+for arg in "$@"; do
+    case "${arg}" in
+        -d) isdir=1 ;;
+        -m) mode_next=1 ;;
+        -o | -g) skip_next=1 ;;
+        -*) ;;
+        *) if [ "${mode_next}" = "1" ]; then mode="${arg}"; mode_next=0; elif [ "${skip_next}" = "1" ]; then skip_next=0; else args+=("${arg}"); fi ;;
+    esac
+done
+if [ "${isdir}" = "1" ]; then
+    mkdir -p "${args[@]}"
+    if [ -n "${mode}" ]; then chmod "${mode}" "${args[@]}"; fi
+else
+    cp "${args[0]}" "${args[1]}"
+    if [ -n "${mode}" ]; then chmod "${mode}" "${args[1]}"; fi
+fi

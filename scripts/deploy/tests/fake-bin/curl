@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Подмена curl: readyz зависит от текущего релиза хаба, коды сайтов — из сценария.
+set -euo pipefail
+[ -n "${FAKE_ROOT:-}" ] || { echo "fake-curl: FAKE_ROOT unset" >&2; exit 99; }
+
+url=""
+for arg in "$@"; do
+    case "${arg}" in -*) ;; *) url="${arg}" ;; esac
+done
+want_code=0
+for arg in "$@"; do [ "${arg}" = "%{http_code}" ] && want_code=1; done
+
+if [[ "${url}" == *readyz* ]]; then
+    ok="1"
+    if [ "${FAKE_READYZ_MODE:-ok}" = "byhub" ]; then
+        cur="$(readlink "${FAKE_ROOT}/hub/opt/canterlot/current" 2>/dev/null | sed 's|.*/||' || echo none)"
+        if [ "${cur}" = "${FAKE_READYZ_NEW_SHA:-}" ]; then ok="${FAKE_READYZ_NEW:-1}"; fi
+    else
+        ok="${FAKE_READYZ_OK:-1}"
+    fi
+    if [ "${want_code}" = "1" ]; then
+        [ "${ok}" = "1" ] && printf '200' || printf '000'
+    else
+        [ "${ok}" = "1" ] && printf '{"status":"ok"}' || exit 22
+    fi
+    exit 0
+fi
+
+# Коды сайтов: по умолчанию прод-набор, сценарий может уронить один сайт.
+hostport="${url#https://}"
+hostport="${hostport#http://}"
+site="${hostport%%/*}"
+case "${site}" in
+    meeting.fenicu.com | auth.fenicu.com | git.fenicu.com | gotify.fenicu.com | immich.fenicu.com | bookshelf.fenicu.com) code=200 ;;
+    caddy.fenicu.com | hub.fenicu.com) code=302 ;;
+    *) code=000 ;;
+esac
+[ "${FAKE_SITE_FAIL:-}" = "${site}" ] && code=500
+printf '%s' "${code}"

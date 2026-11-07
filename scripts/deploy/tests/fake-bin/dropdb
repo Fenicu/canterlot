@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Подмена dropdb/createdb: удаляет/создаёт state/db.txt. Каждый вызов — в журнал.
+set -euo pipefail
+[ -n "${FAKE_ROOT:-}" ] || { echo "fake-db: FAKE_ROOT unset" >&2; exit 99; }
+name="$(basename "$0")"
+echo "${name} $*" >>"${FAKE_ROOT}/state/calls.log"
+if [ "${name}" = "dropdb" ] && [ -n "${FAKE_DROPDB_HOOK:-}" ]; then bash "${FAKE_DROPDB_HOOK}" || true; fi
+case "${name}" in
+    dropdb) rm -f "${FAKE_ROOT}/state/db.txt" ;;
+    createdb) : >"${FAKE_ROOT}/state/db.txt" ;;
+esac

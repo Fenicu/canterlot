@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Подмена rm для тестов гонок: по FAKE_RM_DELAY удаление пути, содержащего
+# FAKE_RM_MATCH, начинается с паузы, а перед паузой пишется маркер state/rm-started
+# (путь). Так конкурирующая операция запускается ровно внутри критического участка.
+set -euo pipefail
+if [ -n "${FAKE_RM_DELAY:-}" ] && [ -n "${FAKE_ROOT:-}" ]; then
+    for a in "$@"; do
+        case "${a}" in
+            *"${FAKE_RM_MATCH:-/releases/}"*)
+                printf '%s\n' "${a}" >"${FAKE_ROOT}/state/rm-started"
+                command sleep "${FAKE_RM_DELAY}"
+                break ;;
+        esac
+    done
+fi
+exec /bin/rm "$@"

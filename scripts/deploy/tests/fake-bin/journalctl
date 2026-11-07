@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Подмена journalctl: строки в НАСТОЯЩЕМ формате рендера.
+# Хаб: tracing_subscriber::fmt::layer().with_target(false).with_ansi(false) в stderr ->
+#   "<ISO-время>Z  <УРОВЕНЬ> <сообщение> поле=значение", перед ним префикс journald.
+# Воркер: tracing_subscriber::fmt().with_target(false) -> то же, поле state="live".
+# Сценарий добавляет строки через FAKE_HUB_JOURNAL_LINES / FAKE_WORKER_JOURNAL_ERRORS.
+set -euo pipefail
+if [ "${FAKE_FAIL_JOURNALCTL:-0}" = "1" ]; then
+    echo "fake-journalctl: injected inspection failure" >&2
+    exit 1
+fi
+ts="2026-11-03T12:00:00.123456Z"
+if [[ "$*" == *canterlot-hub* ]]; then
+    echo "Nov 03 12:00:00 canterlot-hub canterlot-hub[101]: ${ts}  INFO schema ready kind=\"migrations_applied\" version=40"
+    echo "Nov 03 12:00:01 canterlot-hub canterlot-hub[101]: ${ts}  INFO listening on 10.0.40.64:8080"
+    if [ "${FAKE_JOURNAL_MIGRATION_ERROR:-0}" = "1" ]; then
+        echo "hub migration_error version_missing table=blocks"
+    fi
+    if [[ "$*" == *--until* ]]; then
+        # Окно базы (до текущего окна проверки): отдельный набор строк прошлого.
+        if [ -n "${FAKE_HUB_JOURNAL_BASELINE_FILE:-}" ]; then cat "${FAKE_HUB_JOURNAL_BASELINE_FILE}"; fi
+        if [ -n "${FAKE_HUB_JOURNAL_BASELINE_LINES:-}" ]; then printf '%s\n' "${FAKE_HUB_JOURNAL_BASELINE_LINES}"; fi
+    else
+        if [ -n "${FAKE_HUB_JOURNAL_LINES:-}" ]; then
+            printf '%s\n' "${FAKE_HUB_JOURNAL_LINES}"
+        fi
+        if [ -n "${FAKE_HUB_JOURNAL_FILE:-}" ]; then cat "${FAKE_HUB_JOURNAL_FILE}"; fi
+    fi
+fi
+if [[ "$*" == *canterlot-worker* ]]; then
+    wp="Nov 03 12:00:02 devvm canterlot-worker[202]: ${ts}"
+    # Сценарий ожидания live: первые N вызовов дают connecting/backoff и строку
+    # time="…" без state=live; затем — голое state="live". Проверяет и парсер, и
+    # отсутствие set -e-обрыва на первом неудачном poll.
+    if [ -n "${FAKE_LIVE_SEQUENCE:-}" ]; then
+        seq_file="${FAKE_ROOT}/state/live-seq"
+        n=0
+        [ -f "${seq_file}" ] && n="$(cat "${seq_file}")"
+        n=$((n + 1))
+        printf '%s' "${n}" >"${seq_file}"
+        if [ "${n}" -lt "${FAKE_LIVE_SEQUENCE}" ]; then
+            echo "${wp}  INFO session state state=\"connecting\" time=\"2026-11-07T00:00:00Z\""
+            echo "${wp}  INFO session attempt time=\"2026-11-07T00:00:01Z\""
+        else
+            echo "${wp}  INFO session state state=\"live\""
+        fi
+        exit 0
+    fi
+    case "${FAKE_WORKER_JOURNAL_MODE:-live}" in
+        live)
+            for st in connecting handshaking reconciling live; do
+                echo "${wp}  INFO session state state=\"${st}\""
+            done ;;
+        backoff)
+            # Воркер активен, но так и не соединился: только connecting/backoff.
+            for st in connecting backoff connecting backoff; do
+                echo "${wp}  INFO session state state=\"${st}\""
+            done
+            echo "${wp}  WARN session attempt failed error_kind=Transport" ;;
+        silent) ;;
+    esac
+    if [ -n "${FAKE_WORKER_JOURNAL_ERRORS:-}" ]; then
+        printf '%s\n' "${FAKE_WORKER_JOURNAL_ERRORS}"
+    fi
+fi
+exit 0

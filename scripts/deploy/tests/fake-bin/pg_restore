@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Подмена pg_restore: --list печатает TOC дампа; иначе «восстанавливает» db.txt.
+set -euo pipefail
+[ -n "${FAKE_ROOT:-}" ] || { echo "fake-pg_restore: FAKE_ROOT unset" >&2; exit 99; }
+echo "pg_restore $*" >>"${FAKE_ROOT}/state/calls.log"
+list=0
+for arg in "$@"; do [ "${arg}" = "--list" ] && list=1; done
+# Файл дампа — существующий путь среди позиционных аргументов; цель -f не дамп.
+file=""
+target=""
+prev=""
+for arg in "$@"; do
+    if [ "${prev}" = "-f" ]; then target="${arg}"; prev=""; continue; fi
+    if [[ "${arg}" != -* ]] && [ -f "${arg}" ]; then file="${arg}"; fi
+    prev="${arg}"
+done
+[ -n "${file}" ] || { echo "fake-pg_restore: no dump file in $*" >&2; exit 99; }
+if [ "${list}" = "1" ]; then
+    grep '^TOC-' "${file}" || true
+    exit 0
+fi
+# pg_restore -f /dev/null — только чтение дампа, база не трогается.
+if [ -n "${target}" ]; then
+    cat "${file}" >/dev/null
+    exit 0
+fi
+if [ "${FAKE_FAIL_PG_RESTORE:-0}" = "1" ]; then
+    echo "fake-pg_restore: injected restore failure" >&2
+    exit 1
+fi
+cp "${file}" "${FAKE_ROOT}/state/db.txt"

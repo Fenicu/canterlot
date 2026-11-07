@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Подмена docker для тестов. compose run запрещён громко (dry-run и проверки
+# обязаны обходиться exec в запущенном контейнере).
+set -euo pipefail
+[ -n "${FAKE_ROOT:-}" ] || { echo "fake-docker: FAKE_ROOT unset" >&2; exit 99; }
+echo "docker ${FAKE_HOST:-local} $*" >>"${FAKE_ROOT}/state/calls.log"
+
+if [ "${1:-}" = "exec" ]; then
+    shift
+    enc=""
+    # Пропускаем опции exec (-i/-e NAME=VALUE), затем CONTAINER.
+    while (($#)); do
+        case "$1" in
+            -i) shift ;;
+            -e) enc="${2#ENC=}"; shift 2 ;;
+            -*) shift ;;
+            *) break ;;
+        esac
+    done
+    shift || true  # CONTAINER
+    # Одноразовый loopback-Caddy: скрипт приходит на stdin, отвечаем заголовками.
+    if [ "${1:-}" = "sh" ] && [ "${2:-}" = "-s" ]; then
+        cat >/dev/null
+        if [ "${FAKE_ENCODING_FAIL:-}" = "${enc}" ]; then
+            printf 'HTTP/1.1 200 OK\r\nVary: Accept-Encoding\r\n\r\n'
+        elif [ -n "${enc}" ]; then
+            printf 'HTTP/1.1 200 OK\r\nContent-Encoding: %s\r\nVary: Accept-Encoding\r\n\r\n' "${enc}"
+        else
+            printf 'HTTP/1.1 200 OK\r\n\r\n'
+        fi
+        exit 0
+    fi
+    case "$1" in
+        cat)
+            case "$2" in
+                /srv/canterlot/web/build/_app/version.json) cat "${FAKE_ROOT}/container/version.json" ;;
+                *) echo "fake-docker: exec cat unknown path $2" >&2; exit 99 ;;
+            esac
+            ;;
+        printenv)
+            case "$2" in
+                GODEBUG) printf '%s' "${FAKE_GODEBUG:-tlsmlkem=0}" ;;
+                CANTERLOT_CSP)
+                    if [ "${FAKE_FAIL_CSP_READ:-0}" = "1" ]; then
+                        echo "fake-docker: injected CSP read failure" >&2
+                        exit 1
+                    fi
+                    cat "${FAKE_ROOT}/container/csp" ;;
+                *) echo "fake-docker: exec printenv unknown var $2" >&2; exit 99 ;;
+            esac
+            ;;
+        caddy)
+            shift
+            if [ "${1:-}" = "validate" ]; then
+                [ "${FAKE_CADDY_VALIDATE:-0}" = "0" ] || { echo "fake-docker: caddy validate failed" >&2; exit 1; }
+                echo "Valid configuration"
+            else
+                echo "fake-docker: exec caddy unknown: $*" >&2; exit 99
+            fi
+            ;;
+        *) echo "fake-docker: exec unknown: $*" >&2; exit 99 ;;
+    esac
+    exit 0
+fi
+
+if [ "${1:-}" = "compose" ]; then
+    shift
+    case "$1" in
+        config) exit "${FAKE_COMPOSE_OK:-0}" ;;
+        up)
+            if [ "${FAKE_FAIL_CADDY_UP:-0}" = "1" ]; then
+                echo "fake-docker: injected compose up failure" >&2
+                exit 1
+            fi
+            # Тестовая задержка для детерминированного попадания сигналом в PWA-фазу.
+            # command sleep: тесты сжимают функцию sleep, но это окно должно остаться реальным.
+            if [ -n "${FAKE_CADDY_UP_DELAY:-}" ]; then command sleep "${FAKE_CADDY_UP_DELAY}"; fi
+            # Симуляция recreate: контейнер видит свежие build и env.
+            build_link="${WEB_SITES_BASE:?}/build"
+            cp "${build_link}/_app/version.json" "${FAKE_ROOT}/container/version.json"
+            sed 's/^CANTERLOT_CSP="//; s/"$//' "${WEB_ENV:?}" >"${FAKE_ROOT}/container/csp"
+            ;;
+        run) echo "fake-docker: 'compose run' must not be used (use exec)" >&2; exit 99 ;;
+        *) echo "fake-docker: compose unknown: $*" >&2; exit 99 ;;
+    esac
+    exit 0
+fi
+echo "fake-docker: unknown: $*" >&2
+exit 99

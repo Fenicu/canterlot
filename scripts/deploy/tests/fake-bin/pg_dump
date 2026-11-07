@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Подмена pg_dump: пишет дамп с TOC (или портит/падает по флагам сценария).
+set -euo pipefail
+[ -n "${FAKE_ROOT:-}" ] || { echo "fake-pg_dump: FAKE_ROOT unset" >&2; exit 99; }
+echo "pg_dump $*" >>"${FAKE_ROOT}/state/calls.log"
+file=""
+prev=""
+for arg in "$@"; do
+    if [ "${prev}" = "-f" ]; then file="${arg}"; fi
+    prev="${arg}"
+done
+[ -n "${file}" ] || { echo "fake-pg_dump: no -f" >&2; exit 99; }
+if [ "${FAKE_FAIL_PG_DUMP:-0}" = "1" ]; then
+    echo "fake-pg_dump: injected failure" >&2
+    exit 1
+fi
+if [ "${FAKE_DUMP_CORRUPT:-0}" = "1" ]; then
+    printf 'CORRUPT-NO-TOC\n' >"${file}"
+    exit 0
+fi
+{
+    printf 'TOC-LINE-01\nTOC-LINE-02 _sqlx_migrations table\nTOC-LINE-03\nTOC-LINE-04\n'
+    printf 'TOC-LINE-05\nTOC-LINE-06\nTOC-LINE-07\nTOC-LINE-08\n'
+    printf 'TOC-LINE-09\nTOC-LINE-10\nTOC-LINE-11\nTOC-LINE-12\n'
+    cat "${FAKE_ROOT}/state/db.txt"
+} >"${file}"

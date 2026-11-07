@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Подмена ssh для тестов: выполняет удалённую команду локально, переписав пути
+# прод-хостов на каталоги FAKE_ROOT. Любой настоящий хост — отказ (тесты никогда
+# не должны коснуться продакшена).
+set -euo pipefail
+[ -n "${FAKE_ROOT:-}" ] || { echo "fake-ssh: FAKE_ROOT unset" >&2; exit 99; }
+
+host=""
+cmd_parts=()
+skip_next=0
+for arg in "$@"; do
+    if [ "${skip_next}" = "1" ]; then skip_next=0; continue; fi
+    case "${arg}" in
+        -o) skip_next=1 ;;
+        -n) ;;
+        -*) echo "fake-ssh: unexpected flag ${arg}" >&2; exit 99 ;;
+        *) if [ -z "${host}" ]; then host="${arg}"; else cmd_parts+=("${arg}"); fi ;;
+    esac
+done
+case "${host}" in
+    fakehub | fakeweb | fakeproxmox) ;;
+    *) echo "fake-ssh: refusing non-fake host '${host}'" >&2; exit 99 ;;
+esac
+cmd="${cmd_parts[*]}"
+# Маппятся только два жёстко зашитых в скрипты /tmp-пути: всё остальное скрипты
+# берут из exported env (уже фейкового). Маппить корни прод-хостов нельзя:
+# фейковая раскладка содержит те же подстроки, маппинг зациклился бы.
+cmd="${cmd//\/tmp\/stage-/${FAKE_ROOT}\/tmp\/stage-}"
+cmd="${cmd//\/tmp\/webstage-/${FAKE_ROOT}\/tmp\/webstage-}"
+# Журнал удалённых команд — только по запросу теста (в calls.log его нет:
+# dry-run ищет там только реальные мутирующие команды).
+if [ -n "${FAKE_SSH_LOG_CMDS:-}" ]; then
+    logged="${cmd//$'\n'/ }"
+    printf '%s\t%s\n' "${host}" "${logged}" >>"${FAKE_ROOT}/state/ssh-cmds.log"
+fi
+# Явный отказной крючок для сценариев (например, сломать hub flip).
+if [ -n "${FAKE_FAIL_CMD:-}" ] && [[ "${cmd}" == *"${FAKE_FAIL_CMD}"* ]]; then
+    echo "fake-ssh: injected failure for '${FAKE_FAIL_CMD}'" >&2
+    exit 1
+fi
+export FAKE_HOST="${host}"
+export PATH="${FAKE_ROOT}/fake-bin:${PATH}"
+# Обрыв транспорта при живой удалённой команде: клиент получает 255 сразу, а
+# удалённая сторона продолжает (и держит свой lock), как настоящий sshd после
+# потери соединения. Нужен, чтобы проверять чтение «после неудачного flip».
+if [ -n "${FAKE_SSH_DETACH_MATCH:-}" ] && [[ "${cmd}" == *"${FAKE_SSH_DETACH_MATCH}"* ]]; then
+    setsid bash -c "${cmd}" >/dev/null 2>&1 </dev/null &
+    command sleep 0.3
+    echo "fake-ssh: connection lost" >&2
+    exit 255
+fi
+rc=0
+bash -c "${cmd}" || rc=$?
+# Крючок «после успешной команды»: детерминированно вклинить конкурентное
+# действие (например, flip current между проверкой и удалением) в старую схему.
+if [ -n "${FAKE_SSH_AFTER_HOOK:-}" ] && [ -n "${FAKE_SSH_AFTER_CMD:-}" ] && [ "${rc}" = "0" ] \
+    && [[ "${cmd}" == *"${FAKE_SSH_AFTER_CMD}"* ]] \
+    && { [ -z "${FAKE_SSH_AFTER_UNLESS:-}" ] || [[ "${cmd}" != *"${FAKE_SSH_AFTER_UNLESS}"* ]]; }; then
+    FAKE_SSH_LAST_CMD="${cmd}" bash "${FAKE_SSH_AFTER_HOOK}" >&2 || true
+fi
+exit "${rc}"
