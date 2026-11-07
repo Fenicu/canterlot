@@ -227,5 +227,44 @@ bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain2.log" 2>&1 || case_
 teardown_case
 case_end
 
+# --- решение владельца 2: локальный dist — 3 свежих + каждый --keep, только буквальные пути ---
+case_begin "retain keeps the local dist of the newest ids and every --keep id"
+setup_retain dist
+for i in 1 2 3 4 5; do
+    mkdir -p "${FAKE_ROOT}/dist/00000000000${i}"
+    touch -d "2026-11-0${i} 00:00:00" "${FAKE_ROOT}/dist/00000000000${i}"
+done
+mkdir -p "${FAKE_ROOT}/dist/000000000001-logs"
+if bash "${DEPLOY_DIR}/retain.sh" --apply --dist "${FAKE_ROOT}/dist" --keep 000000000001 >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/retain.log"
+fi
+for i in 3 4 5; do
+    [ -d "${FAKE_ROOT}/dist/00000000000${i}" ] && case_ok "dist ${i} kept (newest three)" || case_fail "dist ${i} removed"
+done
+[ -d "${FAKE_ROOT}/dist/000000000001" ] && case_ok "dist 1 kept (--keep, oldest)" || case_fail "--keep dist removed"
+[ ! -e "${FAKE_ROOT}/dist/000000000002" ] && case_ok "dist 2 removed" || case_fail "dist 2 kept"
+[ -d "${FAKE_ROOT}/dist/000000000001-logs" ] && case_ok "log dirs never touched" || case_fail "log dir removed"
+assert_contains "${FAKE_ROOT}/retain.log" "REMOVE ${FAKE_ROOT}/dist/000000000002" "literal absolute path printed before deletion"
+assert_contains "${FAKE_ROOT}/retain.log" "removed ${FAKE_ROOT}/dist/000000000002" "the same literal path reported removed"
+teardown_case
+case_end
+
+case_begin "retain --apply in rehearsal mode prints every deletion and removes nothing"
+setup_retain rehearse
+if DEPLOY_MODE=rehearse bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/retain.log"
+fi
+[ -d "${HUB_RELEASES}/000000000002" ] && [ -d "${WEB_RELEASES}/000000000002" ] && [ -d "${WORKER_RELEASES}/000000000002" ] \
+    && [ -f "${HUB_BACKUP_DIR}/canterlot-pre-000000000001.dump" ] \
+    && case_ok "nothing removed" || case_fail "something was removed in a rehearsal"
+assert_contains "${FAKE_ROOT}/retain.log" "WOULD-WRITE" "deletions printed as WOULD-WRITE"
+assert_contains "${FAKE_ROOT}/retain.log" "(remove hub release)" "hub deletion printed"
+teardown_case
+case_end
+
 printf 'retain harness: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

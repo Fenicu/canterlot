@@ -4,3 +4,6 @@ set -euo pipefail
 [ -n "${FAKE_ROOT:-}" ] || { echo "fake-vzdump: FAKE_ROOT unset" >&2; exit 99; }
 echo "vzdump $*" >>"${FAKE_ROOT}/state/calls.log"
 if [ "${FAKE_FAIL_VZDUMP:-0}" = "1" ]; then echo "fake-vzdump: injected failure" >&2; exit 1; fi
+echo "INFO: starting new backup job: vzdump $*"
+echo "INFO: creating Proxmox Backup Server archive 'ct/130/2026-11-07T12:00:00Z'"
+[ "${FAKE_VZDUMP_NO_SUCCESS:-0}" = "1" ] || echo "INFO: Backup job finished successfully"

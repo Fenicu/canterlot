@@ -52,7 +52,7 @@ make_target_dist() {
     # shellcheck disable=SC2016 # format string is intentional
     printf '#!/bin/sh\ncase "$1" in\n  --version) echo "canterlot-hub 1.17.0" ;;\n  openapi) cat "%s" ;;\n  *) exit 99 ;;\nesac\n' "${REPO_ROOT}/docs/api/openapi.json" >"${d}/hub/bin/canterlot-hub"
     # shellcheck disable=SC2016 # format string is intentional
-    printf '#!/bin/sh\ncase "$1" in --version) echo "canterlot-worker 1.17.0";; *) exit 99;; esac\n' >"${d}/worker/bin/canterlot-worker"
+    printf '#!/bin/sh\ncase "$1" in --version) echo "canterlot-worker 1.17.0";; capabilities) printf "capability claude_histories_v1\\ncapability path_probe_v1\\nharness claude_code\\nharness codex\\n";; *) exit 99;; esac\n' >"${d}/worker/bin/canterlot-worker"
     # shellcheck disable=SC2016 # format string is intentional
     printf '#!/bin/sh\ncase "$1" in --version) echo "canterlot-worker 1.17.0 (synthetic)";; *) exit 99;; esac\n' >"${d}/synthetic/bin/canterlot-worker"
     chmod +x "${d}/hub/bin/canterlot-hub" "${d}/worker/bin/canterlot-worker" "${d}/synthetic/bin/canterlot-worker"
@@ -93,6 +93,9 @@ setup_dryrun() {
     printf '{"version":"bbbbbbbbbbbb"}' >"${FAKE_ROOT}/container/version.json"
     printf 'CSP-BODY' >"${FAKE_ROOT}/container/csp"
     printf 'CANTERLOT_CSP="CSP-BODY"\n' >"${WEB_ENV}"
+    # Запись развёрнутого релиза, как её оставляет cutover (0600, равна живому env).
+    cp "${WEB_ENV}" "${WEB_ENV}.${DEPLOYED}"
+    chmod 0600 "${WEB_ENV}.${DEPLOYED}"
     # dist развёрнутого релиза: без него сравнения миграций и CSP с dist не выполняются.
     mkdir -p "${FAKE_ROOT}/dist/bbbbbbbbbbbb"
     printf 'sha=bbbbbbbbbbbb\ndate=x\nmigrations_last=0040_monthly_limits.sql\n' >"${FAKE_ROOT}/dist/bbbbbbbbbbbb/RELEASE"
@@ -192,6 +195,16 @@ assert_contains "${FAKE_ROOT}/dry.log" "dry-run plan for ${TARGET}" "plan printe
 assert_contains "${FAKE_ROOT}/dry.log" "target check PASS for ${TARGET}" "target release was checked, not the deployed one"
 assert_contains "${FAKE_ROOT}/dry.log" "baseline (deployed): hub=${DEPLOYED}" "deployed release named as the baseline"
 assert_contains "${FAKE_ROOT}/dry.log" "dry-run PASS" "dry-run passed"
+assert_contains "${FAKE_ROOT}/dry.log" "maintenance: 2 live executions, each checked for its exec dir and socket" "maintenance checked in the dry-run"
+assert_contains "${FAKE_ROOT}/dry.log" "chunk merge preview: from ${DEPLOYED}" "chunk merge previewed"
+assert_contains "${FAKE_ROOT}/dry.log" "owner checklist: authenticated checks" "owner checklist printed"
+DRY_TOKEN="$(sed -n 's/^  CONFIRM=\([0-9a-f-]*\).*/\1/p' "${FAKE_ROOT}/dry.log")"
+if bash -c 'source "$1/lib.sh"; ph="$(plan_hash "$2" "$3/$2" "$(deployed_sha hub)" "$(deployed_sha web)" "$(deployed_sha worker)")"; confirm_token_check "$4" "$2" "${ph}"' \
+        _ "${DEPLOY_DIR}" "${TARGET}" "${FAKE_ROOT}/dist" "${DRY_TOKEN}" >/dev/null; then
+    case_ok "the dry-run token is valid for this plan: ${DRY_TOKEN}"
+else
+    case_fail "dry-run token '${DRY_TOKEN}' not valid for the current plan"
+fi
 if grep -Eq 'compose (run|up)|^vzdump |^pg_dump |^dropdb |^pg_restore |^createdb |^systemctl .* (start|stop|restart)( |$)' "${FAKE_ROOT}/state/calls.log"; then
     case_fail "mutating calls in dry-run"
 else
@@ -230,6 +243,7 @@ fi
 watch_stop
 unset FAKE_CT_LOCK
 assert_contains "${FAKE_ROOT}/dry.log" "CT locked" "gate failure reported"
+assert_not_contains "${FAKE_ROOT}/dry.log" "CONFIRM=" "a failed dry-run prints no token"
 fs_unchanged "failed dry-run wrote nothing"
 teardown_case
 case_end
@@ -333,17 +347,21 @@ else
 fi
 assert_contains "${FAKE_ROOT}/dry.log" "migrations max 999, expected 40" "migration mismatch reported without the deployed dist"
 printf 'MIGR_MAX=40\nFAILED=0\npayload\n' >"${FAKE_ROOT}/state/db.txt"
-# Без dist базы и без записи релиза сравнение CSP — SKIPPED с причиной, а не провал.
+# Без dist базы и без записи релиза сравнение CSP — SKIPPED с причиной, а не NOT RUN;
+# но отсутствие самой записи (источника отката PWA) — мягкий провал обслуживания.
+rm -f "${WEB_ENV}.${DEPLOYED}"
 SNAP_BEFORE="$(snapshot_tree)"
 if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
-    case_ok "no baseline dist, no record: SKIPPED, exit 0"
+    case_fail "exit 0 without the release env record"
 else
-    case_fail "healthy target fails without the baseline dist"; tail -5 "${FAKE_ROOT}/dry.log"
+    case_ok "no release env record: maintenance fails the dry-run"
 fi
 assert_contains "${FAKE_ROOT}/dry.log" "SKIPPED: container CSP vs dist" "SKIPPED reported with the reason"
 assert_not_contains "${FAKE_ROOT}/dry.log" "NOT RUN: container CSP vs dist" "not counted as NOT RUN"
+assert_contains "${FAKE_ROOT}/dry.log" "maintenance: env record canterlot.env.${DEPLOYED}: missing" "missing env record reported"
 # С записью развёрнутого релиза контейнер сверяется с ней.
 printf 'CANTERLOT_CSP="CSP-BODY"\n' >"${WEB_ENV}.${DEPLOYED}"
+chmod 0600 "${WEB_ENV}.${DEPLOYED}"
 if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
     case_ok "record matches the container: exit 0"
 else
@@ -488,6 +506,27 @@ fi
 assert_contains "${FAKE_ROOT}/state/calls.log" "docker fakeweb exec caddy cat /srv/canterlot/web/build/_app/version.json" "version.json read via docker exec in the container"
 teardown_case
 case_end
+
+# D16: EXPECT цели сверяется с `capabilities` боевого воркера dist (решение владельца 4).
+for variant in match differ; do
+    case_begin "target-check compares the dist EXPECT with the dist worker (${variant})"
+    setup_dryrun "expect-${variant}"
+    d="${FAKE_ROOT}/dist/${TARGET}"
+    if [ "${variant}" = "match" ]; then
+        printf 'format=1\ncapabilities=claude_histories_v1 path_probe_v1\nharnesses=claude_code codex\n' >"${d}/EXPECT"
+    else
+        printf 'format=1\ncapabilities=claude_histories_v1\nharnesses=claude_code codex\n' >"${d}/EXPECT"
+    fi
+    (cd "${d}" && find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
+    bash "${DEPLOY_DIR}/target-check.sh" "${TARGET}" --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/tc.log" 2>&1 || true
+    if [ "${variant}" = "match" ]; then
+        assert_contains "${FAKE_ROOT}/tc.log" "target dist EXPECT equals the worker's own capabilities: 2 capabilities, harnesses claude_code codex" "EXPECT matches the binary"
+    else
+        assert_contains "${FAKE_ROOT}/tc.log" "target dist EXPECT differs from 'canterlot-worker capabilities'" "EXPECT mismatch caught"
+    fi
+    teardown_case
+    case_end
+done
 
 printf 'dryrun harness: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

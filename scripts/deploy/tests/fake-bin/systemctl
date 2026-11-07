@@ -95,9 +95,18 @@ case "${op}" in
         [ -n "${props}" ] || { echo "fake-systemctl: show needs -p" >&2; exit 99; }
         for one in ${props}; do
             case "${one}" in
-                MainPID) value="$(cat "${pid_file}" 2>/dev/null || echo 0)"; [ "${state}" = "1" ] || [ -f "${pid_file}" ] || value=0 ;;
+                MainPID)
+                    value="$(cat "${pid_file}" 2>/dev/null || echo 0)"; [ "${state}" = "1" ] || [ -f "${pid_file}" ] || value=0
+                    # Окно activating после start: первые N опросов MainPID пустой или 0
+                    # (как у настоящего systemd, урок 1.18.1).
+                    if [ "${unit}" = "canterlot-worker" ] && [ -f "${STATE_DIR}/mainpid-faults" ]; then
+                        fault="$(head -n 1 "${STATE_DIR}/mainpid-faults")"
+                        sed -i 1d "${STATE_DIR}/mainpid-faults"
+                        [ -s "${STATE_DIR}/mainpid-faults" ] || rm -f "${STATE_DIR}/mainpid-faults"
+                        case "${fault}" in empty) value="" ;; zero) value=0 ;; esac
+                    fi ;;
                 KillMode) value=process ;;
-                NRestarts) value=0 ;;
+                NRestarts) if [ "${unit}" = "canterlot-worker" ]; then value="${FAKE_WORKER_NRESTARTS:-0}"; else value=0; fi ;;
                 ActiveEnterTimestamp) value="$(cat "${stfile}.since" 2>/dev/null || true)" ;;
                 ActiveState) value="${active_state}" ;;
                 SubState) value="${sub_state}" ;;
@@ -173,6 +182,10 @@ case "${op}" in
         fi
         setsid "${exe}" 1000 >/dev/null 2>&1 <&- &
         echo "$!" >"${pid_file}"
+        if [ "${unit}" = "canterlot-worker" ] && [ -n "${FAKE_MAINPID_FAULTS:-}" ]; then
+            # shellcheck disable=SC2086 # список через пробел
+            printf '%s\n' ${FAKE_MAINPID_FAULTS} >"${STATE_DIR}/mainpid-faults"
+        fi
         date -u '+%a %Y-%m-%d %H:%M:%S UTC' >"${stfile}.since"
         echo 1 >"${active_file}"
         ;;

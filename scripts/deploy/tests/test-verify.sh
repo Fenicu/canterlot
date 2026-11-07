@@ -159,6 +159,7 @@ case_end
 # V9: процесс сессии умер между чтениями — жёстко (свой снимок).
 case_begin "verify session gone between reads"
 setup_verify gonesession
+export VERIFY_GAP_RELEASE="${FAKE_ROOT}/state/gap-release"
 bash "${DEPLOY_DIR}/verify.sh" "${SHA_PREV}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/verify.log" 2>&1 &
 VPID=$!
 for _ in $(seq 1 600); do grep -q "waiting 60s between reads" "${FAKE_ROOT}/verify.log" 2>/dev/null && break; sleep 0.1; done
@@ -166,7 +167,7 @@ CLI1="$(ps -o pid= --ppid "${SUP1}" 2>/dev/null | tr -s ' ' '\n' | grep -v '^$' 
 for cand in ${CLI1:-}; do
     case "$(tr '\0' ' ' <"/proc/${cand}/cmdline" 2>/dev/null)" in *mcp-relay*) continue;; *) kill "${cand}" 2>/dev/null || true;; esac
 done
-rc=0; wait "${VPID}" || rc=$?
+touch "${VERIFY_GAP_RELEASE}"; rc=0; wait "${VPID}" || rc=$?; unset VERIFY_GAP_RELEASE
 [ "${rc}" != "0" ] && case_ok "exit nonzero" || case_fail "exit 0 despite gone session"
 assert_contains "${FAKE_ROOT}/verify.log" "session process gone" "gone session counted"
 teardown_case
@@ -193,12 +194,13 @@ case_end
 # V12: курсор SJ уменьшился между чтениями — жёстко.
 case_begin "verify ack decreased"
 setup_verify ackdec
+export VERIFY_GAP_RELEASE="${FAKE_ROOT}/state/gap-release"
 bash "${DEPLOY_DIR}/verify.sh" "${SHA_PREV}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/verify.log" 2>&1 &
 VPID=$!
 for _ in $(seq 1 600); do grep -q "waiting 60s between reads" "${FAKE_ROOT}/verify.log" 2>/dev/null && break; sleep 0.1; done
 python3 -c "import struct,sys; sys.stdout.buffer.write(struct.pack('<Q', 1) + b'\0'*4)" \
     >"${WORKER_DATA}/executions/${EXEC1}/sj/ack"
-rc=0; wait "${VPID}" || rc=$?
+touch "${VERIFY_GAP_RELEASE}"; rc=0; wait "${VPID}" || rc=$?; unset VERIFY_GAP_RELEASE
 [ "${rc}" != "0" ] && case_ok "exit nonzero" || case_fail "exit 0 despite ack decrease"
 assert_contains "${FAKE_ROOT}/verify.log" "sj ack decreased" "ack decrease counted"
 teardown_case
@@ -207,6 +209,7 @@ case_end
 # V13: сессия чисто завершена владельцем между чтениями — мягкая пометка, не провал.
 case_begin "verify owner-stopped session"
 setup_verify ownerstop
+export VERIFY_GAP_RELEASE="${FAKE_ROOT}/state/gap-release"
 bash "${DEPLOY_DIR}/verify.sh" "${SHA_PREV}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/verify.log" 2>&1 &
 VPID=$!
 wait_for_read1() {
@@ -222,7 +225,7 @@ mv "${FAKE_ROOT}/state/live-ids.new" "${FAKE_ROOT}/state/live-ids"
 printf '%s stopped:user_stop\n' "${EXEC2}" >"${FAKE_ROOT}/state/ended-ids"
 SUP2_PID="$(sup_pid_of "${EXEC2}")"
 [ -n "${SUP2_PID}" ] && kill "${SUP2_PID}" 2>/dev/null || true
-rc=0; wait "${VPID}" || rc=$?
+touch "${VERIFY_GAP_RELEASE}"; rc=0; wait "${VPID}" || rc=$?; unset VERIFY_GAP_RELEASE
 [ "${rc}" = "0" ] && case_ok "exit 0" || case_fail "exit ${rc}"
 assert_contains "${FAKE_ROOT}/verify.log" "session ended between reads" "owner stop reported as ended"
 teardown_case
@@ -292,6 +295,7 @@ case_end
 # раньше ветки mcp-relay, релей не попадал в снимок и verify давал PASS.
 case_begin "verify relay gone between reads"
 setup_verify relaygone
+export VERIFY_GAP_RELEASE="${FAKE_ROOT}/state/gap-release"
 bash "${DEPLOY_DIR}/verify.sh" "${SHA_PREV}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/verify.log" 2>&1 &
 VPID=$!
 for _ in $(seq 1 600); do grep -q "waiting 60s between reads" "${FAKE_ROOT}/verify.log" 2>/dev/null && break; sleep 0.1; done
@@ -301,7 +305,7 @@ for d in /proc/[0-9]*; do
     if [ "$(proc_relay_exec_id "${cand}")" = "${EXEC1}" ]; then RELAY_PID="${cand}"; break; fi
 done
 if [ -n "${RELAY_PID}" ]; then kill "${RELAY_PID}" 2>/dev/null || true; else case_fail "no relay found for ${EXEC1}"; fi
-rc=0; wait "${VPID}" || rc=$?
+touch "${VERIFY_GAP_RELEASE}"; rc=0; wait "${VPID}" || rc=$?; unset VERIFY_GAP_RELEASE
 [ "${rc}" != "0" ] && case_ok "exit nonzero" || case_fail "exit 0 despite gone relay"
 assert_contains "${FAKE_ROOT}/verify.log" "session process gone (read 2): ${EXEC1} relay" "gone relay counted"
 teardown_case
@@ -482,10 +486,11 @@ end_session_between_reads() { # $1 exec id, $2 "state:outcome" (пусто — �
 for scenario in "stopped:user_stop" "stopped:normal_exit"; do
     case_begin "verify reports a session ended between reads (${scenario}) and does not fail"
     setup_verify "ended-${scenario//:/-}"
+    export VERIFY_GAP_RELEASE="${FAKE_ROOT}/state/gap-release"
     bash "${DEPLOY_DIR}/verify.sh" "${SHA_PREV}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/verify.log" 2>&1 &
     VPID=$!
     end_session_between_reads "${EXEC2}" "${scenario}"
-    rc=0; wait "${VPID}" || rc=$?
+    touch "${VERIFY_GAP_RELEASE}"; rc=0; wait "${VPID}" || rc=$?; unset VERIFY_GAP_RELEASE
     [ "${rc}" = "0" ] && case_ok "exit 0" || { case_fail "exit ${rc}"; grep HARD "${FAKE_ROOT}/verify.log" | head -3; }
     assert_contains "${FAKE_ROOT}/verify.log" "session ended between reads: ${EXEC2}" "reported as ended"
     assert_not_contains "${FAKE_ROOT}/verify.log" "cannot re-read sj ack" "ack re-read is not a failure"
@@ -495,22 +500,135 @@ done
 
 case_begin "verify fails on a crashed session and on a row that is still running"
 setup_verify crashed
+export VERIFY_GAP_RELEASE="${FAKE_ROOT}/state/gap-release"
 bash "${DEPLOY_DIR}/verify.sh" "${SHA_PREV}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/verify.log" 2>&1 &
 VPID=$!
 end_session_between_reads "${EXEC2}" "failed:crashed"
-rc=0; wait "${VPID}" || rc=$?
+touch "${VERIFY_GAP_RELEASE}"; rc=0; wait "${VPID}" || rc=$?; unset VERIFY_GAP_RELEASE
 [ "${rc}" != "0" ] && case_ok "crashed: exit nonzero" || case_fail "crashed session passed"
 assert_contains "${FAKE_ROOT}/verify.log" "session process gone" "crash is a process-gone failure"
 teardown_case
 setup_verify stillrunning
+export VERIFY_GAP_RELEASE="${FAKE_ROOT}/state/gap-release"
 bash "${DEPLOY_DIR}/verify.sh" "${SHA_PREV}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/verify.log" 2>&1 &
 VPID=$!
 end_session_between_reads "${EXEC2}" ""
-rc=0; wait "${VPID}" || rc=$?
+touch "${VERIFY_GAP_RELEASE}"; rc=0; wait "${VPID}" || rc=$?; unset VERIFY_GAP_RELEASE
 [ "${rc}" != "0" ] && case_ok "still-running row: exit nonzero" || case_fail "vanished running session passed"
 assert_contains "${FAKE_ROOT}/verify.log" "session process gone" "unexpected disappearance fails"
 teardown_case
 case_end
+
+# --- EXPECT релиза (решение владельца 4): требования — из dist, не из toolkit ---
+write_expect() {
+    printf 'format=1\ncapabilities=%s\nharnesses=%s\n' "$1" "$2" >"${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT"
+}
+case_begin "verify takes required capabilities and harnesses from the release EXPECT"
+setup_verify expect
+write_expect "claude_histories_v1 path_probe_v1 pilot_v1" "claude_code codex opencode antigravity"
+printf '\n[claude_code]\n[codex]\n[opencode]\n[antigravity]\nenabled = false\n' >>"${WORKER_CONFIG}"
+if run_verify; then case_ok "verify PASS"; else case_fail "verify failed"; grep -E 'HARD|FATAL' "${FAKE_ROOT}/verify.log" | head -5; fi
+assert_contains "${FAKE_ROOT}/verify.log" "expectations from the release ${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT" "EXPECT used"
+assert_contains "${FAKE_ROOT}/verify.log" "enabled in worker.toml: claude_code codex opencode" "a harness disabled in worker.toml is not required"
+assert_contains "${FAKE_ROOT}/verify.log" "capabilities present: claude_histories_v1, path_probe_v1, pilot_v1 (source: ${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT)" "capabilities from EXPECT"
+assert_not_contains "${FAKE_ROOT}/verify.log" "WARNING: no " "no fallback warning"
+teardown_case
+case_end
+
+case_begin "verify fails on a capability the release declares and the machine lacks"
+setup_verify expect-missing
+write_expect "claude_histories_v1 path_probe_v1 brand_new_v1" "claude_code"
+printf '\n[claude_code]\n' >>"${WORKER_CONFIG}"
+if run_verify; then case_fail "verify passed without brand_new_v1"; else case_ok "verify failed"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "capability check: machine lacks brand_new_v1" "missing capability named"
+teardown_case
+case_end
+
+case_begin "a release that drops a harness needs no toolkit change"
+setup_verify expect-dropped
+write_expect "claude_histories_v1" "claude_code codex"
+printf '\n[claude_code]\n[codex]\n[opencode]\n' >>"${WORKER_CONFIG}"
+export FAKE_HARNESSES="claude_code,codex"
+if run_verify; then case_ok "verify PASS without opencode"; else case_fail "verify failed"; grep -E 'HARD' "${FAKE_ROOT}/verify.log" | head -3; fi
+unset FAKE_HARNESSES
+assert_not_contains "${FAKE_ROOT}/verify.log" "machine lacks opencode" "opencode not required"
+teardown_case
+case_end
+
+case_begin "verify fails on an enabled harness missing from the catalog"
+setup_verify expect-harness
+write_expect "claude_histories_v1" "claude_code codex opencode antigravity"
+printf '\n[claude_code]\n[codex]\n[opencode]\n[antigravity]\n' >>"${WORKER_CONFIG}"
+if run_verify; then case_fail "verify passed without antigravity"; else case_ok "verify failed"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "harness catalog: machine lacks antigravity" "enabled harness required"
+teardown_case
+case_end
+
+case_begin "verify without EXPECT falls back to the built-in list with a warning"
+setup_verify expect-absent
+if run_verify; then case_ok "verify PASS"; else case_fail "verify failed"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "WARNING: no ${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT" "fallback warned"
+assert_contains "${FAKE_ROOT}/verify.log" "capabilities present: claude_histories_v1, path_probe_v1 (source: fallback)" "fallback list used"
+teardown_case
+case_end
+
+case_begin "verify refuses an EXPECT of an unknown format"
+setup_verify expect-format
+printf 'format=2\ncapabilities=x\n' >"${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT"
+if run_verify; then case_fail "verify accepted format=2"; else case_ok "verify refused"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "unsupported" "format reported"
+teardown_case
+case_end
+
+case_begin "the harness catalog may appear a few seconds after the connection"
+setup_verify catalog-late
+n_file="${FAKE_ROOT}/state/catalog-polls"
+printf '0' >"${n_file}"
+# Первые два чтения каталога пустые, потом полный (счётчик в файле: psql — отдельный процесс).
+mv "${FAKE_ROOT}/fake-bin/psql" "${FAKE_ROOT}/fake-bin/psql.real"
+cat >"${FAKE_ROOT}/fake-bin/psql" <<EOF
+#!/usr/bin/env bash
+case "\${*: -1}" in
+    *"from machine_harnesses"*)
+        n=\$(cat "${n_file}"); n=\$((n + 1)); printf '%s' "\${n}" >"${n_file}"
+        if [ "\${n}" -le 2 ]; then printf ''; exit 0; fi ;;
+esac
+exec "${FAKE_ROOT}/fake-bin/psql.real" "\$@"
+EOF
+chmod +x "${FAKE_ROOT}/fake-bin/psql"
+if run_verify; then case_ok "verify PASS after the catalog filled in"; else case_fail "verify failed"; grep HARD "${FAKE_ROOT}/verify.log" | head -3; fi
+teardown_case
+case_end
+
+# --- loopback-проба Caddy (решение владельца 3): старт, останов, порт закрыт ---
+case_begin "the loopback Caddy probe logs its start and stop and proves the port closed"
+setup_verify probe
+if run_verify; then case_ok "verify PASS"; else case_fail "verify failed"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "precompressed probe: starting a one-off loopback Caddy" "start announced"
+assert_contains "${FAKE_ROOT}/verify.log" "probe: loopback caddy pid 4242 stopped" "stop logged"
+assert_contains "${FAKE_ROOT}/verify.log" "port 18080 closed again" "port closed proven"
+grep -q 'trap cleanup EXIT' "${FAKE_ROOT}/state/probe-script.sh" && grep -q 'trap "exit 1" INT TERM HUP' "${FAKE_ROOT}/state/probe-script.sh" \
+    && case_ok "probe script traps EXIT and INT/TERM/HUP" || case_fail "probe script has no trap"
+# shellcheck disable=SC2016 # литеральный текст скрипта пробы
+grep -q 'timeout "$LIFETIME" caddy run' "${FAKE_ROOT}/state/probe-script.sh" && case_ok "probe Caddy runs under timeout" || case_fail "no timeout"
+grep -q 'bind 127.0.0.1' "${FAKE_ROOT}/state/probe-script.sh" && case_ok "probe listens on loopback only" || case_fail "probe not bound to loopback"
+teardown_case
+case_end
+
+for scenario in busy no-stop port-open; do
+    case_begin "the loopback Caddy probe fails loudly: ${scenario}"
+    setup_verify "probe-${scenario}"
+    case "${scenario}" in
+        busy) export FAKE_PROBE_BUSY=1; want="port 18080 already in use" ;;
+        no-stop) export FAKE_PROBE_NO_STOP=1; want="did not report its stop" ;;
+        port-open) export FAKE_PROBE_PORT_OPEN=1; want="port 18080 still answers" ;;
+    esac
+    if run_verify; then case_fail "verify passed"; else case_ok "verify failed"; fi
+    unset FAKE_PROBE_BUSY FAKE_PROBE_NO_STOP FAKE_PROBE_PORT_OPEN
+    assert_contains "${FAKE_ROOT}/verify.log" "${want}" "${scenario} reported"
+    teardown_case
+    case_end
+done
 
 printf 'verify harness: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

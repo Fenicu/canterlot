@@ -25,6 +25,55 @@ date() {
 }
 export -f date
 
+# Бинарь фейкового воркера собирается один раз на прогон (а не на кейс): cc на
+# каждом кейсе стоил секунды. Игнорирует argv (как демон/supervise/relay) и живёт
+# до сигнала; `capabilities` печатает список, как настоящий воркер (или файл
+# $FAKE_ROOT/state/worker-capabilities, если сценарий его положил).
+fake_worker_build() {
+    local cache uid
+    uid="$(id -u)"
+    cache="${HARNESS_CACHE_DIR:-/tmp}/canterlot-fake-worker-v2.${uid}"
+    if [ ! -x "${cache}" ]; then
+        cat >"${cache}.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "capabilities") == 0) {
+        const char *root = getenv("FAKE_ROOT");
+        char path[4096];
+        if (root) {
+            snprintf(path, sizeof path, "%s/state/worker-capabilities", root);
+            FILE *f = fopen(path, "r");
+            if (f) { int c; while ((c = fgetc(f)) != EOF) putchar(c); fclose(f); return 0; }
+        }
+        puts("capability claude_histories_v1");
+        puts("capability path_probe_v1");
+        puts("harness claude_code");
+        puts("harness codex");
+        puts("harness opencode");
+        puts("harness antigravity");
+        return 0;
+    }
+    for (;;) pause();
+}
+EOF
+        cc -O0 -o "${cache}.tmp.$$" "${cache}.c" && mv -f "${cache}.tmp.$$" "${cache}"
+    fi
+    printf '%s' "${cache}"
+}
+
+# Токен подтверждения для боевого прогона в тестах: тот же план, что посчитает
+# cutover.sh (lib.sh в отдельном bash, чтобы set -e библиотеки не попал в тест).
+# $1 релиз, $2 каталог dist (база), $3 — epoch (по умолчанию сейчас).
+issue_token() {
+    bash -c 'source "$1/lib.sh"
+        ep="${4:-$(date -u +%s)}"
+        ph="$(plan_hash "$2" "$3/$2" "$(deployed_sha hub)" "$(deployed_sha web)" "$(deployed_sha worker)")"
+        confirm_token "$2" "${ph}" "${ep}"' _ "${DEPLOY_DIR}" "$1" "$2" "${3:-}"
+}
+
 setup_case() {
     FAKE_ROOT="$(mktemp -d /tmp/canterlot-deploy-test.XXXXXX)"
     export FAKE_ROOT
@@ -49,14 +98,12 @@ setup_case() {
     # у fake-процессов был подкомандой, а /proc/<pid>/exe указывал на релиз.
     FAKE_WORKER_BIN="${FAKE_ROOT}/fake-worker"
     export FAKE_WORKER_BIN
-    cat >"${FAKE_ROOT}/fake-worker.c" <<'EOF'
-#include <unistd.h>
-int main(void) {
-    for (;;) pause();
-}
-EOF
-    cc -O0 -o "${FAKE_WORKER_BIN}" "${FAKE_ROOT}/fake-worker.c"
+    cp "$(fake_worker_build)" "${FAKE_WORKER_BIN}"
     chmod 0755 "${FAKE_WORKER_BIN}"
+    # Дамп в тестах крошечный: порог «подозрительно маленького» дампа снижен.
+    export DUMP_MIN_BYTES=1
+    # Ожидания каталога и переподключения в тестах короче боевых.
+    export CATALOG_WAIT="${CATALOG_WAIT:-3}" CONNECT_WAIT="${CONNECT_WAIT:-10}"
 
     # Конфиг скриптов — на фейковые хосты и пути.
     export HUB_SSH=fakehub WEB_SSH=fakeweb PROXMOX_SSH=fakeproxmox PROXMOX_NODE=bigboy
@@ -83,6 +130,7 @@ EOF
     export WORKER_CONFIG="${FAKE_ROOT}/worker/config/worker.toml"
     export WORKER_DATA="${FAKE_ROOT}/worker/data"
     export WORKER_UNIT=canterlot-worker
+    export WORKER_SOCKET_DIR="${FAKE_ROOT}/worker/run/canterlot"
     # Юнит воркера установлен локально, как в документированной установке
     # (~/.config/systemd/user/canterlot-worker.service): настоящий systemd отказывает
     # `mask` поверх существующего файла юнита, и фейк обязан это воспроизводить.
@@ -180,11 +228,32 @@ spawn_session() {
         exec -a '${bindir}/canterlot-worker' '${bindir}/canterlot-worker' supervise --exec-dir '${WORKER_DATA}/executions/${exec_id}'
     " >/dev/null 2>&1 <&- &
     HARNESS_PIDS+=("$!")
-    # Дождаться появления супервизора в /proc.
-    for _ in $(seq 1 50); do
-        pgrep -f "supervise --exec-dir ${WORKER_DATA}/executions/${exec_id} " >/dev/null && break
-        sleep 0.1
+    # Дождаться появления супервизора в /proc: точный argv (argv[1]=supervise и
+    # нужный --exec-dir), а не pgrep -f. Прежний pgrep с хвостовым пробелом в
+    # образце не совпадал никогда и стоил полные 5 с на сессию; к тому же pgrep -f
+    # ловит обёртку bash -c, в чьей командной строке тот же текст.
+    harness_wait_supervisor "${WORKER_DATA}/executions/${exec_id}"
+    # Сокет сессии, как у настоящего воркера (проверка обслуживания ждёт его).
+    mkdir -p "${WORKER_SOCKET_DIR}"
+    python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' \
+        "${WORKER_SOCKET_DIR}/${exec_id}.sock" 2>/dev/null || true
+}
+
+harness_wait_supervisor() {
+    local want="$1" d i
+    local -a argv=()
+    for i in $(seq 1 200); do
+        for d in /proc/[0-9]*; do
+            argv=()
+            mapfile -d '' -t argv 2>/dev/null <"${d}/cmdline" || continue
+            if [ "${argv[1]:-}" = "supervise" ] && [ "${argv[3]:-}" = "${want}" ]; then
+                return 0
+            fi
+        done
+        command sleep 0.02
     done
+    harness_log "supervisor for ${want} did not appear after ${i} polls"
+    return 1
 }
 
 cli_pid_of() {
@@ -225,9 +294,9 @@ harness_cleanup() {
     # $1 = normal при явном вызове из teardown_case; из ловушки EXIT — авария.
     local mode="${1:-trap}"
     if [ -n "${FAKE_ROOT:-}" ]; then
-        for d in /proc/[0-9]*; do
-            pid="${d#/proc/}"
-            exe="$(readlink "${d}/exe" 2>/dev/null || true)"
+        # Один find на всю таблицу процессов (а не readlink на процесс): цели
+        # /proc/*/exe, лежащие внутри FAKE_ROOT.
+        while IFS=' ' read -r pid exe; do
             case "${exe}" in
                 # SIGKILL: воркеры, поднятые из обработчика cutover, унаследовали
                 # SIG_IGN для INT/TERM и обычным kill не умирают.
@@ -235,7 +304,7 @@ harness_cleanup() {
                     kill -KILL "${pid}" 2>/dev/null || true
                     wait "${pid}" 2>/dev/null || true ;;
             esac
-        done
+        done < <(find /proc -mindepth 2 -maxdepth 2 -name exe -printf '%h %l\n' 2>/dev/null | sed 's|^/proc/||')
     fi
     HARNESS_PIDS=()
     # Упавший кейс не трогаем: каталог остаётся для разбора. Из ловушки EXIT

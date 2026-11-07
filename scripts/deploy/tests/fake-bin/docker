@@ -7,27 +7,37 @@ echo "docker ${FAKE_HOST:-local} $*" >>"${FAKE_ROOT}/state/calls.log"
 
 if [ "${1:-}" = "exec" ]; then
     shift
-    enc=""
+    encs=""
     # Пропускаем опции exec (-i/-e NAME=VALUE), затем CONTAINER.
     while (($#)); do
         case "$1" in
             -i) shift ;;
-            -e) enc="${2#ENC=}"; shift 2 ;;
+            -e) case "$2" in ENCS=*) encs="${2#ENCS=}" ;; esac; shift 2 ;;
             -*) shift ;;
             *) break ;;
         esac
     done
     shift || true  # CONTAINER
-    # Одноразовый loopback-Caddy: скрипт приходит на stdin, отвечаем заголовками.
+    # Одноразовый loopback-Caddy: скрипт приходит на stdin, отвечаем заголовками
+    # по каждой кодировке, с метками старта и останова, как настоящий скрипт.
     if [ "${1:-}" = "sh" ] && [ "${2:-}" = "-s" ]; then
-        cat >/dev/null
-        if [ "${FAKE_ENCODING_FAIL:-}" = "${enc}" ]; then
-            printf 'HTTP/1.1 200 OK\r\nVary: Accept-Encoding\r\n\r\n'
-        elif [ -n "${enc}" ]; then
-            printf 'HTTP/1.1 200 OK\r\nContent-Encoding: %s\r\nVary: Accept-Encoding\r\n\r\n' "${enc}"
-        else
-            printf 'HTTP/1.1 200 OK\r\n\r\n'
-        fi
+        cat >"${FAKE_ROOT}/state/probe-script.sh"
+        if [ "${FAKE_PROBE_BUSY:-0}" = "1" ]; then echo "probe: port 18080 already in use"; exit 4; fi
+        echo "probe: loopback caddy pid 4242 started on 127.0.0.1:18080"
+        for enc in ${encs}; do
+            echo "probe-enc: ${enc}"
+            if [ "${FAKE_ENCODING_FAIL:-}" = "${enc}" ]; then
+                printf 'HTTP/1.1 200 OK\r\nVary: Accept-Encoding\r\n\r\n'
+            else
+                printf 'HTTP/1.1 200 OK\r\nContent-Encoding: %s\r\nVary: Accept-Encoding\r\n\r\n' "${enc}"
+            fi
+        done
+        [ "${FAKE_PROBE_NO_STOP:-0}" = "1" ] || echo "probe: loopback caddy pid 4242 stopped"
+        exit 0
+    fi
+    # Чтение «порт закрыт?» после пробы.
+    if [ "${1:-}" = "sh" ] && [ "${2:-}" = "-c" ]; then
+        if [ "${FAKE_PROBE_PORT_OPEN:-0}" = "1" ]; then echo open; else echo closed; fi
         exit 0
     fi
     case "$1" in
@@ -63,6 +73,12 @@ if [ "${1:-}" = "exec" ]; then
     exit 0
 fi
 
+# Идентификатор контейнера: меняется при каждом recreate (compose up).
+if [ "${1:-}" = "inspect" ]; then
+    cat "${FAKE_ROOT}/state/caddy-id" 2>/dev/null || echo "caddy-id-0"
+    exit 0
+fi
+
 if [ "${1:-}" = "compose" ]; then
     shift
     case "$1" in
@@ -79,6 +95,8 @@ if [ "${1:-}" = "compose" ]; then
             build_link="${WEB_SITES_BASE:?}/build"
             cp "${build_link}/_app/version.json" "${FAKE_ROOT}/container/version.json"
             sed 's/^CANTERLOT_CSP="//; s/"$//' "${WEB_ENV:?}" >"${FAKE_ROOT}/container/csp"
+            n="$(sed 's/caddy-id-//' "${FAKE_ROOT}/state/caddy-id" 2>/dev/null || echo 0)"
+            printf 'caddy-id-%s\n' "$((n + 1))" >"${FAKE_ROOT}/state/caddy-id"
             ;;
         run) echo "fake-docker: 'compose run' must not be used (use exec)" >&2; exit 99 ;;
         *) echo "fake-docker: compose unknown: $*" >&2; exit 99 ;;

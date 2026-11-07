@@ -49,6 +49,18 @@ if [ -n "${FAKE_SSH_DETACH_MATCH:-}" ] && [[ "${cmd}" == *"${FAKE_SSH_DETACH_MAT
     echo "fake-ssh: connection lost" >&2
     exit 255
 fi
+# Удалённый ps гипервизора — это ps этой машины: в нём видны процессы соседних
+# наборов (параллельный прогон) и даже текст команды оператора. Показываем только
+# процессы своего стенда (FAKE_ROOT в окружении), как если бы хост был отдельным.
+if [ "${host}" = "fakeproxmox" ] && [ "${cmd}" = "ps -eo pid=,args=" ]; then
+    out="$(ps -eo pid=,args=)" || exit $?
+    while read -r pid rest; do
+        if tr '\0' '\n' <"/proc/${pid}/environ" 2>/dev/null | grep -qxF "FAKE_ROOT=${FAKE_ROOT}"; then
+            printf '%s %s\n' "${pid}" "${rest}"
+        fi
+    done <<<"${out}"
+    exit 0
+fi
 rc=0
 bash -c "${cmd}" || rc=$?
 # Крючок «после успешной команды»: детерминированно вклинить конкурентное
