@@ -1030,6 +1030,12 @@ export interface LimitsChanged {
     weekly_reserve_active: boolean;
     weekly_reserve_resets_at: Time | null;
     data_confidence?: "exact" | "estimated";
+    forecast?: {
+      rate_permille_per_hour: number;
+      recent_rate_permille_per_hour: number | null;
+      exhausts_at: Time | null;
+      before_reset: boolean;
+    } | null;
   };
 }
 export interface LimitsProvidersChanged {

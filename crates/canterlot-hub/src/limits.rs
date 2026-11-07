@@ -1,4 +1,5 @@
 pub use crate::crunch::LimitReachedEffect;
+pub use crate::limits_forecast::Forecast;
 use crate::{
     blocks::ExecutionRef,
     config::LimitsConfig,
@@ -131,6 +132,8 @@ pub struct WindowState {
     pub used_permille: u16,
     pub resets_at: Option<DateTime<Utc>>,
     pub observed_at: DateTime<Utc>,
+    /// Прогноз по темпу; `None` — данных мало или окно без времени сброса.
+    pub forecast: Option<crate::limits_forecast::Forecast>,
 }
 
 pub(crate) async fn lock_provider(
@@ -351,13 +354,19 @@ pub(crate) async fn emit_changed(
         };
         let wire = |at: DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let reserve = p.weekly_reserve_resets_at.map(wire);
+        let forecast = state
+            .as_ref()
+            .and_then(|s| s.forecast.as_ref())
+            .and_then(|f| {
+                serde_json::to_value(crate::http::limits::ForecastView::from(f.clone())).ok()
+            });
         // Отсутствующее окно уходит клиентам событием без значения: `used_permille` и `resets_at` равны null.
         let payload = match (state, p.five_hour_absent_at) {
             (Some(s), _) => Some(
-                json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(wire),"observed_at":wire(s.observed_at),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str()}),
+                json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(wire),"observed_at":wire(s.observed_at),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast}),
             ),
             (None, Some(absent)) if window == Window::FiveHour => Some(
-                json!({"provider":provider,"window":window,"used_permille":null,"resets_at":null,"observed_at":wire(absent),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str()}),
+                json!({"provider":provider,"window":window,"used_permille":null,"resets_at":null,"observed_at":wire(absent),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast}),
             ),
             _ => None,
         };
@@ -499,45 +508,73 @@ pub(crate) fn timestamp(ms: u64) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
         .map(Some)
         .ok_or_else(|| sqlx::Error::InvalidArgument("invalid limit timestamp".into()))
 }
+async fn window_state(
+    conn: &mut PgConnection,
+    provider: &str,
+    prefix: &str,
+    window: Window,
+    row: &sqlx::postgres::PgRow,
+    now: DateTime<Utc>,
+) -> Result<Option<WindowState>, sqlx::Error> {
+    let used: Option<i32> = row.try_get(format!("{prefix}_used_permille").as_str())?;
+    let observed_at: Option<DateTime<Utc>> =
+        row.try_get(format!("{prefix}_observed_at").as_str())?;
+    let (Some(used), Some(observed_at)) = (used, observed_at) else {
+        return Ok(None);
+    };
+    let used_permille =
+        u16::try_from(used).map_err(|_| sqlx::Error::Protocol("invalid stored limit".into()))?;
+    let resets_at: Option<DateTime<Utc>> = row.try_get(format!("{prefix}_resets_at").as_str())?;
+    let current = crate::limits_forecast::Reading {
+        used_permille,
+        resets_at,
+        observed_at,
+    };
+    let forecast = crate::limits_forecast::load(&mut *conn, provider, window, current, now).await?;
+    Ok(Some(WindowState {
+        used_permille,
+        resets_at,
+        observed_at,
+        forecast,
+    }))
+}
+
 pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sqlx::Error> {
+    let now = Utc::now();
     let rows = sqlx::query("select * from provider_limits order by provider")
-        .fetch_all(conn)
+        .fetch_all(&mut *conn)
         .await?;
-    rows.into_iter()
-        .map(|r| {
-            let state = |prefix: &str| -> Result<Option<WindowState>, sqlx::Error> {
-                let used: Option<i32> = r.try_get(format!("{prefix}_used_permille").as_str())?;
-                let at: Option<DateTime<Utc>> =
-                    r.try_get(format!("{prefix}_observed_at").as_str())?;
-                match (used, at) {
-                    (Some(used), Some(observed_at)) => Ok(Some(WindowState {
-                        used_permille: u16::try_from(used)
-                            .map_err(|_| sqlx::Error::Protocol("invalid stored limit".into()))?,
-                        resets_at: r.try_get(format!("{prefix}_resets_at").as_str())?,
-                        observed_at,
-                    })),
-                    _ => Ok(None),
-                }
-            };
-            Ok(ProviderLimits {
-                provider: r.try_get("provider")?,
-                weekly: state("weekly")?,
-                five_hour: state("five_hour")?,
-                monthly: state("monthly")?,
-                weekly_reserve_active: r.try_get("weekly_reserve_active")?,
-                weekly_reserve_resets_at: r.try_get("weekly_reserve_resets_at")?,
-                five_hour_absent: r
-                    .try_get::<Option<DateTime<Utc>>, _>("five_hour_absent_at")?
-                    .is_some(),
-                five_hour_absent_at: r.try_get("five_hour_absent_at")?,
-                data_confidence: DataConfidence::from_stored(
-                    r.try_get::<Option<String>, _>("data_confidence")?
-                        .as_deref()
-                        .unwrap_or("exact"),
-                ),
-            })
-        })
-        .collect()
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let provider: String = row.try_get("provider")?;
+        out.push(ProviderLimits {
+            weekly: window_state(&mut *conn, &provider, "weekly", Window::Weekly, row, now).await?,
+            five_hour: window_state(
+                &mut *conn,
+                &provider,
+                "five_hour",
+                Window::FiveHour,
+                row,
+                now,
+            )
+            .await?,
+            monthly: window_state(&mut *conn, &provider, "monthly", Window::Monthly, row, now)
+                .await?,
+            provider,
+            weekly_reserve_active: row.try_get("weekly_reserve_active")?,
+            weekly_reserve_resets_at: row.try_get("weekly_reserve_resets_at")?,
+            five_hour_absent: row
+                .try_get::<Option<DateTime<Utc>>, _>("five_hour_absent_at")?
+                .is_some(),
+            five_hour_absent_at: row.try_get("five_hour_absent_at")?,
+            data_confidence: DataConfidence::from_stored(
+                row.try_get::<Option<String>, _>("data_confidence")?
+                    .as_deref()
+                    .unwrap_or("exact"),
+            ),
+        });
+    }
+    Ok(out)
 }
 /// Провайдеры, чей харнесс сейчас есть в каталоге хотя бы одной машины владельца.
 pub async fn offered_providers(

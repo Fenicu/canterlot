@@ -33,6 +33,7 @@ pub mod ingest;
 pub mod installation;
 pub mod limit_settings;
 pub mod limits;
+pub mod limits_forecast;
 pub mod machine_info;
 pub mod machines;
 pub mod media;

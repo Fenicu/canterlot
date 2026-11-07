@@ -1603,6 +1603,11 @@ export interface components {
         Decision: {
             considered: components["schemas"]["Considered"][];
             effort: string;
+            /**
+             * Format: int64
+             * @description Ожидаемая длительность задачи, по которой считался прогноз лимита.
+             */
+            expected_minutes?: number;
             harness: string;
             level?: string | null;
             model: string;
@@ -1789,6 +1794,23 @@ export interface components {
             title: string;
             /** Format: int32 */
             width?: number | null;
+        };
+        /** @description Прогноз окна: средний и недавний темп, ожидаемое исчерпание. */
+        ForecastView: {
+            /** @description Исчерпание наступит раньше сброса окна. */
+            before_reset: boolean;
+            /** @description Когда окно кончится при среднем темпе; `null`, если темп нулевой. */
+            exhausts_at?: string | null;
+            /**
+             * Format: int64
+             * @description Средний темп от начала окна, промилле в час.
+             */
+            rate_permille_per_hour: number;
+            /**
+             * Format: int64
+             * @description Темп за последний час (пятичасовое окно) или шесть часов (неделя, месяц).
+             */
+            recent_rate_permille_per_hour?: number | null;
         };
         Group: {
             created_at: string;
@@ -3008,6 +3030,11 @@ export interface components {
         /** @description Тип задачи: русское название для PWA и упорядоченные кандидаты. */
         TaskType: {
             candidates: components["schemas"]["Candidate"][];
+            /**
+             * Format: int64
+             * @description Ожидаемая длительность задачи в минутах: по ней прогноз решает, хватит ли лимита.
+             */
+            expected_minutes?: number;
             isolated?: boolean | null;
             preset?: string | null;
             title: string;
@@ -3107,6 +3134,7 @@ export interface components {
             is_default: boolean;
         };
         WindowView: {
+            forecast?: components["schemas"]["ForecastView"] | null;
             observed_at: string;
             resets_at?: string | null;
             /** Format: double */

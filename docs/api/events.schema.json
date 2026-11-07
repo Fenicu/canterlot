@@ -4386,6 +4386,53 @@
                 "exact",
                 "estimated"
               ]
+            },
+            "forecast": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "rate_permille_per_hour": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "recent_rate_permille_per_hour": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "exhausts_at": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/Time"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "before_reset": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "rate_permille_per_hour",
+                    "recent_rate_permille_per_hour",
+                    "exhausts_at",
+                    "before_reset"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [

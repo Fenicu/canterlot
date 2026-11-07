@@ -24,6 +24,7 @@ use super::{
     Caller, ToolContext, ToolError, ToolErrorCode,
     whitelist::{self, WhitelistEntry},
 };
+use crate::limits_forecast::Forecast;
 
 /// Имя встроенного пресета исполнителя: ищется по названию среди пресетов
 /// владельца с назначением `instructions` (если нет — без пресета).
@@ -71,6 +72,14 @@ pub struct Candidate {
     pub watchdog_minutes: Option<i64>,
 }
 
+pub const MIN_EXPECTED_MINUTES: i64 = 5;
+pub const MAX_EXPECTED_MINUTES: i64 = 1440;
+pub const DEFAULT_EXPECTED_MINUTES: i64 = 60;
+
+fn default_expected_minutes() -> i64 {
+    DEFAULT_EXPECTED_MINUTES
+}
+
 /// Тип задачи: русское название для PWA и упорядоченные кандидаты.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +88,9 @@ pub struct TaskType {
     pub candidates: Vec<Candidate>,
     pub preset: Option<String>,
     pub isolated: Option<bool>,
+    /// Ожидаемая длительность задачи в минутах: по ней прогноз решает, хватит ли лимита.
+    #[serde(default = "default_expected_minutes")]
+    pub expected_minutes: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -129,6 +141,11 @@ pub fn validate(policy: &Policy) -> Result<(), String> {
         }
         if task.title.trim().is_empty() {
             return Err(format!("task type {key:?} needs a title"));
+        }
+        if !(MIN_EXPECTED_MINUTES..=MAX_EXPECTED_MINUTES).contains(&task.expected_minutes) {
+            return Err(format!(
+                "task type {key:?}: expected_minutes is out of range {MIN_EXPECTED_MINUTES}..={MAX_EXPECTED_MINUTES}"
+            ));
         }
         if task.candidates.is_empty() || task.candidates.len() > MAX_CANDIDATES {
             return Err(format!(
@@ -321,6 +338,7 @@ pub fn builtin() -> Policy {
                 candidates,
                 preset: None,
                 isolated: Some(isolated),
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
             },
         );
     };
@@ -533,6 +551,7 @@ pub struct WindowReading {
     pub used_percent: f64,
     pub observed_at: DateTime<Utc>,
     pub resets_at: Option<DateTime<Utc>>,
+    pub forecast: Option<Forecast>,
 }
 
 /// Лимиты провайдера для маршрута.
@@ -566,6 +585,9 @@ pub struct Decision {
     pub preset: Option<String>,
     pub nudge: Value,
     pub watchdog_minutes: Option<i64>,
+    /// Ожидаемая длительность задачи, по которой считался прогноз лимита.
+    #[serde(default = "default_expected_minutes")]
+    pub expected_minutes: i64,
     pub considered: Vec<Considered>,
 }
 
@@ -754,6 +776,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
                 limits.get(&provider),
                 stale,
                 now,
+                task.expected_minutes,
                 &mut nearest_reset,
             )
         {
@@ -801,6 +824,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
             preset: candidate.preset.clone().or_else(|| task.preset.clone()),
             nudge: candidate.nudge.clone().unwrap_or(Value::Bool(false)),
             watchdog_minutes: candidate.watchdog_minutes,
+            expected_minutes: task.expected_minutes,
             considered,
         });
     }
@@ -841,6 +865,7 @@ fn check_window(
     unknown: UnknownLimits,
     stale: Duration,
     now: DateTime<Utc>,
+    expected_minutes: i64,
     nearest_reset: &mut Option<DateTime<Utc>>,
 ) -> Option<(&'static str, String)> {
     let threshold = threshold?;
@@ -885,7 +910,41 @@ fn check_window(
             ),
         ));
     }
+    // Прогноз: окно не успеет сброситься до конца задачи, а темп пересечёт порог.
+    if let Some(forecast) = reading.forecast.as_ref() {
+        let task_end = now + chrono::TimeDelta::minutes(expected_minutes);
+        let resets_before_end = reading.resets_at.is_some_and(|reset| reset <= task_end);
+        if !resets_before_end {
+            let pace = forecast.pace_permille_per_hour() / 10.0;
+            let projected = reading.used_percent + pace * expected_minutes as f64 / 60.0;
+            if projected > threshold {
+                return Some((
+                    "projected_over_threshold",
+                    format!(
+                        "{} {}% now, projected {}% in {} min > {}%",
+                        projected_window_name(window),
+                        whole_percent(reading.used_percent),
+                        whole_percent(projected),
+                        expected_minutes,
+                        whole_percent(threshold),
+                    ),
+                ));
+            }
+        }
+    }
     None
+}
+
+/// Имя окна в причине прогноза: у пятичасового окна дефис, как в контракте PWA.
+fn projected_window_name(window: &str) -> &str {
+    match window {
+        "five_hour" => "five-hour",
+        other => other,
+    }
+}
+
+fn whole_percent(value: f64) -> i64 {
+    value.round() as i64
 }
 
 /// Проверка лимитов: пороги, резерв и пауза. Возвращает вердикт и причину пропуска.
@@ -895,6 +954,7 @@ fn limits_verdict(
     view: Option<&ProviderView>,
     stale: Duration,
     now: DateTime<Utc>,
+    expected_minutes: i64,
     nearest_reset: &mut Option<DateTime<Utc>>,
 ) -> Option<(&'static str, String)> {
     let thresholds = policy.providers.get(provider);
@@ -915,6 +975,7 @@ fn limits_verdict(
         unknown,
         stale,
         now,
+        expected_minutes,
         nearest_reset,
     ) {
         return Some(reason);
@@ -927,6 +988,7 @@ fn limits_verdict(
         unknown,
         stale,
         now,
+        expected_minutes,
         nearest_reset,
     ) {
         return Some(reason);
@@ -939,6 +1001,7 @@ fn limits_verdict(
         unknown,
         stale,
         now,
+        expected_minutes,
         nearest_reset,
     ) {
         return Some(reason);
@@ -977,7 +1040,7 @@ pub fn queue_reason(
     for entry in considered {
         match entry.verdict.as_str() {
             "parallel_busy" => return Some("concurrency"),
-            "limits_over" | "quota_paused" => limits = true,
+            "limits_over" | "projected_over_threshold" | "quota_paused" => limits = true,
             _ => {}
         }
     }
@@ -1045,6 +1108,7 @@ pub async fn limits_view(
                 used_percent: f64::from(reading.used_permille) / 10.0,
                 observed_at: reading.observed_at,
                 resets_at: reading.resets_at,
+                forecast: reading.forecast,
             })
         };
         out.insert(
@@ -1425,6 +1489,7 @@ mod tests {
             used_percent: percent,
             observed_at: now() - chrono::TimeDelta::minutes(age_minutes),
             resets_at: Some(now() + chrono::TimeDelta::hours(4)),
+            forecast: None,
         }
     }
 
@@ -1504,6 +1569,7 @@ mod tests {
         assert_eq!(decision.effort, "high");
         assert_eq!(decision.policy_revision, 3);
         assert_eq!(decision.watchdog_minutes, Some(90));
+        assert_eq!(decision.expected_minutes, DEFAULT_EXPECTED_MINUTES);
         assert_eq!(decision.considered.len(), 1);
         assert_eq!(decision.considered[0].verdict, "chosen");
     }
@@ -1601,6 +1667,7 @@ mod tests {
                 }],
                 preset: None,
                 isolated: None,
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
             },
         );
         let decision = route(RouteInputs {
@@ -1638,6 +1705,7 @@ mod tests {
                 }],
                 preset: None,
                 isolated: None,
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
             },
         );
         let decision = route(RouteInputs {
@@ -1675,6 +1743,7 @@ mod tests {
                 }],
                 preset: None,
                 isolated: None,
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
             },
         );
         // Beam свободен от лимитов, но усилие `high` он не знает.
@@ -1722,6 +1791,170 @@ mod tests {
                 .iter()
                 .any(|entry| entry.reason == "opencode weekly 97% > 95%")
         );
+    }
+
+    fn with_forecast(percent: f64, resets_in: chrono::TimeDelta, rate: f64) -> WindowReading {
+        WindowReading {
+            used_percent: percent,
+            observed_at: now() - chrono::TimeDelta::minutes(5),
+            resets_at: Some(now() + resets_in),
+            forecast: Some(Forecast {
+                rate_permille_per_hour: rate,
+                recent_rate_permille_per_hour: None,
+                exhausts_at: Some(now() + chrono::TimeDelta::hours(1)),
+                before_reset: true,
+            }),
+        }
+    }
+
+    fn projected_policy() -> Policy {
+        let mut policy = policy();
+        let thresholds = policy.providers.get_mut("opencode").unwrap();
+        thresholds.max_weekly_percent = Some(80.0);
+        thresholds.max_five_hour_percent = None;
+        thresholds.max_monthly_percent = None;
+        policy
+    }
+
+    #[test]
+    fn projected_over_threshold_skips_with_the_contract_reason() {
+        let limits: HashMap<String, ProviderView> = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(with_forecast(72.0, chrono::TimeDelta::hours(4), 120.0)),
+                ..ProviderView::default()
+            },
+        )]);
+        let decision = route(RouteInputs {
+            policy: &projected_policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+            bypass_limits: false,
+        })
+        .unwrap();
+        // Оба кандидата opencode пропущены прогнозом; выбран opus.
+        assert_eq!(decision.harness, "claude_code");
+        assert!(decision.considered.iter().any(|entry| {
+            entry.verdict == "projected_over_threshold"
+                && entry.reason == "weekly 72% now, projected 84% in 60 min > 80%"
+        }));
+    }
+
+    #[test]
+    fn a_reset_before_the_task_ends_does_not_skip() {
+        let limits: HashMap<String, ProviderView> = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(with_forecast(72.0, chrono::TimeDelta::minutes(30), 120.0)),
+                ..ProviderView::default()
+            },
+        )]);
+        let decision = route(RouteInputs {
+            policy: &projected_policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+            bypass_limits: false,
+        })
+        .unwrap();
+        assert_eq!(decision.harness, "opencode");
+        assert_eq!(decision.considered[0].verdict, "chosen");
+    }
+
+    #[test]
+    fn without_forecast_only_the_current_percent_counts() {
+        let limits: HashMap<String, ProviderView> = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(reading(72.0, 5)),
+                ..ProviderView::default()
+            },
+        )]);
+        let decision = route(RouteInputs {
+            policy: &projected_policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+            bypass_limits: false,
+        })
+        .unwrap();
+        assert_eq!(decision.harness, "opencode");
+        assert_eq!(decision.considered[0].verdict, "chosen");
+    }
+
+    #[test]
+    fn an_already_over_window_keeps_the_old_reason() {
+        let limits: HashMap<String, ProviderView> = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(with_forecast(97.0, chrono::TimeDelta::hours(4), 120.0)),
+                ..ProviderView::default()
+            },
+        )]);
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("bugfix"),
+            bypass_limits: false,
+        })
+        .unwrap();
+        assert!(decision.considered.iter().any(|entry| {
+            entry.verdict == "limits_over" && entry.reason == "opencode weekly 97% > 95%"
+        }));
+    }
+
+    #[test]
+    fn expected_minutes_defaults_and_validates() {
+        let task: TaskType =
+            serde_json::from_value(json!({"title": "Проба", "candidates": []})).unwrap();
+        assert_eq!(task.expected_minutes, DEFAULT_EXPECTED_MINUTES);
+        let mut policy = builtin();
+        assert!(
+            policy
+                .task_types
+                .values()
+                .all(|task| task.expected_minutes == DEFAULT_EXPECTED_MINUTES)
+        );
+        policy
+            .task_types
+            .get_mut("bugfix")
+            .unwrap()
+            .expected_minutes = MIN_EXPECTED_MINUTES - 1;
+        assert!(validate(&policy).is_err());
+        policy
+            .task_types
+            .get_mut("bugfix")
+            .unwrap()
+            .expected_minutes = MAX_EXPECTED_MINUTES + 1;
+        assert!(validate(&policy).is_err());
+        policy
+            .task_types
+            .get_mut("bugfix")
+            .unwrap()
+            .expected_minutes = MIN_EXPECTED_MINUTES;
+        assert!(validate(&policy).is_ok());
     }
 
     #[test]
@@ -1792,6 +2025,7 @@ mod tests {
                 }],
                 preset: None,
                 isolated: None,
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
             },
         );
         policy.unlimited_models = vec!["opencode-go/beam-free".to_owned()];
@@ -2081,6 +2315,7 @@ mod tests {
                 candidates: vec![],
                 preset: None,
                 isolated: None,
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
             },
         );
         assert!(validate(&policy).is_err());

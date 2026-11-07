@@ -8676,6 +8676,11 @@
           "effort": {
             "type": "string"
           },
+          "expected_minutes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ожидаемая длительность задачи, по которой считался прогноз лимита."
+          },
           "harness": {
             "type": "string"
           },
@@ -9448,6 +9453,40 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "ForecastView": {
+        "type": "object",
+        "description": "Прогноз окна: средний и недавний темп, ожидаемое исчерпание.",
+        "required": [
+          "rate_permille_per_hour",
+          "before_reset"
+        ],
+        "properties": {
+          "before_reset": {
+            "type": "boolean",
+            "description": "Исчерпание наступит раньше сброса окна."
+          },
+          "exhausts_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Когда окно кончится при среднем темпе; `null`, если темп нулевой."
+          },
+          "rate_permille_per_hour": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Средний темп от начала окна, промилле в час."
+          },
+          "recent_rate_permille_per_hour": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Темп за последний час (пятичасовое окно) или шесть часов (неделя, месяц)."
           }
         }
       },
@@ -13838,6 +13877,11 @@
               "$ref": "#/components/schemas/Candidate"
             }
           },
+          "expected_minutes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ожидаемая длительность задачи в минутах: по ней прогноз решает, хватит ли лимита."
+          },
           "isolated": {
             "type": [
               "boolean",
@@ -14199,6 +14243,17 @@
           "observed_at"
         ],
         "properties": {
+          "forecast": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ForecastView",
+                "description": "Прогноз по темпу; поля нет, когда данных мало."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "observed_at": {
             "type": "string"
           },

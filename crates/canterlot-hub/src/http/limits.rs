@@ -17,12 +17,39 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(history))
         .routes(routes!(refresh))
 }
+/// Прогноз окна: средний и недавний темп, ожидаемое исчерпание.
+#[derive(Serialize, ToSchema)]
+pub struct ForecastView {
+    /// Средний темп от начала окна, промилле в час.
+    pub rate_permille_per_hour: i64,
+    /// Темп за последний час (пятичасовое окно) или шесть часов (неделя, месяц).
+    pub recent_rate_permille_per_hour: Option<i64>,
+    /// Когда окно кончится при среднем темпе; `null`, если темп нулевой.
+    pub exhausts_at: Option<String>,
+    /// Исчерпание наступит раньше сброса окна.
+    pub before_reset: bool,
+}
+impl From<limits::Forecast> for ForecastView {
+    fn from(f: limits::Forecast) -> Self {
+        Self {
+            rate_permille_per_hour: f.rate_permille_per_hour.round() as i64,
+            recent_rate_permille_per_hour: f
+                .recent_rate_permille_per_hour
+                .map(|rate| rate.round() as i64),
+            exhausts_at: f.exhausts_at.map(time),
+            before_reset: f.before_reset,
+        }
+    }
+}
 #[derive(Serialize, ToSchema)]
 pub struct WindowView {
     pub used_permille: u16,
     pub used_pct: f64,
     pub resets_at: Option<String>,
     pub observed_at: String,
+    /// Прогноз по темпу; поля нет, когда данных мало.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forecast: Option<ForecastView>,
 }
 fn window(w: limits::WindowState) -> WindowView {
     WindowView {
@@ -30,6 +57,7 @@ fn window(w: limits::WindowState) -> WindowView {
         used_pct: f64::from(w.used_permille) / 10.0,
         resets_at: w.resets_at.map(time),
         observed_at: time(w.observed_at),
+        forecast: w.forecast.map(ForecastView::from),
     }
 }
 #[derive(Serialize, ToSchema)]
