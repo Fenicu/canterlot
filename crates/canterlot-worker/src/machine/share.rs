@@ -135,7 +135,9 @@ fn token_stem(lower: &str) -> &str {
 /// `tokens-report.md` и `tokenizer.rs` остаются обычными файлами.
 fn denied_token_name(lower: &str) -> bool {
     let stem = token_stem(lower);
-    matches!(lower, "token" | ".token" | "token.json" | "tokens.json")
+    // Имена самих хранилищ: `token`/`tokens` в любом из трёх видов. Хвост
+    // `.txt`/`.json` уже снят, поэтому `token.txt` и `tokens.json` тоже здесь.
+    matches!(stem, "token" | "tokens" | ".token")
         || lower.ends_with(".token")
         || stem.ends_with("_token")
         || stem.ends_with("-token")
@@ -441,8 +443,29 @@ fn open_component(
     Ok((fd, kind))
 }
 
+/// Проверить запреты по именам компонентов, которые ещё не раскрыты: для
+/// абсолютной цели ссылки — до `canonicalize` и до первого перехода.
+fn refuse_component_names(parts: &[OsString]) -> Result<(), ShareError> {
+    let mut names: Vec<&str> = Vec::with_capacity(parts.len());
+    for part in parts {
+        match part.to_str() {
+            Some(part) => names.push(part),
+            // Не-UTF-8 имя раскроется позже и даст `Unreadable`; сейчас скрывать нечего.
+            None => return Ok(()),
+        }
+    }
+    if denied_parts(&names) {
+        return Err(ShareError::Denied);
+    }
+    Ok(())
+}
+
 /// Раскрыть ссылку в родителе: ссылка не должна увести из разрешённых корней
 /// и не должна спрятать секретный каталог. Возвращает новые компоненты для обхода.
+///
+/// Каждое имя из цели проверяется лексически в тот момент, когда оно вставляется
+/// в обход, — до открытия или `stat` этого компонента. Поэтому запрет не зависит
+/// от того, существует ли он, и не даёт оракула существования.
 fn expand_link(
     target: &Path,
     names: &mut Vec<String>,
@@ -453,14 +476,22 @@ fn expand_link(
 ) -> Result<Vec<OsString>, ShareError> {
     if target.is_absolute() {
         let parts = lexical_parts(target).ok_or(outside)?;
+        // Запрет по именам — до раскрытия корня и до перехода по цели.
+        refuse_component_names(&parts)?;
         let (root, depth) = root_prefix(&parts, roots).ok_or(outside)?;
         let canonical = fs::canonicalize(&root).map_err(resolve_error)?;
         let root_names = resolved_names(&canonical)?;
         refuse_names(&root_names)?;
+        let rest = &parts[depth..];
+        let mut projected = root_names.clone();
+        for part in rest {
+            projected.push(part.to_str().ok_or(ShareError::Unreadable)?.to_owned());
+            refuse_names(&projected)?;
+        }
         *root_depth = root_names.len();
         *names = root_names;
         *stack = vec![nofollow::open_dir(&canonical).map_err(open_error)?];
-        Ok(parts[depth..].to_vec())
+        Ok(rest.to_vec())
     } else {
         // Ссылка относительна каталога, в котором лежит: `..` поднимается не выше корня.
         let mut depth = names.len();
@@ -468,7 +499,23 @@ fn expand_link(
         for component in target.components() {
             match component {
                 Component::CurDir => {}
-                Component::Normal(part) => pending.push(part.to_os_string()),
+                Component::Normal(part) => {
+                    let name = part.to_str().ok_or(ShareError::Unreadable)?;
+                    // Запрет проверяется на спроецированном пути: уже пройденные
+                    // каталоги + ещё не открытые компоненты этой же цели + имя.
+                    let mut projected: Vec<String> = names[..depth].to_vec();
+                    for pending_part in &pending {
+                        projected.push(
+                            pending_part
+                                .to_str()
+                                .ok_or(ShareError::Unreadable)?
+                                .to_owned(),
+                        );
+                    }
+                    projected.push(name.to_owned());
+                    refuse_names(&projected)?;
+                    pending.push(part.to_os_string());
+                }
                 Component::ParentDir => {
                     if pending.pop().is_none() {
                         if depth <= *root_depth {
@@ -486,8 +533,9 @@ fn expand_link(
     }
 }
 
-/// Обход пути от дескриптора разрешённого корня по одному компоненту. Каждый шаг
-/// проверяет запреты до перехода дальше; `..` в ссылке не поднимается выше корня.
+/// Обход пути от дескриптора разрешённого корня по одному компоненту. Имя каждого
+/// компонента проверяется до `open`/`stat`, поэтому запрет не выдаёт существование;
+/// `..` в ссылке не поднимается выше корня.
 fn open_beneath(
     path: &Path,
     roots: &[std::path::PathBuf],
@@ -514,11 +562,15 @@ fn open_beneath(
             return Err(ShareError::NotRegular);
         };
         let part = component.to_str().ok_or(ShareError::Unreadable)?;
+        // Запрет решается по именам, до обращения к файловой системе: иначе
+        // `alias -> .cursor` отвечал бы `Missing` при отсутствующем `.cursor`.
+        let mut projected = names.clone();
+        projected.push(part.to_owned());
+        refuse_names(&projected)?;
         if pending.is_empty() {
-            let mut names = names.clone();
-            names.push(part.to_owned());
-            refuse_names(&names)?;
-            if !inside_roots(&path_of_names(&names), roots) {
+            // Повторная проверка окончательного раскрытого пути относительно корня.
+            refuse_names(&projected[root_depth..])?;
+            if !inside_roots(&path_of_names(&projected), roots) {
                 return Err(outside);
             }
             let file =
@@ -529,7 +581,6 @@ fn open_beneath(
         match kind {
             rustix::fs::FileType::Directory => {
                 names.push(part.to_owned());
-                refuse_names(&names)?;
                 stack.push(next);
             }
             rustix::fs::FileType::Symlink => {
@@ -537,9 +588,15 @@ fn open_beneath(
                 if followed > 40 {
                     return Err(ShareError::Symlink);
                 }
-                let target =
-                    rustix::fs::readlinkat(stack.last().expect("root fd"), part, Vec::new())
-                        .map_err(|_| ShareError::Unreadable)?;
+                // Цель читается через уже открытый `O_PATH|O_NOFOLLOW` дескриптор
+                // самой ссылки, а не по изменяемому имени: подмена записи после
+                // `open` не меняет inode, из которого читается цель. Гонка остаётся
+                // только для подмены имени до `open`: тогда откроется другой объект
+                // (каталог или файл), но имя уже проверено по запретам, а новая цель
+                // снова раскрывается по именам — секрет или выход из корня так не
+                // прочитать.
+                let target = rustix::fs::readlinkat(&next, "", Vec::new())
+                    .map_err(|_| ShareError::Unreadable)?;
                 let target = Path::new(OsStr::from_bytes(target.as_bytes()));
                 let inserted = expand_link(
                     target,
@@ -1144,5 +1201,127 @@ mod tests {
         .unwrap();
         assert_eq!(prepared.name, "note.txt");
         assert_eq!(prepared.size, 5);
+    }
+
+    /// `share_file` идёт тем же `open_checked`, что и проба пути.
+    fn denied(path: &Path, workdir: &Path) -> bool {
+        share(path, Some(workdir)).unwrap_err() == ShareError::Denied
+    }
+
+    #[test]
+    fn refuses_two_hop_chain_into_a_secret_directory() {
+        // `alias -> .cursor`, `.cursor -> private`: раскрытие не должно прочитать
+        // `private/config.json`, хотя ни одно имя в заданном пути не секретно.
+        let home = dir();
+        fs::create_dir(home.path().join("private")).unwrap();
+        fs::write(home.path().join("private").join("config.json"), b"secret").unwrap();
+        symlink("private", home.path().join(".cursor")).unwrap();
+        symlink(".cursor", home.path().join("alias")).unwrap();
+        assert!(denied(
+            &home.path().join("alias").join("config.json"),
+            home.path()
+        ));
+        assert!(denied(
+            &home.path().join("alias").join("absent"),
+            home.path()
+        ));
+    }
+
+    #[test]
+    fn an_alias_into_a_secret_directory_is_denied_whether_it_exists_or_not() {
+        // Существующий `.cursor` и отсутствующий дают одинаковый ответ:
+        // запрет решается по именам, до открытия компонента.
+        let present = dir();
+        fs::create_dir(present.path().join(".cursor")).unwrap();
+        symlink(present.path().join(".cursor"), present.path().join("alias")).unwrap();
+        let existing = share(
+            &present.path().join("alias").join("sentinel"),
+            Some(present.path()),
+        )
+        .unwrap_err();
+        let absent = dir();
+        symlink(absent.path().join(".cursor"), absent.path().join("alias")).unwrap();
+        let missing = share(
+            &absent.path().join("alias").join("sentinel"),
+            Some(absent.path()),
+        )
+        .unwrap_err();
+        assert_eq!(existing, ShareError::Denied);
+        assert_eq!(existing, missing);
+    }
+
+    #[test]
+    fn refuses_a_chain_whose_target_names_a_secret_symlink() {
+        // `a -> .ssh/c`, а сам `.ssh` — ссылка на безобидный каталог: имя `.ssh`
+        // встречается при раскрытии и запрещается до перехода по ссылке.
+        let home = dir();
+        let benign = home.path().join("benign");
+        fs::create_dir_all(benign.join("c")).unwrap();
+        fs::write(benign.join("c").join("note.txt"), b"secret").unwrap();
+        symlink("benign", home.path().join(".ssh")).unwrap();
+        symlink(".ssh/c", home.path().join("a")).unwrap();
+        assert!(denied(&home.path().join("a").join("note.txt"), home.path()));
+        assert!(denied(&home.path().join("a").join("absent"), home.path()));
+    }
+
+    #[test]
+    fn refuses_an_absolute_chain_through_a_secret_config_directory() {
+        // Абсолютная ссылка остаётся под `/R`, но проходит через `.config/forgejo`.
+        let home = dir();
+        fs::create_dir_all(home.path().join(".config")).unwrap();
+        fs::create_dir_all(home.path().join("private").join("sub")).unwrap();
+        fs::write(
+            home.path().join("private").join("sub").join("note.txt"),
+            b"secret",
+        )
+        .unwrap();
+        symlink(
+            home.path().join("private"),
+            home.path().join(".config").join("forgejo"),
+        )
+        .unwrap();
+        symlink(
+            home.path().join(".config").join("forgejo").join("sub"),
+            home.path().join("alias"),
+        )
+        .unwrap();
+        assert!(denied(
+            &home.path().join("alias").join("note.txt"),
+            home.path()
+        ));
+        assert!(denied(
+            &home.path().join("alias").join("absent"),
+            home.path()
+        ));
+    }
+
+    #[test]
+    fn refuses_token_stems_with_text_and_json_suffixes() {
+        let home = dir();
+        for name in [
+            "token",
+            "tokens",
+            "token.txt",
+            "tokens.txt",
+            "token.json",
+            "tokens.json",
+        ] {
+            let path = home.path().join(name);
+            fs::write(&path, b"secret").unwrap();
+            assert!(denied(&path, home.path()), "{name} must be denied");
+        }
+        for name in [
+            "tokens-report.md",
+            "token-usage.png",
+            "tokenizer.rs",
+            "tokens-compact.test.ts",
+        ] {
+            let path = home.path().join(name);
+            fs::write(&path, b"report").unwrap();
+            assert!(
+                share(&path, Some(home.path())).is_ok(),
+                "{name} must stay shareable"
+            );
+        }
     }
 }

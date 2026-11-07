@@ -699,6 +699,129 @@ mod tests {
         assert!(permits.clone().try_acquire_owned().is_ok());
     }
 
+    #[test]
+    fn a_two_hop_alias_into_a_secret_directory_is_denied() {
+        // `alias -> .cursor`, `.cursor -> private`: проба не должна ни прочитать
+        // `private/config.json`, ни отличить существующий путь от отсутствующего.
+        let dir = dir();
+        fs::create_dir(dir.path().join("private")).unwrap();
+        fs::write(dir.path().join("private").join("config.json"), b"secret").unwrap();
+        symlink("private", dir.path().join(".cursor")).unwrap();
+        symlink(".cursor", dir.path().join("alias")).unwrap();
+        for name in ["alias/config.json", "alias/absent"] {
+            assert_eq!(
+                probe_in(dir.path(), name, 0),
+                Outcome::NotAllowed("denied"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_alias_into_a_secret_directory_answers_the_same_whether_it_exists_or_not() {
+        let present = dir();
+        fs::create_dir(present.path().join(".cursor")).unwrap();
+        symlink(present.path().join(".cursor"), present.path().join("alias")).unwrap();
+        let existing = probe_in(present.path(), "alias/sentinel", 0);
+        let absent = dir();
+        symlink(absent.path().join(".cursor"), absent.path().join("alias")).unwrap();
+        let missing = probe(
+            &absent
+                .path()
+                .join("alias")
+                .join("sentinel")
+                .to_string_lossy(),
+            &roots(absent.path()),
+            0,
+        );
+        assert_eq!(existing, Outcome::NotAllowed("denied"));
+        assert_eq!(existing, missing);
+    }
+
+    #[test]
+    fn a_chain_whose_target_names_a_secret_symlink_is_denied() {
+        // `a -> .ssh/c`, а `.ssh` — ссылка на безобидный каталог.
+        let dir = dir();
+        let benign = dir.path().join("benign");
+        fs::create_dir_all(benign.join("c")).unwrap();
+        fs::write(benign.join("c").join("note.txt"), b"secret").unwrap();
+        symlink("benign", dir.path().join(".ssh")).unwrap();
+        symlink(".ssh/c", dir.path().join("a")).unwrap();
+        for name in ["a/note.txt", "a/absent"] {
+            assert_eq!(
+                probe_in(dir.path(), name, 0),
+                Outcome::NotAllowed("denied"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absolute_chain_through_a_secret_config_directory_is_denied() {
+        let dir = dir();
+        fs::create_dir_all(dir.path().join(".config")).unwrap();
+        fs::create_dir_all(dir.path().join("private").join("sub")).unwrap();
+        fs::write(
+            dir.path().join("private").join("sub").join("note.txt"),
+            b"secret",
+        )
+        .unwrap();
+        symlink(
+            dir.path().join("private"),
+            dir.path().join(".config").join("forgejo"),
+        )
+        .unwrap();
+        symlink(
+            dir.path().join(".config").join("forgejo").join("sub"),
+            dir.path().join("alias"),
+        )
+        .unwrap();
+        for name in ["alias/note.txt", "alias/absent"] {
+            assert_eq!(
+                probe_in(dir.path(), name, 0),
+                Outcome::NotAllowed("denied"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_stems_with_text_and_json_suffixes_are_denied() {
+        let dir = dir();
+        for relative in [
+            "token",
+            "tokens",
+            "token.txt",
+            "tokens.txt",
+            "token.json",
+            "tokens.json",
+        ] {
+            let path = dir.path().join(relative);
+            fs::write(&path, b"secret").unwrap();
+            assert_eq!(
+                probe(&path.to_string_lossy(), &roots(dir.path()), 0),
+                Outcome::NotAllowed("denied"),
+                "{relative}"
+            );
+        }
+        for relative in [
+            "tokens-report.md",
+            "token-usage.png",
+            "tokenizer.rs",
+            "tokens-compact.test.ts",
+        ] {
+            let path = dir.path().join(relative);
+            fs::write(&path, b"report").unwrap();
+            assert!(
+                matches!(
+                    probe(&path.to_string_lossy(), &roots(dir.path()), 0),
+                    Outcome::Exists { .. }
+                ),
+                "{relative} must stay probeable"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn work_over_the_permit_limit_is_rejected_promptly() {
         let permits = permits();
