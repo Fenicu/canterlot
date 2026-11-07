@@ -5,6 +5,8 @@ export const test = base.extend({
     const violations: string[] = [];
     await page.addInitScript(() => {
       window.addEventListener('securitypolicyviolation', (event) => {
+        // axe-core для части проверок вставляет свой <style>: это нарушение самого сканера, не приложения.
+        if (event.violatedDirective.startsWith('style-src') && event.blockedURI === 'inline' && 'axe' in window) return;
         const list = ((window as unknown as { __csp?: string[] }).__csp ??= []);
         list.push(`${event.violatedDirective} ${event.blockedURI}`);
       });
