@@ -4,9 +4,46 @@ import { devices, type Page } from '@playwright/test';
 import { expect, test } from '../ui/fixtures';
 import { Fingers, frameState, openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
 
-// Снимки и запись просмотрщика для владельца: PW_SCREENSHOTS=1 npx playwright test e2e/screenshots/image-viewer.spec.ts --project=phone
+// Снимки и записи просмотрщика для владельца: PW_SCREENSHOTS=1 npx playwright test e2e/screenshots/image-viewer.spec.ts --project=phone --project=desktop
 const OUT = process.env.VIEWER_SHOTS_DIR ?? '/tmp/image-viewer';
 const PHONE = { width: 390, height: 844 };
+const DESKTOP = { width: 1440, height: 900 };
+
+/** Курсор и подписи действий на записи рабочего стола: видео не показывает ни указатель, ни клавиши. */
+async function showMouse(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const host = () => document.querySelector('dialog[open]') ?? document.body;
+    const cursor = document.createElement('div');
+    cursor.style.cssText = 'position:fixed;left:-50px;top:-50px;width:22px;height:22px;margin:-11px 0 0 -11px;border-radius:50%;background:rgba(255,255,255,.35);outline:2px solid rgba(255,255,255,.9);box-shadow:0 0 0 1px rgba(0,0,0,.6);pointer-events:none;z-index:2147483647;transition:transform .08s';
+    const label = document.createElement('div');
+    label.style.cssText = 'position:fixed;left:50%;bottom:96px;transform:translateX(-50%);padding:8px 16px;border-radius:999px;background:rgba(255,255,255,.92);color:#111;font:600 18px system-ui,sans-serif;pointer-events:none;z-index:2147483647;opacity:0;transition:opacity .2s';
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const say = (text: string) => {
+      if (label.parentElement !== host()) host().append(label);
+      label.textContent = text;
+      label.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(() => { label.style.opacity = '0'; }, 900);
+    };
+    const keep = () => { if (cursor.parentElement !== host()) host().append(cursor); };
+    addEventListener('pointermove', (event) => { keep(); cursor.style.left = `${event.clientX}px`; cursor.style.top = `${event.clientY}px`; }, true);
+    addEventListener('pointerdown', () => { keep(); cursor.style.transform = 'scale(.7)'; }, true);
+    addEventListener('pointerup', () => { cursor.style.transform = ''; }, true);
+    addEventListener('dblclick', () => say('Двойной щелчок'), true);
+    addEventListener('wheel', (event) => say(event.ctrlKey ? 'Ctrl + колесо' : event.deltaY < 0 ? 'Колесо вверх' : 'Колесо вниз'), true);
+    const names: Record<string, string> = { ArrowRight: '→', ArrowLeft: '←', Escape: 'Esc', '+': '+', '-': '−', '0': '0' };
+    addEventListener('keydown', (event) => { if (names[event.key]) say(names[event.key]!); }, true);
+    new MutationObserver(keep).observe(document.documentElement, { subtree: true, childList: true });
+  });
+}
+
+/** Плавное движение мыши, чтобы на записи было видно путь курсора. */
+async function glide(page: Page, from: { x: number; y: number }, to: { x: number; y: number }, steps = 25): Promise<void> {
+  for (let step = 1; step <= steps; step++) {
+    await page.mouse.move(from.x + ((to.x - from.x) * step) / steps, from.y + ((to.y - from.y) * step) / steps);
+    await page.waitForTimeout(16);
+  }
+}
 
 /** Точки касаний на записи: без них на видео не понять, что делает палец. */
 async function showTouches(page: Page): Promise<void> {
@@ -142,6 +179,86 @@ test.describe('просмотр картинок', () => {
       const video = page.video();
       await context.close();
       if (video) copyFileSync(await video.path(), resolve(OUT, 'viewer-phone.webm'));
+    });
+
+    test('desktop_recording', async ({ browser }, info) => {
+      test.skip(info.project.name !== 'desktop', 'запись рабочего стола');
+      test.setTimeout(90_000);
+      const context = await browser.newContext({ viewport: DESKTOP, recordVideo: { dir: resolve(OUT, 'raw'), size: DESKTOP } });
+      const page = await context.newPage();
+      await showMouse(page);
+      await openChat(page, 'shared');
+      await page.waitForTimeout(1000);
+      // Открыть с миниатюры.
+      const box = (await thumb(page, 'shared', 0).boundingBox())!;
+      const target = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      await glide(page, { x: 1100, y: 700 }, target, 35);
+      await page.waitForTimeout(300);
+      await page.mouse.click(target.x, target.y);
+      await expect(viewer(page).locator('.slide[data-current] .frame[data-ready]')).toBeVisible();
+      await settled(page);
+      await page.waitForTimeout(1000);
+      // Колесо приближает под курсором.
+      const fit = await frameState(page);
+      const spot = { x: fit.left + fit.width * 0.72, y: fit.top + fit.height * 0.3 };
+      await glide(page, target, spot, 30);
+      for (let notch = 0; notch < 6; notch++) {
+        await page.mouse.wheel(0, -100);
+        await page.waitForTimeout(110);
+      }
+      await page.waitForTimeout(900);
+      // Ctrl + колесо (щипок на тачпаде) приближает мельче, в другой точке.
+      const second = { x: 520, y: 560 };
+      await glide(page, spot, second, 30);
+      await page.keyboard.down('Control');
+      for (let notch = 0; notch < 10; notch++) {
+        await page.mouse.wheel(0, -18);
+        await page.waitForTimeout(60);
+      }
+      await page.keyboard.up('Control');
+      await page.waitForTimeout(900);
+      // Перетаскивание сдвигает приближенную картинку и упирается в край.
+      await page.mouse.down();
+      await glide(page, second, { x: 1150, y: 760 }, 45);
+      await page.mouse.up();
+      await settled(page);
+      await page.waitForTimeout(700);
+      await page.mouse.down();
+      await glide(page, { x: 1150, y: 760 }, { x: 600, y: 300 }, 40);
+      await page.mouse.up();
+      await settled(page);
+      await page.waitForTimeout(800);
+      // Двойной щелчок возвращает вписанный вид, второй приближает в точке щелчка.
+      await page.mouse.dblclick(600, 300);
+      await settled(page);
+      await page.waitForTimeout(1000);
+      const point = { x: 900, y: 420 };
+      await glide(page, { x: 600, y: 300 }, point, 25);
+      await page.mouse.dblclick(point.x, point.y);
+      await settled(page);
+      await page.waitForTimeout(1100);
+      await page.keyboard.press('0');
+      await settled(page);
+      await page.waitForTimeout(700);
+      // Стрелки листают.
+      await page.keyboard.press('ArrowRight');
+      await settled(page);
+      await expect(viewer(page).locator('.counter')).toHaveText('2 из 3');
+      await page.waitForTimeout(1100);
+      await page.keyboard.press('ArrowRight');
+      await settled(page);
+      await expect(viewer(page).locator('.counter')).toHaveText('3 из 3');
+      await page.waitForTimeout(1100);
+      await page.keyboard.press('ArrowLeft');
+      await settled(page);
+      await page.waitForTimeout(1000);
+      // Escape закрывает, кадр уходит в свою миниатюру.
+      await page.keyboard.press('Escape');
+      await expect(viewer(page)).toHaveCount(0);
+      await page.waitForTimeout(1500);
+      const video = page.video();
+      await context.close();
+      if (video) copyFileSync(await video.path(), resolve(OUT, 'viewer-desktop.webm'));
     });
   });
 });
