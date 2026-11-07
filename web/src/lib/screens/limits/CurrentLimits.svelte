@@ -1,5 +1,6 @@
 <script lang="ts">
   import Gauge from '#lib/ui/Gauge.svelte';
+  import { timeTip } from '#lib/ui/time-tip.js';
   import type { currentBlocks } from './model.js';
   let { blocks }: { blocks: ReturnType<typeof currentBlocks> } = $props();
 </script>
@@ -19,8 +20,10 @@
           <div class="row" data-window={row.key} data-tone={row.tone} data-stale={row.stale || undefined}>
             <span class="label">{row.label}</span>
             <b class="value">{row.value}</b>
-            {#if row.reset}<span class="reset">{row.reset}</span>{/if}
+            {#if row.reset}<time class="reset" datetime={new Date(row.resetAt).toISOString()} aria-label={row.resetLong} use:timeTip={row.resetAt}>{row.reset}</time>{/if}
             <span class="gauge"><Gauge value={row.fill} tone={row.tone} dim={row.stale} label="{block.label}, {row.label}" /></span>
+            <!-- Прогноз по средней скорости окна: предупреждение, только если окно кончится раньше сброса. -->
+            {#if row.forecast}<p class="forecast" data-forecast={row.forecast.before ? 'before' : 'calm'}><span class="verdict">{row.forecast.text}</span><span class="pace" title="Средняя скорость расхода окна">{row.forecast.pace}</span></p>{/if}
           </div>
         {/each}
       </div>{/if}
@@ -49,6 +52,9 @@
   .value { grid-column: 2; }
   .reset { grid-column: 3; justify-self: end; }
   .gauge { grid-column: 1 / -1; grid-row: 2; display: flex; min-width: 0; --gauge-width: 100%; }
+  .forecast { grid-column: 1 / -1; grid-row: 3; display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s1) var(--s4); margin: var(--s0); font-size: var(--fs-sm); color: var(--muted); }
+  .forecast[data-forecast='before'] .verdict { color: var(--warning); font-weight: var(--weight-semibold); }
+  .pace { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .label, .reset { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; }
   .value { font-size: var(--fs-meta); font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .reset { font-variant-numeric: tabular-nums; }
@@ -60,5 +66,6 @@
   @container (max-width: 15em) {
     .rows { grid-template-columns: max-content minmax(0, 1fr); }
     .reset { grid-column: 1 / -1; grid-row: 3; }
+    .forecast { grid-row: 4; }
   }
 </style>
