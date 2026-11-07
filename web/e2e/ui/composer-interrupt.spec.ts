@@ -183,12 +183,15 @@ test('the_live_line_starts_the_turn_before_the_first_answer_and_shows_the_outcom
   await expect(line.locator('.live[data-working]')).toBeVisible();
   await expect(line).toContainText('Запускается');
   await expect(line.getByRole('button', { name: 'Прервать' })).toBeVisible();
+  // Идёт ход, а не пустой разговор: подсказки «Сообщений пока нет» нет.
+  await expect(page.locator('[data-feed-empty]')).toHaveCount(0);
   await line.getByRole('button', { name: 'Прервать' }).click();
   await expect(line.getByRole('button', { name: 'Прерываю…' })).toBeVisible();
   await expect.poll(() => hits.length).toBe(1);
   finishTurn(hub, api, id);
   const outcome = page.locator('[data-role="interrupt-outcome"]');
   await expect(outcome).toHaveText('Прервано');
+  await expect(page.locator('[data-feed-empty]')).toHaveCount(0);
   await expect(line).toHaveCount(0);
 });
 
