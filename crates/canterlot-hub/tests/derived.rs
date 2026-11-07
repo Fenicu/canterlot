@@ -5,7 +5,7 @@ use canterlot_hub::{
     events::{self, NewEvent, Scope},
     testkit,
 };
-use chrono::{TimeDelta, Timelike, Utc};
+use chrono::{DateTime, TimeDelta, Timelike, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgListener};
 use std::time::Duration;
@@ -97,6 +97,71 @@ async fn refresh_without_change_emits_nothing(pool: PgPool) {
         )
         .await,
         2
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_new_turn_in_the_same_phase_rebases_the_activity_clocks(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    // Прошлый ход закончился, но исполнение живо и стоит в прежней фазе:
+    // отметка фазы осталась от него, а не от нового хода.
+    let execution = Uuid::now_v7();
+    sqlx::query("insert into executions(id,conversation_id,generation,state,phase,phase_at,last_event_at) values($1,$2,1,'running','awaiting_input',clock_timestamp()-interval '6 hours',clock_timestamp()-interval '6 hours')")
+        .bind(execution)
+        .bind(s.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Changed);
+    assert_eq!(
+        row(&pool, s.conversation_id).await["activity_state"],
+        "idle"
+    );
+
+    // Владелец пишет: слот хода занят только что, а фаза в исполнении ещё прежняя.
+    sqlx::query("update queue_state set run_slot='running',run_slot_input_id=$2,run_slot_since=clock_timestamp(),hold_reasons='[]' where conversation_id=$1")
+        .bind(s.conversation_id)
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let turn_start: DateTime<Utc> =
+        sqlx::query_scalar("select run_slot_since from queue_state where conversation_id=$1")
+            .bind(s.conversation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Changed);
+    let derived = row(&pool, s.conversation_id).await;
+    assert_eq!(derived["activity_state"], "working");
+    let at = |value: &Value| {
+        DateTime::parse_from_rfc3339(value.as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc)
+    };
+    // В событие время уходит с миллисекундами: допускаем их потерю.
+    let phase_since = at(&derived["activity_evidence"]["phase_since"]);
+    assert!(
+        phase_since >= turn_start - TimeDelta::milliseconds(1),
+        "phase_since {phase_since} is older than the turn start {turn_start}"
+    );
+    let since = at(&derived["activity_since"]);
+    assert!(
+        since >= turn_start,
+        "activity_since {since} is older than the turn start {turn_start}"
+    );
+
+    // Состояние работы уже шло, когда начался ход: часы переезжают на начало хода.
+    sqlx::query("update conversation_derived set activity_since = clock_timestamp() - interval '6 hours' where conversation_id=$1")
+        .bind(s.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Changed);
+    let since = at(&row(&pool, s.conversation_id).await["activity_since"]);
+    assert!(
+        since >= turn_start,
+        "activity_since {since} kept counting from the previous turn"
     );
 }
 

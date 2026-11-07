@@ -272,10 +272,7 @@ pub async fn settled_live_in_tx(
         since,
         last_turn_at: inputs.last_turn_at,
         last_event_at: inputs.last_event_at,
-        phase_since: inputs
-            .execution
-            .as_ref()
-            .and_then(|execution| execution.phase_at),
+        phase_since: activity::phase_since(&inputs),
     };
     Ok(
         settle::settled(&live, &inputs.queue, &facts, config).map(|state| Current {
@@ -309,10 +306,7 @@ pub async fn settled_in_tx(
         since,
         last_turn_at: inputs.last_turn_at,
         last_event_at: inputs.last_event_at,
-        phase_since: inputs
-            .execution
-            .as_ref()
-            .and_then(|execution| execution.phase_at),
+        phase_since: activity::phase_since(&inputs),
     };
     let activity = Activity { state, evidence };
     Ok(

@@ -231,6 +231,51 @@ fn a_new_turn_after_a_long_idle_counts_silence_from_its_own_start() {
 }
 
 #[test]
+fn a_new_turn_in_the_same_phase_starts_the_phase_clock_again() {
+    // Прошлый ход закончился в generating: исполнение так и стоит в этой фазе,
+    // и её отметка относится к прошлому ходу.
+    let mut i = inputs();
+    i.turn_started_at = Some(i.now);
+    i.execution.as_mut().unwrap().phase = "generating".into();
+    i.execution.as_mut().unwrap().phase_at = Some(i.now - TimeDelta::hours(6));
+    let activity = activity::compute(&i, &thresholds());
+    assert_eq!(activity.state, S::Working);
+    assert!(
+        matches!(
+            activity.evidence,
+            E::Working {
+                phase_since: Some(at),
+                ..
+            } if at == i.now
+        ),
+        "phase_since must not be earlier than the current turn: {:?}",
+        activity.evidence
+    );
+
+    // Отметка фазы вообще без времени: опорой остаётся начало хода.
+    i.execution.as_mut().unwrap().phase_at = None;
+    assert!(matches!(
+        activity::compute(&i, &thresholds()).evidence,
+        E::Working {
+            phase_since: Some(at),
+            ..
+        } if at == i.now
+    ));
+
+    // Фаза, начавшаяся внутри хода, остаётся точнее его начала.
+    let phase_at = i.now + TimeDelta::minutes(2);
+    i.now = phase_at + TimeDelta::seconds(5);
+    i.execution.as_mut().unwrap().phase_at = Some(phase_at);
+    assert!(matches!(
+        activity::compute(&i, &thresholds()).evidence,
+        E::Working {
+            phase_since: Some(at),
+            ..
+        } if at == phase_at
+    ));
+}
+
+#[test]
 fn stalled_thresholds_are_generous_for_generation_and_configurable() {
     for (phase, seconds) in [
         ("generating", 1800),

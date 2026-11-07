@@ -271,6 +271,16 @@ pub fn extract_request_summary(
     })
 }
 
+/// Отметка начала текущей фазы: не раньше начала хода. Между ходами исполнение
+/// стоит в прежней фазе, так что её отметка может относиться к прошлому ходу:
+/// новый ход в той же фазе не присылает смену фазы, пока не начнёт работу.
+pub fn phase_since(inputs: &ActivityInputs) -> Option<DateTime<Utc>> {
+    inputs
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.phase_at.max(inputs.turn_started_at))
+}
+
 pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
     use ActivityState as S;
     let idle = || Activity {
@@ -312,7 +322,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
             phase: phase.into(),
             tool_name: e.tool_name.clone(),
             summary: e.summary.clone(),
-            phase_since: e.phase_at,
+            phase_since: phase_since(i),
         },
     };
     if matches!(e.state, ExecutionState::Created | ExecutionState::Starting) {
@@ -673,7 +683,16 @@ pub async fn refresh_with_metrics(
         if old_state == activity.state.as_str() {
             since = old.try_get("activity_since")?;
         }
+        // Состояние работы переживает границу ходов: часы нового хода начинаются
+        // с него, а не тянутся из прошлого.
+        if activity.state == ActivityState::Working
+            && let Some(turn_started_at) = inputs.turn_started_at
+            && since < turn_started_at
+        {
+            since = turn_started_at;
+        }
         if old_state == activity.state.as_str()
+            && old.try_get::<DateTime<Utc>, _>("activity_since")? == since
             && old.try_get::<Value, _>("activity_evidence")? == evidence
             && old.try_get::<i32, _>("unread_count")? == unread as i32
             && old.try_get::<i32, _>("queue_queued")? == inputs.queue.queued as i32
