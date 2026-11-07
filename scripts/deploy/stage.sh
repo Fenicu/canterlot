@@ -55,10 +55,10 @@ verify_dist_manifest() {
 }
 # Не оставлять мусор в /tmp хостов после неудачи.
 cleanup_stage_tmp() {
-    ssh_hub "rm -rf '/tmp/stage-${SHA}'" || true
-    ssh_web "rm -rf '/tmp/webstage-${SHA}'" || true
-    rm -rf "${WORKER_BASE}/.stage-${SHA}" || true
-    rm -f "/tmp/web-dist-${SHA}.sums" "/tmp/web-staged-${SHA}.sums"
+    run_write "clean hub stage tmp" ssh_hub "rm -rf '/tmp/stage-${SHA}'" || true
+    run_write "clean web stage tmp" ssh_web "rm -rf '/tmp/webstage-${SHA}'" || true
+    run_write "clean worker stage" rm -rf "${WORKER_BASE}/.stage-${SHA}" || true
+    run_write "clean local sums" rm -f "/tmp/web-dist-${SHA}.sums" "/tmp/web-staged-${SHA}.sums"
 }
 trap cleanup_stage_tmp EXIT
 verify_dist_manifest
@@ -80,8 +80,8 @@ stage_hub() {
         return 0
     fi
     # Явный конвейер вместо rsync (урок: план говорил rsync).
-    tar -C "${DIST}/hub" -cf - bin | recv_to "${HUB_SSH}" "rm -rf '/tmp/stage-${SHA}' && mkdir -p '/tmp/stage-${SHA}' && tar -C '/tmp/stage-${SHA}' -xf -"
-    tar -C "${DIST}" -cf - RELEASE SHA256SUMS | recv_to "${HUB_SSH}" "tar -C '/tmp/stage-${SHA}' -xf -"
+    tar -C "${DIST}/hub" -cf - bin | run_write_pipe "stage hub binaries" recv_to "${HUB_SSH}" "rm -rf '/tmp/stage-${SHA}' && mkdir -p '/tmp/stage-${SHA}' && tar -C '/tmp/stage-${SHA}' -xf -"
+    tar -C "${DIST}" -cf - RELEASE SHA256SUMS | run_write_pipe "stage hub RELEASE" recv_to "${HUB_SSH}" "tar -C '/tmp/stage-${SHA}' -xf -"
     # Полный состав stagedir проверяется ДО публикации, а не только бинарь.
     verify_remote_tree "${HUB_SSH}" "/tmp/stage-${SHA}" "$(hub_expected_sums)" "hub ${SHA}"
     # Хэш staged binary равен dist; staged binary запускается на CT и отдаёт openapi из репо.
@@ -91,7 +91,7 @@ stage_hub() {
     STAGED_OPENAPI="$(ssh_hub "'/tmp/stage-${SHA}/bin/canterlot-hub' openapi" | sha256sum | cut -d' ' -f1)"
     REPO_OPENAPI="$(sha256sum "${SOURCE_DIR}/docs/api/openapi.json" | cut -d' ' -f1)"
     [ "${STAGED_OPENAPI}" = "${REPO_OPENAPI}" ] || die "staged hub openapi differs from ${SOURCE_DIR}/docs/api/openapi.json"
-    ssh_hub "cd '${HUB_RELEASES}' && mv -T '/tmp/stage-${SHA}' '${SHA}'"
+    run_write "publish hub release" ssh_hub "cd '${HUB_RELEASES}' && mv -T '/tmp/stage-${SHA}' '${SHA}'"
     # Точный состав корня: bin, RELEASE, SHA256SUMS — и ничего лишнего.
     TOP="$(ssh_hub "ls -A '${HUB_RELEASES}/${SHA}'" | sort | tr '\n' ' ')"
     HUB_EXPECTED="$(printf 'bin\nRELEASE\nSHA256SUMS\n' | LC_ALL=C sort | tr '\n' ' ')"
@@ -117,7 +117,7 @@ stage_web() {
         return 0
     fi
     # Конвейер именно содержимого dist/web (урок: tar целого web давал лишний уровень web/).
-    tar -C "${DIST}/web" -cf - . | recv_to "${WEB_SSH}" "rm -rf '/tmp/webstage-${SHA}' && mkdir -p '/tmp/webstage-${SHA}' && tar -C '/tmp/webstage-${SHA}' -xf -"
+    tar -C "${DIST}/web" -cf - . | run_write_pipe "stage web tree" recv_to "${WEB_SSH}" "rm -rf '/tmp/webstage-${SHA}' && mkdir -p '/tmp/webstage-${SHA}' && tar -C '/tmp/webstage-${SHA}' -xf -"
     # Полный пофайловый состав против dist (и dist/SHA256SUMS, проверенного выше).
     verify_remote_tree "${WEB_SSH}" "/tmp/webstage-${SHA}" "$(web_expected_sums)" "web ${SHA}"
     # Точный состав корня stagedir (урок: assert до flip, иначе битый build).
@@ -128,7 +128,7 @@ stage_web() {
     [ "${TOP}" = "${EXPECTED_TOP}" ] || die "unexpected web staged top entries: ${TOP}"
     [ "$(ssh_web "cat '/tmp/webstage-${SHA}/_app/version.json'")" = "{\"version\":\"${SHA}\"}" ] \
         || die "staged version.json is not ${SHA}"
-    ssh_web "mkdir -p '${WEB_RELEASES}' && mv -T '/tmp/webstage-${SHA}' '${WEB_RELEASES}/${SHA}'"
+    run_write "publish web release" ssh_web "mkdir -p '${WEB_RELEASES}' && mv -T '/tmp/webstage-${SHA}' '${WEB_RELEASES}/${SHA}'"
     verify_remote_tree "${WEB_SSH}" "${WEB_RELEASES}/${SHA}" "$(web_expected_sums)" "web ${SHA}"
     log "web staged: ${WEB_RELEASES}/${SHA}"
 }
@@ -144,16 +144,16 @@ stage_worker() {
     fi
     # Публикация только после полной сборки: stage-каталог + атомарный mv -T.
     WORKER_STAGE="${WORKER_BASE}/.stage-${SHA}"
-    rm -rf "${WORKER_STAGE}"
-    install -d "${WORKER_STAGE}/bin"
-    install -m 0755 "${DIST}/worker/bin/canterlot-worker" "${WORKER_STAGE}/bin/canterlot-worker.staged"
+    run_write "clean worker stage" rm -rf "${WORKER_STAGE}"
+    run_write "create worker stage" install -d "${WORKER_STAGE}/bin"
+    run_write "install worker binary" install -m 0755 "${DIST}/worker/bin/canterlot-worker" "${WORKER_STAGE}/bin/canterlot-worker.staged"
     cmp -s "${DIST}/worker/bin/canterlot-worker" "${WORKER_STAGE}/bin/canterlot-worker.staged" \
         || die "worker staged binary differs from dist"
-    mv -T "${WORKER_STAGE}/bin/canterlot-worker.staged" "${WORKER_STAGE}/bin/canterlot-worker"
-    cp "${DIST}/RELEASE" "${WORKER_STAGE}/RELEASE"
+    run_write "publish worker binary" mv -T "${WORKER_STAGE}/bin/canterlot-worker.staged" "${WORKER_STAGE}/bin/canterlot-worker"
+    run_write "copy RELEASE" cp "${DIST}/RELEASE" "${WORKER_STAGE}/RELEASE"
     [ "$(tree_sums_local "${WORKER_STAGE}")" = "$(worker_expected_sums)" ] \
         || die "worker ${SHA} staged tree differs from dist"
-    mv -T "${WORKER_STAGE}" "${WORKER_RELEASES}/${SHA}"
+    run_write "publish worker release" mv -T "${WORKER_STAGE}" "${WORKER_RELEASES}/${SHA}"
     log "worker staged: ${WORKER_RELEASES}/${SHA}"
 }
 

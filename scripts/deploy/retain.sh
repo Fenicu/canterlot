@@ -205,7 +205,7 @@ while IFS='|' read -r hostkind path; do
         hub)
             # Финальная сверка current и удаление — одна удалённая команда под
             # одним flock: flip между ними невозможен (все flip'ы берут тот же lock).
-            hub_locked '
+            run_write "remove hub release" hub_locked '
                 current="$1"; path="$2"; name="$3"; base="$4"
                 [ ! -e "${base}/.reserved.${name}" ] || { echo "guard: ${path} is reserved by a running operation" >&2; exit 6; }
                 readlink -m "${current}" >/dev/null 2>&1 || { echo "guard: cannot read hub current" >&2; exit 4; }
@@ -220,7 +220,7 @@ while IFS='|' read -r hostkind path; do
         web)
             # Caddy-version, build и удаление — под тем же lock, что и compose up:
             # recreate между проверками не проскочит.
-            web_locked '
+            run_write "remove web release" web_locked '
                 container="$1"; version_json="$2"; build="$3"; path="$4"; name="$5"; base="$6"
                 [ ! -e "${base}/.reserved.${name}" ] || { echo "guard: ${path} is reserved by a running operation" >&2; exit 6; }
                 now="$(docker exec "${container}" cat "${version_json}")" \
@@ -244,10 +244,10 @@ while IFS='|' read -r hostkind path; do
             case " ${KEEP_IDS} " in
                 *" ${name} "*) die "guard: ${path} is a kept release id" ;;
             esac
-            rm -rf "${path}"
+            run_write "remove local dist" rm -rf "${path}"
             ;;
         local)
-            worker_locked '
+            run_write "remove worker release" worker_locked '
                 current="$1"; base="$2"; path="$3"; name="$4"
                 [ ! -e "${base}/.reserved.${name}" ] || { echo "guard: ${path} is reserved by a running operation" >&2; exit 6; }
                 for e in /proc/[0-9]*/exe; do

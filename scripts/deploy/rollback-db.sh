@@ -47,17 +47,17 @@ WORKER_GUARDED=0
 RESERVED_RELEASE=""
 remove_worker_guard() {
     WORKER_GUARDED=0
-    rm -f "${WORKER_GUARD_FILE}" || log "could not remove ${WORKER_GUARD_FILE}: needs the owner loudly"
+    run_write "remove worker guard" rm -f "${WORKER_GUARD_FILE}" || log "could not remove ${WORKER_GUARD_FILE}: needs the owner loudly"
     rmdir "${WORKER_GUARD_DIR}" 2>/dev/null || true
-    systemctl --user daemon-reload || log "daemon-reload failed after removing the guard: needs the owner loudly"
+    run_write "daemon-reload" systemctl --user daemon-reload || log "daemon-reload failed after removing the guard: needs the owner loudly"
 }
 install_worker_guard() {
     local refuse cond
     WORKER_GUARDED=1
-    mkdir -p "${WORKER_GUARD_DIR}" || die "cannot create ${WORKER_GUARD_DIR}"
+    run_write "create worker guard dir" mkdir -p "${WORKER_GUARD_DIR}" || die "cannot create ${WORKER_GUARD_DIR}"
     printf '[Unit]\nRefuseManualStart=yes\n[Service]\nExecCondition=/bin/false\n' >"${WORKER_GUARD_FILE}" \
         || die "cannot write ${WORKER_GUARD_FILE}"
-    systemctl --user daemon-reload || die "daemon-reload failed: worker guard not loaded"
+    run_write "daemon-reload" systemctl --user daemon-reload || die "daemon-reload failed: worker guard not loaded"
     refuse="$(systemctl --user show "${WORKER_UNIT}" -p RefuseManualStart --value 2>/dev/null || true)"
     cond="$(systemctl --user show "${WORKER_UNIT}" -p ExecCondition --value 2>/dev/null || true)"
     [ "${refuse}" = "yes" ] || die "worker guard not loaded (RefuseManualStart=${refuse:-unknown}): refusing to touch the database"
@@ -69,7 +69,7 @@ install_worker_guard() {
 cleanup_rollback() {
     local rc=$?
     if [ -n "${RESERVED_RELEASE}" ]; then
-        unreserve_releases hub "${RESERVED_RELEASE}" || log "could not release the reservation of ${RESERVED_RELEASE}: .reserved.${RESERVED_RELEASE} remains in ${HUB_BASE}"
+        run_write "release reservation" unreserve_releases hub "${RESERVED_RELEASE}" || log "could not release the reservation of ${RESERVED_RELEASE}: .reserved.${RESERVED_RELEASE} remains in ${HUB_BASE}"
         RESERVED_RELEASE=""
     fi
     if [ "${WORKER_GUARDED}" = "1" ]; then
@@ -135,7 +135,7 @@ else
 fi
 if [ -n "${TO_RELEASE}" ]; then
     # Резерв под lock: retain не удалит цель между проверкой и flip.
-    reserve_releases hub "${TO_RELEASE}" || die "cannot reserve release ${TO_RELEASE}"
+    run_write "reserve release" reserve_releases hub "${TO_RELEASE}" || die "cannot reserve release ${TO_RELEASE}"
     RESERVED_RELEASE="${TO_RELEASE}"
     ssh_hub "test -d '${HUB_RELEASES}/${TO_RELEASE}/bin' \
         && test -f '${HUB_RELEASES}/${TO_RELEASE}/RELEASE' \
@@ -149,16 +149,16 @@ fi
 # На время восстановления воркер не только остановлен, но и под охранником:
 # auto-restart/systemd не поднимут его посреди dropdb/createdb/pg_restore.
 log "guarding worker ${WORKER_UNIT} (drop-in) for the duration of the restore"
-systemctl --user stop "${WORKER_UNIT}" || die "cannot stop worker before the restore"
+run_write "stop worker" systemctl --user stop "${WORKER_UNIT}" || die "cannot stop worker before the restore"
 install_worker_guard
 assert_worker_stopped "after stop+guard, before hub stop"
 log "prerequisites verified (dump, target release), stopping hub ${HUB_UNIT}"
-hub_locked 'systemctl stop "$1"' "${HUB_UNIT}" || die "cannot stop hub"
+run_write "stop hub" hub_locked 'systemctl stop "$1"' "${HUB_UNIT}" || die "cannot stop hub"
 
 if [ "${FLIP_REQUESTED}" = "1" ]; then
     log "flipping hub to previous release ${TO_RELEASE}"
     HUB_FLIP_FAILED=0
-    if ! HUB_LINK_AFTER="$(hub_locked "${HUB_FLIP_SCRIPT}" \
+    if ! HUB_LINK_AFTER="$(run_write "hub flip" hub_locked "${HUB_FLIP_SCRIPT}" \
             "${HUB_BASE}" "${TO_RELEASE}" "${HUB_CURRENT}")"; then
         HUB_FLIP_FAILED=1
     else
@@ -168,8 +168,8 @@ if [ "${FLIP_REQUESTED}" = "1" ]; then
     if [ "${HUB_FLIP_FAILED}" = "1" ]; then
         HUB_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'" 2>/dev/null || echo UNKNOWN)"
         log "hub flip to ${TO_RELEASE} FAILED (current is ${HUB_NOW}): starting the hub again on its current release; database is untouched"
-        hub_locked 'rm -f "$1"' "${HUB_BASE}/current.new" || log "could not remove leftover current.new: needs the owner loudly"
-        hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || log "could not start the hub after the failed flip: needs the owner loudly"
+        run_write "remove leftover current.new" hub_locked 'rm -f "$1"' "${HUB_BASE}/current.new" || log "could not remove leftover current.new: needs the owner loudly"
+        run_write "start hub" hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || log "could not start the hub after the failed flip: needs the owner loudly"
         HUB_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'" 2>/dev/null || echo UNKNOWN)"
         log "hub restarted on ${HUB_NOW}; no database restore was attempted. Needs the owner loudly"
         exit 1
@@ -189,7 +189,7 @@ else
 fi
 
 log "starting hub"
-hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || die "hub failed to start after restore"
+run_write "start hub" hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || die "hub failed to start after restore"
 sleep 3
 READYZ="$(ssh_hub "curl -fsS -m 5 'http://${HUB_IP}:8080/readyz'" 2>/dev/null || echo FAIL)"
 if [ "${READYZ}" = '{"status":"ok"}' ]; then
