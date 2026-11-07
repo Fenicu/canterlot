@@ -214,6 +214,11 @@
   const ready = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' || rows.length > 0 : false);
   // Строки могут прийти из памяти устройства раньше снимка, а лимиты и счёт вкладок — только со снимком.
   const synced = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' : false);
+  // Счёт, однажды пришедший со снимком, держится и при переподключении: без чисел вкладки перестраиваются и список прыгает.
+  let counted = $state(false);
+  $effect(() => {
+    if (synced) counted = true;
+  });
 
   // Выбор вкладки живёт на устройстве; удалённую группу после снимка заменяет «Все».
   $effect(() => {
@@ -415,7 +420,7 @@
     <GroupTabs
       tabs={tabs}
       current={tab}
-      counted={synced}
+      counted={counted}
       onselect={(next) => tab = next}
     />
   {:else}
