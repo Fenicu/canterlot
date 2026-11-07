@@ -52,7 +52,7 @@ hub_psql() { ssh_hub "runuser -u canterlot -- psql -h '${HUB_PG_SOCKET}' -d '${H
 is_elf() { [ "$(head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; }
 binary_version() {
     local bin="$1" out
-    out="$("${bin}" --version 2>/dev/null | head -1 || true)"
+    out="$("${bin}" --version 2>/dev/null | sed -n 1p || true)"
     [ -n "${out}" ] || return 1
     printf '%s' "${out}"
 }
@@ -112,6 +112,24 @@ if [ "${DIST_OK}" = "1" ]; then
     else
         hard "target dist RELEASE source is '${SOURCE_SHA:-missing}', expected a 40-hex commit starting with ${SHA}"
     fi
+    # EXPECT: что релиз ждёт от воркера (возможности, харнессы). Файл входит в
+    # SHA256SUMS и обязан совпадать с выводом `capabilities` боевого воркера dist.
+    if [ -f "${DIST}/EXPECT" ]; then
+        if ! CAPS_OUT="$(timeout 10 "${DIST}/worker/bin/canterlot-worker" capabilities 2>/dev/null)"; then
+            hard "target dist worker cannot print its capabilities (canterlot-worker capabilities)"
+        else
+            EXPECT_FROM_BIN="$(printf 'format=1\ncapabilities=%s\nharnesses=%s\n' \
+                "$(printf '%s\n' "${CAPS_OUT}" | sed -n 's/^capability //p' | tr '\n' ' ' | sed 's/ $//')" \
+                "$(printf '%s\n' "${CAPS_OUT}" | sed -n 's/^harness //p' | tr '\n' ' ' | sed 's/ $//')")"
+            if [ "${EXPECT_FROM_BIN}" = "$(cat "${DIST}/EXPECT")" ]; then
+                log "target dist EXPECT equals the worker's own capabilities: $(sed -n 's/^capabilities=//p' "${DIST}/EXPECT" | wc -w) capabilities, harnesses $(sed -n 's/^harnesses=//p' "${DIST}/EXPECT")"
+            else
+                hard "target dist EXPECT differs from 'canterlot-worker capabilities' of the dist worker"
+            fi
+        fi
+    else
+        log "target dist has no EXPECT (release built before it existed): verify will fall back to the built-in capability list"
+    fi
     # --version, libssl, glibc, openapi — на самих бинарях dist.
     HUB_VERSION=""; WORKER_VERSION=""
     for pair in hub:canterlot-hub worker:canterlot-worker synthetic:canterlot-worker; do
@@ -131,7 +149,7 @@ if [ "${DIST_OK}" = "1" ]; then
         # Скриптовые/тестовые артефакты (не ELF) не линкуются: для них ldd/glibc
         # неприменимы, и это отмечается, а не выдаётся за проверку.
         if is_elf "${bin}"; then
-            if ldd "${bin}" 2>/dev/null | grep -q libssl; then
+            if ldd "${bin}" 2>/dev/null | grep -c libssl >/dev/null; then
                 hard "target dist ${comp}/bin/${bin_name} links libssl"
             else
                 log "target dist ${comp}: no libssl in ldd"
@@ -148,8 +166,8 @@ if [ "${DIST_OK}" = "1" ]; then
         fi
     done
     if [ -n "${HUB_VERSION}" ] && [ -n "${WORKER_VERSION}" ]; then
-        hub_v="$(printf '%s' "${HUB_VERSION}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-        worker_v="$(printf '%s' "${WORKER_VERSION}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+        hub_v="$(printf '%s' "${HUB_VERSION}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p || true)"
+        worker_v="$(printf '%s' "${WORKER_VERSION}" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p || true)"
         if [ -n "${hub_v}" ] && [ "${hub_v}" = "${worker_v}" ]; then
             log "target dist hub and worker versions agree (${hub_v})"
         else

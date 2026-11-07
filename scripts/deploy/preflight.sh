@@ -71,7 +71,7 @@ PROC_IDS="$(proc_supervisor_ids "${WORKER_DATA}")"
 OWNERSHIP_OUT="$(python3 "${SCRIPT_DIR}/ownership-check.py" \
     "${SOURCE_DIR}/crates/canterlot-proto/proto/canterlot/worker/v1/ipc.proto" \
     "${WORKER_DATA}" 2>&1)" && OWNERSHIP_RC=0 || OWNERSHIP_RC=$?
-printf '%s\n' "${OWNERSHIP_OUT}" | head -1
+printf "%s\n" "${OWNERSHIP_OUT%%$'\n'*}"
 if [ "${OWNERSHIP_RC}" -ne 0 ]; then
     hard "ownership journal decode failed: $(printf '%s' "${OWNERSHIP_OUT}" | tr '\n' ';' | cut -c1-300)"
     OWNERSHIP_UNRELEASED=""
@@ -85,19 +85,19 @@ fi
 # Супервизор без живой строки хаба и живая строка без супервизора — жёстко.
 # shellcheck disable=SC2086
 for pid_id in ${PROC_IDS:-}; do
-    printf '%s\n' "${LIVE_EXECS}" | grep -qx "${pid_id}" \
+    in_lines "${pid_id}" "${LIVE_EXECS}" \
         || hard "supervisor runs for execution ${pid_id} with no live hub row"
 done
 # shellcheck disable=SC2086
 for exec_id in ${LIVE_EXECS:-}; do
-    printf '%s\n' "${PROC_IDS}" | grep -qx "${exec_id}" \
+    in_lines "${exec_id}" "${PROC_IDS}" \
         || hard "live hub execution ${exec_id} has no supervisor process"
 done
 # Неосвобождённая запись без строки хаба и без процесса — утечка: жёстко.
 # shellcheck disable=SC2086
 for own_id in ${OWNERSHIP_UNRELEASED:-}; do
-    if ! printf '%s\n' "${LIVE_EXECS}" | grep -qx "${own_id}"; then
-        if ! printf '%s\n' "${PROC_IDS}" | grep -qx "${own_id}"; then
+    if ! in_lines "${own_id}" "${LIVE_EXECS}"; then
+        if ! in_lines "${own_id}" "${PROC_IDS}"; then
             hard "orphan unreleased ownership for ${own_id}: no hub row, no supervisor"
         else
             soft "unreleased ownership for ${own_id} with supervisor but no hub row"
@@ -113,7 +113,7 @@ for exec_id in ${LIVE_EXECS:-}; do
     [ -d "${EXEC_DIR}" ] || { hard "exec dir missing for live execution ${exec_id}"; continue; }
     # Точное совпадение: любой агентский процесс (playwright-профиль в exec-dir)
     # может содержать exec id в командной строке и затмить сопровождение в head -1.
-    SUP_LINE="$(proc_ticks "${exec_id}" | grep supervise | grep -v mcp-relay | head -1)"
+    SUP_LINE="$(proc_ticks "${exec_id}" | grep supervise | grep -v mcp-relay | sed -n 1p)"
     [ -n "${SUP_LINE}" ] || { hard "no supervisor process for live execution ${exec_id}"; continue; }
     SUP_PID="${SUP_LINE%% *}"
     SUP_TICK="$(printf '%s' "${SUP_LINE}" | cut -d' ' -f2)"
@@ -237,7 +237,7 @@ else
     if ! CT_STATUS="$(ssh_pmx "pvesh get /nodes/${PROXMOX_NODE}/lxc/${HUB_CTID}/status/current --output-format json")"; then
         hard "cannot query CT ${HUB_CTID} lock state (pvesh/ssh failed)"
     else
-        CT_LOCK="$(printf '%s' "${CT_STATUS}" | grep -o 'lock[^,]*' | head -1 || true)"
+        CT_LOCK="$(printf '%s' "${CT_STATUS}" | grep -o 'lock[^,]*' | sed -n 1p || true)"
         if [ -n "${CT_LOCK}" ]; then
             hard "CT ${HUB_CTID} locked: ${CT_LOCK}"
         else

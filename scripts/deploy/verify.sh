@@ -52,7 +52,16 @@ require_release_id "${HUB_SHA}"
 require_release_id "${WEB_SHA}"
 require_release_id "${WORKER_SHA}"
 DIST_HUB="${DIST_BASE:-${REPO_ROOT}/dist}/${HUB_SHA}"
-[ "${DRY_RUN}" = "1" ] && log "dry-run mode: read-only verification of deployed releases"
+# Базовая проверка развёрнутого релиза (dry-run или репетиция): dist базы может
+# не быть в сборочном worktree, тогда CSP сверяется с записью самого релиза.
+BASELINE=0
+if [ "${DRY_RUN}" = "1" ] || is_rehearse; then BASELINE=1; fi
+if [ "${DRY_RUN}" = "1" ]; then
+    log "dry-run mode: read-only verification of deployed releases"
+    # Dry-run не пишет никогда: любая запись (а их здесь одна — loopback-проба)
+    # проходит через run_write в режиме репетиции.
+    DEPLOY_MODE=rehearse
+fi
 
 # Сравнения, которые нельзя выполнить: список строк (без повторов между чтениями).
 NOT_RUN_LIST=""
@@ -116,7 +125,7 @@ ack_gone_is_end() {
 # Живой супервизор исполнения по /proc (пусто — нет).
 sup_pid_of_exec() {
     local exec_id="$1" line
-    line="$(proc_ticks "${exec_id}" | grep supervise | grep -v mcp-relay | head -1 || true)"
+    line="$(proc_ticks "${exec_id}" | grep supervise | grep -v mcp-relay | sed -n 1p || true)"
     printf '%s' "${line%% *}"
 }
 
@@ -180,7 +189,7 @@ take_own_snapshot() {
         return
     fi
     for exec_id in ${live_ids:-}; do
-        sup_line="$(proc_ticks "${exec_id}" | grep supervise | grep -v mcp-relay | head -1)"
+        sup_line="$(proc_ticks "${exec_id}" | grep supervise | grep -v mcp-relay | sed -n 1p)"
         [ -n "${sup_line}" ] || { hard "no supervisor for live execution ${exec_id}"; continue; }
         sup_pid="${sup_line%% *}"; sup_tick="$(printf '%s' "${sup_line}" | cut -d' ' -f2)"
         OWN_SNAP+="${exec_id} sup ${sup_pid} ${sup_tick}"$'\n'
@@ -197,9 +206,10 @@ take_own_snapshot() {
     # убитый между чтениями релей не попадал в снимок и verify давал PASS.
     for d in /proc/[0-9]*; do
         cand="${d#/proc/}"
-        relay_id="$(proc_relay_exec_id "${cand}")"
+        _relay_exec_id "${cand}"
+        relay_id="${RELAY_ID}"
         [ -n "${relay_id}" ] || continue
-        printf '%s\n' "${live_ids}" | grep -qx "${relay_id}" || continue
+        in_lines "${relay_id}" "${live_ids}" || continue
         is_zombie "${cand}" && continue
         tick="$(tr ' ' '\n' <"/proc/${cand}/stat" 2>/dev/null | sed -n '22p')"
         OWN_SNAP+="${relay_id} relay ${cand} ${tick:-?}"$'\n'
@@ -271,12 +281,71 @@ snap_acks() {
 #    (возраст считает сам хаб, так что расхождение часов не влияет).
 # Соединение занимает секунды, поэтому ждём до CONNECT_WAIT секунд.
 CONNECT_WAIT="${CONNECT_WAIT:-60}"
-# Новые возможности воркера, без которых релиз не считается здоровым (как в логе).
-REQUIRED_CAPABILITIES="${REQUIRED_CAPABILITIES:-claude_histories_v1 path_probe_v1}"
-REQUIRED_HARNESSES="${REQUIRED_HARNESSES:-claude_code codex opencode}"
+# Что релиз ждёт от воркера, объявляет сам релиз: dist/<worker>/EXPECT (его пишет
+# scripts/release-build/in-container.sh из вывода `canterlot-worker capabilities`,
+# файл входит в SHA256SUMS). Формат: format=1, capabilities=…, harnesses=… через
+# пробел. Требуемые харнессы — объявленные релизом и включённые в worker.toml
+# (таблица есть и enabled не false; читаются только имена таблиц и ключ enabled).
+# Релиз, который намеренно убирает харнесс или возможность, не требует правки
+# toolkit. Dist без EXPECT (старые релизы) — прежний список с предупреждением.
+REQUIRED_CAPABILITIES_FALLBACK="${REQUIRED_CAPABILITIES:-claude_histories_v1 path_probe_v1}"
+REQUIRED_HARNESSES_FALLBACK="${REQUIRED_HARNESSES:-claude_code codex opencode}"
+EXPECT_FILE="${DIST_BASE:-${REPO_ROOT}/dist}/${WORKER_SHA}/EXPECT"
+EXPECT_SOURCE=""
+REQUIRED_CAPABILITIES=""
+REQUIRED_HARNESSES=""
+load_expectations() {
+    local line key value fmt="" caps="" harnesses="" enabled
+    if [ ! -f "${EXPECT_FILE}" ]; then
+        REQUIRED_CAPABILITIES="${REQUIRED_CAPABILITIES_FALLBACK}"
+        REQUIRED_HARNESSES="${REQUIRED_HARNESSES_FALLBACK}"
+        EXPECT_SOURCE="fallback"
+        log "WARNING: no ${EXPECT_FILE} (release built before EXPECT existed): falling back to the built-in list (capabilities: ${REQUIRED_CAPABILITIES}; harnesses: ${REQUIRED_HARNESSES})"
+        return 0
+    fi
+    while IFS= read -r line || [ -n "${line}" ]; do
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "${key}" in
+            format) fmt="${value}" ;;
+            capabilities) caps="${value}" ;;
+            harnesses) harnesses="${value}" ;;
+            '') ;;
+            *) die "unknown key in ${EXPECT_FILE}: ${key}" ;;
+        esac
+    done <"${EXPECT_FILE}"
+    [ "${fmt}" = "1" ] || die "unsupported ${EXPECT_FILE} format '${fmt}' (this toolkit knows format=1)"
+    [ -n "${caps}" ] || die "${EXPECT_FILE} declares no capabilities"
+    [[ "${caps} ${harnesses}" =~ ^[a-z0-9_\ ]+$ ]] || die "${EXPECT_FILE} has odd names"
+    # shellcheck disable=SC2086 # harnesses — имена через пробел, проверены выше
+    if ! enabled="$(python3 -I - "${WORKER_CONFIG}" ${harnesses} <<'PY'
+import sys, tomllib
+try:
+    cfg = tomllib.load(open(sys.argv[1], "rb"))
+except (OSError, tomllib.TOMLDecodeError) as exc:
+    print(f"cannot parse worker config: {type(exc).__name__}", file=sys.stderr)
+    sys.exit(1)
+on = []
+for name in sys.argv[2:]:
+    table = cfg.get(name)
+    if isinstance(table, dict) and table.get("enabled", True) is not False:
+        on.append(name)
+print(" ".join(on))
+PY
+    )"; then
+        die "cannot read harness tables from ${WORKER_CONFIG}"
+    fi
+    REQUIRED_CAPABILITIES="${caps}"
+    REQUIRED_HARNESSES="${enabled}"
+    EXPECT_SOURCE="${EXPECT_FILE}"
+    log "expectations from the release ${EXPECT_FILE}: capabilities ${caps}; harnesses declared ${harnesses}, enabled in ${WORKER_CONFIG##*/}: ${enabled:-none}"
+}
+load_expectations
+# Каталог машины наполняется через секунды после соединения: ждём до CATALOG_WAIT.
+CATALOG_WAIT="${CATALOG_WAIT:-60}"
 worker_machine_id() {
     local mid
-    mid="$(sed -n 's/^machine_id[ ]*=[ ]*"\([0-9a-fA-F-]*\)".*/\1/p' "${WORKER_CONFIG}" 2>/dev/null | head -1)"
+    mid="$(sed -n 's/^machine_id[ ]*=[ ]*"\([0-9a-fA-F-]*\)".*/\1/p' "${WORKER_CONFIG}" 2>/dev/null | sed -n 1p)"
     [[ "${mid}" =~ ^[0-9a-fA-F-]{36}$ ]] || return 1
     printf '%s' "${mid}"
 }
@@ -300,13 +369,14 @@ check_worker_connected() {
         if ! wlog="$(journalctl --user -u "${WORKER_UNIT}" --since "${since}" --no-pager)"; then
             problem="cannot read the worker journal since ${since}"
         else
-            last_state="$(printf '%s\n' "${wlog}" | grep -E 'session state state="' | tail -1 | sed -n 's/.*state="\([a-z_]*\)".*/\1/p')"
+            last_state="$(printf '%s\n' "${wlog}" | grep -E 'session state state="' | tail -1 | sed -n 's/.*state="\([a-z_]*\)".*/\1/p')" || last_state=""
             if [ "${last_state}" != "live" ]; then
                 problem="worker journal since ${since} shows no live session (last state: ${last_state:-none})"
             fi
         fi
         if [ -z "${problem}" ]; then
-            row="$(hub_psql "select availability || ':' || coalesce(floor(extract(epoch from (now() - reported_at)))::bigint::text, 'never') from machines where id = '${machine_id}'")"
+            row="$(hub_psql "select availability || ':' || coalesce(floor(extract(epoch from (now() - reported_at)))::bigint::text, 'never') from machines where id = '${machine_id}'")" \
+                || { hard "no fresh worker connection: cannot read the machine row"; return; }
             avail="${row%%:*}"; age="${row##*:}"
             if [ "${avail}" != "available" ]; then
                 problem="hub does not see the worker: machine availability is '${avail:-missing}'"
@@ -326,86 +396,141 @@ check_worker_connected() {
 }
 
 # Возможности и каталог харнессов после переподключения: имена, без значений.
+# Требования — из EXPECT релиза (load_expectations). Повтор до CATALOG_WAIT секунд.
 check_machine_catalog() {
-    local machine_id caps harnesses cap h missing=0
+    local machine_id caps harnesses cap h missing waited=0
     if ! machine_id="$(worker_machine_id)"; then
         hard "capability check: cannot read machine_id from ${WORKER_CONFIG}"
         return
     fi
-    if ! caps="$(hub_psql "select array_to_string(capabilities, ',') from machines where id = '${machine_id}'")"; then
-        hard "capability check: cannot read machines.capabilities"
-        return
-    fi
-    for cap in ${REQUIRED_CAPABILITIES}; do
-        case ",${caps}," in
-            *",${cap},"*) ;;
-            *) hard "capability check: machine lacks ${cap}"; missing=1 ;;
-        esac
+    while :; do
+        missing=""
+        if ! caps="$(hub_psql "select array_to_string(capabilities, ',') from machines where id = '${machine_id}'")"; then
+            hard "capability check: cannot read machines.capabilities"
+            return
+        fi
+        if ! harnesses="$(hub_psql "select string_agg(harness, ',' order by harness) from machine_harnesses where machine_id = '${machine_id}'")"; then
+            hard "harness catalog: cannot read machine_harnesses"
+            return
+        fi
+        for cap in ${REQUIRED_CAPABILITIES}; do
+            case ",${caps}," in
+                *",${cap},"*) ;;
+                *) missing+="capability ${cap}; " ;;
+            esac
+        done
+        for h in ${REQUIRED_HARNESSES}; do
+            case ",${harnesses}," in
+                *",${h},"*) ;;
+                *) missing+="harness ${h}; " ;;
+            esac
+        done
+        [ -n "${missing}" ] || break
+        if [ "${waited}" -ge "${CATALOG_WAIT}" ]; then
+            for cap in ${REQUIRED_CAPABILITIES}; do
+                case ",${caps}," in *",${cap},"*) ;; *) hard "capability check: machine lacks ${cap}" ;; esac
+            done
+            for h in ${REQUIRED_HARNESSES}; do
+                case ",${harnesses}," in *",${h},"*) ;; *) hard "harness catalog: machine lacks ${h}" ;; esac
+            done
+            return
+        fi
+        sleep 1
+        waited=$((waited + 1))
     done
-    [ "${missing}" = "1" ] || log "capabilities present: ${REQUIRED_CAPABILITIES// /, }"
-    if ! harnesses="$(hub_psql "select string_agg(harness, ',' order by harness) from machine_harnesses where machine_id = '${machine_id}'")"; then
-        hard "harness catalog: cannot read machine_harnesses"
-        return
-    fi
-    missing=0
-    for h in ${REQUIRED_HARNESSES}; do
-        case ",${harnesses}," in
-            *",${h},"*) ;;
-            *) hard "harness catalog: machine lacks ${h}"; missing=1 ;;
-        esac
-    done
-    [ "${missing}" = "1" ] || log "harness catalog has ${REQUIRED_HARNESSES// /, }"
+    log "capabilities present: ${REQUIRED_CAPABILITIES// /, } (source: ${EXPECT_SOURCE})"
+    log "harness catalog has ${REQUIRED_HARNESSES// /, }${REQUIRED_HARNESSES:+ }(machine reports: ${harnesses:-none})"
 }
 
 # Precompressed Content-Encoding: тот же Caddyfile-фрагмент, что у живого сайта,
-# но на одноразовом loopback-процессе ВНУТРИ контейнера. Живой слушатель закрыт
-# Authelia и без сессии отдаёт 302, поэтому проверяется именно раздача файлов.
-# В dry-run шаг не выполняется (это запуск процесса и временный конфиг) и
-# печатается SKIPPED с причиной.
-check_precompressed() {
-    local asset enc got out
-    if [ "${DRY_RUN}" = "1" ]; then
-        log "SKIPPED: precompressed Content-Encoding (dry-run: would start a one-off loopback Caddy inside the container)"
-        return 0
-    fi
-    if ! asset="$(ssh_web "cd '${WEB_RELEASES}/${WEB_SHA}' && find _app/immutable -type f -name '*.js' | LC_ALL=C sort | head -1")"; then
-        hard "precompressed check: cannot pick an asset from release ${WEB_SHA}"
-        return
-    fi
-    [ -n "${asset}" ] || { hard "precompressed check: no JS asset in release ${WEB_SHA}"; return; }
-    for enc in br zstd gzip; do
-        # Скрипт фиксирован, значения передаются в контейнер через -e: никакой
-        # интерполяции имён файлов в shell-текст.
-        if ! out="$( {
-            cat <<'REMOTE'
-set -eu
+# но на одноразовом loopback-процессе ВНУТРИ контейнера (решение владельца:
+# допустимо в боевом прогоне). Живой слушатель закрыт Authelia и без сессии
+# отдаёт 302, поэтому проверяется именно раздача файлов. Процесс один на все три
+# кодировки, слушает только 127.0.0.1:18080, живёт под timeout и гасится
+# ловушкой на EXIT/INT/TERM/HUP; его старт и останов попадают в журнал, а после
+# пробы отдельное чтение доказывает, что порт закрыт. Запуск — запись через
+# run_write: в репетиции он только печатается, в dry-run — SKIPPED с причиной.
+# shellcheck disable=SC2016 # скрипт раскрывается внутри контейнера
+PROBE_SCRIPT='set -eu
 d="$(mktemp -d)"
 pid=""
-cleanup() { if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi; rm -rf "$d"; }
+cleanup() {
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        echo "probe: loopback caddy pid $pid stopped"
+    fi
+    rm -rf "$d"
+}
 trap cleanup EXIT
-printf '%s\n' '{' '  admin off' '  auto_https off' '}' ':18080 {' '  root * /srv/canterlot/web/build' '  file_server {' '    precompressed zstd br gzip' '  }' '}' >"$d/Caddyfile"
-caddy run --config "$d/Caddyfile" --adapter caddyfile >/dev/null 2>&1 &
+trap "exit 1" INT TERM HUP
+if curl -s -o /dev/null http://127.0.0.1:18080/ 2>/dev/null; then echo "probe: port 18080 already in use"; exit 4; fi
+printf "%s\n" "{" "  admin off" "  auto_https off" "}" ":18080 {" "  bind 127.0.0.1" "  root * /srv/canterlot/web/build" "  file_server {" "    precompressed zstd br gzip" "  }" "}" >"$d/Caddyfile"
+if command -v timeout >/dev/null 2>&1; then
+    timeout "$LIFETIME" caddy run --config "$d/Caddyfile" --adapter caddyfile >/dev/null 2>&1 &
+else
+    caddy run --config "$d/Caddyfile" --adapter caddyfile >/dev/null 2>&1 &
+fi
 pid=$!
+echo "probe: loopback caddy pid $pid started on 127.0.0.1:18080"
 i=0
 while [ "$i" -lt 50 ]; do
     if curl -fsS -o /dev/null http://127.0.0.1:18080/200.html 2>/dev/null; then break; fi
     i=$((i + 1))
     sleep 0.1
 done
-curl -sS -D - -o /dev/null -H "Accept-Encoding: $ENC" "http://127.0.0.1:18080/$ASSET"
-REMOTE
-        } | ssh -o BatchMode=yes -o ConnectTimeout=10 "${WEB_SSH}" \
-            "docker exec -i -e ASSET=$(shq "${asset}") -e ENC=$(shq "${enc}") $(shq "${WEB_CONTAINER}") sh -s" 2>/dev/null)"; then
-            hard "precompressed check: probe failed for ${enc}"
-            return
-        fi
-        got="$(printf '%s' "${out}" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ee]ncoding:[[:space:]]*//p' | head -1)"
+for enc in $ENCS; do
+    echo "probe-enc: $enc"
+    curl -sS -D - -o /dev/null -H "Accept-Encoding: $enc" "http://127.0.0.1:18080/$ASSET"
+done'
+PROBE_LIFETIME="${PROBE_LIFETIME:-60}"
+check_precompressed() {
+    local asset enc got out list
+    if [ "${DRY_RUN}" = "1" ]; then
+        log "SKIPPED: precompressed Content-Encoding (dry-run: would start a one-off loopback Caddy inside the container)"
+        return 0
+    fi
+    if ! list="$(ssh_web "cd '${WEB_RELEASES}/${WEB_SHA}' && find _app/immutable -type f -name '*.js'")"; then
+        hard "precompressed check: cannot pick an asset from release ${WEB_SHA}"
+        return
+    fi
+    asset="$(printf '%s\n' "${list}" | LC_ALL=C sort | sed -n 1p)"
+    [ -n "${asset}" ] || { hard "precompressed check: no JS asset in release ${WEB_SHA}"; return; }
+    log "precompressed probe: starting a one-off loopback Caddy in ${WEB_CONTAINER} (127.0.0.1:18080, timeout ${PROBE_LIFETIME}s, trap-stopped) for ${asset}"
+    # Скрипт фиксирован, значения уходят в контейнер через -e: никакой
+    # интерполяции имён файлов в shell-текст.
+    if ! out="$(printf '%s\n' "${PROBE_SCRIPT}" | run_write_pipe "loopback caddy probe" \
+            ssh -o BatchMode=yes -o ConnectTimeout=10 "${WEB_SSH}" \
+            "docker exec -i -e ASSET=$(shq "${asset}") -e ENCS='br zstd gzip' -e LIFETIME=$(shq "${PROBE_LIFETIME}") $(shq "${WEB_CONTAINER}") sh -s")"; then
+        hard "precompressed check: probe failed ($(printf '%s\n' "${out}" | grep '^probe:' | tr '\n' ' '))"
+        return
+    fi
+    if is_rehearse; then
+        log "rehearse: loopback Caddy probe printed above, not started"
+        return 0
+    fi
+    printf '%s\n' "${out}" | grep '^probe:' | while IFS= read -r line; do log "${line}"; done
+    for enc in br zstd gzip; do
+        got="$(printf '%s\n' "${out}" | tr -d '\r' | awk -v enc="${enc}" '
+            /^probe-enc: / { cur = $2; next }
+            cur == enc && tolower($0) ~ /^content-encoding:/ { sub(/^[^:]*:[ \t]*/, ""); if (val == "") val = $0 }
+            END { print val }')"
         if [ "${got}" = "${enc}" ]; then
             log "precompressed ${enc}: Content-Encoding ${got} on ${asset}"
         else
             hard "precompressed ${enc}: got '${got:-none}' on ${asset}"
         fi
     done
+    case "${out}" in
+        *"probe: loopback caddy pid "*" stopped"*) ;;
+        *) hard "precompressed check: the loopback Caddy did not report its stop" ;;
+    esac
+    if out="$(ssh_web "docker exec $(shq "${WEB_CONTAINER}") sh -c 'if curl -s -o /dev/null http://127.0.0.1:18080/ 2>/dev/null; then echo open; else echo closed; fi'")" \
+            && [ "${out}" = "closed" ]; then
+        log "precompressed probe: port 18080 closed again inside ${WEB_CONTAINER}"
+    else
+        hard "precompressed check: port 18080 still answers inside ${WEB_CONTAINER} after the probe (${out:-unreadable})"
+    fi
 }
 
 # WARN/ERROR хаба сравниваются с базой, а не с нулём: у прода есть собственный
@@ -435,10 +560,10 @@ check_hub_levels() {
     local -A base_n=() cur_n=()
     local n key b allowed level kind summary=""
     while IFS=$'\t' read -r n key; do
-        [ -n "${key}" ] && base_n["${key}"]="${n}"
+        if [ -n "${key}" ]; then base_n["${key}"]="${n}"; fi
     done < <(printf '%s\n' "${HUB_BASELOG}" | level_kind_counts)
     while IFS=$'\t' read -r n key; do
-        [ -n "${key}" ] && cur_n["${key}"]="${n}"
+        if [ -n "${key}" ]; then cur_n["${key}"]="${n}"; fi
     done < <(printf '%s\n' "${HUB_ERRLOG}" | level_kind_counts)
     while IFS= read -r key; do
         [ -n "${key}" ] || continue
@@ -546,7 +671,7 @@ verify_read() {
     fi
     log "live executions: ${live_summary:-none}"
     for exec_id in ${live_ids:-}; do
-        log "exec ${exec_id}: sup=[$(proc_ticks "${exec_id}" | grep supervise | head -1)]"
+        log "exec ${exec_id}: sup=[$(proc_ticks "${exec_id}" | grep supervise | sed -n 1p)]"
         SJ="$(read_ack "${WORKER_DATA}/executions/${exec_id}/sj/ack" || echo unreadable)"
         if [ "${SJ}" = "unreadable" ] || [ -z "${SJ}" ]; then
             ack_gone_is_end "${exec_id}" "sj ack not readable" || hard "cannot read sj ack for ${exec_id}"
@@ -594,7 +719,7 @@ verify_read() {
         log "no dist CSP compare: PWA is on ${WEB_SHA}, hub on ${HUB_SHA} (the container is compared with the env file only)"
     elif [ "${CONTAINER_CSP_READ}" != "1" ]; then
         log "dist CSP compare skipped: the container CSP was not readable (already counted)"
-    elif [ ! -d "${DIST_HUB}" ] && [ "${DRY_RUN}" = "1" ]; then
+    elif [ ! -d "${DIST_HUB}" ] && [ "${BASELINE}" = "1" ]; then
         # Dry-run смотрит на развёрнутую базу, чьего dist в сборочном worktree может не
         # быть. Тогда сверяем контейнер с записью самого развёрнутого релиза
         # (canterlot.env.<sha>, её CSP пишет cutover из dist этого релиза); значения не
@@ -640,8 +765,20 @@ if [ -n "${STATE_FILE}" ]; then
 fi
 take_own_snapshot
 snap_acks
-log "waiting 60s between reads"
-sleep 60
+# Пауза между чтениями настраивается (VERIFY_READ_GAP); боевое значение — 60 с.
+VERIFY_READ_GAP="${VERIFY_READ_GAP:-60}"
+log "waiting ${VERIFY_READ_GAP}s between reads"
+# VERIFY_GAP_RELEASE (только для тестов): пауза кончается раньше, как только этот
+# файл появится, — событие вместо гонки с фиксированным окном.
+if [ -n "${VERIFY_GAP_RELEASE:-}" ]; then
+    GAP_TICKS=0
+    while [ ! -e "${VERIFY_GAP_RELEASE}" ] && [ "${GAP_TICKS}" -lt $((VERIFY_READ_GAP * 20)) ]; do
+        sleep 0.05
+        GAP_TICKS=$((GAP_TICKS + 1))
+    done
+else
+    sleep "${VERIFY_READ_GAP}"
+fi
 verify_read "2"
 if [ -n "${STATE_FILE}" ] && [ -f "${STATE_FILE}" ]; then
     check_ticks_file "${STATE_FILE}" "read 2"
