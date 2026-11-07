@@ -1601,6 +1601,19 @@
   --motion-base-theme-reveal: 420ms;
   --duration-theme-reveal: calc(var(--motion-base-theme-reveal) * var(--motion-scale));
   --ease-theme-reveal: cubic-bezier(.4, 0, .2, 1);
+  /* Просмотр картинки: тёмная сцена во весь экран не зависит от темы, как в галереях. */
+  --viewer-bg: #000000;
+  --viewer-text: #f4f4f4;
+  --viewer-muted: #c4c4c4;
+  --viewer-control: color-mix(in srgb, #1c1c1c 72%, transparent);
+  --viewer-control-hover: color-mix(in srgb, #3a3a3a 80%, transparent);
+  --viewer-gap: var(--s10);
+  /* Кадр въезжает из миниатюры и уходит в неё; без движения только смена прозрачности. */
+  --motion-base-viewer-open: 280ms;
+  --duration-viewer-open: calc(var(--motion-base-viewer-open) * var(--motion-scale));
+  --ease-viewer-open: cubic-bezier(.22, 1, .36, 1);
+  --motion-base-viewer-fade: 160ms;
+  --duration-viewer-fade: calc(var(--motion-base-viewer-fade) * var(--motion-scale));
 }
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-scale: 0 !important;
@@ -1630,6 +1643,8 @@
     --duration-gauge: 0ms;
     --duration-branch-grow: 0ms;
     --duration-theme-reveal: 0ms;
+    --duration-viewer-open: 0ms;
+    --duration-viewer-fade: 0ms;
   }
 }
 

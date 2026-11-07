@@ -67,3 +67,24 @@ export function cubicBezier(x1: number, y1: number, x2: number, y2: number): (t:
     return at(y1, y2, s);
   };
 }
+/**
+ * Длительность смены прозрачности. Она ничего не сдвигает, поэтому при выключенном движении не пропадает,
+ * а идёт с базовой длительностью токена: просмотрщик картинки так появляется вместо въезда из миниатюры.
+ */
+export function fadeMs(token: DurationToken): number {
+  if (typeof document === 'undefined') return 0;
+  if (prefersReducedMotion()) {
+    // Пробу переходом здесь гасит правило reduced motion, а база токена записана готовым числом.
+    const base = getComputedStyle(document.documentElement).getPropertyValue(token.replace('--duration-', '--motion-base-')).trim();
+    const numeric = parseFloat(base);
+    return Number.isFinite(numeric) ? numeric * (base.endsWith('ms') ? 1 : 1000) : 0;
+  }
+  const probe = document.createElement('span');
+  probe.style.transitionDuration = `var(${token})`;
+  probe.hidden = true;
+  document.documentElement.append(probe);
+  const value = getComputedStyle(probe).transitionDuration;
+  probe.remove();
+  const numeric = parseFloat(value);
+  return Number.isFinite(numeric) ? numeric * (value.endsWith('ms') ? 1 : 1000) : 0;
+}

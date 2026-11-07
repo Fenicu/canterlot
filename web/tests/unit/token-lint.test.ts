@@ -27,8 +27,10 @@ describe('tokens', () => {
       'element.style.animationDuration = "200ms";',
       'element.style.transitionDuration = "200ms";',
       'element.animate([], { duration: scaledDurationMs(200) });',
-      'scaledDurationMs(200);'
+      'scaledDurationMs(200);',
+      "element.animate([], { duration: fadeMs('--unscaled') });"
     ]) expect(lintFile('bad.ts', code).map(v => v.rule)).toContain('all_durations_go_through_the_motion_scale');
+    expect(lintFile('good.ts', "element.animate([], { duration: fadeMs('--duration-viewer-fade') });")).toEqual([]);
   });
   test('raw_length_detects_transforms_flex_and_background_positions', () => {
     expect(lintFile('bad.css', '.a { transform: translateY(12px); }').map(v => v.rule)).toContain('raw-length');

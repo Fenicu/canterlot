@@ -106,7 +106,7 @@ export function lintFile(path, text) {
           }
         }
         if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
-          if (node.expression.text === 'durationMs' && (!node.arguments[0] || !ts.isStringLiteral(node.arguments[0]) || !allowed.has(node.arguments[0].text))) {
+          if (['durationMs', 'fadeMs'].includes(node.expression.text) && (!node.arguments[0] || !ts.isStringLiteral(node.arguments[0]) || !allowed.has(node.arguments[0].text))) {
             add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.getText(source));
           }
           if (node.expression.text === 'scaledDurationMs' && (!node.arguments[0] || ts.isNumericLiteral(node.arguments[0]) || (ts.isStringLiteral(node.arguments[0]) && !allowed.has(node.arguments[0].text)))) {
@@ -116,8 +116,9 @@ export function lintFile(path, text) {
         if (ts.isPropertyAssignment(node) && ['duration', 'delay'].includes(node.name.getText(source))) {
           const text = node.initializer.getText(source);
           const isCountdownDeadline = /countdown(?:\?\.|\.)durationMs\b/.test(text);
+          // fadeMs читает тот же публичный токен, но при выключенном движении берёт его базу: прозрачность ничего не сдвигает.
           const isDurationMsCall = ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression) &&
-            node.initializer.expression.text === 'durationMs' && node.initializer.arguments[0] &&
+            ['durationMs', 'fadeMs'].includes(node.initializer.expression.text) && node.initializer.arguments[0] &&
             ts.isStringLiteral(node.initializer.arguments[0]) && allowed.has(node.initializer.arguments[0].text);
           const isScaledDurationToken = ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression) &&
             node.initializer.expression.text === 'scaledDurationMs' && node.initializer.arguments[0] &&
