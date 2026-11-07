@@ -132,6 +132,19 @@ async fn state(pool: &PgPool, input_id: Uuid) -> InputState {
         .unwrap()
 }
 
+async fn delivery_row(
+    pool: &PgPool,
+    command_id: Uuid,
+) -> (String, Option<String>, i32, Option<Value>) {
+    sqlx::query_as(
+        "select delivery_state, last_status, last_status_rank, result from commands where id = $1",
+    )
+    .bind(command_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 async fn slot(pool: &PgPool, conversation_id: Uuid) -> RunSlot {
     let (name, id, attempt): (String, Option<Uuid>, Option<i32>) = sqlx::query_as(
         "select run_slot, run_slot_input_id, run_slot_attempt from queue_state where conversation_id = $1",
@@ -409,6 +422,13 @@ async fn turn_end_between_click_and_delivery_becomes_next_turn(pool: PgPool) -> 
         }
     ));
     assert_eq!(state(&pool, second_id).await, InputState::Queued);
+    // Отложенное вливание не завершает исходную выдачу: она ещё ждёт
+    // обычного хода, который позже переведёт её в pending.
+    let (delivery, last_status, rank, result) = delivery_row(&pool, second_cmd).await;
+    assert_eq!(delivery, "held");
+    assert!(last_status.is_none(), "held delivery has no outcome");
+    assert_eq!(rank, 0);
+    assert!(result.is_none(), "held delivery has no result");
     // Обычная выдача следующим ходом — ровно один раз, без дубля.
     assert!(matches!(
         gate_dispatch(&pool, seed.conversation_id).await,
@@ -465,6 +485,13 @@ async fn steer_rejected_and_unconfirmed(pool: PgPool) -> TestResult {
         slot(&pool, seed.conversation_id).await,
         RunSlot::Running { input_id: first_id }
     );
+    // Отказ вливания не завершает исходную выдачу: ввод вернулся в очередь
+    // и ждёт обычного хода.
+    let (delivery, last_status, rank, result) = delivery_row(&pool, second_cmd).await;
+    assert_eq!(delivery, "held");
+    assert!(last_status.is_none(), "held delivery has no outcome");
+    assert_eq!(rank, 0);
+    assert!(result.is_none(), "held delivery has no result");
     let (_, delivery, _) = steer_row(&pool, second_cmd).await;
     assert_eq!(delivery, "completed");
 
@@ -491,7 +518,13 @@ async fn steer_rejected_and_unconfirmed(pool: PgPool) -> TestResult {
         slot(&pool, seed.conversation_id).await,
         RunSlot::Running { input_id: first_id }
     );
-    // Позднее доказательство снимает паузу, ход тот же.
+    // Неподтверждённый приём тоже оставляет выдачу ждать исхода.
+    let (delivery, last_status, rank, result) = delivery_row(&pool, third_cmd).await;
+    assert_eq!(delivery, "held");
+    assert!(last_status.is_none(), "held delivery has no outcome");
+    assert_eq!(rank, 0);
+    assert!(result.is_none(), "held delivery has no result");
+    // Позднее доказательство снимает паузу, ход тот же и завершает удержанную выдачу.
     let outcome = apply_steer(&pool, steer_command_id, InputReceipt::Accepted).await;
     assert!(matches!(
         outcome,
@@ -504,7 +537,15 @@ async fn steer_rejected_and_unconfirmed(pool: PgPool) -> TestResult {
         slot(&pool, seed.conversation_id).await,
         RunSlot::Running { input_id: first_id }
     );
-    let _ = (second_cmd, third_cmd);
+    assert_eq!(
+        delivery_row(&pool, third_cmd).await,
+        (
+            "completed".to_owned(),
+            Some("accepted".to_owned()),
+            3,
+            Some(json!({"superseded": "accepted"}))
+        )
+    );
     Ok(())
 }
 
