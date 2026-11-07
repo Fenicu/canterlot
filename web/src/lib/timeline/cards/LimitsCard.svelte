@@ -22,7 +22,7 @@
               <span class="meter" data-window={meter.window}>
                 <span class="tag">{meterTag(meter.window)}</span>
                 <span class="bar" aria-hidden="true"><Gauge value={meter.remaining} tone={meter.tone} label="{row.label} {meterTag(meter.window)}" /></span>
-                <b class="pct" data-tone={meter.tone}><span class="sr-only">осталось </span>{meter.text}</b>
+                <b class="pct" data-tone={meter.tone}><span class="sr-only">осталось&nbsp;</span>{meter.text}</b>
               </span>
             {/each}
           {/if}

@@ -5,7 +5,7 @@
   import CardLine from './CardLine.svelte';
   import CardShell from './CardShell.svelte';
   import { firstLine } from './copy';
-  import { placeLine, queueLine, spawnWord, type SpawnData } from './defs/sessions';
+  import { placeLine, queueLine, spawnExecutor, spawnWord, type SpawnData } from './defs/sessions';
   import type { CardProps } from './types';
 
   let { call, data, line, link, grows, env }: CardProps<SpawnData> = $props();
@@ -32,7 +32,9 @@
     const titles = catalogTitles(runtime?.machines.items.values() ?? []);
     return routeLine(decision, routingTitles.title(decision.task_type), titles);
   });
-  const meta = $derived([route ? '' : data.executor, placeLine(data)].filter(Boolean).join(' · '));
+  // Название модели по каталогу машин, как в строке маршрута; без каталога — по идентификатору.
+  const executor = $derived(spawnExecutor(data.harness, data.model, data.effort, catalogTitles(runtime?.machines.items.values() ?? [])));
+  const meta = $derived([route ? '' : executor, placeLine(data)].filter(Boolean).join(' · '));
   const queued = $derived(queueLine(data, env.now));
   const briefKey = $derived(`brief:${call.block.id}`);
   const briefOpen = $derived(env.folds.isOpen(briefKey));

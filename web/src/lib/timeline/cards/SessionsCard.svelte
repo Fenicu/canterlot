@@ -26,9 +26,9 @@
 </CardShell>
 
 <style>
-  .list { display: flex; flex-wrap: wrap; gap: var(--s0) var(--s6); margin: var(--s0); padding: var(--s0); list-style: none; }
+  .list { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s6); margin: var(--s0); padding: var(--s0); list-style: none; }
   li { display: inline-flex; align-items: center; gap: var(--s3); min-width: 0; max-width: 100%; }
-  a { display: inline-flex; align-items: center; min-width: 0; min-height: var(--target); overflow: hidden; color: var(--accent-link); text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
+  a { min-width: 0; overflow: hidden; color: var(--accent-link); text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
   .word { flex: none; color: var(--secondary); white-space: nowrap; }
   .word[data-tone='accent'] { color: var(--accent-link); }
   .word[data-tone='success'] { color: var(--success); }

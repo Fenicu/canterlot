@@ -1,6 +1,6 @@
 // Карточки инструментов сессий canterlot: запуск, приёмка, сообщение, просмотр и управление.
 import { fmt } from '#lib/format/ru.js';
-import { effortName, pairName } from '#lib/routing/decision.js';
+import { effortName, pairName, type ModelTitles } from '#lib/routing/decision.js';
 import { itemReason } from '#lib/routing/queue.js';
 import type { HubEvent } from '#lib/timeline/hubEvent.js';
 import { bool, isObject, list, num, obj, str, type JsonObject } from '../json';
@@ -30,6 +30,9 @@ export interface SpawnData {
   sessionId: string;
   /** Исполнитель словами: «DeepSeek · высокое» или «Claude · Opus 1M». */
   executor: string;
+  harness: string;
+  model: string;
+  effort: string;
   /** Тип задачи маршрута, если запуск шёл по маршруту. */
   route: string;
   routing: JsonObject | null;
@@ -46,9 +49,9 @@ export interface SpawnData {
 
 const HARNESS_IDS: Record<string, string> = { claude: 'claude_code', claude_code: 'claude_code', codex: 'codex', opencode: 'opencode', antigravity: 'antigravity' };
 
-export function spawnExecutor(harness: string, model: string, effort: string): string {
+export function spawnExecutor(harness: string, model: string, effort: string, titles?: ModelTitles): string {
   if (!harness && !model) return effort ? effortName(effort) : '';
-  const pair = pairName(HARNESS_IDS[harness] ?? harness, model);
+  const pair = pairName(HARNESS_IDS[harness] ?? harness, model, titles);
   return [pair, effort ? effortName(effort) : ''].filter(Boolean).join(' · ');
 }
 
@@ -103,6 +106,9 @@ export const spawn: CardLogic<SpawnData> = {
       briefCut: call.partial && brief.length > 0,
       sessionId,
       executor: spawnExecutor(harness, model, effort),
+      harness,
+      model,
+      effort,
       route: str(routing?.task_type) || str(routeInput.task_type),
       routing,
       isolated: bool(input.isolated) === true || Object.keys(worktree).length > 0,
