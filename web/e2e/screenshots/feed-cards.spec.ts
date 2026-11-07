@@ -2,7 +2,7 @@
 // Файлы ложатся в FEED_CARDS_OUT (по умолчанию /tmp/feed-cards).
 import { test, expect, type Browser, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
@@ -17,7 +17,7 @@ async function open(browser: Browser, opts: { width: number; height: number; the
     viewport: { width: opts.width, height: opts.height },
     deviceScaleFactor: 2,
     colorScheme: opts.theme,
-    ...(opts.video ? { recordVideo: { dir: opts.video, size: { width: opts.width * 2, height: opts.height * 2 } } } : {})
+    ...(opts.video ? { recordVideo: { dir: opts.video, size: opts.width > 1000 ? { width: opts.width, height: opts.height } : { width: opts.width * 2, height: opts.height * 2 } } } : {})
   });
   await context.addInitScript((value) => localStorage.setItem('canterlot.theme', value), opts.theme);
   const page = await context.newPage();
@@ -66,7 +66,7 @@ async function scrollTo(page: Page, selector: string, ms = 1600): Promise<void> 
 test.skip(process.env.PW_SCREENSHOTS !== '1', 'снимки для ревью снимаются отдельно');
 
 test('feed_cards_video_and_screenshots', async ({ browser }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(420_000);
   mkdirSync(OUT, { recursive: true });
   const raw = resolve(OUT, 'raw-video');
   rmSync(raw, { recursive: true, force: true });
@@ -89,8 +89,15 @@ test('feed_cards_video_and_screenshots', async ({ browser }) => {
     await close();
   }
 
-  // Видео: телефон 390×844, тёмная тема.
-  const { page, hub, api, seed, close } = await open(browser, { width: 390, height: 844, theme: 'dark', video: raw });
+  // Видео: телефон 390×844 тёмный и рабочий стол 1440×900 светлый, один сценарий.
+  await record(browser, { width: 390, height: 844, theme: 'dark', name: 'feed-cards-phone-dark', scale: 780, raw });
+  await record(browser, { width: 1440, height: 900, theme: 'light', name: 'feed-cards-desktop-light', scale: 1440, raw });
+  rmSync(raw, { recursive: true, force: true });
+});
+
+/** Сценарий видео: лента целиком, живой запуск делегата, обновление плана, просмотр файла и сырой вызов. */
+async function record(browser: Browser, opts: { width: number; height: number; theme: 'dark' | 'light'; name: string; scale: number; raw: string }): Promise<void> {
+  const { page, hub, api, seed, close } = await open(browser, { width: opts.width, height: opts.height, theme: opts.theme, video: opts.raw });
   const video = page.video();
   await page.locator('.feed').evaluate((node) => { node.scrollTop = 0; });
   await page.waitForTimeout(1500);
@@ -138,8 +145,7 @@ test('feed_cards_video_and_screenshots', async ({ browser }) => {
   await close();
 
   const webm = await video!.path();
-  const mp4 = resolve(OUT, 'feed-cards-phone-dark.mp4');
-  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', webm, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '22', '-movflags', '+faststart', '-vf', 'scale=780:-2', mp4]);
-  renameSync(webm, resolve(OUT, 'feed-cards-phone-dark.webm'));
-  rmSync(raw, { recursive: true, force: true });
-});
+  const mp4 = resolve(OUT, `${opts.name}.mp4`);
+  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', webm, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '22', '-movflags', '+faststart', '-vf', `scale=${opts.scale}:-2`, mp4]);
+  rmSync(webm, { force: true });
+}
