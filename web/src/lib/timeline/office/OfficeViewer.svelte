@@ -143,4 +143,6 @@
   .document-text :global(:is(td, th) > p) { margin-block: var(--s0); }
   .document-text :global(:is(td, th) > p + p) { margin-top: var(--s2); }
   .document-text :global(:is(sup, sub)) { font-size: var(--fs-xs); }
+  /* Ссылка, у которой очистка забрала адрес (javascript:, якорь), остаётся просто текстом и не зовёт нажать. */
+  .document-text :global(a:not([href])) { color: inherit; text-decoration: none; }
 </style>

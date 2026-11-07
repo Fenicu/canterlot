@@ -128,8 +128,9 @@
     {:else}
       <table style:width={tableWidth} aria-rowcount={sheet.rows.length}>
         <colgroup>{#each sheet.widths as chars, column (column)}<col style:width={width(chars)} />{/each}</colgroup>
+        <!-- Подпись числового столбца стоит над числами, у правого края. -->
         <thead>
-          <tr aria-rowindex="1">{#each head as cell, column (column)}<th scope="col" data-numeric={cell.numeric || undefined} title={long(cell.text)}>{cell.text}</th>{/each}</tr>
+          <tr aria-rowindex="1">{#each head as cell, column (column)}<th scope="col" data-numeric={cell.numeric || body[0]?.[column]?.numeric || undefined} title={long(cell.text)}>{cell.text}</th>{/each}</tr>
         </thead>
         <tbody>
           {#if start > 0}<tr class="spacer" aria-hidden="true"><td colspan={head.length} style:height={`${start * step}px`}></td></tr>{/if}

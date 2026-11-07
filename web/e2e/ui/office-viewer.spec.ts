@@ -177,6 +177,7 @@ test('a_docx_from_a_share_file_card_renders_headings_lists_a_table_a_blob_image_
   await expect(docs).toHaveAttribute('rel', /noopener noreferrer/);
   await expect(dialog.getByText('Опасная ссылка')).toBeVisible();
   await expect(dialog.getByRole('link', { name: 'Опасная ссылка' })).toHaveCount(0);
+  await expect(text.getByText('Опасная ссылка')).toHaveCSS('text-decoration-line', 'none');
   await expect(dialog.locator('a[href^="javascript"], script, [style]')).toHaveCount(0);
 
   // Таблица прокручивается в своей рамке, страница вбок не едет.
@@ -207,6 +208,7 @@ test('an_xlsx_from_an_agent_answer_switches_sheets_keeps_the_header_sticky_and_n
   await expect(profit.locator('th, td')).toHaveText(['Прибыль', '420 000,5', '31.10.2026, 18:30', 'ИСТИНА']);
   await expect(grid.locator('tbody tr').first().locator('td')).toHaveText(['1 250 000,5', '01.10.2026', 'ИСТИНА']);
   await expect(grid.locator('tbody tr').first().locator('td').first()).toHaveCSS('text-align', 'right');
+  await expect(grid.locator('thead th').nth(1)).toHaveCSS('text-align', 'right');
   await expect(dialog.locator('[data-role="sheet-cap"]')).toHaveCount(0);
 
   await tabs.nth(1).click();
