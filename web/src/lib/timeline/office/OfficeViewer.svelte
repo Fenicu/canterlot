@@ -2,7 +2,7 @@
   import { untrack } from 'svelte';
   import { fmt } from '#lib/format/ru.js';
   import Html from '#lib/render/Html.svelte';
-  import { sanitizeDocument } from '#lib/render/sanitize.js';
+  import { sanitizeDocument } from '#lib/render/documentSanitize.js';
   import type { AttachmentRef } from '#lib/stores/inputs.js';
   import { OFFICE_VIEW_MAX_BYTES, attachmentUrl, officeFitsViewer, officeLabel, type OfficeKind } from '#lib/timeline/attachments.js';
   import { DocumentTooLarge, fetchDocumentBytes } from '#lib/timeline/document.js';

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeDocument, sanitizeRendered } from '#lib/render/sanitize.js';
+import { sanitizeDocument } from '#lib/render/documentSanitize.js';
+import { sanitizeRendered } from '#lib/render/sanitize.js';
 
 const host = (html: string) => new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html').body;
 
