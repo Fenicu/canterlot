@@ -210,7 +210,7 @@
 </script>
 
 
-<div class="chat-header" role="region" aria-label="Шапка чата">
+<div class="chat-header" role="region" aria-label="Шапка чата" data-top-chrome>
 	<div class="topbar" class:tall={!!parentId}>
 		{#if !pane.desktop}
 			<a

@@ -19,7 +19,7 @@
   }
 </script>
 
-<div class="search" role="search">
+<div class="search" role="search" data-top-chrome>
   <label>
     <span class="sr-only">Поиск сессий</span>
     <input bind:this={field} bind:value aria-label="Поиск сессий" placeholder="Поиск сессий" onkeydown={keydown} />

@@ -62,7 +62,7 @@
   }
 </script>
 
-<div bind:this={strip} class="tabs" data-fade-start={fadeStart ? '' : undefined} data-fade-end={fadeEnd ? '' : undefined} role="tablist" aria-label="Группы сессий" tabindex="-1" onkeydown={move} onscroll={measure}>
+<div bind:this={strip} class="tabs" data-top-chrome data-fade-start={fadeStart ? '' : undefined} data-fade-end={fadeEnd ? '' : undefined} role="tablist" aria-label="Группы сессий" tabindex="-1" onkeydown={move} onscroll={measure}>
   {#each tabs as item, index (item.label + index)}
     <button
       type="button"

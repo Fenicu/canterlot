@@ -265,7 +265,7 @@
   }
 
   .shell[data-harness] {
-    position: static;
+    position: relative;
     height: var(--app-height);
   }
 
@@ -309,7 +309,9 @@
     flex: 0 0 var(--sidebar-width);
   }
 
+  /* Баннер связи лежит в панели чата поверх содержимого, не в потоке. */
   [data-pane="chat"] {
+    position: relative;
     flex: 1;
     display: flex;
     flex-direction: column;

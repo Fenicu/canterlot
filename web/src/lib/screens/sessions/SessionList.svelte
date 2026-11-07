@@ -364,7 +364,7 @@
 </script>
 
 <svelte:element this={main ? 'main' : 'div'} bind:this={listNode} id={main ? 'main' : undefined} class="list" data-list-ready={ready ? '' : undefined} >
-  <div class="bar">
+  <div class="bar" data-top-chrome>
     <p class="brand">Canterlot</p>
 
     <IconButton
