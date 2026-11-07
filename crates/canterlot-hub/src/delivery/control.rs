@@ -5,7 +5,7 @@ use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::LockedQueue;
+use super::{LockedQueue, receipts::complete_held_deliver_in_tx};
 use crate::{
     blocks::ExecutionRef,
     events::{self, NewEvent, Scope},
@@ -156,6 +156,9 @@ pub async fn cancel_input(
             .bind(input_id)
             .execute(&mut *conn)
             .await?;
+            // Отменённый ввод не оставляет удержанную выдачу висеть: она
+            // завершается в той же транзакции вместе с вводом.
+            complete_held_deliver_in_tx(&mut *conn, command_id, InputState::Cancelled).await?;
             events::append(
                 &mut *conn,
                 NewEvent {

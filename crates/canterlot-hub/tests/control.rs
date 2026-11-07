@@ -206,12 +206,17 @@ async fn cancel_queued_input(pool: PgPool) -> TestResult {
             DispatchOutcome::Empty
         );
     }
-    let (delivery, attempt): (String, i32) =
-        sqlx::query_as("select delivery_state, dispatch_attempt from commands where id = $1")
-            .bind(head.command_id)
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!((delivery.as_str(), attempt), ("held", 0));
+    // Отменённый ввод не оставляет за собой удержанную выдачу: команда
+    // завершена в той же транзакции и не выглядит ждущей доставки.
+    let (delivery, attempt, completed): (String, i32, bool) = sqlx::query_as(
+        "select delivery_state, dispatch_attempt, completed_at is not null
+         from commands where id = $1",
+    )
+    .bind(head.command_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((delivery.as_str(), attempt), ("completed", 0));
+    assert!(completed);
     let (kind, payload): (String, Value) =
         sqlx::query_as("select kind, payload from events where correlation_id = $1")
             .bind(correlation_id)
@@ -515,7 +520,7 @@ async fn cancel_races_dispatch_without_false_cancel(pool: PgPool) -> TestResult 
         match (cancelled??, dispatched?) {
             (CancelOutcome::Cancelled, DispatchOutcome::Empty | DispatchOutcome::Blocked(_)) => {
                 hub_cancelled += 1;
-                assert_eq!(row, ("cancelled".into(), false, "held".into(), 0));
+                assert_eq!(row, ("cancelled".into(), false, "completed".into(), 0));
                 let dispatched_events: i64 = sqlx::query_scalar(
                     "select count(*) from events where conversation_id = $1
                      and payload->>'state' = 'dispatched'",

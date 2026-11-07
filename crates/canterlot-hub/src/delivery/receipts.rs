@@ -82,6 +82,7 @@ struct ReceiptTarget {
     execution_id: Option<Uuid>,
     execution_state: Option<String>,
     command_kind: String,
+    deliver_command_id: Option<Uuid>,
 }
 
 pub async fn apply_input_receipt(
@@ -116,7 +117,8 @@ pub async fn apply_input_receipt_in_tx(
     .await?;
     let target: Option<ReceiptTarget> = sqlx::query_as(
         "select i.id as input_id, i.state, i.cancel_requested, c.dispatch_attempt, c.last_status_rank,
-                c.delivery_state, c.execution_id, e.state as execution_state, c.kind as command_kind
+                c.delivery_state, c.execution_id, e.state as execution_state, c.kind as command_kind,
+                case when c.kind = 'steer_input' then c.target_command_id else c.id end as deliver_command_id
          from commands c join inputs i on i.command_id = case when c.kind = 'steer_input'
                 then c.target_command_id else c.id end
          left join executions e on e.id = c.execution_id
@@ -380,6 +382,12 @@ pub async fn apply_input_receipt_in_tx(
         .bind(matches!(receipt, InputReceipt::Stored | InputReceipt::TransmissionStarted))
         .execute(&mut *conn)
         .await?;
+        // Ввод, дошедший до агента вливанием, или отменённый владельцем, больше
+        // не ждёт обычной выдачи: его удержанная команда завершается здесь же,
+        // иначе она навсегда остаётся «held» и выглядит ждущей доставки.
+        if let Some(deliver_command_id) = target.deliver_command_id {
+            complete_held_deliver_in_tx(&mut *conn, deliver_command_id, input_state).await?;
+        }
         queue
             .save(conn, &slot, target.execution_id, correlation_id)
             .await?;
@@ -425,6 +433,35 @@ pub async fn apply_input_receipt_in_tx(
             .await?;
     }
     Ok(ApplyOutcome::Applied { input_state })
+}
+
+/// Терминальный ввод не держит свою выдачу: текст уже дошёл до агента другим
+/// путём (вливание) или отменён владельцем. Команда гасится тем же итогом, что
+/// и обычная завершённая выдача, чтобы не выглядеть ждущей отправки. Уже
+/// завершённые команды и вводы в очереди не трогаются.
+pub(crate) async fn complete_held_deliver_in_tx(
+    conn: &mut PgConnection,
+    deliver_command_id: Uuid,
+    input_state: InputState,
+) -> Result<(), sqlx::Error> {
+    let (last_status, result) = match input_state {
+        InputState::Accepted => ("accepted", json!({"superseded": "accepted"})),
+        InputState::Rejected => ("explicit_rejection", json!({"superseded": "rejected"})),
+        InputState::Cancelled => ("cancel_won", json!({"cancelled": true})),
+        _ => return Ok(()),
+    };
+    sqlx::query(
+        "update commands set delivery_state = 'completed',
+                completed_at = coalesce(completed_at, now()),
+                last_status = $2, last_status_rank = 3, result = $3
+         where id = $1 and kind = 'deliver_input' and delivery_state = 'held'",
+    )
+    .bind(deliver_command_id)
+    .bind(last_status)
+    .bind(result)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 /// Страховка для вливания без итога. Не ушедшее с хаба вливание просто

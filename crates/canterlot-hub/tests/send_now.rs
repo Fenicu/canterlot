@@ -353,6 +353,16 @@ async fn steer_accepted_belongs_to_running_turn(pool: PgPool) -> TestResult {
     );
     let (_, delivery, _): (Uuid, String, Value) = steer_row(&pool, second_cmd).await;
     assert_eq!(delivery, "completed");
+    // Удержанная выдача этого ввода больше не висит: текст ушёл вливание
+    // в чужой ход, и вторая команда не должна выглядеть ждущей доставки.
+    let (own_delivery, own_completed): (String, bool) = sqlx::query_as(
+        "select delivery_state, completed_at is not null from commands where id = $1",
+    )
+    .bind(second_cmd)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(own_delivery, "completed");
+    assert!(own_completed);
     // Ход кончился как обычно.
     apply_run_finished(&pool, execution_id, first_cmd, Uuid::now_v7()).await?;
     assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
