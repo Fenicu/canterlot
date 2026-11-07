@@ -1,11 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { sanitizeDocument, sanitizeRendered } from '#lib/render/sanitize.js';
 
-const host = (html: string) => {
-  const div = document.createElement('div');
-  div.innerHTML = html;
-  return div;
-};
+const host = (html: string) => new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html').body;
 
 describe('render/sanitizeDocument', () => {
   it('keeps_the_semantic_markup_mammoth_produces', () => {
