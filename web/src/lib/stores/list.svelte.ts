@@ -8,7 +8,19 @@ import type {
 } from "#lib/sync/scope.js";
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import type { HubEvent } from "#lib/sync/wire.js";
-import type { ProviderLimits } from "./limits";
+import type { LimitWindow, ProviderLimits, WindowForecast } from "./limits";
+
+/**
+ * Прогноз из события `limits_changed`: поле, если хаб его прислал; иначе прежний прогноз,
+ * пока окно то же (тот же сброс), — до следующего снимка он верен приблизительно.
+ */
+function eventForecast(
+  payload: { resets_at: string | null },
+  previous: LimitWindow | null | undefined,
+): WindowForecast | null {
+  if ("forecast" in payload) return (payload as { forecast?: WindowForecast | null }).forecast ?? null;
+  return previous && previous.resets_at === payload.resets_at ? (previous.forecast ?? null) : null;
+}
 
 export interface ListActivity {
   state:
@@ -270,14 +282,17 @@ export class ListStore {
         provider = { provider: payload.provider, weekly_reserve_active: false };
         next.push(provider);
       }
+      const previous =
+        payload.window === "five_hour" ? provider.five_hour : payload.window === "monthly" ? provider.monthly : provider.weekly;
       // Событие без значения сообщает, что пятичасового окна у провайдера нет.
-      const window =
+      const window: LimitWindow | null =
         payload.used_permille === null
           ? null
           : {
               used_permille: payload.used_permille,
               resets_at: payload.resets_at,
               observed_at: payload.observed_at,
+              forecast: eventForecast(payload, previous),
             };
       if (payload.window === "five_hour") {
         provider.five_hour = window;

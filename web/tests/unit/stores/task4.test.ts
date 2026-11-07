@@ -1315,6 +1315,32 @@ describe("stores task 4", () => {
     ).toBe(20);
   });
 
+  it("limits_changed_keeps_the_forecast_of_the_same_window_and_takes_a_new_one_when_sent", () => {
+    const list = listOf();
+    const resets = "2026-10-29T12:00:00.000Z";
+    const forecast = { rate_permille_per_hour: 40, recent_rate_permille_per_hour: null, exhausts_at: "2026-10-28T20:00:00.000Z", before_reset: true };
+    list.limits = [
+      { provider: "claude", weekly: { used_permille: 500, resets_at: resets, observed_at: "2026-10-28T12:00:00.000Z", forecast }, weekly_reserve_active: false },
+    ];
+    const change = (payload: Record<string, unknown>, seq: string) =>
+      list.applier.applyEvents([
+        {
+          event: ev("limits_changed", { provider: "claude", window: "weekly", used_permille: 520, observed_at: "2026-10-28T12:05:00.000Z", weekly_reserve_active: false, weekly_reserve_resets_at: null, ...payload }, seq),
+          overlap: false,
+        },
+      ]);
+    // Событие без прогноза: окно то же, прежний прогноз остаётся до снимка.
+    change({ resets_at: resets }, "3");
+    expect(list.limits[0]!.weekly!.forecast).toEqual(forecast);
+    // Новое окно: старый прогноз к нему не относится.
+    change({ resets_at: "2026-11-05T12:00:00.000Z" }, "4");
+    expect(list.limits[0]!.weekly!.forecast).toBeNull();
+    // Хаб прислал прогноз в событии: берётся он.
+    const fresh = { ...forecast, before_reset: false };
+    change({ resets_at: "2026-11-05T12:00:00.000Z", forecast: fresh }, "5");
+    expect(list.limits[0]!.weekly!.forecast).toEqual(fresh);
+  });
+
   it("limits_providers_changed_drops_providers_gone_from_the_catalog_and_lets_them_return", () => {
     const list = listOf();
     const observed = "2026-10-28T12:00:00.000Z";

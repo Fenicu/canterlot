@@ -1,7 +1,8 @@
 import { modelLabel, providerLabel } from '#lib/format/labels.js';
 import { fmt } from '#lib/format/ru.js';
+import { resetPhrase } from '#lib/format/countdown.js';
 import type { components } from '#lib/api/generated/openapi.js';
-import { dayClock, remainingPct, remainingText, shortWeekday, type LimitThresholds, type MeterTone, type MeterView, type ProviderLimits } from '#lib/stores/limits.js';
+import { dayClock, remainingPct, remainingText, shortWeekday, type ForecastView, type LimitThresholds, type MeterTone, type MeterView, type ProviderLimits } from '#lib/stores/limits.js';
 import { limitStrip, providerRank } from '#lib/screens/sessions/limitsText.js';
 type Series = components['schemas']['ProviderSeries'];
 type Usage = components['schemas']['UsageDay'];
@@ -25,8 +26,14 @@ export interface WindowRow {
   value: string;
   tone: MeterTone;
   stale: boolean;
-  /** «сброс чт 18:34»; у устаревшего окна пусто. */
+  /** «сброс через 2 ч 15 мин»; у устаревшего окна пусто. */
   reset: string;
+  /** Момент сброса для подсказки с полной датой; `NaN` без сброса. */
+  resetAt: number;
+  /** То же словами для чтения вслух. */
+  resetLong: string;
+  /** Прогноз: предупреждение или спокойная строка со скоростью; `null` без поля хаба. */
+  forecast: ForecastView | null;
   /** Остаток без слова: «4%», «<1%» или «устарело». */
   pct: string;
 }
@@ -61,7 +68,9 @@ export function currentBlocks(providers: ProviderLimits[], now: number, cfg: Lim
       .map(([key, meter]) => ({
         key, label: WINDOW_LABEL[key], fill: meter.fill,
         value: meter.stale ? meter.text : `осталось ${meter.text}`,
-        tone: meter.tone, stale: meter.stale, reset: meter.reset, pct: meter.text
+        tone: meter.tone, stale: meter.stale, pct: meter.text,
+        reset: resetPhrase(meter.reset), resetAt: meter.resetAt,
+        resetLong: meter.resetLong ? `сброс ${meter.resetLong}` : '', forecast: meter.forecast
       }));
     const markers = [row.estimated ? 'оценка' : '', row.reserve ? 'резерв недели' : ''].filter(Boolean);
     const lead = leadWindow(windows);

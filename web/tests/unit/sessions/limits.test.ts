@@ -101,14 +101,17 @@ describe("sessions/limits", () => {
     expect(fresh.five.stale).toBe(false);
   });
 
-  it("reset_text_has_a_weekday_only_when_it_is_not_today", () => {
+  it("reset_text_counts_down_to_the_reset_in_three_forms", () => {
     const row = limitStrip(
       [provider("claude", 100, 100, { fiveAt: at(29, 19, 20), weekAt: at(31, 4, 0) })],
       NOW,
       cfg,
     ).rows[0]!;
-    expect(row.five.reset).toBe("сброс 19:20");
-    expect(row.week.reset).toBe("сброс сб 04:00");
+    expect(row.five.reset).toBe("через 7\u00a0ч 20\u00a0мин");
+    expect(row.five.resetShort).toBe("7ч20м");
+    expect(row.five.resetLong).toBe("через 7 часов 20 минут");
+    expect(row.five.resetAt).toBe(Date.parse(at(29, 19, 20)));
+    expect(row.week.reset).toBe("через 40\u00a0ч");
   });
 
   it("updated_line_names_the_latest_reading_of_any_window", () => {
@@ -181,7 +184,7 @@ describe("sessions/limits", () => {
     const [claude, opencode] = strip.rows;
     expect(claude?.month).toBeNull();
     expect(opencode?.month).toMatchObject({ text: "91%", fill: 90.7 });
-    expect(opencode?.month?.reset).toBe("сброс сб 04:00");
+    expect(opencode?.month?.reset).toBe("через 40\u00a0ч");
   });
 
   it("opencode_sorts_after_codex_and_keeps_its_label", () => {

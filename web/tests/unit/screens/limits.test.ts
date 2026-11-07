@@ -94,8 +94,8 @@ describe("screens/limits current blocks", () => {
     const blocks = currentBlocks(providers, NOW, cfg);
     expect(blocks.map((b) => b.label)).toEqual(["Claude", "Codex", "OpenCode", "Antigravity"]);
     expect(blocks[0]!.windows.map((w) => [w.label, w.value, w.reset])).toEqual([
-      ["5 часов", "осталось 39%", "сброс пт 18:34"],
-      ["неделя", "осталось 16%", "сброс пт 18:34"],
+      ["5 часов", "осталось 39%", "сброс через 30\u00a0ч 34\u00a0мин"],
+      ["неделя", "осталось 16%", "сброс через 30\u00a0ч 34\u00a0мин"],
     ]);
     expect(blocks[0]!.windows[1]!.tone).toBe("warning");
     expect(blocks[1]!.windows.map((w) => w.key)).toEqual(["week"]);

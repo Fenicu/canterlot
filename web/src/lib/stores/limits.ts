@@ -1,9 +1,19 @@
 import { fmt } from "#lib/format/ru.js";
+import { spanText, untilLong, untilShort, untilText } from "#lib/format/countdown.js";
+
+/** Прогноз хаба по средней скорости расхода окна; нет поля — данных для прогноза мало. */
+export interface WindowForecast {
+  rate_permille_per_hour: number;
+  recent_rate_permille_per_hour?: number | null;
+  exhausts_at?: string | null;
+  before_reset: boolean;
+}
 
 export interface LimitWindow {
   used_permille: number;
   resets_at: string | null;
   observed_at: string;
+  forecast?: WindowForecast | null;
 }
 
 export interface ProviderLimits {
@@ -64,9 +74,56 @@ export interface MeterView {
   tone: MeterTone;
   /** Сброс окна уже прошёл или показание старше порога. */
   stale: boolean;
-  /** «сброс 19:20» или «сброс вт 04:00»; у устаревшего окна пусто. */
+  /** «через 2 ч 15 мин» до сброса; у устаревшего окна и после сброса пусто. */
   reset: string;
+  /** Без «через» для узкой раскрытой полосы: «2 ч 15 мин». */
+  resetSpan: string;
+  /** То же сжато для свёрнутой полосы: «2ч15м». */
+  resetShort: string;
+  /** То же словами для чтения вслух: «через 2 часа 15 минут». */
+  resetLong: string;
+  /** Момент сброса для подсказки с полной датой; `NaN`, когда сброс не показывается. */
+  resetAt: number;
+  /** Прогноз расхода; `null`, когда хаб его не прислал или окно устарело. */
+  forecast: ForecastView | null;
   observedAt: number;
+}
+
+export interface ForecastView {
+  /** Окно кончится раньше сброса: предупреждение. */
+  before: boolean;
+  /** «кончится через 3 ч» или «хватит до сброса». */
+  text: string;
+  /** То же словами: «кончится через 3 часа». */
+  long: string;
+  /** Средняя скорость окна: «≈4 %/ч». */
+  pace: string;
+}
+
+/** Скорость расхода в процентах окна за час: целые от процента, десятые ниже. */
+export function paceText(permillePerHour: number): string {
+  const pct = Math.max(0, permillePerHour) / 10;
+  const value = pct >= 1 || pct === 0 ? String(Math.round(pct)) : pct.toFixed(1).replace(".", ",");
+  return `≈${value}\u00a0%/ч`;
+}
+
+/** Прогноз окна по полю хаба: предупреждение только при `before_reset`, иначе спокойная строка. */
+export function forecastView(
+  forecast: WindowForecast | null | undefined,
+  usedPermille: number,
+  now: number,
+): ForecastView | null {
+  if (!forecast || usedPermille >= 1000) return null;
+  const pace = paceText(forecast.rate_permille_per_hour);
+  const exhaustsAt = forecast.exhausts_at ? Date.parse(forecast.exhausts_at) : Number.NaN;
+  if (!forecast.before_reset || !Number.isFinite(exhaustsAt)) {
+    return { before: false, text: "хватит до сброса", long: "хватит до сброса", pace };
+  }
+  const left = exhaustsAt - now;
+  if (left < 60_000) {
+    return { before: true, text: "кончится с минуты на минуту", long: "кончится с минуты на минуту", pace };
+  }
+  return { before: true, text: `кончится ${untilText(left, true)}`, long: `кончится ${untilLong(left, true)}`, pace };
 }
 
 export interface LimitView {
@@ -122,6 +179,11 @@ const NOT_SEEN: MeterView = {
   tone: "normal",
   stale: false,
   reset: "",
+  resetSpan: "",
+  resetShort: "",
+  resetLong: "",
+  resetAt: Number.NaN,
+  forecast: null,
   observedAt: Number.NaN,
 };
 
@@ -142,6 +204,8 @@ export function windowText(
     now - observedAt > staleAfterMs ||
     (Number.isFinite(resetAt) && resetAt <= now);
   const remaining = remainingPct(window.used_permille);
+  const resetShown = !stale && Number.isFinite(resetAt);
+  const left = resetAt - now;
   return {
     absent: false,
     known: true,
@@ -149,8 +213,12 @@ export function windowText(
     text: stale ? STALE_DATA : remainingText(window.used_permille),
     tone: stale ? "normal" : meterTone(remaining, options?.thresholds),
     stale,
-    reset:
-      !stale && Number.isFinite(resetAt) ? `сброс ${dayClock(resetAt, now)}` : "",
+    reset: resetShown ? untilText(left) : "",
+    resetSpan: resetShown ? spanText(left) : "",
+    resetShort: resetShown ? untilShort(left) : "",
+    resetLong: resetShown ? untilLong(left) : "",
+    resetAt: resetShown ? resetAt : Number.NaN,
+    forecast: stale ? null : forecastView(window.forecast, window.used_permille, now),
     observedAt,
   };
 }
