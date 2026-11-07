@@ -13,6 +13,8 @@ export const MAX_EXCLUDE_WORKDIRS = 16;
 export const LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
 export const PROVIDERS = ['claude', 'codex', 'opencode'] as const;
 export const KNOWN_HARNESSES = ['claude_code', 'codex', 'opencode', 'antigravity'];
+/** Длительность задачи, по которой маршрут прогнозирует расход лимита, как у хаба. */
+export const EXPECTED_MINUTES = { min: 5, max: 1440, default: 60 } as const;
 export const NOT_IN_WHITELIST = 'Не в белом списке — маршрут их пропустит';
 
 export type NudgeMode = 'off' | 'on' | 'max';
@@ -40,6 +42,8 @@ export interface DraftTask {
   title: string;
   preset: string | null;
   isolated: boolean | null;
+  /** Ожидаемая длительность задачи, минут; `null` — по умолчанию хаба (60). */
+  expectedMinutes: number | null;
   candidates: DraftCandidate[];
 }
 
@@ -120,6 +124,7 @@ export function fromPolicy(policy: Policy): Draft {
       title: task.title,
       preset: task.preset ?? null,
       isolated: task.isolated ?? null,
+      expectedMinutes: task.expected_minutes ?? null,
       candidates: task.candidates.map((candidate) => candidateDraft(candidate))
     })),
     providers: [...providers.values()],
@@ -152,6 +157,7 @@ export function toPolicy(draft: Draft): Policy {
     const value: PolicyTask = { title: task.title.trim(), candidates: task.candidates.map(candidateValue) };
     if (task.preset) value.preset = task.preset;
     if (task.isolated !== null) value.isolated = task.isolated;
+    if (task.expectedMinutes !== null) value.expected_minutes = task.expectedMinutes;
     task_types[task.key.trim()] = value;
   }
   const providers: Policy['providers'] = {};
@@ -213,6 +219,9 @@ export function validate(draft: Draft): Issue[] {
     else if ((keys.get(key) ?? 0) > 1) issues.push({ at, message: `Ключ «${key}» уже занят` });
     if (!task.title.trim()) issues.push({ at, message: 'Нужно название' });
     if (task.candidates.length === 0) issues.push({ at, message: 'Нужен хотя бы один кандидат' });
+    const minutes = task.expectedMinutes;
+    if (minutes !== null && (!Number.isInteger(minutes) || minutes < EXPECTED_MINUTES.min || minutes > EXPECTED_MINUTES.max))
+      issues.push({ at, message: `Ожидаемая длительность: от ${EXPECTED_MINUTES.min} до ${EXPECTED_MINUTES.max} минут` });
     if (task.candidates.length > MAX_CANDIDATES) issues.push({ at, message: `Не больше ${MAX_CANDIDATES} кандидатов` });
     for (const candidate of task.candidates) {
       const cat = `candidate:${candidate.uid}`;
@@ -271,7 +280,7 @@ export function addTask(draft: Draft, first: { harness: string; model: string })
     ...draft,
     tasks: [
       ...draft.tasks,
-      { uid: uid('t'), key: `task_${n}`, title: 'Новый тип', preset: null, isolated: null, candidates: [candidateDraft(first)] }
+      { uid: uid('t'), key: `task_${n}`, title: 'Новый тип', preset: null, isolated: null, expectedMinutes: null, candidates: [candidateDraft(first)] }
     ]
   };
 }

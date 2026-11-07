@@ -53,7 +53,22 @@ export function utcClock(hhmm: string, now: number = Date.now()): string {
 
 type Rule = [RegExp, (match: RegExpExecArray, now: number) => string];
 
+/** Окно в причине прогноза хаба: `weekly`, `five-hour`, `monthly`. */
+const PROJECTED_WINDOWS: Record<string, string> = {
+  weekly: 'неделя',
+  'five-hour': '5 ч',
+  monthly: 'месяц'
+};
+
 const RULES: Rule[] = [
+  [
+    // Прогноз маршрута: за ожидаемое время задачи окно перейдёт порог.
+    // Имя провайдера впереди необязательно: так же, как у причины «weekly 83% > 80%».
+    /^(?:([a-z_]+) )?(weekly|five-hour|monthly) (\d+)% now, projected (\d+)% in (\d+) min > (\d+)%$/,
+    (m) =>
+      (m[1] ? `${provider(m[1])} — ` : '') +
+      `${PROJECTED_WINDOWS[m[2]!]} ${percent(m[3]!)}, через ${m[5]}${NBSP}мин будет ~${percent(m[4]!)} при пороге ${percent(m[6]!)}`
+  ],
   [
     /^([a-z_]+) (weekly|five_hour|monthly) ([\d.]+)% > ([\d.]+)%$/,
     (m) => `${provider(m[1]!)} — ${windowName(m[2]!)} ${percent(m[3]!)} при пороге ${percent(m[4]!)}`
@@ -187,6 +202,7 @@ const VERDICTS: Record<string, string> = {
   skipped: 'пропущен',
   level: 'не тот уровень',
   limits_over: 'выше порога',
+  projected_over_threshold: 'превысит порог',
   limits_unknown: 'лимиты неизвестны',
   quota_paused: 'квота на паузе',
   parallel_busy: 'занят',

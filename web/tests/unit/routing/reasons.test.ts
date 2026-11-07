@@ -12,6 +12,16 @@ describe('reason translation', () => {
     expect(reasonText('opencode monthly 99% > 95%', NOW)).toBe(`OpenCode — месяц 99${N}% при пороге 95${N}%`);
   });
 
+  test('projected threshold crossing names the window, now, projection, task length and threshold', () => {
+    expect(reasonText('weekly 72% now, projected 84% in 60 min > 80%', NOW)).toBe(`неделя 72${N}%, через 60${N}мин будет ~84${N}% при пороге 80${N}%`);
+    expect(reasonText('five-hour 40% now, projected 97% in 90 min > 95%', NOW)).toBe(`5 ч 40${N}%, через 90${N}мин будет ~97${N}% при пороге 95${N}%`);
+    expect(reasonText('monthly 88% now, projected 91% in 1440 min > 90%.', NOW)).toBe(`месяц 88${N}%, через 1440${N}мин будет ~91${N}% при пороге 90${N}%`);
+    expect(reasonText('codex weekly 72% now, projected 84% in 60 min > 80%', NOW)).toBe(`Codex — неделя 72${N}%, через 60${N}мин будет ~84${N}% при пороге 80${N}%`);
+    // Незнакомое окно не переводится наполовину.
+    expect(reasonText('daily 72% now, projected 84% in 60 min > 80%', NOW)).toBe('daily 72% now, projected 84% in 60 min > 80%');
+    expect(verdictLabel('projected_over_threshold')).toBe('превысит порог');
+  });
+
   test('quota pause converts the hub UTC clock to local time', () => {
     expect(reasonText('quota paused until 18:40 UTC', NOW)).toBe(`квота на паузе до ${utcClock('18:40', NOW)}`);
     expect(reasonText('quota paused', NOW)).toBe('квота на паузе');

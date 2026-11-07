@@ -21,7 +21,7 @@
   import RoutingPreview from './RoutingPreview.svelte';
   import { harnessOptions, mergeCatalog, modelOptions, type CatalogHarness, type WhitelistEntry } from './spawnWhitelist.js';
   import {
-    LEVELS, MAX_CANDIDATES, MAX_TASK_TYPES, NOT_IN_WHITELIST, addCandidate, addTask, allowedByWhitelist, fromPolicy, isDirty,
+    EXPECTED_MINUTES, LEVELS, MAX_CANDIDATES, MAX_TASK_TYPES, NOT_IN_WHITELIST, addCandidate, addTask, allowedByWhitelist, fromPolicy, isDirty,
     issuesAt, moveCandidate, removeCandidate, removeTask, toPolicy, uid, validate, type Draft, type DraftCandidate, type DraftTask, type Policy
   } from './routingPolicy.js';
   import '../secondary.css';
@@ -220,6 +220,10 @@
               <label class="field"><span>Название</span><input type="text" bind:value={task.title} aria-label="Название типа {task.key}" /></label>
               <label class="field key"><span>Ключ</span><input type="text" bind:value={task.key} aria-label="Ключ типа {task.title}" spellcheck="false" autocapitalize="off" /></label>
             </div>
+            <div class="expected">
+              <label class="field small"><span>Ожидаемая длительность, мин</span><input type="number" inputmode="numeric" min={EXPECTED_MINUTES.min} max={EXPECTED_MINUTES.max} placeholder={String(EXPECTED_MINUTES.default)} value={task.expectedMinutes ?? ''} aria-describedby="expected-note-{task.uid}" oninput={(event) => (task.expectedMinutes = numberOrNull(event.currentTarget.value))} /></label>
+              <p class="note" id="expected-note-{task.uid}">Кандидат пропускается, если за это время расход его лимита по прогнозу перейдёт порог. Пусто — {EXPECTED_MINUTES.default} минут</p>
+            </div>
             {#each taskIssues as message (message)}<p class="error" role="alert">{message}</p>{/each}
             <ol class="candidates" aria-label="Кандидаты «{task.title}» по порядку">
               {#each task.candidates as candidate, index (candidate.uid)}
@@ -405,6 +409,8 @@
   .task { display: grid; gap: var(--s4); margin-bottom: var(--s8); padding: var(--s6); border-radius: var(--radius-card); background: var(--surface); }
   .task-head { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--s4); }
   .field { display: grid; gap: var(--s2); min-width: 0; }
+  .expected { display: grid; gap: var(--s2); }
+  .expected .note { margin: var(--s0); }
   .field > span, .label { color: var(--secondary); font-size: var(--fs-meta); }
   .field.small input { inline-size: calc(4ch + 2 * var(--s8)); max-inline-size: 100%; font-variant-numeric: tabular-nums; appearance: textfield; -moz-appearance: textfield; }
   .field.small input::-webkit-inner-spin-button, .field.small input::-webkit-outer-spin-button { appearance: none; margin: 0; }

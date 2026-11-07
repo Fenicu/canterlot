@@ -143,3 +143,36 @@ describe('routing policy editor model', () => {
     expect(issuesAt(issues, 'parallel:x2')).toEqual(['Пара в виде агент/модель', 'Не меньше одной сессии']);
   });
 });
+
+describe('expected task length', () => {
+  test('absent field stays absent, a set value round-trips', () => {
+    const d = draft();
+    expect(d.tasks[0]!.expectedMinutes).toBeNull();
+    expect(toPolicy(d).task_types.bugfix!.expected_minutes).toBeUndefined();
+    d.tasks[0]!.expectedMinutes = 90;
+    expect(toPolicy(d).task_types.bugfix!.expected_minutes).toBe(90);
+    expect(isDirty(d, policy)).toBe(true);
+    const saved = toPolicy(d);
+    expect(fromPolicy(saved).tasks[0]!.expectedMinutes).toBe(90);
+    expect(isDirty(fromPolicy(saved), saved)).toBe(false);
+  });
+
+  test('validated like the hub: whole minutes from 5 to 1440', () => {
+    const d = draft();
+    const at = `task:${d.tasks[0]!.uid}`;
+    const message = 'Ожидаемая длительность: от 5 до 1440 минут';
+    for (const ok of [5, 60, 1440]) {
+      d.tasks[0]!.expectedMinutes = ok;
+      expect(issuesAt(validate(d), at)).not.toContain(message);
+    }
+    for (const bad of [4, 1441, 30.5, 0]) {
+      d.tasks[0]!.expectedMinutes = bad;
+      expect(issuesAt(validate(d), at)).toContain(message);
+    }
+  });
+
+  test('a new task type starts with the hub default', () => {
+    const next = addTask(draft(), { harness: 'claude_code', model: 'default' }) as Draft;
+    expect(next.tasks.at(-1)!.expectedMinutes).toBeNull();
+  });
+});
