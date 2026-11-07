@@ -146,10 +146,14 @@ if ((want_rust)); then
     stage_done fmt
 
     # Линт идёт в отдельном каталоге сборки одновременно с тестовой сборкой.
+    # Инкрементальный кэш clippy почти не экономит, а target/lint растёт на
+    # десятки гигабайт за день (57 ГБ за сутки), поэтому у линта он выключен.
+    # Тестовая сборка ниже сохраняет обычное поведение.
     stage "линт и тесты (параллельно)"
     lint_log=$(mktemp)
     (
         export CARGO_TARGET_DIR="$PWD/target/lint"
+        export CARGO_INCREMENTAL=0
         lint_rust
     ) >"$lint_log" 2>&1 &
     lint_pid=$!
