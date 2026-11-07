@@ -545,6 +545,7 @@ impl ClaudeCodeAdapter {
                         ..Default::default()
                     },
                     "claude",
+                    chrono::Utc::now(),
                 );
                 self.limits_calls.insert(call_id, text);
                 self.events.push_back(AdapterEvent::Limits { call_id });

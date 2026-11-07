@@ -90,7 +90,7 @@ async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgP
     };
     let text = report["text"].as_str().unwrap();
     assert!(
-        text.starts_with("Claude API budget: five-hour window 12% used, resets "),
+        text.starts_with("Claude API budget: five-hour window 12% used, resets in "),
         "{text}"
     );
     assert!(text.contains("Antigravity (Gemini): five-hour window 4.1% used"));
@@ -111,6 +111,101 @@ async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgP
     assert_eq!(claude[2]["absent"], true);
     let codex = &find("codex")["windows"];
     assert_eq!(codex[0]["fresh"], false);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn limits_report_includes_the_countdown_and_the_forecast(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    let now = Utc::now();
+    // Claude: окно недели началось сутки назад, 900 промилле — кончится раньше сброса.
+    let claude_reset = now + TimeDelta::days(6);
+    // Codex: окно началось пять дней назад, 610 промилле — до сброса хватает.
+    let codex_reset = now + TimeDelta::days(2);
+    let mut tx = pool.begin().await.unwrap();
+    for (provider, reset, snapshots, used) in [
+        (
+            "claude",
+            claude_reset,
+            vec![
+                (now - TimeDelta::days(1), 100),
+                (now - TimeDelta::hours(12), 400),
+                (now - TimeDelta::hours(3), 800),
+            ],
+            900,
+        ),
+        (
+            "codex",
+            codex_reset,
+            vec![
+                (now - TimeDelta::days(5), 200),
+                (now - TimeDelta::days(1), 500),
+            ],
+            610,
+        ),
+    ] {
+        for (observed_at, snapshot_used) in snapshots {
+            sqlx::query(
+                "insert into limit_snapshots(provider,window_kind,used_permille,resets_at,
+                   observed_at,source,machine_id)
+                 values($1,'weekly',$2,$3,$4,'poll',$5)",
+            )
+            .bind(provider)
+            .bind(snapshot_used)
+            .bind(reset)
+            .bind(observed_at)
+            .bind(seed.machine_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,
+               weekly_observed_at)
+             values($1,$2,$3,$4)",
+        )
+        .bind(provider)
+        .bind(used)
+        .bind(reset)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    let caller = Caller {
+        owner_id: seed.owner_id,
+        conversation_id: seed.conversation_id,
+        execution_id: Uuid::now_v7(),
+        machine_id: seed.machine_id,
+        call_id: Uuid::now_v7(),
+    };
+    let report = session_tools::call(&context(&pool), &caller, "limits.report", json!({}))
+        .await
+        .unwrap();
+    let text = report["text"].as_str().unwrap();
+    assert!(text.contains("resets in "), "{text}");
+    assert!(text.contains("at the average pace ("), "{text}");
+    assert!(text.contains("runs out in "), "{text}");
+    assert!(text.contains("before the reset"), "{text}");
+    assert!(text.contains("lasts until the reset"), "{text}");
+    let find = |name: &str| {
+        report["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["provider"] == name)
+            .unwrap()
+    };
+    let claude = &find("claude")["windows"][1]["forecast"];
+    assert_eq!(claude["before_reset"], true);
+    assert!(claude["exhausts_at"].is_string());
+    assert!(claude["rate_permille_per_hour"].as_i64().unwrap() > 0);
+    let codex = &find("codex")["windows"][1]["forecast"];
+    assert_eq!(codex["before_reset"], false);
+    assert_eq!(
+        codex["recent_rate_permille_per_hour"],
+        serde_json::Value::Null
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

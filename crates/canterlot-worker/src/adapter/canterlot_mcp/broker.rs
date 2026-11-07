@@ -462,7 +462,7 @@ impl Broker {
         } else {
             snapshot.provider.as_str()
         };
-        let text = mcp::limits_tool_text(snapshot, provider);
+        let text = mcp::limits_tool_text(snapshot, provider, chrono::Utc::now());
         let reply = mcp::tool_call_reply(&call.rpc_id, &Value::String(text));
         let writer = call.writer.clone();
         tokio::spawn(async move {

@@ -64,7 +64,7 @@ fn opencode_gets_its_own_budget_and_instructions_without_approve() {
         }],
         ..Default::default()
     };
-    let reply = mcp::limits_tool_text(&snapshot, "opencode");
+    let reply = mcp::limits_tool_text(&snapshot, "opencode", chrono::Utc::now());
     assert!(reply.starts_with("OpenCode API budget"), "{reply}");
 }
 

@@ -588,7 +588,7 @@ fn error(id: &Value, code: i64, message: &str) -> McpAction {
 fn limits_tool_description(provider: &str) -> String {
     let budget = budget_label(provider);
     format!(
-        "Report the remaining {budget} for this session: the five-hour and weekly windows in percent with local reset times, or that no limit data is available yet. Call it before starting long work or when unsure about the remaining budget. Do not call it in a loop; it is idempotent."
+        "Report the remaining {budget} for this session: the five-hour and weekly windows in percent with time to reset and a burn forecast, or that no limit data is available yet. Call it before starting long work or when unsure about the remaining budget. Do not call it in a loop; it is idempotent."
     )
 }
 
@@ -857,8 +857,38 @@ pub fn cli_policy_mark(
     Some("cli_policy")
 }
 
+/// Срок до события простыми словами: `9h 30m`, `2d 4h`, `25m`.
+fn countdown(millis: i64) -> String {
+    let minutes = (millis / 60_000).max(0);
+    if minutes == 0 {
+        return "less than a minute".to_owned();
+    }
+    let days = minutes / (24 * 60);
+    let hours = (minutes % (24 * 60)) / 60;
+    let minutes = minutes % 60;
+    if days > 0 {
+        if hours > 0 {
+            format!("{days}d {hours}h")
+        } else {
+            format!("{days}d")
+        }
+    } else if hours > 0 {
+        if minutes > 0 {
+            format!("{hours}h {minutes}m")
+        } else {
+            format!("{hours}h")
+        }
+    } else {
+        format!("{minutes}m")
+    }
+}
+
 /// Текст ответа `canterlot_limits` по последнему снимку лимитов.
-pub fn limits_tool_text(snapshot: &LimitsSnapshot, provider: &str) -> String {
+pub fn limits_tool_text(
+    snapshot: &LimitsSnapshot,
+    provider: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     let budget = budget_label(provider);
     let mut windows: Vec<(&str, u32, u64)> = Vec::new();
     for observation in &snapshot.current {
@@ -876,60 +906,18 @@ pub fn limits_tool_text(snapshot: &LimitsSnapshot, provider: &str) -> String {
     let parts: Vec<String> = windows
         .into_iter()
         .map(|(name, permille, resets_at_ms)| {
-            format!(
-                "{name} window {}% used, resets {}",
-                permille as f64 / 10.0,
-                format_reset(resets_at_ms)
-            )
+            let reset = if resets_at_ms == 0 {
+                String::new()
+            } else {
+                format!(
+                    ", resets in {}",
+                    countdown(resets_at_ms as i64 - now.timestamp_millis())
+                )
+            };
+            format!("{name} window {}% used{reset}", permille as f64 / 10.0)
         })
         .collect();
     format!("{budget}: {}.", parts.join("; "))
-}
-
-fn format_reset(resets_at_ms: u64) -> String {
-    let seconds = resets_at_ms / 1000;
-    let days = (seconds / 86400) as i64;
-    let time = (seconds % 86400) as i64;
-    let mut year = 1970;
-    let mut day = days;
-    loop {
-        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-        let year_days = if leap { 366 } else { 365 };
-        if day < year_days {
-            break;
-        }
-        day -= year_days;
-        year += 1;
-    }
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let lengths = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1;
-    for length in lengths {
-        if day < length {
-            break;
-        }
-        day -= length;
-        month += 1;
-    }
-    format!(
-        "{year:04}-{month:02}-{:02} {:02}:{:02} UTC",
-        day + 1,
-        time / 3600,
-        (time % 3600) / 60
-    )
 }
 
 #[cfg(test)]

@@ -34,6 +34,10 @@ fn window(
             "observed_at": rfc3339(state.observed_at),
             "age_seconds": (now - state.observed_at).num_seconds().max(0),
             "fresh": (now - state.observed_at).num_seconds() <= FRESH_SECONDS,
+            "forecast": state.forecast.as_ref().map(|forecast| {
+                serde_json::to_value(crate::http::limits::ForecastView::from(forecast.clone()))
+                    .unwrap_or(Value::Null)
+            }),
         }),
         None => json!({"window": name, "absent": true}),
     }
@@ -48,11 +52,42 @@ fn label(provider: &str) -> &str {
     }
 }
 
-fn reset(at: chrono::DateTime<Utc>) -> String {
-    at.format("%Y-%m-%d %H:%M UTC").to_string()
+/// Срок до события простыми словами: `9h 30m`, `2d 4h`, `25m`.
+fn countdown(delta: chrono::TimeDelta) -> String {
+    let minutes = delta.num_minutes().max(0);
+    if minutes == 0 {
+        return "less than a minute".to_owned();
+    }
+    let days = minutes / (24 * 60);
+    let hours = (minutes % (24 * 60)) / 60;
+    let minutes = minutes % 60;
+    if days > 0 {
+        if hours > 0 {
+            format!("{days}d {hours}h")
+        } else {
+            format!("{days}d")
+        }
+    } else if hours > 0 {
+        if minutes > 0 {
+            format!("{hours}h {minutes}m")
+        } else {
+            format!("{hours}h")
+        }
+    } else {
+        format!("{minutes}m")
+    }
 }
 
-fn line(row: &crate::limits::ProviderLimits) -> String {
+fn rate_percent(permille_per_hour: f64) -> String {
+    let value = permille_per_hour / 10.0;
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+fn line(row: &crate::limits::ProviderLimits, now: chrono::DateTime<Utc>) -> String {
     let mut parts = Vec::new();
     for (name, state) in [
         ("five-hour", row.five_hour.as_ref()),
@@ -62,10 +97,24 @@ fn line(row: &crate::limits::ProviderLimits) -> String {
         if let Some(state) = state {
             let reset = state
                 .resets_at
-                .map(|at| format!(", resets {}", reset(at)))
+                .map(|at| format!(", resets in {}", countdown(at - now)))
+                .unwrap_or_default();
+            let forecast = state
+                .forecast
+                .as_ref()
+                .map(|forecast| {
+                    let pace = rate_percent(forecast.rate_permille_per_hour);
+                    match forecast.exhausts_at {
+                        Some(at) if forecast.before_reset => format!(
+                            "; at the average pace ({pace}%/h) runs out in {}, before the reset",
+                            countdown(at - now)
+                        ),
+                        _ => format!("; at the average pace ({pace}%/h) lasts until the reset"),
+                    }
+                })
                 .unwrap_or_default();
             parts.push(format!(
-                "{name} window {}% used{reset}",
+                "{name} window {}% used{reset}{forecast}",
                 f64::from(state.used_permille) / 10.0
             ));
         }
@@ -124,11 +173,11 @@ pub async fn report(
     );
     let mut text = rows
         .first()
-        .map(line)
+        .map(|row| line(row, now))
         .unwrap_or_else(|| "no limit data yet in this session".to_owned());
     for row in rows.iter().skip(1) {
         text.push('\n');
-        text.push_str(&line(row));
+        text.push_str(&line(row, now));
     }
     if !rows.is_empty() {
         let fresh = rows

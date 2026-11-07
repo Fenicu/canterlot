@@ -164,6 +164,12 @@ fn observation(window: &str, used_permille: u32, resets_at_ms: u64) -> LimitObse
     }
 }
 
+fn fixed_now() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-10-24T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
 #[test]
 fn limits_tool_reports_codex_windows_or_no_data() {
     let text = mcp::limits_tool_text(
@@ -176,16 +182,19 @@ fn limits_tool_reports_codex_windows_or_no_data() {
             weekly_reserve_active: false,
         },
         "codex",
+        fixed_now(),
     );
     assert!(text.starts_with("Codex API budget:"));
     assert!(text.contains("42"));
     assert!(text.contains("81"));
+    assert!(text.contains("resets in "), "{text}");
     let empty = mcp::limits_tool_text(
         &LimitsSnapshot {
             provider: "codex".into(),
             ..Default::default()
         },
         "codex",
+        fixed_now(),
     );
     assert_eq!(empty, "no limit data yet in this session");
 }
@@ -199,6 +208,7 @@ fn limits_tool_omits_a_window_the_provider_does_not_have() {
             weekly_reserve_active: false,
         },
         "claude",
+        fixed_now(),
     );
     assert!(text.contains("weekly window 54% used"), "{text}");
     assert!(!text.contains("five-hour"), "{text}");
