@@ -37,7 +37,9 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
   test.describe(path, () => {
     test('rows_read_as_the_mockup_and_no_internal_label_leaks', async ({ page }) => {
       await open(page);
-      await expect(toolRow(page, 'canterlot_limits').locator('.name')).toHaveText('canterlot_limits');
+      // Лимиты и служебный поиск инструментов — карточки реестра, а не строки с именем инструмента.
+      await expect(page.locator('.feed-card[data-card="canterlot.limits"] .lead')).toHaveText('Лимиты');
+      await expect(page.locator('.feed-card[data-card="canterlot.limits"] [data-provider="claude"] [data-window="five"] .pct')).toHaveText(/^осталось\s85%$/);
       await expect(page.locator('.card [data-role="answer-footer"] strong').last()).toHaveText('Claude');
       for (const leak of ['rchestrator', 'claude-opus-5-5', 'mcp__', '0,0 с', 'Bash: ', 'Read: ', 'Agent: ', 'инструмент']) {
         await expect(page.locator('.tool .head, .card [data-role="answer-footer"], .sub')).not.toContainText([leak]);
@@ -49,7 +51,7 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
       const bash = toolRow(page, 'sleep 90').last();
       await expect(bash.locator('.name')).toHaveText('Bash');
       await expect(bash.locator('.summary')).toHaveText('sleep 90');
-      await expect(toolRow(page, 'ToolSearch').locator('.summary')).toHaveCount(0);
+      await expect(page.locator('.feed-card[data-card="meta.tool_search"] .lead')).toHaveText('Поиск инструментов');
       await expect(page.locator('.tool .name', { hasText: 'AskUserQuestion' })).toHaveCount(0);
     });
 
@@ -82,8 +84,8 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
 
     test('tool_without_output_says_so_instead_of_an_empty_panel', async ({ page }) => {
       await open(page);
-      const search = toolRow(page, 'ToolSearch');
-      await search.locator('.head').click();
+      const search = page.locator('.feed-card[data-card="meta.tool_search"]');
+      await search.locator('.hit').click();
       await expect(search.locator('.out')).toHaveText('Вывода нет');
       await expect(search.getByRole('button', { name: /Показать полностью/ })).toHaveCount(0);
     });

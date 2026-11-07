@@ -6,6 +6,7 @@ import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect } from '../ui/fixtures';
 import { bootSecondary } from '../ui/secondary-fixture';
 import { seedConversation } from '../../testing/fake-hub/seed';
+import { seedFeedCards } from '../../testing/fixtures/feed-cards';
 import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
 
@@ -110,6 +111,24 @@ async function orchestrator(page: Page, afterOpen?: (page: Page, hub: FakeHub, a
   await page.goto(`/c/${open === 'child' ? child : id}`);
   await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
   await afterOpen?.(page, hub, api, id, child);
+}
+
+/** Лента оркестратора со всеми карточками инструментов: низ ленты или её начало с раскрытыми строками. */
+async function feedCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
+  const { hub, api } = fresh();
+  const seed = seedFeedCards(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  // Однопиксельная картинка: проверке нужен вид плитки, а не содержимое снимка.
+  await page.route(`**/api/v1/attachments/${seed.imageId}/content`, (route) => route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGPQmNbz//9/BggFADYPCI8NpaO2AAAAAElFTkSuQmCC', 'base64') }));
+  await page.goto(`/c/${seed.id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.feed-card').first()).toBeVisible();
+  if (at === 'top') {
+    await page.locator('.feed').evaluate((node) => { node.scrollTop = 0; });
+    await page.locator('[data-role="quiet-group"] .head').click();
+    await page.locator('.feed-card[data-card="todo.write"] .hit').first().click();
+    await expect(page.locator('[data-role="card-raw"]').first()).toBeVisible();
+  }
 }
 
 const screen = (name: string, mockup: boolean, viewport: Screen['viewport'], theme: Theme, boot: Screen['boot']): Screen => ({ name, mockup, viewport, theme, boot });
@@ -321,6 +340,9 @@ export const SCREENS: Screen[] = [
   }, 'child')),
   screen('image-viewer', false, PHONE, 'dark', imageViewer),
   screen('image-viewer-desktop', false, DESKTOP, 'light', imageViewer),
+  screen('feed-cards', false, PHONE, 'dark', (page) => feedCards(page, 'bottom')),
+  screen('feed-cards-top', false, PHONE, 'dark', (page) => feedCards(page, 'top')),
+  screen('feed-cards-desktop', false, DESKTOP, 'light', (page) => feedCards(page, 'bottom')),
   screen('question-request', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, hub, api, id) => {
     openRequest(hub, api, id, 'question', { truncated: true, questions: [{ id: 'q0', text: 'Что делать?', options: ['Да', 'Нет'] }, { id: 'q1', text: 'Какие тесты?', options: ['Сон', 'Сеть'], multi_select: true, allow_custom: true }] });
     await expect(opened.locator('.question-card')).toBeVisible();
