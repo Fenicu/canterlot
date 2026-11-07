@@ -53,6 +53,8 @@ test('owner_attachment_opens_full_screen_on_a_dark_stage_and_escape_returns_focu
   expect(box.height).toBe(viewport.height);
   expect(await dialog.locator('.backdrop').evaluate((node) => getComputedStyle(node).backgroundColor)).toBe('rgb(0, 0, 0)');
   await expect(dialog.locator('.counter')).toHaveText('2 из 3');
+  const counter = (await dialog.locator('.counter').boundingBox())!;
+  expect(Math.abs(counter.x + counter.width / 2 - viewport.width / 2)).toBeLessThan(2);
   // Картинка вписана: целиком на сцене и по центру.
   const frame = await frameState(page);
   expect(frame.width).toBeLessThanOrEqual(frame.stage.width + 1);

@@ -768,9 +768,10 @@
     top: 0;
     right: 0;
     left: 0;
-    display: flex;
+    /* Три колонки: счётчик стоит ровно по центру, как бы ни отличались кнопки по краям. */
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
     align-items: center;
-    justify-content: space-between;
     gap: var(--s4);
     padding: calc(env(safe-area-inset-top) + var(--s4)) calc(env(safe-area-inset-right) + var(--s4)) var(--s4) calc(env(safe-area-inset-left) + var(--s4));
   }
@@ -791,8 +792,10 @@
   }
   .control:hover { background: var(--viewer-control-hover); }
   .control[aria-disabled='true'] { color: var(--viewer-muted); cursor: default; opacity: var(--opacity-dim); }
-  .save { padding-inline: var(--s6) var(--s8); border-radius: var(--radius-pill); }
+  .top > .control:first-child { justify-self: start; }
+  .save { grid-column: 3; justify-self: end; padding-inline: var(--s6) var(--s8); border-radius: var(--radius-pill); }
   .counter {
+    grid-column: 2;
     margin: 0;
     padding: var(--s3) var(--s6);
     border-radius: var(--radius-pill);
