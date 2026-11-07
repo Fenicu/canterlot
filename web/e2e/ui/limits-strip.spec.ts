@@ -53,7 +53,10 @@ test('collapsed_strip_shows_the_remaining_share_of_both_windows_per_provider', a
   // Полоска показывает остаток: у Claude в пятичасовом окне занято 34%, значит заполнено 66%.
   await expect(rows.nth(0).getByRole('meter', { includeHidden: true }).first()).toHaveAttribute('aria-valuenow', '66');
   await expect(rows.nth(0).locator('.pct[data-tone="danger"]')).toHaveText(/4%/);
-  await expect(strip.locator('.reset').first()).toBeHidden();
+  // Свёрнутая полоса сразу говорит, сколько до сброса каждого показанного окна: сжато, без слова «сброс».
+  await expect(rows.nth(0).locator('.meter').nth(0).locator('.reset-short')).toHaveText(/^(59м|1ч)$/);
+  await expect(rows.nth(0).locator('.meter').nth(1).locator('.reset-short')).toHaveText(/^(23ч\d+м|1д)$/);
+  await expect(strip.locator('.reset-full').first()).toBeHidden();
   const box = await strip.boundingBox();
   const viewport = page.viewportSize();
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
@@ -98,7 +101,10 @@ test('expanded_strip_puts_resets_beside_meters_and_offers_the_refresh_button', a
   const strip = page.locator('.limits').first();
   await strip.locator('summary').click();
   await expect(strip.locator('.reset').first()).toBeVisible();
-  await expect(strip.locator('.reset').first()).toHaveText(/^сброс\s+(\p{L}{2}\s+)?\d\d:\d\d$/u);
+  // Раскрытая полоса говорит словами; на узкой полосе слово «сброс» уходит, отсчёт остаётся.
+  const words = strip.locator('.reset').first().locator('.reset-full:visible, .reset-bare:visible, .reset-span:visible');
+  await expect(words).toHaveText(/^(сброс )?(через )?(59\u00a0мин|1\u00a0ч)$/);
+  await expect(strip.locator('.reset-short:visible')).toHaveCount(0);
   await expect(strip.locator('.reset')).toHaveCount(4);
   await expect(strip.locator('.updated')).toHaveText(/^обновлено \d\d:\d\d$/);
   await expect(strip.getByRole('button', { name: 'Обновить лимиты' })).toBeVisible();
@@ -485,7 +491,8 @@ async function windowMetrics(page: Page): Promise<WindowMetrics[]> {
         window: meter.dataset.window ?? '',
         band: (band.textContent ?? '').replace(/\s+/g, ' ').trim(),
         visible: getComputedStyle(meter).display !== 'none' && tagBox.width > 0 && tagBox.height > 0,
-        gaugeX: bar.getBoundingClientRect().x,
+        // Без полоски (узкая свёрнутая полоса) колонку окна отмечает значение.
+        gaugeX: (bar.getClientRects().length > 0 ? bar : value).getBoundingClientRect().x,
         bandTop: bandBox.top,
         bandBottom: bandBox.bottom,
         meterTop: meterBox.top,
@@ -564,7 +571,13 @@ async function expectFourProviderStrip(page: Page, open: boolean): Promise<void>
       expect(Math.abs(item.resetHeight - item.resetLineHeight), `${item.window} reset height`).toBeLessThanOrEqual(1);
     }
   } else {
-    expect(metrics.some((item) => item.resetVisible)).toBe(false);
+    // Свёрнутая полоса: у каждого показанного окна свой отсчёт до сброса в одну строку.
+    const resets = metrics.filter((item) => item.resetVisible);
+    expect(resets.map((item) => item.window)).toEqual(metrics.filter((item) => item.value !== 'устарело').map((item) => item.window));
+    for (const item of resets) {
+      expect(item.resetLines, `${item.window} reset lines`).toBe(1);
+      expect(item.resetOverflow, `${item.window} reset overflow`).toBeLessThanOrEqual(0);
+    }
   }
 }
 
@@ -624,6 +637,8 @@ for (const motion of ['full', 'reduced'] as const) {
   test(`meter_slides_to_a_new_reading_by_transform_and_stands_still_on_first_paint_${motion}`, async ({ page }) => {
     if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
     const { hub, api } = await boot(page);
+    // В узкой свёрнутой полосе (боковая колонка рабочего стола) полоски уступают место отсчёту; в раскрытой они всегда есть.
+    await page.locator('.limits').first().locator('summary').click();
     const fill = page.locator('.limits').first().locator('.row').nth(0).locator('[role="meter"] span').first();
     await expect(fill).toBeVisible();
     // Первая отрисовка: заливка уже на месте, переход не идёт.
@@ -728,12 +743,12 @@ test('stripes_span_the_strip_and_the_chevron_keeps_its_place_in_both_states', as
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       }
       if (await strip.evaluate((node) => (node as HTMLDetailsElement).open)) await strip.locator('summary').click();
-      await expect(strip.locator('.reset').first()).toBeHidden();
+      await expect(strip.locator('.reset-short').first()).toBeVisible();
       await settled();
       const collapsed = await stripGeometry(page);
       expectStripGeometry(collapsed);
       await strip.locator('summary').click();
-      await expect(strip.locator('.reset').first()).toBeVisible();
+      await expect(strip.locator('.reset-short').first()).toBeHidden();
       await settled();
       const expanded = await stripGeometry(page);
       expectStripGeometry(expanded);

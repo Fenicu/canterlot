@@ -6,6 +6,8 @@
   import IconButton from '#lib/ui/IconButton.svelte';
   import { LimitsRefresh } from '#lib/stores/limitsRefresh.svelte.js';
   import { limitStrip } from './limitsText';
+  import { fmt } from '#lib/format/ru.js';
+  import { resetPhrase } from '#lib/format/countdown.js';
   import type { LimitThresholds, MeterView, ProviderLimits } from '#lib/stores/limits.js';
 
   let {
@@ -30,13 +32,19 @@
   $effect(() => refresher.observe(view.updatedAt));
   onDestroy(() => refresher.dispose());
 
-  /** Полный текст сброса остаётся в title, а по узкой полосе показываем только время. */
-  function resetParts(reset: string): { day: string; clock: string } {
-    const body = reset.replace(/^сброс\s+/, '');
-    const cut = body.indexOf(' ');
-    return cut === -1
-      ? { day: '', clock: body }
-      : { day: body.slice(0, cut), clock: body.slice(cut + 1) };
+  /** Старшая единица сжатого отсчёта («23ч» из «23ч59м») остаётся и в самой узкой полосе. */
+  const SHORT_SPLIT = /^(\D*\d+\D+)(.*)$/;
+  function shortHead(text: string): string {
+    return SHORT_SPLIT.exec(text)?.[1] ?? text;
+  }
+  function shortTail(text: string): string {
+    return SHORT_SPLIT.exec(text)?.[2] ?? '';
+  }
+
+  /** Подсказка над отсчётом: полная дата сброса и, если окно кончится раньше, прогноз. */
+  function resetTitle(m: MeterView): string {
+    const date = `сброс ${fmt.fullStamp(m.resetAt)}`;
+    return m.forecast?.before ? `${date}; ${m.forecast.long}, раньше сброса` : date;
   }
 </script>
 
@@ -47,11 +55,16 @@
     <span class="bar" aria-hidden="true"><Gauge value={m.fill} tone={m.tone} dim={m.stale || !m.known} label="{name} {tag}" /></span>
     <b class="pct" data-tone={m.tone}><span class="sr-only">осталось </span>{m.text}</b>
     {#if m.reset}
-      {@const parts = resetParts(m.reset)}
-      <span class="reset" title={m.reset}>
-        <span class="reset-prefix">сброс&nbsp;</span>{#if parts.day}<span class="reset-day">{parts.day}&nbsp;</span>{/if}{parts.clock}
+      <!-- Свёрнутая полоса показывает сжатый отсчёт, раскрытая — словами; полная дата в подсказке. -->
+      <span class="reset" data-forecast={m.forecast?.before ? 'before' : undefined} title={resetTitle(m)}>
+        <span class="sr-only">{resetPhrase(m.resetLong)}{m.forecast?.before ? `, ${m.forecast.long}` : ''}</span>
+        <span class="reset-short" aria-hidden="true">{shortHead(m.resetShort)}{#if shortTail(m.resetShort)}<span class="reset-tail">{shortTail(m.resetShort)}</span>{/if}</span>
+        <span class="reset-full" aria-hidden="true">{resetPhrase(m.reset)}</span>
+        <span class="reset-bare" aria-hidden="true">{m.reset}</span>
+        <span class="reset-span" aria-hidden="true">{m.resetSpan}</span>
       </span>
     {/if}
+    {#if m.reset && m.forecast?.before}<span class="forecast" aria-hidden="true">{m.forecast.text}</span>{/if}
   </span>
 {/snippet}
 
@@ -141,9 +154,10 @@
     align-items: baseline;
     min-width: 0;
   }
-  /* Свёрнутая полоса компактна: одна строка на провайдера, 5ч и нед рядом, месяц скрыт. */
+  /* Свёрнутая полоса компактна: одна строка на провайдера, 5ч и нед рядом, месяц скрыт.
+     У каждого окна свой сжатый отсчёт до сброса: колонки 5 и 9. */
   .limits:not([open]) .rows {
-    grid-template-columns: minmax(0, 1fr) minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content var(--chevron-column);
+    grid-template-columns: minmax(0, 1fr) minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content max-content minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content max-content var(--chevron-column);
     column-gap: var(--s1);
   }
   .limits:not([open]) .meter { display: contents; }
@@ -153,10 +167,29 @@
   .limits:not([open]) .meter[data-window='five'] > .tag { grid-column: 2; }
   .limits:not([open]) .meter[data-window='five'] > .bar { grid-column: 3; }
   .limits:not([open]) .meter[data-window='five'] > .pct { grid-column: 4; }
+  .limits:not([open]) .meter[data-window='five'] > .reset { grid-column: 5; }
   /* Значение 5ч («устарело») не должно сливаться с меткой недели. */
-  .limits:not([open]) .meter[data-window='week'] > .tag { grid-column: 5; padding-inline-start: var(--s3); }
-  .limits:not([open]) .meter[data-window='week'] > .bar { grid-column: 6; }
-  .limits:not([open]) .meter[data-window='week'] > .pct { grid-column: 7; }
+  .limits:not([open]) .meter[data-window='week'] > .tag { grid-column: 6; padding-inline-start: var(--s3); }
+  .limits:not([open]) .meter[data-window='week'] > .bar { grid-column: 7; }
+  .limits:not([open]) .meter[data-window='week'] > .pct { grid-column: 8; }
+  .limits:not([open]) .meter[data-window='week'] > .reset { grid-column: 9; }
+  .limits:not([open]) .reset { display: inline-block; padding-inline-start: var(--s1); font-size: var(--fs-xs); }
+  /* У окна без отсчёта («устарело», «нет данных») значение занимает и колонку сброса: длинное слово не раздувает колонку процентов. */
+  .limits:not([open]) .meter[data-window='five']:not(:has(.reset)) > .pct { grid-column: 4 / span 2; }
+  .limits:not([open]) .meter[data-window='week']:not(:has(.reset)) > .pct { grid-column: 8 / span 2; }
+  .limits:not([open]) .reset-full, .limits:not([open]) .reset-bare, .limits:not([open]) .reset-span, .limits[open] .reset-short, .limits[open] .reset-bare, .limits[open] .reset-span { display: none; }
+  /* Окно кончится раньше сброса: в свёрнутой полосе места под слова нет, отсчёт окрашен, прогноз в подсказке и раскрытой полосе. */
+  .limits:not([open]) .reset[data-forecast='before'] { color: var(--warning); }
+  .limits:not([open]) .forecast { display: none; }
+  /* Узкая полоса отдаёт место отсчёту сброса: полоски повторяют проценты и уходят первыми,
+     затем отсчёт оставляет старшую единицу («23ч» вместо «23ч59м»), точный остаток — в раскрытой полосе. */
+  @container (max-width: 25em) {
+    .limits:not([open]) .rows { --gauge-width: var(--s0); }
+    .limits:not([open]) .bar { display: none; }
+  }
+  @container (max-width: 19em) {
+    .limits:not([open]) .reset-tail { display: none; }
+  }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Длинное имя («Antigravity», «OpenCode») не прилипает к метке окна. */
   .limits[open] .pname { padding-inline-end: var(--s2); }
@@ -168,12 +201,20 @@
   .meter[data-stale] .pct, .meter[data-known='false'] .pct { color: var(--muted); font-weight: var(--weight-normal); }
   .reset { display: none; padding-inline-start: var(--s2); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .limits[open] .reset { display: inline; }
+  /* Прогноз — своя строка под окном: в строку окна он не помещается на телефоне. */
+  .forecast { grid-column: 2 / -1; color: var(--warning); white-space: nowrap; }
   .none { grid-column: 2 / span 4; justify-self: start; color: var(--muted); white-space: nowrap; }
   .reserve { grid-column: 2 / -2; justify-self: start; }
   .estimated { grid-column: 2 / -2; justify-self: start; color: var(--muted); font-size: var(--fs-xs); }
-  /* В узкой полосе сброс укорачивается, но никогда не переносится. */
-  @container (max-width: 26em) { .reset-prefix { display: none; } }
-  @container (max-width: 16em) { .reset-day { display: none; } }
+  /* В узкой раскрытой полосе сброс теряет слово «сброс», затем «через», но никогда не переносится. */
+  @container (max-width: 30em) {
+    .limits[open] .reset-full { display: none; }
+    .limits[open] .reset-bare { display: inline; }
+  }
+  @container (max-width: 26em) {
+    .limits[open] .reset-bare { display: none; }
+    .limits[open] .reset-span { display: inline; }
+  }
   .chevron {
     grid-row: 1;
     grid-column: -2 / -1;
