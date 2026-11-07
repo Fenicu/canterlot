@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{io::Write, path::PathBuf, process::ExitCode};
 
 use canterlot_worker::{
     config,
@@ -55,10 +55,18 @@ enum Command {
         #[arg(long)]
         exec_dir: PathBuf,
     },
+    /// Напечатать возможности и харнессы этой сборки.
+    ///
+    /// Строки `capability <имя>` и `harness <имя>`, без конфига, файлов и сети: по ним
+    /// инструменты выкладки сверяют развёрнутый воркер с выпуском.
+    Capabilities,
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Some(code) = capabilities() {
+        return code;
+    }
     if let Some(code) = codex_replay().await {
         return code;
     }
@@ -81,6 +89,31 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn capabilities() -> Option<ExitCode> {
+    let Command::Capabilities = Cli::try_parse().ok()?.command else {
+        return None;
+    };
+    let lines = canterlot_worker::session::OPTIONAL_CAPABILITIES
+        .iter()
+        .map(|name| format!("capability {name}\n"))
+        .chain(
+            canterlot_worker::adapter::HARNESSES
+                .iter()
+                .map(|name| format!("harness {name}\n")),
+        )
+        .collect::<String>();
+    // Без `print!`: закрытый канал (`| head`) даёт код ошибки, а не панику.
+    let mut stdout = std::io::stdout().lock();
+    let written = stdout.write_all(lines.as_bytes());
+    Some(match written.and_then(|()| stdout.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("capabilities: {error}");
+            ExitCode::FAILURE
+        }
+    })
 }
 
 #[cfg(feature = "synthetic-adapter")]
@@ -156,7 +189,9 @@ async fn supervise() -> Option<ExitCode> {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = match Cli::parse().command {
         Command::Run { config } => config,
-        Command::McpRelay { .. } | Command::Supervise { .. } => return Ok(()),
+        Command::McpRelay { .. } | Command::Supervise { .. } | Command::Capabilities => {
+            return Ok(());
+        }
         #[cfg(feature = "synthetic-adapter")]
         Command::CodexReplay { .. } => return Ok(()),
         #[cfg(feature = "synthetic-adapter")]

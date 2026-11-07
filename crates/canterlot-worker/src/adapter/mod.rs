@@ -784,6 +784,10 @@ const CLAUDE_MODELS: &[(&str, &str, u64)] = &[
     ("haiku", "Haiku", 200_000),
 ];
 
+/// Харнессы боевой сборки в порядке каталога: те же строки хаб хранит в
+/// `machine_harnesses.harness`. Синтетические сюда не входят.
+pub const HARNESSES: &[&str] = &["claude_code", "codex", "opencode", "antigravity"];
+
 pub fn catalog() -> Vec<HarnessCatalog> {
     catalog_with(None, None, None, None, None)
 }
@@ -994,10 +998,7 @@ pub struct AdapterContext {
 }
 
 pub fn known_harness(profile: &str) -> bool {
-    if matches!(
-        profile,
-        "claude_code" | "codex" | "opencode" | "antigravity"
-    ) {
+    if HARNESSES.contains(&profile) {
         return true;
     }
     #[cfg(feature = "synthetic-adapter")]
@@ -1071,6 +1072,56 @@ mod tests {
     fn synthetic_profiles_are_disabled_without_feature() {
         assert!(super::registry("synthetic").is_none());
         assert!(super::registry("synthetic-exit-on-interrupt").is_none());
+    }
+}
+
+#[cfg(test)]
+mod harness_list_tests {
+    use super::*;
+
+    fn real(harness: &&str) -> bool {
+        !harness.starts_with("synthetic")
+    }
+
+    #[test]
+    fn harness_list_matches_full_catalog_and_proto() {
+        let claude = crate::config::ClaudeCodeConfig::default();
+        let claude_cli = claude_code::version::CliVersion::Verified("2.1.311".into());
+        let version = || cli_version::CliVersion::Verified("1.0.0".into());
+        let codex = codex::CodexCatalog {
+            version: version(),
+            models: vec![],
+        };
+        let opencode = opencode::OpenCodeCatalog {
+            version: version(),
+            models: vec![],
+        };
+        let antigravity = antigravity::AntigravityCatalog {
+            version: version(),
+            models: vec![],
+            current_model: None,
+            efforts: vec![],
+            current_effort: None,
+        };
+        let listed: Vec<&str> = catalog_with(
+            Some(&claude),
+            Some(&claude_cli),
+            Some(&codex),
+            Some(&opencode),
+            Some(&antigravity),
+        )
+        .iter()
+        .map(|entry| entry.harness)
+        .filter(real)
+        .collect();
+        assert_eq!(listed, HARNESSES);
+        let proto: Vec<&str> = canterlot_proto::harness::HARNESS_PROVIDERS
+            .iter()
+            .map(|&(harness, _)| harness)
+            .filter(real)
+            .collect();
+        assert_eq!(proto, HARNESSES);
+        assert!(HARNESSES.iter().all(|harness| known_harness(harness)));
     }
 }
 
