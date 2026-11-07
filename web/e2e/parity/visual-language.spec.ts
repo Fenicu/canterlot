@@ -7,7 +7,11 @@ import { bootScreen, SCREENS, type Theme } from './states';
 const THEMES: Theme[] = ['dark', 'light'];
 const COLOR_TOKENS = [...readFileSync(resolve(process.cwd(), 'src/lib/styles/tokens.css'), 'utf8').matchAll(/(--[a-z0-9-]+):\s*(?:#|rgb|hsl|oklch|color-mix)/g)].map((match) => match[1]!);
 
+// QUARANTINE: экран не успевает открыться под полной нагрузкой гейта (1.19.1: spawn-queue и docx-viewer,
+// 4 из 1722 при check.sh --all; 518 из 518 отдельно)
 // Каждая пара «экран, тема» отдельным тестом: проверки идут параллельно, а падение называет экран.
+test.describe('quarantine axe_has_no_serious_violations_on_every_route_in_both_themes', () => {
+test.describe.configure({ retries: 2 });
 for (const screen of SCREENS) {
   for (const theme of THEMES) {
     test(`axe_has_no_serious_violations_on_every_route_in_both_themes: ${screen.name} ${theme}`, async ({ page }) => {
@@ -21,6 +25,7 @@ for (const screen of SCREENS) {
     });
   }
 }
+});
 
 for (const screen of SCREENS.filter((item) => item.viewport.width < 1000)) {
   for (const width of [360, 320]) {
