@@ -75,7 +75,9 @@ test('bundle_budget_holds', async (ctx) => {
   const parts: Record<string, RegExp> = {
     markdown: /linkify/,
     dompurify: /DOMPurify/,
-    'html-to-image': /foreignObject/
+    'html-to-image': /foreignObject/,
+    mammoth: /wordprocessingml\/2006\/main/,
+    'read-excel-file': /XLS_FILE_NOT_SUPPORTED/
   };
   for (const [name, signature] of Object.entries(parts)) {
     const holders = where(signature);
@@ -88,4 +90,8 @@ test('bundle_budget_holds', async (ctx) => {
   const workers = all(join(immutable, 'workers'));
   expect(workers.some((file) => /hash\.worker/.test(file)), 'хеш-воркер отдельным файлом').toBe(true);
   expect(entry.some((file) => /hash\.worker/.test(file))).toBe(false);
+  // Разборщики Word и Excel живут только в своих воркерах: ни во входе, ни в чанках ленты их нет.
+  for (const [name, signature] of [['docx', parts.mammoth!], ['xlsx', parts['read-excel-file']!]] as const) {
+    expect(where(signature).map((file) => relative(immutable, file)), `${name}: библиотека только в воркере`).toEqual(workers.filter((file) => new RegExp(`${name}\\.worker`).test(file)).map((file) => relative(immutable, file)));
+  }
 });
