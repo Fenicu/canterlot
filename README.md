@@ -106,6 +106,53 @@ scripts/publish-release.sh v1.16.1
 
 Выкат production — только через `scripts/deploy` (см. §11 `docs/deploy/pilot.md`): он проверяет готовый dist из `build-release.sh`, боевой прогон требует `--execute <id>` и `--confirm <токен>` от dry-run.
 
+### Полный гейт на сборочной машине
+
+Тот же прогон, что перед выпуском, можно снять на `mainpc-build` в контейнере
+Debian 13: быстрее, чем на рабочей VM, и без влияния на неё.
+
+```bash
+scripts/gate-remote.sh 4d884712            # коммит на сборочной машине (CANTERLOT_BUILD_HOST)
+scripts/gate-remote.sh 4d884712 --local    # то же на местном docker, для проверки
+```
+
+`REV` — любой коммит, не только тег (по умолчанию `HEAD`). Скрипт отправляет его
+в `~/canterlot.git` как `refs/gate/<sha12>`, создаёт отсоединённую рабочую копию
+`~/gate/src-<sha12>` и запускает в контейнере ровно три шага `/tmp/gate/run.sh`:
+
+1. `VITE_UI_TESTS=1 npm run build` (после своего `npm ci`);
+2. `scripts/check.sh --all` — fmt, clippy, nextest с тестовой PostgreSQL;
+3. `scripts/check-web.sh --stack` — проверки web, Playwright и сквозные сценарии
+   на настоящем хабе и воркере.
+
+Образ `canterlot-gate:<hash>` (`docker/gate/Dockerfile`) — Debian trixie по digest,
+Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестовой базы VM),
+браузеры Playwright из `web/package-lock.json` и те же шрифты, что на VM. Тег
+считается из Dockerfile, `rust-toolchain.toml` и версии Playwright. База
+поднимается внутри контейнера на `127.0.0.1:55441` с выключенным fsync; на host
+`55441` не занимается, поэтому гейт на VM можно запускать одновременно.
+
+Ограничения контейнера — `--cpus 30 --memory 48g --pids-limit 8192 --shm-size=2g`:
+у 7950X 32 потока и 61 ГБ, два потока и ~13 ГБ остаются хосту. Общая память
+браузеров — 2 ГБ вместо 64 МБ по умолчанию: иначе Firefox не доводит страницы до
+`[data-ready]` и тесты падают по таймауту. Число браузерных воркеров Playwright
+считается от квоты CPU (один на ~4 CPU: `PW_WORKERS`), а `strace`-тестам выдаётся
+`SYS_PTRACE`; `--init` пожинает осиротевших потомков. Кэши на сборочной машине —
+`~/gate/cache/{cargo,target,npm,playwright,tmp}`, локально —
+`~/.cache/canterlot-gate` (`CANTERLOT_GATE_CACHE`); повторный прогон того же
+коммита их переиспользует. `tmp` — это `/tmp` контейнера (база, временные
+каталоги тестов и профили браузеров): на overlayfs и на tmpfs те же проверки
+ловят таймауты, на обычной ФС хоста проходят.
+
+Результат и логи (`build.log`, `check.log`, `web.log`, `result.txt` в формате
+`/tmp/gate/run.sh`) складываются в `/tmp/gate-remote/<sha12>`
+(`CANTERLOT_GATE_OUT`). Код возврата — код гейта. Рабочая копия и ref на
+сборочной машине убираются автоматически (`git worktree remove --force` и
+`update-ref -d`, без `rm`).
+
+Гейт на самой VM (`/tmp/gate/run.sh` с `CANTERLOT_TEST_PG_PORT=55441`) продолжает
+работать и остаётся эталоном: контейнер повторяет его шаги.
+
 ## Развёртывание из готовых архивов
 
 В [выпусках на Forgejo](https://git.fenicu.com/Fenicu/canterlot/releases) лежат собранные хаб, воркер и PWA. Хаб и воркер собраны для x86_64 под glibc 2.41 и новее (Debian 13, Ubuntu 25.04 и новее). Подробности каждого шага — в [docs/deploy/pilot.md](docs/deploy/pilot.md), ключи конфигурации — в [docs/configuration.md](docs/configuration.md). Собрать всё из исходников можно по [docs/development.md](docs/development.md).
