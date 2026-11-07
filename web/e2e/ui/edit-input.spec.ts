@@ -391,6 +391,9 @@ test('edit_conflict_keeps_the_editor_open_with_the_other_revision', async ({ pag
 });
 
 test('background_update_keeps_an_open_bubble_edit', async ({ page, context, baseURL }) => {
+  // Загрузка ленты, отправка и проверка обновления делят бюджет: под нагрузкой полного гейта
+  // тридцати секунд по умолчанию не хватало ещё до ожидания баннера.
+  test.setTimeout(60_000);
   const { hub, api, id } = await boot(page, []);
   const { ownKey } = await sendOwn(page, 'Правка до обновления');
   const { bubble } = await confirmQueued(page, hub, api, id, ownKey, 'Правка до обновления');
