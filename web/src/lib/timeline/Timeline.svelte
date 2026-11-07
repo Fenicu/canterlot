@@ -144,10 +144,10 @@
   // Живая строка закрывает промежуток до строки эпизода: фаза агента или только что принятый запрос.
   const compactingRow = $derived(entries.some((entry) => entry.kind === 'compaction' && entry.compaction.ok === null));
   const compacting = $derived(!feed && !laneRoot && chat.compacting && !compactingRow);
-  const turn = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
+  const turn = $derived(turnIsLive(chat.activity, chat.queue?.run_slot));
   // Текущий ход узнаётся по слоту очереди: до первого блока последний блок ещё принадлежит прошлому ходу.
   const runInputId = $derived.by(() => {
-    const slot = chat.queue.run_slot;
+    const slot = chat.queue?.run_slot;
     if (typeof slot !== 'object' || slot === null) return null;
     if ('running' in slot) return slot.running?.input_id ?? null;
     return slot.dispatching?.input_id ?? null;
