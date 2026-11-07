@@ -7,6 +7,7 @@ import { expect } from '../ui/fixtures';
 import { bootSecondary } from '../ui/secondary-fixture';
 import { seedConversation } from '../../testing/fake-hub/seed';
 import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
+import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
 
 export type Theme = 'dark' | 'light';
 
@@ -112,6 +113,16 @@ async function orchestrator(page: Page, afterOpen?: (page: Page, hub: FakeHub, a
 }
 
 const screen = (name: string, mockup: boolean, viewport: Screen['viewport'], theme: Theme, boot: Screen['boot']): Screen => ({ name, mockup, viewport, theme, boot });
+
+/** Просмотр картинки из присланного файла. Фокус на «Закрыть» держит кнопки на экране, иначе они спрячутся до проверки. */
+async function imageViewer(page: Page): Promise<void> {
+  await openChat(page, 'shared');
+  await thumb(page, 'shared', 0).click();
+  await expect(viewer(page).locator('.slide[data-current] .frame[data-ready]')).toBeVisible();
+  await settled(page);
+  await page.keyboard.press('Tab');
+  await expect(viewer(page).getByRole('button', { name: 'Закрыть' })).toBeFocused();
+}
 
 export const SCREENS: Screen[] = [
   screen('01-sessions', true, PHONE, 'dark', (page) => sessions(page, '/sessions', '[data-list-ready]')),
@@ -308,6 +319,8 @@ export const SCREENS: Screen[] = [
     // Строка в шапке под указателем меняет цвет переходом: проверка смотрит на устоявшийся цвет.
     await opened.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== 'running'));
   }, 'child')),
+  screen('image-viewer', false, PHONE, 'dark', imageViewer),
+  screen('image-viewer-desktop', false, DESKTOP, 'light', imageViewer),
   screen('question-request', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, hub, api, id) => {
     openRequest(hub, api, id, 'question', { truncated: true, questions: [{ id: 'q0', text: 'Что делать?', options: ['Да', 'Нет'] }, { id: 'q1', text: 'Какие тесты?', options: ['Сон', 'Сеть'], multi_select: true, allow_custom: true }] });
     await expect(opened.locator('.question-card')).toBeVisible();
