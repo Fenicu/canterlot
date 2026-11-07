@@ -5,19 +5,18 @@
   import RequestCard from '#lib/requests/RequestCard.svelte';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
   import type { FeedFolds } from '#lib/timeline/folds.js';
-  import { ASK_TOOL, agentTitle, handBackText, isMainAgent, toolTitle } from '#lib/timeline/present.js';
-  import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
+  import { agentTitle, handBackText, isMainAgent, toolTitle } from '#lib/timeline/present.js';
+  import { shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import { foldSteps } from '#lib/timeline/steps.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
   import ReasoningBlock from '#lib/timeline/ReasoningBlock.svelte';
   import StepGroupRow from '#lib/timeline/StepGroupRow.svelte';
-  import SubagentRow from '#lib/timeline/SubagentRow.svelte';
+  import QuietRow from '#lib/timeline/cards/QuietRow.svelte';
+  import ToolCard from '#lib/timeline/cards/ToolCard.svelte';
+  import { cardLabel, cardQuiet, cardStays, cardYieldsToRequest } from '#lib/timeline/cards/registry.js';
   import TextBlock from '#lib/timeline/TextBlock.svelte';
-  import ToolBlock from '#lib/timeline/ToolBlock.svelte';
-  import SpawnRouteLine from '#lib/timeline/SpawnRouteLine.svelte';
-  import { isSpawnCall } from '#lib/routing/spawnAnswer.js';
   import IconButton from '#lib/ui/IconButton.svelte';
   import { timeTip } from '#lib/ui/time-tip.js';
 
@@ -57,7 +56,7 @@
     const empty = new Set(hollow.split(' '));
     const list = entries.filter((entry) => !empty.has(entry.key));
     // Вопрос и ответ показывает его запрос, строка вызова их только повторяла бы.
-    return list.filter((entry, index) => !(entry.kind === 'block' && entry.block.toolName === ASK_TOOL && list[index + 1]?.kind === 'request'));
+    return list.filter((entry, index) => !(entry.kind === 'block' && cardYieldsToRequest(entry.block) && list[index + 1]?.kind === 'request'));
   });
   const head = $derived(all[0]);
   const streaming = $derived(all.some((block) => block.state === 'streaming'));
@@ -68,9 +67,8 @@
   const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
   const live = $derived(working || streaming);
   const report = (block: BlockModel) => block.parentId === laneRoot && block.kind === 'tool_result' && isMainAgent(block.agent);
-  // Запуск сессии не прячется в свёрнутые шаги: под ним строка маршрута или очереди.
-  const spawn = (block: BlockModel) => block.kind === 'tool_call' && isSpawnCall(block.toolName);
-  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: (block) => report(block) || spawn(block) }));
+  // Карточки делегирования, плана и файлов не прячутся в свёрнутые шаги: реестр говорит, какие.
+  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: (block) => report(block) || cardStays(block), quiet: cardQuiet, label: cardLabel }));
   const view = $derived(folds.view(cardKey, items, live));
 </script>
 
@@ -84,11 +82,8 @@
         <h3>Итог</h3>
         <TextBlock block={{ id: block.id, text: handBackText(block.text), state: 'final' }} />
       </section>
-    {:else if isSubagentCall(block)}
-      <SubagentRow call={block} nodes={links.children(block.id)} result={links.result(block.id)} background={links.background(block.id)} {working} {now} {conversationId} />
     {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
-      <ToolBlock {block} result={links.result(block.id)} background={links.background(block.id)} {working} {now} {load} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
-      {#if spawn(block)}<SpawnRouteLine result={links.result(block.id)} />{/if}
+      <ToolCard {block} result={links.result(block.id)} background={links.background(block.id)} {working} {now} {load} {links} {folds} {conversationId} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
     {:else if block.kind === 'warning' || block.kind === 'error'}
       <NoticeBlock {block} />
     {:else if block.kind === 'reasoning'}
@@ -109,6 +104,8 @@
     <div class="entry" data-key={item.key}>
       {#if item.kind === 'group'}
         <StepGroupRow group={item} {folds} row={entryRow} />
+      {:else if item.kind === 'quiet'}
+        <QuietRow group={item} {folds} row={entryRow} />
       {:else}
         {@render entryRow(item.entry)}
       {/if}

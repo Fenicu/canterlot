@@ -14,7 +14,9 @@ export default defineConfig({
     conditions: ['browser'],
     alias: {
       $lib: new URL('./src/lib', import.meta.url).pathname,
-      '#lib': new URL('./src/lib', import.meta.url).pathname
+      '#lib': new URL('./src/lib', import.meta.url).pathname,
+      // Карточки ленты строят ссылки через `resolve`; в юнит-тестах приложение живёт в корне.
+      '$app/paths': new URL('./tests/unit/stubs/app-paths.ts', import.meta.url).pathname
     }
   },
   test: {

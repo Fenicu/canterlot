@@ -19,6 +19,7 @@
   import { rowIndexOfInput } from '#lib/timeline/ownerMessages.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
+  import { feedEvents, listSession, previousCall, setFeedCards } from '#lib/timeline/cards/context.js';
   import {
     HeightIndex,
     captureAnchor,
@@ -118,6 +119,18 @@
   const streaming = $derived(entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
   const failed = $derived(entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || (entry.block.state === 'incomplete' && shownInCard(entry.block)))));
   const harness = $derived(chat.detail?.harness as { title?: string; provider?: string } | undefined);
+  // Карточки инструментов читают ленту через контекст: свой ли это оркестратор, прошлый список задач, события хаба.
+  setFeedCards({
+    get root() {
+      return !laneRoot && !feed && !chat.detail?.parent_id;
+    },
+    get harness() {
+      return harness?.provider ?? '';
+    },
+    previous: (block) => previousCall(entries, block),
+    session: listSession,
+    events: (sessionId) => feedEvents(entries, sessionId)
+  });
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
   const permissionMode = $derived(
     (chat.settings.effective as { permission_mode?: string } | null | undefined)?.permission_mode ??

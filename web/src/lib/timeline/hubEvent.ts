@@ -19,7 +19,8 @@ type AlarmOrigin = InputOrigin & AlarmFacts & { event?: (HubEvent & AlarmFacts) 
 
 const SESSION_KINDS = new Set(['session_result', 'asked', 'stalled', 'failed', 'quota_paused']);
 
-const STATUS: Record<string, string> = {
+/** Слова состояния чужой сессии: их же говорят карточки запуска и просмотра. */
+export const SESSION_STATE_WORD: Record<string, string> = {
   idle: 'завершена',
   waiting_for_user: 'задала вопрос',
   stalled: 'зависла',
@@ -42,7 +43,7 @@ export function isSessionEvent(event: HubEvent | null | undefined): boolean {
 }
 
 export function sessionStatus(event: HubEvent): string {
-  return (event.state && STATUS[event.state]) || 'завершена';
+  return (event.state && SESSION_STATE_WORD[event.state]) || 'завершена';
 }
 
 export function eventTitle(origin: InputOrigin | null | undefined): string {

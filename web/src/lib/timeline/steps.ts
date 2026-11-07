@@ -25,7 +25,14 @@ export interface PlainItem {
   entry: TimelineEntry;
 }
 
-export type CardItem = StepGroup | PlainItem;
+/** Подряд идущие служебные вызовы одной бледной строкой. */
+export interface QuietGroup {
+  kind: "quiet";
+  key: string;
+  entries: TimelineEntry[];
+}
+
+export type CardItem = StepGroup | PlainItem | QuietGroup;
 
 export interface FoldContext {
   links: BlockLinks;
@@ -35,6 +42,10 @@ export interface FoldContext {
   folds: FeedFolds;
   /** Строка, которая остаётся на виду, даже если похожа на шаг. */
   stays?: (block: BlockModel) => boolean;
+  /** Служебный вызов: подряд идущие собираются в одну бледную строку. */
+  quiet?: (block: BlockModel) => boolean;
+  /** Имя шага для подсчёта в свёрнутой группе: у карточек оно своё. */
+  label?: (block: BlockModel) => string | null;
 }
 
 function isTool(entry: TimelineEntry): entry is BlockEntry {
@@ -52,14 +63,14 @@ function running(block: BlockModel, ctx: FoldContext): boolean {
   return toolTiming(block, ctx.links.result(block.id), ctx.working, ctx.links.background(block.id)).running;
 }
 
-function stepName(block: BlockModel): string {
+function stepName(block: BlockModel, ctx: FoldContext): string {
   if (isSubagentCall(block)) return "Субагент";
-  return toolTitle(block).name || "Шаг";
+  return ctx.label?.(block) || toolTitle(block).name || "Шаг";
 }
 
-function tallyOf(tools: BlockEntry[]): string {
+function tallyOf(tools: BlockEntry[], ctx: FoldContext): string {
   const counts = new Map<string, number>();
-  for (const { block } of tools) counts.set(stepName(block), (counts.get(stepName(block)) ?? 0) + 1);
+  for (const { block } of tools) counts.set(stepName(block, ctx), (counts.get(stepName(block, ctx)) ?? 0) + 1);
   return [...counts]
     .sort((a, b) => b[1] - a[1])
     .map(([name, count]) => `${name} ${count}`)
@@ -84,7 +95,7 @@ function group(entries: TimelineEntry[], ctx: FoldContext, taken: Set<string>): 
     key: ctx.folds.groupKey(entries.map((entry) => entry.key), taken),
     entries,
     label: `${tools.length} ${fmt.plural(tools.length, ["шаг", "шага", "шагов"])}`,
-    tally: tallyOf(tools),
+    tally: tallyOf(tools, ctx),
     failed,
     elapsed: Math.max(0, end - start),
   };
@@ -102,9 +113,29 @@ export function foldSteps(list: TimelineEntry[], ctx: FoldContext): CardItem[] {
   const plain = (entry: TimelineEntry): void => {
     items.push({ kind: "entry", key: entry.key, entry });
   };
+  const quietCall = (entry: TimelineEntry): boolean =>
+    entry.kind === "block" && entry.block.kind === "tool_call" && ctx.quiet?.(entry.block) === true;
+  // Результат служебного вызова без своего вызова в ленте не стоит: он идёт вместе с вызовом.
+  const spill = (entries: TimelineEntry[]): void => {
+    let quiet: TimelineEntry[] = [];
+    const close = (): void => {
+      if (quiet.length >= 2) items.push({ kind: "quiet", key: `quiet:${quiet[0]!.key}`, entries: quiet });
+      else quiet.forEach(plain);
+      quiet = [];
+    };
+    for (const entry of entries) {
+      if (quietCall(entry)) {
+        quiet.push(entry);
+        continue;
+      }
+      close();
+      plain(entry);
+    }
+    close();
+  };
   const flush = (following: number): void => {
     if (run.filter(isTool).length + following >= MIN_STEPS) items.push(group(run, ctx, taken));
-    else run.forEach(plain);
+    else spill(run);
     run = [];
   };
   for (const entry of list) {
@@ -118,6 +149,6 @@ export function foldSteps(list: TimelineEntry[], ctx: FoldContext): CardItem[] {
   const lastTool = ctx.live ? run.findLastIndex(isTool) : -1;
   const tail = lastTool >= 0 ? run.splice(lastTool) : [];
   flush(tail.length > 0 ? 1 : 0);
-  tail.forEach(plain);
+  spill(tail);
   return items;
 }

@@ -32,7 +32,7 @@ function fold(list: TimelineEntry[], over: Partial<FoldContext> = {}, folds = ne
   return foldSteps(top(list), { links: blockLinks(list), working: false, live: false, folds, ...over });
 }
 
-const shape = (items: CardItem[]) => items.map((item) => (item.kind === "group" ? `group:${item.label}` : item.entry.kind === "block" ? item.entry.block.kind : item.entry.kind));
+const shape = (items: CardItem[]) => items.map((item) => (item.kind === "group" ? `group:${item.label}` : item.kind === "quiet" ? `quiet:${item.entries.length}` : item.entry.kind === "block" ? item.entry.block.kind : item.entry.kind));
 
 describe("step groups", () => {
   it("folds_three_steps_with_their_reasoning_and_leaves_text_outside", () => {
