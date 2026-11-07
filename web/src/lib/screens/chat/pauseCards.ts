@@ -1,4 +1,5 @@
 import { compactionLabel, failureLabel, providerLabel } from "#lib/format/labels.js";
+import { untilText } from "#lib/format/countdown.js";
 import { fmt } from "#lib/format/ru.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
@@ -131,7 +132,8 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
         const resetTime = p.resets_at
           ? fmt.resetAt(Date.parse(p.resets_at), ctx.now)
           : "";
-        const reset = resetTime ? `, сброс ${resetTime}` : "";
+        const until = p.resets_at ? untilText(Date.parse(p.resets_at) - ctx.now) : "";
+        const reset = resetTime ? `, сброс ${until ? `${until} (${resetTime})` : resetTime}` : "";
         const title = `Остановлена: достигнут лимит ${name}${reset}; без «кранча» продолжение не отправляется`;
         cards.push({
           key: "pause:limit_reached",
@@ -315,7 +317,8 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           const resetStr = h.resets_at
             ? fmt.resetAt(Date.parse(h.resets_at), ctx.now)
             : "";
-          body.push(`Автоматическое продолжение · ${resetStr}`);
+          const until = h.resets_at ? untilText(Date.parse(h.resets_at) - ctx.now) : "";
+          body.push(`Автоматическое продолжение · ${resetStr}${until ? ` · ${until}` : ""}`);
         } else {
           body.push("Пауза снимется после сброса недельного лимита.");
         }

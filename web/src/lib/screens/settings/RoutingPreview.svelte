@@ -4,6 +4,10 @@
   import { ApiError } from '#lib/api/http.js';
   import { effortLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
+  import { untilText } from '#lib/format/countdown.js';
+  import { clock } from '#lib/clock.js';
+  import { ticker } from '#lib/ticker.svelte.js';
+  import { onMount } from 'svelte';
   import { asDecision, skippedText, type Considered, type ModelTitles, type RouteDecision } from '#lib/routing/decision.js';
   import { detailText, reasonText } from '#lib/routing/reasons.js';
   import Button from '#lib/ui/Button.svelte';
@@ -25,6 +29,9 @@
   let machine = $state<Machine | null>(null);
   let guard = $state<Guard | null>(null);
   let refused = $state<{ candidates: Considered[]; reset: number | null } | null>(null);
+  // Отсчёт до ближайшего сброса идёт по общему маятнику приложения.
+  const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
+  onMount(() => ticker.retain());
 
   $effect(() => {
     if (!types.some((item) => item.key === taskType)) taskType = types[0]?.key ?? '';
@@ -110,7 +117,7 @@
           {/each}
         </ol>
       {/if}
-      {#if refused.reset !== null}<p class="note">Ближайший сброс лимита в {fmt.clock(refused.reset)}: запуск встанет в очередь, если сброс не дальше 6 часов</p>{/if}
+      {#if refused.reset !== null}{@const until = untilText(refused.reset - now)}<p class="note">Ближайший сброс лимита в {fmt.clock(refused.reset)}{until ? ` (${until})` : ''}: запуск встанет в очередь, если сброс не дальше 6 часов</p>{/if}
     </div>
   {/if}
 </section>

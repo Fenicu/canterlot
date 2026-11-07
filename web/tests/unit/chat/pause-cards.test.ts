@@ -136,7 +136,7 @@ describe("chat/pauseCards", () => {
           resets_at: RESET_AT_ISO,
           window: "5h",
         },
-        expectedTitle: `Остановлена: достигнут лимит Claude, сброс ${RESET_AT_FMT}; без «кранча» продолжение не отправляется`,
+        expectedTitle: `Остановлена: достигнут лимит Claude, сброс через 21\u00a0ч (${RESET_AT_FMT}); без «кранча» продолжение не отправляется`,
         expectedTone: "warning",
         expectedActionIds: ["run"],
       },
@@ -517,7 +517,7 @@ describe("chat/pauseCards", () => {
     });
     expect(cards.length).toBe(1);
     expect(cards[0]!.title).toBe(
-      `Остановлена: достигнут лимит Claude, сброс ${RESET_AT_FMT}; без «кранча» продолжение не отправляется`,
+      `Остановлена: достигнут лимит Claude, сброс через 21\u00a0ч (${RESET_AT_FMT}); без «кранча» продолжение не отправляется`,
     );
     expect(
       cards[0]!.body.some((b) => b.includes("Автоматическое продолжение")),
