@@ -490,12 +490,36 @@ check_precompressed() {
         log "SKIPPED: precompressed Content-Encoding (dry-run: would start a one-off loopback Caddy inside the container)"
         return 0
     fi
-    if ! list="$(ssh_web "cd '${WEB_RELEASES}/${WEB_SHA}' && find _app/immutable -type f -name '*.js'")"; then
+    if ! list="$(ssh_web "cd '${WEB_RELEASES}/${WEB_SHA}' && find _app/immutable -type f")"; then
         hard "precompressed check: cannot pick an asset from release ${WEB_SHA}"
         return
     fi
-    asset="$(printf '%s\n' "${list}" | LC_ALL=C sort | sed -n 1p)"
-    [ -n "${asset}" ] || { hard "precompressed check: no JS asset in release ${WEB_SHA}"; return; }
+    # Проба идёт по первому по LC_ALL=C *.js, у которого в релизе есть все три
+    # сжатых соседа: сборка не сжимает совсем маленькие файлы, и Caddy честно
+    # отдаёт их без Content-Encoding (инцидент 1.19.1: --RoKY8p.js, 22 байта).
+    # Список читается одним ssh; фильтрация локальная: имена файлов — только
+    # данные для sort/awk, они не попадают в текст удалённой команды и не могут
+    # стать опциями (сам путь обязан начинаться с _app/immutable/).
+    asset="$(printf '%s\n' "${list}" | LC_ALL=C sort | awk '
+        { present[$0] = 1; if ($0 ~ /[.]js$/) js[++n] = $0 }
+        END {
+            for (i = 1; i <= n; i++) {
+                f = js[i]
+                if (found == "" && present[f ".br"] && present[f ".zst"] && present[f ".gz"]) found = f
+            }
+            print found
+        }')"
+    if [ -z "${asset}" ]; then
+        hard "precompressed check: no JS asset with br/zstd/gzip siblings in release ${WEB_SHA}"
+        return
+    fi
+    case "${asset}" in
+        _app/immutable/*) ;;
+        *)
+            hard "precompressed check: unexpected asset path '${asset}' in release ${WEB_SHA}"
+            return
+            ;;
+    esac
     log "precompressed probe: starting a one-off loopback Caddy in ${WEB_CONTAINER} (127.0.0.1:18080, timeout ${PROBE_LIFETIME}s, trap-stopped) for ${asset}"
     # Скрипт фиксирован, значения уходят в контейнер через -e: никакой
     # интерполяции имён файлов в shell-текст.

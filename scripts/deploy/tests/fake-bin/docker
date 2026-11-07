@@ -8,11 +8,12 @@ echo "docker ${FAKE_HOST:-local} $*" >>"${FAKE_ROOT}/state/calls.log"
 if [ "${1:-}" = "exec" ]; then
     shift
     encs=""
+    asset=""
     # Пропускаем опции exec (-i/-e NAME=VALUE), затем CONTAINER.
     while (($#)); do
         case "$1" in
             -i) shift ;;
-            -e) case "$2" in ENCS=*) encs="${2#ENCS=}" ;; esac; shift 2 ;;
+            -e) case "$2" in ENCS=*) encs="${2#ENCS=}" ;; ASSET=*) asset="${2#ASSET=}" ;; esac; shift 2 ;;
             -*) shift ;;
             *) break ;;
         esac
@@ -22,6 +23,7 @@ if [ "${1:-}" = "exec" ]; then
     # по каждой кодировке, с метками старта и останова, как настоящий скрипт.
     if [ "${1:-}" = "sh" ] && [ "${2:-}" = "-s" ]; then
         cat >"${FAKE_ROOT}/state/probe-script.sh"
+        printf '%s' "${asset}" >"${FAKE_ROOT}/state/probe-asset"
         if [ "${FAKE_PROBE_BUSY:-0}" = "1" ]; then echo "probe: port 18080 already in use"; exit 4; fi
         echo "probe: loopback caddy pid 4242 started on 127.0.0.1:18080"
         for enc in ${encs}; do

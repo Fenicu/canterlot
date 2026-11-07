@@ -70,6 +70,9 @@ setup_verify() {
     printf 'CSP-BODY' >"${FAKE_ROOT}/dist/${SHA_PREV}/csp.txt"
     mkdir -p "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks"
     printf 'console.log(1)\n' >"${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js"
+    for ext in br zst gz; do
+        printf 'precompressed\n' >"${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.${ext}"
+    done
     SUP1="$(sup_pid_of "${EXEC1}")"; SUP2="$(sup_pid_of "${EXEC2}")"; export SUP1 SUP2
 }
 
@@ -629,6 +632,33 @@ for scenario in busy no-stop port-open; do
     teardown_case
     case_end
 done
+
+case_begin "the precompressed probe skips a dash-named JS asset that has no compressed siblings"
+setup_verify probe-asset-pick
+rm -f "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.br" \
+      "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.zst" \
+      "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.gz"
+printf 'tiny\n' >"${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/--a.js"
+printf 'console.log(2)\n' >"${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/z.js"
+for ext in br zst gz; do
+    printf 'precompressed\n' >"${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/z.js.${ext}"
+done
+if run_verify; then case_ok "verify PASS"; else case_fail "verify failed"; grep HARD "${FAKE_ROOT}/verify.log" | head -3; fi
+assert_eq "$(cat "${FAKE_ROOT}/state/probe-asset" 2>/dev/null)" "_app/immutable/chunks/z.js" "probe targeted the first fully precompressed asset"
+assert_contains "${FAKE_ROOT}/verify.log" "on _app/immutable/chunks/z.js" "encoding logged for the chosen asset"
+assert_not_contains "${FAKE_ROOT}/verify.log" "chunks/--a.js" "asset without siblings never probed"
+teardown_case
+case_end
+
+case_begin "the precompressed probe hard-fails when no JS asset has all three siblings"
+setup_verify probe-asset-missing
+rm -f "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.br" \
+      "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.zst" \
+      "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.gz"
+if run_verify; then case_fail "verify passed without a fully precompressed asset"; else case_ok "verify failed"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "no JS asset with br/zstd/gzip siblings in release ${SHA_PREV}" "missing precompressed asset reported"
+teardown_case
+case_end
 
 printf 'verify harness: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

@@ -189,8 +189,12 @@ deploy_release() {
         web)
             mkdir -p "${WEB_RELEASES}/${sha}/_app/immutable/chunks"
             printf '{"version":"%s"}' "${sha}" >"${WEB_RELEASES}/${sha}/_app/version.json"
-            # Ассет нужен precompressed-проверке verify (в т.ч. после PWA flip-back).
+            # Ассет нужен precompressed-проверке verify (в т.ч. после PWA flip-back);
+            # сборка precompressed, поэтому у него есть все три соседа.
             printf 'console.log(1)\n' >"${WEB_RELEASES}/${sha}/_app/immutable/chunks/probe.js"
+            for ext in br zst gz; do
+                printf 'precompressed\n' >"${WEB_RELEASES}/${sha}/_app/immutable/chunks/probe.js.${ext}"
+            done
             ln -sfn "releases/${sha}" "${WEB_BUILD_LINK}"
             ;;
         worker)

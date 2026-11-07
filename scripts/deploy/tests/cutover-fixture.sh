@@ -61,6 +61,10 @@ setup_cutover() {
     mkdir -p "${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks"
     printf '{"version":"%s"}' "${SHA_NEW}" >"${WEB_RELEASES}/${SHA_NEW}/_app/version.json"
     printf 'console.log(1)\n' >"${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe.js"
+    # Сборка precompressed: проба verify выбирает только ассет со всеми соседями.
+    for ext in br zst gz; do
+        printf 'precompressed\n' >"${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe.js.${ext}"
+    done
     mkdir -p "${WORKER_RELEASES}/${SHA_NEW}/bin"
     cp "${FAKE_WORKER_BIN}" "${WORKER_RELEASES}/${SHA_NEW}/bin/canterlot-worker"
     chmod +x "${WORKER_RELEASES}/${SHA_NEW}/bin/canterlot-worker"
