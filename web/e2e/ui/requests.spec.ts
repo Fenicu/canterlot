@@ -869,13 +869,28 @@ for (const motion of ['full', 'reduced'] as const) {
   test(`request_card_enters_once_with_a_brief_accent_${motion}`, async ({ page }) => {
     if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
     const { hub, api, id } = await bootChat(page);
+    // Имена анимаций записываются в момент запуска: короткий вход карточки успевает кончиться
+    // прежде, чем до браузера дойдёт отдельный запрос getAnimations под нагрузкой.
+    await page.evaluate(() => {
+      const names: string[] = [];
+      (window as unknown as { __requestAnimations: string[] }).__requestAnimations = names;
+      document.addEventListener('animationstart', (event) => {
+        const target = event.target as Element;
+        if (target.closest?.('.request-cards-slot')) names.push((event as AnimationEvent).animationName);
+      }, true);
+    });
     const requestId = api.id();
     openQuestion(hub, id, requestId, 'Слить ветку сейчас?');
     const card = page.locator('.request-cards-slot .card-root');
     await expect(card).toHaveAttribute('data-arrive', '');
-    const names = await card.evaluate((el) => el.getAnimations().map((animation) => (animation as CSSAnimation).animationName));
-    if (motion === 'reduced') expect(names).toEqual([]);
-    else expect(names.some((name) => name.endsWith('request-arrive')) && names.some((name) => name.endsWith('request-accent'))).toBe(true);
+    if (motion === 'reduced') {
+      const names = await card.evaluate((el) => el.getAnimations().map((animation) => (animation as CSSAnimation).animationName));
+      expect(names).toEqual([]);
+    } else {
+      await expect.poll(() => page.evaluate(() => (window as unknown as { __requestAnimations: string[] }).__requestAnimations)).toEqual(
+        expect.arrayContaining([expect.stringMatching(/request-arrive$/), expect.stringMatching(/request-accent$/)])
+      );
+    }
     // Вход не повторяется: ни по времени, ни от смены состояния карточки.
     await expect.poll(() => card.evaluate((el) => el.getAnimations().length), { timeout: 3_000 }).toBe(0);
     let release = () => {};
