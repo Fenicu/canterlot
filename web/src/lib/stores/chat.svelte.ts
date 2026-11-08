@@ -379,7 +379,7 @@ export class ChatStore {
   /** Счётчик отправок с этого устройства: лента по нему возвращается к хвосту. */
   ownSends = $state(0);
   /** Просьба ленты прыгнуть к сообщению: место в ленте и номер попытки. */
-  jumpRequest = $state<{ inputId: string; seq: string; nonce: number } | null>(null);
+  jumpRequest = $state<{ inputId: string; seq: string; nonce: number; blockId?: string } | null>(null);
 
   requestJump(inputId: string, seq: string): void {
     this.jumpRequest = {
@@ -389,11 +389,21 @@ export class ChatStore {
     };
   }
 
+  /** Прыжок к блоку ответа по ссылке «Отчёт» из плана: места в ленте у ссылки нет, только блок. */
+  requestBlockJump(blockId: string): void {
+    this.jumpRequest = {
+      inputId: "",
+      seq: "",
+      blockId,
+      nonce: (this.jumpRequest?.nonce ?? 0) + 1,
+    };
+  }
+
   /**
    * Лента забирает просьбу о прыжке один раз: тёплый разговор переживает экран,
    * и повторный монтаж не должен возвращать владельца к якорю прошлого визита.
    */
-  takeJumpRequest(): { inputId: string; seq: string; nonce: number } | null {
+  takeJumpRequest(): { inputId: string; seq: string; nonce: number; blockId?: string } | null {
     const request = this.jumpRequest;
     if (request) this.jumpRequest = null;
     return request;
@@ -582,6 +592,10 @@ export class ChatStore {
   async focusMessage(inputId: string, seq: string): Promise<void> {
     if (this.timeline.entries.some((entry) => entry.kind === "input" && entry.input.id === inputId))
       return;
+    await this.#focusAround(seq);
+  }
+
+  async #focusAround(seq: string): Promise<void> {
     const epoch = this.#epoch;
     this.#holds += 1;
     try {
@@ -595,6 +609,29 @@ export class ChatStore {
     } finally {
       this.#release();
     }
+  }
+
+  /**
+   * Блок, которого нет в окне ленты: место блока ищется по страницам истории без вставки
+   * их в ленту, затем лента заменяется окном вокруг него, как при прыжке к сообщению.
+   * Отчёт исполнителя — его последний ответ, поэтому обычно хватает хвоста или пары страниц.
+   */
+  async focusBlock(blockId: string, maxPages = 10): Promise<void> {
+    if (this.timeline.entries.some((entry) => entry.kind === "block" && entry.block.id === blockId))
+      return;
+    let before = this.timeline.oldestSeq() ?? undefined;
+    let seq: string | null = null;
+    for (let page = 0; page < maxPages && before; page++) {
+      const found = await this.deps.api.history(this.id, { before });
+      const hit = found.items.find((item) => item.kind === "block" && item.id === blockId);
+      if (hit) {
+        seq = seqOf(hit);
+        break;
+      }
+      if (!found.next_before || found.items.length === 0) break;
+      before = [...found.items].map(seqOf).sort(cmpSeq)[0];
+    }
+    if (seq) await this.#focusAround(seq);
   }
 
   /**

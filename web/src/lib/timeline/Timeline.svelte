@@ -371,17 +371,26 @@
    * Прыжок к своему сообщению: старые блоки не монтируются, пока летим, —
    * лента заменяется окном вокруг цели, а высоты строк доводят её до верха.
    */
-  async function jumpTo(request: { inputId: string; seq: string; nonce: number }): Promise<void> {
+  async function jumpTo(request: { inputId: string; seq: string; nonce: number; blockId?: string }): Promise<void> {
     const serial = ++jumpSerial;
     overscan = 0.1;
     held = null;
     controller?.release();
+    const blockId = request.blockId;
+    const targetIndex = (): number =>
+      blockId
+        ? rows.findIndex((row) => row.entries.some((entry) => entry.kind === 'block' && entry.block.id === blockId))
+        : rowIndexOfInput(rows, request.inputId);
     try {
-      await chat.focusMessage(request.inputId, request.seq);
+      if (blockId) await chat.focusBlock(blockId);
+      else await chat.focusMessage(request.inputId, request.seq);
     } catch {
       if (serial === jumpSerial) overscan = 1.5;
       return;
     }
+    // Просьба могла прийти до монтажа ленты: держатель прокрутки появился позже и прижал её к низу.
+    held = null;
+    controller?.release();
     if (serial !== jumpSerial || !host) return;
     // Кадр даёт измерить новые строки до того, как по их высотам считается место.
     await nextFrame();
@@ -390,7 +399,9 @@
     const viewport = host.clientHeight || 1;
     for (let pass = 0; pass < 8; pass++) {
       if (serial !== jumpSerial || !host) return;
-      const index = rowIndexOfInput(rows, request.inputId);
+      // Замена окна сжимает ленту, браузер прижимает scrollTop к низу, и держатель снова цепляется за хвост.
+      controller?.release();
+      const index = targetIndex();
       if (index < 0) {
         await nextFrame();
         continue;
@@ -618,7 +629,7 @@
     <div class="sentinel" use:sentinel></div>
     <div class="pad" style:height={`${range.padTop}px`} use:spacer></div>
     {#each windowRows as row (row.key)}
-      <div class="row" data-row data-kind={row.kind} data-key={row.key} use:measure>
+      <div class="row" data-row data-kind={row.kind} data-key={row.key} data-jump={row.kind === 'answer' && row.key === highlightKey ? '' : undefined} use:measure>
         {#if row.kind === 'day'}
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
@@ -673,6 +684,14 @@
   .feed :global(*) { overflow-anchor: none; }
   .row { padding-top: var(--s3); }
   .row[data-kind='input'] { padding-top: var(--s8); }
+  /* Карточка ответа, к которой привела ссылка «Отчёт», вспыхивает и гаснет, как своё сообщение после прыжка. */
+  .row[data-jump] { border-radius: var(--radius-card); animation: answer-jump var(--duration-jump-glow) var(--ease-jump-glow) both; }
+  @keyframes answer-jump {
+    0%, 15% { background-color: var(--accent-soft); }
+    100% { background-color: var(--transparent); }
+  }
+  @media (prefers-reduced-motion: reduce) { .row[data-jump] { animation: none; background-color: var(--accent-soft); } }
+  :global(:root[data-motion='off']) .row[data-jump] { animation: none; background-color: var(--accent-soft); }
   .row:first-of-type { padding-top: var(--s0); }
   .day { margin: 0; padding-block: var(--s4) var(--s0); color: var(--muted); font-size: var(--fs-sm); text-align: center; }
   .aborted { margin: 0; padding-block: var(--s4) var(--s0); color: var(--warning); font-size: var(--fs-sm); text-align: center; }
