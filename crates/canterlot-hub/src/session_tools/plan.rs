@@ -6,8 +6,11 @@
 //! выводятся при чтении, поэтому удалённый делегат не оставляет в таблице своего текста.
 //!
 //! Порядок блокировок: строки `plan_boards`, затем `plan_tasks` берутся последними, после
-//! заданий и до `events::append`; держа строку плана, путь других блокировок не берёт
-//! (docs/design/delivery.md, «Порядок блокировок инструментов сессии»).
+//! заданий. Счётчик общего журнала владельца (`scope_counters`) каждый писатель плана берёт
+//! раньше строк плана: проектор исполнителя, `start_child` и приём результата дописывают
+//! свои события в этот журнал до перехода задачи, поэтому обратный порядок давал цикл.
+//! Держа строку плана, путь других блокировок не берёт (docs/design/delivery.md,
+//! «Порядок блокировок инструментов сессии»).
 
 use std::fmt;
 
@@ -211,6 +214,52 @@ pub fn view(row: &PlanRow) -> PlanTask {
 
 fn invalid(message: impl Into<String>) -> ToolError {
     ToolError::with_message(ToolErrorCode::InvalidArguments, message)
+}
+
+/// Счётчик общего журнала владельца до строк плана: см. порядок блокировок в начале модуля.
+async fn lock_journal(conn: &mut PgConnection, owner_id: Uuid) -> Result<(), sqlx::Error> {
+    events::lock_scope(conn, &Scope::Conversations { owner_id }).await
+}
+
+/// Ошибка одной попытки записи плана: отказ инструмента или ошибка базы, которую можно
+/// повторить, если она временная.
+enum Fail {
+    Tool(ToolError),
+    Db(sqlx::Error),
+}
+
+impl From<ToolError> for Fail {
+    fn from(error: ToolError) -> Self {
+        Self::Tool(error)
+    }
+}
+
+impl From<sqlx::Error> for Fail {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Db(error)
+    }
+}
+
+/// Взаимная блокировка и сбой сериализации (40P01/40001) откатывают попытку целиком:
+/// запись плана повторяется до трёх раз с паузой, как `idempotency::run_in_tx`.
+async fn retrying<F, Fut>(mut attempt_once: F) -> Result<Value, ToolError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Value, Fail>>,
+{
+    const ATTEMPTS: u32 = 3;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match attempt_once().await {
+            Ok(value) => return Ok(value),
+            Err(Fail::Tool(error)) => return Err(error),
+            Err(Fail::Db(error)) if attempt < ATTEMPTS && crate::db::is_transient(&error) => {
+                tokio::time::sleep(crate::db::retry_delay(Uuid::now_v7(), attempt)).await;
+            }
+            Err(Fail::Db(error)) => return Err(error.into()),
+        }
+    }
 }
 
 /// Одна строка: переводы строки и прочие управляющие символы становятся пробелами.
@@ -555,16 +604,25 @@ pub async fn add(
         };
         cleaned.push((clean_title(&task.title)?, note));
     }
+    retrying(|| add_once(context, caller, &cleaned)).await
+}
+
+async fn add_once(
+    context: &ToolContext,
+    caller: &Caller,
+    cleaned: &[(String, Option<String>)],
+) -> Result<Value, Fail> {
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
+    lock_journal(&mut tx, caller.owner_id).await?;
     let mut next = lock_board(&mut tx, caller.owner_id, caller.conversation_id).await?;
     full(
         task_count(&mut tx, caller.conversation_id).await?,
         cleaned.len(),
     )?;
     let mut rows = Vec::with_capacity(cleaned.len());
-    for (title, note) in cleaned {
+    for (title, note) in cleaned.iter().cloned() {
         let row: PlanRow = sqlx::query_as(
             "insert into plan_tasks(id,owner_id,orchestrator_conversation_id,number,title,note)
              values($1,$2,$3,$4,$5,$6) returning *",
@@ -613,9 +671,37 @@ pub async fn update(
     let note = args.note.as_deref().map(clean_note).transpose()?;
     let blocker = args.blocker.as_deref().map(clean_blocker).transpose()?;
     let findings = args.findings.as_deref().map(clean_findings).transpose()?;
+    let edit = Edit {
+        number: args.number,
+        state: args.state,
+        title,
+        note,
+        blocker,
+        findings,
+    };
+    retrying(|| update_once(context, caller, &edit)).await
+}
+
+/// Проверенная правка `plan.update`.
+struct Edit {
+    number: i32,
+    state: Option<PlanState>,
+    title: Option<String>,
+    note: Option<Option<String>>,
+    blocker: Option<Option<String>>,
+    findings: Option<Vec<String>>,
+}
+
+async fn update_once(context: &ToolContext, caller: &Caller, edit: &Edit) -> Result<Value, Fail> {
+    let args = edit;
+    let title = edit.title.clone();
+    let note = edit.note.clone();
+    let blocker = edit.blocker.clone();
+    let findings = edit.findings.clone();
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
+    lock_journal(&mut tx, caller.owner_id).await?;
     let row: Option<PlanRow> = sqlx::query_as(
         "select * from plan_tasks
          where owner_id=$1 and orchestrator_conversation_id=$2 and number=$3 for update",
@@ -626,7 +712,7 @@ pub async fn update(
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
-        return Err(not_found(args.number));
+        return Err(not_found(args.number).into());
     };
     let mut next = row.clone();
     if let Some(title) = title {
@@ -712,6 +798,13 @@ pub async fn adopt(
     if args.from_session_id == caller.conversation_id {
         return Err(invalid("from_session_id is this session"));
     }
+    retrying(|| adopt_once(context, caller, args.from_session_id)).await
+}
+
+async fn adopt_once(context: &ToolContext, caller: &Caller, from: Uuid) -> Result<Value, Fail> {
+    let args = AdoptArgs {
+        from_session_id: from,
+    };
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     // Строки обоих разговоров по возрастанию ID, как у остальных инструментов.
@@ -727,9 +820,7 @@ pub async fn adopt(
     .await?;
     let me = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if me.spawn_depth != 0 {
-        return Err(invalid(
-            "Only a root session (one the owner started) can adopt a plan",
-        ));
+        return Err(invalid("Only a root session (one the owner started) can adopt a plan").into());
     }
     let source = found
         .iter()
@@ -738,8 +829,10 @@ pub async fn adopt(
     if source.1 != 0 {
         return Err(invalid(
             "The source is a delegated session; only a root session's plan can be adopted",
-        ));
+        )
+        .into());
     }
+    lock_journal(&mut tx, caller.owner_id).await?;
     // Счётчики обоих по возрастанию ID.
     let mut mine = 0;
     for id in pair {
@@ -870,6 +963,14 @@ pub async fn link_child_in_tx(
     task_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<LinkOutcome, sqlx::Error> {
+    let owner: Option<Uuid> = sqlx::query_scalar("select owner_id from plan_tasks where id=$1")
+        .bind(task_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some(owner) = owner else {
+        return Ok(LinkOutcome::NotLinked { number: None });
+    };
+    lock_journal(conn, owner).await?;
     let linked: Option<PlanRow> = sqlx::query_as(
         "update plan_tasks set executor_conversation_id=$3,linked_at=clock_timestamp(),
            attempts=attempts+1,state='in_progress',blocker=null,review_fingerprint=null,
@@ -912,17 +1013,25 @@ pub async fn evaluate_executor_in_tx(
     config: &SettleConfig,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let linked: bool = sqlx::query_scalar(
-        "select exists(select 1 from plan_tasks
-         where executor_conversation_id=$1 and state in ('in_progress','in_review'))",
+    // Строки плана без блокировки: счётчик журнала берётся только перед настоящим переходом,
+    // чтобы обычный обход работающего исполнителя не вставал в очередь журнала владельца.
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "select owner_id from plan_tasks
+         where executor_conversation_id=$1 and state = any($2) limit 1",
     )
     .bind(executor)
-    .fetch_one(&mut *conn)
+    .bind(if activity.state == ActivityState::Working {
+        &["in_review"][..]
+    } else {
+        &["in_progress", "in_review"][..]
+    })
+    .fetch_optional(&mut *conn)
     .await?;
-    if !linked {
+    let Some(owner) = owner else {
         return Ok(());
-    }
+    };
     if activity.state == ActivityState::Working {
+        lock_journal(conn, owner).await?;
         let rows: Vec<PlanRow> = sqlx::query_as(
             "update plan_tasks set state='in_progress',revision=revision+1,
                updated_at=clock_timestamp()
@@ -968,6 +1077,7 @@ pub async fn evaluate_executor_in_tx(
     {
         return Ok(());
     }
+    lock_journal(conn, owner).await?;
     let rows: Vec<PlanRow> = sqlx::query_as(
         "update plan_tasks set state='in_review',review_fingerprint=$2,revision=revision+1,
            updated_at=clock_timestamp()
@@ -988,6 +1098,17 @@ pub async fn on_accept_in_tx(
     executor: Uuid,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "select owner_id from plan_tasks where executor_conversation_id=$1
+           and state in ('waiting','in_progress','in_review','blocked') limit 1",
+    )
+    .bind(executor)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(owner) = owner else {
+        return Ok(());
+    };
+    lock_journal(conn, owner).await?;
     let rows: Vec<PlanRow> = sqlx::query_as(
         "update plan_tasks set state='done',blocker=null,revision=revision+1,
            updated_at=clock_timestamp()
@@ -1028,6 +1149,17 @@ pub async fn linked_to_in_tx(
         .bind(executor)
         .fetch_all(conn)
         .await
+}
+
+/// У разговора есть задачи плана: как у исполнителя или как у оркестратора.
+pub async fn touches_in_tx(conn: &mut PgConnection, id: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "select exists(select 1 from plan_tasks where executor_conversation_id=$1)
+             or exists(select 1 from plan_tasks where orchestrator_conversation_id=$1)",
+    )
+    .bind(id)
+    .fetch_one(conn)
+    .await
 }
 
 /// После `purge_events`: старые события задач с ID исполнителя скрыты, поэтому
@@ -1078,6 +1210,88 @@ mod tests {
             clean_findings(&["a".into(), " ".into()]).unwrap(),
             vec!["a".to_owned()]
         );
+    }
+
+    /// Ошибка базы с заданным SQLSTATE: так приходят взаимная блокировка и прочие отказы.
+    #[derive(Debug)]
+    struct Coded(&'static str);
+
+    impl std::fmt::Display for Coded {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "sqlstate {}", self.0)
+        }
+    }
+
+    impl std::error::Error for Coded {}
+
+    impl sqlx::error::DatabaseError for Coded {
+        fn message(&self) -> &str {
+            "coded"
+        }
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(self.0.into())
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    fn db(code: &'static str) -> Fail {
+        Fail::Db(sqlx::Error::Database(Box::new(Coded(code))))
+    }
+
+    #[tokio::test]
+    async fn plan_writes_retry_transient_database_errors_three_times() {
+        for code in ["40P01", "40001"] {
+            let mut calls = 0;
+            let value = retrying(|| {
+                calls += 1;
+                let attempt = calls;
+                async move {
+                    if attempt < 3 {
+                        Err(db(code))
+                    } else {
+                        Ok(json!({"ok": attempt}))
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(value, json!({"ok": 3}), "{code}");
+        }
+        let mut calls = 0;
+        let error = retrying(|| {
+            calls += 1;
+            async { Err::<Value, _>(db("40P01")) }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!((error.code, calls), (ToolErrorCode::Internal, 3));
+        let mut calls = 0;
+        let error = retrying(|| {
+            calls += 1;
+            async { Err::<Value, _>(db("23505")) }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!((error.code, calls), (ToolErrorCode::Internal, 1));
+        let mut calls = 0;
+        let error = retrying(|| {
+            calls += 1;
+            async { Err::<Value, _>(Fail::Tool(not_found(7))) }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!((error.code, calls), (ToolErrorCode::PlanTaskNotFound, 1));
     }
 
     #[test]

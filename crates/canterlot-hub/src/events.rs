@@ -71,6 +71,22 @@ pub async fn append(conn: &mut PgConnection, ev: NewEvent) -> Result<StoredEvent
     Ok(stored)
 }
 
+/// Берёт счётчик журнала области до фиксации, не дописывая событие: так путь, который
+/// потом допишет событие, занимает счётчик раньше строк, которые держит встречный путь
+/// после своего `append`.
+pub async fn lock_scope(conn: &mut PgConnection, scope: &Scope) -> Result<(), sqlx::Error> {
+    let key = scope.key();
+    sqlx::query("insert into scope_counters(scope,last_seq) values($1,0) on conflict do nothing")
+        .bind(&key)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("select scope from scope_counters where scope=$1 for update")
+        .bind(key)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 /// Строк в одном операторе удаления срока хранения.
 const PURGE_BATCH: i64 = 5000;
 

@@ -468,6 +468,12 @@ async fn delete_in_tx(
     origin::scrub_sender_in_tx(conn, id).await?;
     // Внешний ключ обнулит связь задач плана молча: запомнить их до удаления.
     let plan_tasks = crate::session_tools::plan::linked_to_in_tx(conn, id).await?;
+    // Удаление строк разговора берёт строки плана (обнуление связи исполнителя, каскад
+    // плана оркестратора), а событие потом идёт в общий журнал владельца. Писатели плана
+    // берут журнал раньше строк плана, поэтому здесь журнал тоже берётся до них.
+    if crate::session_tools::plan::touches_in_tx(conn, id).await? {
+        crate::events::lock_scope(conn, &Scope::Conversations { owner_id }).await?;
+    }
     purge_rows(conn, id, &execution_ids).await?;
     purge_events(conn, owner_id, id, &execution_ids).await?;
     // После чистки событий: прежние события задач с ID исполнителя скрыты.

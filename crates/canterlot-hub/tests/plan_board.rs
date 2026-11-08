@@ -1115,31 +1115,15 @@ async fn idle_with_a_running_background_job_never_moves_the_task(pool: PgPool) {
     assert_eq!(f.state(1).await, "in_progress");
 }
 
-/// Проектор исполнителя сначала дописывает `derived_changed` в общий журнал владельца
-/// (строка `scope_counters` занята до фиксации), потом обновляет строки плана.
-/// `plan.update` берёт строку задачи `for update`, потом дописывает `plan_task_changed`
-/// в тот же журнал. Встречный порядок даёт взаимную блокировку.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-#[ignore = "bug: plan.update и проектор исполнителя берут строку плана и счётчик журнала владельца в разном порядке"]
-async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
-    use canterlot_hub::{
-        activity::{Activity, ActivityState, Evidence, QueueFacts},
-        events::{self, NewEvent, Scope},
-        session_tools::settle::SettleFacts,
-        model::RunSlot,
-    };
-    let f = Fx::new(pool.clone()).await;
-    f.add(&["Парсер"]).await;
-    f.link(1, f.child).await;
-    sqlx::query("update plan_tasks set state='in_review' where orchestrator_conversation_id=$1")
-        .bind(f.orchestrator)
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    // Проектор: derived_changed в общий журнал владельца, как в `activity::refresh`.
-    let mut projector = f.pool.begin().await.unwrap();
+/// Проектор исполнителя дописывает `derived_changed` в общий журнал владельца (строка
+/// `scope_counters` занята до фиксации) раньше, чем обновляет строки плана; так же
+/// `start_child` и приём результата. Писатели плана поэтому берут счётчик журнала до строк
+/// плана, а не наоборот: встречный порядок давал взаимную блокировку.
+async fn hold_owner_journal(f: &Fx) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    use canterlot_hub::events::{self, NewEvent, Scope};
+    let mut tx = f.pool.begin().await.unwrap();
     events::append(
-        &mut projector,
+        &mut tx,
         NewEvent {
             scope: Scope::Conversations { owner_id: f.owner },
             kind: "derived_changed",
@@ -1151,21 +1135,16 @@ async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
     )
     .await
     .unwrap();
-    // Оркестратор правит задачу: строка плана, затем журнал (ждёт проектор).
-    let update = {
-        let context = f.context.clone();
-        let caller = f.caller_of(f.orchestrator);
-        tokio::spawn(async move {
-            session_tools::call(
-                &context,
-                &caller,
-                "plan.update",
-                json!({"number": 1, "findings": ["x"]}),
-            )
-            .await
-        })
+    tx
+}
+
+/// Оценка проектора для работающего исполнителя: задача с проверки возвращается в работу.
+async fn project_working(f: &Fx, tx: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    use canterlot_hub::{
+        activity::{Activity, ActivityState, Evidence, QueueFacts},
+        model::RunSlot,
+        session_tools::settle::SettleFacts,
     };
-    tokio::time::sleep(Duration::from_millis(500)).await;
     let now = Utc::now();
     let working = Activity {
         state: ActivityState::Working,
@@ -1178,7 +1157,9 @@ async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
         },
     };
     let queue = QueueFacts {
-        slot: RunSlot::Running { input_id: Uuid::now_v7() },
+        slot: RunSlot::Running {
+            input_id: Uuid::now_v7(),
+        },
         queued: 0,
         pause_reasons: Vec::new(),
         hold_reasons: Vec::new(),
@@ -1190,8 +1171,8 @@ async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
         last_event_at: Some(now),
         phase_since: Some(now),
     };
-    let projected = plan::evaluate_executor_in_tx(
-        &mut projector,
+    plan::evaluate_executor_in_tx(
+        tx,
         f.child,
         &working,
         &queue,
@@ -1199,8 +1180,44 @@ async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
         &f.context.settle,
         Uuid::now_v7(),
     )
-    .await;
-    let projected = match projected {
+    .await
+}
+
+/// Вызов инструмента плана в отдельной задаче: он встаёт в очередь за удержанным журналом.
+fn spawn_call(
+    f: &Fx,
+    conversation: Uuid,
+    tool: &'static str,
+    args: Value,
+) -> tokio::task::JoinHandle<Result<Value, session_tools::ToolError>> {
+    let context = f.context.clone();
+    let caller = f.caller_of(conversation);
+    tokio::spawn(async move { session_tools::call(&context, &caller, tool, args).await })
+}
+
+async fn in_review(f: &Fx) {
+    sqlx::query("update plan_tasks set state='in_review' where executor_conversation_id=$1")
+        .bind(f.child)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
+    let f = Fx::new(pool.clone()).await;
+    f.add(&["Парсер"]).await;
+    f.link(1, f.child).await;
+    in_review(&f).await;
+    let mut projector = hold_owner_journal(&f).await;
+    let update = spawn_call(
+        &f,
+        f.orchestrator,
+        "plan.update",
+        json!({"number": 1, "findings": ["x"]}),
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let projected = match project_working(&f, &mut projector).await {
         Ok(()) => projector.commit().await.map_err(|e| e.to_string()),
         Err(error) => Err(error.to_string()),
     };
@@ -1209,4 +1226,79 @@ async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
         projected.is_ok() && updated.is_ok(),
         "projector: {projected:?}; plan.update: {updated:?}"
     );
+    let (state, _, _) = f.task(1).await;
+    assert_eq!(state, "in_progress");
+    let findings: Value = sqlx::query_scalar(
+        "select findings from plan_tasks where orchestrator_conversation_id=$1 and number=1",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(findings, json!(["x"]));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn plan_adopt_and_executor_projection_do_not_deadlock(pool: PgPool) {
+    let f = Fx::new(pool.clone()).await;
+    f.add(&["Парсер"]).await;
+    f.link(1, f.child).await;
+    in_review(&f).await;
+    let adopter = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let mut projector = hold_owner_journal(&f).await;
+    let adopt = spawn_call(
+        &f,
+        adopter,
+        "plan.adopt",
+        json!({"from_session_id": f.orchestrator}),
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let projected = match project_working(&f, &mut projector).await {
+        Ok(()) => projector.commit().await.map_err(|e| e.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    let adopted = adopt.await.unwrap().map_err(|e| format!("{e:?}"));
+    assert!(
+        projected.is_ok() && adopted.is_ok(),
+        "projector: {projected:?}; plan.adopt: {adopted:?}"
+    );
+    let (state, _, executor) = f.task_of(adopter, 1).await;
+    assert_eq!((state.as_str(), executor), ("in_progress", Some(f.child)));
+}
+
+/// Связь задачи в `start_child` идёт после событий создания разговора в журнале владельца.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn linking_a_child_and_plan_update_do_not_deadlock(pool: PgPool) {
+    let f = Fx::new(pool.clone()).await;
+    f.add(&["Парсер"]).await;
+    let mut start = hold_owner_journal(&f).await;
+    let task = plan::resolve_for_spawn_in_tx(&mut start, f.owner, f.orchestrator, 1)
+        .await
+        .unwrap();
+    let update = spawn_call(
+        &f,
+        f.orchestrator,
+        "plan.update",
+        json!({"number": 1, "note": "сначала тесты"}),
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let linked =
+        match plan::link_child_in_tx(&mut start, f.orchestrator, f.child, task, Uuid::now_v7())
+            .await
+        {
+            Ok(outcome) => start
+                .commit()
+                .await
+                .map(|()| outcome)
+                .map_err(|e| e.to_string()),
+            Err(error) => Err(error.to_string()),
+        };
+    let updated = update.await.unwrap().map_err(|e| format!("{e:?}"));
+    assert!(
+        linked.is_ok() && updated.is_ok(),
+        "link: {linked:?}; plan.update: {updated:?}"
+    );
+    assert_eq!(linked.unwrap(), plan::LinkOutcome::Linked { number: 1 });
+    let (state, _, executor) = f.task(1).await;
+    assert_eq!((state.as_str(), executor), ("in_progress", Some(f.child)));
 }
