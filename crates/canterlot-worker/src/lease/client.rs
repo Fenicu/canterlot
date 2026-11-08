@@ -137,8 +137,9 @@ struct Granted {
 
 enum Wait {
     Granted(Granted),
-    /// Обрыв посреди ожидания: переподключиться с тем же временем запроса.
-    Lost(String),
+    /// Обрыв посреди ожидания: переподключиться с тем же временем запроса. `true` —
+    /// воркер успел ответить по этому соединению, отсчёт переподключения начинается заново.
+    Lost(String, bool),
     /// Ошибка протокола или отказ: без аренды.
     Failed(String),
 }
@@ -172,13 +173,15 @@ async fn request(
         requested_at_ms,
     };
     if let Err(error) = write_message(&mut write, acquire).await {
-        return Wait::Lost(error.to_string());
+        return Wait::Lost(error.to_string(), false);
     }
+    let mut answered = false;
     loop {
         match read_message(&mut lines).await {
             Ok(ServerMessage::Queued {
                 position, holders, ..
             }) => {
+                answered = true;
                 let line = waiting_line(kind, position, &holders);
                 if last_line.as_deref() != Some(line.as_str()) {
                     note(&line);
@@ -203,7 +206,7 @@ async fn request(
             }
             Ok(ServerMessage::Error { reason }) => return Wait::Failed(reason),
             Ok(other) => return Wait::Failed(format!("unexpected reply {other:?}")),
-            Err(reason) if reason == "connection closed" => return Wait::Lost(reason),
+            Err(reason) if reason == "connection closed" => return Wait::Lost(reason, answered),
             Err(reason) => return Wait::Failed(reason),
         }
     }
@@ -282,10 +285,11 @@ pub async fn run(args: RunArgs) -> ExitCode {
     let requested_at_ms = super::now_ms();
     let mut last_line = None;
     let mut patience = REFUSED_RETRY;
-    let lost_since = tokio::time::Instant::now();
+    // Начало текущего обрыва: 30 с на переподключение считаются от него, а не от запуска.
+    let mut lost_since: Option<tokio::time::Instant> = None;
     let mut lost = false;
     let granted = loop {
-        let stream = match connect(&socket, patience, lost).await {
+        let stream = match connect(&socket, patience, lost_since.is_some()).await {
             Connect::Stream(stream) => stream,
             Connect::Unreachable(reason) => {
                 return unwrapped(&args.command, &format!("worker unreachable ({reason})"));
@@ -312,14 +316,16 @@ pub async fn run(args: RunArgs) -> ExitCode {
             Wait::Failed(reason) => {
                 return unwrapped(&args.command, &format!("lease refused ({reason})"));
             }
-            Wait::Lost(reason) => {
-                if !lost {
+            Wait::Lost(reason, answered) => {
+                if answered || lost_since.is_none() {
                     lost = true;
+                    lost_since = Some(tokio::time::Instant::now());
                     note(format!(
                         "connection to worker lost ({reason}), reconnecting"
                     ));
                 }
-                let left = RECONNECT_TOTAL.saturating_sub(lost_since.elapsed());
+                let since = lost_since.unwrap_or_else(tokio::time::Instant::now);
+                let left = RECONNECT_TOTAL.saturating_sub(since.elapsed());
                 if left.is_zero() {
                     return unwrapped(&args.command, "worker unreachable");
                 }
@@ -357,6 +363,10 @@ pub async fn run(args: RunArgs) -> ExitCode {
         ..
     } = granted;
     let mut connected = true;
+    // Переподключение идёт рядом с ожиданием команды: выход и TERM не ждут его 30 с.
+    type Reattach =
+        std::pin::Pin<Box<dyn Future<Output = Option<(Reader, OwnedWriteHalf)>> + Send>>;
+    let mut reattaching: Option<Reattach> = None;
     let status = loop {
         tokio::select! {
             status = child.wait() => break status,
@@ -368,7 +378,11 @@ pub async fn run(args: RunArgs) -> ExitCode {
                 if matches!(line, Ok(Some(_))) { continue; }
                 // Воркер ушёл (рестарт): снова прицепиться к своей аренде, команда работает дальше.
                 connected = false;
-                match reattach(&socket, &lease_id).await {
+                reattaching = Some(Box::pin(reattach(socket.clone(), lease_id.clone())));
+            }
+            result = async { reattaching.as_mut().unwrap().await }, if reattaching.is_some() => {
+                reattaching = None;
+                match result {
                     Some((new_lines, new_write)) => {
                         lines = new_lines;
                         write = new_write;
@@ -397,18 +411,18 @@ pub async fn run(args: RunArgs) -> ExitCode {
 }
 
 /// Держатель после обрыва: переподключение и `attach` в пределах 30 с.
-async fn reattach(socket: &std::path::Path, lease_id: &str) -> Option<(Reader, OwnedWriteHalf)> {
+async fn reattach(socket: PathBuf, lease_id: String) -> Option<(Reader, OwnedWriteHalf)> {
     let started = tokio::time::Instant::now();
     loop {
         let left = RECONNECT_TOTAL.saturating_sub(started.elapsed());
         if left.is_zero() {
             return None;
         }
-        if let Connect::Stream(stream) = connect(socket, left, true).await {
+        if let Connect::Stream(stream) = connect(&socket, left, true).await {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
             let attach = ClientMessage::Attach {
-                lease_id: lease_id.to_owned(),
+                lease_id: lease_id.clone(),
             };
             if write_message(&mut write, attach).await.is_ok() {
                 match read_message(&mut lines).await {

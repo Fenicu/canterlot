@@ -543,3 +543,22 @@ async fn status_lists_holders_and_waiters() {
     drop(waiter);
     drop(holder);
 }
+
+/// Воркер ушёл и не вернулся: команда держателя работает дальше, а её выход не ждёт
+/// 30 с переподключения.
+#[tokio::test(flavor = "multi_thread")]
+async fn holder_exits_promptly_while_worker_is_down() {
+    let mut fixture = Fixture::new(1).await;
+    let job = fixture.job("build", "orphaned");
+    job.wait_granted().await;
+    fixture.restart().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = Instant::now();
+    let status = job.finish().await;
+    assert!(status.success(), "{status:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
