@@ -210,16 +210,42 @@ fn read_tools_are_read_only() {
         let tools = tools_of(tool_set, provider);
         for (mcp_name, _) in SESSION_TOOLS {
             let tool = tools.iter().find(|tool| tool["name"] == mcp_name).unwrap();
-            let read_only = matches!(
-                mcp_name,
-                "sessions_list" | "session_inspect" | "alarm_list" | "route_preview" | "plan_list"
-            );
+            // В наборе Claude `readOnlyHint` стоит на всех инструментах без вопроса: только
+            // его слушает режим `plan`.
+            let read_only = if tool_set == ToolSet::ApproveAndLimits {
+                mcp::MODE_FREE_TOOLS.contains(&mcp_name)
+            } else {
+                matches!(
+                    mcp_name,
+                    "sessions_list"
+                        | "session_inspect"
+                        | "alarm_list"
+                        | "route_preview"
+                        | "plan_list"
+                )
+            };
             assert_eq!(
                 tool["annotations"]["readOnlyHint"] == json!(true),
                 read_only,
                 "{provider}: {mcp_name}"
             );
         }
+    }
+}
+
+#[test]
+fn claude_marks_every_mode_free_tool_read_only_and_nothing_else() {
+    let tools = tools_of(ToolSet::ApproveAndLimits, "claude");
+    for tool in &tools {
+        let name = tool["name"].as_str().unwrap();
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"] == json!(true),
+            mcp::MODE_FREE_TOOLS.contains(&name),
+            "{name}"
+        );
+    }
+    for name in mcp::MODE_FREE_TOOLS {
+        assert!(tools.iter().any(|tool| tool["name"] == name), "{name}");
     }
 }
 

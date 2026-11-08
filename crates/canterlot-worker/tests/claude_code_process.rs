@@ -90,7 +90,7 @@ fn owner_preset_args_keep_owner_configuration() {
     let idx = s.iter().position(|x| x == "--settings").unwrap();
     assert_eq!(
         s[idx + 1],
-        "{\"crossSessionInbound\":\"refuse\",\"permissions\":{\"allow\":[\"mcp__canterlot__plan_list\",\"mcp__canterlot__plan_add\",\"mcp__canterlot__plan_update\"]}}"
+        "{\"crossSessionInbound\":\"refuse\",\"permissions\":{\"allow\":[\"mcp__canterlot__canterlot_limits\",\"mcp__canterlot__canterlot_presets_list\",\"mcp__canterlot__sessions_list\",\"mcp__canterlot__session_inspect\",\"mcp__canterlot__session_subscribe\",\"mcp__canterlot__session_unsubscribe\",\"mcp__canterlot__session_wait\",\"mcp__canterlot__alarm_set\",\"mcp__canterlot__alarm_cancel\",\"mcp__canterlot__alarm_list\",\"mcp__canterlot__route_preview\",\"mcp__canterlot__plan_list\",\"mcp__canterlot__plan_add\",\"mcp__canterlot__plan_update\"]}}"
     );
     assert_eq!(s[idx + 2], "--system-prompt-snapshot");
     assert_eq!(s[idx + 3], "off");

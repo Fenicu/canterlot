@@ -127,6 +127,30 @@ pub const AGENT_TOOLS: [(&str, &str); 24] = [
     ("plan_adopt", "plan.adopt"),
 ];
 
+/// Инструменты, которые в режимах `ask` и `read_only` не спрашивают владельца ни у Claude Code,
+/// ни у OpenCode: чтение, подписка и ожидание, свои будильники и своя доска плана. Они не
+/// меняют чужие сессии и не тратят лимиты; права на чужие сессии проверяет хаб. Всё, что
+/// действует на другую сессию или тратит деньги и лимиты (`session_spawn`, `session_send`,
+/// `session_interrupt`, `session_stop`, `session_accept`, `spawn_cancel`, `nudge_set`,
+/// `nudge_clear`, `share_file`, `canterlot_preset_save`, `canterlot_preset_apply`,
+/// `plan_adopt`), решает режим. Имена без префикса сервера: адаптер добавляет свой.
+pub const MODE_FREE_TOOLS: [&str; 14] = [
+    "canterlot_limits",
+    "canterlot_presets_list",
+    "sessions_list",
+    "session_inspect",
+    "session_subscribe",
+    "session_unsubscribe",
+    "session_wait",
+    "alarm_set",
+    "alarm_cancel",
+    "alarm_list",
+    "route_preview",
+    "plan_list",
+    "plan_add",
+    "plan_update",
+];
+
 fn is_session_tool(mcp_name: &str) -> bool {
     matches!(
         mcp_name,
@@ -714,6 +738,18 @@ fn tools_list(tool_set: ToolSet, provider: &str) -> Value {
             ];
             tools.push(share);
             tools.append(&mut presets);
+            // В `plan` Claude Code 2.1.319 не слушает ни `permissions.allow`, ни разрешение
+            // хука `PreToolUse`: без вопроса проходит только `readOnlyHint`. Инструменты
+            // `MODE_FREE_TOOLS` не трогают рабочий каталог, чужие сессии и лимиты, поэтому
+            // в наборе Claude помечены так все; у Codex и OpenCode аннотации прежние.
+            for tool in &mut tools {
+                let free = tool["name"]
+                    .as_str()
+                    .is_some_and(|name| MODE_FREE_TOOLS.contains(&name));
+                if free {
+                    tool["annotations"] = json!({"readOnlyHint": true});
+                }
+            }
             json!({"tools": tools})
         }
         ToolSet::LimitsOnly => {

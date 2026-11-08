@@ -1,4 +1,4 @@
-use crate::adapter::canterlot_mcp::RELAY_SECRET_ENV;
+use crate::adapter::canterlot_mcp::{MODE_FREE_TOOLS, RELAY_SECRET_ENV, SERVER_NAME};
 use crate::adapter::{InstructionMode, InstructionSpec, SettingsChange, spawn_with_retry_io};
 use crate::config::ClaudeCodeConfig;
 use crate::containment::Containment;
@@ -135,21 +135,22 @@ pub fn owner_instruction_excludes_in(
     out
 }
 
-/// JSON для `--settings` по режиму инструкций.
-/// Инструменты своей доски плана касаются только плана этой сессии: в `ask` (`manual`) и
-/// `read_only` (`plan`) CLI иначе спрашивал бы владельца о каждом вызове (проверено вживую
-/// на Claude Code 2.1.319: без правила каждый вызов MCP идёт в `--permission-prompt-tool`).
-/// Перенос чужого плана (`plan_adopt`) остаётся под правилами режима.
-pub const PLAN_TOOLS_ALLOWED: [&str; 3] = [
-    "mcp__canterlot__plan_list",
-    "mcp__canterlot__plan_add",
-    "mcp__canterlot__plan_update",
-];
+/// Разрешения `permissions.allow` для инструментов [`MODE_FREE_TOOLS`]: в `ask` (`manual`)
+/// CLI иначе спрашивал бы владельца о каждом вызове, даже с `readOnlyHint` (проверено вживую
+/// на Claude Code 2.1.319). Режим `plan` эти правила не слушает, там работает `readOnlyHint`
+/// набора Claude (`tools_list`). Остальные инструменты canterlot решает режим.
+pub fn mode_free_tools_allowed() -> Vec<String> {
+    MODE_FREE_TOOLS
+        .iter()
+        .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
+        .collect()
+}
 
+/// JSON для `--settings` по режиму инструкций.
 pub fn settings_json(mode: InstructionMode, excludes: &[String]) -> serde_json::Value {
     let mut settings = serde_json::json!({
         "crossSessionInbound": "refuse",
-        "permissions": {"allow": PLAN_TOOLS_ALLOWED},
+        "permissions": {"allow": mode_free_tools_allowed()},
     });
     if mode != InstructionMode::Owner {
         settings["claudeMdExcludes"] = serde_json::json!(excludes);

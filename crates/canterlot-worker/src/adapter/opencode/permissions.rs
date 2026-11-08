@@ -3,6 +3,8 @@
 
 use serde_json::{Value, json};
 
+use crate::adapter::canterlot_mcp::MODE_FREE_TOOLS;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionMode {
     Owner,
@@ -11,33 +13,20 @@ pub enum PermissionMode {
     ReadOnly,
 }
 
-/// Чтение через MCP canterlot, будильники и доска плана: они касаются только своей очереди
-/// и своего плана, поэтому разрешены и в `ask`, и в `read_only`. Сохранение и применение
-/// пресета и перенос чужого плана (`plan_adopt`) решает режим.
-const READ_TOOLS: [&str; 14] = [
-    "canterlot_canterlot_limits",
-    "canterlot_canterlot_presets_list",
-    "canterlot_sessions_list",
-    "canterlot_session_inspect",
-    // Подписка и ожидание ничего не меняют у другой сессии; права на них проверяет хаб.
-    "canterlot_session_subscribe",
-    "canterlot_session_unsubscribe",
-    "canterlot_session_wait",
-    "canterlot_alarm_set",
-    "canterlot_alarm_cancel",
-    "canterlot_alarm_list",
-    "canterlot_route_preview",
-    "canterlot_plan_list",
-    "canterlot_plan_add",
-    "canterlot_plan_update",
-];
+/// Инструменты canterlot без вопроса в `ask` и `read_only`: общий список
+/// [`MODE_FREE_TOOLS`] с префиксом сервера `canterlot_`.
+fn read_tools() -> impl Iterator<Item = String> {
+    MODE_FREE_TOOLS
+        .iter()
+        .map(|tool| format!("canterlot_{tool}"))
+}
 
 fn rule(action: &str, effect: &str) -> Value {
     json!({"action": action, "resource": "*", "effect": effect})
 }
 
 fn with_read_tools(mut rules: Vec<Value>) -> Vec<Value> {
-    rules.extend(READ_TOOLS.iter().map(|tool| rule(tool, "allow")));
+    rules.extend(read_tools().map(|tool| rule(&tool, "allow")));
     rules
 }
 

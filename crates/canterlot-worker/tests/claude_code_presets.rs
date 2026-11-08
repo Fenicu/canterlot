@@ -311,6 +311,17 @@ fn settings_json_modes_match_the_plan() {
         json!({
             "crossSessionInbound": "refuse",
             "permissions": {"allow": [
+                "mcp__canterlot__canterlot_limits",
+                "mcp__canterlot__canterlot_presets_list",
+                "mcp__canterlot__sessions_list",
+                "mcp__canterlot__session_inspect",
+                "mcp__canterlot__session_subscribe",
+                "mcp__canterlot__session_unsubscribe",
+                "mcp__canterlot__session_wait",
+                "mcp__canterlot__alarm_set",
+                "mcp__canterlot__alarm_cancel",
+                "mcp__canterlot__alarm_list",
+                "mcp__canterlot__route_preview",
                 "mcp__canterlot__plan_list",
                 "mcp__canterlot__plan_add",
                 "mcp__canterlot__plan_update",
@@ -324,6 +335,30 @@ fn settings_json_modes_match_the_plan() {
         settings_json(InstructionMode::Preset, &excludes),
         settings_json(InstructionMode::Clean, &excludes)
     );
+}
+
+#[test]
+fn settings_json_leaves_tools_acting_on_others_to_the_mode() {
+    let settings = settings_json(InstructionMode::Clean, &[]);
+    let allow = settings["permissions"]["allow"].as_array().unwrap();
+    for tool in [
+        "session_spawn",
+        "session_send",
+        "session_interrupt",
+        "session_stop",
+        "session_accept",
+        "spawn_cancel",
+        "nudge_set",
+        "nudge_clear",
+        "share_file",
+        "canterlot_preset_save",
+        "canterlot_preset_apply",
+        "plan_adopt",
+        "approve",
+    ] {
+        let name = format!("mcp__canterlot__{tool}");
+        assert!(!allow.contains(&json!(name)), "{name}");
+    }
 }
 
 #[test]
