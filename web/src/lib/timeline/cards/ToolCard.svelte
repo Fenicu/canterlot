@@ -45,9 +45,11 @@
       background,
       root: feed.root,
       harness: feed.harness,
+      conversationId,
       session: feed.session,
       events: feed.events,
-      previous: () => feed.previous(block)
+      previous: () => feed.previous(block),
+      planBefore: (number) => feed.planBefore?.(block, number) ?? null
     })
   );
   const card = $derived(block.kind === 'tool_call' ? resolveCard(call, now) : null);

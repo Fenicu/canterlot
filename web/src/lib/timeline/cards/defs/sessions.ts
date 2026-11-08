@@ -6,6 +6,7 @@ import type { HubEvent } from '#lib/timeline/hubEvent.js';
 import { bool, isObject, list, num, obj, str, type JsonObject } from '../json';
 import { hubError, quoted, say, sessionWord, stateCountWord, type SessionWord, type Tone } from '../copy';
 import type { CardCall, CardLogic, SessionFacts } from '../types';
+import { planError, spawnPlanTask, type SpawnPlanTask } from './plan';
 
 /** Заголовок сессии: из списка владельца, иначе из ответа, иначе начало id. */
 export function sessionTitle(call: CardCall, id: string, fallback = ''): string {
@@ -45,6 +46,8 @@ export interface SpawnData {
   decision: string;
   error: string;
   metricsStale: boolean;
+  /** Задача плана, которую делегат взял в работу (`plan_task`). */
+  planTask: SpawnPlanTask | null;
 }
 
 const HARNESS_IDS: Record<string, string> = { claude: 'claude_code', claude_code: 'claude_code', codex: 'codex', opencode: 'opencode', antigravity: 'antigravity' };
@@ -58,6 +61,11 @@ export function spawnExecutor(harness: string, model: string, effort: string, ti
 function approvalOf(call: CardCall, requestId: string): HubEvent | null {
   if (!requestId) return null;
   return call.events('').find((event) => event.kind === 'approval' && event.request_id === requestId) ?? null;
+}
+
+/** Ошибка запуска: отказы по задаче плана — по-русски, остальное — текст хаба. */
+function spawnError(output: string): string {
+  return /^\s*plan_/.test(output) ? planError(output).text : hubError(output);
 }
 
 export const spawn: CardLogic<SpawnData> = {
@@ -119,8 +127,9 @@ export const spawn: CardLogic<SpawnData> = {
           : null,
       requestId,
       decision: approval?.decision ?? '',
-      error: known === 'error' ? (call.output ? hubError(call.output) : '') || (isObject(answer.reason) ? str(answer.reason.reason) : '') : '',
-      metricsStale: str(answer.machine_metrics) === 'stale'
+      error: known === 'error' ? (call.output ? spawnError(call.output) : '') || (isObject(answer.reason) ? str(answer.reason.reason) : '') : '',
+      metricsStale: str(answer.machine_metrics) === 'stale',
+      planTask: spawnPlanTask(call)
     };
   },
   summary(call, data) {

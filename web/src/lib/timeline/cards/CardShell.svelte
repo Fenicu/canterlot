@@ -88,6 +88,7 @@
   /* Сессия занята делом: точка дышит, как активный пункт плана. Без движения — ровный тон. */
   .dot[data-live] { animation: card-pulse var(--duration-stage-pulse) var(--ease-stage-pulse) infinite; }
   @keyframes card-pulse { 50% { opacity: var(--opacity-stage-halo); } }
+  .word[data-tone='blue'] { color: var(--blue); }
   .word[data-tone='success'] { color: var(--success); }
   .word[data-tone='warning'] { color: var(--warning); }
   .word[data-tone='danger'] { color: var(--danger); }

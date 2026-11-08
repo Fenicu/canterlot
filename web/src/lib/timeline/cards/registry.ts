@@ -15,8 +15,14 @@ import ShareCard from './ShareCard.svelte';
 import SpawnCard from './SpawnCard.svelte';
 import SubagentCard from './SubagentCard.svelte';
 import TodoCard from './TodoCard.svelte';
+import PlanAddCard from './plan/PlanAddCard.svelte';
+import PlanAdoptCard from './plan/PlanAdoptCard.svelte';
+import PlanListCard from './plan/PlanListCard.svelte';
+import PlanUpdateCard from './plan/PlanUpdateCard.svelte';
+import { planHref } from './plan/livePlan';
 import { alarmCancel, alarmList, alarmSet } from './defs/alarms';
 import { limits } from './defs/limits';
+import { planAdd, planAdopt, planList, planUpdate } from './defs/plan';
 import * as sessions from './defs/sessions';
 import { share } from './defs/share';
 import { todo } from './defs/todo';
@@ -33,6 +39,17 @@ function card<D>(logic: CardLogic<D>, component?: Component<CardProps<D>>): Card
 /** Ссылка на сессию по полю `session_id` входа. */
 function bySession<D>(logic: CardLogic<D>, pick: (call: CardCall, data: D) => string = (call) => String(call.input.session_id ?? '')): CardLogic<D> {
   return { ...logic, link: logic.link ?? ((call, data) => sessionLink(call, pick(call, data))) };
+}
+
+/** Слово «План» в строке ведёт в план оркестратора этой ленты. */
+function toPlan<D>(logic: CardLogic<D>): CardLogic<D> {
+  return {
+    ...logic,
+    link: (call) => {
+      const id = call.conversationId;
+      return id ? { text: 'План', href: planHref(id), plan: id } : null;
+    }
+  };
 }
 
 /** Однострочная запись управления: своё слово и тон, если они есть. */
@@ -66,6 +83,10 @@ const REGISTRY: Record<string, CardDef<never>> = {
   'canterlot.alarm_list': card(alarmList, AlarmListCard),
   'canterlot.share_file': card(share, ShareCard),
   'canterlot.limits': card(limits, LimitsCard),
+  'canterlot.plan_add': card(toPlan(planAdd), PlanAddCard),
+  'canterlot.plan_update': card(planUpdate, PlanUpdateCard),
+  'canterlot.plan_list': card(toPlan(planList), PlanListCard),
+  'canterlot.plan_adopt': card({ ...planAdopt, link: (call, data) => sessionLink(call, data.from) }, PlanAdoptCard),
   'todo.write': card(todo, TodoCard),
   'agent.task': card(subagent, SubagentCard),
   'question.ask': card(question, QuestionCard),

@@ -5,7 +5,7 @@ import { cleanToolOutput, isLaunchResult, isMainAgent, toolError, toolInterrupte
 import type { HubEvent } from '#lib/timeline/hubEvent.js';
 import { isObject, jsonObjectIn, parseJson, type JsonObject } from './json';
 import { toolId } from './toolId';
-import type { CardCall, CardState, SessionFacts, Voice } from './types';
+import type { CardCall, CardState, PlanSnapshot, SessionFacts, Voice } from './types';
 
 export interface CallFacts {
   working?: boolean;
@@ -13,9 +13,11 @@ export interface CallFacts {
   /** Лента корневой сессии владельца: её агент говорит о себе в женском роде. */
   root?: boolean;
   harness?: string;
+  conversationId?: string;
   session?: (id: string) => SessionFacts | null;
   events?: (sessionId: string) => HubEvent[];
   previous?: () => BlockModel | null;
+  planBefore?: (number: number) => PlanSnapshot | null;
 }
 
 /** Состояние вызова из тех же признаков, что у обычного блока инструмента. */
@@ -55,8 +57,10 @@ export function cardCall(block: BlockModel, result: BlockModel | null, facts: Ca
     state: cardState(block, result, facts),
     voice: voiceOf(block, facts.root ?? false),
     harness: facts.harness ?? '',
+    conversationId: facts.conversationId ?? '',
     session: facts.session ?? (() => null),
     events: facts.events ?? (() => []),
-    previous: facts.previous ?? (() => null)
+    previous: facts.previous ?? (() => null),
+    planBefore: facts.planBefore ?? (() => null)
   };
 }

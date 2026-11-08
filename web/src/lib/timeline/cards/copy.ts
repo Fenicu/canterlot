@@ -11,7 +11,7 @@ export function quoted(title: string): string {
   return clean ? `«${clean}»` : 'сессию';
 }
 
-export type Tone = 'accent' | 'success' | 'warning' | 'danger' | 'muted';
+export type Tone = 'accent' | 'blue' | 'success' | 'warning' | 'danger' | 'muted';
 
 export interface SessionWord {
   word: string;

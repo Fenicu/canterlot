@@ -1,6 +1,7 @@
 import type { Component } from 'svelte';
 import type { BackgroundFact } from '#lib/stores/background.svelte.js';
 import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
+import type { PlanTaskState } from '#lib/stores/plan.svelte.js';
 import type { BlockLinks } from '#lib/timeline/rows.js';
 import type { HubEvent } from '#lib/timeline/hubEvent.js';
 import type { FeedFolds } from '#lib/timeline/folds.js';
@@ -40,12 +41,22 @@ export interface CardCall {
   voice: Voice;
   /** Провайдер сессии: claude, codex, opencode … */
   harness: string;
+  /** Разговор, в чьей ленте стоит вызов: его план правят инструменты плана. */
+  conversationId: string;
   /** Строка сессии из списка владельца: заголовок и живое состояние. */
   session: (id: string) => SessionFacts | null;
   /** События хаба о сессии из той же ленты, по порядку: итог приёмки, решение владельца, старт из очереди. */
   events: (sessionId: string) => HubEvent[];
   /** Прошлый вызов того же инструмента в той же дорожке. */
   previous: () => BlockModel | null;
+  /** Задача плана с этим номером по прошлым вызовам плана в ленте: какой она была до этого вызова. */
+  planBefore: (number: number) => PlanSnapshot | null;
+}
+
+/** Задача плана в ответе прошлого вызова той же ленты. */
+export interface PlanSnapshot {
+  title: string;
+  state: PlanTaskState | null;
 }
 
 /** Что карточке видно о чужой сессии из списка владельца. */
@@ -114,6 +125,8 @@ export interface CardLink {
   text: string;
   href: string;
   external?: boolean;
+  /** Ссылка на план этого оркестратора: в своём чате открывает вкладку «План» на месте. */
+  plan?: string;
 }
 
 export interface StateWord {

@@ -57,7 +57,7 @@ export function countText(state: PlanTaskState, n: number): string {
 	}
 }
 
-export function countByState(tasks: readonly PlanTask[]): Record<PlanTaskState, number> {
+export function countByState(tasks: readonly Pick<PlanTask, 'state'>[]): Record<PlanTaskState, number> {
 	const counts: Record<PlanTaskState, number> = { in_progress: 0, in_review: 0, blocked: 0, waiting: 0, done: 0, cancelled: 0 };
 	for (const task of tasks) counts[task.state] += 1;
 	return counts;
@@ -81,7 +81,7 @@ export function groupTasks<T extends PlanTask>(tasks: readonly T[]): PlanGroup<T
 }
 
 /** Сводка плана по всем непустым состояниям: «2 в работе · 1 на проверке · 4 готово». */
-export function planSummary(tasks: readonly PlanTask[]): string {
+export function planSummary(tasks: readonly Pick<PlanTask, 'state'>[]): string {
 	const counts = countByState(tasks);
 	return STATE_ORDER.filter((state) => counts[state] > 0)
 		.map((state) => countText(state, counts[state]))
