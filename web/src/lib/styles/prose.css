@@ -104,10 +104,3 @@
 @media (hover: none) {
   .prose .copy-button { min-width: var(--target); min-height: var(--target); opacity: 1; pointer-events: auto; }
 }
-
-/* На большом экране код и таблицы могут выйти за колонку чтения, но не за панель чата. */
-@container (min-width: 72rem) {
-  .prose .code-block, .prose table { width: fit-content; min-width: 100%; max-width: min(var(--prose-wide), calc(50cqw + 50% - var(--gutter))); }
-  /* Внутри цитаты или пункта списка ширина считается от их полей: выходить за карточку некуда. */
-  .prose :is(blockquote, li) :is(.code-block, table) { width: auto; min-width: 0; max-width: 100%; }
-}
