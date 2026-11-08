@@ -28,7 +28,7 @@ export interface FeedCardsSeed {
   imageId: string;
 }
 
-class Feed {
+export class Feed {
   seq = 0;
   readonly items: (HistoryBlock | HistoryInput)[] = [];
   readonly blocks: Record<string, string> = {};

@@ -10,6 +10,7 @@ import { expect } from '../ui/fixtures';
 import { bootSecondary } from '../ui/secondary-fixture';
 import { seedConversation, seedMachineWatch } from '../../testing/fake-hub/seed';
 import { seedFeedCards } from '../../testing/fixtures/feed-cards';
+import { seedPlanCards } from '../../testing/fixtures/plan-cards';
 import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
 import { seedPlan } from '../../testing/fixtures/plan';
@@ -155,6 +156,21 @@ async function feedCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
     await page.locator('[data-role="quiet-group"] .head').click();
     await page.locator('.feed-card[data-card="todo.write"] .hit').first().click();
     await expect(page.locator('[data-role="card-raw"]').first()).toBeVisible();
+  }
+}
+
+/** Лента оркестратора с вызовами доски плана: низ ленты или её начало с раскрытыми списками. */
+async function planCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
+  const { hub, api } = fresh();
+  const seed = seedPlanCards(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${seed.id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.feed-card').first()).toBeVisible();
+  if (at === 'top') {
+    await page.locator('.feed').evaluate((node) => { node.scrollTop = 0; });
+    await page.getByRole('button', { name: /^Все задачи · 5$/ }).first().click();
+    await expect(page.locator('[data-role="plan-add-tasks"] [data-plan-task]')).toHaveCount(5);
   }
 }
 
@@ -452,6 +468,9 @@ export const SCREENS: Screen[] = [
   screen('feed-cards', false, PHONE, 'dark', (page) => feedCards(page, 'bottom')),
   screen('feed-cards-top', false, PHONE, 'dark', (page) => feedCards(page, 'top')),
   screen('feed-cards-desktop', false, DESKTOP, 'light', (page) => feedCards(page, 'bottom')),
+  screen('plan-cards', false, PHONE, 'dark', (page) => planCards(page, 'bottom')),
+  screen('plan-cards-top', false, PHONE, 'dark', (page) => planCards(page, 'top')),
+  screen('plan-cards-desktop', false, DESKTOP, 'light', (page) => planCards(page, 'bottom')),
   screen('docx-viewer', false, PHONE, 'dark', (page) => officeViewer(page, 'word')),
   screen('docx-viewer-light', false, PHONE, 'light', (page) => officeViewer(page, 'word')),
   screen('docx-viewer-desktop', false, DESKTOP, 'light', (page) => officeViewer(page, 'word')),
