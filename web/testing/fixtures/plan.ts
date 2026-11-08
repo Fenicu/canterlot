@@ -11,6 +11,7 @@ export interface PlanSeed {
 	orchestrator: string;
 	executors: { working: string; review: string; failed: string; accepted: string };
 	reportBlockId: string;
+	reportSeq: number;
 	tasks: PlanTask[];
 }
 
@@ -55,7 +56,8 @@ export function seedPlan(api: FakeHubApi, opts: { reportAt?: number; history?: n
 		],
 		commits_truncated: false,
 		files_changed: 14,
-		report_block_id: report.id
+		report_block_id: report.id,
+		report_seq: Number(report.created_seq)
 	});
 	api.planDetails.set(tasks[0]!.id, {
 		commits: [{ sha: 'd4e5f60718293a4b5c6d7e8f90123456789abc01', subject: 'Создать таблицу plan_tasks' }],
@@ -63,5 +65,5 @@ export function seedPlan(api: FakeHubApi, opts: { reportAt?: number; history?: n
 		files_changed: 3,
 		report_block_id: null
 	});
-	return { orchestrator, executors: { working, review, failed, accepted }, reportBlockId: report.id, tasks };
+	return { orchestrator, executors: { working, review, failed, accepted }, reportBlockId: report.id, reportSeq: Number(report.created_seq), tasks };
 }

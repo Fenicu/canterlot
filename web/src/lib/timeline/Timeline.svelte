@@ -382,12 +382,16 @@
     held = null;
     controller?.release();
     const blockId = request.blockId;
-    const targetIndex = (): number =>
-      blockId
-        ? rows.findIndex((row) => row.entries.some((entry) => entry.kind === 'block' && entry.block.id === blockId))
-        : rowIndexOfInput(rows, request.inputId);
+    // Вложенный блок не стоит строкой ленты: его место — строка верхнего предка с тем же seq.
+    const blockIndex = (id: string): number => {
+      const exact = rows.findIndex((row) => row.entries.some((entry) => entry.kind === 'block' && entry.block.id === id));
+      if (exact >= 0 || !request.seq) return exact;
+      return rows.findIndex((row) => row.entries.some((entry) => entry.seq === request.seq));
+    };
+    const targetIndex = (): number => (blockId ? blockIndex(blockId) : rowIndexOfInput(rows, request.inputId));
     try {
-      if (blockId) await chat.focusBlock(blockId);
+      if (blockId && request.seq) await chat.focusAt(blockId, request.seq);
+      else if (blockId) await chat.focusBlock(blockId);
       else await chat.focusMessage(request.inputId, request.seq);
     } catch {
       if (serial === jumpSerial) overscan = 1.5;
@@ -634,7 +638,7 @@
     <div class="sentinel" use:sentinel></div>
     <div class="pad" style:height={`${range.padTop}px`} use:spacer></div>
     {#each windowRows as row (row.key)}
-      <div class="row" data-row data-kind={row.kind} data-key={row.key} data-jump={row.kind === 'answer' && row.key === highlightKey ? '' : undefined} use:measure>
+      <div class="row" data-row data-kind={row.kind} data-key={row.key} data-jump={(row.kind === 'answer' || row.kind === 'event') && row.key === highlightKey ? '' : undefined} use:measure>
         {#if row.kind === 'day'}
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}

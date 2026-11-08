@@ -88,7 +88,34 @@ test('expanded_task_lists_commits_and_report_opens_the_executor_chat_at_the_bloc
 	await expect(blocked.locator('[data-role="plan-executor-state"]')).toContainText('упала');
 	expect(api.planReads).toContain(seed.orchestrator);
 
+	// Место отчёта приходит с планом: лента встаёт окном вокруг seq, без перебора страниц истории.
+	const historyCalls: URL[] = [];
+	page.on('request', (request) => {
+		if (request.url().includes(`/conversations/${seed.executors.review}/history`)) historyCalls.push(new URL(request.url()));
+	});
 	await body.getByRole('link', { name: 'Отчёт' }).click();
+	await expect(page).toHaveURL(new RegExp(`/c/${seed.executors.review}\\?block=${seed.reportBlockId}&seq=${seed.reportSeq}$`));
+	const block = page.locator(`[data-block="${seed.reportBlockId}"]`);
+	await expect(block).toHaveText(REPORT_TEXT, { timeout: 10_000 });
+	await expect(block).toBeInViewport();
+	await expect(page.locator('[data-row][data-jump]')).toContainText(REPORT_TEXT);
+	expect(historyCalls.some((url) => url.searchParams.get('around') === String(seed.reportSeq))).toBe(true);
+	expect(historyCalls.some((url) => url.searchParams.has('before'))).toBe(false);
+});
+
+test('report_link_without_a_seq_still_finds_the_block_by_paging', async ({ page }) => {
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const seed = seedPlan(api);
+	const detail = api.planDetails.get(seed.tasks[1]!.id)!;
+	api.planDetails.set(seed.tasks[1]!.id, { ...detail, report_seq: null });
+	await installChatRoutes(page, hub, api, OWNER);
+	await page.goto(`/c/${seed.orchestrator}`);
+	await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+	await page.locator('[data-role="plan-strip"] button').click();
+	const task = planTab(page).locator('[data-plan-task="2"]');
+	await task.getByRole('button', { name: /#2 Хранилище плана/ }).click();
+	await task.getByRole('link', { name: 'Отчёт' }).click();
 	await expect(page).toHaveURL(new RegExp(`/c/${seed.executors.review}\\?block=${seed.reportBlockId}$`));
 	const block = page.locator(`[data-block="${seed.reportBlockId}"]`);
 	await expect(block).toHaveText(REPORT_TEXT, { timeout: 10_000 });

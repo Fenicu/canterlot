@@ -389,11 +389,14 @@ export class ChatStore {
     };
   }
 
-  /** Прыжок к блоку ответа по ссылке «Отчёт» из плана: места в ленте у ссылки нет, только блок. */
-  requestBlockJump(blockId: string): void {
+  /**
+   * Прыжок к блоку ответа по ссылке «Отчёт» из плана или по совпадению поиска.
+   * С местом в ленте лента сразу встаёт вокруг него; без места блок ищется по страницам.
+   */
+  requestBlockJump(blockId: string, seq = ""): void {
     this.jumpRequest = {
       inputId: "",
-      seq: "",
+      seq,
       blockId,
       nonce: (this.jumpRequest?.nonce ?? 0) + 1,
     };
@@ -609,6 +612,16 @@ export class ChatStore {
     } finally {
       this.#release();
     }
+  }
+
+  /**
+   * Блок с известным местом в ленте: окно сразу встаёт вокруг него, без поиска по страницам.
+   * Для вложенного блока место — его верхний предок, поэтому проверка окна по id лишь сокращает путь.
+   */
+  async focusAt(blockId: string, seq: string): Promise<void> {
+    if (this.timeline.entries.some((entry) => entry.kind === "block" && entry.block.id === blockId))
+      return;
+    await this.#focusAround(seq);
   }
 
   /**

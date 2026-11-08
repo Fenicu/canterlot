@@ -102,7 +102,9 @@
 			(id) => runtime?.list.deleted.has(id) ?? false
 		);
 	const chatHref = (id: string): string => resolve(`/c/${id}` as '/');
-	const reportHref = (id: string, block: string): string => `${chatHref(id)}?block=${encodeURIComponent(block)}`;
+	// С местом отчёта лента сразу встаёт вокруг него; без места блок ищется по страницам истории.
+	const reportHref = (id: string, block: string, seq: number | null | undefined): string =>
+		`${chatHref(id)}?block=${encodeURIComponent(block)}${seq === null || seq === undefined ? '' : `&seq=${encodeURIComponent(String(seq))}`}`;
 </script>
 
 {#snippet taskRow(task: PlanTask)}
@@ -162,7 +164,7 @@
 					{/if}
 					{#if who.row && detail?.report_block_id}
 						<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-						<a class="report" data-role="plan-report" href={reportHref(who.row.id, detail.report_block_id)} onclick={() => onnavigate?.()}>
+						<a class="report" data-role="plan-report" href={reportHref(who.row.id, detail.report_block_id, detail.report_seq)} onclick={() => onnavigate?.()}>
 							Отчёт
 							<Icon name="chevron" />
 						</a>
