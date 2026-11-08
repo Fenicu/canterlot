@@ -275,7 +275,7 @@
 				<Icon name="list" />
 			</button>
 			{#if pane.desktop && delegated}
-				<button type="button" class="pane-action" aria-pressed={pane.view === 'delegation'} onclick={() => pane.toggle('delegation')}>{running > 0 ? `Делегирование · ${running}` : 'Делегирование'}</button>
+				<button type="button" class="pane-action" aria-pressed={pane.view === 'delegation'} onclick={() => pane.toggleDelegation()}>{running > 0 ? `Делегирование · ${running}` : 'Делегирование'}</button>
 			{/if}
 			{#if !pane.desktop && delegated && onOpenDelegation}
 				<button

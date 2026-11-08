@@ -142,8 +142,9 @@
 	const childRunning = $derived(childSessions.filter(childLive).length);
 	// Задачи плана живут в списке владельца: вкладка «План» открывается в панели делегирования.
 	const hasPlan = $derived(runtime?.list.plan.has(chat.id) ?? false);
+	$effect.pre(() => pane.forChat(chat.id));
 	function openPlan(): void {
-		pane.delegationTab = 'plan';
+		pane.openPlan();
 		if (pane.desktop) pane.open('delegation');
 		else showDelegation = true;
 	}
@@ -235,7 +236,10 @@
 			else showSettings = true;
 		}}
 		onOpenDiagnostics={() => (showDiagnostics = true)}
-		onOpenDelegation={() => (showDelegation = true)}
+		onOpenDelegation={() => {
+			pane.showDelegationTree();
+			showDelegation = true;
+		}}
 		onOpenMessages={() => (showMessages = true)}
 		onOpenSearch={() => openSearch('', { id: chat.id, title: (chat.detail as { title?: string } | null)?.title ?? '' })}
 		onOpenAlarms={() => (showAlarms = true)}
