@@ -255,6 +255,29 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[conversation, delegate],
     )
     .await;
+    // Доска плана: удаляемый — оркестратор своей задачи (каскад) и исполнитель задачи
+    // потомка (связь обнуляется, строка потомка остаётся без ссылки на удалённого).
+    exec(
+        pool,
+        "insert into plan_boards(orchestrator_conversation_id,owner_id,next_number)
+         values($1,$2,2),($3,$2,2)",
+        &[conversation, owner, delegate],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into plan_tasks(id,owner_id,orchestrator_conversation_id,number,title,
+           executor_conversation_id,state,attempts)
+         values($1,$2,$3,1,'task',$4,'in_progress',1),($5,$2,$4,1,'task',$3,'in_progress',1)",
+        &[
+            Uuid::now_v7(),
+            owner,
+            conversation,
+            delegate,
+            Uuid::now_v7(),
+        ],
+    )
+    .await;
     exec(
         pool,
         "insert into session_subscriptions(id,owner_id,subscriber_id,target_id)

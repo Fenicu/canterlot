@@ -979,6 +979,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_plan"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/presets": {
         parameters: {
             query?: never;
@@ -2243,6 +2259,11 @@ export interface components {
             groups: components["schemas"]["Group"][];
             items: components["schemas"]["ListItem"][];
             limits: components["schemas"]["ProviderView"][];
+            /**
+             * @description Задачи досок плана корневых оркестраторов вне архива и корзины; готовые и
+             *     отменённые — за 7 дней, не больше 50 оркестраторов. Снимок заменяет набор целиком.
+             */
+            plan_tasks: components["schemas"]["PlanTask"][];
             presets: components["schemas"]["PresetSummary"][];
             truncated: boolean;
         };
@@ -2577,6 +2598,61 @@ export interface components {
             compaction?: components["schemas"]["CompactionProgress"] | null;
             /** @enum {string} */
             reason: "session_stuck";
+        };
+        PlanCommit: {
+            sha: string;
+            subject: string;
+        };
+        PlanList: {
+            /** @description Задачи по номерам с выведенными полями исполнителя. */
+            tasks: components["schemas"]["PlanTaskDetail"][];
+        };
+        /**
+         * @description Состояние задачи плана.
+         * @enum {string}
+         */
+        PlanState: "waiting" | "in_progress" | "in_review" | "done" | "cancelled" | "blocked";
+        /**
+         * @description Задача плана: только хранимые поля. Так она идёт в снимок владельца и в
+         *     `plan_task_changed`; исполнитель известен клиенту из списка разговоров.
+         */
+        PlanTask: {
+            /** Format: int32 */
+            attempts: number;
+            blocker: string | null;
+            created_at: string;
+            /** Format: uuid */
+            executor_id: string | null;
+            findings: string[];
+            /** Format: uuid */
+            id: string;
+            note: string | null;
+            /** Format: int32 */
+            number: number;
+            /** Format: uuid */
+            orchestrator_id: string;
+            /** Format: int64 */
+            revision: number;
+            state: components["schemas"]["PlanState"];
+            title: string;
+            updated_at: string;
+        };
+        /**
+         * @description Задача с выведенными полями исполнителя: считается по запросу
+         *     (`GET /api/v1/plan` и `plan_list`), в события не идёт.
+         */
+        PlanTaskDetail: components["schemas"]["PlanTask"] & {
+            /** @description Коммиты ходов исполнителя, свежие первыми, без повторов, не больше 50. */
+            commits: components["schemas"]["PlanCommit"][];
+            /** @description Список коммитов неполон: обрезан или git не смог прочитать диапазон. */
+            commits_truncated: boolean;
+            /** Format: int64 */
+            files_changed: number;
+            /**
+             * Format: uuid
+             * @description Последний ответ основного агента исполнителя.
+             */
+            report_block_id: string | null;
         };
         Point: {
             observed_at: string;
@@ -2993,6 +3069,11 @@ export interface components {
                 groups: components["schemas"]["Group"][];
                 items: components["schemas"]["ListItem"][];
                 limits: components["schemas"]["ProviderView"][];
+                /**
+                 * @description Задачи досок плана корневых оркестраторов вне архива и корзины; готовые и
+                 *     отменённые — за 7 дней, не больше 50 оркестраторов. Снимок заменяет набор целиком.
+                 */
+                plan_tasks: components["schemas"]["PlanTask"][];
                 presets: components["schemas"]["PresetSummary"][];
                 truncated: boolean;
             };
@@ -6558,6 +6639,53 @@ export interface operations {
             };
             /** @description Чужой пользователь */
             403: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_plan: {
+        parameters: {
+            query: {
+                /** @description Разговор оркестратора. */
+                orchestrator: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Доска плана оркестратора с коммитами и отчётом исполнителей */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlanList"];
+                };
+            };
+            /** @description Разговор не найден */
+            404: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;

@@ -1228,12 +1228,13 @@ async fn try_start(
                 caller.owner_id,
                 row.parent_id,
                 format!(
-                    "[canterlot] Queued spawn q-{} started as session \"{}\" ({}, {}, model {}). {follow}{stale}",
+                    "[canterlot] Queued spawn q-{} started as session \"{}\" ({}, {}, model {}). {follow}{stale}{}",
                     &row.id.to_string()[..8],
                     origin::clean_title(&child.title),
                     child.session_id,
                     spec.harness,
                     spec.model,
+                    child.plan.as_ref().map(|plan| format!(" {}", plan.note())).unwrap_or_default(),
                 ),
                 spec.chain_depth,
                 origin::HubEvent {

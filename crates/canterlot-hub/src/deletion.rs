@@ -466,8 +466,13 @@ async fn delete_in_tx(
         subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
     }
     origin::scrub_sender_in_tx(conn, id).await?;
+    // Внешний ключ обнулит связь задач плана молча: запомнить их до удаления.
+    let plan_tasks = crate::session_tools::plan::linked_to_in_tx(conn, id).await?;
     purge_rows(conn, id, &execution_ids).await?;
     purge_events(conn, owner_id, id, &execution_ids).await?;
+    // После чистки событий: прежние события задач с ID исполнителя скрыты.
+    crate::session_tools::plan::on_executor_deleted_in_tx(conn, &plan_tasks, correlation_id)
+        .await?;
     announce(conn, owner_id, id, correlation_id).await?;
     Ok(json!({"deleted": true}))
 }

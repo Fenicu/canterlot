@@ -619,6 +619,9 @@ fn session_tool_error_codes_are_unique_snake_case_with_messages() {
         "not_parent",
         "not_delegated",
         "text_too_large",
+        "plan_task_not_found",
+        "plan_task_closed",
+        "plan_full",
         "invalid_arguments",
     ] {
         assert!(seen.contains(expected), "{expected} missing");

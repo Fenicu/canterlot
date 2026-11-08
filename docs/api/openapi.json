@@ -5947,6 +5947,85 @@
         }
       }
     },
+    "/api/v1/plan": {
+      "get": {
+        "tags": [
+          "plan"
+        ],
+        "operationId": "get__api_v1_plan",
+        "parameters": [
+          {
+            "name": "orchestrator",
+            "in": "query",
+            "description": "Разговор оркестратора.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Доска плана оркестратора с коммитами и отчётом исполнителей",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Разговор не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/presets": {
       "get": {
         "tags": [
@@ -10984,7 +11063,8 @@
           "counts",
           "groups",
           "presets",
-          "limits"
+          "limits",
+          "plan_tasks"
         ],
         "properties": {
           "counts": {
@@ -11007,6 +11087,13 @@
             "items": {
               "$ref": "#/components/schemas/ProviderView"
             }
+          },
+          "plan_tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanTask"
+            },
+            "description": "Задачи досок плана корневых оркестраторов вне архива и корзины; готовые и\nотменённые — за 7 дней, не больше 50 оркестраторов. Снимок заменяет набор целиком."
           },
           "presets": {
             "type": "array",
@@ -12218,6 +12305,168 @@
             }
           }
         ]
+      },
+      "PlanCommit": {
+        "type": "object",
+        "required": [
+          "sha",
+          "subject"
+        ],
+        "properties": {
+          "sha": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        }
+      },
+      "PlanList": {
+        "type": "object",
+        "required": [
+          "tasks"
+        ],
+        "properties": {
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanTaskDetail"
+            },
+            "description": "Задачи по номерам с выведенными полями исполнителя."
+          }
+        }
+      },
+      "PlanState": {
+        "type": "string",
+        "description": "Состояние задачи плана.",
+        "enum": [
+          "waiting",
+          "in_progress",
+          "in_review",
+          "done",
+          "cancelled",
+          "blocked"
+        ]
+      },
+      "PlanTask": {
+        "type": "object",
+        "description": "Задача плана: только хранимые поля. Так она идёт в снимок владельца и в\n`plan_task_changed`; исполнитель известен клиенту из списка разговоров.",
+        "required": [
+          "id",
+          "orchestrator_id",
+          "number",
+          "title",
+          "note",
+          "blocker",
+          "findings",
+          "state",
+          "executor_id",
+          "attempts",
+          "created_at",
+          "updated_at",
+          "revision"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "blocker": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "executor_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "orchestrator_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PlanState"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        }
+      },
+      "PlanTaskDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PlanTask"
+          },
+          {
+            "type": "object",
+            "required": [
+              "commits",
+              "commits_truncated",
+              "files_changed",
+              "report_block_id"
+            ],
+            "properties": {
+              "commits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PlanCommit"
+                },
+                "description": "Коммиты ходов исполнителя, свежие первыми, без повторов, не больше 50."
+              },
+              "commits_truncated": {
+                "type": "boolean",
+                "description": "Список коммитов неполон: обрезан или git не смог прочитать диапазон."
+              },
+              "files_changed": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "report_block_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid",
+                "description": "Последний ответ основного агента исполнителя."
+              }
+            }
+          }
+        ],
+        "description": "Задача с выведенными полями исполнителя: считается по запросу\n(`GET /api/v1/plan` и `plan_list`), в события не идёт."
       },
       "Point": {
         "type": "object",
@@ -13725,7 +13974,8 @@
               "counts",
               "groups",
               "presets",
-              "limits"
+              "limits",
+              "plan_tasks"
             ],
             "properties": {
               "counts": {
@@ -13748,6 +13998,13 @@
                 "items": {
                   "$ref": "#/components/schemas/ProviderView"
                 }
+              },
+              "plan_tasks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PlanTask"
+                },
+                "description": "Задачи досок плана корневых оркестраторов вне архива и корзины; готовые и\nотменённые — за 7 дней, не больше 50 оркестраторов. Снимок заменяет набор целиком."
               },
               "presets": {
                 "type": "array",

@@ -1665,3 +1665,122 @@ async fn child_cannot_start_with_the_owner_preset(pool: PgPool) {
     assert_eq!(code(f.spawn(args).await), Code::ProfileUnknown);
     assert!(f.child().await.is_none());
 }
+
+// Доска плана: `plan_task` связывает задачу с ребёнком в `start_child`.
+
+impl Fx {
+    async fn plan_add(&self, titles: &[&str]) {
+        let tasks: Vec<Value> = titles.iter().map(|t| json!({"title": t})).collect();
+        session_tools::call(
+            &self.context,
+            &self.caller(),
+            "plan.add",
+            json!({"tasks": tasks}),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn plan_set(&self, number: i32, state: &str) {
+        session_tools::call(
+            &self.context,
+            &self.caller(),
+            "plan.update",
+            json!({"number": number, "state": state}),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn task(&self, number: i32) -> (String, Option<Uuid>, i32) {
+        sqlx::query_as(
+            "select state,executor_conversation_id,attempts from plan_tasks
+             where orchestrator_conversation_id=$1 and number=$2",
+        )
+        .bind(self.parent)
+        .bind(number)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap()
+    }
+}
+
+fn with_plan(mut args: Value, number: i64) -> Value {
+    args["plan_task"] = json!(number);
+    args
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn direct_spawn_links_the_plan_task(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.plan_add(&["Парсер", "Тесты"]).await;
+    let (child, answer) = f.started(with_plan(inside(), 2)).await;
+    assert_eq!(answer["plan_task"], json!({"number": 2, "linked": true}));
+    assert!(
+        answer["hint"].as_str().unwrap().contains("plan task #2"),
+        "{answer}"
+    );
+    assert_eq!(f.task(2).await, ("in_progress".into(), Some(child), 1));
+    assert_eq!(f.task(1).await, ("waiting".into(), None, 0));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_validates_the_plan_task_before_creating_anything(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.plan_add(&["Парсер"]).await;
+    assert_eq!(
+        code(f.spawn(with_plan(inside(), 7)).await),
+        Code::PlanTaskNotFound
+    );
+    f.plan_set(1, "done").await;
+    assert_eq!(
+        code(f.spawn(with_plan(inside(), 1)).await),
+        Code::PlanTaskClosed
+    );
+    // ID задачи ставит только хаб.
+    let mut forged = inside();
+    forged["plan_task_id"] = json!(Uuid::now_v7());
+    assert_eq!(code(f.spawn(forged).await), Code::InvalidArguments);
+    assert_eq!(f.sessions().await, 1, "nothing was created");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn approval_links_at_start_and_a_task_closed_meanwhile_stays_closed(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.plan_add(&["Парсер", "Тесты"]).await;
+    let answer = f.spawn(with_plan(outside(), 1)).await.unwrap();
+    assert_eq!(answer["status"], "pending_approval");
+    assert!(
+        answer["hint"]
+            .as_str()
+            .unwrap()
+            .contains("Plan task #1 is linked when the session starts"),
+        "{answer}"
+    );
+    let request: Uuid = serde_json::from_value(answer["request_id"].clone()).unwrap();
+    assert_eq!(
+        f.task(1).await,
+        ("waiting".into(), None, 0),
+        "untouched until start"
+    );
+    // Пока владелец решает, оркестратор отменяет задачу: запуск идёт без связи.
+    f.plan_set(1, "cancelled").await;
+    f.decide(request, PermissionBehavior::Allow).await;
+    f.tick().await;
+    let child = f.child().await.expect("the session starts anyway");
+    assert_eq!(f.task(1).await, ("cancelled".into(), None, 0));
+    let notes = f.notes().await;
+    assert!(
+        notes.iter().any(|note| note.contains(&child.to_string())
+            && note.contains("Plan task #1 was closed or moved meanwhile")),
+        "{notes:?}"
+    );
+
+    // Второй запуск по одобрению связывает открытую задачу.
+    let request = f.pending(with_plan(outside(), 2)).await;
+    f.decide(request, PermissionBehavior::Allow).await;
+    f.tick().await;
+    let (state, executor, attempts) = f.task(2).await;
+    assert_eq!((state.as_str(), attempts), ("in_progress", 1));
+    assert!(executor.is_some_and(|id| id != child));
+}

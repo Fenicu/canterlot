@@ -230,7 +230,16 @@ pub async fn accept(
     let parent = parent_of(&mut tx, caller.owner_id, target.id)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
-    check_parent(parent, me.id).map_err(tool_error)?;
+    // Перенятый план (`plan.adopt`): его исполнитель остаётся ребёнком прежнего
+    // оркестратора, но принять его может держатель связанной задачи.
+    if let Err(error) = check_parent(parent, me.id) {
+        // Связь бывает только у запущенного ребёнка: родитель мог быть и удалён.
+        let adopted = matches!(error, AcceptError::NotParent | AcceptError::NotDelegated)
+            && super::plan::owns_executor_in_tx(&mut tx, caller.owner_id, me.id, target.id).await?;
+        if !adopted {
+            return Err(tool_error(error));
+        }
+    }
     access::check_accept(&me, &target, args.force)?;
     let state = begin_in_tx(
         &mut tx,
@@ -292,7 +301,20 @@ pub fn wake(dispatcher: Option<&crate::dispatcher::Dispatcher>, pool: &PgPool, i
 }
 
 /// Общая часть приёма. Повтор безвреден: стоп и задание заводятся один раз.
+/// Задача плана этого исполнителя готова; строки плана берутся последними.
 pub async fn begin_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    id: Uuid,
+    force: bool,
+    correlation_id: Uuid,
+) -> Result<AcceptState, sqlx::Error> {
+    let state = begin_steps_in_tx(conn, owner_id, id, force, correlation_id).await?;
+    super::plan::on_accept_in_tx(conn, id, correlation_id).await?;
+    Ok(state)
+}
+
+async fn begin_steps_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     id: Uuid,

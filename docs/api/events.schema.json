@@ -173,6 +173,9 @@
     },
     {
       "$ref": "#/$defs/spawn_queue_changed"
+    },
+    {
+      "$ref": "#/$defs/plan_task_changed"
     }
   ],
   "$defs": {
@@ -4286,6 +4289,71 @@
       ],
       "additionalProperties": false
     },
+    "PlanTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "orchestrator_id", "number", "title", "note", "blocker", "findings",
+        "state", "executor_id", "attempts", "created_at", "updated_at", "revision"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "orchestrator_id": { "$ref": "#/$defs/Uuid" },
+        "number": { "type": "integer", "minimum": 1 },
+        "title": { "type": "string" },
+        "note": {
+          "anyOf": [ { "type": "string" }, { "type": "null" } ]
+        },
+        "blocker": {
+          "anyOf": [ { "type": "string" }, { "type": "null" } ]
+        },
+        "findings": { "type": "array", "items": { "type": "string" } },
+        "state": {
+          "enum": ["waiting", "in_progress", "in_review", "done", "cancelled", "blocked"]
+        },
+        "executor_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "created_at": { "$ref": "#/$defs/Time" },
+        "updated_at": { "$ref": "#/$defs/Time" },
+        "revision": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "plan_task_changed": {
+      "type": "object",
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/Uuid" },
+        "scope": { "$ref": "#/$defs/Scope" },
+        "scope_seq": { "$ref": "#/$defs/Seq" },
+        "scope_seq_from": { "$ref": "#/$defs/Seq" },
+        "committed_at": { "$ref": "#/$defs/Time" },
+        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "conversation_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "execution_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "correlation_id": { "$ref": "#/$defs/Uuid" },
+        "kind": { "const": "plan_task_changed" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["task"],
+          "properties": {
+            "task": { "$ref": "#/$defs/PlanTask" }
+          }
+        }
+      },
+      "required": [
+        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
+        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
+        "kind", "payload"
+      ],
+      "additionalProperties": false
+    },
     "limits_changed": {
       "type": "object",
       "properties": {
@@ -6196,6 +6264,9 @@
                 },
                 {
                   "$ref": "#/$defs/spawn_queue_changed"
+                },
+                {
+                  "$ref": "#/$defs/plan_task_changed"
                 },
                 {
                   "$ref": "#/$defs/limits_changed"

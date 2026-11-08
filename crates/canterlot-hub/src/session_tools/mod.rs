@@ -18,6 +18,7 @@ pub mod nudge;
 pub mod origin;
 pub mod outage;
 pub mod paths;
+pub mod plan;
 pub mod probe;
 pub mod read;
 pub mod report;
@@ -65,6 +66,10 @@ pub const TOOLS: &[&str] = &[
     "nudge.clear",
     "routing.preview",
     "spawn_queue.cancel",
+    "plan.list",
+    "plan.add",
+    "plan.update",
+    "plan.adopt",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -102,12 +107,15 @@ pub enum ToolErrorCode {
     MachineBusy,
     SpawnQueueFull,
     PathNotAllowed,
+    PlanTaskNotFound,
+    PlanTaskClosed,
+    PlanFull,
     InvalidArguments,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 33] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -136,6 +144,9 @@ impl ToolErrorCode {
         Self::MachineBusy,
         Self::SpawnQueueFull,
         Self::PathNotAllowed,
+        Self::PlanTaskNotFound,
+        Self::PlanTaskClosed,
+        Self::PlanFull,
         Self::InvalidArguments,
         Self::Internal,
     ];
@@ -170,6 +181,9 @@ impl ToolErrorCode {
             Self::MachineBusy => "machine_busy",
             Self::SpawnQueueFull => "spawn_queue_full",
             Self::PathNotAllowed => "path_not_allowed",
+            Self::PlanTaskNotFound => "plan_task_not_found",
+            Self::PlanTaskClosed => "plan_task_closed",
+            Self::PlanFull => "plan_full",
             Self::InvalidArguments => "invalid_arguments",
             Self::Internal => "internal_error",
         }
@@ -205,6 +219,9 @@ impl ToolErrorCode {
             Self::MachineBusy => "The machine is too busy for a new session",
             Self::SpawnQueueFull => "Too many spawns are already queued for this session",
             Self::PathNotAllowed => "The path is not allowed",
+            Self::PlanTaskNotFound => "No such task in your plan",
+            Self::PlanTaskClosed => "The plan task is done or cancelled",
+            Self::PlanFull => "The plan holds too many tasks",
             Self::InvalidArguments => "Invalid arguments",
             Self::Internal => "The hub could not complete the call, try later",
         }
@@ -303,6 +320,10 @@ pub async fn call(
         "nudge.clear" => nudge::clear(context, caller, arguments).await,
         "routing.preview" => routing::preview(context, caller, arguments).await,
         "spawn_queue.cancel" => spawn_queue::cancel(context, caller, arguments).await,
+        "plan.list" => plan::list(context, caller, arguments).await,
+        "plan.add" => plan::add(context, caller, arguments).await,
+        "plan.update" => plan::update(context, caller, arguments).await,
+        "plan.adopt" => plan::adopt(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

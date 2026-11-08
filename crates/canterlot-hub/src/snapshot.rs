@@ -29,6 +29,9 @@ pub struct ListSnapshot {
     pub groups: Vec<Group>,
     pub presets: Vec<PresetSummary>,
     pub limits: Vec<ProviderLimits>,
+    /// Задачи досок плана корневых оркестраторов вне архива и корзины; готовые и
+    /// отменённые — за 7 дней, не больше 50 оркестраторов. Снимок заменяет набор целиком.
+    pub plan_tasks: Vec<crate::session_tools::plan::PlanTask>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct ConversationSnapshot {
@@ -135,6 +138,8 @@ pub async fn conversations(
                     .into_iter()
                     .map(ProviderLimits::from)
                     .collect(),
+                plan_tasks: crate::session_tools::plan::snapshot_views(&mut *conn, owner_id)
+                    .await?,
             };
             Ok(Snapshot {
                 scope: events::wire_scope(&scope),

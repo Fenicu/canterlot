@@ -194,6 +194,36 @@ fn aggregate_git(runs: &[Option<Value>]) -> Option<Git> {
     })
 }
 
+/// Коммиты и файлы исполнителя задачи плана: та же сводка ходов, что у итога.
+pub(crate) struct PlanGit {
+    /// `(sha, subject)`, свежие первыми, без повторов.
+    pub(crate) commits: Vec<(String, String)>,
+    pub(crate) truncated: bool,
+    pub(crate) files_changed: usize,
+}
+
+/// Сводка по всем ходам исполнителя; `max_commits` режет список и ставит `truncated`.
+pub(crate) fn plan_git(runs: &[Option<Value>], max_commits: usize) -> PlanGit {
+    let Some(git) = aggregate_git(runs) else {
+        return PlanGit {
+            commits: Vec::new(),
+            truncated: false,
+            files_changed: 0,
+        };
+    };
+    let truncated = git.truncated || git.commits.len() > max_commits;
+    PlanGit {
+        commits: git
+            .commits
+            .into_iter()
+            .take(max_commits)
+            .map(|commit| (commit.sha, commit.subject))
+            .collect(),
+        truncated,
+        files_changed: git.files.len(),
+    }
+}
+
 /// Граница завершения, удержанная пачкой: идентичность, а не время.
 ///
 /// Часы воркера (`runs.finished_at`) и часы хаба (`blocks.created_at`) идут по-разному,

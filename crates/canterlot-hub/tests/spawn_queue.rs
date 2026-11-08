@@ -1844,3 +1844,91 @@ async fn queue_views_name_the_future_session(pool: PgPool) {
     let view = views.iter().find(|view| view.id == routed_id).unwrap();
     assert!(view.child_id.is_some(), "{view:?}");
 }
+
+async fn plan_task(pool: &PgPool, parent: Uuid, number: i32) -> (String, Option<Uuid>) {
+    sqlx::query_as(
+        "select state,executor_conversation_id from plan_tasks
+         where orchestrator_conversation_id=$1 and number=$2",
+    )
+    .bind(parent)
+    .bind(number)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_queued_spawn_links_its_plan_task_only_at_start(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.call(
+        "plan.add",
+        json!({"tasks": [{"title": "Парсер"}, {"title": "Тесты"}]}),
+    )
+    .await
+    .unwrap();
+    fill_rate(&f.pool, f.parent).await;
+    let spawn = |number: i64| {
+        f.call(
+            "sessions.spawn",
+            json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b","plan_task":number}),
+        )
+    };
+    let first = spawn(1).await.unwrap();
+    assert_eq!(first["status"], "queued", "{first}");
+    assert!(
+        first["hint"]
+            .as_str()
+            .unwrap()
+            .contains("Plan task #1 is linked when the session starts"),
+        "{first}"
+    );
+    let second = spawn(2).await.unwrap();
+    assert_eq!(
+        plan_task(&f.pool, f.parent, 1).await,
+        ("waiting".into(), None)
+    );
+    // Задачу №2 закрыли, пока запуск ждал: он стартует без связи и не падает.
+    f.call("plan.update", json!({"number": 2, "state": "done"}))
+        .await
+        .unwrap();
+    sqlx::query(
+        "update conversations set created_at=now()-interval '61 minutes'
+          where parent_conversation_id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    for answer in [&first, &second] {
+        let id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+        make_due(&f.pool, id).await;
+        let outcome = f.run_dequeue(id, Utc::now()).await;
+        assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
+    }
+    let first_id: Uuid = serde_json::from_value(first["queue_id"].clone()).unwrap();
+    let second_id: Uuid = serde_json::from_value(second["queue_id"].clone()).unwrap();
+    let child1 = queue_row(&f.pool, first_id).await.3.expect("started");
+    let child2 = queue_row(&f.pool, second_id)
+        .await
+        .3
+        .expect("started anyway");
+    assert_eq!(
+        plan_task(&f.pool, f.parent, 1).await,
+        ("in_progress".into(), Some(child1))
+    );
+    assert_eq!(plan_task(&f.pool, f.parent, 2).await, ("done".into(), None));
+    let notes = notes_for(&f.pool, f.parent).await;
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("Linked to plan task #1")),
+        "{notes:?}"
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains(&child2.to_string())
+                && note.contains("Plan task #2 was closed")),
+        "{notes:?}"
+    );
+}

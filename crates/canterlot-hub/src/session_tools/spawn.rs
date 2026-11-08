@@ -90,6 +90,12 @@ pub(crate) struct SpawnArgs {
     /// `true`, `false` или поля `nudge_set` без `session_id`.
     pub(crate) nudge: Option<Value>,
     pub(crate) watchdog_minutes: Option<i64>,
+    /// Номер задачи плана вызывающего: ребёнок станет её исполнителем.
+    #[serde(default)]
+    pub(crate) plan_task: Option<i32>,
+    /// ID той же задачи, найденный хабом при вызове; модель его не передаёт.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) plan_task_id: Option<Uuid>,
 }
 
 /// Проверенный запуск с уже выбранным режимом: `request_payload` карточки.
@@ -122,6 +128,9 @@ pub struct SpawnSpec {
     /// Режим у CLI потомка сильнее, чем у родителя: запуск только через карточку.
     #[serde(default)]
     pub(crate) wider_than_parent: bool,
+    /// Задача плана родителя, найденная при вызове: `start_child` перепроверяет и связывает.
+    #[serde(default)]
+    pub(crate) plan_task_id: Option<Uuid>,
 }
 
 impl fmt::Debug for SpawnSpec {
@@ -272,6 +281,9 @@ fn check_arguments(args: &SpawnArgs) -> Result<(), ToolError> {
     if let Some(watchdog) = args.watchdog_minutes
         && !(5..=1440).contains(&watchdog)
     {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    if args.plan_task_id.is_some() || args.plan_task.is_some_and(|number| number < 1) {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
     let usable = args.nudge.clone().unwrap_or(Value::Null);
@@ -570,6 +582,7 @@ pub(crate) async fn validate(
             watchdog_minutes: args.watchdog_minutes,
             chain_depth,
             wider_than_parent,
+            plan_task_id: args.plan_task_id,
         },
         catalog,
     ))
@@ -744,6 +757,7 @@ pub(crate) async fn validate_routed(
             watchdog_minutes,
             chain_depth,
             wider_than_parent,
+            plan_task_id: args.plan_task_id,
         },
         first_model,
     ))
@@ -753,6 +767,8 @@ pub(crate) struct Started {
     pub(crate) session_id: Uuid,
     pub(crate) title: String,
     pub(crate) worktree: Option<Value>,
+    /// Исход связи с задачей плана, если запуск её называл.
+    pub(crate) plan: Option<super::plan::LinkOutcome>,
 }
 
 /// Всё для создания сессии: и у инструмента, и у задания после решения владельца.
@@ -877,10 +893,18 @@ pub(crate) async fn start_child(
         )
         .await?;
     }
+    // Последний оператор: строки плана берутся после всех остальных блокировок.
+    let plan = match spec.plan_task_id {
+        Some(task) => {
+            Some(super::plan::link_child_in_tx(conn, parent.id, child, task, correlation_id).await?)
+        }
+        None => None,
+    };
     Ok(Started {
         session_id: child,
         title,
         worktree,
+        plan,
     })
 }
 
@@ -1012,7 +1036,7 @@ pub async fn spawn(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: SpawnArgs = parse_arguments(arguments)?;
+    let mut args: SpawnArgs = parse_arguments(arguments)?;
     check_arguments(&args)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
@@ -1038,6 +1062,16 @@ pub async fn spawn(
     }
     let depth = access::current_depth(&mut tx, parent.id).await?;
     access::check_depth(&context.config, depth + 1)?;
+    // Номер задачи плана → её ID один раз: отложенный запуск свяжет именно эту задачу.
+    if let Some(number) = args.plan_task {
+        args.plan_task_id = Some(
+            super::plan::resolve_for_spawn_in_tx(&mut tx, caller.owner_id, parent.id, number)
+                .await?,
+        );
+    }
+    let plan_later = args
+        .plan_task
+        .map(|number| format!(" Plan task #{number} is linked when the session starts."));
     let now = Utc::now();
     let spawn_context = SpawnContext::of(context);
     let runtime = spawn_queue::Runtime {
@@ -1135,7 +1169,7 @@ pub async fn spawn(
         if let Some(dispatcher) = &context.dispatcher {
             dispatcher.trigger(parent.id);
         }
-        return Ok(answer);
+        return Ok(with_plan_hint(answer, plan_later.as_deref()));
     };
     let list = whitelist::view(&mut tx, caller.owner_id).await?;
     let needs_card = spec.wider_than_parent
@@ -1148,7 +1182,10 @@ pub async fn spawn(
     if needs_card {
         let request = open_card(&mut tx, caller, &spec).await?;
         tx.commit().await?;
-        return Ok(pending_answer(request));
+        return Ok(with_plan_hint(
+            pending_answer(request),
+            plan_later.as_deref(),
+        ));
     }
     // Единственные препятствия дальше — частота, страж машины или (у маршрута)
     // занятость и лимит: они ставят запуск в очередь.
@@ -1229,7 +1266,7 @@ pub async fn spawn(
         if let Some(dispatcher) = &context.dispatcher {
             dispatcher.trigger(parent.id);
         }
-        return Ok(answer);
+        return Ok(with_plan_hint(answer, plan_later.as_deref()));
     }
     let started = start_child(
         &mut tx,
@@ -1284,7 +1321,21 @@ pub async fn spawn(
         }
         answer["hint"] = serde_json::json!(hint);
     }
+    if let Some(plan) = &started.plan {
+        answer["plan_task"] = plan.to_value();
+        let note = format!(" {}", plan.note());
+        answer = with_plan_hint(answer, Some(&note));
+    }
     Ok(answer)
+}
+
+/// Строка о задаче плана в конце подсказки ответа.
+fn with_plan_hint(mut answer: Value, note: Option<&str>) -> Value {
+    if let Some(note) = note {
+        let hint = answer["hint"].as_str().unwrap_or_default().to_owned();
+        answer["hint"] = json!(format!("{hint}{note}").trim().to_owned());
+    }
+    answer
 }
 
 /// Вместо команды машине: решение выполнит задание хаба.
@@ -1395,8 +1446,16 @@ fn started(request: Uuid, spec: &SpawnSpec, child: &Started) -> Resolution {
         state: RequestState::DecisionApplied,
         reason: REASON_APPLIED.to_owned(),
         text: format!(
-            "[canterlot] The owner allowed your session_spawn request {request}. Session {} started ({}, model {}, permission mode {}). {follow_up}",
-            child.session_id, spec.harness, spec.model, spec.permission_mode,
+            "[canterlot] The owner allowed your session_spawn request {request}. Session {} started ({}, model {}, permission mode {}). {follow_up}{}",
+            child.session_id,
+            spec.harness,
+            spec.model,
+            spec.permission_mode,
+            child
+                .plan
+                .as_ref()
+                .map(|plan| format!(" {}", plan.note()))
+                .unwrap_or_default(),
         ),
         origin: origin::started_note_origin(&sender, spec.chain_depth),
         event: origin::HubEvent::approval("allowed", request, Some(child.session_id), None),
