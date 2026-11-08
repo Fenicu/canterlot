@@ -459,6 +459,15 @@ async fn hits_carry_origin_seq_jump_target_and_archive_flag(pool: PgPool) {
             true,
         )
         .await;
+    // Итог удалённого делегата: `from` вычищен, остался `sender_deleted`.
+    let (kept, _) = f
+        .input_with(
+            f.root,
+            "маркер вычищенного",
+            Some(json!({"kind": "event", "chain_depth": 0, "sender_deleted": true})),
+            true,
+        )
+        .await;
     for (text, origin, fed) in [
         (
             "маркер будильника",
@@ -473,11 +482,6 @@ async fn hits_carry_origin_seq_jump_target_and_archive_flag(pool: PgPool) {
         (
             "маркер хаба",
             Some(json!({"kind": "event", "chain_depth": 0})),
-            true,
-        ),
-        (
-            "маркер вычищенного",
-            Some(json!({"kind": "event", "chain_depth": 0, "sender_deleted": true})),
             true,
         ),
         ("маркер очереди", None, false),
@@ -502,6 +506,7 @@ async fn hits_carry_origin_seq_jump_target_and_archive_flag(pool: PgPool) {
         (message, "message".to_owned()),
         (spawn, "spawn".to_owned()),
         (result, "result".to_owned()),
+        (kept, "result".to_owned()),
     ];
     want.sort();
     assert_eq!(got, want, "{page}");
@@ -558,13 +563,18 @@ async fn trashed_and_deleted_sessions_are_not_found(pool: PgPool) {
         f.input(id, &format!("вопрос {token}")).await;
     }
     f.block(delegate, "делегаттокен в ленте делегата").await;
-    f.input_with(
-        parent,
-        "[canterlot] Session result: итогтокен",
-        Some(json!({"kind": "event", "from": delegate.to_string(), "chain_depth": 0})),
-        true,
-    )
-    .await;
+    let (result, _) = f
+        .input_with(
+            parent,
+            &format!(
+                "[canterlot] Session \"Делегат\" (id {delegate}, synthetic, model small) is now idle.\n\
+                 Turns: 2, duration 1m 5s, tokens in/out 10/20.\nFinal answer:\nитогтокен готов"
+            ),
+            Some(json!({"kind": "event", "from": delegate.to_string(), "title": "Делегат",
+                        "harness": "synthetic", "model": "small", "chain_depth": 0})),
+            true,
+        )
+        .await;
     // Сообщение от делегата сохраняет тело и после удаления отправителя: это ввод родителя.
     f.input_with(
         parent,
@@ -592,11 +602,34 @@ async fn trashed_and_deleted_sessions_are_not_found(pool: PgPool) {
         .unwrap();
     f.delete(doomed).await;
     f.delete(delegate).await;
-    for token in ["корзинатокен", "удалениетокен", "делегаттокен", "итогтокен"]
+    for token in ["корзинатокен", "удалениетокен", "делегаттокен"]
     {
         assert_eq!(count(token).await, (0, 0), "{token}");
     }
     assert_eq!(count("сообщениетокен").await, (1, 1));
+    // Итог делегата остаётся вводом родителя и ищется, но без названия удалённой сессии.
+    assert_eq!(count("итогтокен").await, (1, 1));
+    let page = f.http(json!({"q": "итогтокен"})).await;
+    let hit = &page["hits"][0];
+    assert_eq!(hit["input_id"], json!(result));
+    assert_eq!(hit["origin_kind"], "result");
+    assert_eq!(hit["conversation_id"], json!(parent));
+    assert_eq!(hit["conversation_title"], "Родитель");
+    assert!(!page.to_string().contains("Делегат"), "{page}");
+    let named: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1
+         and (content::text like '%Делегат%' or origin::text like '%Делегат%'
+              or content::text like '%'||$2||'%' or origin::text like '%'||$2||'%')",
+    )
+    .bind(parent)
+    .bind(delegate.to_string())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        named, 0,
+        "the parent keeps no name or id of the deleted delegate"
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

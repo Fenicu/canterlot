@@ -293,13 +293,14 @@ const BLOCK_WHERE: &str = "b.kind = 'text' and b.state <> 'streaming'
    and ($7::text is null or c.harness = $7::text)
    and $8::boolean";
 
-/// Сообщения ленты: владелец, другая сессия, бриф запуска и итог делегата. Будильники,
-/// автопинок, служебные сообщения хаба и вычищенные события удалённого отправителя — нет.
+/// Сообщения ленты: владелец, другая сессия, бриф запуска и итог делегата, в том числе
+/// оставшийся после удаления делегата (`sender_deleted` вместо `from`). Будильники,
+/// автопинок и служебные сообщения хаба — нет: у них нет ни `from`, ни `sender_deleted`.
 const INPUT_WHERE: &str = "i.feed_seq is not null
    and canterlot_input_doc(i.content) @@ websearch_to_tsquery('pg_catalog.russian', $2)
    and (i.origin is null or i.origin->>'kind' in ('message','spawn')
-        or (i.origin->>'kind' = 'event' and i.origin->>'from' is not null
-            and i.origin->'sender_deleted' is distinct from 'true'::jsonb))
+        or (i.origin->>'kind' = 'event'
+            and (i.origin->>'from' is not null or i.origin->'sender_deleted' = 'true'::jsonb)))
    and c.owner_id = $1 and c.trashed_at is null
    and ($3::uuid[] is null or i.conversation_id = any($3::uuid[]))
    and ($4::uuid is null or i.conversation_id = $4::uuid)
