@@ -1114,3 +1114,99 @@ async fn idle_with_a_running_background_job_never_moves_the_task(pool: PgPool) {
     assert_eq!(warnings[0]["state"], "idle_background");
     assert_eq!(f.state(1).await, "in_progress");
 }
+
+/// Проектор исполнителя сначала дописывает `derived_changed` в общий журнал владельца
+/// (строка `scope_counters` занята до фиксации), потом обновляет строки плана.
+/// `plan.update` берёт строку задачи `for update`, потом дописывает `plan_task_changed`
+/// в тот же журнал. Встречный порядок даёт взаимную блокировку.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+#[ignore = "bug: plan.update и проектор исполнителя берут строку плана и счётчик журнала владельца в разном порядке"]
+async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
+    use canterlot_hub::{
+        activity::{Activity, ActivityState, Evidence, QueueFacts},
+        events::{self, NewEvent, Scope},
+        session_tools::settle::SettleFacts,
+        model::RunSlot,
+    };
+    let f = Fx::new(pool.clone()).await;
+    f.add(&["Парсер"]).await;
+    f.link(1, f.child).await;
+    sqlx::query("update plan_tasks set state='in_review' where orchestrator_conversation_id=$1")
+        .bind(f.orchestrator)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    // Проектор: derived_changed в общий журнал владельца, как в `activity::refresh`.
+    let mut projector = f.pool.begin().await.unwrap();
+    events::append(
+        &mut projector,
+        NewEvent {
+            scope: Scope::Conversations { owner_id: f.owner },
+            kind: "derived_changed",
+            conversation_id: Some(f.child),
+            execution_id: None,
+            payload: json!({"conversation_id": f.child}),
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .unwrap();
+    // Оркестратор правит задачу: строка плана, затем журнал (ждёт проектор).
+    let update = {
+        let context = f.context.clone();
+        let caller = f.caller_of(f.orchestrator);
+        tokio::spawn(async move {
+            session_tools::call(
+                &context,
+                &caller,
+                "plan.update",
+                json!({"number": 1, "findings": ["x"]}),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let now = Utc::now();
+    let working = Activity {
+        state: ActivityState::Working,
+        evidence: Evidence::Working {
+            phase: "generating".into(),
+            tool_name: None,
+            summary: None,
+            phase_since: Some(now),
+            lease_wait: None,
+        },
+    };
+    let queue = QueueFacts {
+        slot: RunSlot::Running { input_id: Uuid::now_v7() },
+        queued: 0,
+        pause_reasons: Vec::new(),
+        hold_reasons: Vec::new(),
+    };
+    let facts = SettleFacts {
+        now,
+        since: now,
+        last_turn_at: None,
+        last_event_at: Some(now),
+        phase_since: Some(now),
+    };
+    let projected = plan::evaluate_executor_in_tx(
+        &mut projector,
+        f.child,
+        &working,
+        &queue,
+        &facts,
+        &f.context.settle,
+        Uuid::now_v7(),
+    )
+    .await;
+    let projected = match projected {
+        Ok(()) => projector.commit().await.map_err(|e| e.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    let updated = update.await.unwrap().map_err(|e| format!("{e:?}"));
+    assert!(
+        projected.is_ok() && updated.is_ok(),
+        "projector: {projected:?}; plan.update: {updated:?}"
+    );
+}
