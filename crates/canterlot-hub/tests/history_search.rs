@@ -851,12 +851,21 @@ async fn search_queries_use_the_gin_indexes(pool: PgPool) {
         .execute(&mut *conn)
         .await
         .unwrap();
+    // В пределах одной сессии планировщик вправе взять индекс самой сессии: строк мало,
+    // полнотекстовый индекс тогда не выгоднее. Главное — без полного просмотра таблиц.
     let check = |context: String, plan: &str, blocks: bool, inputs: bool| {
+        let scoped = context.contains("session");
         if blocks {
-            assert!(plan.contains("blocks_search"), "{context}\n{plan}");
+            assert!(
+                plan.contains("blocks_search") || (scoped && plan.contains("blocks_timeline")),
+                "{context}\n{plan}"
+            );
         }
         if inputs {
-            assert!(plan.contains("inputs_search"), "{context}\n{plan}");
+            assert!(
+                plan.contains("inputs_search") || (scoped && plan.contains("inputs_feed")),
+                "{context}\n{plan}"
+            );
         }
         assert!(!plan.contains("Seq Scan on blocks"), "{context}\n{plan}");
         assert!(!plan.contains("Seq Scan on inputs"), "{context}\n{plan}");
