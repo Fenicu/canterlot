@@ -237,3 +237,55 @@ export function limitForecast(opts: { rate: number; recent?: number | null; exha
 		before_reset: opts.beforeReset
 	};
 }
+
+export interface MachineWatchSeed {
+	watch: NonNullable<MachineRecord['watch']>;
+	memory_low: boolean;
+	mem_available_bytes: number;
+}
+
+/**
+ * Отчёт сторожа для экрана машин: крупные кэши сборки при нехватке диска, мало памяти,
+ * три процесса из двух закрытых сессий и две сборки мимо очереди.
+ */
+export function machineWatchSeed(api: FakeHubApi, now = Date.now()): MachineWatchSeed {
+	const ago = (ms: number) => new Date(now - ms).toISOString();
+	const HOUR = 3_600_000;
+	const MIB = 1024 ** 2;
+	const banner = api.id();
+	const forecast = api.id();
+	// Похожие на настоящие UUIDv7: подпись запуска без названия берёт хвост идентификатора.
+	const bannerRun = '019a6c1b-2d90-7e11-8c4f-a3b6e0d29174';
+	const forecastRun = '019a6c2e-7f41-7d3a-9b2c-5e81d4a7c3f9';
+	return {
+		memory_low: true,
+		mem_available_bytes: Math.round(2.1 * 1024 ** 3),
+		watch: {
+			observed_at: ago(20_000),
+			hotspots: [
+				{ path: '/home/owner/myprojects/canterlot-2a/web/node_modules', kind: 'node_modules', bytes: 1_200_000_000, incremental_bytes: 0, newest_at: ago(26 * HOUR), measured_at: ago(60_000), conversation_id: null, title: null },
+				{ path: '/home/owner/myprojects/canterlot-2a/target', kind: 'target', bytes: 77_000_000_000, incremental_bytes: 31_000_000_000, newest_at: ago(2 * HOUR), measured_at: ago(60_000), conversation_id: null, title: null },
+				{ path: '/home/owner/.local/state/canterlot-worker/worktrees/01a1b8e2-659f-715f-aad1-bf53d98aefdd/target', kind: 'target', bytes: 12_000_000_000, incremental_bytes: 4_300_000_000, newest_at: ago(5 * HOUR), measured_at: ago(60_000), conversation_id: banner, title: 'Баннер связи' },
+				{ path: '/home/owner/myprojects/canterlot-2a/web/.svelte-kit', kind: 'svelte_kit', bytes: 380_000_000, incremental_bytes: 0, newest_at: ago(2 * HOUR), measured_at: ago(60_000), conversation_id: null, title: null }
+			],
+			leaked: [
+				{ execution_id: bannerRun, conversation_id: banner, title: 'Баннер связи', pid: 48211, comm: 'cargo', rss_bytes: 600 * MIB, age_s: 3 * 3600 + 40 * 60 },
+				{ execution_id: bannerRun, conversation_id: banner, title: 'Баннер связи', pid: 48390, comm: 'cargo', rss_bytes: 380 * MIB, age_s: 3 * 3600 + 38 * 60 },
+				{ execution_id: forecastRun, conversation_id: forecast, title: null, pid: 51022, comm: 'node', rss_bytes: 450 * MIB, age_s: 50 * 60 }
+			],
+			unleased_count: 2
+		}
+	};
+}
+
+/** Кладёт отчёт сторожа в запись машины так, как его отдаёт снимок `machines`. */
+export function seedMachineWatch(api: FakeHubApi, machineId: string, now = Date.now()): MachineWatchSeed {
+	const seed = machineWatchSeed(api, now);
+	const machine = api.machines.get(machineId);
+	if (!machine) throw new Error(`no machine ${machineId}`);
+	const kept = machine.warnings.filter(warning => warning !== 'memory_low' && warning !== 'processes_leaked');
+	machine.watch = seed.watch;
+	machine.warnings = [...new Set([...kept, 'disk_usage_high', 'memory_low', 'processes_leaked'])];
+	if (machine.metrics) machine.metrics = { ...machine.metrics, mem_available_bytes: seed.mem_available_bytes };
+	return seed;
+}

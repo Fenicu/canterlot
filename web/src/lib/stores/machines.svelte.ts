@@ -6,6 +6,8 @@ import type { HubEvent } from '#lib/sync/wire.js';
 
 export type MachineMetrics = Pick<components['schemas']['MetricsView'], 'observed_at'> & Partial<components['schemas']['MetricsView']>;
 
+export type MachineWatch = components['schemas']['WatchView'];
+
 export interface MachineRecord {
 	id: string;
 	name: string;
@@ -23,6 +25,8 @@ export interface MachineRecord {
 	limits_ok?: boolean;
 	allowed_roots?: string[];
 	home_dir?: string | null;
+	/** Отчёт сторожа машины: крупные кэши сборки, процессы без сессии, сборки мимо очереди. */
+	watch?: MachineWatch | null;
 }
 
 export class MachinesStore {
@@ -126,6 +130,16 @@ export class MachinesStore {
 			if (!machine) return;
 			const kept = machine.warnings.filter(warning => !warning.endsWith('_journal_stopped'));
 			this.items.set(machine.id, { ...machine, warnings: [...kept, ...event.payload.stopped.map(kind => `${kind}_journal_stopped`)] });
+			return;
+		}
+		if (kind === 'machine_watch_changed' && event.kind === 'machine_watch_changed') {
+			const machine = this.items.get(event.payload.machine_id);
+			if (!machine) return;
+			// Событие несёт полное состояние: прежний отчёт и оба его предупреждения заменяются целиком.
+			const watch = event.payload.watch;
+			const kept = machine.warnings.filter(warning => warning !== 'memory_low' && warning !== 'processes_leaked');
+			const warnings = [...kept, ...(event.payload.memory_low ? ['memory_low'] : []), ...((watch?.leaked.length ?? 0) > 0 ? ['processes_leaked'] : [])];
+			this.items.set(machine.id, { ...machine, watch, warnings });
 			return;
 		}
 		if (kind !== 'hidden') this.unknownKinds += 1;

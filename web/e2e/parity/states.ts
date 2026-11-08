@@ -8,7 +8,7 @@ import { seedMockup04, seedMockup05, seedMockup06, seedMockup08, seedMockup11, s
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect } from '../ui/fixtures';
 import { bootSecondary } from '../ui/secondary-fixture';
-import { seedConversation } from '../../testing/fake-hub/seed';
+import { seedConversation, seedMachineWatch } from '../../testing/fake-hub/seed';
 import { seedFeedCards } from '../../testing/fixtures/feed-cards';
 import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
@@ -252,6 +252,14 @@ export const SCREENS: Screen[] = [
     await expect(page.locator('[data-pane="lane"] .selected-lane')).toBeVisible();
   }),
   // Экраны без утверждённого макета строятся из тех же компонентов.
+  // Отчёт сторожа машины: кэши сборки, нехватка памяти, процессы без сессий, сборки мимо очереди.
+  ...([['machine-watch', PHONE], ['machine-watch-desktop', DESKTOP]] as const).map(([name, viewport]) => screen(name, false, viewport, 'dark', async (page) => {
+    const { api, ids } = await bootSecondary(page, '/machines');
+    seedMachineWatch(api, ids.machine);
+    await page.reload();
+    await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('region', { name: 'Крупные кэши сборки' })).toBeVisible();
+  })),
   screen('settings', false, PHONE, 'dark', async (page) => {
     await bootSecondary(page, '/settings');
     await expect(page.locator('[data-secondary-ready]')).toBeVisible();

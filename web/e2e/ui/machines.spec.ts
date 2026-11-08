@@ -1,5 +1,6 @@
 import { test, expect } from './fixtures';
 import { bootSecondary } from './secondary-fixture';
+import { machineWatchSeed, seedMachineWatch } from '../../testing/fake-hub';
 
 test('machine_screen_follows_mockup_09_and_updates_metrics_live', async ({ page }) => {
   const { hub, ids, metrics } = await bootSecondary(page);
@@ -118,4 +119,62 @@ test('secondary_navigation_matches_phone_and_desktop_mockups', async ({ page }) 
   await expect(page.locator('[data-pane="list"]').getByRole('navigation', { name: 'Навигация' })).toBeVisible();
   await page.locator('[data-pane="list"]').getByRole('link', { name: 'Машины', exact: true }).click();
   await expect(page.locator('main').getByRole('heading', { name: 'Машины', exact: true })).toBeVisible();
+});
+
+test('machine_screen_shows_the_watchdog_report_from_the_snapshot', async ({ page }) => {
+  const { api, ids } = await bootSecondary(page);
+  seedMachineWatch(api, ids.machine);
+  await page.reload();
+  await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
+  const main = page.locator('main');
+  await expect(main.locator('[data-watch="memory"]')).toHaveText('Мало памяти: 2,1 ГиБ свободно');
+  await expect(main.getByRole('meter', { name: 'RAM' })).toHaveAttribute('data-tone', 'warning');
+  const caches = main.getByRole('region', { name: 'Крупные кэши сборки' });
+  // Самый крупный каталог первым, рабочая копия делегата названа по сессии.
+  const rows = caches.getByRole('listitem');
+  await expect(rows).toHaveCount(4);
+  await expect(rows.first()).toContainText('/home/owner/myprojects/canterlot-2a/target');
+  await expect(rows.first()).toContainText('77 ГБ');
+  await expect(rows.first()).toContainText('из них incremental 31 ГБ · запись 2 ч назад');
+  await expect(rows.nth(1)).toContainText('Рабочая копия «Баннер связи»');
+  await expect(rows.nth(1)).toContainText('…/01a1b8e2-659f-715f-aad1-bf53d98aefdd/target');
+  await expect(rows.nth(1)).toContainText('запись 5 ч назад');
+  await expect(rows.nth(2)).toContainText('1,2 ГБ');
+  await expect(rows.nth(2)).not.toContainText('incremental');
+  await expect(caches).toContainText('Освободить: scripts/prune-target.sh или удалить target/debug/incremental в простаивающих копиях');
+  const leaked = main.getByRole('region', { name: '3 процесса пережили свои сессии' });
+  await expect(leaked).toContainText('cargo 2, node 1 · занимают 1,4 ГиБ');
+  // Процессы одного запуска стоят под одним названием сессии.
+  await expect(leaked.getByRole('listitem')).toHaveCount(2);
+  await expect(leaked.getByRole('listitem').first()).toContainText('Баннер связи');
+  await expect(leaked.getByRole('listitem').first()).toContainText('cargo · pid 48211 · 3 ч · 600 МиБ');
+  await expect(leaked.getByRole('listitem').first()).toContainText('cargo · pid 48390 · 3 ч · 380 МиБ');
+  await expect(leaked.getByRole('listitem').last()).toContainText('Запуск d4a7c3f9');
+  await expect(main.locator('[data-watch="unleased"]')).toHaveText('Без очереди: 2 сборки');
+  // Длинные пути переносятся внутри колонки, а не раздвигают страницу.
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  const box = await caches.boundingBox();
+  const view = page.viewportSize()!;
+  expect(box!.x + box!.width).toBeLessThanOrEqual(view.width);
+});
+
+test('machine_screen_applies_machine_watch_changed_live', async ({ page }) => {
+  const { hub, api, ids } = await bootSecondary(page);
+  const main = page.locator('main');
+  await expect(main.getByRole('heading', { name: 'workstation' })).toBeVisible();
+  await expect(main.getByRole('region', { name: 'Крупные кэши сборки' })).toHaveCount(0);
+  const seed = machineWatchSeed(api);
+  hub.append('machines', { kind: 'machine_watch_changed', payload: { machine_id: ids.machine, watch: seed.watch, memory_low: true } }); hub.flush();
+  await expect(main.getByRole('region', { name: 'Крупные кэши сборки' }).getByRole('listitem')).toHaveCount(4);
+  await expect(main.getByRole('region', { name: '3 процесса пережили свои сессии' })).toBeVisible();
+  await expect(main.locator('[data-watch="memory"]')).toContainText('Мало памяти');
+  await expect(main.locator('[data-watch="unleased"]')).toHaveText('Без очереди: 2 сборки');
+  // Следующий отчёт заменяет прежний целиком: процессы ушли, память вернулась, сборка одна.
+  hub.append('machines', { kind: 'machine_watch_changed', payload: { machine_id: ids.machine, watch: { ...seed.watch, leaked: [], unleased_count: 1 }, memory_low: false } }); hub.flush();
+  await expect(main.locator('[data-watch="unleased"]')).toHaveText('Без очереди: 1 сборка');
+  await expect(main.getByRole('region', { name: /пережил/ })).toHaveCount(0);
+  await expect(main.locator('[data-watch="memory"]')).toHaveCount(0);
+  hub.append('machines', { kind: 'machine_watch_changed', payload: { machine_id: ids.machine, watch: null, memory_low: false } }); hub.flush();
+  await expect(main.getByRole('region', { name: 'Крупные кэши сборки' })).toHaveCount(0);
+  await expect(main.locator('[data-watch="unleased"]')).toHaveCount(0);
 });

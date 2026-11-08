@@ -11,7 +11,7 @@
   import Segmented from '#lib/ui/Segmented.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import MetricCard from './MetricCard.svelte';
-  import { diskLimits, diskView, journalStops, machineStatus, machineWarnings } from './model.js';
+  import { diskLimits, diskView, generalWarnings, hotspotRows, journalStops, leakedSummary, machineStatus, memoryLowText, unleasedText } from './model.js';
   import '../secondary.css';
 
   let runtime = $state<Runtime | null>(null);
@@ -27,7 +27,12 @@
   const memory = $derived(metrics?.mem_total_bytes);
   const usedMemory = $derived(memory !== undefined && metrics?.mem_available_bytes !== undefined ? memory - metrics.mem_available_bytes : null);
   const disks = $derived((metrics?.disks ?? []).map(disk => ({ ...disk, ...diskView(disk, machine?.allowed_roots ?? [], limits) })));
-  const warnings = $derived(machineWarnings([...new Set([...(machine?.warnings ?? []).filter(w => w !== 'disk_usage_high'), ...(disks.some(d => d.tone !== 'normal') ? ['disk_usage_high'] : [])])]));
+  const warnings = $derived(generalWarnings([...new Set([...(machine?.warnings ?? []).filter(w => w !== 'disk_usage_high'), ...(disks.some(d => d.tone !== 'normal') ? ['disk_usage_high'] : [])])]));
+  const watch = $derived(machine?.watch ?? null);
+  const memoryLow = $derived(machine?.warnings.includes('memory_low') ?? false);
+  const hotspots = $derived(watch ? hotspotRows(watch.hotspots, now) : []);
+  const leaked = $derived(watch && machine?.warnings.includes('processes_leaked') ? leakedSummary(watch.leaked) : null);
+  const unleased = $derived(watch ? unleasedText(watch.unleased_count) : null);
   const sessions = $derived(machine?.sessions?.map(session => ({ id: session.conversation_id, title: session.title, detail: runtime?.list.items.get(session.conversation_id) })) ?? (runtime && machine ? [...runtime.list.items.values()].filter(s => s.machine.id === machine.id).map(session => ({ id: session.id, title: session.title, detail: session })) : []));
   const heartbeat = $derived(machine?.heartbeat_age_ms != null ? (machine.heartbeat_received_at === undefined ? now : machine.heartbeat_received_at + clock.offset) - machine.heartbeat_age_ms : metrics ? Date.parse(metrics.observed_at) : null);
 
@@ -56,11 +61,35 @@
         {#if stale}<p>данные устарели</p>{/if}
         {#if metrics}
           <MetricCard title="CPU" value={metrics.cpu_permille === undefined ? 'Нет данных' : fmt.pct(metrics.cpu_permille)} pct={metrics.cpu_permille === undefined ? null : metrics.cpu_permille / 10} caption={metrics.cpu_cores ? `${metrics.cpu_cores} ${fmt.plural(metrics.cpu_cores, ['ядро', 'ядра', 'ядер'])}` : ''} />
-          <MetricCard title="RAM" value={usedMemory !== null && memory ? `${fmt.bytes(usedMemory)} / ${fmt.bytes(memory)}` : 'Нет данных'} pct={usedMemory !== null && memory ? Math.round(usedMemory / memory * 1000) / 10 : null} caption={metrics.mem_available_bytes === undefined ? '' : `Доступно ${fmt.bytes(metrics.mem_available_bytes)}`} />
+          <MetricCard title="RAM" value={usedMemory !== null && memory ? `${fmt.bytes(usedMemory)} / ${fmt.bytes(memory)}` : 'Нет данных'} pct={usedMemory !== null && memory ? Math.round(usedMemory / memory * 1000) / 10 : null} tone={memoryLow ? 'warning' : 'normal'} caption={metrics.mem_available_bytes === undefined ? '' : `Доступно ${fmt.bytes(metrics.mem_available_bytes)}`} />
+          {#if memoryLow}<p class="notice" data-watch="memory">{memoryLowText(metrics.mem_available_bytes)}</p>{/if}
           {#each disks as disk (disk.label)}
             <MetricCard title={disk.label} value={disk.pct === null ? 'Нет данных' : fmt.pct(Math.round(disk.pct * 10))} pct={disk.pct} tone={disk.tone} caption={disk.text} />
           {/each}
           {#each warnings as warning (warning)}<p class="notice">{warning}</p>{/each}
+          {#if hotspots.length}
+            <section class="watch" aria-labelledby="watch-caches">
+              <h3 id="watch-caches">Крупные кэши сборки</h3>
+              <ul>
+                {#each hotspots as spot (spot.key)}
+                  <li><div class="row"><span class="name" class:path={!spot.path}>{spot.name}</span><strong>{spot.size}</strong></div>
+                    {#if spot.path}<span class="path meta">{spot.path}</span>{/if}
+                    {#if spot.meta}<span class="meta">{spot.meta}</span>{/if}</li>
+                {/each}
+              </ul>
+              <p class="hint">Освободить: <code>scripts/prune-target.sh</code> или удалить <code>target/debug/incremental</code> в простаивающих копиях</p>
+            </section>
+          {/if}
+          {#if leaked}
+            <section class="watch" aria-labelledby="watch-leaked">
+              <h3 id="watch-leaked" class="warned">{leaked.title}</h3>
+              <p class="hint">{leaked.meta}</p>
+              <ul>
+                {#each leaked.rows as row (row.key)}<li><span class="name">{row.name}</span>{#each row.processes as process (process.key)}<span class="meta">{process.text}</span>{/each}</li>{/each}
+              </ul>
+            </section>
+          {/if}
+          {#if unleased}<p class="notice" data-watch="unleased">{unleased}</p>{/if}
           <MetricCard title="Нагрузка" value={loadText(metrics.load1_centi)} caption={`1 / 5 / 15 мин: ${loadText(metrics.load1_centi)} · ${loadText(metrics.load5_centi)} · ${loadText(metrics.load15_centi)}`} />
         {:else}
           <p>Метрики ещё не поступили. Ожидаю сигнал машины</p>
@@ -86,5 +115,17 @@
   .stale :global([role='meter'] span) { background: var(--muted); }
   .session-link { display: block; padding: var(--s8); margin-bottom: var(--s4); background: var(--surface); border-radius: var(--radius-card); min-height: var(--target); }
   small { display: block; color: var(--muted); }
+  /* Отчёт сторожа — та же поверхность, что у карточек метрик; тревогу несёт цвет текста. */
+  .watch { background: var(--surface); border-radius: var(--radius-card); padding: var(--s5) var(--s6); margin-block: var(--s2); }
+  .watch h3 { font-size: var(--fs-body); font-weight: var(--weight-medium); }
+  .watch .warned { color: var(--warning); }
+  .watch ul { list-style: none; margin: var(--s4) 0 0; padding: 0; }
+  .watch li { display: flex; flex-direction: column; gap: var(--s1); padding-block: var(--s3); min-width: 0; }
+  .watch .row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s6); min-width: 0; }
+  .watch .name { min-width: 0; overflow-wrap: anywhere; }
+  .watch strong { flex: none; font-variant-numeric: tabular-nums; }
+  .watch .path { font-family: var(--font-mono); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+  .watch .meta, .watch .hint { color: var(--muted); font-size: var(--fs-meta); }
+  .watch .hint { margin-block: var(--s2) 0; }
   .heartbeat { margin-block: var(--s6); padding: var(--s6); border-radius: var(--radius); background: var(--surface); font-size: var(--fs-sm); color: var(--muted); }
 </style>
