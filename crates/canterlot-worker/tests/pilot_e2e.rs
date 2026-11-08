@@ -1489,3 +1489,80 @@ async fn synthetic_agent_call_applies_a_preset_end_to_end(pool: PgPool) {
     assert!(echo.contains("mode=preset"), "{echo}");
     assert!(echo.contains("revision=1"), "{echo}");
 }
+
+/// Настоящий воркер ведёт очередь, настоящий хаб её отражает: держатель и
+/// ожидающий видны в чтении машины, освобождение двигает очередь.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn lease_queue_of_a_real_worker_reaches_the_machine_view(pool: PgPool) {
+    let p = Pilot::new(&pool, PilotOptions::default()).await;
+    let socket = p.config.data_dir.join("runtime/canterlot/lease.sock");
+    let wrap = |kind: &str, release: &std::path::Path| {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+            .args(["lease", "run", "--kind", kind, "--label", kind, "--"])
+            .args([
+                "sh",
+                "-c",
+                &format!("while [ ! -e {release:?} ]; do sleep 0.05; done"),
+            ])
+            .env("CANTERLOT_LEASE_SOCKET", &socket)
+            .env_remove("CANTERLOT_LEASE_HELD")
+            .env_remove("CANTERLOT_NO_LEASE")
+            .env_remove("CANTERLOT_EXECUTION_GROUP")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    };
+    let lease = async || p.get(&format!("/api/v1/machines/{}", p.machine)).await["lease"].clone();
+    until("empty queue mirrored", async || {
+        lease().await["holders"]
+            .as_array()
+            .is_some_and(|h| h.is_empty())
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (dir.path().join("build"), dir.path().join("gate"));
+    let mut build = wrap("build", &first);
+    until("build held", async || {
+        lease().await["holders"]
+            .as_array()
+            .is_some_and(|h| h.len() == 1)
+    })
+    .await;
+    let mut gate = wrap("gate", &second);
+    until("gate waits behind the build", async || {
+        lease().await["waiters"]
+            .as_array()
+            .is_some_and(|w| w.len() == 1)
+    })
+    .await;
+    let state = lease().await;
+    assert_eq!(state["holders"][0]["kind"], "build");
+    assert_eq!(state["holders"][0]["holder"], "owner");
+    assert!(state["holders"][0]["since"].is_string());
+    assert_eq!(state["waiters"][0]["kind"], "gate");
+    assert_eq!(state["waiters"][0]["position"], 1);
+    assert!(state["waiters"][0]["since"].is_null());
+
+    fs::write(&first, b"").unwrap();
+    assert!(build.wait().await.unwrap().success());
+    until("gate granted", async || {
+        let state = lease().await;
+        state["holders"][0]["kind"] == "gate"
+            && state["waiters"].as_array().is_some_and(|w| w.is_empty())
+    })
+    .await;
+    fs::write(&second, b"").unwrap();
+    assert!(gate.wait().await.unwrap().success());
+    until("queue empty again", async || {
+        lease().await["holders"]
+            .as_array()
+            .is_some_and(|h| h.is_empty())
+    })
+    .await;
+    let events: i64 =
+        sqlx::query_scalar("select count(*) from events where kind='machine_lease_changed'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(events >= 4, "{events}");
+}
