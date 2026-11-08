@@ -489,15 +489,17 @@ impl ClaudeCodeAdapter {
                 kind,
                 payload,
             } => {
+                // Вызов прошёл через `approve`: карточка без отметки `cli_policy`, и отказ
+                // canterlot выглядит как отказ владельца — ошибкой с текстом отказа.
+                self.approved.insert(request_id.clone());
+                if let Some(block) = self.tool_ids.get(&request_id).copied() {
+                    self.flush_tool(block, None);
+                }
                 if self.read_only_exit_plan(kind, &payload) {
                     if let Some(broker) = self.broker.as_mut() {
                         broker.refuse(&request_id, READ_ONLY_EXIT_PLAN).await;
                     }
                     return;
-                }
-                self.approved.insert(request_id.clone());
-                if let Some(block) = self.tool_ids.get(&request_id).copied() {
-                    self.flush_tool(block, None);
                 }
                 self.requests
                     .insert(request_id.clone(), (kind.into(), payload.clone()));

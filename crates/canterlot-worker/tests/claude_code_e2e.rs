@@ -1098,7 +1098,12 @@ async fn exit_plan_mode_turn(permission_mode: &str) -> (Vec<AdapterEvent>, Value
         call,
         vec![
             json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_exit","name":"ExitPlanMode","input":{}}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"plan\":\"Отчёт готов\"}"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
+            json!({"type":"stream_event","event":{"type":"message_stop"}}),
             json!("@request:0"),
+            json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_exit","is_error":true,"content":"denied"}]}}),
             json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id]}),
         ],
     );
@@ -1150,6 +1155,19 @@ async fn read_only_session_denies_exit_plan_mode_without_asking_the_owner() {
     assert!(message.contains("read-only"), "{message}");
     assert!(message.contains("Do not call ExitPlanMode"), "{message}");
     assert!(message.contains("final answer"), "{message}");
+    // Отказ canterlot — не пропуск правилами CLI: карточка вызова без отметки `cli_policy`.
+    let calls: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                kind: BlockKind::ToolCall,
+                approved_by,
+                ..
+            } => Some(approved_by.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![None], "{events:?}");
 }
 
 #[tokio::test]
