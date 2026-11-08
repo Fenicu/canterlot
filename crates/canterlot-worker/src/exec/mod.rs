@@ -264,6 +264,8 @@ pub(crate) struct Shared {
     pub worktree_jobs: Mutex<HashSet<String>>,
     pub runtime_dir: Option<PathBuf>,
     pub maintenance_started: AtomicBool,
+    /// Сроки уборки сборки: простаивающая живая копия и копия без живого исполнения.
+    pub cache_ages: Mutex<CacheAges>,
     pub data_dir: OnceCell<PathBuf>,
     pub boot_id: OnceCell<String>,
     #[cfg(feature = "fault-injection")]
@@ -272,6 +274,23 @@ pub(crate) struct Shared {
     pub fail_sends: Mutex<usize>,
     #[cfg(feature = "fault-injection")]
     pub strip_caps: Mutex<bool>,
+}
+
+/// Сроки уборки сборки в рабочих копиях (`[machine].idle_cache_hours`,
+/// `[machine].released_target_hours`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheAges {
+    pub idle: std::time::Duration,
+    pub released: std::time::Duration,
+}
+
+impl Default for CacheAges {
+    fn default() -> Self {
+        Self {
+            idle: std::time::Duration::from_secs(3 * 3600),
+            released: std::time::Duration::from_secs(6 * 3600),
+        }
+    }
 }
 
 pub(crate) fn open(store: &mut Option<WorkerStore>) -> Result<&mut WorkerStore, WorkerError> {
@@ -591,6 +610,7 @@ impl ExecutionManager {
                 worktree_jobs: Mutex::default(),
                 runtime_dir,
                 maintenance_started: AtomicBool::new(false),
+                cache_ages: Mutex::new(CacheAges::default()),
                 data_dir: OnceCell::new(),
                 boot_id: OnceCell::new(),
                 #[cfg(feature = "fault-injection")]
@@ -660,6 +680,28 @@ impl ExecutionManager {
         for task in tasks {
             let _ = task.await;
         }
+    }
+
+    pub fn set_cache_ages(&self, ages: CacheAges) {
+        *self.shared.cache_ages.lock().expect("cache ages lock") = ages;
+    }
+
+    /// Отпущенные записи принадлежности и живые участники исполнений для сторожа.
+    pub async fn watch_records(&self) -> Result<crate::machine::watch::WatchRecords, ExecError> {
+        let released = self
+            .shared
+            .store
+            .call(|store| Ok(open(store)?.ownership().released()))
+            .await?
+            .into_iter()
+            .map(|record| record.execution_id)
+            .collect();
+        let live = self
+            .probes()
+            .into_iter()
+            .flat_map(|probe| probe.members)
+            .collect();
+        Ok(crate::machine::watch::WatchRecords { released, live })
     }
 
     pub fn probes(&self) -> Vec<crate::machine::metrics::ExecutionProbe> {

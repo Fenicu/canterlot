@@ -11,12 +11,15 @@ use std::{
 };
 pub mod claude_history;
 pub mod codexbar;
+pub mod hotspots;
+pub mod leaks;
 pub mod limits;
 pub mod metrics;
 mod nofollow;
 pub mod owner_instructions;
 pub mod probe;
 pub mod share;
+pub mod watch;
 pub mod workdirs;
 
 pub fn now_ms() -> u64 {

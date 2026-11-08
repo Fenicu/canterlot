@@ -44,6 +44,9 @@ mod data;
 /// перезапустить воркер штатно, чтобы восстановление после сбоя прошло целиком.
 pub const STORAGE_RESTART_EXIT_CODE: u8 = 75;
 
+/// Первый отчёт сторожа после подключения: размеры к этому времени ещё могут меряться.
+const WATCH_FIRST_DELAY: Duration = Duration::from_secs(90);
+
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
     "pilot_v1",
@@ -61,6 +64,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "nudge_v1",
     "path_probe_v1",
     "resource_lease_v1",
+    "watchdog_v1",
 ];
 
 #[derive(Clone)]
@@ -431,6 +435,7 @@ pub struct Worker {
     idle_ticker: crate::machine::limits::IdleTicker,
     metrics: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
     metrics_task: Option<MetricsFuture>,
+    watchdog: std::sync::Arc<crate::machine::watch::Watchdog>,
     workdirs: crate::machine::workdirs::WorkdirSuggester,
     catalogs: std::sync::Arc<catalog::Catalogs>,
     catalog_retry_delays: Option<Vec<Duration>>,
@@ -577,7 +582,12 @@ impl Worker {
             config.execution.allowed_workdir_roots.clone(),
         );
         let runtime_dir = default_runtime_dir(&config.data_dir);
+        let watchdog = crate::machine::watch::Watchdog::new(
+            PathBuf::from(crate::machine::worktree_root(&config.data_dir)),
+            config.machine.hotspot_roots(),
+        );
         Self {
+            watchdog: std::sync::Arc::new(watchdog),
             limits_cache,
             limits_source,
             live_limits,
@@ -737,6 +747,12 @@ impl Worker {
             self.config.attachments.clone(),
             runtime_dir,
         );
+        manager.set_cache_ages(crate::exec::CacheAges {
+            idle: Duration::from_secs(self.config.machine.idle_cache_hours.saturating_mul(3600)),
+            released: Duration::from_secs(
+                self.config.machine.released_target_hours.saturating_mul(3600),
+            ),
+        });
         manager.configure_adapters(
             self.config.claude_code.clone(),
             self.config.codex.clone(),
@@ -1180,6 +1196,14 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "resource_lease_v1");
+        let watch_enabled = pilot
+            && accepted
+                .capabilities
+                .iter()
+                .any(|cap| cap == "watchdog_v1");
+        if watch_enabled {
+            self.watchdog.ensure_started();
+        }
         self.manager
             .as_ref()
             .unwrap()
@@ -1306,6 +1330,14 @@ impl Worker {
         let mut owner_outbound: Option<ControlUp> = None;
         type OwnerFuture = Pin<Box<dyn Future<Output = ControlUp> + Send>>;
         let mut owner_operation: Option<OwnerFuture> = None;
+        // Отчёт сторожа: первый вскоре после подключения, затем раз в 5 минут и сразу,
+        // когда свободное место пересекло порог вниз.
+        let mut watch_at = Instant::now() + WATCH_FIRST_DELAY;
+        let mut watch_outbound: Option<ControlUp> = None;
+        type WatchFuture<'a> = Pin<Box<dyn Future<Output = Option<MachineWatch>> + Send + 'a>>;
+        let mut watch_operation: Option<WatchFuture> = None;
+        let mut disk_above: Option<bool> = None;
+        let disk_warn = self.config.machine.disk_warn_free_gb.saturating_mul(1_000_000_000);
         let session_state = self.state.clone();
         let manager = self.manager.as_ref().unwrap();
         let (data_state, mut data_attached) = watch::channel(true);
@@ -1575,6 +1607,7 @@ impl Worker {
                 || owner_outbound.is_some()
                 || !probe_outbound.is_empty()
                 || lease_outbound.is_some()
+                || watch_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
@@ -1673,6 +1706,7 @@ impl Worker {
                     else if let Some(message)=owner_outbound.take() {message}
                     else if let Some(message)=probe_outbound.pop_front() {message}
                     else if let Some(message)=lease_outbound.take() {message}
+                    else if let Some(message)=watch_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
                         activate_data.send_replace(true);
@@ -1706,6 +1740,11 @@ impl Worker {
                 }
                 result = async {self.metrics_task.as_mut().unwrap().await}, if self.metrics_task.is_some() => {
                     self.metrics_task=None;
+                    if watch_enabled && let Ok(sample)=&result && let Some(free)=sample.disks.iter().map(|d| d.free_bytes).min() {
+                        let (fire, above) = crate::machine::watch::crossed_below(disk_above, free, disk_warn);
+                        disk_above = Some(above);
+                        if fire { watch_at = Instant::now(); }
+                    }
                     if let Ok(sample)=result && heartbeat_outbound.is_none() && Instant::now()<heartbeat_deadline {try_send_metrics(&tx,sample);}
                 }
                 due = idle_ticker.tick(), if pilot => {
@@ -1735,6 +1774,25 @@ impl Worker {
                         Ok(()) => lease_outbound = lease_updates.as_mut().map(|updates| lease_state_message(&updates.borrow_and_update())),
                         Err(_) => lease_updates = None,
                     }
+                }
+                _ = sleep_until(watch_at), if watch_enabled && watch_operation.is_none() => {
+                    watch_at = Instant::now() + crate::machine::watch::SHORT_PASS;
+                    let watchdog = self.watchdog.clone();
+                    let records = manager.watch_records();
+                    watch_operation = Some(Box::pin(async move {
+                        let records = match records.await {
+                            Ok(records) => records,
+                            Err(error) => {
+                                tracing::warn!(reason = %error, "watch records unavailable");
+                                return None;
+                            }
+                        };
+                        tokio::task::spawn_blocking(move || watchdog.observe(&records)).await.ok()
+                    }));
+                }
+                watch=async{watch_operation.as_mut().unwrap().await}, if watch_operation.is_some()=>{
+                    watch_operation=None;
+                    if let Some(watch)=watch { watch_outbound=Some(ControlUp{msg:Some(control_up::Msg::MachineWatch(watch))}); }
                 }
                 reply=async{probe_operation.as_mut().unwrap().await}, if probe_operation.is_some()=>{
                     probe_operation=None;probe_queue.finish();

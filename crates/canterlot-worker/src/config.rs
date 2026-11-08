@@ -342,10 +342,32 @@ pub struct MachineConfig {
     pub limits_poll_interval: Duration,
     /// Ёмкость очереди тяжёлых задач: `build` занимает слот, `gate` — все.
     pub lease_slots: u32,
+    /// Где сторож ищет крупные каталоги сборки кроме корня рабочих копий. Нет ключа —
+    /// домашний каталог; `/` не обходится никогда.
+    pub hotspot_roots: Option<Vec<PathBuf>>,
+    /// Свободного места меньше этого — отчёт сторожа уходит хабу сразу, не дожидаясь
+    /// пятиминутного. Совпадает с порогом хаба `[machines].disk_warn_free_gb`.
+    pub disk_warn_free_gb: u64,
+    /// Живая, но простаивающая рабочая копия теряет `incremental`, `target/lint` и
+    /// старые тестовые бинарники, когда сборка не писала дольше этого.
+    pub idle_cache_hours: u64,
+    /// Рабочая копия без живого исполнения теряет весь `target` после стольких часов.
+    pub released_target_hours: u64,
 }
 
 impl MachineConfig {
     pub const MIN_LIMITS_POLL_INTERVAL: Duration = Duration::from_secs(900);
+
+    pub fn hotspot_roots(&self) -> Vec<PathBuf> {
+        match &self.hotspot_roots {
+            Some(roots) => roots.clone(),
+            None => std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|home| home.is_absolute())
+                .into_iter()
+                .collect(),
+        }
+    }
 
     pub fn limits_poll_interval(&self) -> Duration {
         self.limits_poll_interval
@@ -360,6 +382,10 @@ impl Default for MachineConfig {
             codexbar_path: None,
             limits_poll_interval: Self::MIN_LIMITS_POLL_INTERVAL,
             lease_slots: 2,
+            hotspot_roots: None,
+            disk_warn_free_gb: 30,
+            idle_cache_hours: 3,
+            released_target_hours: 6,
         }
     }
 }
