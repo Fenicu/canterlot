@@ -165,6 +165,7 @@ pub(super) fn spawn_supervisor(
     exe: &Path,
     dir: &Path,
     configured_build_jobs: u32,
+    lease_socket: Option<&Path>,
 ) -> std::io::Result<Spawned> {
     let build_jobs = build_jobs_env(
         configured_build_jobs,
@@ -195,6 +196,11 @@ pub(super) fn spawn_supervisor(
             .kill_on_drop(false);
         if let Some(value) = &build_jobs {
             command.env("CARGO_BUILD_JOBS", value);
+        }
+        // Сопровождение передаёт их CLI через `prepare_command` рядом с меткой группы.
+        if let Some(socket) = lease_socket {
+            command.env(crate::containment::LEASE_SOCKET_ENV, socket);
+            command.env(crate::containment::WORKER_BIN_ENV, exe);
         }
         command.spawn()
     })?;
@@ -271,7 +277,7 @@ mod tests {
     async fn spawn_proceeds_with_null_stdio_when_supervisor_log_cannot_be_opened() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("supervisor.log")).unwrap();
-        let child = spawn_supervisor(std::path::Path::new("/bin/true"), directory.path(), 1);
+        let child = spawn_supervisor(std::path::Path::new("/bin/true"), directory.path(), 1, None);
         assert!(child.is_ok(), "{:?}", child.err());
         drop(child);
     }

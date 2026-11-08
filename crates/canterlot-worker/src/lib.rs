@@ -10,6 +10,7 @@ pub mod containment;
 pub mod exec;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
+pub mod lease;
 pub mod machine;
 pub mod mcp_relay;
 pub mod media;

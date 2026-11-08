@@ -60,6 +60,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "alarms_v1",
     "nudge_v1",
     "path_probe_v1",
+    "resource_lease_v1",
 ];
 
 #[derive(Clone)]
@@ -434,6 +435,7 @@ pub struct Worker {
     catalogs: std::sync::Arc<catalog::Catalogs>,
     catalog_retry_delays: Option<Vec<Duration>>,
     catalog_tasks: Vec<tokio::task::JoinHandle<()>>,
+    lease: Option<crate::lease::server::LeaseServer>,
 }
 
 type MetricsFuture = Pin<
@@ -586,6 +588,7 @@ impl Worker {
             catalogs: std::sync::Arc::new(catalog::Catalogs::new()),
             catalog_retry_delays: None,
             catalog_tasks: Vec::new(),
+            lease: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
             config,
@@ -654,6 +657,9 @@ impl Worker {
         if let Some(task) = self.metrics_task.take() {
             let _ = task.await;
         }
+        if let Some(lease) = self.lease.take() {
+            lease.stop().await;
+        }
         if let Some(manager) = self.manager.take() {
             manager.set_attachment_source(None);
             manager.set_media_sink(None);
@@ -713,6 +719,17 @@ impl Worker {
             .runtime_dir
             .clone()
             .or_else(crate::exec::runtime_dir_from_env);
+        // Тестовая сборка не поднимает сокет аренды в общем каталоге сокетов.
+        if crate::exec::maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref()).is_ok() {
+            self.lease = Some(crate::lease::server::LeaseServer::start(
+                crate::lease::server::ServerConfig::new(
+                    runtime_dir.as_deref(),
+                    &self.config.data_dir,
+                    self.config.machine.lease_slots,
+                ),
+                shutdown.clone(),
+            ));
+        }
         let manager = ExecutionManager::new_with_attachments_and_runtime_dir(
             self.config.execution.clone(),
             self.store.client(),
@@ -1159,6 +1176,10 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "path_probe_v1");
+        let lease_enabled = accepted
+            .capabilities
+            .iter()
+            .any(|cap| cap == "resource_lease_v1");
         self.manager
             .as_ref()
             .unwrap()
@@ -1245,6 +1266,15 @@ impl Worker {
         } else {
             None
         };
+        // Полное состояние очереди при подключении и при каждом изменении.
+        let mut lease_updates = self
+            .lease
+            .as_ref()
+            .filter(|_| lease_enabled)
+            .map(|lease| lease.snapshot());
+        let mut lease_outbound = lease_updates
+            .as_mut()
+            .map(|updates| lease_state_message(&updates.borrow_and_update()));
         let mut metrics_at = Instant::now() + self.config.machine.metrics_interval;
         // Провайдер и источник запроса: `true` — тикер простоя, `false` — запрос хаба.
         let mut polls: VecDeque<(String, PollKind)> = VecDeque::new();
@@ -1544,6 +1574,7 @@ impl Worker {
                 || histories_outbound.is_some()
                 || owner_outbound.is_some()
                 || !probe_outbound.is_empty()
+                || lease_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
@@ -1641,6 +1672,7 @@ impl Worker {
                     else if let Some(message)=histories_outbound.take() {message}
                     else if let Some(message)=owner_outbound.take() {message}
                     else if let Some(message)=probe_outbound.pop_front() {message}
+                    else if let Some(message)=lease_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
                         activate_data.send_replace(true);
@@ -1697,6 +1729,12 @@ impl Worker {
                 }
                 owned=async{owner_operation.as_mut().unwrap().await}, if owner_operation.is_some()=>{
                     owner_operation=None;owner_outbound=Some(owned);
+                }
+                changed = async { lease_updates.as_mut().unwrap().changed().await }, if lease_updates.is_some() => {
+                    match changed {
+                        Ok(()) => lease_outbound = lease_updates.as_mut().map(|updates| lease_state_message(&updates.borrow_and_update())),
+                        Err(_) => lease_updates = None,
+                    }
                 }
                 reply=async{probe_operation.as_mut().unwrap().await}, if probe_operation.is_some()=>{
                     probe_operation=None;probe_queue.finish();
@@ -1760,6 +1798,14 @@ fn initialize_generation(store: &mut WorkerStore, configured: Uuid) -> Result<()
         Some(_) => return Err(WorkerError::GenerationMismatch),
     }
     Ok(())
+}
+
+fn lease_state_message(snapshot: &crate::lease::Snapshot) -> ControlUp {
+    ControlUp {
+        msg: Some(control_up::Msg::LeaseState(crate::lease::to_proto(
+            snapshot,
+        ))),
+    }
 }
 
 fn check_generation(generation: Uuid, accepted: &Accepted) -> Result<(), WorkerError> {

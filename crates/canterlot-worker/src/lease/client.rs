@@ -1,0 +1,635 @@
+//! `canterlot-worker lease run` и `lease status`.
+//!
+//! Аренда никогда не делает сборку невозможной: любая ошибка связи или протокола —
+//! одна строка в stderr и запуск команды без аренды.
+//!
+//! Команда остаётся в группе процессов и сессии обёртки: убийство группы, дерева и
+//! сигналы терминала достаются обоим. Пока команда работает, обёртка не реагирует на
+//! INT и QUIT (группа их уже получила), TERM и HUP пересылает только ребёнку. Код выхода —
+//! код команды; умершая от сигнала команда — тот же сигнал на обёртке.
+
+use std::{
+    ffi::OsString,
+    io::{self, Write},
+    os::unix::process::{CommandExt, ExitStatusExt},
+    path::PathBuf,
+    process::ExitCode,
+    time::Duration,
+};
+
+use rustix::process::Signal;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
+    signal::unix::{SignalKind, signal},
+};
+
+use super::{
+    BUDGET_ENV, ClientMessage, EntryView, HELD_ENV, Kind, ServerMessage, Snapshot, UNLEASED,
+    decode, encode,
+};
+use crate::containment::LEASE_SOCKET_ENV;
+
+/// Сокет есть, но не отвечает (воркер перезапускается): столько ждём перед запуском без аренды.
+const REFUSED_RETRY: Duration = Duration::from_secs(10);
+/// Переподключение после обрыва: держатель и ожидающий пробуют не дольше.
+const RECONNECT_TOTAL: Duration = Duration::from_secs(30);
+const RETRY_STEP: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Clone)]
+pub struct RunArgs {
+    pub kind: Kind,
+    pub label: Option<String>,
+    pub command: Vec<OsString>,
+}
+
+fn note(text: impl AsRef<str>) {
+    let _ = writeln!(io::stderr(), "canterlot lease: {}", text.as_ref());
+}
+
+/// Путь сокета: переменная исполнения, иначе `$XDG_RUNTIME_DIR/canterlot/lease.sock`.
+pub fn discover_socket() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(LEASE_SOCKET_ENV).filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|p| !p.is_empty())
+        .map(|runtime| {
+            PathBuf::from(runtime)
+                .join("canterlot")
+                .join(super::SOCKET_NAME)
+        })
+}
+
+enum Connect {
+    Stream(UnixStream),
+    Unreachable(String),
+}
+
+/// Любая ошибка подключения (в том числе EPERM/EACCES из песочницы) — недоступность.
+/// Отказ существующего сокета (воркер перезапускается) повторяется до `patience`;
+/// отсутствующий сокет — только при переподключении (`retry_missing`), когда новый
+/// воркер может как раз заменять файл.
+async fn connect(path: &std::path::Path, patience: Duration, retry_missing: bool) -> Connect {
+    let deadline = tokio::time::Instant::now() + patience;
+    loop {
+        match UnixStream::connect(path).await {
+            Ok(stream) => return Connect::Stream(stream),
+            Err(error) => {
+                let transient = error.kind() == io::ErrorKind::ConnectionRefused
+                    || (retry_missing && error.kind() == io::ErrorKind::NotFound);
+                if !transient || tokio::time::Instant::now() + RETRY_STEP >= deadline {
+                    return Connect::Unreachable(format!("{}: {error}", path.display()));
+                }
+                tokio::time::sleep(RETRY_STEP).await;
+            }
+        }
+    }
+}
+
+/// Запуск команды вместо этого процесса (тот же pid): без аренды или внутри чужой.
+fn exec_direct(command: &[OsString], held: Option<&str>) -> ExitCode {
+    let mut process = std::process::Command::new(&command[0]);
+    process.args(&command[1..]);
+    if let Some(value) = held {
+        process.env(HELD_ENV, value);
+    }
+    let error = process.exec();
+    spawn_failure(&command[0], &error)
+}
+
+fn spawn_failure(program: &OsString, error: &io::Error) -> ExitCode {
+    note(format!("{}: {error}", program.to_string_lossy()));
+    if error.kind() == io::ErrorKind::NotFound {
+        ExitCode::from(127)
+    } else {
+        ExitCode::from(126)
+    }
+}
+
+fn unwrapped(command: &[OsString], reason: &str) -> ExitCode {
+    note(format!("{reason}, running without lease"));
+    exec_direct(command, Some(UNLEASED))
+}
+
+type Reader = Lines<BufReader<OwnedReadHalf>>;
+
+async fn read_message(lines: &mut Reader) -> Result<ServerMessage, String> {
+    match lines.next_line().await {
+        Ok(Some(line)) => decode::<ServerMessage>(&line),
+        Ok(None) => Err("connection closed".into()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+async fn write_message(write: &mut OwnedWriteHalf, message: ClientMessage) -> io::Result<()> {
+    write.write_all(encode(message).as_bytes()).await
+}
+
+struct Granted {
+    lease_id: String,
+    kind: Kind,
+    budget: u32,
+    playwright_workers: u32,
+    lines: Reader,
+    write: OwnedWriteHalf,
+}
+
+enum Wait {
+    Granted(Granted),
+    /// Обрыв посреди ожидания: переподключиться с тем же временем запроса.
+    Lost(String),
+    /// Ошибка протокола или отказ: без аренды.
+    Failed(String),
+}
+
+fn waiting_line(kind: Kind, position: u32, holders: &[EntryView]) -> String {
+    let holders = holders
+        .iter()
+        .map(EntryView::describe)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "waiting for {}, position {position} (holders: {holders})",
+        kind.as_str()
+    )
+}
+
+async fn request(
+    stream: UnixStream,
+    kind: Kind,
+    label: &str,
+    dir: &str,
+    requested_at_ms: u64,
+    last_line: &mut Option<String>,
+) -> Wait {
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    let acquire = ClientMessage::Acquire {
+        kind,
+        label: label.to_owned(),
+        dir: dir.to_owned(),
+        requested_at_ms,
+    };
+    if let Err(error) = write_message(&mut write, acquire).await {
+        return Wait::Lost(error.to_string());
+    }
+    loop {
+        match read_message(&mut lines).await {
+            Ok(ServerMessage::Queued {
+                position, holders, ..
+            }) => {
+                let line = waiting_line(kind, position, &holders);
+                if last_line.as_deref() != Some(line.as_str()) {
+                    note(&line);
+                    *last_line = Some(line);
+                }
+            }
+            Ok(ServerMessage::Granted {
+                lease_id,
+                kind,
+                budget,
+                playwright_workers,
+                ..
+            }) => {
+                return Wait::Granted(Granted {
+                    lease_id,
+                    kind,
+                    budget,
+                    playwright_workers,
+                    lines,
+                    write,
+                });
+            }
+            Ok(ServerMessage::Error { reason }) => return Wait::Failed(reason),
+            Ok(other) => return Wait::Failed(format!("unexpected reply {other:?}")),
+            Err(reason) if reason == "connection closed" => return Wait::Lost(reason),
+            Err(reason) => return Wait::Failed(reason),
+        }
+    }
+}
+
+/// Не больше уже заданного меньшего значения в окружении.
+fn capped(name: &str, value: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&v| v > 0)
+        .map_or(value, |inherited| inherited.min(value))
+}
+
+/// Ограничения ресурсов для команды под арендой.
+pub fn cap_env(
+    lease_id: &str,
+    budget: u32,
+    playwright_workers: u32,
+) -> Vec<(&'static str, String)> {
+    vec![
+        (HELD_ENV, lease_id.to_owned()),
+        (BUDGET_ENV, budget.to_string()),
+        ("CANTERLOT_TEST_THREADS", budget.to_string()),
+        (
+            "CARGO_BUILD_JOBS",
+            capped("CARGO_BUILD_JOBS", budget).to_string(),
+        ),
+        (
+            "PW_WORKERS",
+            capped("PW_WORKERS", playwright_workers).to_string(),
+        ),
+    ]
+}
+
+fn current_dir_name() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|dir| {
+            dir.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default()
+}
+
+pub async fn run(args: RunArgs) -> ExitCode {
+    if args.command.is_empty() {
+        note("no command given");
+        return ExitCode::from(2);
+    }
+    if let Ok(held) = std::env::var(HELD_ENV)
+        && !held.is_empty()
+    {
+        note(format!(
+            "already inside lease {held}, running {} directly",
+            args.kind.as_str()
+        ));
+        return exec_direct(&args.command, None);
+    }
+    let Some(socket) = discover_socket() else {
+        return unwrapped(&args.command, "no lease socket known");
+    };
+    // Сигналы ловятся с самого начала: пока ждём, они завершают обёртку тем же сигналом,
+    // а после запуска команды INT и QUIT игнорируются. Перехваченный (не игнорируемый)
+    // сигнал при exec возвращается к умолчанию, поэтому команда получает обычные.
+    let (Ok(mut sigint), Ok(mut sigquit), Ok(mut sigterm), Ok(mut sighup)) = (
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::quit()),
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
+        return unwrapped(&args.command, "signal setup failed");
+    };
+    let label = args.label.clone().unwrap_or_default();
+    let dir = current_dir_name();
+    let requested_at_ms = super::now_ms();
+    let mut last_line = None;
+    let mut patience = REFUSED_RETRY;
+    let lost_since = tokio::time::Instant::now();
+    let mut lost = false;
+    let granted = loop {
+        let stream = match connect(&socket, patience, lost).await {
+            Connect::Stream(stream) => stream,
+            Connect::Unreachable(reason) => {
+                return unwrapped(&args.command, &format!("worker unreachable ({reason})"));
+            }
+        };
+        let waiting = request(
+            stream,
+            args.kind,
+            &label,
+            &dir,
+            requested_at_ms,
+            &mut last_line,
+        );
+        tokio::pin!(waiting);
+        let outcome = tokio::select! {
+            outcome = &mut waiting => outcome,
+            _ = sigint.recv() => reraise(Signal::INT),
+            _ = sigquit.recv() => reraise(Signal::QUIT),
+            _ = sigterm.recv() => reraise(Signal::TERM),
+            _ = sighup.recv() => reraise(Signal::HUP),
+        };
+        match outcome {
+            Wait::Granted(granted) => break granted,
+            Wait::Failed(reason) => {
+                return unwrapped(&args.command, &format!("lease refused ({reason})"));
+            }
+            Wait::Lost(reason) => {
+                if !lost {
+                    lost = true;
+                    note(format!(
+                        "connection to worker lost ({reason}), reconnecting"
+                    ));
+                }
+                let left = RECONNECT_TOTAL.saturating_sub(lost_since.elapsed());
+                if left.is_zero() {
+                    return unwrapped(&args.command, "worker unreachable");
+                }
+                patience = left;
+                tokio::time::sleep(RETRY_STEP).await;
+            }
+        }
+    };
+    if last_line.is_some() || lost {
+        note(format!("granted {}", granted.kind.as_str()));
+    }
+    let mut command = tokio::process::Command::new(&args.command[0]);
+    command.args(&args.command[1..]).envs(cap_env(
+        &granted.lease_id,
+        granted.budget,
+        granted.playwright_workers,
+    ));
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return spawn_failure(&args.command[0], &error),
+    };
+    let child_pid = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(rustix::process::Pid::from_raw);
+    let forward = |sig: Signal| {
+        if let Some(pid) = child_pid {
+            let _ = rustix::process::kill_process(pid, sig);
+        }
+    };
+    let Granted {
+        lease_id,
+        mut lines,
+        mut write,
+        ..
+    } = granted;
+    let mut connected = true;
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status,
+            _ = sigint.recv() => {}
+            _ = sigquit.recv() => {}
+            _ = sigterm.recv() => forward(Signal::TERM),
+            _ = sighup.recv() => forward(Signal::HUP),
+            line = lines.next_line(), if connected => {
+                if matches!(line, Ok(Some(_))) { continue; }
+                // Воркер ушёл (рестарт): снова прицепиться к своей аренде, команда работает дальше.
+                connected = false;
+                match reattach(&socket, &lease_id).await {
+                    Some((new_lines, new_write)) => {
+                        lines = new_lines;
+                        write = new_write;
+                        connected = true;
+                    }
+                    None => note("worker unreachable, continuing without lease"),
+                }
+            }
+        }
+    };
+    drop(write);
+    match status {
+        Ok(status) => match (status.code(), status.signal()) {
+            (Some(code), _) => ExitCode::from(u8::try_from(code & 0xff).unwrap_or(1)),
+            (None, Some(number)) => match signal_from_raw(number) {
+                Some(sig) => reraise(sig),
+                None => ExitCode::from(u8::try_from((128 + number) & 0xff).unwrap_or(1)),
+            },
+            (None, None) => ExitCode::FAILURE,
+        },
+        Err(error) => {
+            note(format!("waiting for command failed: {error}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Держатель после обрыва: переподключение и `attach` в пределах 30 с.
+async fn reattach(socket: &std::path::Path, lease_id: &str) -> Option<(Reader, OwnedWriteHalf)> {
+    let started = tokio::time::Instant::now();
+    loop {
+        let left = RECONNECT_TOTAL.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return None;
+        }
+        if let Connect::Stream(stream) = connect(socket, left, true).await {
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let attach = ClientMessage::Attach {
+                lease_id: lease_id.to_owned(),
+            };
+            if write_message(&mut write, attach).await.is_ok() {
+                match read_message(&mut lines).await {
+                    Ok(ServerMessage::Attached { .. }) => return Some((lines, write)),
+                    Ok(_) => return None,
+                    Err(_) => {}
+                }
+            }
+        }
+        tokio::time::sleep(RETRY_STEP).await;
+    }
+}
+
+pub fn signal_from_raw(number: i32) -> Option<Signal> {
+    [
+        Signal::HUP,
+        Signal::INT,
+        Signal::QUIT,
+        Signal::ILL,
+        Signal::TRAP,
+        Signal::ABORT,
+        Signal::BUS,
+        Signal::FPE,
+        Signal::KILL,
+        Signal::USR1,
+        Signal::SEGV,
+        Signal::USR2,
+        Signal::PIPE,
+        Signal::ALARM,
+        Signal::TERM,
+        Signal::XCPU,
+        Signal::XFSZ,
+        Signal::VTALARM,
+        Signal::PROF,
+        Signal::SYS,
+    ]
+    .into_iter()
+    .find(|sig| sig.as_raw() == number)
+}
+
+/// Тот же сигнал на себе с обработчиком по умолчанию. Перехват tokio не снять, поэтому
+/// процесс заменяет себя (`exec` сбрасывает перехваченные сигналы) скрытой подкомандой,
+/// которая посылает сигнал себе.
+fn reraise(sig: Signal) -> ! {
+    let _ = io::stderr().flush();
+    let error = std::process::Command::new("/proc/self/exe")
+        .args(["lease", "raise", "--signal"])
+        .arg(sig.as_raw().to_string())
+        .exec();
+    note(format!("re-raise failed: {error}"));
+    std::process::exit(128 + sig.as_raw());
+}
+
+/// Тело скрытой подкоманды `lease raise`.
+pub fn raise(number: i32) -> ExitCode {
+    if let Some(sig) = signal_from_raw(number) {
+        let _ = rustix::process::kill_process(rustix::process::getpid(), sig);
+        // Сигнал доставлен синхронно; сюда доходит только игнорируемый.
+    }
+    ExitCode::from(u8::try_from((128 + number) & 0xff).unwrap_or(1))
+}
+
+pub async fn status(json: bool) -> ExitCode {
+    let Some(socket) = discover_socket() else {
+        note("no lease socket known (set CANTERLOT_LEASE_SOCKET or XDG_RUNTIME_DIR)");
+        return ExitCode::from(1);
+    };
+    let stream = match connect(&socket, Duration::ZERO, false).await {
+        Connect::Stream(stream) => stream,
+        Connect::Unreachable(reason) => {
+            note(format!("worker unreachable ({reason})"));
+            return ExitCode::from(1);
+        }
+    };
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read).lines();
+    if let Err(error) = write_message(&mut write, ClientMessage::Status).await {
+        note(error.to_string());
+        return ExitCode::from(1);
+    }
+    let snapshot = match read_message(&mut lines).await {
+        Ok(ServerMessage::Status(snapshot)) => snapshot,
+        Ok(other) => {
+            note(format!("unexpected reply {other:?}"));
+            return ExitCode::from(1);
+        }
+        Err(reason) => {
+            note(reason);
+            return ExitCode::from(1);
+        }
+    };
+    let text = if json {
+        let mut line = serde_json::to_string(&snapshot).unwrap_or_default();
+        line.push('\n');
+        line
+    } else {
+        render(&snapshot, super::now_ms())
+    };
+    let mut stdout = io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => ExitCode::FAILURE,
+    }
+}
+
+fn age(now_ms: u64, since_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(since_ms) / 1000;
+    if seconds >= 3600 {
+        format!("{}h{:02}m", seconds / 3600, seconds % 3600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// Таблица для людей: держатели и ожидающие, pid обёртки и его состояние (`T` — остановлен).
+pub fn render(snapshot: &Snapshot, now_ms: u64) -> String {
+    let used: u32 = snapshot.holders.iter().map(|h| h.weight).sum();
+    let mut out = format!("slots {used}/{}\n", snapshot.slots);
+    let row = |entry: &EntryView, prefix: String, since: u64| {
+        format!(
+            "{prefix} {} pid {} [{}] {}\n",
+            entry.describe(),
+            entry.wrapper_pid,
+            if entry.state.is_empty() {
+                "?"
+            } else {
+                &entry.state
+            },
+            age(now_ms, since)
+        )
+    };
+    if snapshot.holders.is_empty() {
+        out.push_str("holders: none\n");
+    } else {
+        out.push_str("holders:\n");
+        for entry in &snapshot.holders {
+            out.push_str(&row(
+                entry,
+                "  held".into(),
+                entry.since_ms.unwrap_or(now_ms),
+            ));
+        }
+    }
+    if snapshot.waiters.is_empty() {
+        out.push_str("waiters: none\n");
+    } else {
+        out.push_str("waiters:\n");
+        for entry in &snapshot.waiters {
+            out.push_str(&row(
+                entry,
+                format!("  #{}", entry.position.unwrap_or_default()),
+                entry.requested_at_ms,
+            ));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waiting_line_names_holders() {
+        let holders = vec![
+            EntryView {
+                kind: "build".into(),
+                label: "Баннер связи".into(),
+                ..Default::default()
+            },
+            EntryView {
+                kind: "build".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            waiting_line(Kind::Gate, 2, &holders),
+            "waiting for gate, position 2 (holders: build «Баннер связи» owner, build owner)"
+        );
+    }
+
+    #[test]
+    fn render_shows_pid_state_and_ages() {
+        let snapshot = Snapshot {
+            slots: 2,
+            holders: vec![EntryView {
+                kind: "gate".into(),
+                weight: 2,
+                label: "gate".into(),
+                wrapper_pid: 42,
+                state: "T".into(),
+                since_ms: Some(1_000),
+                ..Default::default()
+            }],
+            waiters: vec![EntryView {
+                kind: "build".into(),
+                weight: 1,
+                execution_id: Some("abcdef0123".into()),
+                wrapper_pid: 43,
+                state: "S".into(),
+                requested_at_ms: 3_661_000,
+                position: Some(1),
+                ..Default::default()
+            }],
+            observed_at_ms: 0,
+        };
+        assert_eq!(
+            render(&snapshot, 3_721_000),
+            "slots 2/2\nholders:\n  held gate «gate» owner pid 42 [T] 1h02m\nwaiters:\n  #1 build abcdef01 pid 43 [S] 1m00s\n"
+        );
+    }
+
+    #[test]
+    fn signals_map_back_from_numbers() {
+        assert_eq!(signal_from_raw(2), Some(Signal::INT));
+        assert_eq!(signal_from_raw(15), Some(Signal::TERM));
+        assert_eq!(signal_from_raw(0), None);
+    }
+}

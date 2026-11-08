@@ -18,6 +18,10 @@ pub const GROUP_MARKER_ENV: &str = "CANTERLOT_EXECUTION_GROUP";
 /// Последний снимок участников в каталоге исполнения; его наличие означает, что сопровождение
 /// ставит метку. Старый релиз файла не пишет, и пустоту его группы доказать нельзя.
 pub const GROUP_FILE: &str = "group.json";
+/// Сокет аренды тяжёлых задач и бинарник воркера для исполнений: адаптеры чистят или
+/// перечисляют окружение CLI, поэтому их, как и метку, ставит `prepare_command`.
+pub const LEASE_SOCKET_ENV: &str = "CANTERLOT_LEASE_SOCKET";
+pub const WORKER_BIN_ENV: &str = "CANTERLOT_WORKER_BIN";
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Member {
@@ -79,6 +83,8 @@ pub struct TreeContainment {
     cli: Mutex<Option<Member>>,
     prepared: AtomicBool,
     marker: Option<String>,
+    /// Переменные аренды из окружения сопровождения (их ставит воркер при запуске).
+    lease_env: Vec<(&'static str, std::ffi::OsString)>,
 }
 
 pub(crate) struct Stat {
@@ -131,6 +137,22 @@ fn parse_stat(pid: u32, text: &str) -> Result<Stat, ContainmentError> {
 
 pub fn start_ticks(pid: u32) -> Result<u64, ContainmentError> {
     Ok(stat(pid)?.member.start_ticks)
+}
+
+/// Значение метки группы в окружении процесса. Время старта сверяется после чтения
+/// `environ`: pid мог смениться между опознанием и чтением, тогда ответ — `None`.
+/// Закрытый от чтения или исчезнувший процесс метки не показывает.
+pub fn read_marker(pid: u32, start_ticks: u64) -> Option<String> {
+    let bytes = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let prefix = format!("{GROUP_MARKER_ENV}=");
+    let value = bytes
+        .split(|byte| *byte == 0)
+        .find_map(|entry| entry.strip_prefix(prefix.as_bytes()))
+        .map(|value| String::from_utf8_lossy(value).into_owned());
+    match stat(pid) {
+        Ok(current) if current.member.start_ticks == start_ticks && !current.zombie => value,
+        _ => None,
+    }
 }
 
 /// Все процессы машины; исчезнувшие по ходу чтения пропускаются.
@@ -197,6 +219,14 @@ impl TreeContainment {
             supervisor: stat(std::process::id())?.member,
             cli: Mutex::new(None),
             prepared: AtomicBool::new(false),
+            lease_env: if marker.is_some() {
+                [LEASE_SOCKET_ENV, WORKER_BIN_ENV]
+                    .into_iter()
+                    .filter_map(|name| Some((name, std::env::var_os(name)?)))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             marker,
         })
     }
@@ -286,6 +316,9 @@ impl Containment for TreeContainment {
         command.process_group(0);
         if let Some(marker) = &self.marker {
             command.env(GROUP_MARKER_ENV, marker);
+        }
+        for (name, value) in &self.lease_env {
+            command.env(name, value);
         }
     }
 

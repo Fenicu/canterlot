@@ -340,6 +340,8 @@ pub struct MachineConfig {
     /// Как часто опрашивать лимиты через CodexBar, не меньше 15 минут: точка usage ограничена по частоте.
     #[serde(with = "humantime_serde")]
     pub limits_poll_interval: Duration,
+    /// Ёмкость очереди тяжёлых задач: `build` занимает слот, `gate` — все.
+    pub lease_slots: u32,
 }
 
 impl MachineConfig {
@@ -357,6 +359,7 @@ impl Default for MachineConfig {
             metrics_interval: Duration::from_secs(30),
             codexbar_path: None,
             limits_poll_interval: Self::MIN_LIMITS_POLL_INTERVAL,
+            lease_slots: 2,
         }
     }
 }

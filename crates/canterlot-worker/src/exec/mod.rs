@@ -32,7 +32,7 @@ use crate::{
 mod group;
 mod ipc_caps;
 mod lost;
-mod maintenance;
+pub(crate) mod maintenance;
 mod manager;
 mod procfs;
 mod spawn;

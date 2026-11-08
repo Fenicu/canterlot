@@ -1393,6 +1393,24 @@ async fn cli_carries_the_group_marker_and_the_supervisor_records_the_members() {
             .split(|byte| *byte == 0)
             .any(|entry| entry == expected)
     );
+    // Сокет аренды и бинарник воркера идут рядом с меткой: адаптеры чистят окружение CLI.
+    for expected in [
+        format!(
+            "CANTERLOT_LEASE_SOCKET={}",
+            env.runtime.path().join("canterlot/lease.sock").display()
+        ),
+        format!(
+            "CANTERLOT_WORKER_BIN={}",
+            env.config.supervisor_exe.as_ref().unwrap().display()
+        ),
+    ] {
+        assert!(
+            environ
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == expected.as_bytes()),
+            "{expected} missing"
+        );
+    }
     let path = env.exec_dir().join(GROUP_FILE);
     timeout(WAIT, async {
         loop {

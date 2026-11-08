@@ -1384,7 +1384,15 @@ impl Actor {
             self.cancel_start().await?;
             return Ok(false);
         }
-        let mut child = match spawn::spawn_supervisor(&exe, &dir, self.shared.config.build_jobs) {
+        let lease_socket = self.shared.data_dir().await.ok().map(|data_dir| {
+            crate::lease::socket_path(self.shared.runtime_dir.as_deref(), data_dir)
+        });
+        let mut child = match spawn::spawn_supervisor(
+            &exe,
+            &dir,
+            self.shared.config.build_jobs,
+            lease_socket.as_deref(),
+        ) {
             Ok(child) => child,
             Err(_) => {
                 return self

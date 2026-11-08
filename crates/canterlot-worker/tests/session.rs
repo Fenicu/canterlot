@@ -1849,6 +1849,88 @@ async fn path_probe_answers_with_the_same_protection_as_share_file() {
     stop_worker(stop, join).await;
 }
 
+/// С согласованной `resource_lease_v1` воркер шлёт полное состояние очереди при
+/// подключении и после каждого изменения.
+#[tokio::test]
+async fn lease_state_is_sent_on_connect_and_on_change() {
+    use canterlot_proto::worker::v1::control_up::Msg;
+    assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"resource_lease_v1"));
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["pilot_v1".into(), "resource_lease_v1".into()],
+        ..Default::default()
+    })
+    .await;
+    let socket = hub.config.data_dir.join("runtime/canterlot/lease.sock");
+    let release = hub.config.data_dir.join("release");
+    let (stop, _, join) = start(hub.config.clone(), store);
+    let Msg::LeaseState(initial) = next_pilot(&mut hub, |m| matches!(m, Msg::LeaseState(_))).await
+    else {
+        panic!()
+    };
+    assert_eq!(initial.slots, 2);
+    assert!(initial.holders.is_empty() && initial.waiters.is_empty());
+    assert!(initial.observed_at_ms > 0);
+
+    timeout(Duration::from_secs(10), async {
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut wrapper = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+        .args([
+            "lease",
+            "run",
+            "--kind",
+            "gate",
+            "--label",
+            "hub mirror",
+            "--",
+        ])
+        .args([
+            "sh",
+            "-c",
+            &format!("while [ ! -e {release:?} ]; do sleep 0.05; done"),
+        ])
+        .env("CANTERLOT_LEASE_SOCKET", &socket)
+        .env_remove("CANTERLOT_LEASE_HELD")
+        .env(
+            "CANTERLOT_EXECUTION_GROUP",
+            "0190a000-0000-7000-8000-000000000001",
+        )
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let Msg::LeaseState(held) = next_pilot(
+        &mut hub,
+        |m| matches!(m, Msg::LeaseState(state) if !state.holders.is_empty()),
+    )
+    .await
+    else {
+        panic!()
+    };
+    let holder = &held.holders[0];
+    assert_eq!(holder.kind, "gate");
+    assert_eq!(holder.weight, 2);
+    assert_eq!(holder.label, "hub mirror");
+    assert_eq!(holder.holder, "execution");
+    assert_eq!(holder.execution_id, "0190a000-0000-7000-8000-000000000001");
+    assert!(holder.since_ms > 0);
+    fs::write(&release, b"").unwrap();
+    assert!(wrapper.wait().await.unwrap().success());
+    let Msg::LeaseState(empty) = next_pilot(
+        &mut hub,
+        |m| matches!(m, Msg::LeaseState(state) if state.holders.is_empty()),
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(empty.waiters.is_empty());
+    stop_worker(stop, join).await;
+}
+
 #[tokio::test]
 async fn concurrent_path_probes_are_all_answered_or_explicitly_busy() {
     use canterlot_proto::worker::v1::{

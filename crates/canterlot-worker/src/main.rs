@@ -7,7 +7,7 @@ use canterlot_worker::{
     session::{Worker, WorkerError},
     store::WorkerStore,
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tokio::sync::watch;
 
 #[derive(Parser)]
@@ -60,11 +60,52 @@ enum Command {
     /// Строки `capability <имя>` и `harness <имя>`, без конфига, файлов и сети: по ним
     /// инструменты выкладки сверяют развёрнутый воркер с выпуском.
     Capabilities,
+    /// Аренда тяжёлых задач машины (очередь сборок и гейтов в воркере).
+    Lease {
+        #[command(subcommand)]
+        command: LeaseCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum LeaseCommand {
+    /// Дождаться слота и запустить команду с ограничениями ресурсов.
+    ///
+    /// Без воркера, при отказе сокета или ошибке протокола команда запускается без аренды
+    /// с одной строкой в stderr. Код выхода — код команды; 127 — команда не найдена.
+    Run {
+        #[arg(long, value_enum)]
+        kind: LeaseKind,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(last = true, required = true, num_args = 1..)]
+        command: Vec<std::ffi::OsString>,
+    },
+    /// Напечатать держателей и очередь.
+    Status {
+        /// Одна строка JSON вместо таблицы.
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(hide = true)]
+    Raise {
+        #[arg(long)]
+        signal: i32,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LeaseKind {
+    Gate,
+    Build,
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     if let Some(code) = capabilities() {
+        return code;
+    }
+    if let Some(code) = lease().await {
         return code;
     }
     if let Some(code) = codex_replay().await {
@@ -113,6 +154,33 @@ fn capabilities() -> Option<ExitCode> {
             eprintln!("capabilities: {error}");
             ExitCode::FAILURE
         }
+    })
+}
+
+async fn lease() -> Option<ExitCode> {
+    use canterlot_worker::lease::{Kind, client};
+    let Command::Lease { command } = Cli::try_parse().ok()?.command else {
+        return None;
+    };
+    Some(match command {
+        LeaseCommand::Run {
+            kind,
+            label,
+            command,
+        } => {
+            let kind = match kind {
+                LeaseKind::Gate => Kind::Gate,
+                LeaseKind::Build => Kind::Build,
+            };
+            client::run(client::RunArgs {
+                kind,
+                label,
+                command,
+            })
+            .await
+        }
+        LeaseCommand::Status { json } => client::status(json).await,
+        LeaseCommand::Raise { signal } => client::raise(signal),
     })
 }
 
@@ -189,7 +257,10 @@ async fn supervise() -> Option<ExitCode> {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = match Cli::parse().command {
         Command::Run { config } => config,
-        Command::McpRelay { .. } | Command::Supervise { .. } | Command::Capabilities => {
+        Command::McpRelay { .. }
+        | Command::Supervise { .. }
+        | Command::Capabilities
+        | Command::Lease { .. } => {
             return Ok(());
         }
         #[cfg(feature = "synthetic-adapter")]
