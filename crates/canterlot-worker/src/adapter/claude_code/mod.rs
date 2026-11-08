@@ -870,8 +870,9 @@ impl ClaudeCodeAdapter {
             return TransmitOutcome::Undetermined;
         }
         // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода. Пока идёт
-        // фоновая работа, ждёт только перезапуск. Модель и режим уходят управляющими запросами
-        // перед сообщением: хаб покажет их сразу, и агент не должен работать шире показанного.
+        // фоновая работа, ждёт только перезапуск. Модель, усилие и режим уходят управляющими
+        // запросами перед сообщением: хаб покажет их сразу, и агент не должен работать шире
+        // показанного.
         let own_restart = input
             .settings
             .as_ref()
@@ -884,8 +885,9 @@ impl ClaudeCodeAdapter {
                 .as_mut()
                 .filter(|change| own_restart || (pending && change.instructions.is_some()))
             {
+                // Усилие уходит в CLI сразу (`apply_flag_settings`), а не с перезапуском: иначе
+                // отложенный перезапуск поднял бы CLI с усилием, которое владелец уже сменил.
                 restart_later = Some(SettingsChange {
-                    effort: change.effort.take(),
                     instructions: change.instructions.take(),
                     ..SettingsChange::default()
                 });

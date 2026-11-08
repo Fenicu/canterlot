@@ -1463,7 +1463,6 @@ async fn usage_baseline_resets_after_restart() {
 // Усилие из смены инструкций, отложенной фоновой работой, не должно перекрыть усилие,
 // которое владелец позже сменил на ходу запросом `apply_flag_settings`.
 #[tokio::test]
-#[ignore = "bug: отложенный перезапуск поднимает CLI с устаревшим усилием вместо последнего применённого"]
 async fn deferred_restart_keeps_the_effort_changed_later_on_the_fly() {
     let mut h = RestartHarness::new().await;
     background_frames(&h, running_task());
