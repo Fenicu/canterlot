@@ -395,6 +395,7 @@
           <MenuItem icon="sliders" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</MenuItem>
           <MenuItem icon="folder" onclick={() => { groupsOpen = true; menu = false; }}>Группы</MenuItem>
           <MenuItem icon="archive" onclick={() => { tab = { kind: 'archive' }; menu = false; }}>Архив</MenuItem>
+          {#if runtime && runtime.list.plan.tasks.size > 0}<MenuItem icon="list" href={resolve('/plan')} onclick={() => { menu = false; }}>Планы</MenuItem>{/if}
           <MenuItem icon="retry" onclick={() => { menu = false; void reloadApp(); }}>Обновить страницу</MenuItem>
           {#if canInstall}<MenuItem icon="download" onclick={() => { menu = false; void installation().prompt(); }}>Установить</MenuItem>{/if}
         </Menu>

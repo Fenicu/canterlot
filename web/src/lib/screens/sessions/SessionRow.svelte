@@ -7,6 +7,8 @@
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import { activityLine, type Activity } from './activityText';
   import { colorVar, toneVar } from './colors';
+  import { getRuntime } from '#lib/app/runtime.js';
+  import { planBadge } from '#lib/screens/plan/planText.js';
 
   let {
     item,
@@ -23,6 +25,15 @@
   } = $props();
 
   const line = $derived(activityLine(item.activity as Activity, { now }));
+  function planOf(id: string) {
+    try {
+      return getRuntime().list.plan.of(id);
+    } catch {
+      return [];
+    }
+  }
+  // Метка плана у оркестратора: сколько задач готово из всех неотменённых.
+  const plan = $derived(planBadge(planOf(item.id)));
   // Как в шапке чата: точка показывает состояние, а цвет владельца — только у спокойной сессии.
   const mark = $derived(line.tone === 'default' && item.color ? colorVar(item.color) : toneVar(line.tone));
   const stampTs = $derived.by(() => {
@@ -68,6 +79,9 @@
     </span>
     <span class="meta">{item.harness.title} · {modelLabel(item.model)} · {item.machine.name}</span>
     <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{#if tail && stampTs !== null}{stampSeparator}<time datetime={item.last_activity_at ?? undefined} use:timeTip={stampTs}>{stamp}</time>{/if}</span>
+    {#if plan}
+      <span class="plan" data-role="plan-badge"><span class="sr-only">{plan.label}</span><span aria-hidden="true">{plan.text}</span></span>
+    {/if}
     {#if depth > 0 && item.working_ms}
       <span class="worked" data-worked>работала {fmt.durationCoarse(item.working_ms)}</span>
     {/if}
@@ -98,6 +112,7 @@
   .side { display: inline-flex; align-items: center; justify-content: flex-end; height: calc(var(--fs-body) * var(--lh-body)); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .meta, .activity { grid-column: 2 / -1; min-width: 0; overflow: hidden; color: var(--secondary); font-size: var(--fs-sm); text-overflow: ellipsis; white-space: nowrap; }
+  .plan { grid-column: 2 / -1; justify-self: start; max-width: 100%; margin-top: var(--s1); padding: var(--s0) var(--s3); overflow: hidden; border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .worked { grid-column: 2 / -1; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .activity[data-tone='accent'] { color: var(--accent-link); }
   .activity[data-tone='warning'] { color: var(--warning); }

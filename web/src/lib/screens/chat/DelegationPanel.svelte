@@ -2,7 +2,10 @@
 	import IconButton from '#lib/ui/IconButton.svelte';
 	import { type Component } from 'svelte';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import DelegationTabs from './DelegationTabs.svelte';
 	import DelegationTree from './DelegationTree.svelte';
+	import { pane } from '#lib/shell/pane.svelte.js';
+	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
 
 	let {
 		chat,
@@ -13,6 +16,13 @@
 	} = $props();
 
 	let selectedBlockId = $state<string | null>(null);
+	let runtime: Runtime | null = null;
+	try {
+		runtime = getRuntime();
+	} catch {
+		runtime = null;
+	}
+	const planOpen = $derived(pane.delegationTab === 'plan' && (runtime?.list.plan.has(chat.id) ?? false));
 	let LaneComponent = $state<Component<{ chat: ChatStore; rootBlockId: string; embedded?: boolean }> | null>(null);
 
 	$effect(() => {
@@ -32,11 +42,13 @@
 		{/if}
 	</header>
 
-	<div class="tree-slot">
-		<DelegationTree {chat} selected={selectedBlockId} onselect={(id) => (selectedBlockId = selectedBlockId === id ? null : id)} />
+	<div class="tree-slot" class:plan-open={planOpen}>
+		<DelegationTabs {chat}>
+			<DelegationTree {chat} selected={selectedBlockId} onselect={(id) => (selectedBlockId = selectedBlockId === id ? null : id)} />
+		</DelegationTabs>
 	</div>
 
-	{#if selectedBlockId && LaneComponent}
+	{#if selectedBlockId && LaneComponent && !planOpen}
 		<div class="selected-lane">
 			<LaneComponent {chat} rootBlockId={selectedBlockId} embedded />
 		</div>
@@ -78,6 +90,12 @@
 		overflow-y: auto;
 		border-radius: var(--radius-card);
 		margin: var(--s0) var(--gutter) var(--s4);
+	}
+	/* План занимает всю высоту панели: линии субагента рядом с ним нет. */
+	.tree-slot.plan-open {
+		flex: 1;
+		max-height: none;
+		min-height: 0;
 	}
 	.selected-lane {
 		flex: 1;

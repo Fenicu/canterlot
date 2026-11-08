@@ -34,7 +34,7 @@
   const mode: LayoutMode = $derived(layoutMode(width || 412));
   const path = $derived(page.url.pathname);
   const onSessions = $derived(path === '/' || path === '/sessions');
-  const standalonePage = $derived(path === '/settings' || path === '/changes' || path === '/share');
+  const standalonePage = $derived(path === '/settings' || path === '/changes' || path === '/share' || path === '/plan' || path.startsWith('/plan/'));
   const onChat = $derived(path.startsWith('/c/'));
   const chatId = $derived(onChat ? path.split('/')[2] : null);
   let currentChat = $state<ChatStore | null>(null);

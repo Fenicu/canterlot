@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
+	import { page } from '$app/state';
 	import { onMount, untrack } from 'svelte';
 	import { browserRuntime } from '#lib/app/browser.js';
 	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
@@ -13,6 +14,7 @@
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
 	import SpawnQueueStrip from './SpawnQueueStrip.svelte';
+	import PlanStrip from '#lib/screens/plan/PlanStrip.svelte';
 	import RequestCard from '#lib/requests/RequestCard.svelte';
 	import { isDocked } from '#lib/stores/requests.svelte.js';
 	import DelegationSheet from './DelegationSheet.svelte';
@@ -137,6 +139,13 @@
 		runtime ? [...runtime.list.items.values()].filter((row) => row.parent_id === chat.id) : []
 	);
 	const childRunning = $derived(childSessions.filter(childLive).length);
+	// Задачи плана живут в списке владельца: вкладка «План» открывается в панели делегирования.
+	const hasPlan = $derived(runtime?.list.plan.has(chat.id) ?? false);
+	function openPlan(): void {
+		pane.delegationTab = 'plan';
+		if (pane.desktop) pane.open('delegation');
+		else showDelegation = true;
+	}
 	const parentTitle = $derived.by(() => {
 		const parentId = (chat.detail as AcceptDetail | null)?.parent_id;
 		return parentId ? (runtime?.list.items.get(parentId)?.title ?? null) : null;
@@ -177,6 +186,17 @@
 		}
 	});
 
+	// Ссылка «Отчёт» из плана приводит к блоку ответа: `/c/<id>?block=<block_id>`.
+	const jumpBlock = $derived(page.url.searchParams.get('block'));
+	// Прыжок ждёт снимка: до него ленты нет, и искать блок негде. Каждый блок — один раз за показ.
+	let jumpedTo: string | null = null;
+	$effect(() => {
+		const block = jumpBlock;
+		if (!block || !chat.detail || jumpedTo === block) return;
+		jumpedTo = block;
+		untrack(() => chat.requestBlockJump(block));
+	});
+
 	const waitingId = $props.id();
 	const docked = $derived([...chat.requests.items.values()].filter(isDocked));
 	// Вопрос из активности без открытого запроса отвечать некуда: показываем его только для чтения.
@@ -213,7 +233,7 @@
 		}}
 		{parentTitle}
 		childRunning={childRunning}
-		hasChildren={childSessions.length > 0}
+		hasChildren={childSessions.length > 0 || hasPlan}
 	/>
 	{#if continuedFromAt}
 		<p class="continuation" data-role="continuation">Продолжение истории Claude Code от {fmt.stamp(Date.parse(continuedFromAt), now)}</p>
@@ -263,6 +283,8 @@
 	<PauseCards {chat} {now} />
 
 	<SpawnQueueStrip {chat} />
+
+	{#if hasPlan}<PlanStrip orchestratorId={chat.id} onopen={openPlan} />{/if}
 
 	<PendingStrip {chat} />
 

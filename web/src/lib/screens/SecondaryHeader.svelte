@@ -4,7 +4,7 @@
   import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import { theme } from '#lib/theme.js';
-  let { title, subtitle, back }: { title: string; subtitle?: string; back?: { path: '/settings' | '/sessions'; label: string } } = $props();
+  let { title, subtitle, back }: { title: string; subtitle?: string; back?: { path: '/settings' | '/sessions' | '/plan'; label: string } } = $props();
 </script>
 <TopBar {title} {subtitle}>
   {#snippet leading()}<a href={resolve(back?.path ?? '/sessions')} aria-label={back?.label ?? 'К сессиям'}><Icon name="back" /></a>{/snippet}
