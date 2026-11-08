@@ -986,6 +986,18 @@ fn countdown(millis: i64) -> String {
     }
 }
 
+/// Возраст наблюдения: `just now`, `25 min ago`, `61 h ago`.
+fn age(millis: i64) -> String {
+    let seconds = (millis / 1000).max(0);
+    if seconds < 60 {
+        "just now".to_owned()
+    } else if seconds < 3600 {
+        format!("{} min ago", seconds / 60)
+    } else {
+        format!("{} h ago", seconds / 3600)
+    }
+}
+
 /// Текст ответа `canterlot_limits` по последнему снимку лимитов.
 pub fn limits_tool_text(
     snapshot: &LimitsSnapshot,
@@ -993,29 +1005,43 @@ pub fn limits_tool_text(
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
     let budget = budget_label(provider);
-    let mut windows: Vec<(&str, u32, u64)> = Vec::new();
+    let mut windows: Vec<(&str, u32, u64, u64)> = Vec::new();
     for observation in &snapshot.current {
         let name = match observation.window {
             x if x == LimitWindow::FiveHour as i32 => "five-hour",
             x if x == LimitWindow::Weekly as i32 => "weekly",
             _ => continue,
         };
-        windows.push((name, observation.used_permille, observation.resets_at_ms));
+        windows.push((
+            name,
+            observation.used_permille,
+            observation.resets_at_ms,
+            observation.observed_machine_ms,
+        ));
     }
     if windows.is_empty() {
         return "no limit data yet in this session".to_owned();
     }
     windows.sort();
+    let now_ms = now.timestamp_millis();
     let parts: Vec<String> = windows
         .into_iter()
-        .map(|(name, permille, resets_at_ms)| {
+        .map(|(name, permille, resets_at_ms, observed_ms)| {
+            let resets_at_ms = i64::try_from(resets_at_ms).unwrap_or(i64::MAX);
+            if resets_at_ms != 0 && resets_at_ms <= now_ms {
+                // Как в PWA: прошедший сброс значит устаревшие данные, процент уже неверен.
+                return match i64::try_from(observed_ms).ok().filter(|ms| *ms > 0) {
+                    Some(observed) => format!(
+                        "{name} window: data from {}, reset already passed",
+                        age(now_ms - observed)
+                    ),
+                    None => format!("{name} window: stale data, reset already passed"),
+                };
+            }
             let reset = if resets_at_ms == 0 {
                 String::new()
             } else {
-                format!(
-                    ", resets in {}",
-                    countdown(resets_at_ms as i64 - now.timestamp_millis())
-                )
+                format!(", resets in {}", countdown(resets_at_ms - now_ms))
             };
             format!("{name} window {}% used{reset}", permille as f64 / 10.0)
         })

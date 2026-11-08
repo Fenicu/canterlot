@@ -213,3 +213,44 @@ fn limits_tool_omits_a_window_the_provider_does_not_have() {
     assert!(text.contains("weekly window 54% used"), "{text}");
     assert!(!text.contains("five-hour"), "{text}");
 }
+
+/// Сброс окна в снимке уже прошёл: текст говорит, что данные устарели, а не
+/// «resets in less than a minute»; окно с будущим сбросом описано как прежде.
+#[test]
+fn limits_tool_says_a_passed_reset_is_stale() {
+    let now = fixed_now().timestamp_millis() as u64;
+    let hour = 3_600_000;
+    let text = mcp::limits_tool_text(
+        &LimitsSnapshot {
+            provider: "codex".into(),
+            current: vec![
+                LimitObservation {
+                    observed_machine_ms: now - 61 * hour,
+                    ..observation("five_hour", 420, now - 58 * hour)
+                },
+                observation("weekly", 810, now + 2 * hour),
+            ],
+            weekly_reserve_active: false,
+        },
+        "codex",
+        fixed_now(),
+    );
+    assert_eq!(
+        text,
+        "Codex API budget: five-hour window: data from 61 h ago, reset already passed; \
+         weekly window 81% used, resets in 2h."
+    );
+    let unknown_age = mcp::limits_tool_text(
+        &LimitsSnapshot {
+            provider: "codex".into(),
+            current: vec![observation("weekly", 810, now - hour)],
+            weekly_reserve_active: false,
+        },
+        "codex",
+        fixed_now(),
+    );
+    assert_eq!(
+        unknown_age,
+        "Codex API budget: weekly window: stale data, reset already passed."
+    );
+}
