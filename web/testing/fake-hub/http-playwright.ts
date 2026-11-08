@@ -1294,6 +1294,16 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: info });
   });
 
+  await page.route(/\/api\/v1\/plan\?/, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const orchestrator = new URL(route.request().url()).searchParams.get('orchestrator') ?? '';
+    if (!api.list.has(orchestrator)) {
+      await route.fulfill({ status: 404, headers: headers(), json: errorBody('not_found', 'Conversation not found') });
+      return;
+    }
+    await route.fulfill({ headers: headers(), json: api.planView(orchestrator) });
+  });
+
   await page.route('**/api/v1/conversations/*/delegation', async (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';

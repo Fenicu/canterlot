@@ -6,6 +6,7 @@ import type { ProviderLimits } from '../../src/lib/stores/limits';
 import type { MachineRecord } from '../../src/lib/stores/machines.svelte';
 import type { RunInfo } from '../../src/lib/stores/run';
 import type { TodoList } from '../../src/lib/stores/todos.svelte';
+import type { PlanTask, PlanTaskDetail } from '../../src/lib/stores/plan.svelte';
 import type { RangeResult } from '../../src/lib/sync/scope';
 import type { HubEvent } from '../../src/lib/sync/wire';
 import type { DraftRecord } from '../../src/lib/drafts/sync';
@@ -85,6 +86,12 @@ export class FakeHubApi {
 	presets = new Map<string, FakePreset>();
 	readonly nudgeRules = new Map<string, NudgeRuleView>();
 	readonly nudgeEvents = new Map<string, NudgeEventView[]>();
+	/** Задачи планов оркестраторов: снимок списка отдаёт их целиком. */
+	readonly planTasks = new Map<string, PlanTask>();
+	/** Посчитанное хабом при чтении: коммиты, файлы и отчёт исполнителя по задаче. */
+	readonly planDetails = new Map<string, Pick<PlanTaskDetail, 'commits' | 'commits_truncated' | 'files_changed' | 'report_block_id'>>();
+	/** Запросы `GET /api/v1/plan`: какой оркестратор просили. */
+	readonly planReads: string[] = [];
 	/** Очередь запусков разговора: ожидающие и недавно завершённые элементы. */
 	readonly spawnQueue = new Map<string, QueueItemView[]>();
 	ownerOverview = {
@@ -268,6 +275,10 @@ export class FakeHubApi {
 	deleteConversation(id: string): void {
 		const row = this.list.get(id);
 		this.list.delete(id);
+		// Задачи плана уходят вместе с оркестратором; исполнитель снимается с задачи явным событием.
+		for (const task of [...this.planTasks.values()]) {
+			if (task.orchestrator_id === id) this.planTasks.delete(task.id);
+		}
 		this.details.delete(id);
 		this.histories.delete(id);
 		this.deleted.add(id);
@@ -278,6 +289,9 @@ export class FakeHubApi {
 			conversation_id: id,
 			payload: { id, counts: this.counts }
 		});
+		for (const task of [...this.planTasks.values()]) {
+			if (task.executor_id === id) this.pushPlanTask({ ...task, executor_id: null, revision: task.revision + 1 });
+		}
 		this.hub.flush();
 	}
 
@@ -730,8 +744,55 @@ export class FakeHubApi {
 			items: [...this.list.values()],
 			limits: this.limits,
 			truncated: this.truncated,
-			presets: this.presetList()
+			presets: this.presetList(),
+			plan_tasks: [...this.planTasks.values()]
 		};
+	}
+
+	/**
+	 * Как `plan_task_changed` хаба: задача целиком, ревизия растёт с каждой правкой.
+	 * Номер, время и ревизия заполняются сами, если их не передали.
+	 */
+	pushPlanTask(task: Partial<PlanTask> & Pick<PlanTask, 'orchestrator_id' | 'title'>): PlanTask {
+		const known = task.id ? this.planTasks.get(task.id) : undefined;
+		const siblings = [...this.planTasks.values()].filter((item) => item.orchestrator_id === task.orchestrator_id);
+		const now = new Date().toISOString();
+		const next: PlanTask = {
+			id: this.id(),
+			number: siblings.reduce((max, item) => Math.max(max, item.number), 0) + 1,
+			note: null,
+			blocker: null,
+			findings: [],
+			state: 'waiting',
+			executor_id: null,
+			attempts: 0,
+			created_at: now,
+			...known,
+			...task,
+			updated_at: task.updated_at ?? now,
+			revision: Math.max(task.revision ?? 0, (known?.revision ?? 0) + 1)
+		};
+		this.planTasks.set(next.id, next);
+		this.hub.append('conversations', { kind: 'plan_task_changed', conversation_id: next.orchestrator_id, payload: { task: next } });
+		this.hub.flush();
+		return next;
+	}
+
+	/** Ответ `GET /api/v1/plan?orchestrator=`: задачи по номерам с посчитанными полями. */
+	planView(orchestrator: string): { tasks: PlanTaskDetail[] } {
+		this.planReads.push(orchestrator);
+		const tasks = [...this.planTasks.values()]
+			.filter((task) => task.orchestrator_id === orchestrator)
+			.sort((a, b) => a.number - b.number)
+			.map((task) => ({
+				...task,
+				commits: [],
+				commits_truncated: false,
+				files_changed: 0,
+				report_block_id: null,
+				...this.planDetails.get(task.id)
+			}));
+		return { tasks };
 	}
 
 	presetSummary(preset: FakePreset): PresetSummary {

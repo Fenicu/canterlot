@@ -1,0 +1,151 @@
+import type { Page } from '@playwright/test';
+import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
+import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
+import { REPORT_TEXT, seedPlan } from '../../testing/fixtures/plan';
+import { expect, test } from './fixtures';
+
+const OWNER = '00000000-0000-4000-8000-0000000000d1';
+
+async function boot(page: Page, path: (seed: ReturnType<typeof seedPlan>) => string, ready = '[data-ready]') {
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const seed = seedPlan(api);
+	await installChatRoutes(page, hub, api, OWNER);
+	await page.goto(path(seed));
+	await expect(page.locator(ready).first()).toBeVisible({ timeout: 15_000 });
+	return { hub, api, seed };
+}
+
+/** Вкладка «План» в листе делегирования (телефон) или в панели стола. */
+function planTab(page: Page) {
+	return page.locator('[data-role="plan-tab"]');
+}
+
+test('plan_strip_shows_review_and_blocked_and_opens_the_plan_tab', async ({ page }) => {
+	const { api, seed } = await boot(page, (s) => `/c/${s.orchestrator}`);
+	const strip = page.locator('[data-role="plan-strip"]');
+	await expect(strip).toHaveText('План: 1 заблокирована · 1 на проверке');
+	await expect(strip).toHaveAttribute('data-tone', 'warning');
+
+	await strip.getByRole('button').click();
+	await expect(planTab(page)).toBeVisible();
+	await expect(page.getByRole('radio', { name: 'План' })).toBeChecked();
+
+	// Группы идут в порядке внимания, закрытые свёрнуты.
+	const groups = planTab(page).locator('[data-plan-group]');
+	await expect(groups).toHaveCount(6);
+	expect(await groups.evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-plan-group')))).toEqual([
+		'in_progress',
+		'in_review',
+		'blocked',
+		'waiting',
+		'done',
+		'cancelled'
+	]);
+	const done = planTab(page).locator('[data-plan-group="done"]');
+	await expect(done.getByRole('button', { name: 'Готово · 2' })).toHaveAttribute('aria-expanded', 'false');
+	await expect(done.locator('[data-plan-task]')).toHaveCount(0);
+	await expect(planTab(page).locator('[data-plan-group="cancelled"] [data-plan-task]')).toHaveCount(0);
+	await done.getByRole('button', { name: 'Готово · 2' }).click();
+	await expect(done.locator('[data-plan-task]')).toHaveCount(2);
+
+	// Строка задачи: номер и название, слово состояния, исполнитель с моделью и число коммитов.
+	const first = planTab(page).locator('[data-plan-task="1"]');
+	await expect(first.getByRole('button').first()).toContainText('#1 Таблица plan_tasks и миграция');
+	await expect(first.locator('[data-role="plan-state"]')).toHaveText('в работе');
+	await expect(first.locator('[data-role="plan-executor"]')).toContainText('Миграция plan_tasks');
+	await expect(first.locator('[data-role="plan-executor"]')).toContainText('opus-5.5');
+	await expect(first.locator('[data-role="plan-commits-count"]')).toContainText('1 коммит');
+	await expect(first.getByRole('link', { name: 'Миграция plan_tasks' })).toHaveAttribute('href', `/c/${seed.executors.working}`);
+
+	// Закрытие обеих задач снимает полосу; новая задача на проверке возвращает её без предупреждения.
+	await page.keyboard.press('Escape');
+	const [, review, blocked] = seed.tasks;
+	api.pushPlanTask({ ...blocked!, state: 'done' });
+	api.pushPlanTask({ ...review!, state: 'done' });
+	await expect(strip).toHaveCount(0);
+	api.pushPlanTask({ ...seed.tasks[0]!, state: 'in_review' });
+	await expect(strip).toHaveText('План: 1 на проверке');
+	await expect(strip).toHaveAttribute('data-tone', 'default');
+});
+
+test('expanded_task_lists_commits_and_report_opens_the_executor_chat_at_the_block', async ({ page }) => {
+	const { api, seed } = await boot(page, (s) => `/c/${s.orchestrator}`);
+	await page.locator('[data-role="plan-strip"] button').click();
+	const task = planTab(page).locator('[data-plan-task="2"]');
+	await task.getByRole('button', { name: /#2 Хранилище плана/ }).click();
+	const body = task.locator('[data-role="plan-task-body"]');
+	await expect(body).toBeVisible();
+	await expect(body).toContainText('Сессия исполнителя закончила ход');
+	await expect(body).toContainText('Снимок заменяет набор задач целиком');
+	await expect(body).toContainText('3 коммита · 14 файлов изменено');
+	await expect(body.locator('[data-role="plan-commits"] li')).toHaveCount(3);
+	await expect(body.locator('[data-role="plan-commits"] li').first()).toHaveText('a1b2c3d Добавить хранилище плана с ревизиями');
+
+	const blocked = planTab(page).locator('[data-plan-task="3"]');
+	await blocked.getByRole('button', { name: /#3/ }).click();
+	await expect(blocked.locator('[data-role="plan-blocker"]')).toContainText('Нужен общий ответ гейта толчка');
+	await expect(blocked.locator('[data-role="plan-executor-state"]')).toContainText('упала');
+	expect(api.planReads).toContain(seed.orchestrator);
+
+	await body.getByRole('link', { name: 'Отчёт' }).click();
+	await expect(page).toHaveURL(new RegExp(`/c/${seed.executors.review}\\?block=${seed.reportBlockId}$`));
+	const block = page.locator(`[data-block="${seed.reportBlockId}"]`);
+	await expect(block).toHaveText(REPORT_TEXT, { timeout: 10_000 });
+	await expect(block).toBeInViewport();
+});
+
+test('deleted_orchestrator_drops_its_plan_and_deleted_executor_reads_as_removed', async ({ page }) => {
+	const { api, seed } = await boot(page, () => '/sessions', '[data-list-ready]');
+	const badge = page.locator(`[data-session="${seed.orchestrator}"] [data-role="plan-badge"]`);
+	await expect(badge).toContainText('План · 2/6');
+
+	await page.getByRole('button', { name: 'Ещё' }).click();
+	await page.getByRole('menuitem', { name: 'Планы' }).click();
+	await expect(page).toHaveURL(/\/plan$/);
+	const entry = page.locator(`[data-plan-orchestrator="${seed.orchestrator}"]`);
+	await expect(entry).toContainText('Доска плана');
+	await expect(entry).toContainText('1 в работе · 1 на проверке · 1 заблокирована · 1 ждёт · 2 готово · 1 отменена');
+
+	await entry.getByRole('link').click();
+	await expect(page).toHaveURL(new RegExp(`/plan/${seed.orchestrator}$`));
+	const task = page.locator('[data-plan-task="3"]');
+	await task.getByRole('button', { name: /#3/ }).click();
+	await expect(task.locator('[data-role="plan-executor"]')).toContainText('Отбор подписок');
+	api.deleteConversation(seed.executors.failed);
+	await expect(task.locator('[data-role="plan-executor"]')).toHaveText('исполнитель удалён');
+	await expect(task.locator('[data-role="plan-executor-state"]')).toHaveText('исполнитель удалён');
+
+	api.deleteConversation(seed.orchestrator);
+	await expect(page.locator('[data-role="plan-gone"]')).toBeVisible();
+	await expect(page.locator('[data-plan-task]')).toHaveCount(0);
+	await page.goto('/plan');
+	await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator('[data-plan-orchestrator]')).toHaveCount(0);
+	await expect(page.getByText('Планов пока нет')).toBeVisible();
+});
+
+test('snapshot_replaces_the_plan_instead_of_merging', async ({ page }) => {
+	const { hub, api, seed } = await boot(page, (s) => `/plan/${s.orchestrator}`, '[data-secondary-ready]');
+	await expect(page.locator('[data-plan-task="1"]')).toBeVisible();
+	await expect(page.locator('[data-plan-group="in_review"]')).toBeVisible();
+	// Хаб потерял две задачи без событий: новый снимок убирает их и у клиента.
+	api.planTasks.delete(seed.tasks[0]!.id);
+	api.planTasks.delete(seed.tasks[1]!.id);
+	hub.chaos.forceResync('cursor_too_old');
+	await expect(page.locator('[data-plan-task="1"]')).toHaveCount(0);
+	await expect(page.locator('[data-plan-group="in_review"]')).toHaveCount(0);
+	await expect(page.locator('[data-plan-task="3"]')).toBeVisible();
+});
+
+test('delegation_panel_switches_between_tree_and_plan', async ({ page }) => {
+	const { seed } = await boot(page, (s) => `/c/${s.orchestrator}`);
+	await page.getByRole('button', { name: /^Делегирование/ }).first().click();
+	const tree = page.getByRole('radio', { name: 'Делегирование' });
+	await expect(tree).toBeChecked();
+	await expect(page.locator(`.tree a[href="/c/${seed.executors.working}"]`)).toBeVisible();
+	await page.locator('[data-role="delegation-tabs"] label', { hasText: 'План' }).click();
+	await expect(planTab(page).locator('[data-plan-group="in_progress"]')).toBeVisible();
+	await page.locator('[data-role="delegation-tabs"] label', { hasText: 'Делегирование' }).click();
+	await expect(planTab(page)).toHaveCount(0);
+});

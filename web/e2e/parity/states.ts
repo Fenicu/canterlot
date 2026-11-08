@@ -12,6 +12,7 @@ import { seedConversation, seedMachineWatch } from '../../testing/fake-hub/seed'
 import { seedFeedCards } from '../../testing/fixtures/feed-cards';
 import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
+import { seedPlan } from '../../testing/fixtures/plan';
 
 export type Theme = 'dark' | 'light';
 
@@ -114,6 +115,29 @@ async function orchestrator(page: Page, afterOpen?: (page: Page, hub: FakeHub, a
   await page.goto(`/c/${open === 'child' ? child : id}`);
   await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
   await afterOpen?.(page, hub, api, id, child);
+}
+
+/** Оркестратор с планом во всех состояниях: вкладка «План» открыта полосой, задача на проверке раскрыта. */
+async function planTab(page: Page): Promise<void> {
+  const { hub, api } = fresh();
+  const seed = seedPlan(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${seed.orchestrator}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await page.locator('[data-role="plan-strip"] button').click();
+  const task = page.locator('[data-role="plan-tab"] [data-plan-task="2"]');
+  await task.getByRole('button', { name: /#2/ }).click();
+  await expect(task.locator('[data-role="plan-report"]')).toBeVisible();
+}
+
+/** Список планов из меню «Ещё» и план оркестратора отдельным экраном. */
+async function planScreen(page: Page, path: 'list' | 'plan'): Promise<void> {
+  const { hub, api } = fresh();
+  const seed = seedPlan(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(path === 'list' ? '/plan' : `/plan/${seed.orchestrator}`);
+  await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(path === 'list' ? '[data-plan-orchestrator]' : '[data-plan-task]').first()).toBeVisible();
 }
 
 /** Лента оркестратора со всеми карточками инструментов: низ ленты или её начало с раскрытыми строками. */
@@ -419,6 +443,10 @@ export const SCREENS: Screen[] = [
     // Строка в шапке под указателем меняет цвет переходом: проверка смотрит на устоявшийся цвет.
     await opened.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== 'running'));
   }, 'child')),
+  screen('plan-tab', false, PHONE, 'dark', planTab),
+  screen('plan-tab-desktop', false, DESKTOP, 'light', planTab),
+  screen('plans-list', false, PHONE, 'dark', (page) => planScreen(page, 'list')),
+  screen('plan-screen-desktop', false, DESKTOP, 'light', (page) => planScreen(page, 'plan')),
   screen('image-viewer', false, PHONE, 'dark', imageViewer),
   screen('image-viewer-desktop', false, DESKTOP, 'light', imageViewer),
   screen('feed-cards', false, PHONE, 'dark', (page) => feedCards(page, 'bottom')),
