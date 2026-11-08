@@ -864,6 +864,9 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_alarm_cancel", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_alarm_list", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_route_preview", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_plan_list", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_plan_add", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_plan_update", "resource": "*", "effect": "allow"},
             ]),
         ),
         (
@@ -883,6 +886,9 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_alarm_cancel", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_alarm_list", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_route_preview", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_plan_list", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_plan_add", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_plan_update", "resource": "*", "effect": "allow"},
             ]),
         ),
     ] {
@@ -920,6 +926,9 @@ async fn session_tools_follow_the_mode() {
             "canterlot_session_subscribe",
             "canterlot_session_unsubscribe",
             "canterlot_session_wait",
+            "canterlot_plan_list",
+            "canterlot_plan_add",
+            "canterlot_plan_update",
         ] {
             assert_eq!(effect(tool), read_like, "{mode} {tool}");
         }
@@ -930,6 +939,7 @@ async fn session_tools_follow_the_mode() {
             "canterlot_session_interrupt",
             "canterlot_session_stop",
             "canterlot_spawn_cancel",
+            "canterlot_plan_adopt",
         ] {
             assert_eq!(effect(tool), default, "{mode} {tool}");
         }
@@ -4829,7 +4839,11 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "nudge_set",
             "nudge_clear",
             "route_preview",
-            "spawn_cancel"
+            "spawn_cancel",
+            "plan_list",
+            "plan_add",
+            "plan_update",
+            "plan_adopt"
         ]
     );
     bench.close(CloseMode::Graceful).await;

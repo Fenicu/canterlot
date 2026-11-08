@@ -28,7 +28,11 @@ const CANTERLOT_TOOLS: Record<string, string> = {
   nudge_set: 'nudge_set',
   nudge_clear: 'nudge_clear',
   route_preview: 'route_preview',
-  spawn_cancel: 'spawn_cancel'
+  spawn_cancel: 'spawn_cancel',
+  plan_list: 'plan_list',
+  plan_add: 'plan_add',
+  plan_update: 'plan_update',
+  plan_adopt: 'plan_adopt'
 };
 
 /** Все имена инструментов canterlot, как их объявляет воркер. */

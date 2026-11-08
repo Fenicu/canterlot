@@ -14,8 +14,8 @@ function workerTools(): string[] {
 describe('toolId', () => {
   it('every_canterlot_tool_of_the_worker_has_a_canonical_id_in_all_three_spellings', () => {
     const tools = workerTools();
-    expect(tools).toEqual(expect.arrayContaining(['session_spawn', 'share_file', 'canterlot_limits', 'approve', 'alarm_set', 'spawn_cancel', 'canterlot_preset_apply']));
-    expect(tools.length).toBeGreaterThanOrEqual(23);
+    expect(tools).toEqual(expect.arrayContaining(['session_spawn', 'share_file', 'canterlot_limits', 'approve', 'alarm_set', 'spawn_cancel', 'canterlot_preset_apply', 'plan_list', 'plan_add', 'plan_update', 'plan_adopt']));
+    expect(tools.length).toBeGreaterThanOrEqual(27);
     for (const tool of tools) {
       expect(CANTERLOT_MCP_NAMES).toContain(tool);
       const id = toolId(`mcp__canterlot__${tool}`);

@@ -308,7 +308,14 @@ fn settings_json_modes_match_the_plan() {
     let excludes = vec!["/x/CLAUDE.md".to_string()];
     assert_eq!(
         settings_json(InstructionMode::Owner, &excludes),
-        json!({"crossSessionInbound": "refuse"})
+        json!({
+            "crossSessionInbound": "refuse",
+            "permissions": {"allow": [
+                "mcp__canterlot__plan_list",
+                "mcp__canterlot__plan_add",
+                "mcp__canterlot__plan_update",
+            ]},
+        })
     );
     let clean = settings_json(InstructionMode::Clean, &excludes);
     assert_eq!(clean["autoMemoryEnabled"], json!(false));

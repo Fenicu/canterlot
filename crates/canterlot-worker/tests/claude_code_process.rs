@@ -88,7 +88,10 @@ fn owner_preset_args_keep_owner_configuration() {
     assert!(!s.contains(&"--permission-mode".to_string()));
     assert!(!s.contains(&"--append-system-prompt-file".to_string()));
     let idx = s.iter().position(|x| x == "--settings").unwrap();
-    assert_eq!(s[idx + 1], "{\"crossSessionInbound\":\"refuse\"}");
+    assert_eq!(
+        s[idx + 1],
+        "{\"crossSessionInbound\":\"refuse\",\"permissions\":{\"allow\":[\"mcp__canterlot__plan_list\",\"mcp__canterlot__plan_add\",\"mcp__canterlot__plan_update\"]}}"
+    );
     assert_eq!(s[idx + 2], "--system-prompt-snapshot");
     assert_eq!(s[idx + 3], "off");
     assert!(s.contains(&"--mcp-config".to_string()));

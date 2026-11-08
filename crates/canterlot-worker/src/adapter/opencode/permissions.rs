@@ -11,9 +11,10 @@ pub enum PermissionMode {
     ReadOnly,
 }
 
-/// Чтение через MCP canterlot и будильники: они касаются только своей очереди,
-/// поэтому разрешены и в `ask`, и в `read_only`. Сохранение и применение пресета решает режим.
-const READ_TOOLS: [&str; 11] = [
+/// Чтение через MCP canterlot, будильники и доска плана: они касаются только своей очереди
+/// и своего плана, поэтому разрешены и в `ask`, и в `read_only`. Сохранение и применение
+/// пресета и перенос чужого плана (`plan_adopt`) решает режим.
+const READ_TOOLS: [&str; 14] = [
     "canterlot_canterlot_limits",
     "canterlot_canterlot_presets_list",
     "canterlot_sessions_list",
@@ -26,6 +27,9 @@ const READ_TOOLS: [&str; 11] = [
     "canterlot_alarm_cancel",
     "canterlot_alarm_list",
     "canterlot_route_preview",
+    "canterlot_plan_list",
+    "canterlot_plan_add",
+    "canterlot_plan_update",
 ];
 
 fn rule(action: &str, effect: &str) -> Value {
@@ -136,5 +140,26 @@ mod tests {
                 assert!(allowed(mode, tool), "{mode:?} {tool}");
             }
         }
+    }
+
+    #[test]
+    fn own_plan_tools_are_allowed_and_adopt_follows_the_mode() {
+        for mode in [PermissionMode::Ask, PermissionMode::ReadOnly] {
+            for tool in [
+                "canterlot_plan_list",
+                "canterlot_plan_add",
+                "canterlot_plan_update",
+            ] {
+                assert!(allowed(mode, tool), "{mode:?} {tool}");
+            }
+        }
+        assert_eq!(
+            effect(PermissionMode::Ask, "canterlot_plan_adopt").as_deref(),
+            Some("ask")
+        );
+        assert_eq!(
+            effect(PermissionMode::ReadOnly, "canterlot_plan_adopt").as_deref(),
+            Some("deny")
+        );
     }
 }

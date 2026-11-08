@@ -19,7 +19,7 @@ const PROVIDERS: [(ToolSet, &str); 3] = [
     (ToolSet::LimitsOnly, "opencode"),
 ];
 
-const SESSION_TOOLS: [(&str, &str); 17] = [
+const SESSION_TOOLS: [(&str, &str); 21] = [
     ("sessions_list", "sessions.list"),
     ("session_inspect", "sessions.inspect"),
     ("session_send", "sessions.send"),
@@ -37,6 +37,10 @@ const SESSION_TOOLS: [(&str, &str); 17] = [
     ("nudge_clear", "nudge.clear"),
     ("route_preview", "routing.preview"),
     ("spawn_cancel", "spawn_queue.cancel"),
+    ("plan_list", "plan.list"),
+    ("plan_add", "plan.add"),
+    ("plan_update", "plan.update"),
+    ("plan_adopt", "plan.adopt"),
 ];
 
 fn tools_of(tool_set: ToolSet, provider: &str) -> Vec<Value> {
@@ -208,7 +212,7 @@ fn read_tools_are_read_only() {
             let tool = tools.iter().find(|tool| tool["name"] == mcp_name).unwrap();
             let read_only = matches!(
                 mcp_name,
-                "sessions_list" | "session_inspect" | "alarm_list" | "route_preview"
+                "sessions_list" | "session_inspect" | "alarm_list" | "route_preview" | "plan_list"
             );
             assert_eq!(
                 tool["annotations"]["readOnlyHint"] == json!(true),
@@ -227,6 +231,51 @@ fn instructions_stay_short() {
         assert!((10..=15).contains(&lines), "{provider}: {lines}\n{text}");
     }
     assert_eq!(mcp::SERVER_INSTRUCTIONS.lines().count(), 15);
+    // Доска плана и `plan_task` названы во всех трёх вариантах одной заменённой строкой.
+    for (tool_set, provider) in PROVIDERS {
+        let text = instructions_of(tool_set, provider);
+        assert!(
+            text.contains("plan_task links it to your plan"),
+            "{provider}"
+        );
+        assert!(text.contains("plan_adopt"), "{provider}");
+    }
+}
+
+#[test]
+fn plan_tools_have_strict_schemas() {
+    let tools = tools_of(ToolSet::LimitsOnly, "codex");
+    let schema = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("нет {name}"))["inputSchema"]
+            .clone()
+    };
+    assert_eq!(schema("plan_list")["properties"], json!({}));
+    assert_eq!(schema("plan_add")["required"], json!(["tasks"]));
+    assert_eq!(schema("plan_add")["properties"]["tasks"]["maxItems"], 20);
+    assert_eq!(
+        schema("plan_add")["properties"]["tasks"]["items"]["additionalProperties"],
+        json!(false)
+    );
+    assert_eq!(schema("plan_update")["required"], json!(["number"]));
+    assert_eq!(
+        schema("plan_update")["properties"]["state"]["enum"],
+        json!([
+            "waiting",
+            "in_progress",
+            "in_review",
+            "done",
+            "cancelled",
+            "blocked"
+        ])
+    );
+    assert_eq!(schema("plan_adopt")["required"], json!(["from_session_id"]));
+    assert_eq!(
+        schema("session_spawn")["properties"]["plan_task"]["type"],
+        "integer"
+    );
 }
 
 #[test]
@@ -384,11 +433,12 @@ fn no_tool_touches_the_whitelist() {
                 || hub_name.starts_with("alarms.")
                 || hub_name.starts_with("nudge.")
                 || hub_name.starts_with("routing.")
-                || hub_name.starts_with("spawn_queue."),
+                || hub_name.starts_with("spawn_queue.")
+                || hub_name.starts_with("plan."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 20);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 24);
 }
 
 #[tokio::test]
