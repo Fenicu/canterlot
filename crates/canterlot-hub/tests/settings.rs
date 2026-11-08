@@ -1663,6 +1663,61 @@ async fn midsession_effort_change_is_refused_when_the_harness_cannot_apply_it(po
     assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
 }
 
+/// Харнесс со сменой усилия на ходу (Claude Code через `apply_flag_settings`, Codex, OpenCode):
+/// смена у живого исполнения ждёт в `pending` и уходит со следующим вводом.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn midsession_effort_change_travels_with_the_next_input(pool: PgPool) {
+    use canterlot_hub::delivery::dispatch::{self, DispatchOutcome};
+    let (client, id, _machine, _dir) = settings_client(&pool).await;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    start_running(&pool, owner, id).await;
+    let path = format!("/api/v1/conversations/{id}");
+    let changed = client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("effort"),
+            Some(json!({"effort":"low"})),
+        )
+        .await;
+    assert_eq!(
+        changed.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&changed.body)
+    );
+    assert_eq!(changed.json::<Value>()["pending"]["effort"], "low");
+
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("{path}/inputs"),
+            Some("input"),
+            Some(json!({"content":[{"type":"text","text":"text"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let command_id: Uuid = submitted.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let outcome = dispatch::dispatch_next(&pool, id, gate(&["pilot_v1"]), Uuid::now_v7())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["settings"]["effort"], "low", "{payload}");
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn worker_rejection_of_unsupported_settings_drops_them(pool: PgPool) {
     use canterlot_hub::{
@@ -1677,6 +1732,7 @@ async fn worker_rejection_of_unsupported_settings_drops_them(pool: PgPool) {
     };
     for reason in [
         "effort_change_unsupported",
+        "effort_change_failed",
         "permission_mode_needs_restart",
         "instructions_change_failed",
         "codex_home_failed",

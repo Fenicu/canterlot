@@ -34,7 +34,7 @@
 | `crates/canterlot-hub/src/session_tools/`, `crates/canterlot-hub/src/http/session_tools.rs`, `crates/canterlot-hub/migrations/0035_session_tools.sql` | Межсессионные инструменты модели (`pilot.md` §12): `settle` (устоявшееся состояние и отпечаток), `subs` (подписки), `jobs` и `summary` (событие и итог), `access`, `origin`, `read`, `send`, `spawn`, `whitelist`, `wait`, `accept`; белый список и приём результата по HTTP |
 | `crates/canterlot-worker/src/worktree.rs`, `crates/canterlot-worker/src/supervisor/git_facts.rs` | Отдельная рабочая копия делегированной сессии (подготовка и уборка) и факты git на конец хода |
 | `crates/canterlot-worker/tests/session_tools_e2e.rs` | Сквозные сценарии межсессионных инструментов: запуск в копии, подписки, одобрение, приём, цикл и перезапуски |
-| `crates/canterlot-hub/migrations/0020_midsession_effort.sql` | Признак `settings_midsession_effort` харнесса в каталоге машины: можно ли менять усилие у идущего исполнения (по умолчанию да; Claude Code меняет его только перезапуском, поэтому нет) |
+| `crates/canterlot-hub/migrations/0020_midsession_effort.sql` | Признак `settings_midsession_effort` харнесса в каталоге машины: можно ли менять усилие у идущего исполнения (по умолчанию да; `false` присылают воркеры, чей харнесс меняет усилие только перезапуском) |
 | `crates/canterlot-hub/build.rs` | Пересборка встроенных миграций при добавлении SQL-файла |
 | `crates/canterlot-hub/src/{snapshot,history}.rs` | Транзакционные снимки с границей журнала, история по scope_seq, блоки, ходы и делегирование |
 | `crates/canterlot-hub/src/{subscriptions.rs,http/ws.rs}` | WSS canterlot.v1: подписки по курсору, pull-based pump, слияние дельт и отключение зависшего клиента |

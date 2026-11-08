@@ -1691,7 +1691,7 @@ pub async fn change_settings(
         if (pending.get("permission_mode").is_some() || !permission.is_empty()) && !modes.as_ref().and_then(Value::as_array).is_some_and(|v| v.iter().any(|v| v == &permission)) { return Err(SettingsError::PermissionModeUnknown); }
         let live = executions::live(conn, id).await?.is_some();
         if live && !row.try_get::<Option<bool>, _>("settings_midsession")?.unwrap_or(false) { return Err(SettingsError::MidsessionUnsupported); }
-        // Глубину размышлений часть харнессов меняет только перезапуском (Claude Code).
+        // Глубину размышлений часть харнессов меняет только перезапуском (старые воркеры Claude Code).
         if live && effort_patched && effort != row.try_get::<String, _>("effort")? && !row.try_get::<Option<bool>, _>("settings_midsession_effort")?.unwrap_or(true) { return Err(SettingsError::MidsessionUnsupported); }
         sqlx::query("update conversations set pending_settings=$2,settings_rev=settings_rev+1 where id=$1").bind(id).bind(&pending).execute(&mut *conn).await?;
         let view = detail(conn, owner_id, id).await?.ok_or(SettingsError::NotFound)?.settings;
@@ -1724,9 +1724,10 @@ pub async fn drop_rejected_settings_in_tx(
 const SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 
 /// Причины отказа воркера, вызванные самими настройками ввода.
-pub const SETTINGS_REJECTION_REASONS: [&str; 6] = [
+pub const SETTINGS_REJECTION_REASONS: [&str; 7] = [
     SETTINGS_UNAVAILABLE,
     "effort_change_unsupported",
+    "effort_change_failed",
     "permission_mode_needs_restart",
     "instructions_change_failed",
     "codex_home_failed",
