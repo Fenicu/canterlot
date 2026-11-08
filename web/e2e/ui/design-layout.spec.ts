@@ -271,7 +271,7 @@ test.describe('текст ответа', () => {
     await expect(page.locator('.text .hljs-keyword').first()).toBeVisible();
   });
 
-  test('wide_code_may_leave_the_column_on_a_large_screen_but_stays_inside_the_pane', async ({ page }) => {
+  test('wide_code_stays_inside_the_card_and_scrolls_on_a_large_screen', async ({ page }) => {
     await page.setViewportSize({ width: 2560, height: 1440 });
     const { api, id } = await boot(page);
     api.histories.set(id, [block(api, '1', { content: `\`\`\`text\n${'длинная строка вывода '.repeat(20)}\n\`\`\`` })]);
@@ -281,9 +281,8 @@ test.describe('текст ответа', () => {
     await expect(pre).toBeVisible();
     const box = (await pre.boundingBox())!;
     const card = (await page.locator('article.card').boundingBox())!;
-    const pane = (await page.locator('.feed-wrap').boundingBox())!;
-    expect(box.width).toBeGreaterThan(card.width);
-    expect(box.x + box.width).toBeLessThanOrEqual(pane.x + pane.width);
+    expect(box.x + box.width).toBeLessThanOrEqual(card.x + card.width + 0.5);
+    expect(await pre.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
   });
 });
 
