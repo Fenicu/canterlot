@@ -347,19 +347,14 @@ mod tests {
         let mut live = HashSet::new();
         live.insert(me);
         let mut with_me = all.clone();
-        if !with_me.contains_key(&me.0) {
-            with_me.insert(
-                me.0,
-                ProcInfo {
-                    pid: me.0,
-                    ppid: 1,
-                    start_ticks: me.1,
-                    comm: "test".into(),
-                    rss_bytes: 0,
-                    env: None,
-                },
-            );
-        }
+        with_me.entry(me.0).or_insert(ProcInfo {
+            pid: me.0,
+            ppid: 1,
+            start_ticks: me.1,
+            comm: "test".into(),
+            rss_bytes: 0,
+            env: None,
+        });
         let rows = leaked(&with_me, &released, &live, uptime, ticks);
         assert!(!rows.iter().any(|r| r.pid == pid));
         child.kill().unwrap();

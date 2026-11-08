@@ -185,7 +185,7 @@ async fn hotspots(
         return Ok(Vec::new());
     };
     let mut rows = crate::machine_watch::resolve_hotspots(conn, owner_id, &stored).await?;
-    rows.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.bytes));
     rows.truncate(PAYLOAD_HOTSPOTS);
     Ok(rows
         .into_iter()
@@ -252,6 +252,9 @@ async fn end_episode(
         .await?;
     Ok(())
 }
+
+/// Строка выборки: машина, владелец, диски, память, исполнения, время выборки.
+type SampleRow = (Uuid, Uuid, Value, i64, i64, Value, DateTime<Utc>);
 
 struct Sample {
     machine_id: Uuid,
@@ -356,7 +359,7 @@ async fn heaviest(
             ))
         })
         .collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.1));
     rows.truncate(3);
     let mut out = Vec::new();
     for (execution_id, rss) in rows {
@@ -492,17 +495,16 @@ async fn sweep_once(
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
             // Порядок блокировок как у проекции доступности: машины по id, затем остальное.
-            let machines: Vec<(Uuid, Uuid, Value, i64, i64, Value, DateTime<Utc>)> =
-                sqlx::query_as(
-                    "select m.id,m.owner_id,mm.disks,mm.mem_total_bytes,mm.mem_available_bytes,
+            let machines: Vec<SampleRow> = sqlx::query_as(
+                "select m.id,m.owner_id,mm.disks,mm.mem_total_bytes,mm.mem_available_bytes,
                         mm.executions,mm.observed_at
                  from machines m join machine_metrics mm on mm.machine_id=m.id
                  where mm.observed_at >= $1
                  order by m.id for no key update of m",
-                )
-                .bind(cutoff)
-                .fetch_all(&mut *conn)
-                .await?;
+            )
+            .bind(cutoff)
+            .fetch_all(&mut *conn)
+            .await?;
             let mut report = SweepReport::default();
             for (machine_id, owner_id, disks, mem_total, mem_available, executions, observed_at) in
                 machines

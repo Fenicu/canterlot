@@ -258,15 +258,15 @@ fn profiles(target: &Path) -> Vec<PathBuf> {
             continue;
         }
         let path = entry.path();
-        if entry.file_name() == "lint" {
-            if let Ok(inner) = fs::read_dir(&path) {
-                out.extend(
-                    inner
-                        .flatten()
-                        .filter(|e| e.file_type().is_ok_and(|kind| kind.is_dir()))
-                        .map(|e| e.path()),
-                );
-            }
+        if entry.file_name() == "lint"
+            && let Ok(inner) = fs::read_dir(&path)
+        {
+            out.extend(
+                inner
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .map(|e| e.path()),
+            );
         }
         out.push(path);
     }
