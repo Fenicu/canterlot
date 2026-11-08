@@ -9,10 +9,12 @@ alter table machines
     add column lease_received_at timestamptz,
     add column lease_machine_ms bigint;
 
--- Предупреждение о долгом удержании уходит один раз на аренду.
+-- Предупреждение о долгом удержании уходит один раз на аренду. Аренда служит
+-- эпизодом: по episode_id получатели отмечаются в machine_event_marks.
 create table lease_long_hold_marks (
     machine_id uuid not null references machines(id) on delete cascade,
     lease_id text not null,
+    episode_id uuid not null,
     created_at timestamptz not null default now(),
     primary key (machine_id, lease_id)
 );

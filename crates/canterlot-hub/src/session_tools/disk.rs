@@ -121,7 +121,8 @@ async fn recipients(
 }
 
 /// Ставит задания тем получателям, у кого ещё нет отметки этого эпизода и вида.
-async fn announce(
+/// Общая точка для всех событий машины, в том числе `lease_long_hold`.
+pub(crate) async fn announce(
     conn: &mut PgConnection,
     machine_id: Uuid,
     episode_id: Uuid,

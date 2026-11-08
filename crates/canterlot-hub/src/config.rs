@@ -528,8 +528,8 @@ pub struct OrchestratorConfig {
     pub routing: RoutingConfig,
     pub spawn_queue: SpawnQueueConfig,
     pub guards: GuardsConfig,
-    /// Через сколько минут удержания аренды тяжёлой задачи подписчики держателя
-    /// один раз слышат `lease_long_hold`.
+    /// Через сколько минут удержания аренды тяжёлой задачи получатели событий
+    /// машины один раз слышат `lease_long_hold`.
     pub lease_warn_hold_minutes: u64,
 }
 

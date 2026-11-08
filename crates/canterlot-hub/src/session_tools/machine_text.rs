@@ -173,6 +173,38 @@ pub fn leaked(machine: &str, details: &Value) -> String {
     )
 }
 
+/// Аренда тяжёлой задачи держится дольше порога. Держатель — сессия или терминал
+/// владельца; остальные тяжёлые задачи машины ждут за ней.
+pub fn lease_long_hold(machine: &str, details: &Value) -> String {
+    let lease = if details["lease_kind"].as_str() == Some("gate") {
+        "gate"
+    } else {
+        "build"
+    };
+    let holder = match details["holder_title"].as_str().filter(|t| !t.is_empty()) {
+        _ if details["holder"].as_str() == Some("owner") => "the owner's terminal".to_owned(),
+        Some(title) => format!(
+            "session «{title}» (id {})",
+            details["conversation_id"].as_str().unwrap_or_default()
+        ),
+        None => format!(
+            "execution {}",
+            details["execution_id"].as_str().unwrap_or_default()
+        ),
+    };
+    let label = details["label"]
+        .as_str()
+        .filter(|l| !l.is_empty())
+        .map(|l| format!(" \"{l}\""))
+        .unwrap_or_default();
+    format!(
+        "[canterlot] Machine \"{machine}\": {holder} has held the {lease} lease{label} for {} min. \
+         Other heavy tasks on the machine queue behind it; check whether the command hangs. \
+         Nothing is stopped automatically.",
+        details["held_minutes"].as_i64().unwrap_or(0).max(1)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

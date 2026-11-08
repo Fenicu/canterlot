@@ -496,25 +496,55 @@ async fn long_hold_warns_holder_subscribers_once_and_only_from_fresh_state(
     assert_eq!(report, leases::LongHoldReport::default());
     assert!(long_hold_jobs(&pool).await.is_empty());
 
+    // Оркестратор на машине (сессия с делегатом, работает) слышит по общему
+    // правилу событий машины, даже без подписки на держателя.
+    let orchestrator = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
+    let delegate = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
+    sqlx::query("update conversations set parent_conversation_id=$2 where id=$1")
+        .bind(delegate)
+        .bind(orchestrator)
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "insert into conversation_derived(conversation_id,activity_state,activity_evidence)
+         values($1,'working','{}')",
+    )
+    .bind(orchestrator)
+    .execute(&pool)
+    .await?;
+
     available(&pool, s.machine_id).await;
     let report = leases::long_hold_sweep(&pool, HOLD, now).await?;
     assert_eq!(report.leases, 1, "only the lease held past the threshold");
-    assert_eq!(report.delivered, 1);
+    assert_eq!(report.delivered, 2);
     let jobs = long_hold_jobs(&pool).await;
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].0, s.conversation_id);
-    assert_eq!(jobs[0].1["target_id"], json!(holder));
-    assert_eq!(jobs[0].1["lease_kind"], "build");
+    let mut targets: Vec<Uuid> = jobs.iter().map(|(to, _)| *to).collect();
+    targets.sort();
+    let mut want = vec![s.conversation_id, orchestrator];
+    want.sort();
+    assert_eq!(targets, want);
+    for (to, job) in &jobs {
+        // Подлежащее — машина, цель задания — сам получатель.
+        assert_eq!(job["target_id"], json!(to));
+        assert_eq!(job["machine_id"], json!(s.machine_id));
+        assert_eq!(job["details"]["lease_kind"], "build");
+        assert_eq!(job["details"]["conversation_id"], json!(holder));
+    }
+    let marks: i64 =
+        sqlx::query_scalar("select count(*) from machine_event_marks where kind='lease_long_hold'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(marks, 2);
 
     // Повторный обход и перезапуск хаба не дают второго события той же аренды.
     let report = leases::long_hold_sweep(&pool, HOLD, now + TimeDelta::minutes(30)).await?;
     assert_eq!(report.leases, 0);
-    assert_eq!(long_hold_jobs(&pool).await.len(), 1);
+    assert_eq!(long_hold_jobs(&pool).await.len(), 2);
 
-    // Держатель-владелец: у терминала нет подписчиков, задание никому не уходит.
+    // Держатель-владелец (терминал): своя аренда — свой эпизод у тех же получателей.
     let report = leases::long_hold_sweep(&pool, HOLD, now + TimeDelta::minutes(85)).await?;
     assert_eq!(report.leases, 1);
-    assert_eq!(report.delivered, 0);
+    assert_eq!(report.delivered, 2);
 
     Scheduler::new(pool.clone(), Dispatcher::channel().0, Default::default())
         .tick(now + TimeDelta::minutes(85))
@@ -525,19 +555,35 @@ async fn long_hold_warns_holder_subscribers_once_and_only_from_fresh_state(
     .bind(s.conversation_id)
     .fetch_all(&pool)
     .await?;
-    assert_eq!(delivered.len(), 1);
-    assert_eq!(
-        delivered[0].0[0]["text"],
-        format!(
-            "[canterlot] Machine \"synthetic\": Session \"Баннер связи\" (id {holder}) has held \
-             the build lease (\"build label\") for 95 min. Other heavy tasks on the machine queue \
-             behind it; check whether the command hangs."
-        )
+    assert_eq!(delivered.len(), 2);
+    let texts: Vec<&str> = delivered
+        .iter()
+        .map(|(content, _)| content[0]["text"].as_str().unwrap())
+        .collect();
+    assert!(
+        texts.contains(
+            &format!(
+                "[canterlot] Machine \"synthetic\": session «Баннер связи» (id {holder}) has held \
+         the build lease \"build label\" for 95 min. Other heavy tasks on the machine queue \
+         behind it; check whether the command hangs. Nothing is stopped automatically."
+            )
+            .as_str()
+        ),
+        "{texts:#?}"
     );
-    assert_eq!(
-        delivered[0].1.as_ref().unwrap()["event"]["kind"],
-        "lease_long_hold"
+    assert!(
+        texts.contains(
+            &"[canterlot] Machine \"synthetic\": the owner's terminal has held the build lease \
+          \"build label\" for 95 min. Other heavy tasks on the machine queue behind it; check \
+          whether the command hangs. Nothing is stopped automatically."
+        ),
+        "{texts:#?}"
     );
+    for (_, origin) in &delivered {
+        let event = &origin.as_ref().unwrap()["event"];
+        assert_eq!(event["kind"], "lease_long_hold");
+        assert_eq!(event["machine_id"], json!(s.machine_id));
+    }
     Ok(())
 }
 

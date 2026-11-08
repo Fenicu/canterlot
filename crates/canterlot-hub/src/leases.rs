@@ -1,7 +1,8 @@
 //! Зеркало очереди тяжёлых задач машины (`resource_lease_v1`). Очередь ведёт
 //! воркер; хаб хранит последнее полное состояние на строке машины, отдаёт его в
 //! снимке машин и событием `machine_lease_changed`, очищает при пропаже машины и
-//! один раз на аренду предупреждает о долгом удержании (`lease_long_hold`).
+//! один раз на аренду предупреждает о долгом удержании (`lease_long_hold`);
+//! получателей выбирает общее правило событий машины (`session_tools::disk`).
 
 use std::{collections::HashMap, time::Duration};
 
@@ -424,43 +425,6 @@ pub(crate) async fn wait_of(
         }))
 }
 
-/// Получатель предупреждения о долгом удержании.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LongHoldRecipient {
-    pub subscriber_id: Uuid,
-    pub chain_depth: i32,
-}
-
-/// Единственная точка выбора получателей `lease_long_hold`: сейчас — открытые
-/// подписки на сессию-держателя. У держателя `owner` (терминал) сессии нет,
-/// событие видно только в PWA.
-pub async fn long_hold_recipients(
-    conn: &mut PgConnection,
-    owner_id: Uuid,
-    _machine_id: Uuid,
-    holder: Option<Uuid>,
-) -> Result<Vec<LongHoldRecipient>, sqlx::Error> {
-    let Some(holder) = holder else {
-        return Ok(Vec::new());
-    };
-    let rows: Vec<(Uuid, i32)> = sqlx::query_as(
-        "select subscriber_id,chain_depth from session_subscriptions
-         where target_id=$1 and owner_id=$2 and closed_at is null
-         order by subscriber_id",
-    )
-    .bind(holder)
-    .bind(owner_id)
-    .fetch_all(conn)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(subscriber_id, chain_depth)| LongHoldRecipient {
-            subscriber_id,
-            chain_depth,
-        })
-        .collect())
-}
-
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct LongHoldReport {
     pub leases: usize,
@@ -506,55 +470,55 @@ pub async fn long_hold_sweep(
                     if now - since < threshold {
                         continue;
                     }
-                    let fresh = sqlx::query(
-                        "insert into lease_long_hold_marks(machine_id,lease_id,created_at)
-                         values($1,$2,$3) on conflict do nothing",
+                    // Аренда — эпизод: одна отметка на аренду, её id — эпизод для
+                    // отметок получателей.
+                    let episode: Option<Uuid> = sqlx::query_scalar(
+                        "insert into lease_long_hold_marks(machine_id,lease_id,episode_id,created_at)
+                         values($1,$2,$3,$4) on conflict do nothing returning episode_id",
                     )
                     .bind(machine_id)
                     .bind(&holder.lease_id)
+                    .bind(Uuid::now_v7())
                     .bind(now)
-                    .execute(&mut *conn)
-                    .await?
-                    .rows_affected()
-                        != 0;
-                    if !fresh {
+                    .fetch_optional(&mut *conn)
+                    .await?;
+                    let Some(episode_id) = episode else {
                         continue;
-                    }
+                    };
                     report.leases += 1;
                     let minutes = (now - since).num_minutes().max(1);
-                    for recipient in long_hold_recipients(
+                    let title: Option<String> = match holder.conversation_id {
+                        Some(id) => {
+                            sqlx::query_scalar(
+                                "select title from conversations where id=$1 and owner_id=$2",
+                            )
+                            .bind(id)
+                            .bind(owner_id)
+                                .fetch_optional(&mut *conn)
+                                .await?
+                        }
+                        None => None,
+                    };
+                    let details = json!({
+                        "lease_id": holder.lease_id,
+                        "lease_kind": holder.kind.as_str(),
+                        "label": holder.label,
+                        "holder": if holder.holder == LeaseHolder::Owner { "owner" } else { "execution" },
+                        "execution_id": holder.execution_id,
+                        "conversation_id": holder.conversation_id,
+                        "holder_title": title.as_deref().map(crate::session_tools::origin::clean_title),
+                        "held_minutes": minutes,
+                    });
+                    // Получателей и их отметки выбирает общее правило событий машины.
+                    report.delivered += crate::session_tools::disk::announce(
                         &mut *conn,
-                        owner_id,
                         machine_id,
-                        holder.conversation_id,
+                        episode_id,
+                        "lease_long_hold",
+                        &details,
+                        now,
                     )
-                    .await?
-                    {
-                        let payload = json!({
-                            "action": "machine_event",
-                            "kind": "lease_long_hold",
-                            "target_id": holder.conversation_id.unwrap_or(recipient.subscriber_id),
-                            "chain_depth": recipient.chain_depth,
-                            "machine_id": machine_id,
-                            "lease_id": holder.lease_id,
-                            "lease_kind": holder.kind.as_str(),
-                            "lease_label": holder.label,
-                            "owner_holder": holder.holder == LeaseHolder::Owner,
-                            "held_minutes": minutes,
-                        });
-                        sqlx::query(
-                            "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
-                             values($1,'session_task',$2,$3,$4,$5)",
-                        )
-                        .bind(Uuid::now_v7())
-                        .bind(owner_id)
-                        .bind(recipient.subscriber_id)
-                        .bind(now)
-                        .bind(payload)
-                        .execute(&mut *conn)
-                        .await?;
-                        report.delivered += 1;
-                    }
+                    .await?;
                 }
             }
             Ok(report)
