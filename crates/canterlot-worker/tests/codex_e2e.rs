@@ -2778,12 +2778,251 @@ fn live_smoke_enabled() -> bool {
     smoke_flag(std::env::var("CANTERLOT_CODEX_SMOKE").ok().as_deref())
 }
 
+/// Бинарник живых прогонов: `CANTERLOT_CODEX_BIN` (как у `delegated_mcp_live`), прежнее имя
+/// `CANTERLOT_CODEX_EXECUTABLE`, иначе `codex` из PATH. Так новый CLI из изолированного
+/// префикса проверяется до обновления глобальной установки.
+fn smoke_executable() -> PathBuf {
+    std::env::var_os("CANTERLOT_CODEX_BIN")
+        .or_else(|| std::env::var_os("CANTERLOT_CODEX_EXECUTABLE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "codex".into())
+}
+
+fn smoke_config() -> CodexConfig {
+    CodexConfig {
+        executable: smoke_executable(),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn live_smoke_is_skipped_without_the_flag() {
     assert!(!smoke_flag(None));
     assert!(!smoke_flag(Some("")));
     assert!(!smoke_flag(Some("true")));
     assert!(smoke_flag(Some("1")));
+}
+
+// Короткий живой зонд нового CLI (НЕ запускается в обычных тестах): короткий ход, смена
+// усилия на следующем ходе, команда оболочки с вливанием ввода (`turn/steer`) посреди хода и
+// прерывание. Три дешёвых хода; усилие проверяется по `turn_context` рулона треда.
+#[tokio::test]
+async fn live_probe() {
+    if !live_smoke_enabled() {
+        eprintln!("SKIP: set CANTERLOT_CODEX_SMOKE=1 to run live Codex turns");
+        return;
+    }
+    let model = std::env::var("CANTERLOT_CODEX_SMOKE_MODEL").unwrap_or("gpt-6-luna".into());
+    let dir = TempDir::new().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&workdir)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let config = smoke_config();
+    let catalog = canterlot_worker::adapter::codex::discover(&config)
+        .await
+        .expect("discover against the real CLI");
+    eprintln!("PROBE: cli={:?}", catalog.version);
+    let entry = catalog
+        .models
+        .iter()
+        .find(|entry| entry.id == model)
+        .unwrap_or_else(|| panic!("{model} not in the catalog"));
+    eprintln!("PROBE: model={model} efforts={:?}", entry.efforts);
+    let context = AdapterContext {
+        transmit_deadline: Duration::from_secs(60),
+        ready_deadline: Duration::from_secs(60),
+        exec_dir: dir.path().join("exec"),
+        claude_code: None,
+        codex: Some(config),
+        opencode: None,
+        antigravity: None,
+    };
+    let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
+    let group = TreeContainment::new().unwrap();
+    let spec = StartSpec {
+        execution_id: Uuid::now_v7(),
+        generation: 1,
+        workdir: workdir.clone(),
+        native_conversation_id: None,
+        profile: "codex".into(),
+        model: model.clone(),
+        effort: "low".into(),
+        permission_mode: "bypass".into(),
+        instructions: canterlot_worker::adapter::InstructionSpec {
+            mode: canterlot_worker::adapter::InstructionMode::Owner,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        },
+        isolate_mcp: false,
+    };
+    let started = tokio::time::timeout(Duration::from_secs(90), adapter.start(&spec, &group))
+        .await
+        .expect("start in time")
+        .expect("live start works");
+    eprintln!("PROBE: start ok, thread={}", started.native_conversation_id);
+    let text = |body: &str| Transmission {
+        command_id: Uuid::now_v7(),
+        attempt: 1,
+        text: body.into(),
+        files: vec![],
+        settings: None,
+    };
+    async fn admit(adapter: &mut Box<dyn Adapter>, group: &TreeContainment, input: &Transmission) {
+        match tokio::time::timeout(Duration::from_secs(120), adapter.transmit(input, group))
+            .await
+            .expect("transmit in time")
+        {
+            TransmitOutcome::Accepted(proof) => assert_eq!(proof.command_id, input.command_id),
+            other => panic!("live delivery: {other:?}"),
+        }
+    }
+    async fn until(
+        adapter: &mut Box<dyn Adapter>,
+        mut done: impl FnMut(&AdapterEvent) -> bool,
+    ) -> Vec<AdapterEvent> {
+        let mut events = vec![];
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(240), adapter.next_event())
+                .await
+                .expect("event in time");
+            let stop = done(&event);
+            events.push(event);
+            if stop {
+                return events;
+            }
+        }
+    }
+    // Команда оболочки началась (фаза `shell`) или ход уже кончился.
+    fn shell_or_end(event: &AdapterEvent, id: Uuid) -> bool {
+        matches!(event, AdapterEvent::Phase { tool_name: Some(name), .. } if name == "shell")
+            || matches!(event, AdapterEvent::RunFinished { input_command_id, .. }
+                if *input_command_id == id)
+    }
+    fn finished(id: Uuid) -> impl FnMut(&AdapterEvent) -> bool {
+        move |event| {
+            matches!(event, AdapterEvent::RunFinished { input_command_id, .. }
+                if *input_command_id == id)
+        }
+    }
+
+    // Короткий ход без инструментов.
+    let first = text("Reply with exactly CANTERLOT-PROBE. Do not use tools.");
+    admit(&mut adapter, &group, &first).await;
+    let events = until(&mut adapter, finished(first.command_id)).await;
+    assert!(Fake::final_text(&events).contains("CANTERLOT-PROBE"));
+    eprintln!("PROBE: short turn ok");
+
+    // Смена усилия и команда оболочки; посреди хода вливается второй ввод.
+    let mut tool =
+        text("Run the shell command `sleep 8 && echo PROBE-TOOL` and then reply with its output.");
+    tool.settings = Some(canterlot_worker::adapter::SettingsChange {
+        effort: Some("medium".into()),
+        ..Default::default()
+    });
+    assert_eq!(adapter.validate_transmission(&tool), Ok(()));
+    admit(&mut adapter, &group, &tool).await;
+    let tool_id = tool.command_id;
+    let mut events = until(&mut adapter, move |event| shell_or_end(event, tool_id)).await;
+    eprintln!("PROBE: tool call visible: {:?}", events.last());
+    assert!(
+        matches!(events.last(), Some(AdapterEvent::Phase { .. })),
+        "the turn ended before the shell started"
+    );
+    let steer = text("Also append the word STEERED at the very end of your final reply.");
+    let outcome = tokio::time::timeout(Duration::from_secs(60), adapter.steer(&steer))
+        .await
+        .expect("steer in time");
+    eprintln!("PROBE: steer outcome {outcome:?}");
+    assert!(matches!(outcome, SteerOutcome::Accepted(_)), "{outcome:?}");
+    events.extend(until(&mut adapter, finished(tool.command_id)).await);
+    let reply = Fake::final_text(&events);
+    eprintln!("PROBE: tool turn reply {reply:?}");
+    assert!(reply.contains("PROBE-TOOL"), "{reply}");
+    assert!(reply.contains("STEERED"), "{reply}");
+
+    // Прерывание долгой команды.
+    let sleeping = text("Run the shell command `sleep 30` and then reply DONE.");
+    admit(&mut adapter, &group, &sleeping).await;
+    let sleeping_id = sleeping.command_id;
+    let events = until(&mut adapter, move |event| shell_or_end(event, sleeping_id)).await;
+    assert!(
+        matches!(events.last(), Some(AdapterEvent::Phase { .. })),
+        "the turn ended before the shell started"
+    );
+    match tokio::time::timeout(Duration::from_secs(30), adapter.interrupt())
+        .await
+        .expect("interrupt in time")
+    {
+        canterlot_worker::adapter::InterruptOutcome::Acknowledged => {}
+        other => panic!("live interrupt: {other:?}"),
+    }
+    let events = until(&mut adapter, finished(sleeping.command_id)).await;
+    eprintln!(
+        "PROBE: interrupt acknowledged, run finished: {:?}",
+        events.last()
+    );
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        adapter.close(CloseMode::Graceful, &group),
+    )
+    .await
+    .expect("close in time")
+    .expect("live close works");
+
+    // Усилие хода в рулоне треда: первый ход low, второй medium.
+    let efforts = rollout_efforts(&started.native_conversation_id);
+    eprintln!("PROBE: turn_context efforts {efforts:?}");
+    assert_eq!(
+        efforts.first().map(String::as_str),
+        Some("low"),
+        "{efforts:?}"
+    );
+    assert!(
+        efforts.iter().any(|effort| effort == "medium"),
+        "{efforts:?}"
+    );
+}
+
+/// Значения `effort` из записей `turn_context` рулона треда в доме владельца: дом canterlot
+/// ссылается на его `sessions`.
+fn rollout_efforts(thread_id: &str) -> Vec<String> {
+    let sessions = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap()).join(".codex"))
+        .join("sessions");
+    fn find(dir: &std::path::Path, needle: &str) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find(&path, needle) {
+                    return Some(found);
+                }
+            } else if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains(needle))
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+    let rollout = find(&sessions, thread_id).expect("thread rollout");
+    std::fs::read_to_string(rollout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record["type"] == "turn_context")
+        .filter_map(|record| record["payload"]["effort"].as_str().map(str::to_owned))
+        .collect()
 }
 
 const PIXEL_PNG: &[u8] = &[
@@ -2810,7 +3049,7 @@ async fn live_smoke() {
         .current_dir(&workdir)
         .status()
         .unwrap();
-    let config = CodexConfig::default();
+    let config = smoke_config();
     let catalog = canterlot_worker::adapter::codex::discover(&config)
         .await
         .expect("discover against the real CLI");
@@ -3050,7 +3289,7 @@ async fn live_smoke() {
         ready_deadline: Duration::from_secs(60),
         exec_dir: dir.path().join("exec2"),
         claude_code: None,
-        codex: Some(CodexConfig::default()),
+        codex: Some(smoke_config()),
         opencode: None,
         antigravity: None,
     };
@@ -3110,9 +3349,7 @@ async fn live_smoke() {
     std::fs::write(repo.join("AGENTS.md"), "# canterlot smoke repo\n").unwrap();
     let codex_home = smoke_home.join("codex-home");
     let home_config = || CodexConfig {
-        executable: std::env::var_os("CANTERLOT_CODEX_EXECUTABLE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| "codex".into()),
+        executable: smoke_executable(),
         home_dir: Some(codex_home.clone()),
         owner_home: None,
         home_policy: TempDirPolicy::Refuse,
