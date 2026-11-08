@@ -6,9 +6,12 @@
 #   scripts/check.sh --base REF  сравнивать с REF вместо main
 #   scripts/check.sh --fast -E EXPR  свой фильтр тестов nextest вместо выбора по diff (например 'binary(ws)')
 # Скрипт для рабочей копии берёт CANTERLOT_TEST_PG_PORT (своя тестовая PostgreSQL, scripts/test-db.sh).
+# Прогон встаёт в очередь тяжёлых задач воркера: --all берёт аренду gate (весь станок),
+# остальные режимы — build (слот). CANTERLOT_NO_LEASE=1 отключает очередь.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+original_args=("$@")
 source ~/.cargo/env
 
 mode=full
@@ -25,6 +28,23 @@ while (($#)); do
     esac
     shift
 done
+
+lease_kind=build
+((all)) && lease_kind=gate
+source scripts/lease.sh
+lease_self_wrap "$lease_kind" "check.sh${original_args[*]:+ ${original_args[*]}}" \
+    bash "$PWD/scripts/check.sh" "${original_args[@]}"
+# Гейт исключителен только среди арендованных задач: нагрузка в начале объясняет ложные падения.
+printf 'нагрузка: load1 %s на %s ядер, аренда %s\n' "$(cut -d' ' -f1 /proc/loadavg)" "$(nproc)" \
+    "${CANTERLOT_LEASE_HELD:-нет}"
+
+# Бюджет аренды делится между линтом и тестовой сборкой, идущими параллельно: каждой по
+# половине потоков сборки (CARGO_BUILD_JOBS аренды не больше уже заданного), тестам все.
+half_jobs=""
+if [[ -n "${CANTERLOT_LEASE_BUDGET:-}" ]]; then
+    lease_jobs=${CARGO_BUILD_JOBS:-$CANTERLOT_LEASE_BUDGET}
+    half_jobs=$(((lease_jobs + 1) / 2))
+fi
 
 started=$SECONDS
 stage() { printf '\n==> %s\n' "$1"; stage_started=$SECONDS; }
@@ -116,7 +136,7 @@ run_nextest() {
         fi
     fi
     local status=0
-    cargo nextest run --workspace --all-features --profile "$profile" \
+    ${half_jobs:+env CARGO_BUILD_JOBS="$half_jobs"} cargo nextest run --workspace --all-features --profile "$profile" \
         --test-threads "${CANTERLOT_TEST_THREADS:-$(nproc)}" "${filter[@]}" || status=$?
     python3 scripts/slowest-tests.py "target/nextest/$profile/junit.xml" 8 || true
     return "$status"
@@ -154,6 +174,7 @@ if ((want_rust)); then
     (
         export CARGO_TARGET_DIR="$PWD/target/lint"
         export CARGO_INCREMENTAL=0
+        [[ -n "$half_jobs" ]] && export CARGO_BUILD_JOBS="$half_jobs"
         lint_rust
     ) >"$lint_log" 2>&1 &
     lint_pid=$!

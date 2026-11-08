@@ -6,9 +6,12 @@
 #                                        изменённые спеки e2e запускаются на phone
 #   scripts/check-web.sh --fast --base REF  сравнивать с REF (по умолчанию main)
 #   scripts/check-web.sh --stack         полная плюс сквозные сценарии на настоящем хабе (перед выкаткой)
+# Прогон встаёт в очередь тяжёлых задач воркера: --stack берёт аренду gate, остальные
+# режимы — build. Число воркеров Playwright задаёт аренда через PW_WORKERS.
 set -euo pipefail
 
 cd "$(dirname "$0")/../web"
+original_args=("$@")
 
 fast=0
 stack=0
@@ -27,6 +30,12 @@ if ((fast && stack)); then
     echo '--fast и --stack несовместимы' >&2
     exit 2
 fi
+lease_kind=build
+((stack)) && lease_kind=gate
+# shellcheck source=scripts/lease.sh
+source ../scripts/lease.sh
+lease_self_wrap "$lease_kind" "check-web.sh${original_args[*]:+ ${original_args[*]}}" \
+    bash "$(cd .. && pwd)/scripts/check-web.sh" "${original_args[@]}"
 
 # Lock-файл ставится и вне локальной сети: в нём только публичный реестр npm.
 foreign=$(grep -oE '"resolved": "[^"]+' web/package-lock.json | grep -vc '"resolved": "https://registry.npmjs.org/' || true)
