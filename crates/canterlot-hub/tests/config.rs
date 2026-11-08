@@ -444,11 +444,12 @@ fn session_tools_config_defaults_match_the_plan() {
         (10, D::from_secs(3600))
     );
     assert_eq!(config.activity.idle_quiet, D::from_secs(5));
+    assert_eq!(config.activity.idle_background_max, D::from_secs(15 * 60));
 
     fs::write(
         &path,
         format!(
-            "{PILOT_BASE}[session_tools]\nmax_spawn_depth = 1\npair_window = '2m'\n[activity]\nidle_quiet = '9s'\n"
+            "{PILOT_BASE}[session_tools]\nmax_spawn_depth = 1\npair_window = '2m'\n[activity]\nidle_quiet = '9s'\nidle_background_max = '40m'\n"
         ),
     )
     .unwrap();
@@ -457,6 +458,7 @@ fn session_tools_config_defaults_match_the_plan() {
     assert_eq!(config.session_tools.pair_window, D::from_secs(120));
     assert_eq!(config.session_tools.max_chain_depth, 8);
     assert_eq!(config.activity.idle_quiet, D::from_secs(9));
+    assert_eq!(config.activity.idle_background_max, D::from_secs(40 * 60));
 
     fs::write(&path, format!("{PILOT_BASE}[session_tools]\nbogus = 1\n")).unwrap();
     assert!(HubConfig::load(&path).is_err());

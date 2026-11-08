@@ -33,12 +33,14 @@ fn thresholds() -> Thresholds {
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
         idle_quiet: Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
     }
 }
 
 fn config() -> SettleConfig {
     SettleConfig {
         idle_quiet: Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
         nudge_enabled: true,
     }
 }
@@ -1819,4 +1821,292 @@ async fn projector_sweep_fires_after_the_quiet_window(pool: PgPool) {
     }
     let _ = stop.send(true);
     task.abort();
+}
+
+fn background_facts(now: DateTime<Utc>, idle_for: TimeDelta) -> SettleFacts {
+    SettleFacts {
+        now,
+        since: now - idle_for,
+        last_turn_at: Some(now - idle_for),
+        last_event_at: Some(now - TimeDelta::minutes(1)),
+        phase_since: None,
+    }
+}
+
+#[test]
+fn idle_background_waits_for_the_threshold() {
+    let now = Utc::now();
+    let busy = idle_activity(Some(2));
+    let empty = queue(0, vec![]);
+    let under = background_facts(now, TimeDelta::minutes(14));
+    assert_eq!(settle::settled(&busy, &empty, &under, &config()), None);
+    assert_eq!(
+        settle::idle_background(&busy, &empty, &under, &config()),
+        None
+    );
+    let past = background_facts(now, TimeDelta::minutes(15));
+    assert_eq!(
+        settle::settled(&busy, &empty, &past, &config()),
+        None,
+        "the warning is not a settled state"
+    );
+    assert_eq!(
+        settle::idle_background(&busy, &empty, &past, &config()),
+        Some(settle::IdleBackground {
+            jobs: 2,
+            idle_since: now - TimeDelta::minutes(15)
+        })
+    );
+    let custom = SettleConfig {
+        idle_background_max: Duration::from_secs(40 * 60),
+        ..config()
+    };
+    assert_eq!(
+        settle::idle_background(&busy, &empty, &past, &custom),
+        None,
+        "the threshold comes from the config"
+    );
+}
+
+#[test]
+fn idle_background_counts_from_the_last_turn_and_ignores_other_states() {
+    let now = Utc::now();
+    let busy = idle_activity(Some(1));
+    let empty = queue(0, vec![]);
+    let mut facts = background_facts(now, TimeDelta::hours(1));
+    facts.last_turn_at = Some(now - TimeDelta::minutes(3));
+    assert_eq!(
+        settle::idle_background(&busy, &empty, &facts, &config()),
+        None,
+        "a new turn starts a new idle episode"
+    );
+    let facts = background_facts(now, TimeDelta::hours(1));
+    assert_eq!(
+        settle::idle_background(&idle_activity(None), &empty, &facts, &config()),
+        None,
+        "without background work idle settles normally"
+    );
+    assert_eq!(
+        settle::idle_background(&busy, &queue(1, vec![]), &facts, &config()),
+        None,
+        "a queued input is the continuation"
+    );
+    let mut silent = facts;
+    silent.last_event_at = Some(now - TimeDelta::minutes(31));
+    assert_eq!(
+        settle::settled(&busy, &empty, &silent, &config()),
+        Some(Settled::Idle)
+    );
+    assert_eq!(
+        settle::idle_background(&busy, &empty, &silent, &config()),
+        None,
+        "a settled session gets the normal event instead"
+    );
+    let working = Activity {
+        state: S::Working,
+        evidence: E::Working {
+            phase: "running_tool".into(),
+            tool_name: None,
+            summary: None,
+            phase_since: None,
+            lease_wait: None,
+        },
+    };
+    assert_eq!(
+        settle::idle_background(&working, &empty, &facts, &config()),
+        None
+    );
+    let since = now - TimeDelta::hours(1);
+    assert_ne!(
+        settle::idle_background_fingerprint(since, Some(since)),
+        settle::fingerprint(Settled::Idle, since, Some(since), None),
+        "the real idle report must not be swallowed by the warning"
+    );
+}
+
+async fn background_job(
+    pool: &PgPool,
+    p: &Pair,
+    execution: &executions::StartedExecution,
+    state: &str,
+) {
+    sqlx::query(
+        "insert into background_tasks(conversation_id,task_id,execution_id,generation,source_revision,
+           kind,description,state,started_at)
+         values($1,'tail',$2,$3,1,'bash','tail -F build.log',$4,now())
+         on conflict(conversation_id,task_id) do update set state=excluded.state",
+    )
+    .bind(p.target)
+    .bind(execution.execution_id)
+    .bind(execution.generation)
+    .bind(state)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn last_event(pool: &PgPool, id: Uuid, at: DateTime<Utc>) {
+    sqlx::query("update executions set last_event_at=$2 where conversation_id=$1")
+        .bind(id)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Ход кончился в `t0`, сессия простаивает с работающим `tail -F`; подписчик взведён.
+async fn idle_with_background(
+    pool: &PgPool,
+    t0: DateTime<Utc>,
+) -> (Pair, executions::StartedExecution) {
+    let p = pair(pool).await;
+    let execution = start(pool, p.owner, p.target).await;
+    finish_turn(pool, &p, &execution, t0).await;
+    background_job(pool, &p, &execution, "running").await;
+    last_event(pool, p.target, t0).await;
+    refresh_at(pool, p.target, t0 + TimeDelta::seconds(1)).await;
+    subscribe(pool, &p).await;
+    (p, execution)
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn idle_with_background_warns_once_past_the_threshold(pool: PgPool) {
+    let t0 = Utc::now() - TimeDelta::minutes(20);
+    let (p, _) = idle_with_background(&pool, t0).await;
+    for minutes in [1, 5, 10, 14] {
+        refresh_at(&pool, p.target, t0 + TimeDelta::minutes(minutes)).await;
+    }
+    assert!(
+        jobs(&pool, p.subscriber).await.is_empty(),
+        "under the threshold the subscriber hears nothing"
+    );
+
+    refresh_at(&pool, p.target, t0 + TimeDelta::minutes(16)).await;
+    refresh_at(&pool, p.target, t0 + TimeDelta::minutes(17)).await;
+    refresh_at(&pool, p.target, t0 + TimeDelta::minutes(18)).await;
+    let queued = jobs(&pool, p.subscriber).await;
+    assert_eq!(queued.len(), 1, "one warning per idle episode: {queued:?}");
+    assert_eq!(queued[0]["state"], "idle_background");
+    assert_eq!(queued[0]["background_jobs"], 1);
+    let open = subscription(&pool, p.subscriber, p.target).await;
+    assert_eq!(
+        open["closed_at"],
+        Value::Null,
+        "the warning is not a result"
+    );
+
+    let (state,): (String,) = sqlx::query_as(
+        "select activity_state::text from conversation_derived where conversation_id=$1",
+    )
+    .bind(p.target)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "idle", "the state shown to the owner stays as is");
+
+    assert_eq!(scheduler(&pool).tick(Utc::now()).await.unwrap().fired, 1);
+    let delivered = delivered(&pool, p.subscriber).await;
+    assert_eq!(delivered.len(), 1);
+    let (text, origin, _) = &delivered[0];
+    assert!(
+        text.starts_with("[canterlot] Session \"")
+            && text.contains("has been idle for ")
+            && text.contains(" min with 1 background job still running; it is not doing anything until it gets a new input. Check its background job or send it a message."),
+        "{text}"
+    );
+    assert!(!text.contains("is now idle"), "{text}");
+    assert_eq!(origin["event"]["kind"], "idle_background");
+    assert_eq!(origin["event"]["state"], "idle");
+    assert_eq!(origin["event"]["session_id"], json!(p.target));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_new_turn_starts_a_new_idle_background_episode(pool: PgPool) {
+    let t0 = Utc::now() - TimeDelta::minutes(50);
+    let (p, execution) = idle_with_background(&pool, t0).await;
+    refresh_at(&pool, p.target, t0 + TimeDelta::minutes(16)).await;
+    assert_eq!(jobs(&pool, p.subscriber).await.len(), 1);
+
+    // Ход пробуждения: тот же фон, но простой начинается заново.
+    finish_turn(&pool, &p, &execution, t0 + TimeDelta::minutes(17)).await;
+    last_event(&pool, p.target, t0 + TimeDelta::minutes(17)).await;
+    for minutes in [18, 25, 31] {
+        refresh_at(&pool, p.target, t0 + TimeDelta::minutes(minutes)).await;
+    }
+    assert_eq!(
+        jobs(&pool, p.subscriber).await.len(),
+        1,
+        "the new episode is under the threshold"
+    );
+    refresh_at(&pool, p.target, t0 + TimeDelta::minutes(33)).await;
+    let queued = jobs(&pool, p.subscriber).await;
+    assert_eq!(queued.len(), 2);
+    assert_eq!(queued[1]["state"], "idle_background");
+    assert_ne!(queued[0]["fingerprint"], queued[1]["fingerprint"]);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn finished_background_still_reports_the_normal_idle_once(pool: PgPool) {
+    let t0 = Utc::now() - TimeDelta::minutes(30);
+    let (p, execution) = idle_with_background(&pool, t0).await;
+    refresh_at(&pool, p.target, t0 + TimeDelta::minutes(16)).await;
+    assert_eq!(jobs(&pool, p.subscriber).await.len(), 1);
+    assert_eq!(scheduler(&pool).tick(Utc::now()).await.unwrap().fired, 1);
+
+    background_job(&pool, &p, &execution, "completed").await;
+    last_event(&pool, p.target, t0 + TimeDelta::minutes(20)).await;
+    for seconds in [10, 30, 60] {
+        refresh_at(
+            &pool,
+            p.target,
+            t0 + TimeDelta::minutes(20) + TimeDelta::seconds(seconds),
+        )
+        .await;
+    }
+    let queued = jobs(&pool, p.subscriber).await;
+    assert_eq!(queued.len(), 2, "{queued:?}");
+    assert_eq!(queued[1]["state"], "idle");
+    let closed = subscription(&pool, p.subscriber, p.target).await;
+    assert_eq!(closed["closed_reason"], "idle");
+
+    assert_eq!(scheduler(&pool).tick(Utc::now()).await.unwrap().fired, 1);
+    let delivered = delivered(&pool, p.subscriber).await;
+    assert_eq!(delivered.len(), 2);
+    assert!(
+        delivered[0].0.contains("background job still running"),
+        "{}",
+        delivered[0].0
+    );
+    assert!(delivered[1].0.contains("is now idle"), "{}", delivered[1].0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stale_idle_background_warning_is_not_delivered(pool: PgPool) {
+    let t0 = Utc::now() - TimeDelta::minutes(30);
+    let (p, execution) = idle_with_background(&pool, t0).await;
+    refresh_at(&pool, p.target, t0 + TimeDelta::minutes(16)).await;
+    assert_eq!(jobs(&pool, p.subscriber).await.len(), 1);
+    // Фон кончился, пока задание ждало доставки: о нём скажет обычный итог.
+    background_job(&pool, &p, &execution, "completed").await;
+    refresh_at(
+        &pool,
+        p.target,
+        t0 + TimeDelta::minutes(16) + TimeDelta::seconds(1),
+    )
+    .await;
+    scheduler(&pool).tick(Utc::now()).await.unwrap();
+    let delivered = delivered(&pool, p.subscriber).await;
+    assert_eq!(delivered.len(), 1, "only the normal report");
+    assert!(delivered[0].0.contains("is now idle"), "{}", delivered[0].0);
+    let (result,): (Value,) = sqlx::query_as(
+        "select result from scheduled_jobs where kind='session_task'
+           and payload->>'state'='idle_background'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        result["reason"], "no_longer_idle_with_background",
+        "{result}"
+    );
 }

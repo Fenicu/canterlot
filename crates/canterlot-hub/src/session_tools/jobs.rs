@@ -12,7 +12,7 @@ use crate::{
     delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
     scheduler::ClaimedJob,
     session::Registry,
-    session_tools::{accept, origin, spawn, summary},
+    session_tools::{accept, origin, settle::IDLE_BACKGROUND, spawn, summary},
 };
 
 #[derive(Deserialize)]
@@ -32,6 +32,9 @@ struct EventJob {
     nudges: i64,
     #[serde(default)]
     asks_in_text: bool,
+    /// Начало простоя для предупреждения `idle_background`.
+    #[serde(default)]
+    idle_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +145,25 @@ pub async fn run_in_tx(
             let Ok(event) = serde_json::from_value::<EventJob>(job.payload.clone()) else {
                 return Ok(JobOutcome::Cancelled("invalid_payload"));
             };
+            if event.state == IDLE_BACKGROUND {
+                let Some((text, origin)) =
+                    idle_background_message(conn, job.owner_id, &event, now).await?
+                else {
+                    // Пока задание ждало, сессия взяла новый ход или фон кончился:
+                    // предупреждение устарело, о дальнейшем скажет обычное событие.
+                    return Ok(JobOutcome::Cancelled("no_longer_idle_with_background"));
+                };
+                return deliver(
+                    conn,
+                    job,
+                    subscriber,
+                    text,
+                    Some(origin),
+                    now,
+                    correlation_id,
+                )
+                .await;
+            }
             let (text, origin) = event_message(conn, job.owner_id, &event).await?;
             deliver(
                 conn,
@@ -304,6 +326,52 @@ async fn event_message(
             json!({"kind":"event","from":id,"chain_depth":depth,"event":origin::HubEvent::deleted(id)}),
         ),
     })
+}
+
+/// Цель для предупреждения: название, харнесс, модель, состояние, фоновые задачи, начало состояния.
+type IdleTarget = (String, String, String, String, Option<i32>, DateTime<Utc>);
+
+/// Предупреждение о простое с фоном собирается при доставке: число задач и минуты берутся
+/// свежими. `None`, если цель удалена или уже не простаивает с работающим фоном.
+async fn idle_background_message(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    event: &EventJob,
+    now: DateTime<Utc>,
+) -> Result<Option<(String, Value)>, sqlx::Error> {
+    let id = event.target_id;
+    let row: Option<IdleTarget> = sqlx::query_as(
+        "select c.title,c.harness,c.model,d.activity_state::text,
+                    (d.activity_evidence->>'background_work')::int,d.activity_since
+             from conversations c join conversation_derived d on d.conversation_id=c.id
+             where c.id=$1 and c.owner_id=$2 and c.trashed_at is null",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((title, harness, model, state, Some(jobs), since)) = row else {
+        return Ok(None);
+    };
+    let jobs = u32::try_from(jobs).unwrap_or(0);
+    if state != "idle" || jobs == 0 {
+        return Ok(None);
+    }
+    let idle_since = event.idle_since.unwrap_or(since);
+    let minutes = (now - idle_since).num_minutes().max(0);
+    let text = summary::idle_background_text(&title, id, &harness, &model, minutes, jobs);
+    let facts = origin::HubEvent {
+        kind: IDLE_BACKGROUND.to_owned(),
+        state: Some("idle".to_owned()),
+        session_id: Some(id),
+        detail: Some(format!(
+            "idle for {minutes} min with {jobs} background {}",
+            if jobs == 1 { "job" } else { "jobs" }
+        )),
+        ..origin::HubEvent::default()
+    };
+    let origin = json!({"kind":"event","from":id,"title":title,"harness":harness,"model":model,"chain_depth":event.chain_depth,"event":facts});
+    Ok(Some((text, origin)))
 }
 
 /// Событие сторожа: текст о машине, отправитель в `origin` — сам получатель.

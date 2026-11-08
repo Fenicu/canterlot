@@ -50,6 +50,7 @@ fn thresholds() -> Thresholds {
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
         idle_quiet: Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
     }
 }
 
@@ -260,6 +261,7 @@ impl Fx {
             limits: Default::default(),
             settle: SettleConfig {
                 idle_quiet: Duration::from_secs(5),
+                idle_background_max: std::time::Duration::from_secs(15 * 60),
                 nudge_enabled: true,
             },
             alarms_enabled: true,
@@ -873,6 +875,7 @@ async fn idle_fingerprint(pool: &PgPool, child: Uuid, now: DateTime<Utc>) -> Str
         now,
         &SettleConfig {
             idle_quiet: Duration::from_secs(5),
+            idle_background_max: std::time::Duration::from_secs(15 * 60),
             nudge_enabled: true,
         },
         &thresholds(),

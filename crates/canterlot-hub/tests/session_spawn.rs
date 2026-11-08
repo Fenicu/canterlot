@@ -127,6 +127,7 @@ impl Fx {
                 limits: Default::default(),
                 settle: SettleConfig {
                     idle_quiet: std::time::Duration::from_secs(5),
+                    idle_background_max: std::time::Duration::from_secs(15 * 60),
                     nudge_enabled: true,
                 },
                 alarms_enabled: true,

@@ -713,6 +713,7 @@ async fn set_activity(pool: &PgPool, id: Uuid, state: S, evidence: E) {
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
         idle_quiet: Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
     };
     activity::refresh(pool, id, Utc::now(), &thresholds, Uuid::now_v7())
         .await

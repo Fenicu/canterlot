@@ -59,6 +59,7 @@ impl Fx {
                 limits: Default::default(),
                 settle: SettleConfig {
                     idle_quiet: QUIET,
+                    idle_background_max: std::time::Duration::from_secs(15 * 60),
                     nudge_enabled: true,
                 },
                 alarms_enabled: true,
@@ -195,6 +196,7 @@ impl Fx {
             stalled_generating: Duration::from_secs(300),
             stalled_tool: Duration::from_secs(1800),
             idle_quiet: QUIET,
+            idle_background_max: std::time::Duration::from_secs(15 * 60),
         };
         activity::refresh(&self.pool, conversation, now, &thresholds, Uuid::now_v7())
             .await

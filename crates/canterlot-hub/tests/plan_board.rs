@@ -23,6 +23,7 @@ fn thresholds() -> Thresholds {
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
         idle_quiet: Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
     }
 }
 
@@ -43,6 +44,7 @@ fn context(pool: &PgPool) -> ToolContext {
         limits: Default::default(),
         settle: SettleConfig {
             idle_quiet: Duration::from_secs(5),
+            idle_background_max: std::time::Duration::from_secs(15 * 60),
             nudge_enabled: true,
         },
         alarms_enabled: true,
@@ -1058,4 +1060,57 @@ async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete(pool:
         d.unwrap();
         assert_eq!(f.state(1).await, "done", "round {round}");
     }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn idle_with_a_running_background_job_never_moves_the_task(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.add(&["Парсер"]).await;
+    f.link(1, f.child).await;
+    let mut tx = f.pool.begin().await.unwrap();
+    canterlot_hub::session_tools::subs::subscribe_in_tx(
+        &mut tx,
+        f.owner,
+        f.orchestrator,
+        f.child,
+        0,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let now = Utc::now();
+    f.refresh(now - TimeDelta::hours(1)).await;
+    // С маркером готовности обычный `idle` перевёл бы задачу на проверку.
+    f.turn("Всё.\nSTATUS: DONE", now - TimeDelta::minutes(40), no_git())
+        .await;
+    sqlx::query(
+        "insert into background_tasks(conversation_id,task_id,execution_id,generation,source_revision,
+           kind,description,state,started_at)
+         values($1,'tail',$2,$3,1,'bash','tail -F build.log','running',now())",
+    )
+    .bind(f.child)
+    .bind(f.execution.execution_id)
+    .bind(f.execution.generation)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query("update executions set last_event_at=$2 where id=$1")
+        .bind(f.execution.execution_id)
+        .bind(now - TimeDelta::minutes(5))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.refresh(now).await;
+    f.refresh(now + TimeDelta::seconds(30)).await;
+    let warnings: Vec<Value> = sqlx::query_scalar(
+        "select payload from scheduled_jobs where kind='session_task' and conversation_id=$1
+           and payload->>'action'='event'",
+    )
+    .bind(f.orchestrator)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0]["state"], "idle_background");
+    assert_eq!(f.state(1).await, "in_progress");
 }

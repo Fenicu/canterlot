@@ -369,6 +369,7 @@ async fn open_request_sets_activity_waiting_for_user_with_question_summary(
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
         idle_quiet: Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
     };
     let act = activity::compute(&inputs, &thresholds);
     assert_eq!(act.state, ActivityState::WaitingForUser);
@@ -417,6 +418,7 @@ async fn waiting_for_user_with_open_request_is_immune_from_stalled(pool: PgPool)
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
         idle_quiet: Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
     };
     let act = activity::compute(&inputs, &thresholds);
     assert_eq!(

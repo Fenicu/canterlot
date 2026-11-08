@@ -15,6 +15,7 @@ fn thresholds() -> Thresholds {
         stalled_generating: Duration::from_secs(1800),
         stalled_tool: Duration::from_secs(1800),
         idle_quiet: Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
     }
 }
 
@@ -299,6 +300,7 @@ fn stalled_thresholds_are_generous_for_generation_and_configurable() {
             stalled_generating: Duration::from_secs(4000),
             stalled_tool: Duration::from_secs(4000),
             idle_quiet: Duration::from_secs(5),
+            idle_background_max: std::time::Duration::from_secs(15 * 60),
         };
         assert_eq!(activity::compute(&i, &custom).state, S::Working);
     }
@@ -512,6 +514,7 @@ fn generating_without_progress_is_stalled_only_after_a_generous_threshold() {
         stalled_generating: Duration::from_secs(1800),
         stalled_tool: Duration::from_secs(1800),
         idle_quiet: Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
     };
     let mut i = inputs();
     i.process = Some(ProcessFacts {

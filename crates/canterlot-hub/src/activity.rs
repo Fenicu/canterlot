@@ -122,6 +122,7 @@ pub struct Thresholds {
     pub stalled_generating: Duration,
     pub stalled_tool: Duration,
     pub idle_quiet: Duration,
+    pub idle_background_max: Duration,
 }
 impl From<&ActivityConfig> for Thresholds {
     fn from(c: &ActivityConfig) -> Self {
@@ -129,6 +130,7 @@ impl From<&ActivityConfig> for Thresholds {
             stalled_generating: c.stalled_generating,
             stalled_tool: c.stalled_tool,
             idle_quiet: c.idle_quiet,
+            idle_background_max: c.idle_background_max,
         }
     }
 }

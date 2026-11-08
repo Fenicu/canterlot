@@ -59,6 +59,7 @@ mod tests {
     fn config() -> SettleConfig {
         SettleConfig {
             idle_quiet: Duration::from_secs(5),
+            idle_background_max: Duration::from_secs(15 * 60),
             nudge_enabled: true,
         }
     }

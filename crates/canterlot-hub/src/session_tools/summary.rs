@@ -945,6 +945,27 @@ impl SessionSummary {
     }
 }
 
+/// Предупреждение «простаивает с фоном»: сессия не работает, но и не осела, потому что
+/// фоновая задача ещё идёт. Это не итог, слова `is now idle` здесь нет.
+pub fn idle_background_text(
+    title: &str,
+    id: Uuid,
+    harness: &str,
+    model: &str,
+    minutes: i64,
+    jobs: u32,
+) -> String {
+    let noun = if jobs == 1 { "job" } else { "jobs" };
+    format!(
+        "[canterlot] Session \"{}\" (id {id}, {}, model {}) has been idle for {minutes} min with {jobs} background {noun} still running; it is not doing anything until it gets a new input. Check its background job or send it a message.\n\
+         This is not a result: you stay subscribed and still get the final report when the session settles.\n\
+         Next: session_inspect to see the background job, or session_send to wake the session and have it check or stop the job.",
+        one_line(title, SHORT_FIELD),
+        one_line(harness, SHORT_FIELD),
+        one_line(model, SHORT_FIELD),
+    )
+}
+
 /// Текст события для подписчика; `None`, если цели уже нет.
 pub async fn event_text(
     conn: &mut PgConnection,

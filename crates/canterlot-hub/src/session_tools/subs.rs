@@ -373,7 +373,7 @@ pub async fn evaluate_in_tx(
     config: &SettleConfig,
 ) -> Result<bool, sqlx::Error> {
     let Some(state) = settle::settled(activity, queue, facts, config) else {
-        return Ok(false);
+        return idle_background_in_tx(conn, target_id, activity, queue, facts, config).await;
     };
     if !completion::is_completion(state) {
         return Ok(false);
@@ -465,6 +465,55 @@ pub async fn evaluate_in_tx(
         if asks {
             payload["asks_in_text"] = json!(true);
         }
+        insert_job(conn, *owner_id, *subscriber_id, facts.now, &payload).await?;
+    }
+    Ok(!open.is_empty())
+}
+
+/// Простой с работающим фоном дольше порога: подписчик слышит об этом один раз за эпизод.
+/// Это не итог: подписка остаётся открытой, пачка и будильники его не видят, автопинок
+/// не взводится, задача плана не двигается. Отпечаток свой, поэтому настоящий итог,
+/// когда фон кончится, дойдёт до подписчика как обычно.
+async fn idle_background_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+    activity: &Activity,
+    queue: &QueueFacts,
+    facts: &SettleFacts,
+    config: &SettleConfig,
+) -> Result<bool, sqlx::Error> {
+    let Some(idle) = settle::idle_background(activity, queue, facts, config) else {
+        return Ok(false);
+    };
+    let fingerprint = settle::idle_background_fingerprint(facts.since, facts.last_turn_at);
+    let open: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(
+        "select s.id,s.owner_id,s.subscriber_id,s.chain_depth,s.armed_at
+         from session_subscriptions s join conversations c on c.id=s.subscriber_id
+         where s.target_id=$1 and s.subscriber_id<>$1 and s.closed_at is null
+           and s.last_fingerprint is distinct from $2
+         for update of s skip locked for key share of c skip locked",
+    )
+    .bind(target_id)
+    .bind(&fingerprint)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, owner_id, subscriber_id, chain_depth, armed_at) in &open {
+        sqlx::query("update session_subscriptions set last_fingerprint=$2 where id=$1")
+            .bind(id)
+            .bind(&fingerprint)
+            .execute(&mut *conn)
+            .await?;
+        let mut payload = event_job(
+            *id,
+            target_id,
+            settle::IDLE_BACKGROUND,
+            &fingerprint,
+            *armed_at,
+            *chain_depth,
+            None,
+        );
+        payload["idle_since"] = json!(idle.idle_since);
+        payload["background_jobs"] = json!(idle.jobs);
         insert_job(conn, *owner_id, *subscriber_id, facts.now, &payload).await?;
     }
     Ok(!open.is_empty())

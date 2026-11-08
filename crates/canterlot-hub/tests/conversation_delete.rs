@@ -615,6 +615,7 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
         limits: Default::default(),
         settle: SettleConfig {
             idle_quiet: std::time::Duration::from_secs(5),
+            idle_background_max: std::time::Duration::from_secs(15 * 60),
             nudge_enabled: true,
         },
         alarms_enabled: true,

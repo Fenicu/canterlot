@@ -424,6 +424,10 @@ pub struct ActivityConfig {
     /// Сколько `idle` без фоновой работы держится спокойно, прежде чем сессия считается устоявшейся.
     #[serde(with = "humantime_serde")]
     pub idle_quiet: Duration,
+    /// Сколько `idle` с работающей фоновой задачей держится, прежде чем подписчик услышит
+    /// отдельное предупреждение: фон не будит сессию, сама она ничего не делает.
+    #[serde(with = "humantime_serde")]
+    pub idle_background_max: Duration,
 }
 
 impl Default for ActivityConfig {
@@ -434,6 +438,7 @@ impl Default for ActivityConfig {
             tick: Duration::from_secs(15),
             debounce: Duration::from_millis(250),
             idle_quiet: Duration::from_secs(5),
+            idle_background_max: Duration::from_secs(15 * 60),
         }
     }
 }

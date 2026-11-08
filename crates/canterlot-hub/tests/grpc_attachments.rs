@@ -195,6 +195,7 @@ impl Fixture {
                 stalled_generating: config.stalled_generating,
                 stalled_tool: config.stalled_tool,
                 idle_quiet: config.idle_quiet,
+                idle_background_max: std::time::Duration::from_secs(15 * 60),
             },
             Uuid::now_v7(),
         )
