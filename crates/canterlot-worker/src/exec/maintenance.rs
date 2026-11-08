@@ -171,22 +171,50 @@ fn is_live_socket(path: &Path) -> bool {
     }
 }
 
-/// Рабочие копии, где сборка не менялась дольше `idle`.
-pub(crate) struct IdleWorktree {
+/// Рабочая копия со сборкой, которая не писала дольше наименьшего срока уборки.
+pub(crate) struct BuildCandidate {
     pub conversation_id: String,
     pub path: PathBuf,
 }
 
-pub(crate) fn idle_worktrees(
+/// Насколько глубоко убирается сборка рабочей копии.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Grade {
+    /// Живое, но простаивающее исполнение: `*/incremental`, `target/lint` и старые
+    /// тестовые бинарники. Следующая сборка восстановит их сама.
+    Idle,
+    /// Исполнения нет: весь `target` и `node_modules/.cache`.
+    Released,
+}
+
+/// Подкаталог корня рабочих копий для переименованного под удаление: та же файловая
+/// система, имя не UUID, поэтому обход копий его не видит.
+pub(crate) const TRASH_DIR: &str = ".gc";
+
+pub(crate) fn trash_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("worktrees").join(TRASH_DIR)
+}
+
+/// Последняя запись сборки; без каталогов сборки — время самого `target`.
+pub(crate) fn build_newest(target: &Path) -> Option<SystemTime> {
+    crate::machine::hotspots::target_newest(target).or_else(|| {
+        fs::symlink_metadata(target)
+            .ok()
+            .filter(|meta| meta.is_dir())
+            .and_then(|meta| meta.modified().ok())
+    })
+}
+
+pub(crate) fn build_candidates(
     data_dir: &Path,
     now: SystemTime,
-    idle: Duration,
-) -> io::Result<Vec<IdleWorktree>> {
+    min_idle: Duration,
+) -> io::Result<Vec<BuildCandidate>> {
     let worktrees = data_dir.join("worktrees");
     let Ok(entries) = fs::read_dir(&worktrees) else {
         return Ok(Vec::new());
     };
-    let mut idle_worktrees = Vec::new();
+    let mut candidates = Vec::new();
     for entry in entries.flatten() {
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -205,30 +233,230 @@ pub(crate) fn idle_worktrees(
         let Some(target) = direct_dir(&worktree, "target") else {
             continue;
         };
-        let Some(newest) = newest_mtime(&target)? else {
+        let Some(newest) = build_newest(&target) else {
             continue;
         };
-        if !now.duration_since(newest).is_ok_and(|age| age > idle) {
+        if !now.duration_since(newest).is_ok_and(|age| age > min_idle) {
             continue;
         }
-        idle_worktrees.push(IdleWorktree {
+        candidates.push(BuildCandidate {
             conversation_id: name.to_owned(),
             path: worktree,
         });
     }
-    Ok(idle_worktrees)
+    Ok(candidates)
 }
 
-/// Убирает `target` и кэш `node_modules/.cache` в рабочей копии.
-pub(crate) fn remove_build(worktree: &Path) -> io::Result<()> {
+/// Каталоги профилей: `target/<профиль>` и `target/lint/<профиль>`.
+fn profiles(target: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(target) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_name() == "lint" {
+            if let Ok(inner) = fs::read_dir(&path) {
+                out.extend(
+                    inner
+                        .flatten()
+                        .filter(|e| e.file_type().is_ok_and(|kind| kind.is_dir()))
+                        .map(|e| e.path()),
+                );
+            }
+        }
+        out.push(path);
+    }
+    out
+}
+
+/// Взятые на время уборки замки сборки cargo.
+pub(crate) struct BuildLocks(#[allow(dead_code)] Vec<fs::File>);
+
+/// Исключительный замок без ожидания на каждом замке cargo в `target`. Не взялся
+/// хоть один — сборка идёт (или ждёт), копия занята: `None`. Пока замки у уборки,
+/// новая сборка ждёт их и не увидит полуудалённый каталог.
+pub(crate) fn lock_build(target: &Path) -> Option<BuildLocks> {
+    use rustix::fs::{FlockOperation, flock};
+    let mut held = Vec::new();
+    for profile in profiles(target) {
+        for name in [".cargo-lock", ".cargo-build-lock", ".cargo-artifact-lock"] {
+            let path = profile.join(name);
+            let file = match fs::OpenOptions::new().read(true).open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            };
+            if flock(&file, FlockOperation::NonBlockingLockExclusive).is_err() {
+                return None;
+            }
+            held.push(file);
+        }
+    }
+    Some(BuildLocks(held))
+}
+
+/// Держит ли какой-нибудь процесс, кроме `skip` (сам воркер со взятыми замками),
+/// исполняемый файл, рабочий каталог или открытый дескриптор под `target`: тестовый
+/// бинарник из `deps/` или сборка с `--manifest-path` замок cargo могут уже отпустить.
+pub(crate) fn target_in_use(target: &Path, proc_root: &Path, skip: u32) -> bool {
+    let Ok(target) = fs::canonicalize(target) else {
+        return false;
+    };
+    let under = |link: &Path| fs::read_link(link).is_ok_and(|path| path.starts_with(&target));
+    let Ok(entries) = fs::read_dir(proc_root) else {
+        // Не видно процессов — не видно и занятости: уборка не рискует.
+        return true;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+            .is_none_or(|pid| pid == skip)
+        {
+            continue;
+        }
+        let dir = entry.path();
+        if under(&dir.join("cwd")) || under(&dir.join("exe")) {
+            return true;
+        }
+        if let Ok(fds) = fs::read_dir(dir.join("fd")) {
+            for fd in fds.flatten() {
+                if under(&fd.path()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Старые копии тестовых бинарников в `deps/` (логика `scripts/prune-target.sh`):
+/// у каждого имени остаётся самый свежий, прочие уходят вместе с `.d` и `.dwo`.
+fn stale_test_binaries(deps: &Path) -> Vec<PathBuf> {
+    use std::{collections::HashMap, os::unix::fs::PermissionsExt};
+    let Ok(entries) = fs::read_dir(deps) else {
+        return Vec::new();
+    };
+    let mut groups: HashMap<String, Vec<(SystemTime, String)>> = HashMap::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((stem, hash)) = name.rsplit_once('-') else {
+            continue;
+        };
+        if hash.len() != 16 || !hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 || meta.len() <= 1 << 20 {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        groups
+            .entry(stem.to_owned())
+            .or_default()
+            .push((modified, name.to_owned()));
+    }
+    let mut stale = Vec::new();
+    for mut names in groups.into_values() {
+        names.sort();
+        names.pop();
+        for (_, name) in names {
+            for suffix in ["", ".d", ".dwo"] {
+                let path = deps.join(format!("{name}{suffix}"));
+                if fs::symlink_metadata(&path).is_ok() {
+                    stale.push(path);
+                }
+            }
+        }
+    }
+    stale
+}
+
+/// Переименовывает убираемое в новый каталог корзины и возвращает его. Переименование
+/// мгновенно, долгое удаление идёт потом, вне потока хранилища. Пустой результат —
+/// убирать нечего.
+pub(crate) fn stage_build(
+    worktree: &Path,
+    grade: Grade,
+    trash_root: &Path,
+) -> io::Result<Option<PathBuf>> {
     let Some(target) = direct_dir(worktree, "target") else {
+        return Ok(None);
+    };
+    let mut doomed = Vec::new();
+    match grade {
+        Grade::Released => {
+            doomed.push(target.clone());
+            if let Some(modules) = direct_dir(worktree, "node_modules")
+                && let Some(cache) = direct_dir(&modules, ".cache")
+            {
+                doomed.push(cache);
+            }
+        }
+        Grade::Idle => {
+            if let Some(lint) = direct_dir(&target, "lint") {
+                doomed.push(lint);
+            }
+            for profile in profiles(&target) {
+                if profile.starts_with(target.join("lint")) {
+                    continue;
+                }
+                if let Some(incremental) = direct_dir(&profile, "incremental") {
+                    doomed.push(incremental);
+                }
+                doomed.extend(stale_test_binaries(&profile.join("deps")));
+            }
+        }
+    }
+    if doomed.is_empty() {
+        return Ok(None);
+    }
+    fs::create_dir_all(trash_root)?;
+    let batch = trash_root.join(Uuid::now_v7().to_string());
+    fs::create_dir(&batch)?;
+    for (index, path) in doomed.iter().enumerate() {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match fs::rename(path, batch.join(format!("{index}-{name}"))) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Some(batch))
+}
+
+/// Удаляет содержимое корзины, включая остатки прерванных уборок.
+pub(crate) fn purge_trash(trash_root: &Path) -> io::Result<()> {
+    let Ok(entries) = fs::read_dir(trash_root) else {
         return Ok(());
     };
-    fs::remove_dir_all(&target)?;
-    if let Some(modules) = direct_dir(worktree, "node_modules")
-        && let Some(cache) = direct_dir(&modules, ".cache")
-    {
-        fs::remove_dir_all(cache)?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let result = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
     Ok(())
 }
@@ -237,26 +465,6 @@ fn direct_dir(parent: &Path, name: &str) -> Option<PathBuf> {
     let path = parent.join(name);
     let meta = fs::symlink_metadata(&path).ok()?;
     (meta.is_dir() && !meta.file_type().is_symlink()).then_some(path)
-}
-
-fn newest_mtime(path: &Path) -> io::Result<Option<SystemTime>> {
-    let meta = fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
-        return Ok(None);
-    }
-    let mut newest = meta.modified().ok();
-    if meta.is_dir() {
-        for entry in fs::read_dir(path)? {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            if let Ok(Some(time)) = newest_mtime(&entry.path()) {
-                newest = Some(newest.map_or(time, |current| current.max(time)));
-            }
-        }
-    }
-    Ok(newest)
 }
 
 #[cfg(test)]
@@ -272,8 +480,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ensure_test_runtime_allowed, idle_worktrees, remove_build, remove_stale_execution,
-        remove_stale_socket, stale_executions, stale_sockets,
+        Grade, TRASH_DIR, build_candidates, ensure_test_runtime_allowed, lock_build,
+        purge_trash, remove_stale_execution, remove_stale_socket, stage_build, stale_executions,
+        stale_sockets, target_in_use, trash_root,
     };
 
     fn old(path: &Path) {
@@ -360,14 +569,20 @@ mod tests {
         fs::create_dir_all(&cache_outside).unwrap();
         std::os::unix::fs::symlink(&cache_outside, cache_tree.join("node_modules")).unwrap();
 
-        let idle_builds =
-            idle_worktrees(&data, SystemTime::now(), Duration::from_secs(6 * 3600)).unwrap();
-        for worktree in idle_builds {
-            if worktree.conversation_id == live_conversation {
+        let trash = trash_root(&data);
+        let candidates =
+            build_candidates(&data, SystemTime::now(), Duration::from_secs(6 * 3600)).unwrap();
+        for candidate in candidates {
+            if candidate.conversation_id == live_conversation {
                 continue;
             }
-            remove_build(&worktree.path).unwrap();
+            stage_build(&candidate.path, Grade::Released, &trash).unwrap();
         }
+        assert!(build_candidates(&data, SystemTime::now(), Duration::from_secs(1))
+            .unwrap()
+            .iter()
+            .all(|c| c.conversation_id != TRASH_DIR));
+        purge_trash(&trash).unwrap();
 
         assert!(!idle_tree.join("target").exists());
         assert!(!idle_tree.join("node_modules/.cache").exists());
@@ -380,7 +595,93 @@ mod tests {
         assert!(!cache_tree.join("target").exists());
         assert!(cache_tree.join("node_modules").is_symlink());
         assert!(cache_outside.exists());
+        assert_eq!(fs::read_dir(&trash).unwrap().count(), 0);
     }
+
+    fn binary(path: &Path, age_hours: u64) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, vec![0u8; (1 << 20) + 1]).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        let at = SystemTime::now() - Duration::from_secs(age_hours * 3600);
+        fs::File::open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn idle_grade_keeps_target_but_drops_incremental_lint_and_stale_test_binaries() {
+        let root = tempfile::Builder::new().prefix("cl-").tempdir_in("/tmp").unwrap();
+        let worktree = root.path().join("wt");
+        let target = worktree.join("target");
+        let deps = target.join("debug/deps");
+        fs::create_dir_all(&deps).unwrap();
+        fs::create_dir_all(target.join("debug/incremental/crate-abc")).unwrap();
+        fs::create_dir_all(target.join("lint/debug/incremental")).unwrap();
+        fs::write(target.join("debug/incremental/crate-abc/q"), "q").unwrap();
+        binary(&deps.join("session-0123456789abcdef"), 5);
+        fs::write(deps.join("session-0123456789abcdef.d"), "d").unwrap();
+        binary(&deps.join("session-fedcba9876543210"), 1);
+        fs::write(deps.join("libdep-0123456789abcdef.rlib"), "lib").unwrap();
+        binary(&target.join("debug/canterlot-worker"), 5);
+
+        let trash = root.path().join("trash");
+        let batch = stage_build(&worktree, Grade::Idle, &trash).unwrap().unwrap();
+        assert!(!target.join("debug/incremental").exists());
+        assert!(!target.join("lint").exists());
+        assert!(!deps.join("session-0123456789abcdef").exists());
+        assert!(!deps.join("session-0123456789abcdef.d").exists());
+        assert!(deps.join("session-fedcba9876543210").exists(), "newest copy stays");
+        assert!(deps.join("libdep-0123456789abcdef.rlib").exists());
+        assert!(target.join("debug/canterlot-worker").exists());
+        assert_eq!(fs::read_dir(&batch).unwrap().count(), 4);
+        purge_trash(&trash).unwrap();
+        assert!(!batch.exists());
+        // Повтор: убирать уже нечего.
+        assert!(stage_build(&worktree, Grade::Idle, &trash).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_held_cargo_lock_or_a_process_inside_target_makes_the_build_busy() {
+        use rustix::fs::{FlockOperation, flock};
+        let root = tempfile::Builder::new().prefix("cl-").tempdir_in("/tmp").unwrap();
+        let target = root.path().join("wt/target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::create_dir_all(target.join("lint/debug")).unwrap();
+        fs::write(target.join("debug/.cargo-lock"), "").unwrap();
+        fs::write(target.join("lint/debug/.cargo-build-lock"), "").unwrap();
+
+        let locks = lock_build(&target).expect("nobody builds");
+        drop(locks);
+
+        // Сборка началась во время уборки: её замок держит cargo.
+        let cargo = fs::File::open(target.join("lint/debug/.cargo-build-lock")).unwrap();
+        flock(&cargo, FlockOperation::LockShared).unwrap();
+        assert!(lock_build(&target).is_none());
+        drop(cargo);
+        assert!(lock_build(&target).is_some());
+
+        let own = std::process::id();
+        let mine = fs::File::open(target.join("debug/.cargo-lock")).unwrap();
+        assert!(!target_in_use(&target, Path::new("/proc"), own), "own fds are skipped");
+        assert!(target_in_use(&target, Path::new("/proc"), 0));
+        drop(mine);
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(target.join("debug"))
+            .spawn()
+            .unwrap();
+        assert!(target_in_use(&target, Path::new("/proc"), own), "cwd counts");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(fs::File::open(target.join("debug/.cargo-lock")).unwrap())
+            .spawn()
+            .unwrap();
+        assert!(target_in_use(&target, Path::new("/proc"), own), "an open fd counts");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!target_in_use(&target, Path::new("/proc"), own));
+    }
+
     #[test]
     fn sweep_refuses_runtime_outside_the_temp_dir() {
         let error = ensure_test_runtime_allowed(Some(Path::new("/canterlot-worker-test-runtime")))

@@ -386,20 +386,31 @@ async fn before_recheck(key: &str) {
 #[cfg(not(test))]
 async fn before_recheck(_: &str) {}
 
-/// Сборка в рабочей копии без живого исполнения: `target` и кэш узлов старше шести часов.
+/// Уборка сборки в рабочих копиях. Простаивающая живая копия (`idle_cache_hours`)
+/// теряет `incremental`, `target/lint` и старые тестовые бинарники, копия без живого
+/// исполнения (`released_target_hours`) — весь `target` и `node_modules/.cache`.
+/// Занятая сборка (замок cargo, процесс с каталогом, файлом или дескриптором под
+/// `target`) не трогается. Решение перепроверяется в потоке хранилища, там же убираемое
+/// переименовывается в корзину; удаление идёт потом, вне потока хранилища.
 pub(super) async fn gc_worktrees(shared: &Shared) -> Result<(), ExecError> {
     let data_dir = shared.data_dir().await?.clone();
-    let idle_worktrees = tokio::task::spawn_blocking(move || {
-        maintenance::idle_worktrees(&data_dir, SystemTime::now(), Duration::from_secs(6 * 3600))
+    let ages = *shared.cache_ages.lock().expect("cache ages lock");
+    let trash = maintenance::trash_root(&data_dir);
+    let listing_trash = trash.clone();
+    let candidates = tokio::task::spawn_blocking(move || {
+        if let Err(error) = maintenance::purge_trash(&listing_trash) {
+            tracing::warn!(reason = %error, "gc trash purge failed");
+        }
+        maintenance::build_candidates(&data_dir, SystemTime::now(), ages.idle.min(ages.released))
     })
     .await
     .map_err(|_| ExecError::Shutdown)??;
-    for worktree in idle_worktrees {
-        before_recheck(&worktree.conversation_id).await;
-        let conversation_id = worktree.conversation_id.clone();
-        let path = worktree.path.clone();
-        // Проверка и удаление в потоке хранилища: запись принадлежности не вклинится между ними.
-        shared
+    for candidate in candidates {
+        before_recheck(&candidate.conversation_id).await;
+        let conversation_id = candidate.conversation_id.clone();
+        let path = candidate.path.clone();
+        let trash = trash.clone();
+        let staged = shared
             .store
             .call(move |slot| {
                 let store = open(slot)?;
@@ -408,13 +419,35 @@ pub(super) async fn gc_worktrees(shared: &Shared) -> Result<(), ExecError> {
                     .unreleased()
                     .iter()
                     .any(|record| record.conversation_id == conversation_id);
-                if live {
-                    return Ok(());
+                let (grade, age) = if live {
+                    (maintenance::Grade::Idle, ages.idle)
+                } else {
+                    (maintenance::Grade::Released, ages.released)
+                };
+                let target = path.join("target");
+                let idle = maintenance::build_newest(&target)
+                    .and_then(|newest| SystemTime::now().duration_since(newest).ok())
+                    .is_some_and(|elapsed| elapsed > age);
+                if !idle {
+                    return Ok(None);
                 }
-                maintenance::remove_build(&path)?;
-                Ok(())
+                // Замки cargo держатся до конца переименования: новая сборка ждёт их.
+                let Some(locks) = maintenance::lock_build(&target) else {
+                    return Ok(None);
+                };
+                if maintenance::target_in_use(&target, Path::new("/proc"), std::process::id()) {
+                    return Ok(None);
+                }
+                let staged = maintenance::stage_build(&path, grade, &trash)?;
+                drop(locks);
+                Ok(staged)
             })
             .await?;
+        if let Some(batch) = staged {
+            tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&batch))
+                .await
+                .map_err(|_| ExecError::Shutdown)??;
+        }
     }
     Ok(())
 }
@@ -3270,6 +3303,104 @@ mod tests {
         super::gc_worktrees(&manager.shared).await.unwrap();
         *BEFORE_RECHECK.lock().unwrap() = None;
         assert!(worktree.join("target/debug/old").exists());
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    fn gc_manager(
+        root: &Path,
+        thread: &StoreThread,
+    ) -> ExecutionManager {
+        let (relay, _rx) = mpsc::channel(1);
+        ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.join("runtime")),
+        )
+    }
+
+    fn gc_tree(data: &Path, conversation: Uuid) -> std::path::PathBuf {
+        let worktree = data.join("worktrees").join(conversation.to_string());
+        let target = worktree.join("target");
+        fs::create_dir_all(target.join("debug/deps")).unwrap();
+        fs::create_dir_all(target.join("debug/incremental/crate-1")).unwrap();
+        fs::create_dir_all(target.join("lint/debug")).unwrap();
+        fs::write(target.join("debug/.cargo-lock"), "").unwrap();
+        fs::write(target.join("debug/deps/libkeep.rlib"), "keep").unwrap();
+        fs::write(target.join("debug/incremental/crate-1/q"), "q").unwrap();
+        age_tree(&target);
+        worktree
+    }
+
+    async fn attach(thread: &StoreThread, conversation: Uuid) {
+        thread
+            .client()
+            .call(move |slot| {
+                open(slot)?.ownership_mut()?.append(Ownership {
+                    execution_id: Uuid::now_v7().to_string(),
+                    conversation_id: conversation.to_string(),
+                    phase: OwnershipPhase::Attached as i32,
+                    ..Default::default()
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gc_grades_live_idle_and_released_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let live = Uuid::now_v7();
+        let released = Uuid::now_v7();
+        let live_tree = gc_tree(&data, live);
+        let released_tree = gc_tree(&data, released);
+        // Остаток прерванной уборки исчезает на следующем проходе.
+        let leftover = data.join("worktrees/.gc/old-batch");
+        fs::create_dir_all(&leftover).unwrap();
+        let thread = StoreThread::new(store);
+        attach(&thread, live).await;
+        let manager = gc_manager(root.path(), &thread);
+        super::gc_worktrees(&manager.shared).await.unwrap();
+
+        assert!(live_tree.join("target/debug/deps/libkeep.rlib").exists());
+        assert!(!live_tree.join("target/debug/incremental").exists());
+        assert!(!live_tree.join("target/lint").exists());
+        assert!(!released_tree.join("target").exists());
+        assert!(!leftover.exists());
+        assert_eq!(fs::read_dir(data.join("worktrees/.gc")).unwrap().count(), 0);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gc_skips_a_build_that_starts_during_the_pass() {
+        use rustix::fs::{FlockOperation, flock};
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let conversation = Uuid::now_v7();
+        let worktree = gc_tree(&data, conversation);
+        let thread = StoreThread::new(store);
+        let manager = gc_manager(root.path(), &thread);
+        // Между перечислением и перепроверкой cargo взял замок сборки.
+        let held: std::sync::Arc<std::sync::Mutex<Option<fs::File>>> = Default::default();
+        let slot = held.clone();
+        let lock = worktree.join("target/debug/.cargo-lock");
+        *BEFORE_RECHECK.lock().unwrap() = Some(std::sync::Arc::new(move |_| {
+            let file = fs::File::open(&lock).unwrap();
+            flock(&file, FlockOperation::LockExclusive).unwrap();
+            *slot.lock().unwrap() = Some(file);
+            Box::pin(async {})
+        }));
+        super::gc_worktrees(&manager.shared).await.unwrap();
+        *BEFORE_RECHECK.lock().unwrap() = None;
+        assert!(worktree.join("target/debug/incremental/crate-1/q").exists());
+        assert!(worktree.join("target/lint").exists());
+        drop(held.lock().unwrap().take());
         manager.shutdown().await;
         thread.close().await.unwrap();
     }
