@@ -70,10 +70,20 @@ case_end
 # R2: --apply удаляет только старое, живые и current целы.
 case_begin "retain apply"
 setup_retain apply
+export FAKE_SSH_LOG_CMDS=1
 if bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain.log" 2>&1; then
     case_ok "exit 0"
 else
     case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/retain.log"
+fi
+unset FAKE_SSH_LOG_CMDS
+# `removed` печатается только после чтения пути там, где он живёт (прод 1.20.0
+# печатал его локально для удалённого пути хаба).
+assert_contains "${FAKE_ROOT}/retain.log" "removed ${HUB_RELEASES}/000000000002" "hub removal reported"
+if grep -F -- "test ! -e" "${FAKE_ROOT}/state/ssh-cmds.log" | grep -F -- "releases/000000000002" >/dev/null; then
+    case_ok "hub removal is verified by a read on the hub host"
+else
+    case_fail "no read-back of the removed hub release"
 fi
 [ -d "${HUB_RELEASES}/000000000001" ] && [ ! -e "${HUB_RELEASES}/000000000002" ] \
     && case_ok "live hub release kept, old hub release removed" || case_fail "live hub kept/deleted wrong"
@@ -219,11 +229,109 @@ fi
 [ -d "${HUB_RELEASES}/000000000002" ] && [ -d "${WEB_RELEASES}/000000000002" ] && [ -d "${WORKER_RELEASES}/000000000002" ] \
     && case_ok "reserved release kept on all three hosts" || case_fail "reserved release was removed"
 assert_contains "${FAKE_ROOT}/retain.log" "reserved by a running operation" "skip reported"
-assert_not_contains "${FAKE_ROOT}/retain.log" "removed ${HUB_RELEASES}/000000000002" "not reported as removed"
+assert_not_contains "${FAKE_ROOT}/retain.log" "removed ${HUB_RELEASES}/000000000002" "hub not reported as removed"
+assert_not_contains "${FAKE_ROOT}/retain.log" "removed ${WEB_RELEASES}/000000000002" "web not reported as removed"
+assert_not_contains "${FAKE_ROOT}/retain.log" "removed ${WORKER_RELEASES}/000000000002" "worker not reported as removed"
 [ ! -e "${HUB_BACKUP_DIR}/canterlot-pre-000000000001.dump" ] && case_ok "unrelated dump rotation still happens" || case_fail "dump rotation stopped"
 rm -f "${HUB_BASE}/.reserved.000000000002"
 bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain2.log" 2>&1 || case_fail "second retain failed"
 [ ! -e "${HUB_RELEASES}/000000000002" ] && case_ok "without the reservation the release is removed" || case_fail "release kept without reservation"
+teardown_case
+case_end
+
+# Пид процесса, который уже завершился: маркер ссылается на мёртвый прогон.
+dead_pid() { bash -c 'echo $$'; }
+write_marker() { # host_base release content
+    printf '%s\n' "$3" >"$1/.reserved.$2"
+}
+
+# R8: старый маркер мёртвого прогона (старше 2 ч) снимается, релиз удаляется.
+case_begin "retain releases a stale reservation of a dead run"
+setup_retain stalemarker
+NOW="$(date -u +%s)"
+OLD_STARTED="$((NOW - 10800))"
+OLD_PID="$(dead_pid)"
+for base in "${HUB_BASE}" "${WEB_SITES_BASE}" "${WORKER_BASE}"; do
+    write_marker "${base}" 000000000002 "run=old-run pid=${OLD_PID} started=${OLD_STARTED}"
+done
+if bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -8 "${FAKE_ROOT}/retain.log"
+fi
+assert_contains "${FAKE_ROOT}/retain.log" "stale reservation of 000000000002 from " "stale release logged"
+assert_not_contains "${FAKE_ROOT}/retain.log" "reserved by a running operation" "guard did not refuse the stale release"
+[ ! -e "${HUB_RELEASES}/000000000002" ] && [ ! -e "${WEB_RELEASES}/000000000002" ] && [ ! -e "${WORKER_RELEASES}/000000000002" ] \
+    && case_ok "stale-reserved release removed on all three hosts" || case_fail "stale-reserved release kept"
+assert_contains "${FAKE_ROOT}/retain.log" "removed ${HUB_RELEASES}/000000000002" "removal reported after the stale clear"
+if [ ! -e "${HUB_BASE}/.reserved.000000000002" ] && [ ! -e "${WEB_SITES_BASE}/.reserved.000000000002" ] \
+    && [ ! -e "${WORKER_BASE}/.reserved.000000000002" ]; then
+    case_ok "stale markers cleared"
+else
+    case_fail "stale markers left behind"
+fi
+teardown_case
+case_end
+
+# R9: молодой маркер (моложе 2 ч) уважается, даже если прогон уже мёртв.
+case_begin "retain respects a fresh reservation"
+setup_retain freshmarker
+NOW="$(date -u +%s)"
+FRESH_PID="$(dead_pid)"
+for base in "${HUB_BASE}" "${WEB_SITES_BASE}" "${WORKER_BASE}"; do
+    write_marker "${base}" 000000000002 "run=fresh-run pid=${FRESH_PID} started=$((NOW - 60))"
+done
+if bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -8 "${FAKE_ROOT}/retain.log"
+fi
+[ -d "${HUB_RELEASES}/000000000002" ] && [ -d "${WEB_RELEASES}/000000000002" ] && [ -d "${WORKER_RELEASES}/000000000002" ] \
+    && case_ok "fresh reservation kept the release" || case_fail "fresh reservation was ignored"
+assert_contains "${FAKE_ROOT}/retain.log" "reserved by a running operation" "skip reported for the fresh marker"
+assert_not_contains "${FAKE_ROOT}/retain.log" "stale reservation of 000000000002" "fresh marker not called stale"
+assert_not_contains "${FAKE_ROOT}/retain.log" "removed ${HUB_RELEASES}/000000000002" "fresh-reserved release not reported removed"
+teardown_case
+case_end
+
+# R10: старый маркер живого прогона уважается: живой pid важнее возраста.
+case_begin "retain respects a reservation of a live run"
+setup_retain livemarker
+command sleep 600 >/dev/null 2>&1 <&- &
+LIVE_PID=$!
+HARNESS_PIDS+=("${LIVE_PID}")
+NOW="$(date -u +%s)"
+for base in "${HUB_BASE}" "${WEB_SITES_BASE}" "${WORKER_BASE}"; do
+    write_marker "${base}" 000000000002 "run=live-run pid=${LIVE_PID} started=$((NOW - 10800))"
+done
+if bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -8 "${FAKE_ROOT}/retain.log"
+fi
+[ -d "${HUB_RELEASES}/000000000002" ] && [ -d "${WEB_RELEASES}/000000000002" ] && [ -d "${WORKER_RELEASES}/000000000002" ] \
+    && case_ok "live-run reservation kept the release" || case_fail "live-run reservation was ignored"
+assert_contains "${FAKE_ROOT}/retain.log" "is still alive" "live run reported"
+assert_not_contains "${FAKE_ROOT}/retain.log" "stale reservation of 000000000002" "live run not called stale"
+teardown_case
+case_end
+
+# R11: маркеры старого toolkit пустые; их возраст — mtime. Старый пустой маркер
+# (остался от 1.19.1) снимается и больше не держит релиз вечно.
+case_begin "retain releases an old empty marker by its mtime"
+setup_retain legacymarker
+for base in "${HUB_BASE}" "${WEB_SITES_BASE}" "${WORKER_BASE}"; do
+    : >"${base}/.reserved.000000000002"
+    touch -d '3 hours ago' "${base}/.reserved.000000000002"
+done
+if bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -8 "${FAKE_ROOT}/retain.log"
+fi
+assert_contains "${FAKE_ROOT}/retain.log" "stale reservation of 000000000002 from " "legacy stale marker logged"
+[ ! -e "${HUB_RELEASES}/000000000002" ] && [ ! -e "${WEB_RELEASES}/000000000002" ] && [ ! -e "${WORKER_RELEASES}/000000000002" ] \
+    && case_ok "legacy-reserved release removed" || case_fail "legacy-reserved release kept"
 teardown_case
 case_end
 

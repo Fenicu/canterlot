@@ -47,6 +47,11 @@ locked_cmd_text() {
     local lock="$1" script="$2"; shift 2
     printf 'flock -o -w %s %s bash -c %s --%s' "${HOST_LOCK_WAIT}" "$(shq "${lock}")" "$(shq "${script}")" "$(_quote_args "$@")"
 }
+# Текст удалённой команды без lock: bash -c <script> -- <args>. Только чтения.
+script_cmd_text() {
+    local script="$1"; shift
+    printf 'bash -c %s --%s' "$(shq "${script}")" "$(_quote_args "$@")"
+}
 hub_locked() {
     local script="$1"; shift
     ssh_hub "$(locked_cmd_text "${HUB_BASE}/.deploy.lock" "${script}" "$@")"
@@ -72,17 +77,47 @@ ssh_cmd_text() { printf 'ssh %s %s' "$1" "$(shq "$2")"; }
 # <корень выката>/.reserved.<release> под тем же lock. retain не удаляет
 # зарезервированный релиз, так что проверка цели и flip не расходятся с чисткой.
 # Резервы снимаются явно по завершении операции (reservations_release).
+# Маркер хранит, кто и когда его поставил: run=<id> pid=<pid> started=<epoch>.
+# pid — процесс операции на машине воркера (все прогоны идут там), поэтому retain
+# отличает живой прогон от брошенного. Старые маркеры без содержимого оцениваются
+# по mtime файла.
 # shellcheck disable=SC2016 # удалённый скрипт раскрывает свои позиционные аргументы
-RESERVE_SCRIPT='b="$1"; shift; for n in "$@"; do : >"${b}/.reserved.${n}"; done'
+RESERVE_SCRIPT='b="$1"; run="$2"; pid="$3"; started="$4"; shift 4; for n in "$@"; do printf "run=%s pid=%s started=%s\n" "$run" "$pid" "$started" >"${b}/.reserved.${n}"; done'
 # shellcheck disable=SC2016,SC2034 # используется в cutover (печатаемая команда)
 UNRESERVE_SCRIPT='b="$1"; shift; for n in "$@"; do rm -f "${b}/.reserved.${n}"; done'
 reserve_releases() {
     local kind="$1"; shift
+    if [ -z "${DEPLOY_RUN_ID:-}" ]; then
+        DEPLOY_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    fi
+    if [ -z "${DEPLOY_RUN_PID:-}" ]; then
+        DEPLOY_RUN_PID="$$"
+    fi
+    if [ -z "${DEPLOY_RUN_STARTED:-}" ]; then
+        DEPLOY_RUN_STARTED="$(date -u +%s)"
+    fi
     case "${kind}" in
-        hub) hub_locked "${RESERVE_SCRIPT}" "${HUB_BASE}" "$@" ;;
-        web) web_locked "${RESERVE_SCRIPT}" "${WEB_SITES_BASE}" "$@" ;;
-        worker) worker_locked "${RESERVE_SCRIPT}" "${WORKER_BASE}" "$@" ;;
+        hub) hub_locked "${RESERVE_SCRIPT}" "${HUB_BASE}" "${DEPLOY_RUN_ID}" "${DEPLOY_RUN_PID}" "${DEPLOY_RUN_STARTED}" "$@" ;;
+        web) web_locked "${RESERVE_SCRIPT}" "${WEB_SITES_BASE}" "${DEPLOY_RUN_ID}" "${DEPLOY_RUN_PID}" "${DEPLOY_RUN_STARTED}" "$@" ;;
+        worker) worker_locked "${RESERVE_SCRIPT}" "${WORKER_BASE}" "${DEPLOY_RUN_ID}" "${DEPLOY_RUN_PID}" "${DEPLOY_RUN_STARTED}" "$@" ;;
         *) die "unknown reservation kind: ${kind}" ;;
+    esac
+}
+# Снять устаревший резерв под тем же lock: только если содержимое маркера не
+# изменилось с момента чтения. Иначе прогон успел перезаписать его своим —
+# не трогаем и отказываем кодом 6 (это «занято», а не ошибка).
+# shellcheck disable=SC2016,SC2034 # используется в retain (снятие устаревшего резерва)
+CLEAR_RESERVATION_SCRIPT='b="$1"; n="$2"; want="$3"; f="${b}/.reserved.${n}"; [ -e "$f" ] || exit 0; [ "$(cat "$f")" = "$want" ] || exit 6; rm -f "$f"'
+# Чтение резервов хоста (только чтение): строки "release|mtime|content". content —
+# одна строка, которую пишет RESERVE_SCRIPT; у старых прогонов она пустая.
+# shellcheck disable=SC2016 # удалённый скрипт раскрывает свои позиционные аргументы
+RESERVATIONS_SCRIPT='b="$1"; for f in "$b"/.reserved.*; do [ -f "$f" ] || continue; n="${f##*/.reserved.}"; m="$(stat -c %Y "$f" 2>/dev/null || echo 0)"; c="$(tr -d "\n" <"$f" 2>/dev/null || true)"; printf "%s|%s|%s\n" "$n" "$m" "$c"; done'
+reservation_lines() {
+    case "$1" in
+        hub) ssh_hub "$(script_cmd_text "${RESERVATIONS_SCRIPT}" "${HUB_BASE}")" ;;
+        web) ssh_web "$(script_cmd_text "${RESERVATIONS_SCRIPT}" "${WEB_SITES_BASE}")" ;;
+        worker) bash -c "${RESERVATIONS_SCRIPT}" -- "${WORKER_BASE}" ;;
+        *) die "unknown reservation kind: $1" ;;
     esac
 }
 unreserve_releases() {

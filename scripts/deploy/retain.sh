@@ -157,27 +157,104 @@ for dump in ${DUMPS:-}; do
     fi
 done
 
-if [ ! -s "${REMOVE_LIST}" ]; then
-    log "nothing to remove"
-    exit 0
-fi
 if [ "${APPLY}" = "0" ]; then
     log "plan only; re-run with --apply to delete after review"
     exit 0
 fi
 
-# Код 6 — релиз зарезервирован идущей операцией (cutover/rollback-db): это не
-# ошибка, а «не сейчас»; пропускаем его и идём дальше. Остальные коды — громкий отказ.
-SKIPPED_RESERVED=0
-remove_refused() {
-    if [ "$1" = "6" ]; then
-        log "skip ${3}: reserved by a running operation"
-        SKIPPED_RESERVED=$((SKIPPED_RESERVED + 1))
-        return 0
+# Устаревший резерв: прогон уже не работает и маркер старше срока жизни токена
+# плана (2 ч). Живой прогон (pid отвечает) и молодой маркер не трогаем: они всё
+# ещё защищают цель и откат. Маркеры старых версий без содержимого судим по mtime.
+reservation_is_stale() {
+    local started="$1" pid="$2" age
+    age=$(($(date -u +%s) - started))
+    [ "${age}" -gt "${CONFIRM_TTL}" ] || return 1
+    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then  # lint: read-only (liveness probe)
+        return 1
     fi
-    die "guard refused $2 removal: $3"
+    return 0
 }
 
+# Снять устаревшие резервы на всех хостах до удаления. Каждое снятие — запись
+# через run_write под тем же host lock, что reserve и удаление; репетиция только
+# печатает. План удаления уже посчитан, поэтому снятие маркера не расширяет его:
+# живое и current по-прежнему отсекаются guard'ами ниже.
+clear_stale_reservations() {
+    local kind="$1" lines name mtime content kv run pid started from rc
+    local -a kvs
+    lines="$(reservation_lines "${kind}")" || { log "cannot read ${kind} reservations: stale markers stay"; return 0; }
+    while IFS='|' read -r name mtime content; do
+        [ -n "${name}" ] || continue
+        if ! is_release_id "${name}"; then
+            log "ignore odd reservation marker .reserved.${name} on ${kind}"
+            continue
+        fi
+        run=""; pid=""; started=""
+        kvs=()
+        read -r -a kvs <<<"${content}" || true
+        for kv in "${kvs[@]}"; do
+            case "${kv}" in
+                run=*) run="${kv#run=}" ;;
+                pid=*) pid="${kv#pid=}" ;;
+                started=*) started="${kv#started=}" ;;
+            esac
+        done
+        case "${started}" in '' | *[!0-9]*) started="${mtime}" ;; esac
+        case "${started}" in
+            '' | *[!0-9]* | 0) log "keep ${kind} reservation of ${name}: age unknown"; continue ;;
+        esac
+        # Пустой маркер — от toolkit до 1.20.1, его возраст берём по mtime. Непустой
+        # без pid — чужая/битая форма: доказать, что прогон мёртв, нельзя, не трогаем.
+        if [ -n "${content}" ] && [ -z "${pid}" ]; then
+            log "keep ${kind} reservation of ${name}: no run pid recorded"
+            continue
+        fi
+        if ! reservation_is_stale "${started}" "${pid}"; then
+            if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then  # lint: read-only (liveness probe)
+                log "keep ${kind} reservation of ${name}: run ${run:-pid ${pid}} is still alive"
+            fi
+            continue
+        fi
+        from="$(date -u -d "@${started}" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || printf '%s' "${started}")"
+        rc=0
+        case "${kind}" in
+            hub) run_write "release stale reservation of ${name} from ${from}" hub_locked "${CLEAR_RESERVATION_SCRIPT}" "${HUB_BASE}" "${name}" "${content}" || rc=$? ;;
+            web) run_write "release stale reservation of ${name} from ${from}" web_locked "${CLEAR_RESERVATION_SCRIPT}" "${WEB_SITES_BASE}" "${name}" "${content}" || rc=$? ;;
+            worker) run_write "release stale reservation of ${name} from ${from}" worker_locked "${CLEAR_RESERVATION_SCRIPT}" "${WORKER_BASE}" "${name}" "${content}" || rc=$? ;;
+        esac
+        if [ "${rc}" = "0" ]; then
+            if is_rehearse; then
+                log "rehearse: stale reservation of ${name} from ${from} would be released"
+            else
+                log "stale reservation of ${name} from ${from} released"
+            fi
+        elif [ "${rc}" = "6" ]; then
+            log "keep ${kind} reservation of ${name}: marker changed while clearing"
+        else
+            log "could not clear ${kind} stale reservation of ${name} (rc ${rc}): marker stays"
+        fi
+    done <<<"${lines}"
+}
+
+# Путь действительно исчез — читаем там, где он живёт. Локальная проверка
+# `[ ! -e ]` для hub/web врала: путь удалённого хоста локально не существует,
+# и retain печатал `removed`, хотя guard отказал (прод 1.20.0).
+path_is_gone() {
+    case "$1" in
+        hub) ssh_hub "test ! -e $(shq "$2")" ;;
+        web) ssh_web "test ! -e $(shq "$2")" ;;
+        *) [ ! -e "$2" ] ;;
+    esac
+}
+
+clear_stale_reservations hub
+clear_stale_reservations web
+clear_stale_reservations worker
+if [ ! -s "${REMOVE_LIST}" ]; then
+    log "nothing to remove"
+    log "retain done"
+    exit 0
+fi
 log "applying removals, each guarded by literal-path checks"
 while IFS='|' read -r hostkind path; do
     case "${path}" in
@@ -201,6 +278,7 @@ while IFS='|' read -r hostkind path; do
     case " ${GUARD_LIVE} " in
         *" ${name} "*) die "guard: ${path} became live or current, aborting" ;;
     esac
+    remove_rc=0
     case "${hostkind}" in
         hub)
             # Финальная сверка current и удаление — одна удалённая команда под
@@ -216,7 +294,7 @@ while IFS='|' read -r hostkind path; do
                     && { echo "guard: process runs from ${path}" >&2; exit 3; }
                 rm -rf "${path}"
             ' "${HUB_CURRENT}" "${path}" "${name}" "${HUB_BASE}" \
-                || remove_refused "$?" hub "${path}" ;;
+                || remove_rc=$? ;;
         web)
             # Caddy-version, build и удаление — под тем же lock, что и compose up:
             # recreate между проверками не проскочит.
@@ -236,7 +314,7 @@ while IFS='|' read -r hostkind path; do
                 [ "${cur}" != "${name}" ] || { echo "guard: ${path} is web build now" >&2; exit 2; }
                 rm -rf "${path}"
             ' "${WEB_CONTAINER}" "${WEB_CONTAINER_VERSION_JSON}" "${WEB_BUILD_LINK}" "${path}" "${name}" "${WEB_SITES_BASE}" \
-                || remove_refused "$?" web "${path}" ;;
+                || remove_rc=$? ;;
         localdist)
             # Буквальный абсолютный путь под DIST_BASE, не переданный в --keep.
             case "${path}" in "${DIST_BASE}"/*) ;; *) die "guard: ${path} is outside ${DIST_BASE}" ;; esac
@@ -259,9 +337,22 @@ while IFS='|' read -r hostkind path; do
                     || { echo "guard: ${path} is worker current" >&2; exit 5; }
                 rm -rf "${path}"
             ' "${WORKER_CURRENT}" "${WORKER_BASE}" "${path}" "${name}" \
-                || remove_refused "$?" worker "${path}" ;;
+                || remove_rc=$? ;;
     esac
-    [ "${SKIPPED_RESERVED}" = "0" ] || [ ! -e "${path}" ] || continue
-    log "removed ${path}"
+    if [ "${remove_rc}" = "6" ]; then
+        log "skip ${path}: reserved by a running operation"
+        continue
+    fi
+    if [ "${remove_rc}" != "0" ]; then
+        die "removal of ${path} failed (rc ${remove_rc})"
+    fi
+    # `removed` — только после чтения с того хоста, где путь живёт.
+    if is_rehearse; then
+        log "rehearse: ${path} would be removed (nothing was written)"
+    elif path_is_gone "${hostkind}" "${path}"; then
+        log "removed ${path}"
+    else
+        log "skip ${path}: still present after the remove"
+    fi
 done <"${REMOVE_LIST}"
 log "retain done"

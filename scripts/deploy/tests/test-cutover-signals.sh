@@ -93,6 +93,18 @@ else
 fi
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_fail "worker running after post-flip failure" || case_ok "worker stopped by the handler"
+# STOP-AND-REPORT до доказанного живого воркера не снимает резервы: они защищают
+# цель и предыдущий релиз для ручного отката. Снимает их следующий успешный прогон,
+# когда они станут старше 2 ч (см. retain).
+for hostbase in "${HUB_BASE}" "${WEB_SITES_BASE}" "${WORKER_BASE}"; do
+    if [ -f "${hostbase}/.reserved.${SHA_NEW}" ] && [ -f "${hostbase}/.reserved.${SHA_PREV}" ]; then
+        case_ok "reservations kept after STOP-AND-REPORT (${hostbase##*/})"
+    else
+        case_fail "reservations released after STOP-AND-REPORT (${hostbase##*/})"
+    fi
+done
+grep -F -- "pid=" "${HUB_BASE}/.reserved.${SHA_NEW}" >/dev/null \
+    && case_ok "the kept marker records its run pid" || case_fail "kept marker has no run pid"
 assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
