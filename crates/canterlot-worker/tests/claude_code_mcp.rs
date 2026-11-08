@@ -304,6 +304,10 @@ fn approve_is_only_a_prompt_handler_not_invited_for_direct_use() {
         "{instructions}"
     );
     assert!(instructions.contains("Never call the approve tool yourself"));
+    assert!(
+        instructions.contains("In read-only (plan) mode never call ExitPlanMode"),
+        "{instructions}"
+    );
     let list = mcp::handle_rpc(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}));
     let tools = list.as_reply().unwrap()["result"]["tools"].clone();
     let approve = tools
