@@ -113,25 +113,28 @@ fn recorded_turn_gives_independent_text_and_reasoning_blocks() {
     assert_eq!(deltas[&text], "Hello world");
 }
 
-// Манифест версии: постоянная адаптера и запись этапа 0 не должны разойтись молча.
+// Манифесты версий: постоянная адаптера и записи этапа 0 не должны разойтись молча.
 #[test]
-fn verified_schema_digest_is_the_recorded_one() {
-    let manifest = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/stage0/evidence/opencode/openapi-2.1.4.sha256"),
-    )
-    .unwrap();
-    let runtime = manifest
-        .lines()
-        .find(|line| line.contains("GET /openapi.json"))
-        .and_then(|line| line.split_whitespace().next())
+fn verified_schema_digests_are_the_recorded_ones() {
+    let versions: Vec<_> = VERIFIED_OPENAPI_SHA256
+        .iter()
+        .map(|(version, _)| *version)
+        .collect();
+    assert_eq!(versions, version::VERIFIED_VERSIONS);
+    for ((major, minor, patch), digest) in VERIFIED_OPENAPI_SHA256 {
+        let manifest = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "../../docs/stage0/evidence/opencode/openapi-{major}.{minor}.{patch}.sha256"
+            )),
+        )
         .unwrap();
-    assert_eq!(runtime, VERIFIED_OPENAPI_SHA256);
-    assert!(
-        version::VERIFIED_VERSIONS
-            .iter()
-            .any(|(major, minor, patch)| format!("{major}.{minor}.{patch}") == "2.1.4")
-    );
+        let runtime = manifest
+            .lines()
+            .find(|line| line.contains("GET /openapi.json"))
+            .and_then(|line| line.split_whitespace().next())
+            .unwrap();
+        assert_eq!(runtime, *digest, "{major}.{minor}.{patch}");
+    }
 }
 
 #[test]

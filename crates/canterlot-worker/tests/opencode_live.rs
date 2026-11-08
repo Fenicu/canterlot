@@ -2124,9 +2124,22 @@ async fn real_server_schema_matches_the_manifest() {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
+    let version = Command::new(&live.wrapper)
+        .arg("--version")
+        .output()
+        .unwrap();
+    let version = canterlot_worker::adapter::opencode::version::parse_version(
+        &String::from_utf8_lossy(&version.stdout),
+    )
+    .unwrap();
+    let expected = VERIFIED_OPENAPI_SHA256
+        .iter()
+        .find(|(verified, _)| *verified == version)
+        .map(|(_, digest)| *digest);
     assert_eq!(
-        digest, VERIFIED_OPENAPI_SHA256,
-        "scripts/opencode-schema-check.sh"
+        Some(digest.as_str()),
+        expected,
+        "{version:?}: scripts/opencode-schema-check.sh"
     );
 }
 

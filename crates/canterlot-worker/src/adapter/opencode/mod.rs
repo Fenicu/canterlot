@@ -36,7 +36,7 @@ use crate::{
         InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started,
         SteerOutcome, Support, Transmission, TransmitOutcome,
         canterlot_mcp::{Broker, BrokerEvent, ToolSet},
-        cli_version::{CliVersion, VersionError},
+        cli_version::{CliVersion, Triple, VersionError},
         held_tool::HeldTools,
     },
     config::OpenCodeConfig,
@@ -90,9 +90,22 @@ const EXIT_DRAIN: Duration = Duration::from_millis(500);
 const SESSION_TITLE: &str = "canterlot";
 const STALE_INPUT_NOTICE: &str = "Ввод остался в очереди после падения и не выполнен: он снят, чтобы не исполниться вместе со следующим.";
 const ERROR_TEXT_BYTES: usize = 4096;
-/// Схема `GET /openapi.json` проверенной версии (`evidence/opencode/openapi-2.1.4.sha256`).
-pub const VERIFIED_OPENAPI_SHA256: &str =
-    "23a25e5604b1274987ab7093be1eea517bd93d588e849ea53ad93a977878db3a";
+/// Схемы `GET /openapi.json` проверенных версий (`evidence/opencode/openapi-<версия>.sha256`).
+/// Порядок и набор версий те же, что в `version::VERIFIED_VERSIONS`.
+pub const VERIFIED_OPENAPI_SHA256: &[(Triple, &str)] = &[
+    (
+        (2, 1, 4),
+        "23a25e5604b1274987ab7093be1eea517bd93d588e849ea53ad93a977878db3a",
+    ),
+    (
+        (2, 2, 5),
+        "f5c4571bf7e9afc22a440875a746f593f988c4c31bf824f602601c04b20e6c8e",
+    ),
+    (
+        (2, 2, 6),
+        "4172c8b5a105c666235144d87ed9bef3baad837b7249a89fdc4af1bbf6be2b46",
+    ),
+];
 
 /// Итог проверки при старте воркера: версия CLI и каталог моделей.
 #[derive(Clone)]
@@ -712,6 +725,7 @@ impl OpenCodeAdapter {
     }
 
     // Весь API подписан как экспериментальный: у непроверенной версии сверяется схема.
+    // Совпадение со схемой любой проверенной версии считается неизменным контрактом.
     async fn check_schema(&mut self) -> Result<(), AdapterError> {
         let same = match self.http()?.bytes("/openapi.json", REQUEST_WAIT).await {
             Ok(bytes) => {
@@ -719,7 +733,9 @@ impl OpenCodeAdapter {
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect();
-                digest == VERIFIED_OPENAPI_SHA256
+                VERIFIED_OPENAPI_SHA256
+                    .iter()
+                    .any(|(_, verified)| digest == *verified)
             }
             Err(_) => false,
         };

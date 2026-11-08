@@ -32,11 +32,13 @@ fn parses_the_cli_prefix_and_bare_numbers() {
 #[tokio::test]
 async fn verified_version_passes() {
     let dir = tempfile::tempdir().unwrap();
-    let exe = cli(dir.path(), "opencode v2.1.4");
-    assert_eq!(
-        version::check(&exe, &[]).await,
-        Ok(CliVersion::Verified("2.1.4".into()))
-    );
+    for label in ["2.1.4", "2.2.5", "2.2.6"] {
+        let exe = cli(dir.path(), &format!("opencode v{label}"));
+        assert_eq!(
+            version::check(&exe, &[]).await,
+            Ok(CliVersion::Verified(label.into()))
+        );
+    }
 }
 
 #[tokio::test]
