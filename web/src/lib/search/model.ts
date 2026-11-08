@@ -4,8 +4,8 @@ import { harnessLabel } from '#lib/format/labels.js';
 
 export type SearchBody = components['schemas']['SearchBody'];
 export type SearchPage = components['schemas']['SearchPage'];
-export type SearchHit = components['schemas']['SearchHit'];
-export type SearchSegment = components['schemas']['SearchSegment'];
+export type SearchHit = components['schemas']['Hit'];
+export type SearchSegment = components['schemas']['SnippetSegment'];
 
 export type Period = 'today' | 'week' | 'month' | 'all';
 export type KindFilter = 'answers' | 'messages' | 'all';

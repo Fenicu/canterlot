@@ -19,9 +19,9 @@ export type NudgeRuleView = components['schemas']['NudgeRuleView'];
 export type NudgeEventView = components['schemas']['NudgeEventView'];
 type QueueItemView = components['schemas']['QueueItemView'];
 type SearchBody = components['schemas']['SearchBody'];
-type SearchHit = components['schemas']['SearchHit'];
+type SearchHit = components['schemas']['Hit'];
 type SearchPage = components['schemas']['SearchPage'];
-type SearchSegment = components['schemas']['SearchSegment'];
+type SearchSegment = components['schemas']['SnippetSegment'];
 
 const SEARCH_CAP = 200;
 const SEARCH_WINDOW = 90;
