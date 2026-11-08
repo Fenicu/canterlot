@@ -9,6 +9,7 @@ import type {
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import type { HubEvent } from "#lib/sync/wire.js";
 import type { LimitWindow, ProviderLimits, WindowForecast } from "./limits";
+import { PlanModel, type PlanTask } from "./plan.svelte";
 
 /**
  * Прогноз из события `limits_changed`: поле, если хаб его прислал; иначе прежний прогноз,
@@ -97,6 +98,8 @@ export interface ListSnapshot {
   limits: ProviderLimits[];
   truncated: boolean;
   presets: PresetSummary[];
+  /** Задачи планов оркестраторов: снимок заменяет набор целиком. */
+  plan_tasks?: PlanTask[];
 }
 
 const ATTRIBUTES = [
@@ -122,6 +125,8 @@ export class ListStore {
   readonly items = new SvelteMap<string, ListRow>();
   /** Сессии, удалённые на глазах у этого клиента: поиск и экраны держат их копии. */
   readonly deleted = new SvelteSet<string>();
+  /** Планы оркестраторов: задачи и их ревизии. */
+  readonly plan = new PlanModel();
   groups = $state<ListSnapshot["groups"]>([]);
   counts = $state<Counts>({ all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] });
   limits = $state<ProviderLimits[]>([]);
@@ -177,6 +182,7 @@ export class ListStore {
   #markDeleted(id: string): void {
     this.items.delete(id);
     this.deleted.add(id);
+    this.plan.dropOrchestrator(id);
     for (const fn of this.#onDeleted) fn(id);
   }
 
@@ -213,6 +219,7 @@ export class ListStore {
     this.limits = data.limits ?? [];
     this.presets = data.presets ?? [];
     this.truncated = Boolean(data.truncated);
+    this.plan.replace((data.plan_tasks ?? []).filter((task) => !this.deleted.has(task.orchestrator_id)));
   }
 
   #apply(event: HubEvent): void {
@@ -256,6 +263,12 @@ export class ListStore {
       row.permission_mode = event.payload.settings.permission_mode;
       row.crunch = { enabled: event.payload.crunch.enabled };
       this.items.set(row.id, { ...row });
+      return;
+    }
+    if (kind === "plan_task_changed" && event.kind === "plan_task_changed") {
+      const task = event.payload.task;
+      // Событие могло прийти позже удаления оркестратора: план удалённой сессии не возвращается.
+      if (!this.deleted.has(task.orchestrator_id)) this.plan.apply(task);
       return;
     }
     if (kind === "group_changed" && event.kind === "group_changed") {
