@@ -5,7 +5,16 @@ use super::events::RunFailure;
 use crate::adapter::{LimitFact, LimitWindow};
 use sha2::{Digest, Sha256};
 
-const LIMIT_KINDS: [&str; 2] = ["provider.quota", "provider.free-limit"];
+/// 2.1.4 сводил отказы подписок к `provider.quota`; с 2.2.5 у Go, ChatGPT и бюджета рабочего
+/// пространства свои типы. `provider.model-budget-limit` (потолок трат одной модели) сюда не
+/// входит: другая модель того же харнесса работает, это ошибка хода, а не упор в лимит.
+const LIMIT_KINDS: [&str; 5] = [
+    "provider.quota",
+    "provider.free-limit",
+    "provider.go-limit",
+    "provider.chatgpt-limit",
+    "provider.budget-limit",
+];
 const INVALID_REQUEST: &str = "provider.invalid-request";
 pub const AUTH_FAILURE: &str = "provider.auth";
 const FIVE_HOURS_MS: u64 = 5 * 60 * 60 * 1000;
@@ -148,12 +157,31 @@ mod tests {
         );
     }
 
+    // Типы отказов подписок 2.2.5 и 2.2.6 рядом с прежним `provider.quota` версии 2.1.4.
+    #[test]
+    fn subscription_limits_of_both_versions_are_reached_limits() {
+        for kind in [
+            "provider.quota",
+            "provider.go-limit",
+            "provider.chatgpt-limit",
+            "provider.budget-limit",
+        ] {
+            assert_eq!(
+                limit_fact(&failure(kind, "x", Some(3_600_000)), 5),
+                Some(LimitFact::Reached {
+                    window: LimitWindow::FiveHour,
+                    resets_at_ms: Some(3_600_005),
+                }),
+                "{kind}"
+            );
+        }
+    }
+
     #[test]
     fn other_failures_and_a_huge_wait_are_harmless() {
-        assert_eq!(
-            limit_fact(&failure("provider.rate-limit", "x", Some(1)), 5),
-            None
-        );
+        for kind in ["provider.rate-limit", "provider.model-budget-limit"] {
+            assert_eq!(limit_fact(&failure(kind, "x", Some(1)), 5), None, "{kind}");
+        }
         let fact = limit_fact(&failure("provider.quota", "x", Some(u64::MAX)), 5);
         assert_eq!(
             fact,

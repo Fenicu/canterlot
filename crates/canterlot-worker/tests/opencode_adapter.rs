@@ -5781,6 +5781,20 @@ async fn go_quota_is_a_reached_limit_recorded_inside_the_turn() {
     bench.close(CloseMode::Graceful).await;
 }
 
+// Тот же отказ Go в 2.2.5 и 2.2.6: свой тип вместо `provider.quota` (живой кадр 09.11.2026).
+#[tokio::test]
+async fn go_limit_of_newer_servers_is_the_same_reached_limit() {
+    let (mut bench, events) = failed_turn(json!({
+        "type": "provider.go-limit",
+        "message": "OpenCode Go usage limit reached. Switch to a free model, or turn on Extra Usage on the Go page in OpenCode Console to keep going.",
+        "status": 429, "retryAfterMs": 3_600_000}))
+    .await;
+    let fact = limit_of(&events).expect("limit fact");
+    assert!(reset_in(&fact, 3_600_000), "{fact:?}");
+    assert_eq!(text_of(&events, "Error").len(), 1);
+    bench.close(CloseMode::Graceful).await;
+}
+
 #[tokio::test]
 async fn free_limit_waits_in_the_long_window() {
     let (mut bench, events) = failed_turn(json!({
