@@ -1,6 +1,6 @@
 import type { LayoutMode } from './layout';
 
-export type PaneView = 'delegation' | 'settings' | 'messages' | 'alarms';
+export type PaneView = 'delegation' | 'settings' | 'messages' | 'alarms' | 'search';
 /** Вкладка панели делегирования: дерево делегатов или план оркестратора. */
 export type DelegationTab = 'tree' | 'plan';
 

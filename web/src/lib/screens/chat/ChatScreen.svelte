@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { openSearch } from '#lib/search/open.svelte.js';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
@@ -186,15 +187,27 @@
 		}
 	});
 
-	// Ссылка «Отчёт» из плана приводит к блоку ответа: `/c/<id>?block=<block_id>`.
-	const jumpBlock = $derived(page.url.searchParams.get('block'));
-	// Прыжок ждёт снимка: до него ленты нет, и искать блок негде. Каждый блок — один раз за показ.
+	// Ссылка «Отчёт» из плана и совпадение поиска приводят к месту в ленте:
+	// `/c/<id>?block=<block_id>&seq=<n>` или `?input=<input_id>&seq=<n>`; старые ссылки без seq ищут блок по страницам.
+	const jumpLink = $derived.by(() => {
+		const params = page.url.searchParams;
+		const block = params.get('block');
+		const input = params.get('input');
+		const seq = params.get('seq') ?? '';
+		if (block) return { key: `block:${block}:${seq}`, block, input: '', seq };
+		if (input && seq) return { key: `input:${input}:${seq}`, block: '', input, seq };
+		return null;
+	});
+	// Прыжок ждёт снимка: до него ленты нет, и искать блок негде. Каждая ссылка — один раз за показ.
 	let jumpedTo: string | null = null;
 	$effect(() => {
-		const block = jumpBlock;
-		if (!block || !chat.detail || jumpedTo === block) return;
-		jumpedTo = block;
-		untrack(() => chat.requestBlockJump(block));
+		const link = jumpLink;
+		if (!link || !chat.detail || jumpedTo === link.key) return;
+		jumpedTo = link.key;
+		untrack(() => {
+			if (link.block) chat.requestBlockJump(link.block, link.seq);
+			else chat.requestJump(link.input, link.seq);
+		});
 	});
 
 	const waitingId = $props.id();
@@ -224,6 +237,7 @@
 		onOpenDiagnostics={() => (showDiagnostics = true)}
 		onOpenDelegation={() => (showDelegation = true)}
 		onOpenMessages={() => (showMessages = true)}
+		onOpenSearch={() => openSearch('', { id: chat.id, title: (chat.detail as { title?: string } | null)?.title ?? '' })}
 		onOpenAlarms={() => (showAlarms = true)}
 		onOpenNudge={() => (showNudge = true)}
 		onOpenRoute={() => (showRoute = true)}

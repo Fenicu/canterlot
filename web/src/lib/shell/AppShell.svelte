@@ -22,6 +22,8 @@
   import { followSignout, watchSignout } from '#lib/pwa/signout.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import type { MachineRecord } from '#lib/stores/machines.svelte.js';
+  import { goto } from '$app/navigation';
+  import { hitHref, type SearchHit } from '#lib/search/model.js';
 
   let { children }: { children: Snippet } = $props();
   let runtime = $state<Runtime | null>(null);
@@ -34,13 +36,14 @@
   const mode: LayoutMode = $derived(layoutMode(width || 412));
   const path = $derived(page.url.pathname);
   const onSessions = $derived(path === '/' || path === '/sessions');
-  const standalonePage = $derived(path === '/settings' || path === '/changes' || path === '/share' || path === '/plan' || path.startsWith('/plan/'));
+  const standalonePage = $derived(path === '/settings' || path === '/changes' || path === '/share' || path === '/search' || path === '/plan' || path.startsWith('/plan/'));
   const onChat = $derived(path.startsWith('/c/'));
   const chatId = $derived(onChat ? path.split('/')[2] : null);
   let currentChat = $state<ChatStore | null>(null);
   let DelegationPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
   let MessagesPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
   let AlarmsPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
+  let SearchPanelComponent = $state<Component<{ onpick: (hit: SearchHit) => void; onclose?: () => void }> | null>(null);
   let SettingsPanelComponent = $state<Component<{ chat: ChatStore; machine?: MachineRecord | null; desktop?: boolean; onclose?: () => void }> | null>(null);
   const paneMachine = $derived.by(() => {
     const id = (currentChat?.detail?.machine as { id?: string } | undefined)?.id;
@@ -66,6 +69,11 @@
     if (pane.view === 'messages' && !MessagesPanelComponent) {
       import('#lib/screens/chat/OwnerMessagesPanel.svelte').then((m) => {
         MessagesPanelComponent = m.default;
+      });
+    }
+    if (pane.view === 'search' && !SearchPanelComponent) {
+      import('#lib/search/SearchPanel.svelte').then((m) => {
+        SearchPanelComponent = m.default;
       });
     }
     if (pane.view === 'alarms' && !AlarmsPanelComponent) {
@@ -182,6 +190,22 @@
     };
   });
 
+  /**
+   * Совпадение из панели поиска стола: та же ссылка, что на телефоне. Повторное нажатие
+   * на совпадение открытой ленты адреса не меняет, поэтому прыжок просится напрямую.
+   */
+  function pickHit(hit: SearchHit): void {
+    const href = hitHref(hit);
+    const chat = currentChat;
+    if (chat && chat.id === hit.conversation_id && `${page.url.pathname}${page.url.search}` === href) {
+      if (hit.block_id) chat.requestBlockJump(hit.block_id, String(hit.jump_seq));
+      else if (hit.input_id) chat.requestJump(hit.input_id, String(hit.jump_seq));
+      return;
+    }
+    // eslint-disable-next-line svelte/no-navigation-without-resolve
+    void goto(href);
+  }
+
   async function applyUpdate(force = true) {
     try {
       await runtime?.drafts.flush();
@@ -237,9 +261,11 @@
         {@render banner()}
         {@render children()}
       </div>
-      {#if mode === 'desktop' && onChat && pane.view}
+      {#if mode === 'desktop' && pane.view && (onChat || pane.view === 'search')}
         <aside data-pane="lane">
-          {#if currentChat && pane.view === 'delegation' && DelegationPanelComponent}
+          {#if pane.view === 'search' && SearchPanelComponent}
+            <SearchPanelComponent onpick={pickHit} onclose={() => pane.close()} />
+          {:else if currentChat && pane.view === 'delegation' && DelegationPanelComponent}
             <DelegationPanelComponent chat={currentChat} onclose={() => pane.close()} />
           {:else if currentChat && pane.view === 'settings' && SettingsPanelComponent}
             <SettingsPanelComponent chat={currentChat} machine={paneMachine} desktop onclose={() => pane.close()} />

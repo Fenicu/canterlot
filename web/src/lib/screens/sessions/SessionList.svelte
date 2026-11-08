@@ -48,6 +48,7 @@
   import TrashSection from './TrashSection.svelte';
   import TrashToast from './TrashToast.svelte';
   import { installation } from '#lib/pwa/register.js';
+  import { openSearch } from '#lib/search/open.svelte.js';
 
   let { main = false, create = false }: { main?: boolean; create?: boolean } = $props();
 
@@ -481,6 +482,13 @@
       {/each}
       {/key}
     {/if}
+    {#if query.trim() && (results !== null || searchError)}
+      <!-- Поиск по названиям остаётся здесь; текст ответов и сообщений ищет отдельный экран. -->
+      <button type="button" class="deep-search" data-deep-search onclick={() => openSearch(query.trim())}>
+        <Icon name="search" />
+        <span class="deep-text">Искать в сообщениях: “{query.trim()}”</span>
+      </button>
+    {/if}
   </div>
   {#if sheetItem}
     {#key sheetItem.id}<SessionSheet
@@ -507,6 +515,11 @@
 </svelte:element>
 
 <style>
+  .deep-search { display: flex; align-items: center; gap: var(--s4); box-sizing: border-box; width: calc(100% - var(--gutter) * 2); min-height: var(--target); margin: var(--s2) var(--gutter) var(--s6); padding: var(--s3) var(--s6); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); text-align: start; }
+  .deep-search :global(svg) { flex: none; width: var(--icon-small); height: var(--icon-small); }
+  .deep-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @media (hover: hover) and (pointer: fine) { .deep-search:hover { background: var(--hover); } }
+  .deep-search:focus-visible { outline: var(--focus-width) solid var(--accent); outline-offset: calc(var(--focus-width) * -1); }
   .search-error { margin: var(--s2) var(--gutter); color: var(--danger); font-size: var(--fs-sm); }
   /* Тихая строка в семействе прочих уведомлений: цветом, без эмодзи и заливки. */
   .disk-notice { margin: var(--s0) var(--gutter) var(--s2); color: var(--warning); font-size: var(--fs-sm); }

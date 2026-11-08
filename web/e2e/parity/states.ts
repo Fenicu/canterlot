@@ -14,6 +14,7 @@ import { seedPlanCards } from '../../testing/fixtures/plan-cards';
 import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
 import { seedPlan } from '../../testing/fixtures/plan';
+import { seedSearch } from '../../testing/fixtures/search';
 
 export type Theme = 'dark' | 'light';
 
@@ -139,6 +140,19 @@ async function planScreen(page: Page, path: 'list' | 'plan'): Promise<void> {
   await page.goto(path === 'list' ? '/plan' : `/plan/${seed.orchestrator}`);
   await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(path === 'list' ? '[data-plan-orchestrator]' : '[data-plan-task]').first()).toBeVisible();
+}
+
+/** Поиск по истории с совпадениями: экран телефона из списка или панель стола из меню сессии. */
+async function historySearch(page: Page, scoped = false): Promise<void> {
+  const { hub, api } = fresh();
+  const seed = seedSearch(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${seed.migration}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await menuItem(page, 'Искать в этой сессии');
+  if (!scoped) await page.getByRole('button', { name: 'Искать во всех сессиях' }).click();
+  await page.getByRole('searchbox', { name: 'Поиск по сообщениям' }).fill('индекс');
+  await expect(page.locator('[data-search-hit]').first()).toBeVisible();
 }
 
 /** Лента оркестратора со всеми карточками инструментов: низ ленты или её начало с раскрытыми строками. */
@@ -459,6 +473,9 @@ export const SCREENS: Screen[] = [
     // Строка в шапке под указателем меняет цвет переходом: проверка смотрит на устоявшийся цвет.
     await opened.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== 'running'));
   }, 'child')),
+  screen('search', false, PHONE, 'dark', (page) => historySearch(page)),
+  screen('search-session', false, PHONE, 'light', (page) => historySearch(page, true)),
+  screen('search-desktop', false, DESKTOP, 'light', (page) => historySearch(page)),
   screen('plan-tab', false, PHONE, 'dark', planTab),
   screen('plan-tab-desktop', false, DESKTOP, 'light', planTab),
   screen('plans-list', false, PHONE, 'dark', (page) => planScreen(page, 'list')),

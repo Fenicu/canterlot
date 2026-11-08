@@ -60,6 +60,7 @@
 		onOpenDiagnostics,
 		onOpenDelegation,
 		onOpenMessages,
+		onOpenSearch,
 		onOpenAlarms,
 		onOpenNudge,
 		onOpenRoute,
@@ -77,6 +78,7 @@
 		onOpenDiagnostics?: () => void;
 		onOpenDelegation?: () => void;
 		onOpenMessages?: () => void;
+		onOpenSearch?: () => void;
 		onOpenAlarms?: () => void;
 		onOpenNudge?: () => void;
 		/** Решение маршрута, выбравшее исполнителя этой сессии. */
@@ -363,6 +365,10 @@
 
 				{#if chat.nudge && onOpenNudge}
 					<MenuItem icon="pin" onclick={() => { menuOpen = false; onOpenNudge(); }}>Автопинок</MenuItem>
+				{/if}
+
+				{#if onOpenSearch}
+					<MenuItem icon="search" onclick={() => { menuOpen = false; onOpenSearch(); }}>Искать в этой сессии</MenuItem>
 				{/if}
 
 				{#if onOpenDiagnostics}

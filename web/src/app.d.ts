@@ -1,7 +1,7 @@
 declare global {
   const __APP_VERSION__: string;
   namespace App {
-    interface PageState { sheet?: string }
+    interface PageState { sheet?: string; search?: import('#lib/search/model').SearchState }
   }
 }
 export {};
