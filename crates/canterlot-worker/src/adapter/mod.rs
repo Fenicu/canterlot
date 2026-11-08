@@ -807,7 +807,7 @@ pub fn catalog_with(
             title: "Claude Code",
             images: true,
             settings_midsession: true,
-            settings_midsession_effort: false,
+            settings_midsession_effort: true,
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
             models: CLAUDE_MODELS
                 .iter()

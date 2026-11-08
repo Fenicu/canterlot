@@ -797,34 +797,154 @@ async fn model_change_sends_set_model_between_turns_and_rejects_the_input_when_i
     );
 }
 
-#[test]
-fn effort_change_is_rejected_until_verified() {
-    let mut queue = InputQueue::new(launch("ask"));
-    let change = SettingsChange {
-        effort: Some("high".into()),
+fn effort(level: &str) -> SettingsChange {
+    SettingsChange {
+        effort: Some(level.into()),
         ..Default::default()
-    };
-    assert_eq!(
-        queue.validate(Some(&change)),
-        Err("effort_change_unsupported")
-    );
-    let same = SettingsChange {
-        effort: Some("low".into()),
-        ..Default::default()
-    };
-    assert_eq!(
-        queue.validate(Some(&same)),
-        Ok(()),
-        "unchanged effort is no change"
-    );
+    }
+}
 
-    let command = Uuid::now_v7();
-    queue.enqueue(&with_settings(tx(command, 1, "go"), change));
-    assert!(matches!(queue.next(None), Next::Idle), "nothing is written");
-    assert_eq!(
-        queue.take_rejection(command),
-        Some("effort_change_unsupported")
+/// Усилие меняется между ходами запросом `apply_flag_settings` с ключом `effortLevel`:
+/// CLI 2.1.316 и 2.1.319 со следующего хода шлют его в `output_config.effort` запроса к API.
+#[tokio::test]
+async fn effort_change_goes_to_apply_flag_settings_before_the_next_turn() {
+    let (one, two, three, four) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
     );
+    let mut fake = Fake::start(|dir| {
+        write_frames(dir, "turn_1.out", &alpha_turn(one));
+        write_frames(dir, "turn_2.out", &alpha_turn(two));
+        write_frames(dir, "turn_3.out", &alpha_turn(four));
+    })
+    .await;
+    let mut driver = InputDriver::new(
+        InputQueue::new(launch("ask")).with_control_timeout(Duration::from_secs(1)),
+        Parser::new(),
+    );
+    assert_eq!(driver.queue.validate(Some(&effort("high"))), Ok(()));
+    let outcome = driver
+        .transmit(&mut fake.cli, &tx(one, 1, "one"), None, DEADLINE)
+        .await;
+    assert!(matches!(outcome, TransmitOutcome::Accepted(_)));
+
+    // Смена посреди хода: запрос уходит только после `result`, перед сообщением.
+    let outcome = tokio::time::timeout(
+        WAIT,
+        driver.transmit(
+            &mut fake.cli,
+            &with_settings(tx(two, 1, "two"), effort("max")),
+            None,
+            DEADLINE,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, TransmitOutcome::Accepted(ref p) if p.command_id == two));
+    assert!(
+        !fake.early_writes(),
+        "the change waited for the turn to end"
+    );
+    let log = fake.stdin_log();
+    assert_eq!(log.len(), 3);
+    assert_eq!(log[1]["type"], "control_request");
+    assert_eq!(
+        log[1]["request"],
+        json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "max"}})
+    );
+    assert_eq!(log[2]["uuid"], two.to_string());
+    assert_eq!(driver.queue.effective().effort, "max");
+    finish_turn(&mut driver, &mut fake).await;
+
+    // Отказ CLI: ввод не отправлен, действующее усилие прежнее.
+    fake.control("error");
+    let outcome = tokio::time::timeout(
+        WAIT,
+        driver.transmit(
+            &mut fake.cli,
+            &with_settings(tx(three, 1, "three"), effort("low")),
+            None,
+            DEADLINE,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, TransmitOutcome::Rejected(ref r) if r == "effort_change_failed"));
+    assert_eq!(driver.queue.effective().effort, "max", "no silent fallback");
+
+    // То же усилие — не смена: запросов нет, сессия идёт дальше.
+    fake.control("success");
+    let outcome = tokio::time::timeout(
+        WAIT,
+        driver.transmit(
+            &mut fake.cli,
+            &with_settings(tx(four, 1, "four"), effort("max")),
+            None,
+            DEADLINE,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, TransmitOutcome::Accepted(_)));
+    let log = fake.stdin_log();
+    let users: Vec<&str> = log
+        .iter()
+        .filter(|line| line["type"] == "user")
+        .map(|line| line["uuid"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        users,
+        vec![one.to_string(), two.to_string(), four.to_string()]
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|line| line["type"] == "control_request")
+            .count(),
+        2
+    );
+}
+
+/// Модель и усилие вместе: сначала `set_model`, затем усилие для новой модели.
+#[test]
+fn model_and_effort_change_sends_set_model_then_effort() {
+    let mut queue = InputQueue::new(launch("ask"));
+    let command = Uuid::now_v7();
+    let change = SettingsChange {
+        model: Some("opus[1m]".into()),
+        effort: Some("xhigh".into()),
+        ..Default::default()
+    };
+    queue.enqueue(&with_settings(tx(command, 1, "go"), change));
+    let first = written(queue.next(None));
+    assert_eq!(
+        first["request"],
+        json!({"subtype": "set_model", "model": "opus[1m]"})
+    );
+    queue.on_parsed(&Parsed::ControlResponse {
+        request_id: first["request_id"].as_str().unwrap().to_owned(),
+        success: true,
+        interrupt: None,
+    });
+    let second = written(queue.next(None));
+    assert_eq!(
+        second["request"],
+        json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "xhigh"}})
+    );
+    assert!(
+        matches!(queue.next(None), Next::Idle),
+        "waits for the reply"
+    );
+    queue.on_parsed(&Parsed::ControlResponse {
+        request_id: second["request_id"].as_str().unwrap().to_owned(),
+        success: true,
+        interrupt: None,
+    });
+    let message = written(queue.next(None));
+    assert_eq!(message["uuid"], command.to_string());
+    assert_eq!(queue.effective().model, "opus[1m]");
+    assert_eq!(queue.effective().effort, "xhigh");
 }
 
 #[test]

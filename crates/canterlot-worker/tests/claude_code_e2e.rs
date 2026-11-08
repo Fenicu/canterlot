@@ -200,7 +200,7 @@ fn catalog_lists_claude_code_with_canterlot_permission_modes_when_configured() {
     assert_eq!(c.provider, "claude");
     assert_eq!(c.title, "Claude Code");
     assert!(c.images && c.settings_midsession);
-    assert!(!c.settings_midsession_effort);
+    assert!(c.settings_midsession_effort);
     assert_eq!(c.permission_modes, ["owner", "ask", "bypass", "read_only"]);
     assert_eq!(
         c.models

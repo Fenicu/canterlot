@@ -1,6 +1,6 @@
 //! Ввод Claude Code: строго один ход за раз, сообщения пользователя с вложениями,
 //! доказательство доставки кадром `command_lifecycle` (запасное — кадром ответа),
-//! смена модели и режима между ходами, прерывание управляющим запросом
+//! смена модели, усилия и режима между ходами, прерывание управляющим запросом
 //! `interrupt` с запасным SIGINT, если квитанции нет в срок.
 
 use std::collections::{HashMap, VecDeque};
@@ -69,6 +69,7 @@ struct Queued {
 
 enum ControlKind {
     Model(String),
+    Effort(String),
     PermissionMode(String),
 }
 
@@ -204,13 +205,6 @@ impl InputQueue {
         let Some(change) = change else {
             return Ok(());
         };
-        if change
-            .effort
-            .as_ref()
-            .is_some_and(|effort| *effort != self.effective.effort)
-        {
-            return Err("effort_change_unsupported");
-        }
         if let Some(mode) = change
             .permission_mode
             .as_ref()
@@ -319,6 +313,18 @@ impl InputQueue {
                 let request = json!({"subtype": "set_model", "model": model});
                 return self.control_request(command_id, ControlKind::Model(model), request);
             }
+            // После модели: усилие относится к модели, с которой пойдёт ход. CLI кладёт
+            // `effortLevel` в слой флагов и шлёт его со следующего запроса к API.
+            if let Some(effort) = change
+                .effort
+                .filter(|effort| *effort != self.effective.effort)
+            {
+                let request = json!({
+                    "subtype": "apply_flag_settings",
+                    "settings": {"effortLevel": effort},
+                });
+                return self.control_request(command_id, ControlKind::Effort(effort), request);
+            }
             if let Some(mode) = change
                 .permission_mode
                 .filter(|mode| *mode != self.effective.permission_mode)
@@ -386,6 +392,7 @@ impl InputQueue {
     fn finish_control(&mut self, control: PendingControl, success: bool) {
         match (control.kind, success) {
             (ControlKind::Model(model), true) => self.effective.model = model,
+            (ControlKind::Effort(effort), true) => self.effective.effort = effort,
             (ControlKind::PermissionMode(mode), true) => {
                 self.effective.permission_mode = mode;
                 self.mode_changed = true;
@@ -398,6 +405,7 @@ impl InputQueue {
                 {
                     self.reject_front(match kind {
                         ControlKind::Model(_) => "model_change_failed",
+                        ControlKind::Effort(_) => "effort_change_failed",
                         ControlKind::PermissionMode(_) => "permission_mode_change_failed",
                     });
                 }
