@@ -2,7 +2,7 @@
   "name": "canterlot-web",
   "private": true,
   "license": "MIT",
-  "version": "1.22.2",
+  "version": "1.22.3",
   "type": "module",
   "engines": {
     "node": ">=24 <25"
