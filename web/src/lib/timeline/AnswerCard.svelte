@@ -10,6 +10,7 @@
   import { foldSteps } from '#lib/timeline/steps.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
+  import type { LeaseWait } from '#lib/format/lease.js';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
   import ReasoningBlock from '#lib/timeline/ReasoningBlock.svelte';
   import StepGroupRow from '#lib/timeline/StepGroupRow.svelte';
@@ -32,7 +33,8 @@
     now,
     onInfo,
     load,
-    interrupt = null
+    interrupt = null,
+    leaseWait = null
   }: {
     cardKey: string;
     laneRoot?: string;
@@ -47,6 +49,8 @@
     onInfo?: (runId: string) => void;
     load: (blockId: string, offset: number) => Promise<BlockPage>;
     interrupt?: InterruptControl | null;
+    /** Процесс текущего хода ждёт очереди тяжёлых задач машины. */
+    leaseWait?: LeaseWait | null;
   } = $props();
 
   const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
@@ -112,7 +116,7 @@
     </div>
   {/each}
   {#if live && head}
-    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} />
+    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} waiting={working ? leaseWait : null} />
   {/if}
   {#if head}
     <footer class="byline" data-role="answer-footer">

@@ -1,5 +1,6 @@
 import { failureLabel, providerLabel, retryLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
+import { leaseWaitText } from "#lib/format/lease.js";
 
 export type Tone = "accent" | "default" | "warning" | "danger";
 
@@ -17,6 +18,8 @@ export interface ActivityEvidence {
   provider?: string | null;
   until?: string | null;
   outcome?: string;
+  /** Процесс ждёт очереди тяжёлых задач машины. */
+  lease_wait?: { kind: string; position: number; since?: string } | null;
 }
 
 export interface Activity {
@@ -133,6 +136,9 @@ function working(
   now: number,
 ): { text: string; tone: Tone; live: boolean } {
   const phase = evidence.phase ?? "";
+  const wait = evidence.lease_wait;
+  if (wait && typeof wait.kind === "string" && typeof wait.position === "number")
+    return { text: leaseWaitText(wait), tone: "accent", live: false };
   if (phase === "no_link")
     return { text: "Нет связи с машиной", tone: "warning", live: false };
   if (phase === "generating")

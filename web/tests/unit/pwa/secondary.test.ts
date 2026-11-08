@@ -119,3 +119,20 @@ it('fresh_machine_metrics_clear_the_snapshot_stale_warning', () => {
   expect(store.metricsStale(id)).toBe(false);
   expect(store.items.get(id)?.metrics?.mem_total_bytes).toBe(1000);
 });
+it('lease_event_replaces_the_queue_and_unavailability_drops_it', () => {
+  const id = '00000000-0000-4000-8000-000000000001';
+  const store = new MachinesStore({ api: { snapshot: vi.fn(), events: vi.fn() }, connection: {} as never, clock: { now: () => 0 } });
+  store.applier.applySnapshot({ items: [{ id, name: 'Машина', os: null, availability: 'available', warnings: [], metrics: null, harnesses: [] }] }, '0');
+  const lease = { slots: 2, observed_at: '2026-11-08T12:00:00.000Z', holders: [{ lease_id: 'a', kind: 'gate', weight: 2, label: '', holder: 'owner', execution_id: null, conversation_id: null, since: '2026-11-08T11:00:00.000Z', requested_at: null, position: null, dir: 'canterlot' }], waiters: [] };
+  const apply = (kind: string, payload: object) => store.applier.applyEvents([{ event: { kind, committed_at: '2026-11-08T12:00:00Z', payload } }] as never);
+  apply('machine_lease_changed', { machine_id: id, lease });
+  expect(store.items.get(id)?.lease?.holders[0]?.kind).toBe('gate');
+  apply('machine_availability_changed', { machine_id: id, availability: 'degraded' });
+  expect(store.items.get(id)?.lease).not.toBeNull();
+  apply('machine_availability_changed', { machine_id: id, availability: 'unavailable' });
+  expect(store.items.get(id)?.lease).toBeNull();
+  apply('machine_lease_changed', { machine_id: id, lease });
+  apply('machine_lease_changed', { machine_id: id, lease: null });
+  expect(store.items.get(id)?.lease).toBeNull();
+  expect(store.unknownKinds).toBe(0);
+});

@@ -143,6 +143,7 @@ export function seedMachine(api: FakeHubApi, patch: Partial<MachineRecord> = {})
 		warnings: patch.warnings ?? [],
 		metrics: patch.metrics ?? { observed_at: '2026-10-28T12:00:00.000Z' },
 		home_dir: patch.home_dir ?? null,
+		lease: patch.lease ?? null,
 		harnesses: patch.harnesses ?? [
 			{
 				id: 'claude',
@@ -155,6 +156,25 @@ export function seedMachine(api: FakeHubApi, patch: Partial<MachineRecord> = {})
 	};
 	api.machines.set(machine.id, machine);
 	return machine;
+}
+
+type LeaseState = NonNullable<MachineRecord['lease']>;
+type LeaseEntry = LeaseState['holders'][number];
+
+/** Запись очереди тяжёлых задач, как её отдаёт хаб: держатель с `since`, ожидающий с `position`. */
+export function leaseEntry(patch: Partial<LeaseEntry> & { lease_id: string }): LeaseEntry {
+	return {
+		kind: 'build', weight: patch.kind === 'gate' ? 2 : 1, label: '', holder: patch.conversation_id ? 'execution' : 'owner',
+		execution_id: null, conversation_id: null, since: null, requested_at: null, position: null, dir: '', ...patch
+	};
+}
+
+/** Полное состояние очереди машины в снимке фейкового хаба. */
+export function seedLease(api: FakeHubApi, machineId: string, holders: LeaseEntry[], waiters: LeaseEntry[] = [], slots = 2): LeaseState {
+	const lease: LeaseState = { slots, observed_at: new Date().toISOString(), holders, waiters };
+	const machine = api.machines.get(machineId);
+	if (machine) machine.lease = lease;
+	return lease;
 }
 
 export function rememberDelegation(api: FakeHubApi, conversationId: string, nodes: DelegationNode[]): void {

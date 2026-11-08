@@ -12,6 +12,7 @@
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import MetricCard from './MetricCard.svelte';
   import { diskLimits, diskView, generalWarnings, hotspotRows, journalStops, leakedSummary, machineStatus, memoryLowText, unleasedText } from './model.js';
+  import LeaseQueue from './LeaseQueue.svelte';
   import '../secondary.css';
 
   let runtime = $state<Runtime | null>(null);
@@ -34,6 +35,7 @@
   const leaked = $derived(watch && machine?.warnings.includes('processes_leaked') ? leakedSummary(watch.leaked) : null);
   const unleased = $derived(watch ? unleasedText(watch.unleased_count) : null);
   const sessions = $derived(machine?.sessions?.map(session => ({ id: session.conversation_id, title: session.title, detail: runtime?.list.items.get(session.conversation_id) })) ?? (runtime && machine ? [...runtime.list.items.values()].filter(s => s.machine.id === machine.id).map(session => ({ id: session.id, title: session.title, detail: session })) : []));
+  const titleOf = (id: string) => runtime?.list.items.get(id)?.title ?? machine?.sessions?.find(session => session.conversation_id === id)?.title;
   const heartbeat = $derived(machine?.heartbeat_age_ms != null ? (machine.heartbeat_received_at === undefined ? now : machine.heartbeat_received_at + clock.offset) - machine.heartbeat_age_ms : metrics ? Date.parse(metrics.observed_at) : null);
 
   async function load() {
@@ -96,6 +98,7 @@
           {#each journalStops(machine?.warnings ?? []) as warning (warning)}<p class="notice">{warning}</p>{/each}
         {/if}
       </div>
+      <LeaseQueue lease={machine.lease} available={machine.availability === 'available'} {titleOf} {now} />
       <h2>Сессии на машине</h2>
       {#each sessions as session (session.id)}<a class="session-link" href={resolve('/c/[id]', { id: session.id })}>{session.title}{#if session.detail}<small>{session.detail.harness.title} · {modelLabel(session.detail.model)}</small>{/if}</a>{:else}<p class="note">На этой машине пока нет сессий</p>{/each}
       <div class="heartbeat"><p>Последний сигнал {heartbeat === null ? 'ещё не получен' : fmt.ago(heartbeat, now)}</p>

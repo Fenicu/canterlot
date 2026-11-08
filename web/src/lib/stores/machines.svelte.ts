@@ -27,6 +27,8 @@ export interface MachineRecord {
 	home_dir?: string | null;
 	/** Отчёт сторожа машины: крупные кэши сборки, процессы без сессии, сборки мимо очереди. */
 	watch?: MachineWatch | null;
+	/** Очередь тяжёлых задач машины; `null` без свежего состояния. */
+	lease?: components['schemas']['LeaseStateView'] | null;
 }
 
 export class MachinesStore {
@@ -97,7 +99,8 @@ export class MachinesStore {
 		const kind = event.kind as string;
 		if (kind === 'machine_availability_changed' && event.kind === 'machine_availability_changed') {
 			const machine = this.items.get(event.payload.machine_id);
-			if (machine) this.items.set(machine.id, { ...machine, availability: event.payload.availability, availability_since: event.committed_at });
+			// Пропавшая машина не подтверждает очередь: хаб снимает её тем же решением.
+			if (machine) this.items.set(machine.id, { ...machine, availability: event.payload.availability, availability_since: event.committed_at, ...(event.payload.availability === 'unavailable' ? { lease: null } : {}) });
 			return;
 		}
 		if (kind === 'machine_report_updated' && event.kind === 'machine_report_updated') {
@@ -123,6 +126,11 @@ export class MachinesStore {
 			machine.heartbeat_age_ms = 0;
 			machine.heartbeat_received_at = this.deps.clock.now();
 			this.items.set(machine.id, { ...machine });
+			return;
+		}
+		if (kind === 'machine_lease_changed' && event.kind === 'machine_lease_changed') {
+			const machine = this.items.get(event.payload.machine_id);
+			if (machine) this.items.set(machine.id, { ...machine, lease: event.payload.lease ?? null });
 			return;
 		}
 		if (kind === 'machine_journal_stops_changed' && event.kind === 'machine_journal_stops_changed') {

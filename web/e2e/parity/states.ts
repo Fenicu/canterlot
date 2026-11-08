@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Page } from '@playwright/test';
 import type { HistoryBlock } from '../../src/lib/stores/chat.svelte';
-import { FakeHub, FakeHubApi, seedMachine } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, leaseEntry, seedLease, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockup04, seedMockup05, seedMockup06, seedMockup08, seedMockup11, seedMockupChat } from '../../testing/fixtures/mockup-chat';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
@@ -230,6 +230,18 @@ export const SCREENS: Screen[] = [
   screen('09-machine', true, PHONE, 'dark', async (page) => {
     await bootSecondary(page, '/machines');
     await expect(page.locator('[data-secondary-ready]')).toBeVisible();
+  }),
+  screen('09-machine-lease-queue', false, PHONE, 'dark', async (page) => {
+    await bootSecondary(page, '/machines', null, (api) => {
+      const rows = [...api.list.values()];
+      const machine = [...api.machines.values()].find((item) => item.name === 'workstation')!;
+      const since = new Date(Date.now() - 12 * 60_000).toISOString();
+      seedLease(api, machine.id, [
+        leaseEntry({ lease_id: 'h1', conversation_id: rows[0]!.id, since }),
+        leaseEntry({ lease_id: 'h2', label: 'check.sh --fast', since })
+      ], [leaseEntry({ lease_id: 'w1', kind: 'gate', conversation_id: rows[1]!.id, position: 1 })]);
+    });
+    await expect(page.locator('[data-lease-queue]')).toBeVisible();
   }),
   screen('10-limits-history', true, PHONE, 'dark', async (page) => {
     await bootSecondary(page, '/limits');

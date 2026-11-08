@@ -13,6 +13,25 @@ function line(activity: Activity) {
 }
 
 describe("sessions/activity", () => {
+  it("a_session_waiting_for_the_heavy_task_queue_says_so_instead_of_the_tool", () => {
+    const wait = (kind: string, position: number) =>
+      line({
+        state: "working",
+        evidence: {
+          phase: "running_tool",
+          tool_name: "Bash",
+          summary: "scripts/check.sh --fast",
+          lease_wait: { kind, position, since: "2026-10-29T11:50:00.000Z" },
+        },
+      });
+    expect(wait("build", 2)).toEqual({
+      text: "Ждёт очереди на сборку · 2-й",
+      tone: "accent",
+      live: false,
+    });
+    expect(wait("gate", 1).text).toBe("Ждёт очереди на гейт · 1-й");
+  });
+
   it("activity_line_covers_every_state_and_evidence_with_russian_text_and_tone", () => {
     expect(line({ state: "idle" })).toEqual({
       text: "Новая сессия",

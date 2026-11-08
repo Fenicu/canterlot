@@ -2,17 +2,20 @@
   import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import Icon from '#lib/ui/Icon.svelte';
   import { liveLineText } from '#lib/timeline/present.js';
+  import { leaseWaitText, type LeaseWait } from '#lib/format/lease.js';
   let {
     phase = 'working',
     tool = '',
     startedAt,
     now,
-    interrupt = null
-  }: { phase?: string; tool?: string; startedAt: number; now: number; interrupt?: InterruptControl | null } = $props();
-  const text = $derived(liveLineText(phase, Math.max(0, now - startedAt), tool));
+    interrupt = null,
+    waiting = null
+  }: { phase?: string; tool?: string; startedAt: number; now: number; interrupt?: InterruptControl | null; waiting?: LeaseWait | null } = $props();
+  // Процесс стоит в очереди тяжёлых задач машины: место в очереди важнее имени инструмента.
+  const text = $derived(waiting ? leaseWaitText(waiting) : liveLineText(phase, Math.max(0, now - startedAt), tool));
 </script>
 
-<div class="live" data-working>
+<div class="live" data-working data-lease-wait={waiting ? '' : undefined}>
   <span class="write" aria-hidden="true"><i></i><i></i><i></i></span><span class="text">{text}</span>
   <!-- Прервать ход можно здесь, вдали от «Отправить»: промах по кнопке отправки не прерывает работу. -->
   {#if interrupt}
