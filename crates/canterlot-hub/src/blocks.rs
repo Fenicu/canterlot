@@ -246,10 +246,10 @@ pub async fn finalize(
     let accumulated_known = fact.text_omitted || !accumulated.is_empty();
     let mismatch =
         checksum(content) != expected || (accumulated_known && checksum(&accumulated) != expected);
+    let line_count = content.bytes().filter(|b| *b == b'\n').count() as i32;
+    // Закрытие пишет строку блока одним UPDATE: выражение индекса поиска считается один раз.
+    let raw = sealed_raw_checksum(conn, block_id).await?;
     if fact.text_omitted && (block.revision_gap || mismatch) {
-        sqlx::query("update blocks set content = $2, rev = $3, state = 'incomplete', checksum = null, incomplete_reason = 'revision_gap', updated_at = clock_timestamp() where block_id = $1")
-            .bind(block_id).bind(content).bind(rev(fact.rev)?).execute(&mut *conn).await?;
-        seal_chunks(conn, block_id).await?;
         if mismatch {
             emit(
                 conn,
@@ -268,18 +268,46 @@ pub async fn finalize(
             correlation_id,
         )
         .await?;
-        sqlx::query("update blocks set finished_at=$2,summary=coalesce(nullif($3,''),summary),line_count=case when kind='tool_result' then $4 else line_count end where block_id=$1").bind(block_id).bind(event.committed_at).bind(&fact.summary).bind(content.bytes().filter(|b|*b==b'\n').count() as i32).execute(&mut *conn).await?;
+        let sql = format!(
+            "update blocks set content = $2, rev = $3, state = 'incomplete', checksum = null, incomplete_reason = 'revision_gap', updated_at = clock_timestamp(), finished_at = $4, summary = coalesce(nullif($5, ''), summary), line_count = case when kind = 'tool_result' then $6 else line_count end{} where block_id = $1",
+            raw_assignment(&raw, 7)
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(block_id)
+            .bind(content)
+            .bind(rev(fact.rev)?)
+            .bind(event.committed_at)
+            .bind(&fact.summary)
+            .bind(line_count);
+        if let Some(raw) = raw {
+            query = query.bind(raw);
+        }
+        query.execute(&mut *conn).await?;
+        delete_chunks(conn, block_id).await?;
         return Ok(BlockOutcome::Diagnosed(if mismatch {
             "block_checksum_mismatch"
         } else {
             "block_revision_gap"
         }));
     }
-    sqlx::query("update blocks set content = $2, rev = $3, state = 'final', checksum = $4, incomplete_reason = null, updated_at = clock_timestamp() where block_id = $1")
-        .bind(block_id).bind(content).bind(rev(fact.rev)?).bind(&expected).execute(&mut *conn).await?;
-    seal_chunks(conn, block_id).await?;
     let event = emit(conn, run, "block_final", json!({"block_id": block_id, "rev": fact.rev, "text": text, "checksum": expected, "text_omitted": fact.text_omitted, "summary": non_empty(&fact.summary)}), correlation_id).await?;
-    sqlx::query("update blocks set finished_at=$2,summary=coalesce(nullif($3,''),summary),line_count=case when kind='tool_result' then $4 else line_count end where block_id=$1").bind(block_id).bind(event.committed_at).bind(&fact.summary).bind(content.bytes().filter(|b|*b==b'\n').count() as i32).execute(&mut *conn).await?;
+    let sql = format!(
+        "update blocks set content = $2, rev = $3, state = 'final', checksum = $4, incomplete_reason = null, updated_at = clock_timestamp(), finished_at = $5, summary = coalesce(nullif($6, ''), summary), line_count = case when kind = 'tool_result' then $7 else line_count end{} where block_id = $1",
+        raw_assignment(&raw, 8)
+    );
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(block_id)
+        .bind(content)
+        .bind(rev(fact.rev)?)
+        .bind(&expected)
+        .bind(event.committed_at)
+        .bind(&fact.summary)
+        .bind(line_count);
+    if let Some(raw) = raw {
+        query = query.bind(raw);
+    }
+    query.execute(&mut *conn).await?;
+    delete_chunks(conn, block_id).await?;
     if mismatch {
         emit(
             conn,
@@ -338,22 +366,51 @@ async fn raw_chunks_checksum(
     .await
 }
 
-/// Закрытый блок хранит текст в `content`: дельты больше не нужны, остаётся только сумма
-/// оригинала с NUL для сверки повторного финала.
-async fn seal_chunks(conn: &mut PgConnection, block_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query(concat!(
-        "update blocks b set raw_checksum = s.sum from (",
+/// Сумма дельт в том виде, как их прислал воркер, для сверки повторного финала закрытого
+/// блока; `None`, если ни одна дельта не менялась.
+async fn sealed_raw_checksum(
+    conn: &mut PgConnection,
+    block_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let sum: Option<Option<String>> = sqlx::query_scalar(concat!(
         raw_checksum_sql!(),
-        " where c.block_id = $1 having bool_or(c.raw is not null)) s(sum) where b.block_id = $1"
+        " where c.block_id = $1 having bool_or(c.raw is not null)"
     ))
     .bind(block_id)
-    .execute(&mut *conn)
+    .fetch_optional(&mut *conn)
     .await?;
+    Ok(sum.flatten())
+}
+
+/// Сумма оригинала пишется, только если она есть: прежнее значение не читается, поэтому
+/// закрытию не нужно право на чтение `raw_checksum`. Параметр с суммой идёт последним.
+fn raw_assignment(raw: &Option<String>, parameter: usize) -> String {
+    if raw.is_some() {
+        format!(", raw_checksum = ${parameter}")
+    } else {
+        String::new()
+    }
+}
+
+async fn delete_chunks(conn: &mut PgConnection, block_id: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("delete from block_chunks where block_id = $1")
         .bind(block_id)
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// Закрытый блок хранит текст в `content`: дельты больше не нужны, остаётся только сумма
+/// оригинала с NUL для сверки повторного финала.
+async fn seal_chunks(conn: &mut PgConnection, block_id: Uuid) -> Result<(), sqlx::Error> {
+    if let Some(sum) = sealed_raw_checksum(conn, block_id).await? {
+        sqlx::query("update blocks set raw_checksum = $2 where block_id = $1")
+            .bind(block_id)
+            .bind(sum)
+            .execute(&mut *conn)
+            .await?;
+    }
+    delete_chunks(conn, block_id).await
 }
 
 /// Дельты блоков, закрытых до того, как закрытие стало их удалять. Идёт по блокам пачками
@@ -399,9 +456,7 @@ pub async fn mark_incomplete(
     if block.state != "streaming" {
         return Ok(BlockOutcome::Ignored(BlockIgnored::AfterFinal));
     }
-    sqlx::query("update blocks set content = coalesce((select string_agg(text, '' order by seq) from block_chunks where block_id = $1), ''), state = 'incomplete', rev = $2, incomplete_reason = $3, updated_at = clock_timestamp() where block_id = $1")
-        .bind(block_id).bind(rev(fact.rev)?).bind(&fact.reason).execute(&mut *conn).await?;
-    seal_chunks(conn, block_id).await?;
+    let raw = sealed_raw_checksum(conn, block_id).await?;
     let event = emit(
         conn,
         run,
@@ -410,11 +465,20 @@ pub async fn mark_incomplete(
         correlation_id,
     )
     .await?;
-    sqlx::query("update blocks set finished_at = $2 where block_id = $1")
+    let sql = format!(
+        "update blocks set content = coalesce((select string_agg(text, '' order by seq) from block_chunks where block_id = $1), ''), state = 'incomplete', rev = $2, incomplete_reason = $3, updated_at = clock_timestamp(), finished_at = $4{} where block_id = $1",
+        raw_assignment(&raw, 5)
+    );
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(block_id)
-        .bind(event.committed_at)
-        .execute(&mut *conn)
-        .await?;
+        .bind(rev(fact.rev)?)
+        .bind(&fact.reason)
+        .bind(event.committed_at);
+    if let Some(raw) = raw {
+        query = query.bind(raw);
+    }
+    query.execute(&mut *conn).await?;
+    delete_chunks(conn, block_id).await?;
     Ok(BlockOutcome::Applied)
 }
 
