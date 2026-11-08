@@ -1199,11 +1199,7 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "resource_lease_v1");
-        let watch_enabled = pilot
-            && accepted
-                .capabilities
-                .iter()
-                .any(|cap| cap == "watchdog_v1");
+        let watch_enabled = pilot && accepted.capabilities.iter().any(|cap| cap == "watchdog_v1");
         if watch_enabled {
             self.watchdog.ensure_started();
         }
