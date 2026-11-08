@@ -1459,3 +1459,61 @@ async fn usage_baseline_resets_after_restart() {
         .expect("usage after restart");
     assert_eq!(after, 30);
 }
+
+// Усилие из смены инструкций, отложенной фоновой работой, не должно перекрыть усилие,
+// которое владелец позже сменил на ходу запросом `apply_flag_settings`.
+#[tokio::test]
+#[ignore = "bug: отложенный перезапуск поднимает CLI с устаревшим усилием вместо последнего применённого"]
+async fn deferred_restart_keeps_the_effort_changed_later_on_the_fly() {
+    let mut h = RestartHarness::new().await;
+    background_frames(&h, running_task());
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    h.until_finished().await;
+    // Пресет и усилие max вместе: перезапуск ждёт конца фоновой работы.
+    let out = h
+        .transmit(Some(SettingsChange {
+            effort: Some("max".into()),
+            ..change(clean_spec())
+        }))
+        .await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    // Позже владелец ставит усилие high: оно уходит в CLI сразу.
+    let out = h
+        .transmit(Some(SettingsChange {
+            effort: Some("high".into()),
+            ..Default::default()
+        }))
+        .await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    let lines = stdin_values(&h, h.old_pid);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["request"]["settings"]["effortLevel"] == "high"),
+        "{lines:?}"
+    );
+    h.until_finished().await;
+
+    end_background_work(&mut h).await;
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let spawns = h.spawns();
+    assert_eq!(
+        spawns.len(),
+        2,
+        "the deferred restart went ahead: {spawns:?}"
+    );
+    let (_, args) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    let flag = args.iter().position(|a| a == "--effort").unwrap();
+    assert_eq!(
+        args[flag + 1],
+        "high",
+        "the latest effort must survive the restart"
+    );
+}
