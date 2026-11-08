@@ -133,6 +133,12 @@ run_nextest() {
                 return 0
             fi
             [[ "$expr" != all ]] && filter=(-E "$expr")
+            # Выбор по diff может не найти ни одного теста, который nextest запустит: например,
+            # изменились только живые тесты под #[ignore]. Это не ошибка. Свой фильтр -E
+            # остаётся строгим: пустая выборка там скорее опечатка.
+            if [[ -z "$custom_filter" && "$expr" != all ]]; then
+                filter+=(--no-tests=warn)
+            fi
         fi
     fi
     local status=0
