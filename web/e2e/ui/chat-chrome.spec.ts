@@ -5,6 +5,7 @@ import { seedMockupChat, seedMockup08 } from '../../testing/fixtures/mockup-chat
 import { expect, test, toggleChatTheme } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
+const EFFORT_RESTART_REASON = 'Агент этой машины меняет усилие только при запуске. Остановите сессию: новое усилие применится при следующем запуске.';
 
 async function bootChat(
 	page: Page,
@@ -190,6 +191,70 @@ test('unsupported_midsession_setting_is_disabled_with_the_reason_text', async ({
 
 	// Error message appears under control
 	await expect(page.getByText('Модель неизвестна или недоступна на этой машине')).toBeVisible();
+});
+
+async function goLive(hub: FakeHub, id: string): Promise<void> {
+	hub.append(`conversation:${id}`, {
+		kind: 'execution_state_changed',
+		conversation_id: id,
+		payload: { generation: 1, outcome: null, state: 'running' }
+	});
+	hub.flush();
+}
+
+test('effort_changes_on_a_live_session_when_the_harness_applies_it_between_turns', async ({ page }) => {
+	const bodies: { effort?: string }[] = [];
+	page.on('request', (request) => {
+		if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/settings')) {
+			bodies.push(request.postDataJSON() as { effort?: string });
+		}
+	});
+	const { hub, id } = await bootChat(page, {
+		setupApi: (api) => {
+			const machine = api.machines.get('workstation');
+			if (!machine) throw new Error('workstation is seeded');
+			machine.harnesses[0]!.settings_midsession_effort = true;
+		}
+	});
+	await goLive(hub, id);
+	await expect(page.getByRole('button', { name: 'Остановить сессию' })).toBeVisible();
+
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
+	const effort = page.locator('#effort');
+	await expect(effort).toBeEnabled();
+	await effort.selectOption('high');
+	await page.getByRole('button', { name: 'Сохранить настройки' }).click();
+	await expect.poll(() => bodies.find((body) => body.effort === 'high')).toBeDefined();
+});
+
+test('effort_on_a_live_session_is_locked_with_the_reason_when_the_harness_needs_a_restart', async ({ page }) => {
+	const { hub, id } = await bootChat(page, {
+		setupApi: (api) => {
+			const machine = api.machines.get('workstation');
+			if (!machine) throw new Error('workstation is seeded');
+			machine.harnesses[0]!.settings_midsession_effort = false;
+		}
+	});
+	await goLive(hub, id);
+	await expect(page.getByRole('button', { name: 'Остановить сессию' })).toBeVisible();
+
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
+	await expect(page.locator('#effort')).toBeDisabled();
+	await expect(page.getByText(EFFORT_RESTART_REASON)).toBeVisible();
+	// Модель и остальное по-прежнему меняются на ходу.
+	await expect(page.locator('#model')).toBeEnabled();
+
+	// Остановленная сессия принимает новое усилие: оно применится при следующем запуске.
+	hub.append(`conversation:${id}`, {
+		kind: 'execution_state_changed',
+		conversation_id: id,
+		payload: { generation: 1, state: 'stopped', outcome: 'stopped' }
+	});
+	hub.flush();
+	await expect(page.locator('#effort')).toBeEnabled();
+	await expect(page.getByText(EFFORT_RESTART_REASON)).toHaveCount(0);
 });
 
 test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_confirmations', async ({ page }) => {

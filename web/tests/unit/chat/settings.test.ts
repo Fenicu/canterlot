@@ -24,4 +24,19 @@ describe("chat/settings", () => {
       }),
     ).toBe("Настройка недоступна и сброшена: режим разрешений");
   });
+
+  it("rejected_effort_names_the_reason", () => {
+    expect(
+      formatRejectedSettings({
+        keys: ["effort"],
+        reason: "effort_change_unsupported",
+      }),
+    ).toBe("Настройка недоступна и сброшена: усилие. Агент этой машины меняет усилие только при запуске");
+    expect(
+      formatRejectedSettings({
+        keys: ["effort"],
+        reason: "effort_change_failed",
+      }),
+    ).toBe("Настройка недоступна и сброшена: усилие. Агент не принял новое усилие, оно осталось прежним");
+  });
 });

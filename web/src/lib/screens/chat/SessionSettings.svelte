@@ -1,8 +1,19 @@
 <script lang="ts" module>
 	import { settingKeyLabel } from '#lib/format/labels.js';
 
+	/** Агент меняет усилие только флагом запуска: на ходу смена недоступна. */
+	export const EFFORT_RESTART_REASON =
+		'Агент этой машины меняет усилие только при запуске. Остановите сессию: новое усилие применится при следующем запуске.';
+
+	const REJECTION_REASONS: Record<string, string> = {
+		effort_change_unsupported: 'Агент этой машины меняет усилие только при запуске',
+		effort_change_failed: 'Агент не принял новое усилие, оно осталось прежним'
+	};
+
 	export function formatRejectedSettings(rejected: { keys: string[]; reason: string }): string {
-		return `Настройка недоступна и сброшена: ${rejected.keys.map(settingKeyLabel).join(', ')}`;
+		const text = `Настройка недоступна и сброшена: ${rejected.keys.map(settingKeyLabel).join(', ')}`;
+		const reason = Object.hasOwn(REJECTION_REASONS, rejected.reason) ? REJECTION_REASONS[rejected.reason] : undefined;
+		return reason ? `${text}. ${reason}` : text;
 	}
 </script>
 
@@ -110,6 +121,8 @@
 
 	const live = $derived(executionLive(chat.execution));
 	const midsessionSupported = $derived(!live || harness?.settings_midsession !== false);
+	// Каталог без признака — старый хаб: смену усилия проверит он сам.
+	const effortMidsessionSupported = $derived(!live || harness?.settings_midsession_effort !== false);
 
 	// Local form state
 	let selectedModel = $state('opus');
@@ -196,6 +209,7 @@
 		permissionError = null;
 		presetError = null;
 		generalError = null;
+		const patch: SettingsPatch = {};
 
 		try {
 			// Хаб отклоняет значение вне каталога: у сессии без выбранного режима разрешений он пуст, поэтому уходит только изменённое.
@@ -205,9 +219,8 @@
 				permission_mode: pending?.permission_mode ?? effective.permission_mode,
 				instruction_profile: (pending as PresetSettings | null)?.instruction_profile ?? effectiveRef
 			};
-			const patch: SettingsPatch = {};
 			if (selectedModel !== shown.model) patch.model = selectedModel;
-			if (selectedEffort !== shown.effort) patch.effort = selectedEffort;
+			if (selectedEffort !== shown.effort && effortMidsessionSupported) patch.effort = selectedEffort;
 			if (selectedPermission !== permissionValue(shown.permission_mode)) patch.permission_mode = selectedPermission;
 			if (selectedPreset !== shown.instruction_profile) patch.instruction_profile = selectedPreset;
 			if (Object.keys(patch).length > 0) await updateSettings(chat.id, patch);
@@ -229,6 +242,8 @@
 					permissionError = err.message || 'Режим разрешений не поддерживается';
 				} else if (code === 'profile_unknown') {
 					presetError = 'Инструкции не найдены';
+				} else if (code === 'settings_midsession_unsupported' && patch.effort !== undefined && midsessionSupported) {
+					effortError = EFFORT_RESTART_REASON;
 				} else if (code === 'settings_midsession_unsupported') {
 					generalError = 'Настройка посреди сессии не поддерживается';
 				} else {
@@ -310,9 +325,9 @@
 					label="Усилие"
 					options={effortOptions}
 					bind:value={selectedEffort}
-					disabled={locked}
+					disabled={locked || !effortMidsessionSupported}
 					hint={pending?.effort ? 'Применится со следующего хода' : undefined}
-					error={effortError ?? undefined}
+					error={!effortMidsessionSupported && midsessionSupported ? EFFORT_RESTART_REASON : (effortError ?? undefined)}
 				/>
 			{/if}
 		</div>
