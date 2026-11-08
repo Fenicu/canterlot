@@ -62,6 +62,7 @@
 					const next: Record<string, PlanTaskDetail> = {};
 					for (const task of res.data.tasks) next[task.id] = task;
 					details = next;
+					runtime?.list.plan.loaded(id, res.data.tasks);
 				})
 				.catch(() => undefined);
 		if (!fetched) {

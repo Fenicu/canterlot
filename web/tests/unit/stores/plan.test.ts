@@ -123,3 +123,53 @@ describe('ListStore plan', () => {
 		expect(list.plan.has(ORCH)).toBe(false);
 	});
 });
+
+describe('PlanModel: план, прочитанный по HTTP', () => {
+	const A = '00000000-0000-4000-8000-000000000201';
+	const B = '00000000-0000-4000-8000-000000000202';
+
+	it('plan_loaded_tasks_count_even_without_the_snapshot', () => {
+		const plan = new PlanModel();
+		expect(plan.has(ORCH)).toBe(false);
+		plan.loaded(ORCH, [task({ id: A, state: 'done', revision: 2 }), task({ id: B, number: 2, revision: 1 })]);
+		expect(plan.has(ORCH)).toBe(true);
+		expect(plan.of(ORCH).map((t) => t.id)).toEqual([A, B]);
+		expect(plan.of(OTHER)).toEqual([]);
+	});
+
+	it('plan_live_overlays_loaded_only_with_a_newer_revision', () => {
+		const plan = new PlanModel();
+		plan.apply(task({ id: A, state: 'in_progress', revision: 3 }));
+		plan.loaded(ORCH, [task({ id: A, state: 'waiting', revision: 2 }), task({ id: B, number: 2, state: 'done', revision: 5 })]);
+		plan.replace([task({ id: A, state: 'in_progress', revision: 3 }), task({ id: B, number: 2, state: 'in_progress', revision: 4 })]);
+		const states = Object.fromEntries(plan.of(ORCH).map((t) => [t.id, t.state]));
+		expect(states).toEqual({ [A]: 'in_progress', [B]: 'done' });
+		plan.apply(task({ id: B, number: 2, state: 'cancelled', revision: 6 }));
+		expect(plan.of(ORCH).find((t) => t.id === B)?.state).toBe('cancelled');
+	});
+
+	it('plan_live_task_moved_to_another_orchestrator_leaves_the_loaded_plan', () => {
+		const plan = new PlanModel();
+		plan.loaded(ORCH, [task({ id: A, revision: 1 })]);
+		plan.apply(task({ id: A, orchestrator_id: OTHER, revision: 2 }));
+		expect(plan.of(ORCH)).toEqual([]);
+		expect(plan.of(OTHER).map((t) => t.id)).toEqual([A]);
+	});
+
+	it('plan_dropped_orchestrator_forgets_the_loaded_plan_too', () => {
+		const plan = new PlanModel();
+		plan.loaded(ORCH, [task({ id: A })]);
+		plan.dropOrchestrator(ORCH);
+		expect(plan.of(ORCH)).toEqual([]);
+		expect(plan.has(ORCH)).toBe(false);
+		plan.loaded(OTHER, [task({ id: B, orchestrator_id: OTHER })]);
+		plan.clear();
+		expect(plan.has(OTHER)).toBe(false);
+	});
+
+	it('plan_loaded_does_not_bump_the_revision_counter', () => {
+		const plan = new PlanModel();
+		plan.loaded(ORCH, [task({ id: A })]);
+		expect(plan.revisionOf(ORCH)).toBe(0);
+	});
+});

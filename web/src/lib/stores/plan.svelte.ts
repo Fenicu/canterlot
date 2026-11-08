@@ -9,9 +9,14 @@ export type PlanTaskDetail = components['schemas']['PlanTaskDetail'];
 /**
  * Задачи планов всех оркестраторов владельца. Снимок списка заменяет набор целиком,
  * событие `plan_task_changed` правит одну задачу и не откатывает её к старой ревизии.
+ *
+ * Снимок неполон (без архива, планов делегатов и старых готовых задач), поэтому план,
+ * прочитанный экраном плана по HTTP, хранится отдельно и служит основой: живая задача
+ * накладывается на него, если её ревизия не меньше.
  */
 export class PlanModel {
 	readonly tasks = new SvelteMap<string, PlanTask>();
+	readonly #loaded = new SvelteMap<string, readonly PlanTask[]>();
 	/** Растёт с каждой принятой правкой задачи: экран плана по нему перечитывает подробности. */
 	readonly changes = new SvelteMap<string, number>();
 
@@ -30,20 +35,32 @@ export class PlanModel {
 		for (const id of touched.filter((value, index) => touched.indexOf(value) === index)) this.#touch(id);
 	}
 
+	/** План, прочитанный по HTTP (`GET /api/v1/plan`): правда хаба на момент чтения. */
+	loaded(orchestratorId: string, tasks: readonly PlanTask[]): void {
+		this.#loaded.set(orchestratorId, tasks);
+	}
+
 	/** Оркестратор удалён: его план уходит вместе с ним. */
 	dropOrchestrator(id: string): void {
 		for (const task of [...this.tasks.values()]) if (task.orchestrator_id === id) this.tasks.delete(task.id);
+		this.#loaded.delete(id);
 		this.changes.delete(id);
 	}
 
-	/** Задачи одного плана по номерам. */
+	/** Задачи одного плана по номерам: прочитанный план с наложенными живыми задачами. */
 	of(orchestratorId: string): PlanTask[] {
-		return [...this.tasks.values()].filter((task) => task.orchestrator_id === orchestratorId).sort((a, b) => a.number - b.number);
+		const merged = new Map<string, PlanTask>();
+		for (const task of this.#loaded.get(orchestratorId) ?? []) {
+			const live = this.tasks.get(task.id);
+			merged.set(task.id, live && live.revision >= task.revision ? live : task);
+		}
+		for (const task of this.tasks.values()) if (task.orchestrator_id === orchestratorId && !merged.has(task.id)) merged.set(task.id, task);
+		return [...merged.values()].filter((task) => task.orchestrator_id === orchestratorId).sort((a, b) => a.number - b.number);
 	}
 
 	has(orchestratorId: string): boolean {
 		for (const task of this.tasks.values()) if (task.orchestrator_id === orchestratorId) return true;
-		return false;
+		return this.#loaded.has(orchestratorId) && this.of(orchestratorId).length > 0;
 	}
 
 	/** Оркестраторы, у которых есть план: последний изменённый первым. */
@@ -62,6 +79,7 @@ export class PlanModel {
 
 	clear(): void {
 		this.tasks.clear();
+		this.#loaded.clear();
 		this.changes.clear();
 	}
 
