@@ -20,7 +20,13 @@ use canterlot_proto::{limits::MAX_WATCH_LEAKED, worker::v1::LeakedProcess};
 use crate::containment::GROUP_MARKER_ENV;
 
 pub const LEASE_HELD_ENV: &str = "CANTERLOT_LEASE_HELD";
-pub const BUILD_COMMS: &[&str] = &["cargo", "rustc", "cargo-nextest", "rustdoc", "clippy-driver"];
+pub const BUILD_COMMS: &[&str] = &[
+    "cargo",
+    "rustc",
+    "cargo-nextest",
+    "rustdoc",
+    "clippy-driver",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcInfo {
@@ -93,7 +99,8 @@ pub fn leaked(
 }
 
 fn unleased_build(info: &ProcInfo) -> bool {
-    BUILD_COMMS.contains(&info.comm.as_str()) && info.env.as_ref().is_some_and(|env| !env.lease_held)
+    BUILD_COMMS.contains(&info.comm.as_str())
+        && info.env.as_ref().is_some_and(|env| !env.lease_held)
 }
 
 /// Сборки без аренды: верхние процессы сборки, чей родитель сам не сборка.
@@ -176,7 +183,11 @@ pub fn process_table(proc_root: &Path) -> io::Result<HashMap<u32, ProcInfo>> {
     let own = std::process::id();
     let mut all = HashMap::new();
     for entry in fs::read_dir(proc_root)?.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
             continue;
         };
         if pid == own {
@@ -318,7 +329,10 @@ mod tests {
         let all = process_table(Path::new("/proc")).unwrap();
         let info = all.get(&pid).cloned().unwrap();
         assert_eq!(info.comm, "sleep");
-        assert_eq!(info.env.as_ref().unwrap().marker.as_deref(), Some(id.as_str()));
+        assert_eq!(
+            info.env.as_ref().unwrap().marker.as_deref(),
+            Some(id.as_str())
+        );
         let released: HashSet<String> = [id.clone()].into();
         let ticks = rustix::param::clock_ticks_per_second();
         let uptime = uptime_ticks(Path::new("/proc")).unwrap();

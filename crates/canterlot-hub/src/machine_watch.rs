@@ -61,7 +61,11 @@ pub enum WatchOutcome {
 }
 
 fn ignored(reason: &'static str) -> WatchOutcome {
-    tracing::warn!(kind = "machine_watch_ignored", reason, "machine watch ignored");
+    tracing::warn!(
+        kind = "machine_watch_ignored",
+        reason,
+        "machine watch ignored"
+    );
     WatchOutcome::Ignored(reason)
 }
 

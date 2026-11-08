@@ -3307,10 +3307,7 @@ mod tests {
         thread.close().await.unwrap();
     }
 
-    fn gc_manager(
-        root: &Path,
-        thread: &StoreThread,
-    ) -> ExecutionManager {
+    fn gc_manager(root: &Path, thread: &StoreThread) -> ExecutionManager {
         let (relay, _rx) = mpsc::channel(1);
         ExecutionManager::new_with_runtime_dir(
             ExecutionConfig::default(),

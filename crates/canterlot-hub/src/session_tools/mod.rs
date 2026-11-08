@@ -13,6 +13,7 @@ pub mod control;
 pub mod disk;
 pub mod guard;
 pub mod jobs;
+pub mod machine_text;
 pub mod nudge;
 pub mod origin;
 pub mod outage;

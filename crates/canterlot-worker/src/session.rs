@@ -750,7 +750,10 @@ impl Worker {
         manager.set_cache_ages(crate::exec::CacheAges {
             idle: Duration::from_secs(self.config.machine.idle_cache_hours.saturating_mul(3600)),
             released: Duration::from_secs(
-                self.config.machine.released_target_hours.saturating_mul(3600),
+                self.config
+                    .machine
+                    .released_target_hours
+                    .saturating_mul(3600),
             ),
         });
         manager.configure_adapters(
@@ -1337,7 +1340,11 @@ impl Worker {
         type WatchFuture<'a> = Pin<Box<dyn Future<Output = Option<MachineWatch>> + Send + 'a>>;
         let mut watch_operation: Option<WatchFuture> = None;
         let mut disk_above: Option<bool> = None;
-        let disk_warn = self.config.machine.disk_warn_free_gb.saturating_mul(1_000_000_000);
+        let disk_warn = self
+            .config
+            .machine
+            .disk_warn_free_gb
+            .saturating_mul(1_000_000_000);
         let session_state = self.state.clone();
         let manager = self.manager.as_ref().unwrap();
         let (data_state, mut data_attached) = watch::channel(true);

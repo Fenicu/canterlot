@@ -1735,6 +1735,7 @@ async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
         disk_warn_free_gb: 12,
         disk_critical_free_gb: 4,
         metrics_stale_after: Duration::from_secs(45),
+        mem_warn_gb: 3,
     };
     let h = harness_from(deps, dir).await;
     let response = me_path(&h, "/api/v1/config").await;

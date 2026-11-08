@@ -351,7 +351,11 @@ fn stale_test_binaries(deps: &Path) -> Vec<PathBuf> {
         let Some((stem, hash)) = name.rsplit_once('-') else {
             continue;
         };
-        if hash.len() != 16 || !hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        if hash.len() != 16
+            || !hash
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
             continue;
         }
         let Ok(meta) = entry.metadata() else {
@@ -480,9 +484,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        Grade, TRASH_DIR, build_candidates, ensure_test_runtime_allowed, lock_build,
-        purge_trash, remove_stale_execution, remove_stale_socket, stage_build, stale_executions,
-        stale_sockets, target_in_use, trash_root,
+        Grade, TRASH_DIR, build_candidates, ensure_test_runtime_allowed, lock_build, purge_trash,
+        remove_stale_execution, remove_stale_socket, stage_build, stale_executions, stale_sockets,
+        target_in_use, trash_root,
     };
 
     fn old(path: &Path) {
@@ -578,10 +582,12 @@ mod tests {
             }
             stage_build(&candidate.path, Grade::Released, &trash).unwrap();
         }
-        assert!(build_candidates(&data, SystemTime::now(), Duration::from_secs(1))
-            .unwrap()
-            .iter()
-            .all(|c| c.conversation_id != TRASH_DIR));
+        assert!(
+            build_candidates(&data, SystemTime::now(), Duration::from_secs(1))
+                .unwrap()
+                .iter()
+                .all(|c| c.conversation_id != TRASH_DIR)
+        );
         purge_trash(&trash).unwrap();
 
         assert!(!idle_tree.join("target").exists());
@@ -608,7 +614,10 @@ mod tests {
 
     #[test]
     fn idle_grade_keeps_target_but_drops_incremental_lint_and_stale_test_binaries() {
-        let root = tempfile::Builder::new().prefix("cl-").tempdir_in("/tmp").unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let worktree = root.path().join("wt");
         let target = worktree.join("target");
         let deps = target.join("debug/deps");
@@ -623,25 +632,37 @@ mod tests {
         binary(&target.join("debug/canterlot-worker"), 5);
 
         let trash = root.path().join("trash");
-        let batch = stage_build(&worktree, Grade::Idle, &trash).unwrap().unwrap();
+        let batch = stage_build(&worktree, Grade::Idle, &trash)
+            .unwrap()
+            .unwrap();
         assert!(!target.join("debug/incremental").exists());
         assert!(!target.join("lint").exists());
         assert!(!deps.join("session-0123456789abcdef").exists());
         assert!(!deps.join("session-0123456789abcdef.d").exists());
-        assert!(deps.join("session-fedcba9876543210").exists(), "newest copy stays");
+        assert!(
+            deps.join("session-fedcba9876543210").exists(),
+            "newest copy stays"
+        );
         assert!(deps.join("libdep-0123456789abcdef.rlib").exists());
         assert!(target.join("debug/canterlot-worker").exists());
         assert_eq!(fs::read_dir(&batch).unwrap().count(), 4);
         purge_trash(&trash).unwrap();
         assert!(!batch.exists());
         // Повтор: убирать уже нечего.
-        assert!(stage_build(&worktree, Grade::Idle, &trash).unwrap().is_none());
+        assert!(
+            stage_build(&worktree, Grade::Idle, &trash)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn a_held_cargo_lock_or_a_process_inside_target_makes_the_build_busy() {
         use rustix::fs::{FlockOperation, flock};
-        let root = tempfile::Builder::new().prefix("cl-").tempdir_in("/tmp").unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let target = root.path().join("wt/target");
         fs::create_dir_all(target.join("debug")).unwrap();
         fs::create_dir_all(target.join("lint/debug")).unwrap();
@@ -660,7 +681,10 @@ mod tests {
 
         let own = std::process::id();
         let mine = fs::File::open(target.join("debug/.cargo-lock")).unwrap();
-        assert!(!target_in_use(&target, Path::new("/proc"), own), "own fds are skipped");
+        assert!(
+            !target_in_use(&target, Path::new("/proc"), own),
+            "own fds are skipped"
+        );
         assert!(target_in_use(&target, Path::new("/proc"), 0));
         drop(mine);
         let mut child = std::process::Command::new("sleep")
@@ -668,7 +692,10 @@ mod tests {
             .current_dir(target.join("debug"))
             .spawn()
             .unwrap();
-        assert!(target_in_use(&target, Path::new("/proc"), own), "cwd counts");
+        assert!(
+            target_in_use(&target, Path::new("/proc"), own),
+            "cwd counts"
+        );
         child.kill().unwrap();
         child.wait().unwrap();
         let mut child = std::process::Command::new("sleep")
@@ -676,7 +703,10 @@ mod tests {
             .stdin(fs::File::open(target.join("debug/.cargo-lock")).unwrap())
             .spawn()
             .unwrap();
-        assert!(target_in_use(&target, Path::new("/proc"), own), "an open fd counts");
+        assert!(
+            target_in_use(&target, Path::new("/proc"), own),
+            "an open fd counts"
+        );
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(!target_in_use(&target, Path::new("/proc"), own));

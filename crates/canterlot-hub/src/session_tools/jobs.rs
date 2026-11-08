@@ -46,8 +46,15 @@ struct NoteJob {
 #[derive(Deserialize)]
 struct MachineEventJob {
     target_id: Uuid,
-    /// `unavailable`, `available`, `disk_low` или `disk_critical`.
+    /// `unavailable`, `available`, `disk_low`, `disk_critical`, `mem_low` или
+    /// `processes_leaked`.
     kind: String,
+    /// Событие сторожа машины: подлежащее — машина, `target_id` — сам получатель.
+    /// У заданий до сторожа поля нет, у них цель — сессия на машине.
+    #[serde(default)]
+    machine_id: Option<Uuid>,
+    #[serde(default)]
+    details: Value,
     #[serde(default)]
     outage_id: Option<Uuid>,
     #[serde(default)]
@@ -299,12 +306,82 @@ async fn event_message(
     })
 }
 
+/// Событие сторожа: текст о машине, отправитель в `origin` — сам получатель.
+async fn machine_watch_message(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    machine_id: Uuid,
+    event: &MachineEventJob,
+    now: DateTime<Utc>,
+) -> Result<Option<(String, Value)>, sqlx::Error> {
+    let machine: Option<String> =
+        sqlx::query_scalar("select name from machines where id=$1 and owner_id=$2")
+            .bind(machine_id)
+            .bind(owner_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let row: Option<(String, String, String, String, String)> = sqlx::query_as(
+        "select c.title,c.harness,c.model,
+                coalesce(d.activity_state,'unknown'),
+                coalesce(d.activity_evidence->>'reason','')
+         from conversations c
+         left join conversation_derived d on d.conversation_id=c.id
+         where c.id=$1 and c.owner_id=$2",
+    )
+    .bind(event.target_id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let (Some(machine), Some((title, harness, model, state, reason))) = (machine, row) else {
+        return Ok(None);
+    };
+    let machine = super::origin::clean_title(&machine);
+    let (text, kind) = match event.kind.as_str() {
+        "disk_low" => (
+            super::machine_text::disk(&machine, false, &event.details, now),
+            "machine_disk_low",
+        ),
+        "disk_critical" => (
+            super::machine_text::disk(&machine, true, &event.details, now),
+            "machine_disk_critical",
+        ),
+        "mem_low" => (
+            super::machine_text::memory(&machine, &event.details),
+            "machine_mem_low",
+        ),
+        "processes_leaked" => (
+            super::machine_text::leaked(&machine, &event.details),
+            "machine_processes_leaked",
+        ),
+        _ => return Ok(None),
+    };
+    let id = event.target_id;
+    let origin = json!({
+        "kind": "event",
+        "from": id,
+        "title": super::origin::clean_title(&title),
+        "harness": harness,
+        "model": model,
+        "chain_depth": event.chain_depth,
+        "event": {
+            "kind": kind,
+            "session_id": id,
+            "state": machine_state(&state, &reason),
+            "machine_id": machine_id,
+        },
+    });
+    Ok(Some((text, origin)))
+}
+
 async fn machine_event_message(
     conn: &mut PgConnection,
     owner_id: Uuid,
     event: &MachineEventJob,
     now: DateTime<Utc>,
 ) -> Result<Option<(String, Value)>, sqlx::Error> {
+    if let Some(machine_id) = event.machine_id {
+        return machine_watch_message(conn, owner_id, machine_id, event, now).await;
+    }
     let row: Option<(String, String, String, String, String, String)> = sqlx::query_as(
         "select c.title,c.harness,c.model,m.name,
                 coalesce(d.activity_state,'unknown'),

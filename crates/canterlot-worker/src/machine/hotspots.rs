@@ -88,14 +88,7 @@ pub fn discover(roots: &[PathBuf], deadline: Instant) -> Discovery {
         if !meta.is_dir() {
             continue;
         }
-        walk(
-            root,
-            meta.dev(),
-            0,
-            deadline,
-            &mut seen,
-            &mut discovery,
-        );
+        walk(root, meta.dev(), 0, deadline, &mut seen, &mut discovery);
         if discovery.truncated {
             break;
         }
@@ -173,7 +166,16 @@ pub fn measure(path: &Path, kind: Kind, dev: u64, deadline: Instant) -> Size {
     }
     size.bytes = meta.blocks().saturating_mul(512);
     let target = kind == Kind::Target;
-    measure_dir(path, dev, 0, target, false, deadline, &mut inodes, &mut size);
+    measure_dir(
+        path,
+        dev,
+        0,
+        target,
+        false,
+        deadline,
+        &mut inodes,
+        &mut size,
+    );
     size
 }
 
@@ -211,7 +213,12 @@ fn measure_dir(
         let name = entry.file_name();
         let starts_incremental = target
             && name == "incremental"
-            && (depth == 1 || (depth == 2 && dir.parent().and_then(Path::file_name).is_some_and(|p| p == "lint")));
+            && (depth == 1
+                || (depth == 2
+                    && dir
+                        .parent()
+                        .and_then(Path::file_name)
+                        .is_some_and(|p| p == "lint")));
         let inside = incremental || starts_incremental;
         if inside {
             size.incremental_bytes = size.incremental_bytes.saturating_add(bytes);
@@ -399,7 +406,11 @@ mod tests {
 
     fn tag(target: &Path) {
         fs::create_dir_all(target).unwrap();
-        fs::write(target.join("CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55").unwrap();
+        fs::write(
+            target.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55",
+        )
+        .unwrap();
     }
 
     fn far() -> Instant {
@@ -432,7 +443,8 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         tag(&outside.path().join("target"));
         std::os::unix::fs::symlink(outside.path(), r.join("linked")).unwrap();
-        std::os::unix::fs::symlink(outside.path().join("target"), r.join("proj/sub-target")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("target"), r.join("proj/sub-target"))
+            .unwrap();
 
         let found = discover(&[r.to_owned(), r.join("proj")], far());
         assert!(!found.truncated);
@@ -456,7 +468,11 @@ mod tests {
     #[test]
     fn discover_refuses_filesystem_root_and_system_dirs() {
         let found = discover(
-            &[PathBuf::from("/"), PathBuf::from("/proc"), PathBuf::from("/sys")],
+            &[
+                PathBuf::from("/"),
+                PathBuf::from("/proc"),
+                PathBuf::from("/sys"),
+            ],
             far(),
         );
         assert!(found.found.is_empty());
@@ -468,7 +484,9 @@ mod tests {
         // /dev/shm — tmpfs, отдельная файловая система от временного каталога на диске.
         let root = tempfile::tempdir().unwrap();
         let shm = Path::new("/dev/shm");
-        if !shm.is_dir() || fs::metadata(shm).unwrap().dev() == fs::metadata(root.path()).unwrap().dev() {
+        if !shm.is_dir()
+            || fs::metadata(shm).unwrap().dev() == fs::metadata(root.path()).unwrap().dev()
+        {
             return;
         }
         let foreign = tempfile::tempdir_in(shm).unwrap();
@@ -477,8 +495,18 @@ mod tests {
         // устройство отличается — проверяем фильтр устройства прямым вызовом walk.
         let mut out = Discovery::default();
         let dev = fs::metadata(root.path()).unwrap().dev();
-        walk(foreign.path().parent().unwrap(), dev, 0, far(), &mut HashSet::new(), &mut out);
-        assert!(out.found.is_empty(), "directories of another device are skipped");
+        walk(
+            foreign.path().parent().unwrap(),
+            dev,
+            0,
+            far(),
+            &mut HashSet::new(),
+            &mut out,
+        );
+        assert!(
+            out.found.is_empty(),
+            "directories of another device are skipped"
+        );
     }
 
     #[test]
@@ -535,7 +563,10 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(10 * 3600);
         let older = SystemTime::now() - Duration::from_secs(20 * 3600);
         for dir in ["debug/deps", "debug", "lint", "lint/debug", ""] {
-            fs::File::open(target.join(dir)).unwrap().set_modified(older).unwrap();
+            fs::File::open(target.join(dir))
+                .unwrap()
+                .set_modified(older)
+                .unwrap();
         }
         fs::File::open(target.join("lint/debug/.fingerprint"))
             .unwrap()
