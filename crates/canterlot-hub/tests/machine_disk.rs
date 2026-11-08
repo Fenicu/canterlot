@@ -696,3 +696,72 @@ async fn watch_report_is_stored_resolved_and_published(pool: PgPool) -> TestResu
     );
     Ok(())
 }
+
+async fn jobs_of(pool: &PgPool, conversation: Uuid, kind: &str) -> i64 {
+    sqlx::query_scalar(
+        "select count(*) from scheduled_jobs
+         where payload->>'action'='machine_event' and payload->>'kind'=$2 and conversation_id=$1",
+    )
+    .bind(conversation)
+    .bind(kind)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Оркестратор, ставший получателем посреди эпизода, слышит его один раз, как и у диска.
+async fn late_orchestrator(pool: &PgPool, f: &Fx, now: DateTime<Utc>) -> Uuid {
+    let late = conversation(pool, f.owner, f.machine, "поздний").await;
+    let child = conversation(pool, f.owner, f.machine, "его делегат").await;
+    child_of(pool, late, child, now).await;
+    derive_since(pool, late, "working", now).await;
+    late
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_orchestrator_hears_open_memory_and_leak_episodes_once(pool: PgPool) -> TestResult {
+    let f = fx(&pool).await;
+    let gone = execution(&pool, f.target).await;
+    let t0 = Utc::now();
+    let step = |n: i64| t0 + TimeDelta::seconds(30 * n);
+    let leaked =
+        json!([{"execution_id": gone, "pid": 10, "comm": "cargo", "rss_bytes": GB, "age_s": 60}]);
+    for n in 0..3 {
+        set_mem(&pool, f.machine, 2 * GB, json!([]), step(n)).await;
+        set_watch(
+            &pool,
+            f.owner,
+            f.machine,
+            json!([]),
+            leaked.clone(),
+            step(n),
+        )
+        .await;
+        sweep(&pool, step(n)).await;
+    }
+    assert_eq!(mem_episodes(&pool, true).await, 1);
+    assert_eq!(jobs_of(&pool, f.subscriber, "mem_low").await, 1);
+    assert_eq!(jobs_of(&pool, f.subscriber, "processes_leaked").await, 1);
+
+    let late = late_orchestrator(&pool, &f, step(3)).await;
+    for n in 3..6 {
+        set_mem(&pool, f.machine, 2 * GB, json!([]), step(n)).await;
+        set_watch(
+            &pool,
+            f.owner,
+            f.machine,
+            json!([]),
+            leaked.clone(),
+            step(n),
+        )
+        .await;
+        sweep(&pool, step(n)).await;
+        sweep(&pool, step(n) + TimeDelta::seconds(5)).await;
+    }
+    assert_eq!(jobs_of(&pool, late, "mem_low").await, 1);
+    assert_eq!(jobs_of(&pool, late, "processes_leaked").await, 1);
+    assert_eq!(jobs_of(&pool, f.subscriber, "mem_low").await, 1);
+    assert_eq!(jobs_of(&pool, f.subscriber, "processes_leaked").await, 1);
+    assert_eq!(mem_episodes(&pool, true).await, 1);
+    Ok(())
+}

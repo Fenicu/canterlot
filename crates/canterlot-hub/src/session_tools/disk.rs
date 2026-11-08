@@ -413,26 +413,32 @@ async fn sweep_memory(
         return Ok(false);
     };
     let open = open_episode(&mut *conn, machine_id, "mem_low").await?;
-    match open {
+    let (id, opened) = match open {
         Some(id) if available >= warn.saturating_add(MEM_RECOVER_BYTES) => {
             end_episode(&mut *conn, id, now).await?;
             report.mem_recovered += 1;
-            Ok(true)
+            return Ok(true);
         }
+        // Между порогом и порогом с запасом эпизод открыт, но памяти уже не мало: как у
+        // диска, новых получателей в этой полосе не ищем.
+        Some(_) if !low => return Ok(false),
+        Some(id) => (id, false),
         None if samples >= MEM_LOW_SAMPLES => {
             let id = start_episode(&mut *conn, machine_id, sample.owner_id, "mem_low", now).await?;
             report.mem_opened += 1;
-            let details = json!({
-                "available_bytes": available,
-                "total_bytes": u64::try_from(sample.mem_total).unwrap_or(0),
-                "heaviest": heaviest(&mut *conn, sample.owner_id, &sample.executions).await?,
-            });
-            report.mem_warned +=
-                announce(&mut *conn, machine_id, id, "mem_low", &details, now).await?;
-            Ok(true)
+            (id, true)
         }
-        _ => Ok(false),
-    }
+        None => return Ok(false),
+    };
+    // Каждая новая выборка открытого эпизода: получатель, появившийся позже, слышит его
+    // один раз, отметки не дают повтора остальным.
+    let details = json!({
+        "available_bytes": available,
+        "total_bytes": u64::try_from(sample.mem_total).unwrap_or(0),
+        "heaviest": heaviest(&mut *conn, sample.owner_id, &sample.executions).await?,
+    });
+    report.mem_warned += announce(&mut *conn, machine_id, id, "mem_low", &details, now).await?;
+    Ok(opened)
 }
 
 /// Утечки по последнему свежему отчёту сторожа.
@@ -459,10 +465,19 @@ async fn sweep_leaks(
             end_episode(&mut *conn, id, now).await?;
             report.leak_recovered += 1;
         }
-        (None, true) => {
-            let id =
-                start_episode(&mut *conn, machine_id, owner_id, "processes_leaked", now).await?;
-            report.leak_opened += 1;
+        (open, true) => {
+            // Открытый эпизод объявляется на каждом обходе: получатель, появившийся позже,
+            // слышит его один раз, отметки не дают повтора остальным.
+            let id = match open {
+                Some(id) => id,
+                None => {
+                    let id =
+                        start_episode(&mut *conn, machine_id, owner_id, "processes_leaked", now)
+                            .await?;
+                    report.leak_opened += 1;
+                    id
+                }
+            };
             let rows = crate::machine_watch::resolve_leaked(&mut *conn, owner_id, &leaked).await?;
             let details = json!({"leaked": rows.iter().map(|r| json!({
                 "execution_id": r.execution_id,
