@@ -616,6 +616,7 @@ async fn purge_rows(
         "delete from queue_state where conversation_id=$1",
         "delete from idempotency_keys where conversation_id=$1",
         "delete from session_subscriptions where subscriber_id=$1 or target_id=$1",
+        "delete from machine_event_marks where conversation_id=$1",
     ];
     for statement in BY_CONVERSATION.iter().copied() {
         sqlx::query(statement).bind(id).execute(&mut *conn).await?;

@@ -222,6 +222,12 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into machine_event_marks(episode_id,kind,conversation_id) values($1,'disk_low',$2)",
+        &[Uuid::now_v7(), conversation],
+    )
+    .await;
+    exec(
+        pool,
         "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
          values($1,$2,$3,$4,'{}','rate',now())",
         &[Uuid::now_v7(), owner, conversation, Uuid::now_v7()],
