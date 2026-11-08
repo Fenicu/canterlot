@@ -1170,7 +1170,9 @@ async fn canterlot_tools_are_in_the_first_provider_request_across_cold_starts() 
 }
 
 // Список пресетов и лимиты: вызов модели проходит настоящий клиент MCP, реле и брокер, а ответ
-// доходит до следующего запроса. Лимиты отвечает адаптер, поэтому событий о них нет.
+// доходит до следующего запроса. Лимиты адаптер отдаёт событием `Limits`, и вызов ждёт ответа
+// супервизора, как `presets.list`: без ответа OpenCode не доходит до следующего инструмента.
+// Ответ без поля `text` адаптер заменяет текстом «нет данных».
 #[tokio::test]
 #[ignore = "L2: настоящий opencode, см. заголовок файла"]
 async fn real_preset_and_limit_tools_answer_the_model() {
@@ -1185,20 +1187,40 @@ async fn real_preset_and_limit_tools_answer_the_model() {
     let mut session = Session::start(&stub, "bypass").await;
     let turn = input("покажи пресеты");
     session.transmit(&turn).await;
-    let events = session
-        .until(|event| matches!(event, AdapterEvent::AgentCall { .. }))
-        .await;
-    let Some(AdapterEvent::AgentCall { call_id, tool, .. }) = events.last().cloned() else {
-        unreachable!();
-    };
-    assert_eq!(tool, "presets.list");
-    session
-        .adapter
-        .agent_call_result(
-            call_id,
-            AgentCallResult::Ok(json!({"presets": ["CANARY_PRESET"]})),
-        )
-        .await;
+    let mut limits = 0;
+    let mut presets = 0;
+    while limits == 0 || presets == 0 {
+        let events = session
+            .until(|event| {
+                matches!(
+                    event,
+                    AdapterEvent::AgentCall { .. } | AdapterEvent::Limits { .. }
+                )
+            })
+            .await;
+        match events.last().cloned() {
+            Some(AdapterEvent::Limits { call_id }) => {
+                limits += 1;
+                session
+                    .adapter
+                    .agent_call_result(call_id, AgentCallResult::Ok(json!({})))
+                    .await;
+            }
+            Some(AdapterEvent::AgentCall { call_id, tool, .. }) => {
+                assert_eq!(tool, "presets.list");
+                presets += 1;
+                session
+                    .adapter
+                    .agent_call_result(
+                        call_id,
+                        AgentCallResult::Ok(json!({"presets": ["CANARY_PRESET"]})),
+                    )
+                    .await;
+            }
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!((limits, presets), (1, 1));
     let command = turn.command_id;
     session
         .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
