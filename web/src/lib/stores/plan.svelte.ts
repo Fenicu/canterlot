@@ -49,13 +49,13 @@ export class PlanModel {
 
 	/** Задачи одного плана по номерам: прочитанный план с наложенными живыми задачами. */
 	of(orchestratorId: string): PlanTask[] {
-		const merged = new Map<string, PlanTask>();
+		const merged: Record<string, PlanTask> = {};
 		for (const task of this.#loaded.get(orchestratorId) ?? []) {
 			const live = this.tasks.get(task.id);
-			merged.set(task.id, live && live.revision >= task.revision ? live : task);
+			merged[task.id] = live && live.revision >= task.revision ? live : task;
 		}
-		for (const task of this.tasks.values()) if (task.orchestrator_id === orchestratorId && !merged.has(task.id)) merged.set(task.id, task);
-		return [...merged.values()].filter((task) => task.orchestrator_id === orchestratorId).sort((a, b) => a.number - b.number);
+		for (const task of this.tasks.values()) if (task.orchestrator_id === orchestratorId && !(task.id in merged)) merged[task.id] = task;
+		return Object.values(merged).filter((task) => task.orchestrator_id === orchestratorId).sort((a, b) => a.number - b.number);
 	}
 
 	has(orchestratorId: string): boolean {
