@@ -247,6 +247,11 @@
 			onInfo?.(runId);
 		}}
 		{now}
+		onOpenPlan={(id) => {
+			if (id !== chat.id || !hasPlan) return false;
+			openPlan();
+			return true;
+		}}
 	/>
 
 	{#if TodoPanel}<TodoPanel {chat} />{/if}

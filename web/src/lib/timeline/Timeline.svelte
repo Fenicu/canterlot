@@ -22,7 +22,7 @@
   import { rowIndexOfInput } from '#lib/timeline/ownerMessages.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
-  import { feedEvents, listSession, previousCall, setFeedCards } from '#lib/timeline/cards/context.js';
+  import { feedEvents, listSession, planBefore, previousCall, setFeedCards } from '#lib/timeline/cards/context.js';
   import {
     HeightIndex,
     captureAnchor,
@@ -39,7 +39,8 @@
     now = Date.now(),
     laneRoot,
     feed,
-    interrupt = null
+    interrupt = null,
+    onOpenPlan
   }: {
     chat: ChatStore;
     /** Прерывание идущего хода: кнопка в живой строке хода. Только у ленты разговора. */
@@ -49,6 +50,8 @@
     laneRoot?: string;
     /** Записи ветки субагента; без него лента показывает окно разговора. */
     feed?: TimelineSource;
+    /** Открыть план оркестратора на месте; `false` — ссылка карточки ведёт на страницу плана. */
+    onOpenPlan?: (orchestratorId: string) => boolean;
   } = $props();
   let host = $state<HTMLDivElement | null>(null);
   let controller = $state<ScrollController | null>(null);
@@ -132,7 +135,9 @@
     },
     previous: (block) => previousCall(entries, block),
     session: listSession,
-    events: (sessionId) => feedEvents(entries, sessionId)
+    events: (sessionId) => feedEvents(entries, sessionId),
+    planBefore: (block, number) => planBefore(entries, block, number),
+    openPlan: (orchestratorId) => onOpenPlan?.(orchestratorId) ?? false
   });
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
   const permissionMode = $derived(
