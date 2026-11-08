@@ -1672,6 +1672,31 @@ async fn resolve_terminates_the_orphan_group_and_confirms_it_empty() {
     assert!(env.terminal(&resolve).await);
 }
 
+/// Решение владельца сразу за `owner_lost`: актор уже ушёл, наблюдатель ещё не встал.
+/// Решение не теряется и доходит до наблюдателя.
+#[tokio::test]
+async fn resolve_right_after_owner_lost_reaches_the_watcher() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let detached = env.detach_descendant().await;
+    let id = env.execution;
+    env.kill_supervisor().await;
+    timeout(WAIT, async {
+        while owner_lost(&env.cj().await, id) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owner_lost in CJ");
+    let resolve = resolve_command(id, 1);
+    env.send(resolve.clone()).await;
+    env.wait_exit("supervisor_died").await;
+    assert!(!alive(detached), "the rest of the group is terminated");
+    assert!(env.terminal(&resolve).await);
+}
+
 #[tokio::test]
 async fn group_of_an_old_supervisor_waits_for_the_owner_and_ends_admin_resolved() {
     let mut env = Env::new().await;

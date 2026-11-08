@@ -81,9 +81,10 @@ struct Watch {
 }
 
 /// Заменяет запись актора: команды исполнения идут сюда, пока выход не состоялся.
-pub(super) fn watch(shared: &Arc<Shared>, record: Ownership, exit: Option<Exit>) {
+/// `false`, если наблюдатель не встал.
+pub(super) fn watch(shared: &Arc<Shared>, record: Ownership, exit: Option<Exit>) -> bool {
     let Ok(id) = Uuid::parse_str(&record.execution_id) else {
-        return;
+        return false;
     };
     announce_journal(shared, id, &record);
     let (sender, rx) = mpsc::unbounded_channel();
@@ -107,6 +108,7 @@ pub(super) fn watch(shared: &Arc<Shared>, record: Ownership, exit: Option<Exit>)
     };
     let task = tokio::spawn(watch.run());
     shared.tasks.lock().expect("tasks lock").push(task);
+    true
 }
 
 /// Сессия хаба начинает отправку журнала с его курсора и без курсора посчитает остаток

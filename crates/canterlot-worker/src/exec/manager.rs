@@ -1137,12 +1137,10 @@ impl Actor {
         if let Err(error) = &result {
             tracing::warn!(execution_id = %self.id, error_kind = ?std::mem::discriminant(error), "execution actor stopped");
         }
-        self.shared
-            .actors
-            .lock()
-            .expect("actors lock")
-            .remove(&self.id);
         let id = self.id;
+        // Наблюдатель занимает место актора в `actors` без промежутка: команда, пришедшая
+        // между ними, иначе получила бы итог без исполнителя, и решение владельца терялось.
+        let mut watched = false;
         if self.orphaned && !*self.shutdown.borrow() {
             let record = self
                 .shared
@@ -1150,8 +1148,11 @@ impl Actor {
                 .call(move |store| Ok(open(store)?.ownership().get(id).cloned()))
                 .await;
             if let Ok(Some(record)) = record {
-                lost::watch(&self.shared, record, None);
+                watched = lost::watch(&self.shared, record, None);
             }
+        }
+        if !watched {
+            self.shared.actors.lock().expect("actors lock").remove(&id);
         }
         if self.orphaned || self.released {
             self.rx.close();
