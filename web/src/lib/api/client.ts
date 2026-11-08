@@ -1138,3 +1138,11 @@ export function getPlan(
 ): Promise<HttpResponse<Ok<operations["get__api_v1_plan"]>>> {
   return http("GET", `/api/v1/plan?orchestrator=${id(orchestratorId)}`, undefined, opts);
 }
+
+// Запрос поиска идёт только в теле: адрес с ним попал бы в журналы прокси.
+export function searchHistory(
+  body: Body<operations["post__api_v1_search"]>,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_search"]>>> {
+  return http("POST", "/api/v1/search", body, opts);
+}

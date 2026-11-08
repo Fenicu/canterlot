@@ -1111,6 +1111,16 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: api.routingPolicyView() });
   });
 
+  await page.route('**/api/v1/search', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    try {
+      await route.fulfill({ headers: headers(), json: api.search(route.request().postDataJSON()) });
+    } catch (error) {
+      const failure = error as { status: number; code: string; message: string };
+      await route.fulfill({ status: failure.status, headers: headers(), json: errorBody(failure.code, failure.message) });
+    }
+  });
+
   await page.route('**/api/v1/routing-policy/preview', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     const body = route.request().postDataJSON() as { task_type: string; level?: string; workdir?: string };

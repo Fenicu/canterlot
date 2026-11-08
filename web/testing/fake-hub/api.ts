@@ -18,6 +18,67 @@ type QueueSnapshot = components['schemas']['SnapshotQueueView'];
 export type NudgeRuleView = components['schemas']['NudgeRuleView'];
 export type NudgeEventView = components['schemas']['NudgeEventView'];
 type QueueItemView = components['schemas']['QueueItemView'];
+type SearchBody = components['schemas']['SearchBody'];
+type SearchHit = components['schemas']['SearchHit'];
+type SearchPage = components['schemas']['SearchPage'];
+type SearchSegment = components['schemas']['SearchSegment'];
+
+const SEARCH_CAP = 200;
+const SEARCH_WINDOW = 90;
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Простое соответствие вместо полнотекстового поиска хаба: слово запроса совпадает
+ * с началом слова текста («отчёт» находит «отчёта»), середина слова и пути не совпадают.
+ */
+function searchTerms(q: string): { include: RegExp[]; exclude: RegExp[] } {
+	const include: RegExp[] = [];
+	const exclude: RegExp[] = [];
+	for (const raw of q.toLowerCase().match(/"[^"]+"|\S+/g) ?? []) {
+		const negative = raw.startsWith('-') && raw.length > 1;
+		const word = (negative ? raw.slice(1) : raw).replace(/^"|"$/g, '');
+		if (!word || word === 'or') continue;
+		const pattern = new RegExp(`(^|[^\\p{L}\\p{N}])(${escapeRegExp(word)})`, 'giu');
+		(negative ? exclude : include).push(pattern);
+	}
+	return { include, exclude };
+}
+
+function hitRanges(text: string, terms: RegExp[]): [number, number][] {
+	const ranges: [number, number][] = [];
+	for (const term of terms) {
+		term.lastIndex = 0;
+		for (const match of text.matchAll(term)) {
+			const start = (match.index ?? 0) + (match[1]?.length ?? 0);
+			let end = start + (match[2]?.length ?? 0);
+			while (end < text.length && /[\p{L}\p{N}]/u.test(text[end]!)) end++;
+			ranges.push([start, end]);
+		}
+	}
+	return ranges.sort((a, b) => a[0] - b[0]);
+}
+
+function snippetOf(text: string, terms: RegExp[]): SearchSegment[] {
+	const ranges = hitRanges(text, terms);
+	const first = ranges[0]?.[0] ?? 0;
+	const from = Math.max(0, first - Math.floor(SEARCH_WINDOW / 3));
+	const to = Math.min(text.length, from + SEARCH_WINDOW);
+	const segments: SearchSegment[] = [];
+	let at = from;
+	if (from > 0) segments.push({ text: '… ', hit: false });
+	for (const [start, end] of ranges) {
+		if (start < at || start >= to) continue;
+		if (start > at) segments.push({ text: text.slice(at, start), hit: false });
+		segments.push({ text: text.slice(start, Math.min(end, to)), hit: true });
+		at = Math.min(end, to);
+	}
+	if (at < to) segments.push({ text: text.slice(at, to), hit: false });
+	if (to < text.length) segments.push({ text: ' …', hit: false });
+	return segments;
+}
 
 export const NUDGE_BUILTIN_TEXT =
 	'[canterlot] Automatic reminder from canterlot, not the owner: you ended your turn without a final status. If the task is finished, give your report and end it with the line {markers}. If you are blocked, explain why and end with STATUS: BLOCKED. Otherwise continue from where you stopped. Do not end your turn while anything is still running or uncommitted.\nObserved: {signals}.';
@@ -90,6 +151,10 @@ export class FakeHubApi {
 	readonly planTasks = new Map<string, PlanTask>();
 	/** Посчитанное хабом при чтении: коммиты, файлы и отчёт исполнителя по задаче. */
 	readonly planDetails = new Map<string, Pick<PlanTaskDetail, 'commits' | 'commits_truncated' | 'files_changed' | 'report_block_id' | 'report_seq'>>();
+	/** Тела запросов `POST /api/v1/search` в порядке прихода. */
+	readonly searchCalls: SearchBody[] = [];
+	/** Следующие ответы поиска отказом: статус и код, как у хаба. */
+	searchFailure: { status: number; code: string; message: string } | null = null;
 	/** Запросы `GET /api/v1/plan`: какой оркестратор просили. */
 	readonly planReads: string[] = [];
 	/** Очередь запусков разговора: ожидающие и недавно завершённые элементы. */
@@ -794,6 +859,64 @@ export class FakeHubApi {
 				...this.planDetails.get(task.id)
 			}));
 		return { tasks };
+	}
+
+	/** Ответ `POST /api/v1/search`: свежие первыми, курсор — смещение, итог обрезан на 200. */
+	search(body: SearchBody): SearchPage {
+		this.searchCalls.push(body);
+		if (this.searchFailure) throw this.searchFailure;
+		const q = body.q.trim();
+		if (!q || q.length > 200) throw { status: 400, code: 'invalid_request', message: 'Некорректный запрос' };
+		const terms = searchTerms(q);
+		const limit = Math.min(Math.max(body.limit ?? 20, 1), 50);
+		const since = body.since ? Date.parse(body.since) : null;
+		const until = body.until ? Date.parse(body.until) : null;
+		const found: SearchHit[] = [];
+		for (const [conversationId, items] of this.histories) {
+			const row = this.list.get(conversationId);
+			if (!row || row.trashed_at || this.deleted.has(conversationId)) continue;
+			if (body.conversation_id && body.conversation_id !== conversationId) continue;
+			if (body.harness && body.harness !== row.harness.id) continue;
+			const byId = new Map(items.map((item) => [item.id, item]));
+			for (const item of items) {
+				let text = '';
+				let hit: Omit<SearchHit, 'snippet'> | null = null;
+				const base = { conversation_id: conversationId, conversation_title: row.title, harness: row.harness.id, model: row.model, archived: row.archived, created_at: item.created_at };
+				if (item.kind === 'block') {
+					if (item.block_kind !== 'text' || item.state === 'streaming' || body.kind === 'messages') continue;
+					text = this.blocks.get(item.id)?.text ?? item.content;
+					let top: HistoryItem = item;
+					for (let depth = 0; depth < 32 && top.kind === 'block' && top.parent_block_id; depth++) {
+						const parent = byId.get(top.parent_block_id);
+						if (!parent) break;
+						top = parent;
+					}
+					const seq = Number(item.created_seq);
+					hit = { ...base, kind: 'answer', origin_kind: null, block_id: item.id, input_id: null, seq, jump_seq: Number(seqOf(top)) };
+				} else if (item.kind === 'input') {
+					if (!item.feed_seq || waiting(item) || body.kind === 'answers') continue;
+					const origin = item.origin as { kind?: string; from?: unknown } | null | undefined;
+					const kind = origin?.kind ?? null;
+					if (kind === 'alarm' || kind === 'nudge' || kind === 'note' || (kind === 'event' && !origin?.from)) continue;
+					text = item.content.filter((block) => block.type === 'text').map((block) => block.text ?? '').join('\n');
+					const originKind = kind === null ? 'owner' : kind === 'event' ? 'result' : kind === 'spawn' ? 'spawn' : 'message';
+					const seq = Number(item.feed_seq);
+					hit = { ...base, kind: 'message', origin_kind: originKind, block_id: null, input_id: item.id, seq, jump_seq: seq };
+				} else continue;
+				const at = Date.parse(item.created_at);
+				if ((since !== null && at < since) || (until !== null && at >= until)) continue;
+				const lower = text.toLowerCase();
+				if (terms.include.length === 0) continue;
+				if (!terms.include.every((term) => { term.lastIndex = 0; return term.test(lower); })) continue;
+				if (terms.exclude.some((term) => { term.lastIndex = 0; return term.test(lower); })) continue;
+				found.push({ ...hit, snippet: snippetOf(text.replace(/\s+/g, ' '), terms.include) });
+			}
+		}
+		found.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || a.kind.localeCompare(b.kind) || b.seq - a.seq);
+		const offset = body.cursor ? Number(body.cursor.replace(/^o:/, '')) || 0 : 0;
+		const page = found.slice(offset, offset + limit);
+		const next = offset + limit < found.length ? `o:${offset + limit}` : null;
+		return { hits: page, next_cursor: next, total: Math.min(found.length, SEARCH_CAP), total_capped: found.length > SEARCH_CAP };
 	}
 
 	presetSummary(preset: FakePreset): PresetSummary {
