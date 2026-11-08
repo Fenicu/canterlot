@@ -177,3 +177,22 @@ codex app-server generate-json-schema --out <dir>   # сверка с schema-0.1
 ```
 
 Каждый сценарий создаёт новый каталог `/tmp/canterlot-stage0/codex/<scenario>/run-<ms>` с `git init` и guard-правилами, запускает app-server с изоляцией из раздела 2.1 и заканчивает файл записью `{"verdict": ..., "reason": ...}`.
+
+## 9. Сверка 0.167.0 (09.11.2026)
+
+Схемы 0.164.0 и 0.167.0 сравнены поле за полем (стабильная и экспериментальная). Манифесты новой версии: `evidence/codex/schema-0.167.0/`; `scripts/codex-schema-check.sh` выбирает каталог по версии CLI, поэтому проходят обе. Стабильная схема: 320 → 322 файла, экспериментальная: 458 → 470. Удалённых файлов нет.
+
+| Изменение | Где | Класс |
+| --- | --- | --- |
+| `ThreadItem.startedAtMs`, `completedAtMs` (необязательные), `generationId` у картинки | `item/*`, `turn/started`, `turn/completed`, ответы `thread/*` и `turn/start` | добавление, адаптер читает элементы как `Value` |
+| `CodexErrorInfo`: `modelNotFound`, `policyCapacityUnavailable` | `error`, `turn/completed` | добавление; неизвестный вид идёт общей веткой ошибки хода |
+| `UserInput` вида `audio`: `url` или `fileId` | `turn/start`, `turn/steer` | для нас не важно: аудио адаптер не шлёт, поля `text` и `localImage` не менялись |
+| `AdditionalContextEntry.name` | `turn/start`, `turn/steer` | добавление, не используется |
+| `turn/start.effort`, `turn/steer.expectedTurnId` | — | без изменений |
+| `CommandExecutionApprovalKind` += `humanCommand`, `InitializeCapabilities.requiredHumanApproval` | запрос разрешения на команду | не важно: вид приходит только с этой способностью, адаптер её не объявляет и поле `kind` не разбирает |
+| `ChatgptAccount.workspaceName`, учётная запись `gcp` | `account/read` | добавление; адаптер не разбирает ответ |
+| `ReviewDelivery` без `detached` | `review/start` | не используется |
+| Новые методы `accountSession/*`, `account/gcp/setup`, `thread/memory/read`, `thread/guardianReview`, уведомление `thread/section/changed` | — | не используются; неизвестное уведомление пропускается |
+| `HookRunSummary.sourcePath`, `HooksListParams.threadId`, `ProcessExitedNotification.outputDrainTimedOut`, `ThreadUsage.nativeUsageUsdMicros`, `otel` в требованиях конфига | — | не используются |
+
+Ломающих изменений для адаптера нет, правок протокола не понадобилось, минимум остаётся 0.164.0. 0.167.0 внесена в проверенные версии после живого зонда `live_probe` (`codex_e2e.rs`): на 0.164.0 и 0.167.0 одинаково проходят короткий ход, смена усилия (`turn_context`: `low`, затем `medium`), команда оболочки с вливанием `turn/steer` посреди хода (доказательство `codex_user_message_item`, ответ учёл влитый ввод) и прерывание.

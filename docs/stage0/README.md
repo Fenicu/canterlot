@@ -14,7 +14,7 @@
 | Дата прогонов | 25.10.2026 | 25.10.2026 | 31.10.2026 |
 | Стенд | Debian 13 (trixie), Linux 6.12.74, x86-64, VM | тот же | тот же |
 | Прототип | `spikes/claude-probe` (Rust 1.99.1) | `spikes/codex-probe` (Rust 1.99.1) | внешняя обвязка, описана в OC §8; в продукте `fake-opencode` и L2 `opencode_live.rs` |
-| Доказательства | `evidence/claude-code/*.jsonl` | `evidence/codex/*.jsonl`, манифесты схемы `evidence/codex/schema-0.164.0/` | `evidence/opencode/*.jsonl`, манифест `evidence/opencode/openapi-2.1.4.sha256` |
+| Доказательства | `evidence/claude-code/*.jsonl` | `evidence/codex/*.jsonl`, манифесты схемы `evidence/codex/schema-0.164.0/`, `schema-0.167.0/` | `evidence/opencode/*.jsonl`, манифесты `evidence/opencode/openapi-{2.1.4,2.2.5,2.2.6}.sha256` |
 | Расход квоты | 35 запусков модели из 40 (CC §8) | 30 запросов `turn/start`/`turn/steer`, из них 25 реальных ходов (CX §1) | 3 запроса к внешним моделям, все отказ `429 FreeUsageLimitError` |
 
 ## 2. Матрица возможностей

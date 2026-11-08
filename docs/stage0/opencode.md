@@ -448,3 +448,24 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 - **Битая картинка отвергается на приёме** (400 из `image.normalize`): ввод `rejected`, в ленте без причины.
 - **После перезапуска исполнения команды ещё нет:** период сжатия не приписать, расход сжатия не попадает в историю, прерывание сжатия через хаб даёт `not_applicable`. В пределах одного исполнения приписывание работает.
 - `canterlot_limits` отвечает «no limit data yet»: источника лимитов нет (решение 6).
+
+## 10. Сверка 2.2.5 и 2.2.6 (09.11.2026)
+
+Манифест этапа 0 (2.1.4) отставал от работающей версии 2.2.5. Добавлены манифесты `evidence/opencode/openapi-2.2.5.sha256` (350 880 байт, 138 путей) и `openapi-2.2.6.sha256` (444 743 байта, 139 путей); `scripts/opencode-schema-check.sh` выбирает манифест по версии CLI. Схема сравнивалась по всем путям, которые использует адаптер, со ссылками `$ref`, раскрытыми до конца.
+
+| Изменение | Версия | Класс |
+| --- | --- | --- |
+| 21 новый экспериментальный путь (`artifacts`, `schedule`, `generate/*`, `usage/limits`, `fs/watch`, `media`, `plugin/gui`), убран `voice/session/{id}/instructions` | 2.2.5 | не используются |
+| `GET /api/model`: параметр `types`, поля `type`, `settings.cache`, `compatibility.mediaInput` | 2.2.5 | добавление |
+| `POST .../prompt`: `files[].source` (необязательное) | 2.2.5 | добавление, адаптер его не шлёт |
+| `GET /api/info.hostname`, `GET /api/mcp[].title`, `Session.time.busy`, `revert.files[].more` | 2.2.5 | добавление |
+| Ответ 404 у `interrupt`, `model`, `compact` только `SessionNotFoundError` | 2.2.5 | не важно: адаптер различает код, а не тег |
+| Ответ 503 `ServiceUnavailableError` у `GET /api/agent` | 2.2.5 | уже обрабатывался (OC §9, п. 1) |
+| Ответ `form/{id}/reply`: числа и `Infinity`/`NaN` без вложенного `anyOf` | 2.2.5 | переписка схемы, на проводе то же |
+| Путь `GET /api/experimental/job` | 2.2.6 | не используется |
+| Параметры запроса без `null` (`directory`, курсоры, `parentID`, `force`) | 2.2.6 | переписка схемы: в строке запроса `null` и не передать |
+| Схема кадров SSE (`contentSchema` у `GET /api/event`), `seq` числом | 2.2.6 | впервые описана; набор типов событий тот же, `seq` адаптер не читает |
+| `settings.cache.warming` у моделей и агентов | 2.2.6 | добавление |
+| Тип отказа подписки Go: `provider.go-limit` вместо `provider.quota`; новые `provider.chatgpt-limit`, `provider.budget-limit`, `provider.model-budget-limit` | 2.2.5 | **ломающее для адаптера**: схема `Session.StructuredError` не изменилась (`type` — строка), но упор в лимит Go перестал давать `LimitReached`. Найдено L2-тестом `real_quota_refusal_is_a_reached_limit_with_the_wait`, который проходит на 2.1.4 и падал на 2.2.5 и 2.2.6 |
+
+Единственное изменение, которое затронуло адаптер, — типы отказов подписок: `failure.rs` признаёт упором в лимит и старый `provider.quota`, и новые `go-limit`, `chatgpt-limit`, `budget-limit`, поэтому работают обе версии. Потолок трат одной модели (`model-budget-limit`) остаётся ошибкой хода: другая модель харнесса доступна. Проверенные версии: 2.1.4, 2.2.5, 2.2.6; у непроверенной схема сверяется со всеми манифестами (`VERIFIED_OPENAPI_SHA256`). Минимум остаётся 2.1.4. L2-тесты `opencode_live.rs` на 2.2.5 и 2.2.6: 42 из 43; `real_preset_and_limit_tools_answer_the_model` падает и на 2.1.4 с неизменённым кодом (адаптер не получает `AgentCall`), от версии CLI не зависит.
