@@ -310,9 +310,9 @@ pub fn started_note_origin(child: &Sender, chain_depth: i32) -> Value {
 }
 
 /// Что остаётся от ввода, когда его отправитель удалён. Текст сообщения и бриф остаются:
-/// это ввод другой сессии, на него она и отвечала. Событие состоит из данных удалённой сессии
-/// целиком, поэтому от него остаётся только факт.
-fn scrubbed_text(kind: &str, text: &str) -> String {
+/// это ввод другой сессии, на него она и отвечала. Итог и другие события делегата тоже
+/// остаются, без строки с его названием; событие без узнаваемого заголовка сводится к факту.
+fn scrubbed_text(kind: &str, text: &str, sender: Uuid) -> String {
     let body = text.split_once("\n\n").map(|(_, body)| body);
     match (kind, body) {
         ("message", Some(body)) => format!(
@@ -323,16 +323,42 @@ fn scrubbed_text(kind: &str, text: &str) -> String {
             "[canterlot] You were started by a session that was deleted. \
              It was an agent, not the owner.\n\n{body}"
         ),
+        (KIND_EVENT, _) => {
+            scrubbed_event(text, sender).unwrap_or_else(|| HEARD_FROM_DELETED.to_owned())
+        }
         _ => HEARD_FROM_DELETED.to_owned(),
     }
 }
 
-fn scrubbed_content(kind: &str, content: &[ContentBlock]) -> Vec<ContentBlock> {
+/// Итог, вопрос, простой и прочие события подписки начинаются строкой
+/// `[canterlot] Session "<название>" (id <id>, <харнесс>, model <модель>)<состояние>`, а
+/// дальше идут строки фактов и ответ. Заголовок узнаётся по id удалённой сессии; из него
+/// остаётся только хвост после последней скобки («is now idle.»: в модели скобки бывают, в хвосте нет), остальные строки сохраняются, а id
+/// в них (путь рабочей копии) заменяется. Однострочные заметки о запуске и приёме несут имя
+/// посреди фразы и сводятся к факту.
+fn scrubbed_event(text: &str, sender: Uuid) -> Option<String> {
+    let (head, body) = text.split_once('\n')?;
+    let rest = head.strip_prefix("[canterlot] Session \"")?;
+    let marker = format!("\" (id {sender}, ");
+    let after = &rest[rest.find(&marker)? + marker.len()..];
+    let state = &after[after.rfind(')')? + 1..];
+    let body = body.trim_start_matches('\n');
+    if body.trim().is_empty() {
+        return None;
+    }
+    let kept = format!(
+        "[canterlot] Report from a delegate session that was later deleted. \
+         It was an agent, not the owner.\nThe session{state}\n{body}"
+    );
+    Some(kept.replace(&sender.to_string(), "(deleted)"))
+}
+
+fn scrubbed_content(kind: &str, content: &[ContentBlock], sender: Uuid) -> Vec<ContentBlock> {
     content
         .iter()
         .map(|block| match block {
             ContentBlock::Text { text } => ContentBlock::Text {
-                text: scrubbed_text(kind, text),
+                text: scrubbed_text(kind, text, sender),
             },
             attachment => attachment.clone(),
         })
@@ -351,19 +377,28 @@ struct SentInput {
 /// Удаление отправителя: у чужих вводов пропадают его название, идентификатор и модель,
 /// глубина цепочки остаётся. Только строки, очередь получателя не блокируется.
 pub async fn scrub_sender_in_tx(conn: &mut PgConnection, sender: Uuid) -> Result<(), sqlx::Error> {
-    // Сообщение о запуске хранит имя и в задании: строка задания живёт дольше сессии.
-    sqlx::query(
-        "update scheduled_jobs
-         set payload=jsonb_build_object('action','note','text',$2::text,'origin',
-               jsonb_build_object('kind','event','chain_depth',payload->'origin'->'chain_depth',
-                                  'sender_deleted',true))
+    // Заметка о запуске или приёме хранит имя и в задании: строка задания живёт дольше сессии.
+    let notes: Vec<(Uuid, String, Option<Value>)> = sqlx::query_as(
+        "select id,coalesce(payload->>'text',''),payload->'origin'->'chain_depth' from scheduled_jobs
          where kind='session_task' and payload->>'action'='note'
-           and payload->'origin'->>'from'=$1",
+           and payload->'origin'->>'from'=$1 order by id",
     )
     .bind(sender.to_string())
-    .bind(HEARD_FROM_DELETED)
-    .execute(&mut *conn)
+    .fetch_all(&mut *conn)
     .await?;
+    for (id, text, depth) in notes {
+        sqlx::query(
+            "update scheduled_jobs
+             set payload=jsonb_build_object('action','note','text',$2::text,'origin',
+                   jsonb_build_object('kind','event','chain_depth',$3::jsonb,'sender_deleted',true))
+             where id=$1",
+        )
+        .bind(id)
+        .bind(scrubbed_text(KIND_EVENT, &text, sender))
+        .bind(depth)
+        .execute(&mut *conn)
+        .await?;
+    }
     let rows: Vec<SentInput> = sqlx::query_as(
         "select id,conversation_id,command_id,content,origin from inputs
          where origin->>'from'=$1 and conversation_id<>$2 order by id",
@@ -374,7 +409,7 @@ pub async fn scrub_sender_in_tx(conn: &mut PgConnection, sender: Uuid) -> Result
     .await?;
     for row in rows {
         let kind = row.origin["kind"].as_str().unwrap_or_default();
-        let content = json!(scrubbed_content(kind, &row.content));
+        let content = json!(scrubbed_content(kind, &row.content, sender));
         let origin = json!({
             "kind": kind,
             "chain_depth": row.origin["chain_depth"],
@@ -408,4 +443,122 @@ pub async fn scrub_sender_in_tx(conn: &mut PgConnection, sender: Uuid) -> Result
         .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SENDER: Uuid = Uuid::from_u128(0x0199_0000_0000_7000_8000_0000_0000_00aa);
+
+    fn sender() -> Sender {
+        Sender {
+            id: SENDER,
+            title: "секретная задача".to_owned(),
+            harness: "codex".to_owned(),
+            model: "gpt-secret".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_settled_delegate_keeps_its_report_without_the_title_line() {
+        let text = format!(
+            "[canterlot] Session \"секретная задача\" (id {SENDER}, codex, model gpt-secret) is now idle.\n\
+             Turns: 3, duration 4m 10s, tokens in/out 1200/300.\n\
+             Worktree: /w/worktrees/{SENDER}, branch canterlot/000000aa.\n\
+             Final answer:\nГотово, тесты зелёные.\n\n\
+             Next: read the result, then call session_accept to clean up, or session_send to continue."
+        );
+        let kept = scrubbed_text(KIND_EVENT, &text, SENDER);
+        assert_eq!(
+            kept,
+            "[canterlot] Report from a delegate session that was later deleted. \
+             It was an agent, not the owner.\nThe session is now idle.\n\
+             Turns: 3, duration 4m 10s, tokens in/out 1200/300.\n\
+             Worktree: /w/worktrees/(deleted), branch canterlot/000000aa.\n\
+             Final answer:\nГотово, тесты зелёные.\n\n\
+             Next: read the result, then call session_accept to clean up, or session_send to continue."
+        );
+        for secret in [
+            "секретная задача",
+            "gpt-secret",
+            "codex",
+            &SENDER.to_string(),
+        ] {
+            assert!(!kept.contains(secret), "{secret} survives in {kept}");
+        }
+    }
+
+    #[test]
+    fn a_question_and_an_idle_warning_keep_their_facts() {
+        let asked = format!(
+            "[canterlot] Session \"a \"quoted\" (title)\" (id {SENDER}, claude_code, model opus (1m)) is now waiting_for_user.\n\
+             Question: merge into main?\nThe owner answers in the app; do not answer for them."
+        );
+        assert_eq!(
+            scrubbed_text(KIND_EVENT, &asked, SENDER),
+            "[canterlot] Report from a delegate session that was later deleted. \
+             It was an agent, not the owner.\nThe session is now waiting_for_user.\n\
+             Question: merge into main?\nThe owner answers in the app; do not answer for them."
+        );
+        let idle = crate::session_tools::summary::idle_background_text(
+            "секретная задача",
+            SENDER,
+            "codex",
+            "gpt-secret",
+            12,
+            1,
+        );
+        let kept = scrubbed_text(KIND_EVENT, &idle, SENDER);
+        assert!(kept.starts_with(
+            "[canterlot] Report from a delegate session that was later deleted. \
+             It was an agent, not the owner.\nThe session has been idle for 12 min with 1 background job"
+        ));
+        assert!(kept.contains("This is not a result"));
+        assert!(!kept.contains("секретная") && !kept.contains(&SENDER.to_string()));
+    }
+
+    #[test]
+    fn an_event_without_a_recognisable_header_becomes_the_fact() {
+        let other = Uuid::from_u128(7);
+        for text in [
+            format!("[canterlot] Session {SENDER} was deleted."),
+            format!(
+                "[canterlot] Session \"секретная задача\" (id {SENDER}) was accepted: it is stopped and archived."
+            ),
+            format!(
+                "[canterlot] Session \"секретная задача\" (id {SENDER}, codex, model m) is now idle."
+            ),
+            format!(
+                "[canterlot] Session \"чужая\" (id {other}, codex, model m) is now idle.\nFinal answer:\nтекст"
+            ),
+            "итог без заголовка\n\nтело".to_owned(),
+        ] {
+            assert_eq!(
+                scrubbed_text(KIND_EVENT, &text, SENDER),
+                HEARD_FROM_DELETED,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_and_a_brief_keep_their_body_as_before() {
+        let message = message_text(&sender(), "тело сообщения");
+        assert_eq!(
+            scrubbed_text("message", &message, SENDER),
+            "[canterlot] Message from a session that was deleted. \
+             This is another agent, not the owner.\n\nтело сообщения"
+        );
+        let brief = spawn_text(&sender(), Some("canterlot/1"), "тело брифа");
+        assert_eq!(
+            scrubbed_text("spawn", &brief, SENDER),
+            "[canterlot] You were started by a session that was deleted. \
+             It was an agent, not the owner.\n\nтело брифа"
+        );
+        assert_eq!(
+            scrubbed_text("message", "без тела", SENDER),
+            HEARD_FROM_DELETED
+        );
+    }
 }

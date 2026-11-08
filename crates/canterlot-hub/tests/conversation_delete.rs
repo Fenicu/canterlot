@@ -608,7 +608,7 @@ async fn delete_leaves_no_row_in_any_table_that_references_the_conversation(pool
 }
 
 /// Вводы, которые разговор оставил в других сессиях: сообщение, бриф и событие подписки.
-async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) {
+async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str, answer: &str) {
     let context = ToolContext {
         pool: f.pool.clone(),
         config: Default::default(),
@@ -654,7 +654,12 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
         ),
         (
             "event",
-            format!("[canterlot] Session \"{title}\" (id {sender}) is now idle.\n\nитог {title}"),
+            format!(
+                "[canterlot] Session \"{title}\" (id {sender}, synthetic, model secret-model) is now idle.\n\
+                 Turns: 2, duration 1m 5s, tokens in/out 10/20.\n\
+                 Worktree: /w/worktrees/{sender}, branch canterlot/x.\n\
+                 Final answer:\n{answer}"
+            ),
         ),
     ] {
         submit_input(
@@ -693,8 +698,33 @@ async fn a_deleted_sender_leaves_no_name_in_other_sessions(pool: PgPool) {
             .await
             .unwrap();
     }
-    sent_to_others(&f, sender, receiver, &title).await;
-    sent_to_others(&f, other, receiver, "сосед").await;
+    sent_to_others(&f, sender, receiver, &title, "итог работы").await;
+    sent_to_others(&f, other, receiver, "сосед", "итог соседа").await;
+    // Заметки, ещё ждущие доставки: однострочная о приёме и с узнаваемым заголовком.
+    let notes = [
+        format!(
+            "[canterlot] Session \"{title}\" (id {sender}) was accepted: it is stopped and archived."
+        ),
+        format!(
+            "[canterlot] Session \"{title}\" (id {sender}, synthetic, model secret-model) is now stopped.\n\
+             Outcome: stopped.\nFinal answer:\nзаметка работы"
+        ),
+    ];
+    for text in &notes {
+        sqlx::query(
+            "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
+             values($1,'session_task',$2,$3,now()+interval '1 hour',$4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.owner)
+        .bind(receiver)
+        .bind(json!({"action": "note", "text": text, "origin": {
+            "kind": "event", "from": sender, "title": title, "harness": "synthetic",
+            "model": "secret-model", "chain_depth": 2, "event": {"kind": "accepted"}}}))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
     let needles = vec![title.clone(), sender.to_string()];
     assert!(mentions(&f.pool, &needles).await.contains_key("inputs"));
 
@@ -710,6 +740,14 @@ async fn a_deleted_sender_leaves_no_name_in_other_sessions(pool: PgPool) {
     assert_eq!(announced.len(), 1, "only the deletion event: {announced:?}");
     assert!(announced[0].contains("conversation_deleted"));
     assert!(left.is_empty(), "the name survives in {left:?}");
+    // Текст итога остаётся у получателя: ввод, его команда и событие очереди. Больше нигде.
+    let kept = mentions(&f.pool, &["итог работы".to_owned()]).await;
+    assert_eq!(
+        kept.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["commands", "events", "inputs"],
+        "{kept:?}"
+    );
+    assert!(kept.values().all(|rows| rows.len() == 1), "{kept:?}");
 
     let rows: Vec<(Value, Value, Value)> = sqlx::query_as(
         "select i.content,i.origin,c.payload->'content' from inputs i
@@ -731,7 +769,11 @@ async fn a_deleted_sender_leaves_no_name_in_other_sessions(pool: PgPool) {
              This is another agent, not the owner.\n\nтело сообщения",
             "[canterlot] You were started by a session that was deleted. \
              It was an agent, not the owner.\n\nтело брифа",
-            "[canterlot] A session this conversation heard from was deleted.",
+            "[canterlot] Report from a delegate session that was later deleted. \
+             It was an agent, not the owner.\nThe session is now idle.\n\
+             Turns: 2, duration 1m 5s, tokens in/out 10/20.\n\
+             Worktree: /w/worktrees/(deleted), branch canterlot/x.\n\
+             Final answer:\nитог работы",
         ]
     );
     let kinds = ["message", "spawn", "event"];
@@ -755,7 +797,31 @@ async fn a_deleted_sender_leaves_no_name_in_other_sessions(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(queued.len(), 3);
-    assert_eq!(queued[0]["content"], rows[0].0);
+    for (event, (content, origin, _)) in queued.iter().zip(&rows) {
+        assert_eq!(&event["content"], content);
+        assert_eq!(&event["origin"], origin);
+    }
+    let pending: Vec<Value> = sqlx::query_scalar(
+        "select payload from scheduled_jobs where conversation_id=$1
+         and payload->>'action'='note' order by id",
+    )
+    .bind(receiver)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pending,
+        [
+            json!({"action": "note",
+                   "text": "[canterlot] A session this conversation heard from was deleted.",
+                   "origin": {"kind": "event", "chain_depth": 2, "sender_deleted": true}}),
+            json!({"action": "note",
+                   "text": "[canterlot] Report from a delegate session that was later deleted. \
+                            It was an agent, not the owner.\nThe session is now stopped.\n\
+                            Outcome: stopped.\nFinal answer:\nзаметка работы",
+                   "origin": {"kind": "event", "chain_depth": 2, "sender_deleted": true}}),
+        ]
+    );
 
     let neighbour: i64 = sqlx::query_scalar(
         "select count(*) from inputs where conversation_id=$1 and origin->>'title'='сосед'
@@ -767,6 +833,127 @@ async fn a_deleted_sender_leaves_no_name_in_other_sessions(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(neighbour, 3, "another sender keeps its name");
+}
+
+/// Как удаляется делегат: корзина, ручное удаление, срок хранения принятых.
+#[derive(Clone, Copy, Debug)]
+enum Removal {
+    Trash,
+    Manual,
+    AcceptedRetention,
+}
+
+/// Итог делегата остаётся у родителя без строки с названием при любом пути удаления.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delegate_result_keeps_its_text_in_the_parent_after_any_delete(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    for removal in [Removal::Trash, Removal::Manual, Removal::AcceptedRetention] {
+        let parent = f.conversation().await;
+        let child = f.conversation().await;
+        let title = format!("делегат-секрет {child}");
+        sqlx::query(
+            "update conversations set title=$2,model='secret-model',parent_conversation_id=$3,
+                                      spawn_depth=1 where id=$1",
+        )
+        .bind(child)
+        .bind(&title)
+        .bind(parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        submit_input(
+            &f.pool,
+            SubmitInput {
+                owner_id: f.owner,
+                conversation_id: parent,
+                idempotency_key: Uuid::now_v7().to_string(),
+                content: vec![ContentBlock::Text {
+                    text: format!(
+                        "[canterlot] Session \"{title}\" (id {child}, synthetic, model secret-model) is now idle.\n\
+                         Final answer:\nитог {removal:?}"
+                    ),
+                }],
+                received_at: chrono::Utc::now(),
+                correlation_id: Uuid::now_v7(),
+                origin: Some(json!({"kind": "event", "from": child, "title": title,
+                                    "harness": "synthetic", "model": "secret-model",
+                                    "chain_depth": 0, "event": {"kind": "session_result"}})),
+            },
+        )
+        .await
+        .unwrap();
+        match removal {
+            Removal::Trash => {
+                let response = trash(&f, child, &format!("trash-{child}")).await;
+                assert_eq!(response.status, 204, "{:?}", response.body);
+            }
+            Removal::Manual => canterlot_hub::deletion::delete(
+                &f.pool,
+                f.store.as_ref(),
+                f.owner,
+                child,
+                &format!("delete-{child}"),
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap(),
+            Removal::AcceptedRetention => {
+                sqlx::query("update conversations set archived_at=$2,accepted_at=$2 where id=$1")
+                    .bind(child)
+                    .bind(chrono::Utc::now() - chrono::TimeDelta::days(4))
+                    .execute(&f.pool)
+                    .await
+                    .unwrap();
+                let (dispatcher, _) = canterlot_hub::dispatcher::Dispatcher::channel();
+                let purged = canterlot_hub::scheduler::Scheduler::new(
+                    f.pool.clone(),
+                    dispatcher,
+                    Default::default(),
+                )
+                .purge_accepted_retention(chrono::Utc::now())
+                .await
+                .unwrap();
+                assert_eq!(purged, 1);
+            }
+        }
+        let (content, origin, command): (Value, Value, Value) = sqlx::query_as(
+            "select i.content,i.origin,c.payload->'content' from inputs i
+             join commands c on c.id=i.command_id where i.conversation_id=$1",
+        )
+        .bind(parent)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            content[0]["text"],
+            format!(
+                "[canterlot] Report from a delegate session that was later deleted. \
+                 It was an agent, not the owner.\nThe session is now idle.\n\
+                 Final answer:\nитог {removal:?}"
+            ),
+            "{removal:?}"
+        );
+        assert_eq!(content, command, "{removal:?}");
+        assert_eq!(
+            origin,
+            json!({"kind": "event", "chain_depth": 0, "sender_deleted": true}),
+            "{removal:?}"
+        );
+        let named: i64 = sqlx::query_scalar(
+            "select count(*) from inputs i join commands c on c.id=i.command_id
+             where i.conversation_id=$1
+               and (i::text like '%'||$2||'%' or c.payload::text like '%'||$2||'%')",
+        )
+        .bind(parent)
+        .bind(child.to_string())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            named, 0,
+            "{removal:?}: the parent keeps no id or title of the child"
+        );
+    }
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
