@@ -31,6 +31,8 @@ use uuid::Uuid;
 
 #[path = "support/process_guard.rs"]
 mod process_guard;
+#[path = "support/trace.rs"]
+mod trace;
 use process_guard::ProcessGuard;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -72,6 +74,20 @@ fn ticks(pid: u32) -> Option<u64> {
         .nth(19)?
         .parse()
         .ok()
+}
+
+/// Строка `/proc/<pid>/stat` после имени: для отладочных шагов.
+fn proc_state(pid: u32) -> String {
+    match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat.rfind(')').map_or(stat.clone(), |end| {
+            stat[end + 2..]
+                .split_whitespace()
+                .take(5)
+                .collect::<Vec<_>>()
+                .join(" ")
+        }),
+        Err(error) => format!("absent({:?})", error.kind()),
+    }
 }
 
 fn alive(pid: u32) -> bool {
@@ -355,7 +371,12 @@ impl Env {
             }
         })
         .await
-        .unwrap_or_else(|_| panic!("timed out waiting for CJ: {what}"))
+        .unwrap_or_else(|_| {
+            panic!(
+                "timed out waiting for CJ: {what}; supervisor logs: {}",
+                self.logs()
+            )
+        })
     }
 
     async fn ownership(&self, id: Uuid) -> Option<Ownership> {
@@ -1358,7 +1379,12 @@ impl Env {
             }
         })
         .await;
-        found.unwrap_or_else(|_| panic!("timed out waiting for exit {outcome}"))
+        found.unwrap_or_else(|_| {
+            panic!(
+                "timed out waiting for exit {outcome}; supervisor logs: {}",
+                self.logs()
+            )
+        })
     }
 
     async fn assert_released(&self, outcome: &str) {
@@ -1612,18 +1638,35 @@ async fn late_input_for_a_released_execution_is_answered_not_kept() {
 
 #[tokio::test]
 async fn resolve_terminates_the_orphan_group_and_confirms_it_empty() {
+    let mut steps = trace::Steps::new();
     let mut env = Env::new().await;
     env.hub_session();
     env.start(1).await;
     env.wait_running().await;
+    steps.step("running");
     let detached = env.detach_descendant().await;
-    env.kill_supervisor().await;
+    steps.step(&format!(
+        "detached descendant {detached}: {}",
+        proc_state(detached)
+    ));
+    let killed = env.kill_supervisor().await;
+    steps.step(&format!(
+        "supervisor {} killed: {}",
+        killed.supervisor_pid,
+        proc_state(killed.supervisor_pid)
+    ));
     let id = env.execution;
     env.wait_cj("owner lost", |cj| owner_lost(cj, id) == 1)
         .await;
+    steps.step("owner_lost in CJ");
     let resolve = resolve_command(id, 1);
     env.send(resolve.clone()).await;
+    steps.step("resolve handled");
     env.wait_exit("supervisor_died").await;
+    steps.step(&format!(
+        "exit supervisor_died; descendant {detached}: {}",
+        proc_state(detached)
+    ));
     assert!(!alive(detached), "the rest of the group is terminated");
     env.assert_released("supervisor_died").await;
     assert!(env.terminal(&resolve).await);

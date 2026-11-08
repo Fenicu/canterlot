@@ -140,10 +140,27 @@ async fn inspect_blocking(record: &Ownership) -> Group {
 pub(super) async fn confirmed(record: &Ownership) -> Group {
     match inspect_blocking(record).await {
         Group::Empty => {}
-        other => return other,
+        other => {
+            tracing::debug!(execution_id = %record.execution_id, group = %describe(&other), "group pass: not empty");
+            return other;
+        }
     }
     sleep(SECOND_PASS).await;
-    inspect_blocking(record).await
+    let second = inspect_blocking(record).await;
+    tracing::debug!(execution_id = %record.execution_id, group = %describe(&second), "group second pass");
+    second
+}
+
+/// Участники с их состоянием в `/proc` для отладочных строк.
+fn describe(group: &Group) -> String {
+    match group {
+        Group::Occupied(members) => members
+            .iter()
+            .map(|member| format!("{}[{}]", member.pid, super::procfs::describe(member.pid)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => format!("{other:?}"),
+    }
 }
 
 /// Дескриптор держит процесс, поэтому сигнал не уйдёт новому владельцу номера.
@@ -164,12 +181,18 @@ pub(super) async fn terminate(record: &Ownership, grace: Duration) -> Group {
         let deadline = Instant::now() + window;
         let mut signalled = HashSet::new();
         loop {
-            let Group::Occupied(members) = inspect_blocking(record).await else {
+            let found = inspect_blocking(record).await;
+            tracing::debug!(execution_id = %record.execution_id, signal = ?kind, group = %describe(&found), "terminate pass");
+            let Group::Occupied(members) = found else {
                 break;
             };
             for member in members {
-                if !signalled.contains(&member) && signal(&member, kind) {
-                    signalled.insert(member);
+                if !signalled.contains(&member) {
+                    let sent = signal(&member, kind);
+                    tracing::debug!(execution_id = %record.execution_id, pid = member.pid, signal = ?kind, sent, "terminate signal");
+                    if sent {
+                        signalled.insert(member);
+                    }
                 }
             }
             if Instant::now() >= deadline {

@@ -215,6 +215,7 @@ pub(super) async fn connect_attach(
     expected_pid: Option<u32>,
     wait: Option<Duration>,
 ) -> Result<Linked, ExecError> {
+    let started = tokio::time::Instant::now();
     let connect = async {
         loop {
             match UnixStream::connect(&socket).await {
@@ -224,14 +225,23 @@ pub(super) async fn connect_attach(
             }
         }
     };
-    let deadline = tokio::time::Instant::now() + wait.unwrap_or(Duration::from_secs(5));
+    let deadline = started + wait.unwrap_or(Duration::from_secs(5));
     let stream = match wait {
         Some(limit) => timeout(limit, connect)
             .await
             .map_err(|_| ExecError::AttachTimeout)??,
-        None => connect.await?,
+        None => connect.await.inspect_err(|error| {
+            tracing::debug!(%execution_id, error_kind = ?error.kind(), "supervisor socket connect failed");
+        })?,
     };
     let peer = stream.peer_cred()?;
+    tracing::debug!(
+        %execution_id,
+        peer_pid = ?peer.pid(),
+        ?expected_pid,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "supervisor socket connected"
+    );
     if peer.uid() != rustix::process::getuid().as_raw() {
         return Err(ExecError::Verify("ipc_uid"));
     }
@@ -252,7 +262,14 @@ pub(super) async fn connect_attach(
     write_message(&mut write, &attach).await?;
     let reply: SupervisorToControl = tokio::time::timeout_at(deadline, read_message(&mut read))
         .await
-        .map_err(|_| ExecError::AttachTimeout)??;
+        .map_err(|_| ExecError::AttachTimeout)
+        .inspect_err(|_| {
+            tracing::debug!(
+                %execution_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "supervisor attach reply timed out"
+            );
+        })??;
     let Some(up::Msg::Attached(attached)) = reply.msg else {
         return Err(ExecError::Verify("attach_reply"));
     };

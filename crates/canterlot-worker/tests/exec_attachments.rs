@@ -5,6 +5,8 @@
 mod fixture;
 #[allow(dead_code)]
 mod support;
+#[path = "support/trace.rs"]
+mod trace;
 use canterlot_hub::{delivery::control, fault_injection::Point, testkit};
 use canterlot_proto::worker::v1::{StreamKind, record_body::Body};
 use fixture::{Fixture, WAIT, until};
@@ -189,20 +191,28 @@ async fn cancel_while_waiting_for_attachments_wins_and_nothing_is_transmitted(po
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn redelivered_attempt_does_not_refetch_published_files(pool: PgPool) {
+    let mut steps = trace::Steps::new();
     let mut f = Fixture::new_with_gate(&pool, true).await;
+    let _dump = SupervisorLogOnPanic(f.exec_dir());
+    steps.step("fixture running");
     let id = f.ready(b"published").await;
     let input = f.submit(&[id], "hello").await;
+    steps.step("submitted");
     until(async || f.published(id).exists()).await;
+    steps.step("published");
     sleep(Duration::from_millis(200)).await;
     assert!(f.sj_transmissions(input.command_id).is_empty());
     use std::os::unix::fs::MetadataExt;
     let inode = fs::metadata(f.published(id)).unwrap().ino();
     f.stop_worker().await;
+    steps.step("worker stopped");
     let no_fetch = f.hub().faults.pause_next(Point::BeforeFetchChunk);
     f.start_worker().await;
+    steps.step("worker live again");
     sleep(Duration::from_millis(300)).await;
     assert!(timeout(Duration::from_millis(100), no_fetch).await.is_err());
     assert_eq!(fs::metadata(f.published(id)).unwrap().ino(), inode);
+    steps.step("no refetch");
     until(async || {
         f.store_probe
             .snapshots()
@@ -220,9 +230,25 @@ async fn redelivered_attempt_does_not_refetch_published_files(pool: PgPool) {
             >= 2
     })
     .await;
+    steps.step("second AttachmentReady");
     fs::write(f.exec_dir().join("fault_release"), b"1").unwrap();
     f.accepted(&input).await;
+    steps.step("accepted");
     assert_eq!(f.sj_transmissions(input.command_id).len(), 1);
+}
+
+/// Журнал сопровождения при падении теста: оно живёт отдельным процессом.
+struct SupervisorLogOnPanic(std::path::PathBuf);
+
+impl Drop for SupervisorLogOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "supervisor log:\n{}",
+                fs::read_to_string(self.0.join("supervisor.log")).unwrap_or_default()
+            );
+        }
+    }
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]

@@ -223,7 +223,9 @@ impl AttachmentStore {
         };
         if path.exists() {
             let (size, hash) = hash_file(&path).await?;
-            if size == reference.size && hex(&hash.finalize()) == reference.sha256 {
+            let matches = size == reference.size && hex(&hash.finalize()) == reference.sha256;
+            tracing::debug!(attachment_id = %id, matches, "attachment already on disk");
+            if matches {
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
                 tokio::fs::File::open(&path).await?.sync_all().await?;
                 fs::File::open(&self.directory)?.sync_all()?;
@@ -231,6 +233,7 @@ impl AttachmentStore {
             }
             fs::remove_file(&path)?;
         }
+        tracing::debug!(attachment_id = %id, "attachment fetch starts");
         let temporary = self.temp(id);
         let mut failures = 0;
         let mut outage = false;

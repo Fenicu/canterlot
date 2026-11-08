@@ -283,6 +283,7 @@ impl Watch {
                 }
                 () = sleep_until(check_at), if self.exit.is_none() => {
                     let group = group::confirmed(&self.record).await;
+                    tracing::debug!(execution_id = %self.id, ?group, next_ms = delay.as_millis() as u64, "lost execution group check");
                     if group == Group::Empty {
                         self.begin_exit(SUPERVISOR_DIED).await?;
                     } else {
@@ -312,7 +313,15 @@ impl Watch {
         if command.execution_generation != self.record.generation {
             return self.shared.cj(vec![], vec![terminal(&command)]).await;
         }
-        match manager::verify(&self.shared, &self.record).await {
+        let started = Instant::now();
+        let verified = manager::verify(&self.shared, &self.record).await;
+        tracing::debug!(
+            execution_id = %self.id,
+            verified = verified.is_ok(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "resolve: verify of the lost supervisor"
+        );
+        match verified {
             Ok(linked) => return self.adopt(linked, command).await,
             Err(error) => {
                 tracing::info!(execution_id = %self.id, reason = %error, "lost ownership not reclaimed");
@@ -320,6 +329,12 @@ impl Watch {
         }
         let grace = self.shared.config.supervisor.stop_grace;
         let group = group::terminate(&self.record, grace).await;
+        tracing::debug!(
+            execution_id = %self.id,
+            ?group,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "resolve: group terminated"
+        );
         tracing::info!(execution_id = %self.id, confirmed = (group == Group::Empty), kind = "owner_lost_resolved", "lost group terminated by owner");
         self.begin_exit(if group == Group::Empty {
             SUPERVISOR_DIED

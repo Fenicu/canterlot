@@ -647,6 +647,7 @@ impl Supervisor {
                 tokio::select! {
                     connection = server.accept() => {
                         let Ok(connection) = connection else { break };
+                        tracing::debug!("control connection accepted");
                         if accepted_tx.send(connection).await.is_err() { break; }
                     }
                     _ = socket_check.tick() => {

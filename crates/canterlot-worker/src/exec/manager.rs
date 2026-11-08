@@ -572,8 +572,21 @@ pub(super) async fn verify(
         return Err(ExecError::Verify("exec_dir"));
     }
     if !procfs::is_same_process(record.supervisor_pid, record.supervisor_start_ticks) {
+        tracing::debug!(
+            execution_id = %id,
+            supervisor_pid = record.supervisor_pid,
+            expected_ticks = record.supervisor_start_ticks,
+            proc = %procfs::describe(record.supervisor_pid),
+            "verify: supervisor is not the recorded process"
+        );
         return Err(ExecError::Verify("supervisor_process"));
     }
+    tracing::debug!(
+        execution_id = %id,
+        supervisor_pid = record.supervisor_pid,
+        proc = %procfs::describe(record.supervisor_pid),
+        "verify: supervisor looks alive, attaching"
+    );
     let secret = fs::read(dir.join("secret"))?;
     let spec: crate::supervisor::PersistedSpec =
         toml::from_str(&fs::read_to_string(dir.join("spec.toml"))?)
@@ -587,7 +600,8 @@ pub(super) async fn verify(
     if sha256(&secret) != record.secret_sha256 {
         return Err(ExecError::Verify("secret"));
     }
-    let deadline = Instant::now() + shared.config.supervisor.attach_wait;
+    let started = Instant::now();
+    let deadline = started + shared.config.supervisor.attach_wait;
     let linked = loop {
         let attempt = spawn::connect_attach(
             Path::new(&record.ipc_socket),
@@ -603,6 +617,13 @@ pub(super) async fn verify(
         match result {
             Ok(linked) => break linked,
             Err(error) => {
+                tracing::debug!(
+                    execution_id = %id,
+                    reason = %error,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    proc = %procfs::describe(record.supervisor_pid),
+                    "verify: attach attempt failed"
+                );
                 if Instant::now() >= deadline
                     || !procfs::is_same_process(
                         record.supervisor_pid,
@@ -1578,6 +1599,7 @@ impl Actor {
     }
 
     async fn finish_orphan(&mut self) -> Result<(), ExecError> {
+        tracing::debug!(execution_id = %self.id, "supervisor gone, reporting owner_lost");
         report_owner_lost(&self.shared, self.id, self.generation).await?;
         self.link = None;
         self.orphaned = true;
@@ -1627,6 +1649,13 @@ impl Actor {
     }
 
     fn link_lost(&mut self) {
+        tracing::debug!(
+            execution_id = %self.id,
+            supervisor = ?self.supervisor,
+            proc = %self.supervisor.map(|(pid, _)| procfs::describe(pid)).unwrap_or_default(),
+            finished = self.finished,
+            "supervisor link lost"
+        );
         self.link = None;
         if !self.finished {
             self.reconnect_at = Some(Instant::now());
@@ -1638,7 +1667,16 @@ impl Actor {
         let Some((pid, ticks)) = self.supervisor else {
             return self.finish_orphan().await;
         };
-        if !procfs::is_same_process(pid, ticks) {
+        let same = procfs::is_same_process(pid, ticks);
+        tracing::debug!(
+            execution_id = %self.id,
+            supervisor_pid = pid,
+            expected_ticks = ticks,
+            same,
+            proc = %procfs::describe(pid),
+            "check link: supervisor process"
+        );
+        if !same {
             return self.finish_orphan().await;
         }
         let Some(dir) = self.exec_dir.clone() else {
@@ -1671,7 +1709,10 @@ impl Actor {
                 let waiting: Vec<Command> = self.waiting.drain(..).collect();
                 self.pending.extend(waiting.into_iter().map(Msg::Command));
             }
-            Err(_) => self.reconnect_at = Some(Instant::now() + RECONNECT_EVERY),
+            Err(error) => {
+                tracing::debug!(execution_id = %self.id, reason = %error, "check link: reattach failed");
+                self.reconnect_at = Some(Instant::now() + RECONNECT_EVERY);
+            }
         }
         Ok(())
     }
@@ -1818,7 +1859,18 @@ impl Actor {
                 result,
                 retryable,
             } => {
-                if self.discard_closed_fetch(key).await? {
+                let discarded = self.discard_closed_fetch(key).await?;
+                tracing::debug!(
+                    execution_id = %self.id,
+                    command_id = %key.0,
+                    dispatch_attempt = key.1,
+                    %attachment_id,
+                    ok = result.is_ok(),
+                    discarded,
+                    tracked = self.fetching.contains_key(&key),
+                    "attachment progress"
+                );
+                if discarded {
                     return Ok(());
                 }
                 if let Some(fetch) = self.fetching.get(&key) {
@@ -2125,6 +2177,14 @@ impl Actor {
     }
 
     async fn on_command(&mut self, command: Command) -> Result<(), ExecError> {
+        tracing::debug!(
+            execution_id = %self.id,
+            command_id = %command.command_id,
+            dispatch_attempt = command.dispatch_attempt,
+            linked = self.link.is_some(),
+            finished = self.finished,
+            "execution actor command"
+        );
         if self.link.is_none()
             && !self.finished
             && !matches!(
@@ -2555,6 +2615,13 @@ impl Actor {
         let key = (
             Uuid::parse_str(&command.command_id).expect("validated command"),
             command.dispatch_attempt,
+        );
+        tracing::debug!(
+            execution_id = %self.id,
+            command_id = %key.0,
+            dispatch_attempt = key.1,
+            attachments = references.len(),
+            "attachment fetch task starts"
         );
         let store = self.attachments.as_ref().expect("attachment store").clone();
         let source = self.shared.attachment_source.subscribe();

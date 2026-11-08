@@ -963,11 +963,19 @@ impl ExecutionManager {
             let lost = reported || manager::is_orphaned(&record);
             let rebooted =
                 !record.boot_id.is_empty() && record.boot_id != *self.shared.boot_id().await?;
+            let started = tokio::time::Instant::now();
             let verified = if rebooted {
                 Err(ExecError::Verify("boot_id"))
             } else {
                 manager::verify(&self.shared, &record).await
             };
+            tracing::debug!(
+                execution_id = %id,
+                verified = verified.is_ok(),
+                lost,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "startup verify of ownership"
+            );
             self.shared.remember_ownership(&record);
             let conversation_id = Uuid::parse_str(&record.conversation_id).unwrap_or_default();
             self.shared.infos.lock().expect("infos lock").insert(
