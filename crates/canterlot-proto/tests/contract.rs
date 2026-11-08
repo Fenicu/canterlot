@@ -1983,3 +1983,54 @@ fn path_probe_uses_new_control_fields_and_old_decoders_skip_them() {
     let old = OldControlDown::decode(encoded.as_slice()).unwrap();
     assert!(old.list_claude_histories.is_none());
 }
+
+#[test]
+fn lease_state_uses_control_up_field_13_and_old_decoders_skip_it() {
+    use canterlot_proto::worker::v1::*;
+    let entry = LeaseEntry {
+        lease_id: "lease".into(),
+        kind: "gate".into(),
+        weight: 2,
+        label: "check.sh --all".into(),
+        execution_id: "0190a000-0000-7000-8000-000000000001".into(),
+        holder: "execution".into(),
+        since_ms: 1_762_345_300_000,
+        requested_at_ms: 1_762_345_200_000,
+        position: 0,
+        dir: "canterlot".into(),
+    };
+    assert_eq!(
+        LeaseEntry {
+            dir: "d".into(),
+            ..Default::default()
+        }
+        .encode_to_vec(),
+        [10 << 3 | 2, 1, b'd'],
+        "LeaseEntry.dir is field 10"
+    );
+    let state = LeaseState {
+        slots: 2,
+        holders: vec![entry.clone()],
+        waiters: vec![LeaseEntry {
+            position: 1,
+            since_ms: 0,
+            ..entry
+        }],
+        observed_at_ms: 1_762_345_300_001,
+    };
+    assert_roundtrip(state.clone());
+    let message = ControlUp {
+        msg: Some(control_up::Msg::LeaseState(state)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 13 << 3 | 2);
+    assert_roundtrip(message.clone());
+
+    // ControlUp до этой правки: поля до 12. Незнакомое сообщение пропускается.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct OldControlUp {
+        #[prost(message, optional, tag = "12")]
+        path_probe: Option<PathProbe>,
+    }
+    let old = OldControlUp::decode(message.encode_to_vec().as_slice()).unwrap();
+    assert!(old.path_probe.is_none());
+}

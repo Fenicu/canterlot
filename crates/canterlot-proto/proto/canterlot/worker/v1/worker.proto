@@ -93,6 +93,8 @@ message ControlUp {
     ClaudeHistories claude_histories = 11;
     // Только при согласованной возможности path_probe_v1.
     PathProbe path_probe = 12;
+    // Только при согласованной возможности resource_lease_v1.
+    LeaseState lease_state = 13;
   }
 }
 
@@ -1054,4 +1056,33 @@ message DecisionUnconfirmed {
   string request_id = 1;
   string decision_id = 2;
   string reason = 3;
+}
+
+// Очередь тяжёлых задач машины целиком (не дельта): при каждом изменении и после
+// переподключения. Воркер ведёт очередь сам, хаб только отражает её.
+message LeaseState {
+  uint32 slots = 1;
+  repeated LeaseEntry holders = 2;
+  repeated LeaseEntry waiters = 3;
+  // Часы воркера в момент снимка.
+  uint64 observed_at_ms = 4;
+}
+
+message LeaseEntry {
+  string lease_id = 1;
+  // `gate` или `build`.
+  string kind = 2;
+  uint32 weight = 3;
+  string label = 4;
+  // Пусто у держателя `owner` (процесс без метки исполнения).
+  string execution_id = 5;
+  // `execution` или `owner`.
+  string holder = 6;
+  // Время выдачи; 0 у ожидающих.
+  uint64 since_ms = 7;
+  uint64 requested_at_ms = 8;
+  // Место в очереди с единицы; 0 у держателей.
+  uint32 position = 9;
+  // Имя рабочего каталога клиента.
+  string dir = 10;
 }
