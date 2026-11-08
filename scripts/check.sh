@@ -190,6 +190,14 @@ if ((want_rust)); then
     stage_done "линт и тесты"
     ((run_status == 0 && lint_status == 0)) || exit 1
     [[ "$mode" == fast ]] || bash scripts/prune-target.sh
+    # После гейта инкрементальный кэш своей рабочей копии не нужен: при тех же исходниках
+    # его удаление ничего не пересобирает, а копится он на десятки гигабайт. Сборка тестов
+    # с CARGO_INCREMENTAL=0 вместо этого держала бы вторую копию тестовых бинарников, и
+    # prune-target.sh заставлял бы следующий --fast их перелинковать (замер 2026-11-08).
+    if ((all)) && [[ -d target/debug/incremental && ! -L target/debug/incremental ]]; then
+        rm -rf -- "$PWD/target/debug/incremental"
+        echo "удалён target/debug/incremental"
+    fi
 fi
 
 # --- web ---
