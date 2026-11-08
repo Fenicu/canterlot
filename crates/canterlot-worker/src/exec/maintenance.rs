@@ -335,20 +335,73 @@ pub(crate) fn target_in_use(target: &Path, proc_root: &Path, skip: u32) -> bool 
     false
 }
 
-/// Старые копии тестовых бинарников в `deps/` (логика `scripts/prune-target.sh`):
-/// у каждого имени остаётся самый свежий, прочие уходят вместе с `.d` и `.dwo`.
+/// Единицы сборки профиля по отпечаткам cargo: хэш из имени файла в `deps/` →
+/// ключ единицы. Каталог `.fingerprint/<пакет>-<хэш>` хранит файл `<вид>-<цель>`
+/// (`test-integration-test-lease`, `bin-canterlot-hub`, `test-lib-canterlot_hub`) и
+/// его `.json` с хэшами цели, профиля, возможностей и флагов. Ключ — пакет, вид с целью
+/// и эти поля без версии rustc и зависимостей: копии одного ключа отличаются только
+/// устаревшими входами, разные ключи — разные текущие единицы с общим стеблем имени.
+fn unit_keys(fingerprint: &Path) -> std::collections::HashMap<String, String> {
+    let mut keys = std::collections::HashMap::new();
+    let Ok(entries) = fs::read_dir(fingerprint) else {
+        return keys;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some((package, hash)) = name.to_str().and_then(|name| name.rsplit_once('-')) else {
+            continue;
+        };
+        let Ok(files) = fs::read_dir(entry.path()) else {
+            continue;
+        };
+        let units: Vec<String> = files
+            .flatten()
+            .filter_map(|file| {
+                file.file_name()
+                    .to_str()?
+                    .strip_suffix(".json")
+                    .map(str::to_owned)
+            })
+            .collect();
+        // Одна единица на каталог; иначе соответствие бинарнику неоднозначно.
+        let [unit] = units.as_slice() else {
+            continue;
+        };
+        let Some(json) = fs::read(entry.path().join(format!("{unit}.json")))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        else {
+            continue;
+        };
+        let fields = ["features", "target", "profile", "compile_kind", "rustflags"]
+            .map(|field| json.get(field).map(ToString::to_string).unwrap_or_default());
+        keys.insert(
+            hash.to_owned(),
+            format!("{package}\0{unit}\0{}", fields.join("\0")),
+        );
+    }
+    keys
+}
+
+/// Старые копии тестовых бинарников в `deps/` (та же логика в `scripts/prune-target.sh`):
+/// у каждой единицы сборки остаётся самая свежая копия, прочие уходят вместе с `.d` и
+/// `.dwo`. Бинарник без отпечатка не трогается: его единица неизвестна.
 fn stale_test_binaries(deps: &Path) -> Vec<PathBuf> {
     use std::{collections::HashMap, os::unix::fs::PermissionsExt};
     let Ok(entries) = fs::read_dir(deps) else {
         return Vec::new();
     };
-    let mut groups: HashMap<String, Vec<(SystemTime, String)>> = HashMap::new();
+    let keys = deps
+        .parent()
+        .map(|profile| unit_keys(&profile.join(".fingerprint")))
+        .unwrap_or_default();
+    let mut groups: HashMap<&str, Vec<(SystemTime, String)>> = HashMap::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
         };
-        let Some((stem, hash)) = name.rsplit_once('-') else {
+        let Some((_, hash)) = name.rsplit_once('-') else {
             continue;
         };
         if hash.len() != 16
@@ -358,6 +411,9 @@ fn stale_test_binaries(deps: &Path) -> Vec<PathBuf> {
         {
             continue;
         }
+        let Some(key) = keys.get(hash) else {
+            continue;
+        };
         let Ok(meta) = entry.metadata() else {
             continue;
         };
@@ -368,7 +424,7 @@ fn stale_test_binaries(deps: &Path) -> Vec<PathBuf> {
             continue;
         };
         groups
-            .entry(stem.to_owned())
+            .entry(key.as_str())
             .or_default()
             .push((modified, name.to_owned()));
     }
@@ -628,6 +684,21 @@ mod tests {
         binary(&deps.join("session-0123456789abcdef"), 5);
         fs::write(deps.join("session-0123456789abcdef.d"), "d").unwrap();
         binary(&deps.join("session-fedcba9876543210"), 1);
+        let profile = target.join("debug");
+        unit(
+            &profile,
+            "canterlot-worker",
+            "0123456789abcdef",
+            "test-integration-test-session",
+            "[]",
+        );
+        unit(
+            &profile,
+            "canterlot-worker",
+            "fedcba9876543210",
+            "test-integration-test-session",
+            "[]",
+        );
         fs::write(deps.join("libdep-0123456789abcdef.rlib"), "lib").unwrap();
         binary(&target.join("debug/canterlot-worker"), 5);
 
@@ -654,6 +725,113 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Каталог отпечатка cargo для единицы сборки с хэшем `hash`.
+    fn unit(profile: &Path, package: &str, hash: &str, name: &str, features: &str) {
+        let dir = profile.join(format!(".fingerprint/{package}-{hash}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), "0011223344556677").unwrap();
+        fs::write(dir.join(format!("dep-{name}")), "").unwrap();
+        fs::write(dir.join("invoked.timestamp"), "").unwrap();
+        let json = serde_json::json!({
+            "rustc": 1, "features": features, "declared_features": "[]",
+            "target": name.len(), "profile": 7, "path": 3, "deps": [], "local": [],
+            "rustflags": [], "config": 9, "compile_kind": 0,
+        });
+        fs::write(dir.join(format!("{name}.json")), json.to_string()).unwrap();
+    }
+
+    #[test]
+    fn stale_test_binaries_keep_every_current_unit_that_shares_a_stem() {
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let profile = root.path().join("debug");
+        let deps = profile.join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        // Интеграционный тест `version` в двух пакетах: оба текущие.
+        binary(&deps.join("version-1111111111111111"), 5);
+        unit(
+            &profile,
+            "canterlot-hub",
+            "1111111111111111",
+            "test-integration-test-version",
+            "[]",
+        );
+        binary(&deps.join("version-2222222222222222"), 1);
+        unit(
+            &profile,
+            "canterlot-worker",
+            "2222222222222222",
+            "test-integration-test-version",
+            "[]",
+        );
+        // Один пакет: сам бинарник, тесты библиотеки и тесты бинарника под одним стеблем.
+        binary(&deps.join("canterlot_hub-3333333333333333"), 4);
+        unit(
+            &profile,
+            "canterlot-hub",
+            "3333333333333333",
+            "bin-canterlot-hub",
+            "[]",
+        );
+        binary(&deps.join("canterlot_hub-4444444444444444"), 3);
+        unit(
+            &profile,
+            "canterlot-hub",
+            "4444444444444444",
+            "test-lib-canterlot_hub",
+            "[]",
+        );
+        binary(&deps.join("canterlot_hub-5555555555555555"), 2);
+        unit(
+            &profile,
+            "canterlot-hub",
+            "5555555555555555",
+            "test-bin-canterlot-hub",
+            "[]",
+        );
+        // Тот же тест с другим набором возможностей — тоже текущий.
+        binary(&deps.join("exec-6666666666666666"), 6);
+        unit(
+            &profile,
+            "canterlot-worker",
+            "6666666666666666",
+            "test-integration-test-exec",
+            "[]",
+        );
+        binary(&deps.join("exec-7777777777777777"), 1);
+        unit(
+            &profile,
+            "canterlot-worker",
+            "7777777777777777",
+            "test-integration-test-exec",
+            "[\"fault-injection\"]",
+        );
+        // Старая копия той же единицы уходит, свежая остаётся.
+        binary(&deps.join("lease-8888888888888888"), 9);
+        unit(
+            &profile,
+            "canterlot-worker",
+            "8888888888888888",
+            "test-integration-test-lease",
+            "[]",
+        );
+        binary(&deps.join("lease-9999999999999999"), 1);
+        unit(
+            &profile,
+            "canterlot-worker",
+            "9999999999999999",
+            "test-integration-test-lease",
+            "[]",
+        );
+        // Без отпечатка единица неизвестна: не трогается.
+        binary(&deps.join("lease-aaaaaaaaaaaaaaaa"), 20);
+
+        let stale = super::stale_test_binaries(&deps);
+        assert_eq!(stale, vec![deps.join("lease-8888888888888888")]);
     }
 
     #[test]
