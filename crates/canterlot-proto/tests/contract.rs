@@ -2034,3 +2034,45 @@ fn lease_state_uses_control_up_field_13_and_old_decoders_skip_it() {
     let old = OldControlUp::decode(message.encode_to_vec().as_slice()).unwrap();
     assert!(old.path_probe.is_none());
 }
+
+#[test]
+fn machine_watch_uses_field_14_and_old_decoders_skip_it() {
+    use canterlot_proto::worker::v1::*;
+    let watch = MachineWatch {
+        hotspots: vec![DiskHotspot {
+            path: "/home/owner/private-project/target".into(),
+            kind: "target".into(),
+            bytes: 77_000_000_000,
+            incremental_bytes: 31_000_000_000,
+            newest_ms: 1_762_345_260_000,
+            measured_at_ms: 1_762_345_300_000,
+            conversation_id: String::new(),
+        }],
+        leaked: vec![LeakedProcess {
+            execution_id: "019a0000-0000-7000-8000-000000000000".into(),
+            pid: 42,
+            comm: "cargo".into(),
+            rss_bytes: 1 << 30,
+            age_s: 600,
+        }],
+        unleased_count: 2,
+        observed_at_ms: 1_762_345_300_000,
+    };
+    assert_roundtrip(watch.clone());
+    // Путь — данные уровня сообщения: в Debug остаётся только длина.
+    assert!(!format!("{watch:?}").contains("private-project"));
+    let message = ControlUp {
+        msg: Some(control_up::Msg::MachineWatch(watch)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 14 << 3 | 2);
+    assert_roundtrip(message.clone());
+
+    // Старый получатель без поля 14 пропускает сообщение целиком.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct OldControlUp {
+        #[prost(message, optional, tag = "6")]
+        machine_metrics: Option<MachineMetrics>,
+    }
+    let old = OldControlUp::decode(message.encode_to_vec().as_slice()).unwrap();
+    assert!(old.machine_metrics.is_none());
+}

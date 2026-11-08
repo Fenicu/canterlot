@@ -28,6 +28,10 @@ pub const MAX_PROBE_PATH_BYTES: usize = 4096;
 /// Столько байт начала файла проба отдаёт, когда просят больше.
 pub const MAX_PROBE_HEAD_BYTES: u32 = 4096;
 
+/// Крупных каталогов сборки в одном отчёте сторожа.
+pub const MAX_WATCH_HOTSPOTS: usize = 15;
+/// Переживших исполнение процессов в одном отчёте сторожа.
+pub const MAX_WATCH_LEAKED: usize = 64;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1_048_576;
 pub const MAX_INPUT_TEXT_BYTES: usize = 262_144;

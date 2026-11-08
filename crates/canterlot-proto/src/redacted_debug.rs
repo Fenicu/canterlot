@@ -155,6 +155,20 @@ impl fmt::Debug for crate::worker::v1::PathProbeExists {
     }
 }
 
+impl fmt::Debug for crate::worker::v1::DiskHotspot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DiskHotspot")
+            .field("path_bytes", &self.path.len())
+            .field("kind", &self.kind)
+            .field("bytes", &self.bytes)
+            .field("incremental_bytes", &self.incremental_bytes)
+            .field("newest_ms", &self.newest_ms)
+            .field("measured_at_ms", &self.measured_at_ms)
+            .field("conversation_id", &self.conversation_id)
+            .finish()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::ReadOwnerInstructions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReadOwnerInstructions")

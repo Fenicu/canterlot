@@ -56,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.GitFacts",
             ".canterlot.worker.v1.ProbePath",
             ".canterlot.worker.v1.PathProbeExists",
+            ".canterlot.worker.v1.DiskHotspot",
         ])
         .build_server(true)
         .build_client(true)

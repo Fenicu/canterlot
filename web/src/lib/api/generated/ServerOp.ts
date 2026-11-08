@@ -56,6 +56,7 @@ export type ServerOp =
         | MachineReportUpdated
         | MachineMetrics
         | MachineJournalStopsChanged
+        | MachineWatchChanged
         | Hidden
         | PhaseChanged
         | Oversized
@@ -1287,6 +1288,46 @@ export interface MachineJournalStopsChanged {
   payload: {
     machine_id: Uuid;
     stopped: ("cj" | "sj")[];
+  };
+}
+export interface MachineWatchChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "machine_watch_changed";
+  payload: {
+    machine_id: Uuid;
+    watch: {
+      observed_at: Time;
+      hotspots: {
+        path: string;
+        kind: "target" | "node_modules" | "svelte_kit" | "web_build";
+        bytes: number;
+        incremental_bytes: number;
+        newest_at: Time | null;
+        measured_at: Time | null;
+        conversation_id: Uuid | null;
+        title: string | null;
+      }[];
+      leaked: {
+        execution_id: Uuid;
+        conversation_id: Uuid | null;
+        title: string | null;
+        pid: number;
+        comm: string;
+        rss_bytes: number;
+        age_s: number;
+      }[];
+      unleased_count: number;
+    } | null;
+    memory_low: boolean;
   };
 }
 export interface Hidden {

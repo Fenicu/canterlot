@@ -9965,6 +9965,61 @@
           }
         ]
       },
+      "HotspotView": {
+        "type": "object",
+        "required": [
+          "path",
+          "kind",
+          "bytes",
+          "incremental_bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Рабочая копия беседы; пусто — каталог владельца."
+          },
+          "incremental_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "description": "`target`, `node_modules`, `svelte_kit` или `web_build`."
+          },
+          "measured_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "newest_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Последняя запись сборки."
+          },
+          "path": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "HubCommit": {
         "type": "object",
         "description": "Коммит из итога сессии: короткий хеш и первая строка сообщения.",
@@ -10478,6 +10533,53 @@
           }
         }
       },
+      "LeakedView": {
+        "type": "object",
+        "required": [
+          "execution_id",
+          "pid",
+          "comm",
+          "rss_bytes",
+          "age_s"
+        ],
+        "properties": {
+          "age_s": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "comm": {
+            "type": "string"
+          },
+          "conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "execution_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "rss_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "LimitSettings": {
         "type": "object",
         "required": [
@@ -10958,6 +11060,17 @@
               "$ref": "#/components/schemas/MachineWarning"
             }
           },
+          "watch": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WatchView",
+                "description": "Последний отчёт сторожа машины; нет — воркер без `watchdog_v1` или отчёта ещё не было."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "worker_version": {
             "type": [
               "string",
@@ -10973,7 +11086,9 @@
           "metrics_stale",
           "limits_mismatch",
           "cj_journal_stopped",
-          "sj_journal_stopped"
+          "sj_journal_stopped",
+          "memory_low",
+          "processes_leaked"
         ]
       },
       "MachinesSnapshot": {
@@ -14172,6 +14287,37 @@
           "turns": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "WatchView": {
+        "type": "object",
+        "required": [
+          "observed_at",
+          "hotspots",
+          "leaked",
+          "unleased_count"
+        ],
+        "properties": {
+          "hotspots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HotspotView"
+            }
+          },
+          "leaked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LeakedView"
+            }
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "unleased_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },

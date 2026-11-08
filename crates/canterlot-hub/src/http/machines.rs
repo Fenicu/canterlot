@@ -50,6 +50,8 @@ pub struct MachineView {
     pub metrics: Option<Value>,
     pub sessions: Vec<SessionView>,
     pub warnings: Vec<MachineWarning>,
+    /// Последний отчёт сторожа машины; нет — воркер без `watchdog_v1` или отчёта ещё не было.
+    pub watch: Option<crate::machine_watch::WatchView>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct HarnessView {
@@ -78,6 +80,10 @@ pub enum MachineWarning {
     LimitsMismatch,
     CjJournalStopped,
     SjJournalStopped,
+    /// Открыт эпизод `mem_low`.
+    MemoryLow,
+    /// Свежий отчёт сторожа называет процессы, пережившие свои исполнения.
+    ProcessesLeaked,
 }
 #[derive(Serialize, ToSchema)]
 pub struct Workdirs {
@@ -205,6 +211,19 @@ pub(crate) async fn load_stored(
             MachineWarning::SjJournalStopped
         });
     }
+    if crate::machine_watch::memory_low(&mut *conn, id).await? {
+        warnings.push(MachineWarning::MemoryLow);
+    }
+    let watch = crate::machine_watch::view(&mut *conn, owner, id).await?;
+    let watch_fresh = watch.as_ref().is_some_and(|w| {
+        DateTime::parse_from_rfc3339(&w.observed_at).is_ok_and(|at| {
+            (Utc::now() - at.with_timezone(&Utc)).num_seconds()
+                <= crate::machine_watch::WATCH_FRESH_SECS
+        })
+    });
+    if watch_fresh && watch.as_ref().is_some_and(|w| !w.leaked.is_empty()) {
+        warnings.push(MachineWarning::ProcessesLeaked);
+    }
     let roots: sqlx::types::Json<Vec<String>> = r.try_get("allowed_roots")?;
     Ok(MachineView {
         id,
@@ -225,6 +244,7 @@ pub(crate) async fn load_stored(
         metrics,
         sessions,
         warnings,
+        watch,
     })
 }
 async fn load(

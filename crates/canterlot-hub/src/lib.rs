@@ -35,6 +35,7 @@ pub mod limit_settings;
 pub mod limits;
 pub mod limits_forecast;
 pub mod machine_info;
+pub mod machine_watch;
 pub mod machines;
 pub mod media;
 pub mod model;

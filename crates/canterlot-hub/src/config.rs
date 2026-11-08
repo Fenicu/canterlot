@@ -658,6 +658,9 @@ pub struct MachinesConfig {
     pub disk_warn_pct: u8,
     #[serde(with = "humantime_serde")]
     pub metrics_stale_after: Duration,
+    /// Свободной памяти меньше этого три выборки подряд — эпизод `mem_low`. Ниже
+    /// стража запуска (4 ГБ) намеренно: страж не пускает новые сессии раньше.
+    pub mem_warn_gb: u64,
 }
 
 impl Default for MachinesConfig {
@@ -667,6 +670,7 @@ impl Default for MachinesConfig {
             disk_critical_free_gb: 10,
             disk_warn_pct: 85,
             metrics_stale_after: Duration::from_secs(90),
+            mem_warn_gb: 3,
         }
     }
 }

@@ -139,6 +139,9 @@
       "$ref": "#/$defs/machine_journal_stops_changed"
     },
     {
+      "$ref": "#/$defs/machine_watch_changed"
+    },
+    {
       "$ref": "#/$defs/hidden"
     },
     {
@@ -5689,6 +5692,250 @@
       ],
       "additionalProperties": false
     },
+    "machine_watch_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "machine_watch_changed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "machine_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "watch": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "observed_at": {
+                      "$ref": "#/$defs/Time"
+                    },
+                    "hotspots": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "enum": [
+                              "target",
+                              "node_modules",
+                              "svelte_kit",
+                              "web_build"
+                            ]
+                          },
+                          "bytes": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "incremental_bytes": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "newest_at": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/$defs/Time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "measured_at": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/$defs/Time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "conversation_id": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/$defs/Uuid"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "title": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "kind",
+                          "bytes",
+                          "incremental_bytes",
+                          "newest_at",
+                          "measured_at",
+                          "conversation_id",
+                          "title"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "leaked": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "execution_id": {
+                            "$ref": "#/$defs/Uuid"
+                          },
+                          "conversation_id": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/$defs/Uuid"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "title": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "pid": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "comm": {
+                            "type": "string"
+                          },
+                          "rss_bytes": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "age_s": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "execution_id",
+                          "conversation_id",
+                          "title",
+                          "pid",
+                          "comm",
+                          "rss_bytes",
+                          "age_s"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "unleased_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "observed_at",
+                    "hotspots",
+                    "leaked",
+                    "unleased_count"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "memory_low": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "machine_id",
+            "watch",
+            "memory_low"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "hidden": {
       "type": "object",
       "properties": {
@@ -5988,6 +6235,9 @@
                 },
                 {
                   "$ref": "#/$defs/machine_journal_stops_changed"
+                },
+                {
+                  "$ref": "#/$defs/machine_watch_changed"
                 },
                 {
                   "$ref": "#/$defs/hidden"

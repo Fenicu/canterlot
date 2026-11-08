@@ -34,6 +34,7 @@ pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";
 pub const CAPABILITY_OWNER_INSTRUCTIONS_V1: &str = "owner_instructions_v1";
 pub const CAPABILITY_CLAUDE_HISTORIES_V1: &str = "claude_histories_v1";
 pub const CAPABILITY_PATH_PROBE_V1: &str = "path_probe_v1";
+pub const CAPABILITY_WATCHDOG_V1: &str = "watchdog_v1";
 pub const CAPABILITY_ALARMS_V1: &str = "alarms_v1";
 pub const CAPABILITY_NUDGE_V1: &str = "nudge_v1";
 

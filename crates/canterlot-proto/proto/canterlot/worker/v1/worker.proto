@@ -95,6 +95,9 @@ message ControlUp {
     PathProbe path_probe = 12;
     // Только при согласованной возможности resource_lease_v1.
     LeaseState lease_state = 13;
+    // Только при согласованной возможности watchdog_v1. Номер 13 оставлен
+    // под состояние очереди тяжёлых задач.
+    MachineWatch machine_watch = 14;
   }
 }
 
@@ -585,6 +588,40 @@ message ExecutionProcess {
   uint64 rss_bytes = 4;
   // Живые потомки CLI без зомби. Нет поля — старый воркер, неизвестно.
   optional uint32 descendants = 5;
+}
+
+// Сторож машины: кэш крупных каталогов сборки, процессы, пережившие свои
+// исполнения, и число сборок вне очереди. Шлётся раз в 5 минут и сразу, когда
+// свободное место пересекает порог предупреждения. Размеры меряются в фоне,
+// поэтому показание может отставать от диска до часа (`measured_at_ms`).
+message MachineWatch {
+  repeated DiskHotspot hotspots = 1;
+  repeated LeakedProcess leaked = 2;
+  uint32 unleased_count = 3;
+  uint64 observed_at_ms = 4;
+}
+
+message DiskHotspot {
+  string path = 1;
+  // `target`, `node_modules`, `svelte_kit` или `web_build`.
+  string kind = 2;
+  uint64 bytes = 3;
+  // Для `target`: сумма `*/incremental`.
+  uint64 incremental_bytes = 4;
+  // Последняя запись сборки; 0 — неизвестно.
+  uint64 newest_ms = 5;
+  uint64 measured_at_ms = 6;
+  // Рабочая копия беседы под корнем рабочих копий; пусто — каталог владельца.
+  string conversation_id = 7;
+}
+
+// Только `comm`: ни аргументов, ни окружения.
+message LeakedProcess {
+  string execution_id = 1;
+  uint32 pid = 2;
+  string comm = 3;
+  uint64 rss_bytes = 4;
+  uint64 age_s = 5;
 }
 
 enum LimitWindow {

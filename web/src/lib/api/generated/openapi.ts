@@ -1931,6 +1931,24 @@ export interface components {
             /** @enum {string} */
             reason: "capability_missing";
         };
+        HotspotView: {
+            /** Format: int64 */
+            bytes: number;
+            /**
+             * Format: uuid
+             * @description Рабочая копия беседы; пусто — каталог владельца.
+             */
+            conversation_id?: string | null;
+            /** Format: int64 */
+            incremental_bytes: number;
+            /** @description `target`, `node_modules`, `svelte_kit` или `web_build`. */
+            kind: string;
+            measured_at?: string | null;
+            /** @description Последняя запись сборки. */
+            newest_at?: string | null;
+            path: string;
+            title?: string | null;
+        };
         /** @description Коммит из итога сессии: короткий хеш и первая строка сообщения. */
         HubCommit: {
             sha: string;
@@ -2070,6 +2088,20 @@ export interface components {
             items: components["schemas"]["BlockView"][];
             next_before?: string | null;
             root: components["schemas"]["BlockView"];
+        };
+        LeakedView: {
+            /** Format: int64 */
+            age_s: number;
+            comm: string;
+            /** Format: uuid */
+            conversation_id?: string | null;
+            /** Format: uuid */
+            execution_id: string;
+            /** Format: int32 */
+            pid: number;
+            /** Format: int64 */
+            rss_bytes: number;
+            title?: string | null;
         };
         LimitSettings: {
             /**
@@ -2216,10 +2248,11 @@ export interface components {
             os?: string | null;
             sessions: components["schemas"]["SessionView"][];
             warnings: components["schemas"]["MachineWarning"][];
+            watch?: components["schemas"]["WatchView"] | null;
             worker_version?: string | null;
         };
         /** @enum {string} */
-        MachineWarning: "disk_usage_high" | "metrics_stale" | "limits_mismatch" | "cj_journal_stopped" | "sj_journal_stopped";
+        MachineWarning: "disk_usage_high" | "metrics_stale" | "limits_mismatch" | "cj_journal_stopped" | "sj_journal_stopped" | "memory_low" | "processes_leaked";
         MachinesSnapshot: {
             items: components["schemas"]["MachineView"][];
         };
@@ -3119,6 +3152,13 @@ export interface components {
             output_tokens: number;
             /** Format: int64 */
             turns: number;
+        };
+        WatchView: {
+            hotspots: components["schemas"]["HotspotView"][];
+            leaked: components["schemas"]["LeakedView"][];
+            observed_at: string;
+            /** Format: int32 */
+            unleased_count: number;
         };
         WhitelistBody: {
             /** @description `null` возвращает встроенный список; поле обязательно, чтобы пустое тело его не сбрасывало. */

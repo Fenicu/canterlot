@@ -251,7 +251,7 @@ const METRICS_STALE_AGE: TimeDelta = TimeDelta::seconds(91);
 /// Время выборки в часах хаба: смещение сеанса, если оно известно, иначе
 /// собственные часы выборки в пределах правдоподобия. Нулевая или нелепая
 /// отметка не должна доказывать условие: такая выборка считается устаревшей.
-fn sample_observed_at(
+pub(crate) fn sample_observed_at(
     registry: Option<&Registry>,
     machine_id: Uuid,
     machine_ms: u64,

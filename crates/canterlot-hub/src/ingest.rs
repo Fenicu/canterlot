@@ -2144,6 +2144,28 @@ impl crate::grpc::Ingest for Ingest {
         .map_err(|_| tonic::Status::internal("machine_metrics_database"))?;
         Ok(())
     }
+    async fn machine_watch(
+        &self,
+        machine_id: Uuid,
+        watch: canterlot_proto::worker::v1::MachineWatch,
+    ) -> Result<(), tonic::Status> {
+        let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id=$1")
+            .bind(machine_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|_| tonic::Status::internal("machine_watch_database"))?;
+        crate::machine_watch::apply(
+            &self.pool,
+            owner,
+            machine_id,
+            &watch,
+            self.registry.as_ref(),
+            Uuid::now_v7(),
+        )
+        .await
+        .map_err(|_| tonic::Status::internal("machine_watch_database"))?;
+        Ok(())
+    }
     async fn limits_report(
         &self,
         machine_id: Uuid,

@@ -25,7 +25,7 @@ use crate::{
         CAPABILITY_COMPACT_V1, CAPABILITY_EXEC_V1, CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_NUDGE_V1,
         CAPABILITY_OWNER_EXIT_V1, CAPABILITY_OWNER_INSTRUCTIONS_V1, CAPABILITY_PATH_PROBE_V1,
         CAPABILITY_PILOT_V1, CAPABILITY_SEND_NOW_V1, CAPABILITY_SESSION_TOOLS_V1,
-        CAPABILITY_TODO_V1, CAPABILITY_WORKDIR_SUGGEST_V1, Registry,
+        CAPABILITY_TODO_V1, CAPABILITY_WATCHDOG_V1, CAPABILITY_WORKDIR_SUGGEST_V1, Registry,
     },
 };
 
@@ -55,6 +55,7 @@ pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_ALARMS_V1,
     CAPABILITY_NUDGE_V1,
     CAPABILITY_PATH_PROBE_V1,
+    CAPABILITY_WATCHDOG_V1,
 ];
 
 #[tonic::async_trait]
@@ -76,6 +77,9 @@ pub trait Ingest: Send + Sync {
         Ok(())
     }
     async fn limits_report(&self, _machine_id: Uuid, _report: LimitsReport) -> Result<(), Status> {
+        Ok(())
+    }
+    async fn machine_watch(&self, _machine_id: Uuid, _watch: MachineWatch) -> Result<(), Status> {
         Ok(())
     }
     async fn cj_records(
@@ -132,6 +136,7 @@ enum IngestJob {
     MachineReport(MachineReport),
     MachineMetrics(MachineMetrics),
     LimitsReport(LimitsReport),
+    MachineWatch(MachineWatch),
 }
 
 /// Метрики и опрос лимитов теряются без остановки потока: следующий образец заменит их.
@@ -199,6 +204,10 @@ impl IngestLane {
                             volatile(ingest.limits_report(machine_id, report).await);
                             None
                         }
+                        IngestJob::MachineWatch(watch) => {
+                            volatile(ingest.machine_watch(machine_id, watch).await);
+                            None
+                        }
                     }
                 };
                 let result = tokio::select! {
@@ -245,6 +254,9 @@ impl IngestLane {
     }
     fn submit_metrics(&self, metrics: MachineMetrics) {
         let _ = self.batches.try_send(IngestJob::MachineMetrics(metrics));
+    }
+    fn submit_watch(&self, watch: MachineWatch) {
+        let _ = self.batches.try_send(IngestJob::MachineWatch(watch));
     }
     fn submit_limits(&self, report: LimitsReport) {
         self.limits.send_replace(Some(report));
