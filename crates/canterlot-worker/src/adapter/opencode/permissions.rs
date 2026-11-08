@@ -151,4 +151,11 @@ mod tests {
             Some("deny")
         );
     }
+
+    #[test]
+    fn history_search_is_allowed_in_ask_and_read_only() {
+        for mode in [PermissionMode::Ask, PermissionMode::ReadOnly] {
+            assert!(allowed(mode, "canterlot_history_search"), "{mode:?}");
+        }
+    }
 }

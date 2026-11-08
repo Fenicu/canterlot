@@ -867,6 +867,7 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_plan_list", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_plan_add", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_plan_update", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_history_search", "resource": "*", "effect": "allow"},
             ]),
         ),
         (
@@ -889,6 +890,7 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_plan_list", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_plan_add", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_plan_update", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_history_search", "resource": "*", "effect": "allow"},
             ]),
         ),
     ] {
@@ -929,6 +931,7 @@ async fn session_tools_follow_the_mode() {
             "canterlot_plan_list",
             "canterlot_plan_add",
             "canterlot_plan_update",
+            "canterlot_history_search",
         ] {
             assert_eq!(effect(tool), read_like, "{mode} {tool}");
         }
@@ -4843,7 +4846,8 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "plan_list",
             "plan_add",
             "plan_update",
-            "plan_adopt"
+            "plan_adopt",
+            "history_search"
         ]
     );
     bench.close(CloseMode::Graceful).await;

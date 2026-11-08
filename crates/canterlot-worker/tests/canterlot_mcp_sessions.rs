@@ -19,7 +19,7 @@ const PROVIDERS: [(ToolSet, &str); 3] = [
     (ToolSet::LimitsOnly, "opencode"),
 ];
 
-const SESSION_TOOLS: [(&str, &str); 21] = [
+const SESSION_TOOLS: [(&str, &str); 22] = [
     ("sessions_list", "sessions.list"),
     ("session_inspect", "sessions.inspect"),
     ("session_send", "sessions.send"),
@@ -41,6 +41,7 @@ const SESSION_TOOLS: [(&str, &str); 21] = [
     ("plan_add", "plan.add"),
     ("plan_update", "plan.update"),
     ("plan_adopt", "plan.adopt"),
+    ("history_search", "history.search"),
 ];
 
 fn tools_of(tool_set: ToolSet, provider: &str) -> Vec<Value> {
@@ -222,6 +223,7 @@ fn read_tools_are_read_only() {
                         | "alarm_list"
                         | "route_preview"
                         | "plan_list"
+                        | "history_search"
                 )
             };
             assert_eq!(
@@ -460,11 +462,12 @@ fn no_tool_touches_the_whitelist() {
                 || hub_name.starts_with("nudge.")
                 || hub_name.starts_with("routing.")
                 || hub_name.starts_with("spawn_queue.")
-                || hub_name.starts_with("plan."),
+                || hub_name.starts_with("plan.")
+                || hub_name.starts_with("history."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 24);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 25);
 }
 
 #[tokio::test]
@@ -630,4 +633,108 @@ fn spawn_cancel_is_a_session_tool_and_spawn_takes_queue() {
         let description = spawn["description"].as_str().unwrap();
         assert!(description.contains("queued, not refused"), "{provider}");
     }
+}
+
+#[test]
+fn history_search_is_a_strict_read_only_tool() {
+    for (tool_set, provider) in PROVIDERS {
+        let tools = tools_of(tool_set, provider);
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "history_search")
+            .unwrap_or_else(|| panic!("{provider}: нет history_search"));
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            json!(true),
+            "{provider}"
+        );
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["required"], json!(["query"]), "{provider}");
+        assert_eq!(schema["additionalProperties"], json!(false), "{provider}");
+        let mut fields: Vec<&str> = schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "cursor",
+                "harness",
+                "kind",
+                "limit",
+                "query",
+                "session_id",
+                "since",
+                "until"
+            ]
+        );
+        assert_eq!(
+            schema["properties"]["kind"]["enum"],
+            json!(["answers", "messages"])
+        );
+        assert_eq!(schema["properties"]["query"]["maxLength"], 200);
+        assert_eq!(schema["properties"]["limit"]["maximum"], 50);
+    }
+    assert!(mcp::MODE_FREE_TOOLS.contains(&"history_search"));
+    let action = mcp::handle_rpc(
+        &json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
+                "params":{"name":"history_search","arguments":{"query":"сборка","kind":"answers"}}}),
+        ToolSet::ApproveAndLimits,
+    );
+    assert!(
+        matches!(
+            action,
+            mcp::McpAction::ToolCall {
+                kind: mcp::ToolKind::Agent {
+                    tool: "history.search"
+                },
+                ..
+            }
+        ),
+        "{action:?}"
+    );
+}
+
+#[test]
+fn history_search_answer_is_compact_text_then_json() {
+    let hit = json!({
+        "session_id": "0199a000-0000-7000-8000-000000000001",
+        "session_title": "Сборка",
+        "kind": "answer",
+        "block_id": "0199a000-0000-7000-8000-000000000002",
+        "snippet": "тесты **сборки** упали",
+    });
+    let result = AgentCallResult::Ok(json!({
+        "text": "1 of 1 matches, newest first.\n- 2026-11-08T10:00:00.000Z · \"Сборка\" · answer",
+        "hits": [hit],
+        "next_cursor": null,
+        "total": 1,
+        "total_capped": false,
+    }));
+    let (text, is_error) = mcp::agent_tool_text("history.search", &result);
+    assert!(!is_error);
+    let (compact, structured) = text.split_once("\n\n").expect("текст, пустая строка, JSON");
+    assert_eq!(
+        compact,
+        "1 of 1 matches, newest first.\n- 2026-11-08T10:00:00.000Z · \"Сборка\" · answer"
+    );
+    let parsed: Value = serde_json::from_str(structured).expect("JSON одной строкой");
+    assert!(!structured.contains('\n'), "{structured}");
+    assert!(
+        parsed.get("text").is_none(),
+        "текст не дублируется: {parsed}"
+    );
+    assert_eq!(parsed["hits"][0], hit);
+    assert_eq!(parsed["total"], 1);
+
+    let failed = AgentCallResult::Err {
+        code: "invalid_arguments".into(),
+        message: "Invalid arguments".into(),
+    };
+    let (text, is_error) = mcp::agent_tool_text("history.search", &failed);
+    assert!(is_error);
+    assert_eq!(text, "invalid_arguments: Invalid arguments");
 }

@@ -170,6 +170,9 @@ pub struct PlanTaskDetail {
     /// Последний ответ основного агента исполнителя.
     #[schema(required = true)]
     pub report_block_id: Option<Uuid>,
+    /// Место этого ответа в ленте: ссылка открывает ленту сразу вокруг него.
+    #[schema(required = true)]
+    pub report_seq: Option<i64>,
 }
 
 fn time(at: DateTime<Utc>) -> String {
@@ -404,6 +407,7 @@ pub async fn details(
             commits_truncated: false,
             files_changed: 0,
             report_block_id: None,
+            report_seq: None,
         };
         if let Some(executor) = row.executor_conversation_id {
             let runs: Vec<Option<Value>> = sqlx::query_scalar(
@@ -422,16 +426,18 @@ pub async fn details(
             detail.commits_truncated = git.truncated;
             detail.files_changed = git.files_changed as i64;
             let query = format!(
-                "select block_id from blocks
+                "select block_id,created_seq from blocks
                  where conversation_id=$1 and kind='text' and parent_block_id is null
                    and {} and btrim(content) <> ''
                  order by created_seq desc nulls last,created_at desc limit 1",
                 crate::agents::main_agent_filter("agent")
             );
-            detail.report_block_id = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+            let report: Option<(Uuid, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(query))
                 .bind(executor)
                 .fetch_optional(&mut *conn)
                 .await?;
+            detail.report_block_id = report.map(|(id, _)| id);
+            detail.report_seq = report.map(|(_, seq)| seq);
         }
         out.push(detail);
     }

@@ -100,7 +100,7 @@ pub enum ToolKind {
 }
 
 /// Агентские инструменты: имя MCP → имя инструмента хаба.
-pub const AGENT_TOOLS: [(&str, &str); 24] = [
+pub const AGENT_TOOLS: [(&str, &str); 25] = [
     ("canterlot_presets_list", "presets.list"),
     ("canterlot_preset_save", "presets.save"),
     ("canterlot_preset_apply", "presets.apply"),
@@ -125,16 +125,17 @@ pub const AGENT_TOOLS: [(&str, &str); 24] = [
     ("plan_add", "plan.add"),
     ("plan_update", "plan.update"),
     ("plan_adopt", "plan.adopt"),
+    ("history_search", "history.search"),
 ];
 
 /// Инструменты, которые в режимах `ask` и `read_only` не спрашивают владельца ни у Claude Code,
-/// ни у OpenCode: чтение, подписка и ожидание, свои будильники и своя доска плана. Они не
+/// ни у OpenCode: чтение и поиск по истории, подписка и ожидание, свои будильники и своя доска плана. Они не
 /// меняют чужие сессии и не тратят лимиты; права на чужие сессии проверяет хаб. Всё, что
 /// действует на другую сессию или тратит деньги и лимиты (`session_spawn`, `session_send`,
 /// `session_interrupt`, `session_stop`, `session_accept`, `spawn_cancel`, `nudge_set`,
 /// `nudge_clear`, `share_file`, `canterlot_preset_save`, `canterlot_preset_apply`,
 /// `plan_adopt`), решает режим. Имена без префикса сервера: адаптер добавляет свой.
-pub const MODE_FREE_TOOLS: [&str; 14] = [
+pub const MODE_FREE_TOOLS: [&str; 15] = [
     "canterlot_limits",
     "canterlot_presets_list",
     "sessions_list",
@@ -149,6 +150,7 @@ pub const MODE_FREE_TOOLS: [&str; 14] = [
     "plan_list",
     "plan_add",
     "plan_update",
+    "history_search",
 ];
 
 fn is_session_tool(mcp_name: &str) -> bool {
@@ -175,6 +177,7 @@ fn is_session_tool(mcp_name: &str) -> bool {
             | "plan_add"
             | "plan_update"
             | "plan_adopt"
+            | "history_search"
     )
 }
 
@@ -259,6 +262,9 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
         }
         "plan_adopt" => {
             "Move the open tasks of another root session's plan (for example your previous orchestrator, even in the trash) into yours, renumbered after your last number; linked executors stay linked and you may accept them. Only a root session can adopt, and only from a root session of the same owner. Do not call it from a delegate or to copy a plan you still use."
+        }
+        "history_search" => {
+            "Full-text search over the history of the sessions you may see: agent answers and feed messages (the owner's, other sessions', spawn briefs and session results), newest first. Whole words match in any Russian or English form; quotes search a phrase, -word excludes, or matches either. Substrings, partial identifiers, tool output and thinking are not searched. Narrow with session_id, since/until (RFC 3339), harness or kind; page with cursor. Each hit names session_id and block_id (read the whole block with session_inspect) or input_id. Read-only. Do not use it to wait for a session or to poll; do not repeat the same query."
         }
         _ => "Session tool.",
     }
@@ -473,6 +479,21 @@ fn session_input_schema(mcp_name: &str) -> Value {
             "required": ["number"],
             "additionalProperties": false,
         }),
+        "history_search" => json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "maxLength": 200, "description": "Words to find: \"phrase\", -excluded, a or b."},
+                "session_id": {"type": "string", "description": "Only this session (UUID)."},
+                "since": {"type": "string", "description": "RFC 3339 time, inclusive."},
+                "until": {"type": "string", "description": "RFC 3339 time, exclusive."},
+                "harness": {"type": "string", "description": "Only sessions of this harness."},
+                "kind": {"type": "string", "enum": ["answers", "messages"], "description": "Only agent answers or only feed messages; both by default."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+                "cursor": {"type": "string", "description": "next_cursor of the previous page."},
+            },
+            "required": ["query"],
+            "additionalProperties": false,
+        }),
         "plan_adopt" => json!({
             "type": "object",
             "properties": {"from_session_id": {"type": "string", "description": "Root session whose open tasks move into your plan (UUID)."}},
@@ -613,6 +634,13 @@ pub fn agent_tool_text(tool: &str, result: &crate::adapter::AgentCallResult) -> 
             {
                 return (text.to_owned(), false);
             }
+            // Поиск: короткий текст для модели, за ним те же совпадения одной строкой JSON.
+            if tool == "history.search"
+                && let Some(object) = value.as_object_mut()
+                && let Some(Value::String(text)) = object.remove("text")
+            {
+                return (format!("{text}\n\n{value}"), false);
+            }
             let hint = match tool {
                 "presets.save" => value.get("revision").and_then(Value::as_i64).map(|revision| {
                     format!(
@@ -718,6 +746,7 @@ fn tools_list(tool_set: ToolSet, provider: &str) -> Value {
                     | "alarm_list"
                     | "route_preview"
                     | "plan_list"
+                    | "history_search"
             ) {
                 tool.as_object_mut()
                     .expect("tool object")

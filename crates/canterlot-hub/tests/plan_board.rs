@@ -391,6 +391,7 @@ async fn add_list_and_update_follow_the_rules_and_limits(pool: PgPool) {
     assert_eq!(tasks[0]["number"], 1);
     assert_eq!(tasks[0]["commits"], json!([]));
     assert_eq!(tasks[0]["report_block_id"], Value::Null);
+    assert_eq!(tasks[0]["report_seq"], Value::Null);
     let hint = list["hint"].as_str().unwrap();
     assert!(hint.contains("#2 [in_review] Тесты"), "{hint}");
 
@@ -803,6 +804,13 @@ async fn derived_commits_and_report_are_computed_on_demand(pool: PgPool) {
     assert_eq!(task["commits_truncated"], false);
     assert_eq!(task["files_changed"], 3);
     assert_eq!(task["report_block_id"], json!(report));
+    let report_seq: i64 = sqlx::query_scalar("select created_seq from blocks where block_id=$1")
+        .bind(report)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert!(report_seq > 0);
+    assert_eq!(task["report_seq"], report_seq);
     assert_eq!(list["tasks"][1]["commits"], json!([]));
     assert!(
         list["hint"].as_str().unwrap().contains("3 commits"),
@@ -917,6 +925,7 @@ async fn http_plan_and_snapshot_carry_the_contract(pool: PgPool) {
         "commits_truncated",
         "files_changed",
         "report_block_id",
+        "report_seq",
     ] {
         assert!(task.get(field).is_some(), "{field} missing in {task}");
     }

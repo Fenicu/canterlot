@@ -6741,6 +6741,102 @@
         }
       }
     },
+    "/api/v1/search": {
+      "post": {
+        "tags": [
+          "search"
+        ],
+        "operationId": "post__api_v1_search",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Совпадения, новые первыми",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Пустой или длинный запрос, неверный курсор, размер страницы или период",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Поиск не уложился в срок",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/snapshot/conversations": {
       "get": {
         "tags": [
@@ -9838,6 +9934,95 @@
           }
         }
       },
+      "Hit": {
+        "type": "object",
+        "description": "Найденный ответ или сообщение. `seq` — место в ленте (`created_seq` блока, `feed_seq`\nввода); `jump_seq` — место верхнего предка вложенного блока субагента, иначе `seq`.",
+        "required": [
+          "conversation_id",
+          "conversation_title",
+          "harness",
+          "model",
+          "archived",
+          "kind",
+          "origin_kind",
+          "block_id",
+          "input_id",
+          "seq",
+          "jump_seq",
+          "created_at",
+          "snippet"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "Сессия в архиве (или принятый делегат до уборки)."
+          },
+          "block_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "conversation_title": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "harness": {
+            "type": "string"
+          },
+          "input_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "jump_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HitKind"
+          },
+          "model": {
+            "type": "string"
+          },
+          "origin_kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OriginKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "snippet": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnippetSegment"
+            }
+          }
+        }
+      },
+      "HitKind": {
+        "type": "string",
+        "enum": [
+          "answer",
+          "message"
+        ]
+      },
       "HoldView": {
         "oneOf": [
           {
@@ -11831,6 +12016,16 @@
           }
         }
       },
+      "OriginKind": {
+        "type": "string",
+        "description": "Кто написал найденное сообщение: владелец, другая сессия, бриф запуска или итог делегата.",
+        "enum": [
+          "owner",
+          "message",
+          "spawn",
+          "result"
+        ]
+      },
       "OwnerFileContent": {
         "type": "object",
         "required": [
@@ -12437,7 +12632,8 @@
               "commits",
               "commits_truncated",
               "files_changed",
-              "report_block_id"
+              "report_block_id",
+              "report_seq"
             ],
             "properties": {
               "commits": {
@@ -12462,6 +12658,14 @@
                 ],
                 "format": "uuid",
                 "description": "Последний ответ основного агента исполнителя."
+              },
+              "report_seq": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Место этого ответа в ленте: ссылка открывает ленту сразу вокруг него."
               }
             }
           }
@@ -13659,6 +13863,112 @@
           }
         }
       },
+      "SearchBody": {
+        "type": "object",
+        "description": "Поиск по ответам агента и сообщениям ленты; новые первыми.",
+        "required": [
+          "q"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`next_cursor` предыдущей страницы."
+          },
+          "harness": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SearchKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "1–50, по умолчанию 20."
+          },
+          "q": {
+            "type": "string",
+            "description": "Слова запроса, до 200 символов: кавычки ищут фразу, `-слово` исключает, `or` — любое."
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SearchKind": {
+        "type": "string",
+        "description": "Что искать: ответы агента, сообщения ленты или (без поля) и то и другое.",
+        "enum": [
+          "answers",
+          "messages"
+        ]
+      },
+      "SearchPage": {
+        "type": "object",
+        "required": [
+          "hits",
+          "next_cursor",
+          "total",
+          "total_capped"
+        ],
+        "properties": {
+          "hits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Hit"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Число совпадений, не больше 200."
+          },
+          "total_capped": {
+            "type": "boolean",
+            "description": "Совпадений больше, чем `total`."
+          }
+        }
+      },
       "SendNowOutcome": {
         "oneOf": [
           {
@@ -14048,6 +14358,22 @@
             }
           },
           "scope": {
+            "type": "string"
+          }
+        }
+      },
+      "SnippetSegment": {
+        "type": "object",
+        "description": "Кусок фрагмента; `hit` — совпавшее слово, клиент его подсвечивает. HTML сервер не шлёт.",
+        "required": [
+          "text",
+          "hit"
+        ],
+        "properties": {
+          "hit": {
+            "type": "boolean"
+          },
+          "text": {
             "type": "string"
           }
         }

@@ -89,7 +89,7 @@ export class FakeHubApi {
 	/** Задачи планов оркестраторов: снимок списка отдаёт их целиком. */
 	readonly planTasks = new Map<string, PlanTask>();
 	/** Посчитанное хабом при чтении: коммиты, файлы и отчёт исполнителя по задаче. */
-	readonly planDetails = new Map<string, Pick<PlanTaskDetail, 'commits' | 'commits_truncated' | 'files_changed' | 'report_block_id'>>();
+	readonly planDetails = new Map<string, Pick<PlanTaskDetail, 'commits' | 'commits_truncated' | 'files_changed' | 'report_block_id' | 'report_seq'>>();
 	/** Запросы `GET /api/v1/plan`: какой оркестратор просили. */
 	readonly planReads: string[] = [];
 	/** Очередь запусков разговора: ожидающие и недавно завершённые элементы. */
@@ -790,6 +790,7 @@ export class FakeHubApi {
 				commits_truncated: false,
 				files_changed: 0,
 				report_block_id: null,
+				report_seq: null,
 				...this.planDetails.get(task.id)
 			}));
 		return { tasks };

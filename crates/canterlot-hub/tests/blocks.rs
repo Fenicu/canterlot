@@ -980,3 +980,54 @@ async fn purge_sealed_chunks_removes_leftovers_in_batches(pool: PgPool) -> TestR
     assert!(!kinds(&events(&pool, nul).await).contains(&"block_conflicting_final"));
     Ok(())
 }
+
+/// Блок в 1 МБ закрывается: индекс поиска берёт только первые 32768 символов, и
+/// `to_tsvector` не упирается в свой предел 1 МБ внутри транзакции закрытия.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn megabyte_text_block_finalizes_and_is_indexed(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    let piece = "слово word ".repeat(1000);
+    let mut bodies = vec![start(id)];
+    let mut text = String::new();
+    let mut rev = 0;
+    while text.len() < 1024 * 1024 {
+        bodies.push(delta(id, rev, rev + 1, &piece));
+        text.push_str(&piece);
+        rev += 1;
+    }
+    bodies.push(Body::BlockFinal(BlockFinal {
+        block_id: id.to_string(),
+        rev: rev + 1,
+        text: String::new(),
+        checksum: hash(&text),
+        text_omitted: true,
+        ..Default::default()
+    }));
+    // Пачка журнала ограничена по размеру: дельты идут несколькими пачками.
+    while !bodies.is_empty() {
+        let rest = bodies.split_off(bodies.len().min(8));
+        run.send(bodies).await;
+        bodies = rest;
+    }
+    let (stored, _, state, _) = block(&pool, id).await;
+    assert_eq!(state, "final");
+    assert_eq!(stored.len(), text.len());
+    let (chunks, finished): (i64, bool) = sqlx::query_as(
+        "select (select count(*) from block_chunks where block_id = $1),
+                finished_at is not null from blocks where block_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!((chunks, finished), (0, true));
+    let found: bool = sqlx::query_scalar(
+        "select canterlot_block_doc(content) @@ websearch_to_tsquery('russian', 'слова')
+         from blocks where block_id = $1 and kind = 'text' and state <> 'streaming'",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(found);
+    Ok(())
+}

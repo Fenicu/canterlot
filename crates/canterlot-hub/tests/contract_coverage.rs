@@ -220,7 +220,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 30, "screen coverage rows");
+    assert_eq!(rows, 31, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -288,13 +288,15 @@ fn case(
 const SHA_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
 /// Маршруты, освобождённые от ключа: загрузка части (идемпотентна по смещению), отметка прочтения,
-/// просьба обновить лимиты (повтор безвреден, частоту ограничивает хаб) и полная замена
-/// черновика (тот же текст и список вложений дают тот же результат).
+/// просьба обновить лимиты (повтор безвреден, частоту ограничивает хаб), полная замена
+/// черновика (тот же текст и список вложений дают тот же результат) и чтение телом POST:
+/// предпросмотр маршрута и поиск по истории (запрос не должен попадать в адрес).
 fn exempt(method: &str, path: &str) -> bool {
     (method == "PATCH" && path.ends_with("/content"))
         || (method == "POST" && path.ends_with("/read"))
         || (method == "POST" && path == "/api/v1/limits/refresh")
         || (method == "POST" && path == "/api/v1/routing-policy/preview")
+        || (method == "POST" && path == "/api/v1/search")
         || (method == "PUT" && path.ends_with("/draft"))
 }
 

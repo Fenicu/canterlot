@@ -49,6 +49,7 @@ pub mod plan;
 pub mod presets;
 pub mod routing;
 pub mod scheduled;
+pub mod search;
 pub mod session_tools;
 pub mod snapshot;
 pub mod spawn_queue;
@@ -174,6 +175,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(plan::routes())
         .merge(nudge::routes())
         .merge(routing::routes())
+        .merge(search::routes())
         .merge(conversations::routes())
         .merge(drafts::routes())
         .merge(crunch::routes())

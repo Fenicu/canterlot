@@ -1075,6 +1075,22 @@ export interface paths {
         patch: operations["patch__api_v1_scheduled__id_"];
         trace?: never;
     };
+    "/api/v1/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_search"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/snapshot/conversations": {
         parameters: {
             query?: never;
@@ -1897,6 +1913,33 @@ export interface components {
             next_after?: string | null;
             next_before?: string | null;
         };
+        /**
+         * @description Найденный ответ или сообщение. `seq` — место в ленте (`created_seq` блока, `feed_seq`
+         *     ввода); `jump_seq` — место верхнего предка вложенного блока субагента, иначе `seq`.
+         */
+        Hit: {
+            /** @description Сессия в архиве (или принятый делегат до уборки). */
+            archived: boolean;
+            /** Format: uuid */
+            block_id: string | null;
+            /** Format: uuid */
+            conversation_id: string;
+            conversation_title: string;
+            created_at: string;
+            harness: string;
+            /** Format: uuid */
+            input_id: string | null;
+            /** Format: int64 */
+            jump_seq: number;
+            kind: components["schemas"]["HitKind"];
+            model: string;
+            origin_kind: components["schemas"]["OriginKind"] | null;
+            /** Format: int64 */
+            seq: number;
+            snippet: components["schemas"]["SnippetSegment"][];
+        };
+        /** @enum {string} */
+        HitKind: "answer" | "message";
         HoldView: {
             /** @enum {string} */
             reason: "run_in_progress";
@@ -2481,6 +2524,11 @@ export interface components {
             events: components["schemas"]["NudgeEventView"][];
             rule?: components["schemas"]["NudgeRuleView"] | null;
         };
+        /**
+         * @description Кто написал найденное сообщение: владелец, другая сессия, бриф запуска или итог делегата.
+         * @enum {string}
+         */
+        OriginKind: "owner" | "message" | "spawn" | "result";
         OwnerFileContent: {
             content: string;
             files: components["schemas"]["OwnerMemoryFileView"][];
@@ -2653,6 +2701,11 @@ export interface components {
              * @description Последний ответ основного агента исполнителя.
              */
             report_block_id: string | null;
+            /**
+             * Format: int64
+             * @description Место этого ответа в ленте: ссылка открывает ленту сразу вокруг него.
+             */
+            report_seq: number | null;
         };
         Point: {
             observed_at: string;
@@ -2991,6 +3044,42 @@ export interface components {
             run_at: string;
             state: components["schemas"]["JobState"];
         };
+        /** @description Поиск по ответам агента и сообщениям ленты; новые первыми. */
+        SearchBody: {
+            /** Format: uuid */
+            conversation_id?: string | null;
+            /** @description `next_cursor` предыдущей страницы. */
+            cursor?: string | null;
+            harness?: string | null;
+            kind?: components["schemas"]["SearchKind"] | null;
+            /**
+             * Format: int64
+             * @description 1–50, по умолчанию 20.
+             */
+            limit?: number | null;
+            /** @description Слова запроса, до 200 символов: кавычки ищут фразу, `-слово` исключает, `or` — любое. */
+            q: string;
+            /** Format: date-time */
+            since?: string | null;
+            /** Format: date-time */
+            until?: string | null;
+        };
+        /**
+         * @description Что искать: ответы агента, сообщения ленты или (без поля) и то и другое.
+         * @enum {string}
+         */
+        SearchKind: "answers" | "messages";
+        SearchPage: {
+            hits: components["schemas"]["Hit"][];
+            next_cursor: string | null;
+            /**
+             * Format: int64
+             * @description Число совпадений, не больше 200.
+             */
+            total: number;
+            /** @description Совпадений больше, чем `total`. */
+            total_capped: boolean;
+        };
         SendNowOutcome: {
             requested: {
                 /** Format: uuid */
@@ -3085,6 +3174,11 @@ export interface components {
                 items: components["schemas"]["MachineView"][];
             };
             scope: string;
+        };
+        /** @description Кусок фрагмента; `hit` — совпавшее слово, клиент его подсвечивает. HTML сервер не шлёт. */
+        SnippetSegment: {
+            hit: boolean;
+            text: string;
         };
         SpawnQueueActionView: {
             harness?: string | null;
@@ -7101,6 +7195,65 @@ export interface operations {
             };
             /** @description Сообщение уже обработано */
             409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_search: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SearchBody"];
+            };
+        };
+        responses: {
+            /** @description Совпадения, новые первыми */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchPage"];
+                };
+            };
+            /** @description Пустой или длинный запрос, неверный курсор, размер страницы или период */
+            400: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Поиск не уложился в срок */
+            503: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;

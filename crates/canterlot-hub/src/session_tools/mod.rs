@@ -23,6 +23,7 @@ pub mod probe;
 pub mod read;
 pub mod report;
 pub mod routing;
+pub mod search;
 pub mod send;
 pub mod settle;
 pub mod spawn;
@@ -70,6 +71,7 @@ pub const TOOLS: &[&str] = &[
     "plan.add",
     "plan.update",
     "plan.adopt",
+    "history.search",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -324,6 +326,7 @@ pub async fn call(
         "plan.add" => plan::add(context, caller, arguments).await,
         "plan.update" => plan::update(context, caller, arguments).await,
         "plan.adopt" => plan::adopt(context, caller, arguments).await,
+        "history.search" => search::search(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }
