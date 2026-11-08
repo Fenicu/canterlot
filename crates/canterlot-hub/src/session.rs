@@ -37,6 +37,7 @@ pub const CAPABILITY_PATH_PROBE_V1: &str = "path_probe_v1";
 pub const CAPABILITY_WATCHDOG_V1: &str = "watchdog_v1";
 pub const CAPABILITY_ALARMS_V1: &str = "alarms_v1";
 pub const CAPABILITY_NUDGE_V1: &str = "nudge_v1";
+pub const CAPABILITY_RESOURCE_LEASE_V1: &str = "resource_lease_v1";
 
 /// Форма спрашивает по одному запросу с паузой на ввод, остальным ждать незачем.
 pub const MAX_SUGGESTS_PER_MACHINE: usize = 4;

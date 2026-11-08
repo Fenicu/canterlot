@@ -282,6 +282,7 @@ async fn serve(
         machines: machines.clone(),
         session_tools: session_tools.clone(),
         nudge_enabled: orchestrator.nudge.enabled,
+        lease_warn_hold: orchestrator.lease_warn_hold(),
         multi_process: http_parts
             .as_ref()
             .is_some_and(|(config, _, _)| config.multi_process),

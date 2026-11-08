@@ -52,6 +52,7 @@ fn inputs() -> ActivityInputs {
         background_work: None,
         wake_turn: false,
         question_summary: None,
+        lease_wait: None,
     }
 }
 
@@ -112,6 +113,7 @@ fn state_table_matches_pilot_section_9() {
             tool_name: None,
             summary: None,
             phase_since: Some(base.now),
+            lease_wait: None,
         },
     ));
     let mut i = base.clone();
@@ -440,6 +442,43 @@ fn running_tool_with_no_live_descendants_is_stalled_after_the_tool_threshold() {
     assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
     i.now += TimeDelta::seconds(1);
     assert_eq!(activity::compute(&i, &thresholds()).state, S::Stalled);
+}
+
+/// Те же сроки, что дают `stalled` молчащему инструменту без потомков, но
+/// процесс ждёт очереди тяжёлых задач: это работа, и место видно в свидетельстве.
+#[test]
+fn waiting_for_a_lease_is_never_stalled() {
+    use canterlot_hub::leases::{LeaseKind, LeaseWait};
+    for phase in ["running_tool", "generating"] {
+        let mut i = inputs();
+        i.execution.as_mut().unwrap().phase = phase.into();
+        i.process = Some(ProcessFacts {
+            alive: true,
+            cpu_permille: 0,
+            descendants: Some(0),
+        });
+        i.now += TimeDelta::hours(5);
+        assert_eq!(activity::compute(&i, &thresholds()).state, S::Stalled);
+        let wait = LeaseWait {
+            kind: LeaseKind::Build,
+            position: 2,
+            since: i.now - TimeDelta::hours(4),
+        };
+        i.lease_wait = Some(wait.clone());
+        let a = activity::compute(&i, &thresholds());
+        assert_eq!(a.state, S::Working, "{phase}");
+        let evidence = serde_json::to_value(&a.evidence).unwrap();
+        assert_eq!(evidence["lease_wait"]["kind"], "build");
+        assert_eq!(evidence["lease_wait"]["position"], 2);
+        let E::Working { lease_wait, .. } = a.evidence else {
+            panic!("working evidence")
+        };
+        assert_eq!(lease_wait, Some(wait));
+    }
+    // Без ожидания поле не появляется вовсе: старые клиенты видят прежнюю форму.
+    let evidence =
+        serde_json::to_value(activity::compute(&inputs(), &thresholds()).evidence).unwrap();
+    assert!(evidence.get("lease_wait").is_none());
 }
 
 #[test]

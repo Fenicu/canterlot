@@ -57,6 +57,7 @@ export type ServerOp =
         | MachineMetrics
         | MachineJournalStopsChanged
         | MachineWatchChanged
+        | MachineLeaseChanged
         | Hidden
         | PhaseChanged
         | Oversized
@@ -1329,6 +1330,42 @@ export interface MachineWatchChanged {
     } | null;
     memory_low: boolean;
   };
+}
+export interface MachineLeaseChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "machine_lease_changed";
+  payload: {
+    machine_id: Uuid;
+    lease: LeaseState | null;
+  };
+}
+export interface LeaseState {
+  slots: number;
+  observed_at: Time;
+  holders: LeaseEntry[];
+  waiters: LeaseEntry[];
+}
+export interface LeaseEntry {
+  lease_id: string;
+  kind: "gate" | "build";
+  weight: number;
+  label: string;
+  holder: "execution" | "owner";
+  execution_id: Uuid | null;
+  conversation_id: Uuid | null;
+  since: Time | null;
+  requested_at: Time | null;
+  position: number | null;
+  dir: string;
 }
 export interface Hidden {
   v: 1;

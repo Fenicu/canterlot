@@ -15,6 +15,8 @@ pub struct BackgroundDeps {
     pub session_tools: crate::config::SessionToolsConfig,
     /// Выключатель `[orchestrator.nudge]`: шлюз автопинка в проекторе цели.
     pub nudge_enabled: bool,
+    /// Порог `[orchestrator].lease_warn_hold_minutes`.
+    pub lease_warn_hold: std::time::Duration,
     pub multi_process: bool,
     /// Сборщик вложений; `None` у служебных стендов без хранилища.
     pub attachments: Option<(
@@ -46,6 +48,7 @@ impl Background {
             machines,
             session_tools,
             nudge_enabled,
+            lease_warn_hold,
             multi_process,
             attachments,
         } = deps;
@@ -100,6 +103,14 @@ impl Background {
                 tokio::spawn(crate::session_tools::disk::run(
                     pool.clone(),
                     machines,
+                    stopped.clone(),
+                )),
+            ),
+            (
+                "lease_long_hold_task_error",
+                tokio::spawn(crate::leases::run_long_hold(
+                    pool.clone(),
+                    lease_warn_hold,
                     stopped.clone(),
                 )),
             ),

@@ -9246,6 +9246,17 @@
                   "working"
                 ]
               },
+              "lease_wait": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/LeaseWait",
+                    "description": "Процесс исполнения ждёт очереди тяжёлых задач машины."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "phase": {
                 "type": "string"
               },
@@ -10580,6 +10591,147 @@
           }
         }
       },
+      "LeaseEntryView": {
+        "type": "object",
+        "description": "Запись очереди. Времена — в часах хаба.",
+        "required": [
+          "lease_id",
+          "kind",
+          "weight",
+          "label",
+          "holder",
+          "dir"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Сессия исполнения, если хаб знает его на этой машине."
+          },
+          "dir": {
+            "type": "string",
+            "description": "Имя рабочего каталога клиента."
+          },
+          "execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "holder": {
+            "$ref": "#/components/schemas/LeaseHolder"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/LeaseKind"
+          },
+          "label": {
+            "type": "string"
+          },
+          "lease_id": {
+            "type": "string"
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Место в очереди с единицы; `null` у держателей.",
+            "minimum": 0
+          },
+          "requested_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Время выдачи; `null` у ожидающих."
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "LeaseHolder": {
+        "type": "string",
+        "enum": [
+          "execution",
+          "owner"
+        ]
+      },
+      "LeaseKind": {
+        "type": "string",
+        "enum": [
+          "gate",
+          "build"
+        ]
+      },
+      "LeaseStateView": {
+        "type": "object",
+        "description": "Последнее полное состояние очереди машины.",
+        "required": [
+          "slots",
+          "observed_at",
+          "holders",
+          "waiters"
+        ],
+        "properties": {
+          "holders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LeaseEntryView"
+            }
+          },
+          "observed_at": {
+            "type": "string",
+            "description": "Время снимка на машине, в часах хаба."
+          },
+          "slots": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "waiters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LeaseEntryView"
+            }
+          }
+        }
+      },
+      "LeaseWait": {
+        "type": "object",
+        "description": "Ожидание исполнения в очереди: свидетельство активности `lease_wait`.",
+        "required": [
+          "kind",
+          "position",
+          "since"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/LeaseKind"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "since": {
+            "type": "string"
+          }
+        }
+      },
       "LimitSettings": {
         "type": "object",
         "required": [
@@ -11025,6 +11177,17 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "lease": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LeaseStateView",
+                "description": "Очередь тяжёлых задач (`resource_lease_v1`); `null` без свежего состояния."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "limits_ok": {
             "type": "boolean"

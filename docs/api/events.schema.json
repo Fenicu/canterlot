@@ -142,6 +142,9 @@
       "$ref": "#/$defs/machine_watch_changed"
     },
     {
+      "$ref": "#/$defs/machine_lease_changed"
+    },
+    {
       "$ref": "#/$defs/hidden"
     },
     {
@@ -6240,6 +6243,9 @@
                   "$ref": "#/$defs/machine_watch_changed"
                 },
                 {
+                  "$ref": "#/$defs/machine_lease_changed"
+                },
+                {
                   "$ref": "#/$defs/hidden"
                 },
                 {
@@ -7446,6 +7452,223 @@
         "correlation_id",
         "kind",
         "payload"
+      ],
+      "additionalProperties": false
+    },
+    "machine_lease_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "machine_lease_changed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "machine_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "lease": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LeaseState"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "machine_id",
+            "lease"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "LeaseState": {
+      "type": "object",
+      "properties": {
+        "slots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "holders": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LeaseEntry"
+          }
+        },
+        "waiters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LeaseEntry"
+          }
+        }
+      },
+      "required": [
+        "slots",
+        "observed_at",
+        "holders",
+        "waiters"
+      ],
+      "additionalProperties": false
+    },
+    "LeaseEntry": {
+      "type": "object",
+      "properties": {
+        "lease_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "gate",
+            "build"
+          ]
+        },
+        "weight": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "label": {
+          "type": "string"
+        },
+        "holder": {
+          "enum": [
+            "execution",
+            "owner"
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "since": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requested_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "position": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lease_id",
+        "kind",
+        "weight",
+        "label",
+        "holder",
+        "execution_id",
+        "conversation_id",
+        "since",
+        "requested_at",
+        "position",
+        "dir"
       ],
       "additionalProperties": false
     }

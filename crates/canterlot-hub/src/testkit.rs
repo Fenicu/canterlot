@@ -303,6 +303,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         machines: machines.clone(),
         session_tools: session_tools.clone(),
         nudge_enabled: true,
+        lease_warn_hold: crate::config::OrchestratorConfig::default().lease_warn_hold(),
         multi_process: http.as_ref().is_some_and(|config| config.multi_process),
         attachments: Some((blobs.clone(), attachments.clone())),
     });

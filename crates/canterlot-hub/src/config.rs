@@ -520,7 +520,7 @@ impl Default for SchedulerConfig {
 }
 
 /// Инструменты оркестратора: выключатели этапов, откат поведения без отката схемы.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OrchestratorConfig {
     pub alarms: AlarmsConfig,
@@ -528,6 +528,28 @@ pub struct OrchestratorConfig {
     pub routing: RoutingConfig,
     pub spawn_queue: SpawnQueueConfig,
     pub guards: GuardsConfig,
+    /// Через сколько минут удержания аренды тяжёлой задачи подписчики держателя
+    /// один раз слышат `lease_long_hold`.
+    pub lease_warn_hold_minutes: u64,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            alarms: Default::default(),
+            nudge: Default::default(),
+            routing: Default::default(),
+            spawn_queue: Default::default(),
+            guards: Default::default(),
+            lease_warn_hold_minutes: 90,
+        }
+    }
+}
+
+impl OrchestratorConfig {
+    pub fn lease_warn_hold(&self) -> Duration {
+        Duration::from_secs(self.lease_warn_hold_minutes.max(1).saturating_mul(60))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

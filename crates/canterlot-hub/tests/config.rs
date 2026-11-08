@@ -174,6 +174,29 @@ fn pilot_sections_parse_with_defaults() {
 }
 
 #[test]
+fn lease_long_hold_threshold_defaults_to_90_minutes_and_is_configurable() {
+    use std::time::Duration as D;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, PILOT_BASE).unwrap();
+    let config = HubConfig::load(&path).unwrap();
+    assert_eq!(config.orchestrator.lease_warn_hold_minutes, 90);
+    assert_eq!(config.orchestrator.lease_warn_hold(), D::from_secs(90 * 60));
+    fs::write(
+        &path,
+        format!("{PILOT_BASE}[orchestrator]\nlease_warn_hold_minutes = 45\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        HubConfig::load(&path)
+            .unwrap()
+            .orchestrator
+            .lease_warn_hold(),
+        D::from_secs(45 * 60)
+    );
+}
+
+#[test]
 fn deprecated_warn_pcts_still_parse_from_old_hub_toml() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hub.toml");

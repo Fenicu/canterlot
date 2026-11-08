@@ -198,6 +198,7 @@ fn settled_maps_the_other_states_directly() {
             tool_name: None,
             summary: None,
             phase_since: None,
+            lease_wait: None,
         },
     };
     let empty = queue(0, vec![]);

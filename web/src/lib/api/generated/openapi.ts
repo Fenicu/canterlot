@@ -1744,6 +1744,7 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "working";
+            lease_wait?: components["schemas"]["LeaseWait"] | null;
             phase: string;
             /** Format: date-time */
             phase_since?: string | null;
@@ -2103,6 +2104,52 @@ export interface components {
             rss_bytes: number;
             title?: string | null;
         };
+        /** @description Запись очереди. Времена — в часах хаба. */
+        LeaseEntryView: {
+            /**
+             * Format: uuid
+             * @description Сессия исполнения, если хаб знает его на этой машине.
+             */
+            conversation_id?: string | null;
+            /** @description Имя рабочего каталога клиента. */
+            dir: string;
+            /** Format: uuid */
+            execution_id?: string | null;
+            holder: components["schemas"]["LeaseHolder"];
+            kind: components["schemas"]["LeaseKind"];
+            label: string;
+            lease_id: string;
+            /**
+             * Format: int32
+             * @description Место в очереди с единицы; `null` у держателей.
+             */
+            position?: number | null;
+            requested_at?: string | null;
+            /** @description Время выдачи; `null` у ожидающих. */
+            since?: string | null;
+            /** Format: int32 */
+            weight: number;
+        };
+        /** @enum {string} */
+        LeaseHolder: "execution" | "owner";
+        /** @enum {string} */
+        LeaseKind: "gate" | "build";
+        /** @description Последнее полное состояние очереди машины. */
+        LeaseStateView: {
+            holders: components["schemas"]["LeaseEntryView"][];
+            /** @description Время снимка на машине, в часах хаба. */
+            observed_at: string;
+            /** Format: int32 */
+            slots: number;
+            waiters: components["schemas"]["LeaseEntryView"][];
+        };
+        /** @description Ожидание исполнения в очереди: свидетельство активности `lease_wait`. */
+        LeaseWait: {
+            kind: components["schemas"]["LeaseKind"];
+            /** Format: int32 */
+            position: number;
+            since: string;
+        };
         LimitSettings: {
             /**
              * Format: int32
@@ -2242,6 +2289,7 @@ export interface components {
             home_dir?: string | null;
             /** Format: uuid */
             id: string;
+            lease?: components["schemas"]["LeaseStateView"] | null;
             limits_ok: boolean;
             metrics?: components["schemas"]["MetricsView"] | null;
             name: string;

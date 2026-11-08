@@ -65,6 +65,9 @@ pub enum Evidence {
         summary: Option<String>,
         #[serde(with = "optional_time")]
         phase_since: Option<DateTime<Utc>>,
+        /// Процесс исполнения ждёт очереди тяжёлых задач машины.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease_wait: Option<crate::leases::LeaseWait>,
     },
     WaitingForUser {
         phase: String,
@@ -179,6 +182,8 @@ pub struct ActivityInputs {
     /// Идёт ход, который CLI начал сам: места в очереди у него нет.
     pub wake_turn: bool,
     pub question_summary: Option<String>,
+    /// Место исполнения в очереди тяжёлых задач по свежему состоянию машины.
+    pub lease_wait: Option<crate::leases::LeaseWait>,
 }
 
 pub fn extract_request_summary(
@@ -323,6 +328,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
             tool_name: e.tool_name.clone(),
             summary: e.summary.clone(),
             phase_since: phase_since(i),
+            lease_wait: i.lease_wait.clone(),
         },
     };
     if matches!(e.state, ExecutionState::Created | ExecutionState::Starting) {
@@ -347,6 +353,11 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
         }
         if i.awaiting_attachments {
             return working("delivering_attachments");
+        }
+        // Ожидание очереди и есть причина тишины: процесс стоит, пока не получит
+        // аренду, и это не зависание, сколько бы ни длилось.
+        if i.lease_wait.is_some() {
+            return working(&e.phase);
         }
         let last = i.last_event_at.max(e.phase_at).max(i.turn_started_at);
         // Без свежих метрик машинного процесса судить о зависании нельзя: не шлём ложный
@@ -482,9 +493,11 @@ pub async fn load_inputs(
     let mut process = None;
     let mut last_event_at = None;
     let mut wake_turn = false;
+    let mut lease_wait = None;
     let execution = if let Some(e) = latest {
         let id: Uuid = e.try_get("id")?;
         wake_turn = e.try_get("wake_turn")?;
+        lease_wait = crate::leases::wait_of(&mut *conn, id, now).await?;
         last_event_at = e
             .try_get::<Option<DateTime<Utc>>, _>("last_event_at")?
             .or(Some(e.try_get("updated_at")?));
@@ -602,6 +615,7 @@ pub async fn load_inputs(
         background_work,
         wake_turn,
         question_summary,
+        lease_wait,
     })
 }
 

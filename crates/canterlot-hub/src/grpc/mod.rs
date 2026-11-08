@@ -24,7 +24,7 @@ use crate::{
         CAPABILITY_ALARMS_V1, CAPABILITY_BACKGROUND_V1, CAPABILITY_CLAUDE_HISTORIES_V1,
         CAPABILITY_COMPACT_V1, CAPABILITY_EXEC_V1, CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_NUDGE_V1,
         CAPABILITY_OWNER_EXIT_V1, CAPABILITY_OWNER_INSTRUCTIONS_V1, CAPABILITY_PATH_PROBE_V1,
-        CAPABILITY_PILOT_V1, CAPABILITY_SEND_NOW_V1, CAPABILITY_SESSION_TOOLS_V1,
+        CAPABILITY_PILOT_V1, CAPABILITY_RESOURCE_LEASE_V1, CAPABILITY_SEND_NOW_V1, CAPABILITY_SESSION_TOOLS_V1,
         CAPABILITY_TODO_V1, CAPABILITY_WATCHDOG_V1, CAPABILITY_WORKDIR_SUGGEST_V1, Registry,
     },
 };
@@ -56,6 +56,7 @@ pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_NUDGE_V1,
     CAPABILITY_PATH_PROBE_V1,
     CAPABILITY_WATCHDOG_V1,
+    CAPABILITY_RESOURCE_LEASE_V1,
 ];
 
 #[tonic::async_trait]
@@ -80,6 +81,9 @@ pub trait Ingest: Send + Sync {
         Ok(())
     }
     async fn machine_watch(&self, _machine_id: Uuid, _watch: MachineWatch) -> Result<(), Status> {
+        Ok(())
+    }
+    async fn lease_state(&self, _machine_id: Uuid, _state: LeaseState) -> Result<(), Status> {
         Ok(())
     }
     async fn cj_records(
@@ -137,6 +141,7 @@ enum IngestJob {
     MachineMetrics(MachineMetrics),
     LimitsReport(LimitsReport),
     MachineWatch(MachineWatch),
+    LeaseState(LeaseState),
 }
 
 /// Метрики и опрос лимитов теряются без остановки потока: следующий образец заменит их.
@@ -153,6 +158,7 @@ struct IngestLane {
     acks: mpsc::Receiver<Result<Option<JournalRangeAck>, Status>>,
     _stop: DropGuard,
     limits: tokio::sync::watch::Sender<Option<LimitsReport>>,
+    leases: tokio::sync::watch::Sender<Option<LeaseState>>,
 }
 
 impl IngestLane {
@@ -165,6 +171,8 @@ impl IngestLane {
         let (batches, mut queue) = mpsc::channel::<IngestJob>(INGEST_BACKLOG);
         let (reply, acks) = mpsc::channel(INGEST_BACKLOG);
         let (limits, mut latest) = tokio::sync::watch::channel(None);
+        // Очередь машины — полное состояние: важен только последний снимок.
+        let (leases, mut lease_latest) = tokio::sync::watch::channel(None);
         let stop = CancellationToken::new();
         let cancelled = stop.clone();
         tokio::spawn(async move {
@@ -173,6 +181,7 @@ impl IngestLane {
                 _ = cancelled.cancelled() => None,
                 records = queue.recv() => records,
                 changed=latest.changed()=>if changed.is_ok(){latest.borrow_and_update().clone().map(IngestJob::LimitsReport)}else{None},
+                changed=lease_latest.changed()=>if changed.is_ok(){lease_latest.borrow_and_update().clone().map(IngestJob::LeaseState)}else{None},
             } {
                 let applied = async {
                     match job {
@@ -208,6 +217,10 @@ impl IngestLane {
                             volatile(ingest.machine_watch(machine_id, watch).await);
                             None
                         }
+                        IngestJob::LeaseState(state) => {
+                            volatile(ingest.lease_state(machine_id, state).await);
+                            None
+                        }
                     }
                 };
                 let result = tokio::select! {
@@ -229,6 +242,7 @@ impl IngestLane {
             acks,
             _stop: stop.drop_guard(),
             limits,
+            leases,
         }
     }
 
@@ -254,6 +268,9 @@ impl IngestLane {
     }
     fn submit_metrics(&self, metrics: MachineMetrics) {
         let _ = self.batches.try_send(IngestJob::MachineMetrics(metrics));
+    }
+    fn submit_lease(&self, state: LeaseState) {
+        self.leases.send_replace(Some(state));
     }
     fn submit_watch(&self, watch: MachineWatch) {
         let _ = self.batches.try_send(IngestJob::MachineWatch(watch));

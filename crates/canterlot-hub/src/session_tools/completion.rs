@@ -97,6 +97,7 @@ mod tests {
                 tool_name: None,
                 summary: None,
                 phase_since: Some(now - chrono::TimeDelta::hours(1)),
+                lease_wait: None,
             },
         };
         assert_eq!(

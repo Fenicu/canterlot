@@ -46,8 +46,8 @@ struct NoteJob {
 #[derive(Deserialize)]
 struct MachineEventJob {
     target_id: Uuid,
-    /// `unavailable`, `available`, `disk_low`, `disk_critical`, `mem_low` или
-    /// `processes_leaked`.
+    /// `unavailable`, `available`, `disk_low`, `disk_critical`, `mem_low`,
+    /// `processes_leaked` или `lease_long_hold`.
     kind: String,
     /// Событие сторожа машины: подлежащее — машина, `target_id` — сам получатель.
     /// У заданий до сторожа поля нет, у них цель — сессия на машине.
@@ -63,6 +63,14 @@ struct MachineEventJob {
     free_pct: Option<u64>,
     #[serde(default)]
     chain_depth: i32,
+    #[serde(default)]
+    lease_kind: Option<String>,
+    #[serde(default)]
+    lease_label: Option<String>,
+    #[serde(default)]
+    owner_holder: bool,
+    #[serde(default)]
+    held_minutes: Option<i64>,
 }
 
 /// Действие задания `session_task`. Разбор исчерпывающий: новое действие обязано
@@ -416,6 +424,34 @@ async fn machine_event_message(
             } else {
                 "machine_disk_low"
             },
+        )
+    } else if event.kind == "lease_long_hold" {
+        let lease = if event.lease_kind.as_deref() == Some("gate") {
+            "gate"
+        } else {
+            "build"
+        };
+        let minutes = event.held_minutes.unwrap_or(0).max(1);
+        let label = event
+            .lease_label
+            .as_deref()
+            .map(super::origin::clean_title)
+            .filter(|label| !label.is_empty())
+            .map(|label| format!(" (\"{label}\")"))
+            .unwrap_or_default();
+        let holder = if event.owner_holder {
+            "The owner's terminal".to_owned()
+        } else {
+            format!("Session \"{title}\" (id {id})")
+        };
+        (
+            format!(
+                "[canterlot] Machine \"{machine}\": {holder} has held the {lease} lease{label} \
+                 for {minutes} min. Other heavy tasks on the machine queue behind it; \
+                 check whether the command hangs."
+            ),
+            machine_state(&state, &reason),
+            "lease_long_hold",
         )
     } else if event.kind == "available" {
         let state = machine_state(&state, &reason);

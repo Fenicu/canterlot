@@ -52,6 +52,8 @@ pub struct MachineView {
     pub warnings: Vec<MachineWarning>,
     /// Последний отчёт сторожа машины; нет — воркер без `watchdog_v1` или отчёта ещё не было.
     pub watch: Option<crate::machine_watch::WatchView>,
+    /// Очередь тяжёлых задач (`resource_lease_v1`); `null` без свежего состояния.
+    pub lease: Option<crate::leases::LeaseStateView>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct HarnessView {
@@ -215,6 +217,7 @@ pub(crate) async fn load_stored(
         warnings.push(MachineWarning::MemoryLow);
     }
     let watch = crate::machine_watch::view(&mut *conn, owner, id).await?;
+    let lease = crate::leases::load(&mut *conn, id).await?;
     let watch_fresh = watch.as_ref().is_some_and(|w| {
         DateTime::parse_from_rfc3339(&w.observed_at).is_ok_and(|at| {
             (Utc::now() - at.with_timezone(&Utc)).num_seconds()
@@ -245,6 +248,7 @@ pub(crate) async fn load_stored(
         sessions,
         warnings,
         watch,
+        lease,
     })
 }
 async fn load(

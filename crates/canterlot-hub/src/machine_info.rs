@@ -428,6 +428,9 @@ async fn project(
     correlation_id: Uuid,
 ) -> Result<usize, sqlx::Error> {
     let registry = registry.cloned();
+    // Решение о доступности принимается по реестру до транзакции: снимок очереди,
+    // принятый позже (быстрое переподключение), очистка не трогает.
+    let decided_at = Utc::now();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
             let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
@@ -453,6 +456,10 @@ async fn project(
             }
             changes.sort_unstable();
             for &(owner, id, new) in &changes {
+                if new == "unavailable" {
+                    crate::leases::clear_in_tx(&mut *conn, owner, id, decided_at, correlation_id)
+                        .await?;
+                }
                 emit(
                     &mut *conn,
                     owner,
