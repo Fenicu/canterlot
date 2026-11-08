@@ -52,6 +52,7 @@ impl Fx {
             settle: SettleConfig {
                 idle_quiet: Duration::from_secs(5),
                 nudge_enabled: true,
+                idle_background_max: Duration::from_secs(15 * 60),
             },
             alarms_enabled: true,
             nudge_enabled: true,
