@@ -1088,6 +1088,90 @@ async fn refused_question_gets_a_deny_and_stays_out_of_the_journal() {
     f.close().await;
 }
 
+/// Ход, в котором модель зовёт `ExitPlanMode`: возвращает события хода и ответ relay.
+async fn exit_plan_mode_turn(permission_mode: &str) -> (Vec<AdapterEvent>, Value) {
+    let id = Uuid::now_v7();
+    let call = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"approve",
+        "arguments":{"tool_name":"ExitPlanMode","tool_use_id":"toolu_exit","input":{"plan":"Отчёт готов"}},
+        "_meta":{"claudecode/toolUseId":"toolu_exit"}}});
+    let mut f = with_mcp_call(
+        call,
+        vec![
+            json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!("@request:0"),
+            json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id]}),
+        ],
+    );
+    f.spec.permission_mode = permission_mode.into();
+    f.start().await;
+    f.send(&tx(id)).await;
+    let mut events = vec![];
+    loop {
+        let event = f.event().await;
+        if let AdapterEvent::RequestOpened { request_id, .. } = &event {
+            let decision = DecisionPayload::Permission {
+                behavior: PermissionBehavior::Deny,
+                message: Some("owner".into()),
+            };
+            assert!(matches!(
+                tokio::time::timeout(WAIT, f.adapter.deliver_decision(request_id, &decision))
+                    .await
+                    .unwrap(),
+                adapter::DecisionOutcome::Applied(_)
+            ));
+        }
+        let done = matches!(event, AdapterEvent::RunFinished { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    let reply = mcp_reply_text(&f);
+    f.close().await;
+    (events, reply)
+}
+
+#[tokio::test]
+async fn read_only_session_denies_exit_plan_mode_without_asking_the_owner() {
+    let (events, reply) = exit_plan_mode_turn("read_only").await;
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AdapterEvent::RequestOpened { .. }
+                | AdapterEvent::Phase {
+                    phase: adapter::Phase::AwaitingPermission | adapter::Phase::AwaitingAnswer,
+                    ..
+                }
+        )),
+        "ExitPlanMode never reaches the owner in read_only: {events:?}"
+    );
+    assert_eq!(reply["behavior"], "deny");
+    let message = reply["message"].as_str().unwrap();
+    assert!(message.contains("read-only"), "{message}");
+    assert!(message.contains("Do not call ExitPlanMode"), "{message}");
+    assert!(message.contains("final answer"), "{message}");
+}
+
+#[tokio::test]
+async fn exit_plan_mode_outside_read_only_still_asks_the_owner() {
+    for mode in ["ask", "owner"] {
+        let (events, reply) = exit_plan_mode_turn(mode).await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AdapterEvent::RequestOpened { kind, payload, .. }
+                    if kind == "permission" && payload["tool_name"] == "ExitPlanMode"
+            )),
+            "{mode}: the owner decides: {events:?}"
+        );
+        assert_eq!(
+            reply,
+            json!({"behavior": "deny", "message": "owner"}),
+            "{mode}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn request_closed_by_interrupt_is_not_closed_again_on_relay_disconnect() {
     let _sigint =

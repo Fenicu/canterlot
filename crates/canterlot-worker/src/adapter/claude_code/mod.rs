@@ -33,6 +33,10 @@ use std::{
 use tokio::time::{Instant, timeout, timeout_at};
 use uuid::Uuid;
 
+/// Отказ модели на `ExitPlanMode` в сессии `read_only`.
+pub const READ_ONLY_EXIT_PLAN: &str = "This session is read-only by design and cannot leave plan mode. \
+    Do not call ExitPlanMode; finish by writing your final answer as plain text.";
+
 /// Сколько кнопочное сжатие ждёт `compact_boundary`, прежде чем признать отказ.
 const COMPACT_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -467,6 +471,17 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Выход из плана в сессии `read_only` владелец не решает: разрешение сняло бы
+    /// режим только для чтения, а отказ модели нужен сразу, иначе ход стоит на вопросе.
+    fn read_only_exit_plan(&self, kind: &str, payload: &Value) -> bool {
+        kind == "permission"
+            && payload["tool_name"] == "ExitPlanMode"
+            && self
+                .queue
+                .as_ref()
+                .is_some_and(|queue| queue.effective().permission_mode == "read_only")
+    }
+
     async fn broker_event(&mut self, event: BrokerEvent) {
         match event {
             BrokerEvent::Opened {
@@ -474,6 +489,12 @@ impl ClaudeCodeAdapter {
                 kind,
                 payload,
             } => {
+                if self.read_only_exit_plan(kind, &payload) {
+                    if let Some(broker) = self.broker.as_mut() {
+                        broker.refuse(&request_id, READ_ONLY_EXIT_PLAN).await;
+                    }
+                    return;
+                }
                 self.approved.insert(request_id.clone());
                 if let Some(block) = self.tool_ids.get(&request_id).copied() {
                     self.flush_tool(block, None);
