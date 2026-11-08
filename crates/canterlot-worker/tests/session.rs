@@ -2218,3 +2218,37 @@ async fn hello_and_heartbeat_carry_the_machine_clock() {
     assert_eq!(hellos, 2);
     stop_worker(stop, join).await;
 }
+
+#[tokio::test]
+async fn machine_watch_goes_out_at_once_when_free_disk_crosses_the_warn_threshold() {
+    use canterlot_proto::worker::v1::control_up::Msg;
+    assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"watchdog_v1"));
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["pilot_v1".into(), "watchdog_v1".into()],
+        ..Default::default()
+    })
+    .await;
+    hub.config.machine.metrics_interval = Duration::from_millis(45);
+    // Любой диск ниже порога: первая же выборка метрик — пересечение вниз.
+    hub.config.machine.disk_warn_free_gb = u64::MAX / 1_000_000_000;
+    // Домашний каталог тест не обходит; поток замеров и так ждёт минуту.
+    hub.config.machine.hotspot_roots = Some(Vec::new());
+    let (stop, _, join) = start(hub.config.clone(), store);
+    let started = std::time::Instant::now();
+    let Msg::MachineWatch(watch) = tokio::time::timeout(
+        Duration::from_secs(20),
+        next_pilot(&mut hub, |m| matches!(m, Msg::MachineWatch(_))),
+    )
+    .await
+    .expect("watch before the five-minute cadence") else {
+        panic!()
+    };
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(watch.observed_at_ms > 0);
+    assert!(watch.hotspots.is_empty(), "sizes are not measured yet");
+    assert!(
+        watch.leaked.is_empty(),
+        "no released executions in a fresh store"
+    );
+    stop_worker(stop, join).await;
+}

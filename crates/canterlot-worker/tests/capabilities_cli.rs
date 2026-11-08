@@ -32,6 +32,7 @@ fn capabilities_prints_optional_capabilities_and_production_harnesses() {
     assert!(capabilities.contains(&"claude_histories_v1"));
     assert!(capabilities.contains(&"path_probe_v1"));
     assert!(capabilities.contains(&"resource_lease_v1"));
+    assert!(capabilities.contains(&"watchdog_v1"));
     assert_eq!(
         harnesses,
         ["claude_code", "codex", "opencode", "antigravity"]
