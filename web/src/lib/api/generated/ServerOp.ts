@@ -59,7 +59,6 @@ export type ServerOp =
         | MachineJournalStopsChanged
         | MachineWatchChanged
         | MachineLeaseChanged
-        | PlanTaskChanged
         | Hidden
         | PhaseChanged
         | Oversized
@@ -1399,37 +1398,6 @@ export interface LeaseEntry {
   requested_at: Time | null;
   position: number | null;
   dir: string;
-}
-export interface PlanTaskChanged {
-  v: 1;
-  id: Uuid;
-  scope: Scope;
-  scope_seq: Seq;
-  scope_seq_from: Seq;
-  committed_at: Time;
-  committed_at_from: Time;
-  conversation_id: Uuid | null;
-  execution_id: Uuid | null;
-  correlation_id: Uuid;
-  kind: "plan_task_changed";
-  payload: {
-    task: PlanTask;
-  };
-}
-export interface PlanTask {
-  id: Uuid;
-  orchestrator_id: Uuid;
-  number: number;
-  title: string;
-  note: string | null;
-  blocker: string | null;
-  findings: string[];
-  state: "waiting" | "in_progress" | "in_review" | "done" | "cancelled" | "blocked";
-  executor_id: Uuid | null;
-  attempts: number;
-  created_at: Time;
-  updated_at: Time;
-  revision: number;
 }
 export interface Hidden {
   v: 1;

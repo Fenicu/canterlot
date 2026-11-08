@@ -1173,22 +1173,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/plan": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["get__api_v1_plan"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3360,44 +3344,6 @@ export interface components {
             delta_window_ms: number;
             path: string;
             protocol: string;
-        };
-        PlanCommit: {
-            sha: string;
-            subject: string;
-        };
-        /** @enum {string} */
-        PlanTaskState: "waiting" | "in_progress" | "in_review" | "done" | "cancelled" | "blocked";
-        /** @description Задача плана с данными исполнителя, посчитанными при чтении. */
-        PlanTaskDetail: {
-            /** Format: uuid */
-            id: string;
-            /** Format: uuid */
-            orchestrator_id: string;
-            /** Format: int32 */
-            number: number;
-            title: string;
-            note: string | null;
-            blocker: string | null;
-            findings: string[];
-            state: components["schemas"]["PlanTaskState"];
-            /** Format: uuid */
-            executor_id: string | null;
-            /** Format: int32 */
-            attempts: number;
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            updated_at: string;
-            /** Format: int64 */
-            revision: number;
-            commits: components["schemas"]["PlanCommit"][];
-            commits_truncated: boolean;
-            files_changed: number;
-            /** Format: uuid */
-            report_block_id: string | null;
-        };
-        PlanView: {
-            tasks: components["schemas"]["PlanTaskDetail"][];
         };
     };
     responses: never;
@@ -7408,53 +7354,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProbeView"];
-                };
-            };
-            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
-            default: {
-                headers: {
-                    /** @description Часы хаба: целые миллисекунды Unix */
-                    "X-Server-Time-Ms"?: number;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    get__api_v1_plan: {
-        parameters: {
-            query: {
-                /** @description Разговор оркестратора */
-                orchestrator: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Задачи плана оркестратора с коммитами исполнителей */
-            200: {
-                headers: {
-                    /** @description Часы хаба: целые миллисекунды Unix */
-                    "X-Server-Time-Ms"?: number;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PlanView"];
-                };
-            };
-            /** @description Оркестратор не найден */
-            404: {
-                headers: {
-                    /** @description Часы хаба: целые миллисекунды Unix */
-                    "X-Server-Time-Ms"?: number;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
