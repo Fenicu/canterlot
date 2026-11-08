@@ -1130,3 +1130,11 @@ export function startSpawnQueueNow(
     keyed(key, opts),
   );
 }
+
+/** План оркестратора с коммитами, числом изменённых файлов и отчётом исполнителей. */
+export function getPlan(
+  orchestratorId: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_plan"]>>> {
+  return http("GET", `/api/v1/plan?orchestrator=${id(orchestratorId)}`, undefined, opts);
+}
