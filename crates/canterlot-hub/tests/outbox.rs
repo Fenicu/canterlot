@@ -1762,3 +1762,120 @@ async fn start_execution_waits_until_the_session_is_reconciled(pool: PgPool) {
     assert_eq!(state, "created");
     stop(hub).await;
 }
+
+/// Команда, уже уходившая прошлому сеансу, тоже не висит, если новый сеанс её не поймёт.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn resent_command_without_capability_completes_as_capability_missing(pool: PgPool) {
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let (execution_id, generation): (Uuid, i64) =
+        sqlx::query_as("select id, generation from executions where conversation_id = $1")
+            .bind(conversation)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let compact = Uuid::now_v7();
+    // Прошлый сеанс получил команду и оборвался до квитанции хранения.
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
+                               kind, payload, delivery_state, dispatch_attempt, dispatch_claimed_at)
+         values ($1, $2, $3, $4, $5, 'compact_session', '{}'::jsonb, 'pending', 1, now())",
+    )
+    .bind(compact)
+    .bind(machine.machine_id)
+    .bind(conversation)
+    .bind(execution_id)
+    .bind(generation)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let _worker = Worker::connect(&hub, &machine).await;
+    sqlx::query("select pg_notify('canterlot_outbox', $1)")
+        .bind(machine.machine_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    wait_completed(&pool, compact).await;
+    let result: Value = sqlx::query_scalar("select result from commands where id = $1")
+        .bind(compact)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(result, json!({"rejected": "capability_missing"}));
+    stop(hub).await;
+}
+
+/// Выданный под сеанс с `pilot_v1` ввод встретил при отправке сеанс без неё: ввод
+/// возвращается в очередь и ждёт подходящего сеанса, а не отвергается.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn input_dispatched_for_pilot_waits_when_the_session_lacks_it(pool: PgPool) {
+    use canterlot_hub::delivery::dispatch::DispatchOutcome;
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let submitted = input(&pool, &hub, conversation).await;
+    sqlx::query(
+        "update commands set payload = payload || jsonb_build_object('attachment_ids', jsonb_build_array($2::text))
+          where id = $1",
+    )
+    .bind(submitted.command_id)
+    .bind(Uuid::now_v7().to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Диспетчер видел сеанс с `pilot_v1`; к отправке машина переподключилась без неё.
+    let outcome = dispatch_next(
+        &pool,
+        conversation,
+        GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into(), "instructions_v1".into()],
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, DispatchOutcome::Dispatched { .. }),
+        "{outcome:?}"
+    );
+    let mut worker = Worker::connect(&hub, &machine).await;
+    let settled = timeout(Duration::from_secs(5), async {
+        loop {
+            let (input_state, delivery): (String, String) = sqlx::query_as(
+                "select i.state, c.delivery_state from inputs i join commands c on c.id = i.command_id
+                  where c.id = $1",
+            )
+            .bind(submitted.command_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if input_state != "dispatched" {
+                return (input_state, delivery);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(settled, ("queued".into(), "held".into()));
+    assert!(
+        timeout(Duration::from_millis(300), worker.down.message())
+            .await
+            .is_err(),
+        "the input never reaches a session without pilot_v1"
+    );
+    let holds: Value = sqlx::query_scalar(
+        "select to_jsonb(hold_reasons) from queue_state where conversation_id = $1",
+    )
+    .bind(conversation)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        holds,
+        json!([]),
+        "capability_missing is computed, not stored"
+    );
+    stop(hub).await;
+}

@@ -900,6 +900,11 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
 /// вливание, которые уже уходили прошлому сеансу, могли дойти до агента:
 /// приём считается неподтверждённым, решает владелец, повтора нет. Прочие
 /// команды прошлого сеанса ждут его итога.
+/// Сеанс не поймёт команду: она не должна висеть `pending`. Свежая выдача ввода
+/// возвращается в очередь и ждёт сеанса с нужной возможностью (удержание
+/// `capability_missing` вычисляет диспетчер). Ввод или вливание, уже уходившие прошлому
+/// сеансу, могли дойти до агента: решает владелец. Остальные команды, свежие и
+/// повторные, закрываются отказом `capability_missing`.
 async fn refuse_missing_capability(
     pool: &PgPool,
     row: &CommandRow,
@@ -911,31 +916,44 @@ async fn refuse_missing_capability(
         row.dispatch_attempt,
         row.machine_id,
     );
-    if !fresh && !matches!(kind.as_str(), "deliver_input" | "steer_input") {
-        return Ok(());
-    }
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
-            if fresh {
-                crate::ingest::apply_command_rejected_in_tx(
-                    &mut *conn,
-                    machine_id,
-                    id,
-                    attempt,
-                    "capability_missing",
-                    Uuid::now_v7(),
-                )
-                .await
-            } else {
-                apply_input_receipt_in_tx(
-                    &mut *conn,
-                    id,
-                    attempt,
-                    InputReceipt::AcceptanceUndetermined,
-                    Uuid::now_v7(),
-                )
-                .await?;
-                Ok(())
+            match (kind.as_str(), fresh) {
+                ("deliver_input", true) => {
+                    apply_input_receipt_in_tx(
+                        &mut *conn,
+                        id,
+                        attempt,
+                        InputReceipt::DispatchDeferred {
+                            reason: "capability_missing".into(),
+                        },
+                        Uuid::now_v7(),
+                    )
+                    .await?;
+                    Ok(())
+                }
+                ("deliver_input" | "steer_input", false) => {
+                    apply_input_receipt_in_tx(
+                        &mut *conn,
+                        id,
+                        attempt,
+                        InputReceipt::AcceptanceUndetermined,
+                        Uuid::now_v7(),
+                    )
+                    .await?;
+                    Ok(())
+                }
+                _ => {
+                    crate::ingest::apply_command_rejected_in_tx(
+                        &mut *conn,
+                        machine_id,
+                        id,
+                        attempt,
+                        "capability_missing",
+                        Uuid::now_v7(),
+                    )
+                    .await
+                }
             }
         })
     })

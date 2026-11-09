@@ -331,12 +331,16 @@ pub async fn apply_input_receipt_in_tx(
                         .await?
                         .is_some_and(|(id, _, _)| Some(id) == target.execution_id)
                 {
-                    let hold = if reason == "storage_low" {
-                        HoldReason::StorageLow
-                    } else {
-                        HoldReason::NoLiveExecution
+                    // Нехватку возможности сеанса диспетчер вычисляет сам при каждой
+                    // выдаче (`capability_missing`), и сеанс с ней снимает удержание.
+                    let hold = match reason.as_str() {
+                        "storage_low" => Some(HoldReason::StorageLow),
+                        "capability_missing" => None,
+                        _ => Some(HoldReason::NoLiveExecution),
                     };
-                    if !queue.hold_reasons.0.contains(&hold) {
+                    if let Some(hold) = hold
+                        && !queue.hold_reasons.0.contains(&hold)
+                    {
                         queue.hold_reasons.0.push(hold);
                     }
                 }
