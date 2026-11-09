@@ -24,5 +24,6 @@
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   [data-open] .chevron { transform: rotate(90deg); }
   .fold { display: grid; grid-template-rows: 1fr; }
-  .body { min-height: 0; overflow: hidden; font-size: var(--fs-meta); }
+  /* clip, а не hidden: иначе тело прокручиваемо, и ссылка внутри уезжает из-под пальца посреди раскрытия. */
+  .body { min-height: 0; overflow: clip; font-size: var(--fs-meta); }
 </style>
