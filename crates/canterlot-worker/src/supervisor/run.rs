@@ -103,11 +103,14 @@ struct ShareJob {
     workdir: Option<PathBuf>,
     title: String,
     note: String,
+    /// Ход, в котором модель вызвала `share_file`: блок файла встаёт в него же.
+    turn: Option<Uuid>,
 }
 
 struct PendingShare {
     call_id: Uuid,
     block_id: Uuid,
+    turn: Option<Uuid>,
     prepared: PreparedShare,
 }
 
@@ -1456,6 +1459,7 @@ impl Supervisor {
             workdir: self.workdir.clone(),
             title: args.title.unwrap_or_default(),
             note: args.note.unwrap_or_default(),
+            turn: self.active_turn,
         };
         // Подготовка и постановка в очередь ограничены коротко; передача получит
         // свой срок от размера, когда файл действительно пойдёт на хаб.
@@ -1475,6 +1479,7 @@ impl Supervisor {
                     self.shares.ready.push_back(PendingShare {
                         call_id: job.call_id,
                         block_id: job.block_id,
+                        turn: job.turn,
                         prepared,
                     });
                 } else {
@@ -1556,10 +1561,15 @@ impl Supervisor {
         let pending = self.shares.ready.pop_front().expect("front share");
         let _ = std::fs::remove_file(media::media_path(&self.exec_dir, id));
         if result.stored {
+            // Блок-носитель вложения стоит в том же ходе, что и вызов модели (ход
+            // запомнен при вызове: загрузка может закончиться и после хода): лента
+            // держит его в карточке хода, а не открывает новую. Метка агента — та же,
+            // что у основного агента в адаптерах.
             self.record(Body::BlockStarted(BlockStarted {
                 block_id: pending.block_id.to_string(),
                 rev: 1,
                 kind: "tool_call".into(),
+                input_command_id: pending.turn.map(|id| id.to_string()).unwrap_or_default(),
                 tool_name: "share_file".into(),
                 summary: if pending.prepared.title.is_empty() {
                     pending.prepared.name.clone()
@@ -1567,7 +1577,7 @@ impl Supervisor {
                     pending.prepared.title.clone()
                 },
                 model: String::new(),
-                agent: "main".into(),
+                agent: "orchestrator".into(),
                 ..Default::default()
             }))?;
             self.record(Body::BlockFinal(BlockFinal {
@@ -3903,6 +3913,7 @@ mod tests {
         let pending = PendingShare {
             call_id,
             block_id: Uuid::now_v7(),
+            turn: None,
             prepared: PreparedShare {
                 id: share_id,
                 name: "doc.txt".into(),
@@ -4046,6 +4057,47 @@ mod tests {
                 .any(|(id, code)| *id == call_id && code == "ok"),
             "the agent is told the file was shared"
         );
+    }
+
+    #[tokio::test]
+    async fn shared_file_block_stays_in_the_active_turn_as_the_main_agent() {
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        let turn = Uuid::now_v7();
+        let (share_id, call_id, mut pending) = queued_share();
+        // Ход запомнен при вызове; к концу загрузки он может уже закончиться.
+        pending.turn = Some(turn);
+        let block_id = pending.block_id;
+        supervisor.shares.ready.push_back(pending);
+        supervisor.shares.inflight = Some(share_id);
+        supervisor
+            .agent_calls
+            .insert(call_id, Instant::now() + SHARE_PREPARE_TIMEOUT);
+        supervisor
+            .on_share_result(canterlot_proto::worker::ipc::ShareResult {
+                share_id: share_id.to_string(),
+                stored: true,
+                reason: String::new(),
+            })
+            .await
+            .unwrap();
+        let bodies = shipped_bodies(&mut supervisor);
+        let started = bodies
+            .iter()
+            .find_map(|body| match body {
+                Body::BlockStarted(started) if started.block_id == block_id.to_string() => {
+                    Some(started.clone())
+                }
+                _ => None,
+            })
+            .expect("carrier block recorded");
+        assert_eq!(started.input_command_id, turn.to_string());
+        assert_eq!(started.agent, "orchestrator");
+        assert_eq!(started.tool_name, "share_file");
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::BlockFile(file) if file.block_id == block_id.to_string()
+                && file.attachment_id == share_id.to_string()
+        )));
     }
 
     #[tokio::test]

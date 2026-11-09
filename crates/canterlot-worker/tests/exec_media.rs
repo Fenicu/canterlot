@@ -241,6 +241,16 @@ async fn shared_file_is_published_with_the_supervisor_block_id(pool: PgPool) {
     .await;
     let (attachment, block) = found.unwrap();
     assert_eq!(block, tool_block(&f, "Doc").await);
+    // Блок-носитель стоит в ходе входа под меткой основного агента: лента не
+    // открывает для него отдельное сообщение.
+    let (turn, agent): (Option<Uuid>, String) =
+        sqlx::query_as("select input_command_id, agent from blocks where block_id=$1")
+            .bind(block)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(turn, Some(input.command_id));
+    assert_eq!(agent, "orchestrator");
     let row: (String, String, i64, String, String, String) = sqlx::query_as(
         "select name, mime, size_bytes, sha256, title, note from block_files where id=$1",
     )
