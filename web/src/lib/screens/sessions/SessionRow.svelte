@@ -1,7 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
   import { fmt } from '#lib/format/ru.js';
-  import { modelLabel } from '#lib/format/labels.js';
+  import { modelAliasNote, resolvedModelLabel } from '#lib/format/labels.js';
   import Icon from '#lib/ui/Icon.svelte';
   import { timeTip } from '#lib/ui/time-tip.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
@@ -77,7 +77,7 @@
         <time datetime={item.last_activity_at ?? undefined} use:timeTip={stampTs}>{stamp}</time>
       {/if}
     </span>
-    <span class="meta">{item.harness.title} · {modelLabel(item.model)} · {item.machine.name}</span>
+    <span class="meta" title={modelAliasNote(item.model, item.model_resolved) || undefined}>{item.harness.title} · {resolvedModelLabel(item.model, item.model_resolved)} · {item.machine.name}</span>
     <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{#if tail && stampTs !== null}{stampSeparator}<time datetime={item.last_activity_at ?? undefined} use:timeTip={stampTs}>{stamp}</time>{/if}</span>
     {#if plan}
       <span class="plan" data-role="plan-badge"><span class="sr-only">{plan.label}</span><span aria-hidden="true">{plan.text}</span></span>

@@ -1188,6 +1188,11 @@ export class ChatStore {
         if (event.kind === "derived_changed") {
           this.activity = { ...event.payload.activity };
           this.queue.queued = event.payload.queue.queued;
+          const settings = event.payload.settings;
+          // Конкретная модель приходит с первым блоком хода: шапка узнаёт её без перечитывания.
+          if (this.detail && (settings.model_resolved ?? null) !== (this.detail.model_resolved ?? null)) {
+            this.detail = { ...this.detail, model: settings.model, model_resolved: settings.model_resolved ?? null };
+          }
         }
         return;
       case "interrupt_state_changed":

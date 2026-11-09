@@ -6,6 +6,8 @@
   import { stopSession } from '#lib/screens/chat/controls.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { PERMISSION_MODES, effortLabel, permissionHint, permissionLabel, permissionValue } from '#lib/format/labels.js';
+  import { catalogModelLabel } from '#lib/format/modelResolution.js';
+  import ModelResolutionNote from './ModelResolutionNote.svelte';
   import { onMount, untrack } from 'svelte';
   import Button from '#lib/ui/Button.svelte';
   import ChipToggle from '#lib/ui/ChipToggle.svelte';
@@ -146,7 +148,7 @@
     return provider === 'antigravity' && efforts.length === 1 ? (efforts[0] ?? null) : null;
   };
   const known = (values: string[], current: string) => (values.includes(current) ? values : [current, ...values]);
-  const modelOptions = $derived(known(harness?.models.map((entry) => entry.id) ?? [], model).map((value) => ({ value, label: harness?.models.find((entry) => entry.id === value)?.title || value })));
+  const modelOptions = $derived(known(harness?.models.map((entry) => entry.id) ?? [], model).map((value) => { const entry = harness?.models.find((candidate) => candidate.id === value); return { value, label: entry ? catalogModelLabel(entry) : value }; }));
   const effortOptions = $derived(known(harness?.models.find((entry) => entry.id === model)?.efforts ?? ['low', 'medium', 'high'], effort).map((value) => ({ value, label: effortLabel(value) })));
   const permissionOptions = $derived(known(
     (harness?.permission_modes ?? [...PERMISSION_MODES]).filter((mode) => !(provider === 'antigravity' && mode === 'read_only')),
@@ -423,6 +425,7 @@
               <Select id="sheet-effort" label="Усилие" options={effortOptions} bind:value={effort} onchange={() => void saveEffort(effort)} />
             {/if}
           </div>
+          <ModelResolutionNote entry={harness?.models.find((entry) => entry.id === model)} />
           <Select id="sheet-permission" label="Режим разрешений" hint={permissionHint(permission, harness?.provider ?? item.harness?.provider)} options={permissionOptions} bind:value={permission} onchange={() => void savePermission(permission)} />
           <Toggle block label="Автопродолжение после лимитов" bind:checked={crunch} />
           {#if crunch}

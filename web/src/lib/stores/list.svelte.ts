@@ -61,6 +61,8 @@ export interface ListRow {
   workdir: string;
   created_at: string;
   model: string;
+  /** Конкретная модель за псевдонимом `model`; `null` — хаб её ещё не знает. */
+  model_resolved?: string | null;
   effort: string;
   permission_mode: string;
   activity: ListActivity;
@@ -259,6 +261,7 @@ export class ListStore {
       row.last_activity_at = event.payload.last_activity_at;
       row.working_ms = event.payload.working_ms;
       row.model = event.payload.settings.model;
+      row.model_resolved = event.payload.settings.model_resolved ?? null;
       row.effort = event.payload.settings.effort;
       row.permission_mode = event.payload.settings.permission_mode;
       row.crunch = { enabled: event.payload.crunch.enabled };

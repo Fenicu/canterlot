@@ -1547,6 +1547,11 @@ export interface components {
             holds: components["schemas"]["HoldView"][];
             last_activity_at?: string | null;
             model: string;
+            /**
+             * @description Конкретная модель за псевдонимом `model` (`fable[1m]` → `claude-fable-5-2`): из ходов
+             *     сессии, до первого хода на этой модели — последнее наблюдение на машине; `None` — неизвестно.
+             */
+            model_resolved?: string | null;
             permission_mode: string;
             queue: components["schemas"]["QueueView"];
             /** @description Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута. */
@@ -2280,6 +2285,11 @@ export interface components {
             effort: string;
             last_activity_at?: string | null;
             model: string;
+            /**
+             * @description Конкретная модель за псевдонимом `model` (`fable[1m]` → `claude-fable-5-2`): из ходов
+             *     сессии, до первого хода на этой модели — последнее наблюдение на машине; `None` — неизвестно.
+             */
+            model_resolved?: string | null;
             permission_mode: string;
             queue: components["schemas"]["QueueView"];
             /** @description Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута. */
@@ -2466,6 +2476,7 @@ export interface components {
             id: string;
             /** @description Модель принимает картинки; `null`: у харнесса это не свойство модели. */
             images?: boolean | null;
+            resolved?: components["schemas"]["ResolutionView"] | null;
             title: string;
         };
         NewAttachment: {
@@ -2934,6 +2945,16 @@ export interface components {
             updated_at: string;
             /** Format: uuid */
             winner_decision_id?: string | null;
+        };
+        /** @description Последнее разрешение псевдонима на машине. */
+        ResolutionView: {
+            /** @description Когда псевдоним сменил разрешение. */
+            changed_at?: string | null;
+            /** @description Конкретная модель, например `claude-fable-5-2`. */
+            model: string;
+            observed_at: string;
+            /** @description Прежнее разрешение, если псевдоним его сменил. */
+            previous?: string | null;
         };
         ResolveOwnerLostOutcome: {
             requested: {

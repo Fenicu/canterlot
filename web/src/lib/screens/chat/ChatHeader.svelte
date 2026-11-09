@@ -6,7 +6,7 @@
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import StateChip from './StateChip.svelte';
 	import { chatStateLine } from './stateLine';
-	import { modelLabel } from '#lib/format/labels.js';
+	import { modelAliasNote, modelLabel, resolvedModelLabel } from '#lib/format/labels.js';
 	import { fmt } from '#lib/format/ru.js';
 	import Icon from '#lib/ui/Icon.svelte';
 	import { dismissable, type DismissReason } from '#lib/ui/dismiss.js';
@@ -36,6 +36,7 @@
 		harness?: { title?: string; provider?: string };
 		machine?: { name?: string };
 		model?: string;
+		model_resolved?: string | null;
 	}
 
 	interface SettingsLike {
@@ -129,7 +130,11 @@
 		routingTitles.ensure(revision);
 	});
 
-	const effectiveModel = $derived(modelLabel(settings?.effective?.model || detail?.model || 'opus-5.5'));
+	const requestedModel = $derived(settings?.effective?.model || detail?.model || 'opus-5.5');
+	// Конкретная версия относится к модели сессии: после смены модели её ещё не знают.
+	const resolvedModel = $derived(detail?.model === requestedModel ? (detail?.model_resolved ?? null) : null);
+	const effectiveModel = $derived(resolvedModelLabel(requestedModel, resolvedModel));
+	const aliasNote = $derived(modelAliasNote(requestedModel, resolvedModel));
 	const pendingModel = $derived(settings?.pending?.model && modelLabel(settings.pending.model));
 
 	const subtitle = $derived(
@@ -239,7 +244,7 @@
 						executionState={(chat.execution as { state?: string })?.state}
 						now={now}
 					/>
-					<div class="subtitle" title={subtitle}>{subtitle}</div>
+					<div class="subtitle" title={aliasNote ? `${subtitle}\n${aliasNote}` : subtitle} data-model-alias={aliasNote || undefined}>{subtitle}</div>
 				{:else}
 					<span class="skeleton" style:width="var(--bar-74)"></span>
 				{/if}

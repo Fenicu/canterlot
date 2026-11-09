@@ -10,6 +10,8 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { browserRuntime } from '#lib/app/browser.js';
+  import { catalogModelLabel } from '#lib/format/modelResolution.js';
+  import ModelResolutionNote from './ModelResolutionNote.svelte';
   import { ANTIGRAVITY_CATALOG_NOTE, DEFAULT_PERMISSION_MODE, NO_MODELS_HINT, effortLabel, modelImagesNote, permissionHint, permissionLabel } from '#lib/format/labels.js';
   import Button from '#lib/ui/Button.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
@@ -87,7 +89,7 @@
       return { value: item.id, label: `${item.name}${problem ? ` · ${problem}` : ''}`, disabled: Boolean(problem) };
     })
   ]);
-  const modelOptions = $derived([{ value: '', label: 'Выбрать' }, ...models.map((item) => ({ value: item.id, label: item.title }))]);
+  const modelOptions = $derived([{ value: '', label: 'Выбрать' }, ...models.map((item) => ({ value: item.id, label: catalogModelLabel(item) }))]);
   const effortOptions = $derived([{ value: '', label: 'Выбрать' }, ...efforts.map((item) => ({ value: item, label: effortLabel(item) }))]);
   const presetOptions = $derived(presets.map((item) => ({ value: item.id, label: item.title })));
   const permissionOptions = $derived(permissions.map((value) => ({ value, label: permissionLabel(value) })));
@@ -298,6 +300,7 @@
         <Select label="Усилие" options={effortOptions} bind:value={effort} />
       </div>
     {/if}
+    <ModelResolutionNote entry={models.find((item) => item.id === modelId)} />
     {#if harness && models.length === 0}<p class="hint">{NO_MODELS_HINT}</p>{/if}
     {#if catalogNote}<p class="hint">{catalogNote}</p>{/if}
     {#if imagesNote}<p class="hint">{imagesNote}</p>{/if}

@@ -537,6 +537,10 @@ export interface ConversationCreated {
     workdir: string;
     created_at: Time;
     model: string;
+    /**
+     * Конкретная модель за псевдонимом model; null — неизвестна
+     */
+    model_resolved?: string | null;
     effort: string;
     permission_mode: string;
     activity: Activity;
@@ -765,6 +769,10 @@ export interface DerivedChanged {
 }
 export interface Settings {
   model: string;
+  /**
+   * Конкретная модель за псевдонимом model; null — неизвестна
+   */
+  model_resolved?: string | null;
   effort: string;
   permission_mode: string;
 }

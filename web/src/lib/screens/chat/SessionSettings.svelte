@@ -32,13 +32,17 @@
 	import Button from '#lib/ui/Button.svelte';
 	import IconButton from '#lib/ui/IconButton.svelte';
 	import Select from '#lib/ui/Select.svelte';
+	import ModelResolutionNote from '../sessions/ModelResolutionNote.svelte';
+	import { catalogModelLabel } from '#lib/format/modelResolution.js';
 	import Textarea from '#lib/ui/Textarea.svelte';
 	import Toggle from '#lib/ui/Toggle.svelte';
 	import {
 		PERMISSION_MODES,
 		effortLabel,
+		modelAliasNote,
 		modelLabel,
 		permissionHint,
+		resolvedModelLabel,
 		permissionLabel,
 		modelImagesNote,
 		permissionValue,
@@ -217,7 +221,7 @@
 
 	// Модель сессии могли убрать из каталога: она остаётся видна, пока владелец не выберет другую.
 	const modelOptions = $derived([
-		...availableModels.map((m) => ({ value: m.id, label: m.title || m.id })),
+		...availableModels.map((m) => ({ value: m.id, label: catalogModelLabel(m) })),
 		...(effective.model && !availableModels.some((m) => m.id === effective.model)
 			? [{ value: effective.model, label: modelLabel(effective.model) }]
 			: [])
@@ -226,6 +230,14 @@
 	const permissionOptions = $derived(availablePermissionModes.map((value) => ({ value, label: permissionLabel(value) })));
 	const presetSelectOptions = $derived(presetOptions.map((option) => ({ value: option.id, label: option.title })));
 	const locked = $derived(!midsessionSupported || saving);
+	// Версия, на которой сессия реально работает: по ходам этой сессии.
+	const sessionResolved = $derived.by(() => {
+		const detail = chat.detail as { model?: string; model_resolved?: string | null } | null;
+		const model = effective.model ?? '';
+		if (!detail?.model_resolved || detail.model !== model) return '';
+		const note = modelAliasNote(model, detail.model_resolved);
+		return `В этой сессии: ${resolvedModelLabel(model, detail.model_resolved)}${note ? ` (${note})` : ''}`;
+	});
 
 	async function saveSettings(event?: SubmitEvent) {
 		if (event) event.preventDefault();
@@ -359,6 +371,8 @@
 				/>
 			{/if}
 		</div>
+		{#if sessionResolved}<p class="note" data-session-model>{sessionResolved}</p>{/if}
+		<ModelResolutionNote entry={currentModelRecord} quiet={!!sessionResolved && selectedModel === effective.model} />
 		{#if modelImagesNote(currentModelRecord?.images)}<p class="note">{modelImagesNote(currentModelRecord?.images)}</p>{/if}
 
 		<div class="card">
