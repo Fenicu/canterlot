@@ -2519,7 +2519,12 @@ async fn empty_file_uploads_completes_and_downloads_as_zero_bytes(pool: PgPool) 
     }
 
     // Пустой файл с типом картинки не становится картинкой: отдаётся как поток байтов.
-    let picture = f.create("empty.png", "image/png", b"").await;
+    let created = f
+        .create_in(f.conversation, "empty.png", "image/png", b"")
+        .await;
+    assert_eq!(created.status, 201);
+    assert_eq!(created.json::<Value>()["mime"], "application/octet-stream");
+    let picture = id_of(&created);
     assert_eq!(f.complete(picture, "picture_done", None).await.status, 200);
     let download = f
         .client

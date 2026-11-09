@@ -317,6 +317,12 @@ pub async fn create(
     valid_key(key)?;
     let name = normalize_name(&req.name)?;
     let mime = normalize_mime(req.mime.as_deref())?;
+    // Пустой файл не бывает картинкой или видео: агент не получит его нативным блоком изображения.
+    let mime = if req.size == 0 && (mime.starts_with("image/") || mime.starts_with("video/")) {
+        DEFAULT_MIME.to_owned()
+    } else {
+        mime
+    };
     let sha256 = normalize_sha256(&req.sha256)?;
     if req.size > MAX_ATTACHMENT_BYTES {
         return Err(AttachmentError::TooLarge);
