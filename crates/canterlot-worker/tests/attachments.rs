@@ -179,6 +179,29 @@ async fn size_mismatch_is_nonretryable() {
     }
 }
 
+/// Пустое вложение: хаб отдаёт один пустой кадр `last`, агент получает файл нулевой длины;
+/// повтор находит опубликованный файл без новой выборки.
+#[tokio::test]
+async fn empty_attachment_is_published_as_a_zero_byte_file() {
+    let root = tempfile::tempdir().unwrap();
+    let store = AttachmentStore::new(root.path(), 2).unwrap();
+    let r = reference(b"");
+    assert_eq!(r.size, 0);
+    let (s, rx) = source(vec![Ok(vec![chunk(0, b"", true)])]);
+    let published = store
+        .ensure_published(rx.clone(), &r, &policy(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(fs::metadata(&published.path).unwrap().len(), 0);
+    assert!(!temp(root.path(), &r).exists());
+    let again = store
+        .ensure_published(rx, &r, &policy(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(again.path, published.path);
+    assert_eq!(*s.offsets.lock().unwrap(), [0]);
+}
+
 #[tokio::test]
 async fn already_published_same_checksum_is_reported_ready_again() {
     let root = tempfile::tempdir().unwrap();

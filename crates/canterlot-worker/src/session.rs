@@ -362,8 +362,8 @@ fn put_error(status: &Status) -> PutError {
     match status.code() {
         tonic::Code::AlreadyExists => PutError::Conflict,
         tonic::Code::DataLoss => PutError::Corrupt,
-        tonic::Code::InvalidArgument
-        | tonic::Code::NotFound
+        tonic::Code::InvalidArgument => PutError::from_invalid_argument(status.message()),
+        tonic::Code::NotFound
         | tonic::Code::PermissionDenied
         | tonic::Code::FailedPrecondition
         | tonic::Code::OutOfRange

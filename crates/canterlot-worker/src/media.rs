@@ -273,8 +273,18 @@ pub enum PutError {
     Corrupt,
     #[error("conflict")]
     Conflict,
+    /// Хаб отказал без известной причины; так отвечает и хаб без поддержки `share`.
     #[error("rejected")]
     Rejected,
+    /// Хаб назвал причину отказа (`media_too_large` и т.п.): повтор не поможет.
+    #[error("too_large")]
+    TooLarge,
+    #[error("invalid_name")]
+    InvalidName,
+    #[error("invalid_type")]
+    InvalidType,
+    #[error("invalid_text")]
+    InvalidText,
     #[error("io")]
     Io,
     /// Файл пришёл без идентификатора блока: блок нельзя связать с лентой.
@@ -283,12 +293,27 @@ pub enum PutError {
 }
 
 impl PutError {
+    /// Отказ `INVALID_ARGUMENT` хаба: сообщение статуса — стабильный код причины.
+    pub fn from_invalid_argument(message: &str) -> Self {
+        match message {
+            "media_too_large" => Self::TooLarge,
+            "media_invalid_name" => Self::InvalidName,
+            "media_invalid_type" => Self::InvalidType,
+            "media_invalid_text" => Self::InvalidText,
+            _ => Self::Rejected,
+        }
+    }
+
     pub fn reason(self) -> &'static str {
         match self {
             Self::Transport => "hub_unreachable",
             Self::Corrupt => "checksum_mismatch",
             Self::Conflict => "conflict",
             Self::Rejected => "rejected",
+            Self::TooLarge => "too_large",
+            Self::InvalidName => "invalid_name",
+            Self::InvalidType => "invalid_type",
+            Self::InvalidText => "invalid_text",
             Self::Io => "io",
             Self::NoBlock => "share_block_missing",
         }

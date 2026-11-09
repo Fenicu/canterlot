@@ -1621,11 +1621,12 @@ impl Supervisor {
             )
             .await;
         } else {
+            let (code, message) = share_refusal(&result.reason);
             self.answer_share(
                 pending.call_id,
                 crate::adapter::AgentCallResult::Err {
-                    code: "share_unavailable".into(),
-                    message: format!("the hub did not accept the file ({})", result.reason),
+                    code: code.into(),
+                    message,
                 },
             )
             .await;
@@ -3221,9 +3222,77 @@ fn required_diagnostic_cause(kind: &str) -> StopCause {
     }
 }
 
+/// Отказ хаба по файлу `share_file` (причина `PutError::reason`) → код и текст для модели.
+/// `share_unavailable` остаётся только за хабом без поддержки файлов и недоступным хабом;
+/// названная хабом причина становится своим кодом, остальное — `share_rejected` с причиной.
+fn share_refusal(reason: &str) -> (&'static str, String) {
+    match reason {
+        "too_large" => (
+            "share_too_large",
+            "the hub refused the file: it is larger than the hub limit of 50 MiB".into(),
+        ),
+        "invalid_name" => (
+            "share_invalid_name",
+            "the hub refused the file name; rename the file (at most 255 bytes, no control characters or path separators) and share it again".into(),
+        ),
+        "invalid_type" => (
+            "share_invalid_type",
+            "the hub refused the file type: the content does not match it (an image needs its signature; an empty file cannot be an image or a video)".into(),
+        ),
+        "invalid_text" => (
+            "invalid_arguments",
+            "the hub refused the title or the note: too long or contains control characters".into(),
+        ),
+        "rejected" => (
+            "share_unavailable",
+            "the hub does not accept shared files (rejected); the hub may need an update".into(),
+        ),
+        "hub_unreachable" => ("share_unavailable", "the hub is unreachable".into()),
+        "io" => (
+            "share_unreadable",
+            "the prepared copy of the file could not be read; share it again".into(),
+        ),
+        "checksum_mismatch" => (
+            "share_rejected",
+            "the hub did not accept the file: the content did not match its checksum on the way; share it again".into(),
+        ),
+        other => (
+            "share_rejected",
+            format!("the hub did not accept the file ({other})"),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_refusals_of_a_shared_file_keep_their_reason() {
+        use crate::media::PutError;
+        let code =
+            |message: &str| share_refusal(PutError::from_invalid_argument(message).reason()).0;
+        assert_eq!(code("media_too_large"), "share_too_large");
+        assert_eq!(code("media_invalid_name"), "share_invalid_name");
+        assert_eq!(code("media_invalid_type"), "share_invalid_type");
+        assert_eq!(code("media_invalid_text"), "invalid_arguments");
+        // Хаб без поддержки share отвечает общим `media_invalid`.
+        assert_eq!(code("media_invalid"), "share_unavailable");
+        assert_eq!(
+            share_refusal(PutError::Transport.reason()).0,
+            "share_unavailable"
+        );
+        assert_eq!(
+            share_refusal(PutError::Corrupt.reason()).0,
+            "share_rejected"
+        );
+        let (code, message) = share_refusal(PutError::Conflict.reason());
+        assert_eq!(code, "share_rejected");
+        assert!(message.contains("conflict"), "{message}");
+        assert_eq!(share_refusal(PutError::Io.reason()).0, "share_unreadable");
+        let (_, message) = share_refusal("invalid_type");
+        assert!(message.contains("empty file"), "{message}");
+    }
 
     #[test]
     fn missing_init_stops_as_start_failure_not_protocol_incompatibility() {

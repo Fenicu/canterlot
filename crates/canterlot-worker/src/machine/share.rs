@@ -287,7 +287,16 @@ fn extension(name: &str) -> String {
 }
 
 /// Тип по сигнатуре, затем по расширению; неизвестное отдаётся как поток байтов.
+/// Пустой файл не бывает картинкой или видео: он уходит обычным файлом, а не плеером.
 pub fn mime_for(name: &str, head: &[u8]) -> String {
+    let mime = mime_by_content(name, head);
+    if head.is_empty() && (mime.starts_with("image/") || mime.starts_with("video/")) {
+        return "application/octet-stream".into();
+    }
+    mime
+}
+
+fn mime_by_content(name: &str, head: &[u8]) -> String {
     if let Some(image) = media::sniff(head) {
         return image.to_owned();
     }
@@ -979,6 +988,41 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn copies_an_empty_file_as_a_plain_zero_byte_file() {
+        let dir = dir();
+        for (name, mime) in [
+            ("empty.txt", "text/plain"),
+            (".gitkeep", "application/octet-stream"),
+            // Пустой файл не бывает картинкой или видео, даже по расширению.
+            ("empty.png", "application/octet-stream"),
+            ("clip.mp4", "application/octet-stream"),
+            ("clip.webm", "application/octet-stream"),
+        ] {
+            let path = dir.path().join(name);
+            fs::write(&path, b"").unwrap();
+            let prepared = prepare_tmp(
+                dir.path(),
+                Uuid::now_v7(),
+                &path,
+                String::new(),
+                String::new(),
+            )
+            .unwrap();
+            assert_eq!(prepared.name, name);
+            assert_eq!(prepared.mime, mime, "{name}");
+            assert_eq!(prepared.size, 0);
+            assert_eq!(
+                prepared.sha256,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            );
+            assert_eq!((prepared.width, prepared.height), (None, None));
+            let copy = media::media_path(dir.path(), prepared.id);
+            assert_eq!(fs::metadata(&copy).unwrap().len(), 0);
+        }
+        assert_eq!(mime_for("clip.mp4", b"x"), "video/mp4");
     }
 
     #[test]

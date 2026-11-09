@@ -283,6 +283,66 @@ async fn shared_file_is_published_with_the_supervisor_block_id(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn empty_shared_file_reaches_the_owner_as_a_zero_byte_file(pool: PgPool) {
+    // Пустой файл: копия нулевой длины, SHA-256 пустого ввода, хаб публикует пустой blob.
+    // Расширение видео не делает пустой файл видео: он уходит обычным файлом.
+    let f = Fixture::new(&pool).await;
+    let text = f.root.path().join("empty.txt");
+    let clip = f.root.path().join("clip.mp4");
+    fs::write(&text, b"").unwrap();
+    fs::write(&clip, b"").unwrap();
+    let input = f
+        .submit(
+            &[],
+            &script(json!([
+                {"share_file": {"path": text.to_str().unwrap(), "title": "Empty"}},
+                {"share_file": {"path": clip.to_str().unwrap(), "title": "Clip"}},
+                {"delta": "пустые ушли"},
+            ])),
+        )
+        .await;
+    f.accepted(&input).await;
+    final_text(&f, "пустые ушли").await;
+    let mut rows: Vec<(Uuid, String, String, i64, String)> = Vec::new();
+    until(async || {
+        rows = sqlx::query_as(
+            "select id, name, mime, size_bytes, sha256 from block_files
+             where execution_id=$1 and attached_at is not null order by name",
+        )
+        .bind(f.execution)
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+        rows.len() == 2
+    })
+    .await;
+    let empty = sha(b"");
+    let summary: Vec<_> = rows
+        .iter()
+        .map(|(_, name, mime, size, sha256)| {
+            (name.as_str(), mime.as_str(), *size, sha256 == &empty)
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("clip.mp4", "application/octet-stream", 0, true),
+            ("empty.txt", "text/plain", 0, true),
+        ]
+    );
+    for (id, ..) in &rows {
+        assert_eq!(fs::metadata(hub_blob(&f, *id)).unwrap().len(), 0);
+        let state: String = sqlx::query_scalar("select state from attachments where id=$1")
+            .bind(id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "ready");
+    }
+    until(async || files_in(&f.exec_dir().join("media")).is_empty()).await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn media_upload_resumes_after_reconnect_without_duplicate_record(pool: PgPool) {
     let mut f = Fixture::new(&pool).await;
     let bytes = png(8, 6, 1_000_000);
