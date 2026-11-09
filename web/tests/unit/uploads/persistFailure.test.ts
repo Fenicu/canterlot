@@ -5,9 +5,9 @@ import { UploadManager } from "#lib/uploads/manager.js";
 import { openDb, purgeAllStores } from "#lib/storage/idb.js";
 
 describe("uploads/manager: отказ записи в IndexedDB", () => {
-  // bug: UploadManager.add/retry ставят загрузку в очередь только после успешной записи в IndexedDB;
-  // отказ записи (квота) оставляет файл в «queued» навсегда, и отправка блокируется «Файлы ещё загружаются».
-  it.skip("bug: upload_does_not_hang_in_queued_when_the_device_write_fails", async () => {
+  // Отказ записи (квота) не должен держать файл в «queued»: загрузка идёт из памяти,
+  // а лоток предупреждает, что после перезагрузки её не продолжить.
+  it("upload_does_not_hang_in_queued_when_the_device_write_fails", async () => {
     await purgeAllStores();
     const real = await openDb("persist-failure-owner");
     // Квота устройства исчерпана: запись файла в журнал загрузок отклонена.
@@ -25,9 +25,9 @@ describe("uploads/manager: отказ записи в IndexedDB", () => {
     try {
       const manager = new UploadManager({ db, api });
       const upload = manager.add("c-1", new File(["data"], "a.txt"), 0);
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      // Лоток должен либо загрузить файл, либо показать сбой; «загружается» навсегда блокирует отправку.
-      expect(["ready", "failed"]).toContain(upload.phase);
+      await vi.waitFor(() => expect(upload.phase).toBe("ready"), { timeout: 5000 });
+      expect(upload.attachmentId).toBe("att");
+      expect(upload.note).toBe("Не сохранено на устройстве: после перезагрузки загрузку не продолжить");
     } finally {
       process.off("unhandledRejection", swallow);
     }

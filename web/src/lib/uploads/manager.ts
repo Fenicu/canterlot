@@ -36,7 +36,13 @@ export interface Upload {
   sent: number;
   attachmentId?: string;
   error?: { code: string; message: string; retryable: boolean };
+  /** Предупреждение, которое не мешает отправке: например, загрузку не записать на устройство. */
+  note?: string;
 }
+
+/** Запись в IndexedDB отклонена: загрузка идёт из памяти и перезагрузку не переживёт. */
+export const NOT_PERSISTED_NOTE =
+  "Не сохранено на устройстве: после перезагрузки загрузку не продолжить";
 
 interface StoredUpload {
   id: string;
@@ -131,7 +137,7 @@ export class UploadManager {
     };
     this.#views.set(upload.id, upload);
     this.#records.set(upload.id, record);
-    void this.#persist(record).then(() => this.#enqueue(record));
+    void this.#persistOrNote(record).then(() => this.#enqueue(record));
     return upload;
   }
 
@@ -149,7 +155,7 @@ export class UploadManager {
     upload.error = undefined;
     record.phase = "queued";
     record.error = undefined;
-    void this.#persist(record).then(() => this.#enqueue(record));
+    void this.#persistOrNote(record).then(() => this.#enqueue(record));
   }
 
   /** Убирает загрузки из лотка без удаления на сервере: файл уже ушёл в сообщение. */
@@ -271,7 +277,7 @@ export class UploadManager {
         onPhase: (phase) => {
           view.phase = phase;
           record.phase = phase;
-          void this.#persist(record);
+          void this.#persistOrNote(record);
         },
         onProgress: (progress) => {
           view.sent = progress.uploaded;
@@ -282,7 +288,7 @@ export class UploadManager {
           view.attachmentId = attachmentId;
           record.attachmentId = attachmentId;
           record.chunkBytes = chunkBytes;
-          void this.#persist(record);
+          void this.#persistOrNote(record);
         },
       });
       if (controller.signal.aborted) return;
@@ -312,7 +318,7 @@ export class UploadManager {
       };
       record.phase = "failed";
       record.error = view.error;
-      await this.#persist(record);
+      await this.#persistOrNote(record);
     } finally {
       this.#controllers.delete(record.id);
     }
@@ -342,6 +348,19 @@ export class UploadManager {
     } catch (err) {
       if (err instanceof Error && err.message === "storage_retired") return;
       throw err;
+    }
+  }
+
+  /**
+   * Отказ записи (квота, хранилище недоступно) не останавливает загрузку: она идёт из памяти,
+   * а лоток показывает, что после перезагрузки её не продолжить.
+   */
+  async #persistOrNote(record: StoredUpload): Promise<void> {
+    try {
+      await this.#persist(record);
+    } catch {
+      const view = this.#views.get(record.id);
+      if (view) view.note = NOT_PERSISTED_NOTE;
     }
   }
 

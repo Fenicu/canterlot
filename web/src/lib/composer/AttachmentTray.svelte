@@ -53,7 +53,7 @@
             <span class="name">{item.name}</span>
             <span class="meta">{#if item.size > 0}{`${sizeLabel(item.size)} · `}{/if}<span class="status">{statusOf(item)}</span></span>
             <span class="bar" role="progressbar" aria-valuemin={0} aria-valuenow={item.phase === 'ready' ? item.size : item.sent} aria-valuemax={Math.max(item.size, 1)} aria-label={item.name}><span class="fill" style:width={`${percent(item)}%`}></span></span>
-            {#if item.error}<p class="error">{item.error.message}</p>{/if}
+            {#if item.error}<p class="error">{item.error.message}</p>{:else if item.note && item.phase !== 'ready'}<p class="note">{item.note}</p>{/if}
             {#if item.phase === 'failed'}
               <span class="retry"><Button onclick={() => uploads.retry(item.id)}>Повторить</Button></span>
             {/if}
@@ -77,6 +77,7 @@
   .info { display: flex; flex: 1; flex-direction: column; gap: var(--s1); min-width: 0; }
   .name { overflow: hidden; font-size: var(--fs-meta); text-overflow: ellipsis; white-space: nowrap; }
   .meta { color: var(--secondary); font-size: var(--fs-sm); }
+  .note { margin: 0; color: var(--secondary); font-size: var(--fs-sm); }
   [data-phase='ready'] .status { color: var(--success); }
   [data-phase='failed'] .status, .error { color: var(--danger); }
   .bar { display: block; height: var(--s1); overflow: hidden; border-radius: var(--radius-pill); background: var(--control-line); }
