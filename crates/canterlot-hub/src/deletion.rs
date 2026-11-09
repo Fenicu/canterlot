@@ -124,7 +124,7 @@ pub async fn delete(
     match outcome {
         Ok(done) if !done.replayed => {
             scheduler::notify_pool(pool);
-            free_files(blobs, files).await;
+            free_files(pool, blobs, files).await;
         }
         Ok(_) => {}
         Err(DeleteError::NotFound) if tombstoned(pool, owner_id, id).await? => {
@@ -234,7 +234,7 @@ pub async fn purge(
     match outcome {
         Ok(done) if !done.replayed => {
             scheduler::notify_pool(pool);
-            free_files(blobs, files).await;
+            free_files(pool, blobs, files).await;
         }
         Ok(_) => {}
         Err(DeleteError::NotFound) if tombstoned(pool, owner_id, id).await? => {
@@ -270,7 +270,7 @@ pub async fn purge_retained(
             tx.commit().await?;
             scheduler::notify_pool(pool);
             if let Some(blobs) = blobs {
-                free_files(blobs, files).await;
+                free_files(pool, blobs, files).await;
             }
             Ok(())
         }
@@ -307,7 +307,7 @@ pub async fn delete_retained(
             tx.commit().await?;
             scheduler::notify_pool(pool);
             if let Some(blobs) = blobs {
-                free_files(blobs, files).await;
+                free_files(pool, blobs, files).await;
             }
             Ok(())
         }
@@ -336,9 +336,27 @@ async fn owned_files(pool: &PgPool, owner_id: Uuid, id: Uuid) -> Result<Vec<Uuid
 }
 
 /// Файлы адресуются своим ID, поэтому чужих среди них нет. Занятый или неудалённый файл
-/// без строки в каталоге позже подберёт сборщик вложений.
-async fn free_files(blobs: &dyn BlobStore, files: Vec<Uuid>) {
-    for id in files {
+/// без строки в каталоге позже подберёт сборщик вложений. Список собран до транзакции,
+/// поэтому после commit файл освобождается, только если его строки больше нет: вложение,
+/// перешедшее к получателю пересылки, остаётся вместе со своим blob.
+async fn free_files(pool: &PgPool, blobs: &dyn BlobStore, files: Vec<Uuid>) {
+    let gone: Vec<Uuid> = match sqlx::query_scalar(
+        "select f.id from unnest($1::uuid[]) as f(id)
+          where not exists(select 1 from attachments a where a.id=f.id)
+            and not exists(select 1 from block_media m where m.id=f.id)
+            and not exists(select 1 from block_files b where b.id=f.id)",
+    )
+    .bind(&files)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(gone) => gone,
+        Err(error) => {
+            tracing::warn!(kind = "conversation_delete_file_failed", error = %error, "files left for the orphan sweep");
+            return;
+        }
+    };
+    for id in gone {
         let locked = match blobs.try_lock(id) {
             Ok(Some(locked)) => locked,
             Ok(None) => continue,
@@ -624,6 +642,24 @@ async fn purge_rows(
         "delete from block_media where conversation_id=$1",
         "delete from block_files where conversation_id=$1",
         "delete from commands where conversation_id=$1",
+        // Вложение, пересланное в ввод другой сессии (`sessions.send`, бриф `spawn`),
+        // переходит к получателю: его ввод ссылается на файл и живёт дольше отправителя.
+        // Ссылок из других разговоров может быть несколько; берётся наименьший ID, а при
+        // его удалении вложение снова уйдёт следующему. После последней ссылки вложение
+        // удаляется вместе с последним разговором, и висячих строк или файлов не остаётся.
+        "update attachments a set conversation_id=r.conversation_id
+           from (select ia.attachment_id,
+                        (array_agg(i.conversation_id order by i.conversation_id))[1] as conversation_id
+                   from input_attachments ia join inputs i on i.id=ia.input_id
+                  where i.conversation_id<>$1
+                  group by ia.attachment_id
+                 union all
+                 select sa.attachment_id,
+                        (array_agg(j.conversation_id order by j.conversation_id))[1]
+                   from scheduled_job_attachments sa join scheduled_jobs j on j.id=sa.job_id
+                  where j.conversation_id<>$1
+                  group by sa.attachment_id) r
+          where a.conversation_id=$1 and a.id=r.attachment_id",
         "delete from attachments where conversation_id=$1",
         "delete from conversation_group_pins where conversation_id=$1",
         "delete from queue_state where conversation_id=$1",

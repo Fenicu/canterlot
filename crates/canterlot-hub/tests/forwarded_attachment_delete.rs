@@ -1,5 +1,5 @@
-//! Review: deleting a conversation whose attachment was forwarded (sessions.send /
-//! sessions.spawn) to another conversation's input fails on the attachments FK.
+//! Удаление отправителя, чьё вложение переслано в ввод другой сессии (sessions.send /
+//! sessions.spawn): вложение переходит к получателю и удаляется с последней ссылкой.
 
 use std::{sync::Arc, time::Duration};
 
@@ -14,7 +14,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-#[ignore = "bug: пересланное вложение не даёт удалить разговор отправителя"]
 async fn sender_with_forwarded_attachment_can_be_deleted(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let a = seed.conversation_id;
@@ -73,7 +72,18 @@ async fn sender_with_forwarded_attachment_can_be_deleted(pool: PgPool) {
     .unwrap();
 
     let directory = tempfile::tempdir().unwrap();
-    let (_, blobs) = testkit::test_blob_store(directory.path());
+    let (config, _) = testkit::test_blob_store(directory.path());
+    let store = Arc::new(
+        canterlot_hub::attachments::LocalBlobStore::open(
+            &config,
+            Arc::new(canterlot_hub::attachments::NoTrace),
+        )
+        .unwrap(),
+    );
+    let blob = store.blob_path(file);
+    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    std::fs::write(&blob, b"%PDF").unwrap();
+    let blobs: Arc<dyn canterlot_hub::attachments::BlobStore> = store.clone();
     let result = deletion::delete(
         &pool,
         blobs.as_ref(),
@@ -87,4 +97,34 @@ async fn sender_with_forwarded_attachment_can_be_deleted(pool: PgPool) {
         result.is_ok(),
         "deleting the sender conversation failed: {result:?}"
     );
+    let owner: Option<Uuid> =
+        sqlx::query_scalar("select conversation_id from attachments where id=$1")
+            .bind(file)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        owner,
+        Some(b),
+        "the forwarded attachment must move to the recipient"
+    );
+    assert!(blob.exists(), "the recipient still references the blob");
+
+    let result = deletion::delete(
+        &pool,
+        blobs.as_ref(),
+        seed.owner_id,
+        b,
+        "review-delete-b",
+        Uuid::now_v7(),
+    )
+    .await;
+    assert!(result.is_ok(), "deleting the recipient failed: {result:?}");
+    let left: bool = sqlx::query_scalar("select exists(select 1 from attachments where id=$1)")
+        .bind(file)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!left, "the last reference is gone, so is the attachment");
+    assert!(!blob.exists(), "the blob is freed with the last reference");
 }

@@ -1086,7 +1086,7 @@ async fn a_conversation_of_another_owner_is_invisible(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_reference_from_a_neighbour_refuses_the_whole_delete(pool: PgPool) {
+async fn a_reference_from_a_neighbour_hands_the_attachment_over(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let groups = group(&f).await;
     let victim = seed_everything(&f, f.conversation, f.machine, groups).await;
@@ -1097,10 +1097,11 @@ async fn a_reference_from_a_neighbour_refuses_the_whole_delete(pool: PgPool) {
         .fetch_one(&f.pool)
         .await
         .unwrap();
+    let shared = victim.attachments[0];
     exec(
         &f.pool,
         "insert into input_attachments(input_id,attachment_id,position) values($1,$2,7)",
-        &[input, victim.attachments[0]],
+        &[input, shared],
     )
     .await;
     assert_eq!(
@@ -1109,12 +1110,49 @@ async fn a_reference_from_a_neighbour_refuses_the_whole_delete(pool: PgPool) {
             .status,
         204
     );
-    let before = mentions(&f.pool, &victim.needles).await;
     let response = purge(&f, victim.conversation, "shared-reference-purge").await;
-    assert_eq!(response.status, 409, "{:?}", response.body);
-    assert_eq!(code(&response), "invalid_state");
-    assert_eq!(mentions(&f.pool, &victim.needles).await, before);
-    assert!(f.blob_path(victim.attachments[0]).exists());
+    assert_eq!(response.status, 204, "{:?}", response.body);
+    // Вложение, на которое ссылается ввод соседа, переходит к нему вместе с blob;
+    // от удалённой сессии остаётся только сам файл в строках вложения и ссылки соседа.
+    let holder: Uuid = sqlx::query_scalar("select conversation_id from attachments where id=$1")
+        .bind(shared)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(holder, other);
+    assert!(f.blob_path(shared).exists());
+    let mut left = mentions(&f.pool, &victim.needles).await;
+    assert_eq!(
+        left.remove("conversation_tombstones").map(|t| t.len()),
+        Some(1)
+    );
+    let announced = left.remove("events").unwrap_or_default();
+    assert_eq!(announced.len(), 1, "only the deletion event: {announced:?}");
+    assert!(announced[0].contains("conversation_deleted"));
+    let told = left.remove("scheduled_jobs").unwrap_or_default();
+    assert!(
+        told.iter()
+            .all(|job| job.contains("session_task") && job.contains("deleted"))
+    );
+    assert!(
+        left.keys()
+            .all(|table| table == "attachments" || table == "input_attachments"),
+        "{left:#?}"
+    );
+    for rows in left.values() {
+        assert!(
+            rows.iter().all(|row| row.contains(&shared.to_string())),
+            "{left:#?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains(&victim.conversation.to_string())),
+            "{left:#?}"
+        );
+    }
+    for id in &victim.attachments[1..] {
+        assert!(!f.blob_path(*id).exists());
+    }
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
