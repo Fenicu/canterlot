@@ -199,6 +199,26 @@ test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the
   });
 });
 
+test('feed_marks_an_older_page_in_flight_until_it_is_placed', async ({ page }) => {
+  await boot(page, 180);
+  let release = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route('**/history**', async (route) => {
+    await gate;
+    await route.fallback();
+  });
+  const feed = page.locator('.feed');
+  await expect(feed).not.toHaveAttribute('data-paging');
+  const before = Number(await feed.getAttribute('data-loaded'));
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
+  await expect(feed).toHaveAttribute('data-paging', '');
+  release();
+  await expect(feed).not.toHaveAttribute('data-paging');
+  expect(Number(await feed.getAttribute('data-loaded'))).toBeGreaterThan(before);
+});
+
 test('reading_old_history_during_stream_keeps_the_anchor_within_one_pixel', async ({ page }) => {
   const { hub, api, id } = await boot(page, 80);
   const feed = page.locator('.feed');

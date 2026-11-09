@@ -57,7 +57,10 @@
   let controller = $state<ScrollController | null>(null);
   let range = $state({ start: 0, end: 0, padTop: 0, padBottom: 0 });
   let phase = $state<'idle' | 'streaming' | 'done' | 'error'>('idle');
-  let loading = false;
+  // Страница истории в пути или ещё встаёт на место (доводка держит читаемую строку несколько
+  // кадров): лента отмечает это `data-paging`, и следующую прокрутку можно ждать по нему.
+  let loading = $state(false);
+  let placing = $state(0);
   const ix = new HeightIndex(rowEstimate);
   const known = new SvelteMap<string, number>();
   const typical = new SvelteMap<string, number>();
@@ -560,6 +563,7 @@
       previousTail = tail;
       layout(list, el.scrollTop, el.clientHeight || 1);
       const target = anchor ? restoreAnchor(ix, keys, anchor) : null;
+      if (anchor) placing += 1;
       if (target !== null) layout(list, target, el.clientHeight || 1);
       void tick().then(() => {
         if (target !== null) scrollTo(target);
@@ -579,6 +583,7 @@
         const retry = (left: number): void => {
           nudge();
           if (left > 0) requestAnimationFrame(() => retry(left - 1));
+          else placing -= 1;
         };
         retry(12);
       });
@@ -628,6 +633,7 @@
     aria-live="off"
     aria-busy={streaming}
     data-loaded={entries.length}
+    data-paging={loading || placing > 0 ? '' : undefined}
     data-pinned={controller?.pinned ? '' : undefined}
     data-rows={windowRows.length}
     data-renders="0"
