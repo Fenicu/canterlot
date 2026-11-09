@@ -32,8 +32,21 @@ pub enum DeleteError {
     NotTrashed,
     #[error("idempotency conflict")]
     IdempotencyConflict,
+    /// Задание сессии сейчас выполняет планировщик: удаление повторяется позже.
+    #[error("conversation jobs are running")]
+    Busy,
     #[error(transparent)]
     Db(sqlx::Error),
+}
+
+impl crate::db::TransientError for DeleteError {
+    fn is_transient(&self) -> bool {
+        match self {
+            Self::Busy => true,
+            Self::Db(error) => crate::db::is_transient(error),
+            _ => false,
+        }
+    }
 }
 
 impl From<sqlx::Error> for DeleteError {
@@ -467,6 +480,25 @@ async fn delete_in_tx(
     trash_guard: TrashGuard,
 ) -> Result<Value, DeleteError> {
     conversations::lock_owner(&mut *conn, owner_id).await?;
+    // Задания разговора берутся до очереди и без ожидания: планировщик держит строку
+    // задания и потом ждёт очередь, а под блокировкой очереди ждать задание нельзя.
+    // Запертое задание уже выполняется; удаление откатывается и повторяется позже.
+    let free: Vec<Uuid> = sqlx::query_scalar(
+        "select id from scheduled_jobs where conversation_id=$1 order by id for update skip locked",
+    )
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let busy: bool = sqlx::query_scalar(
+        "select exists(select 1 from scheduled_jobs where conversation_id=$1 and id<>all($2))",
+    )
+    .bind(id)
+    .bind(&free)
+    .fetch_one(&mut *conn)
+    .await?;
+    if busy {
+        return Err(DeleteError::Busy);
+    }
     // Порядок ingest: курсор раньше очереди; очередь раньше строки разговора.
     // Встречное исполнение после блокировки очереди либо живое и даёт отказ, либо его
     // курсор удержит внешний ключ.

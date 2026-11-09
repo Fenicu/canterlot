@@ -55,7 +55,6 @@ transient_from_db!(
     crate::conversations::SettingsError,
     crate::conversations::UpdateError,
     crate::crunch::CrunchError,
-    crate::deletion::DeleteError,
     crate::executions::ExecutionError,
     crate::groups::GroupError,
     crate::presets::PresetError,

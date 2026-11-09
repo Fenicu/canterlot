@@ -1403,6 +1403,7 @@ impl Scheduler {
                     | crate::deletion::DeleteError::WorktreeNotRemoved
                     | crate::deletion::DeleteError::Referenced
                     | crate::deletion::DeleteError::NotTrashed
+                    | crate::deletion::DeleteError::Busy
                     | crate::deletion::DeleteError::IdempotencyConflict,
                 ) => {}
             }
@@ -1453,6 +1454,7 @@ impl Scheduler {
                     | crate::deletion::DeleteError::WorktreeNotRemoved
                     | crate::deletion::DeleteError::Referenced
                     | crate::deletion::DeleteError::NotTrashed
+                    | crate::deletion::DeleteError::Busy
                     | crate::deletion::DeleteError::IdempotencyConflict,
                 ) => {}
             }

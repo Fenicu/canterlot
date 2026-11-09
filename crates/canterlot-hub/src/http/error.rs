@@ -518,6 +518,7 @@ impl From<crate::deletion::DeleteError> for ApiError {
                 ApiError::new(ErrorCode::InvalidState)
             }
             DeleteError::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
+            DeleteError::Busy => ApiError::new(ErrorCode::DbUnavailable),
             DeleteError::Db(error) => error.into(),
         }
     }
