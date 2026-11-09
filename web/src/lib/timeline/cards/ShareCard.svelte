@@ -14,7 +14,7 @@
   let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading: string; onclose: () => void }> | null>(null);
   let viewing = $state<number | null>(null);
   // Картинкой файл считается так же, как в плитке и в обычном блоке: по типу или по расширению.
-  const isImage = (file: { name: string; mime: string }) => attachmentKind({ name: file.name, mime: file.mime, image: false }) === 'image';
+  const isImage = (file: { name: string; mime: string; size?: number }) => attachmentKind({ name: file.name, mime: file.mime, image: false, size: file.size }) === 'image';
   const shots = $derived<ViewerShot[]>(
     data.files
       .filter(isImage)

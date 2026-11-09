@@ -31,7 +31,8 @@
   }
 
   function percent(item: Upload): number {
-    if (item.phase === 'ready') return 100;
+    // Пустой файл передан целиком, едва начавшись: тел нет, остаётся только завершение.
+    if (item.phase === 'ready' || item.size === 0) return 100;
     return Math.round((item.sent / Math.max(item.size, 1)) * 100);
   }
 
@@ -51,8 +52,8 @@
           <span class="tile" aria-hidden="true">{extension(item.name)}</span>
           <div class="info">
             <span class="name">{item.name}</span>
-            <span class="meta">{#if item.size > 0}{`${sizeLabel(item.size)} · `}{/if}<span class="status">{statusOf(item)}</span></span>
-            <span class="bar" role="progressbar" aria-valuemin={0} aria-valuenow={item.phase === 'ready' ? item.size : item.sent} aria-valuemax={Math.max(item.size, 1)} aria-label={item.name}><span class="fill" style:width={`${percent(item)}%`}></span></span>
+            <span class="meta">{`${sizeLabel(item.size)} · `}<span class="status">{statusOf(item)}</span></span>
+            <span class="bar" role="progressbar" aria-valuemin={0} aria-valuenow={item.phase === 'ready' || item.size === 0 ? Math.max(item.size, 1) : item.sent} aria-valuemax={Math.max(item.size, 1)} aria-label={item.name}><span class="fill" style:width={`${percent(item)}%`}></span></span>
             {#if item.error}<p class="error">{item.error.message}</p>{:else if item.note && item.phase !== 'ready'}<p class="note">{item.note}</p>{/if}
             {#if item.phase === 'failed'}
               <span class="retry"><Button onclick={() => uploads.retry(item.id)}>Повторить</Button></span>

@@ -406,12 +406,6 @@ test('attachment_tray_shows_progress_errors_and_limits', async ({ page }) => {
   await page.setInputFiles('input[type=file]', files);
   await expect(page.getByText('Не более 10 файлов в одном сообщении')).toBeVisible();
   await expect(page.getByRole('progressbar').first()).toBeVisible();
-  await page.setInputFiles('input[type=file]', {
-    name: 'empty.txt',
-    mimeType: 'text/plain',
-    buffer: Buffer.alloc(0)
-  });
-  await expect(page.getByText('Файл пустой')).toBeVisible();
   const dir = mkdtempSync(join(tmpdir(), 'canterlot-attach-'));
   try {
     const over = join(dir, 'over.bin');

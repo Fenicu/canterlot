@@ -58,7 +58,7 @@
   const readyShots = $derived(shots.filter((shot) => shot.ready));
   const files = $derived(block.files);
   // Картинкой файл считается так же, как в плитке: по типу или по расширению файла без типа.
-  const isImage = (file: { name: string; mime: string }) => attachmentKind({ name: file.name, mime: file.mime, image: false }) === 'image';
+  const isImage = (file: { name: string; mime: string; size?: number }) => attachmentKind({ name: file.name, mime: file.mime, image: false, size: file.size }) === 'image';
   const fileShots = $derived<ViewerShot[]>(
     files
       .filter(isImage)
@@ -75,7 +75,7 @@
   );
   let fileViewing: number | null = $state(null);
 
-  async function viewFile(file: { attachment_id: string; name: string; mime: string }): Promise<void> {
+  async function viewFile(file: { attachment_id: string; name: string; mime: string; size?: number }): Promise<void> {
     if (!isImage(file)) return;
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
     fileViewing = Math.max(0, fileShots.findIndex((shot) => shot.media_id === file.attachment_id));

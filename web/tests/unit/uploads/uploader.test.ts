@@ -77,6 +77,44 @@ describe("uploads/uploader", () => {
     expect(progressReports.at(-1)?.uploaded).toBe(20 * 1024);
   });
 
+  it("empty_file_has_no_patch_loop_and_reports_complete_progress", async () => {
+    const empty = new File([], ".gitkeep");
+    const progress: Array<{ uploaded: number; total: number }> = [];
+    const phases: string[] = [];
+    const mockApi = {
+      createAttachment: vi.fn().mockResolvedValue({
+        id: "att-empty",
+        state: "created",
+        upload: { offset: 0, upload_chunk_bytes: 8192 },
+      }),
+      headContent: vi.fn().mockResolvedValue({ offset: 0, length: 0 }),
+      patchContent: vi.fn(),
+      completeAttachment: vi.fn().mockResolvedValue({
+        id: "att-empty",
+        state: "ready",
+      }),
+    };
+    const res = await uploadFile(empty, conversationId, {
+      api: mockApi,
+      onProgress: (p) => progress.push(p),
+      onPhase: (phase) => phases.push(phase),
+    });
+    expect(res).toEqual({
+      id: "att-empty",
+      status: "ready",
+      size: 0,
+      sha256:
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    });
+    expect(mockApi.createAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({ size: 0, mime: "application/octet-stream" }),
+      expect.anything(),
+    );
+    expect(mockApi.patchContent).not.toHaveBeenCalled();
+    expect(progress).toEqual([{ uploaded: 0, total: 0 }]);
+    expect(phases).toEqual(["hashing", "creating", "uploading", "completing"]);
+  });
+
   it("interrupted_upload_resumes_from_the_head_offset", async () => {
     const chunkBytes = 8 * 1024;
     // Server reports via HEAD that 8192 bytes were already uploaded

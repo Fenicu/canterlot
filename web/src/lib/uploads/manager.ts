@@ -234,7 +234,6 @@ export class UploadManager {
 
   #assertLimits(file: File, countInDraft: number): void {
     const limits = this.#limits();
-    if (file.size === 0) throw new UploadLimitError("empty");
     if (file.size > limits.maxBytes) throw new UploadLimitError("too_large");
     if (countInDraft + 1 > limits.maxPerInput)
       throw new UploadLimitError("too_many");

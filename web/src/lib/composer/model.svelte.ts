@@ -285,7 +285,7 @@ export class ComposerModel {
       mime: u.mime || "application/octet-stream",
       size: u.size,
       sha256: "",
-      image: attachmentKind({ name: u.name, mime: u.mime ?? "", image: false }) === "image",
+      image: attachmentKind({ name: u.name, mime: u.mime ?? "", image: false, size: u.size }) === "image",
     }));
 
     const key = crypto.randomUUID();
@@ -448,8 +448,7 @@ export class ComposerModel {
         count += 1;
       } catch (err) {
         if (err instanceof UploadLimitError) {
-          if (err.reason === "empty") this.errorMessage = "Файл пустой";
-          else if (err.reason === "too_large")
+          if (err.reason === "too_large")
             this.errorMessage = "Файл больше 100 МиБ";
           else if (err.reason === "too_many")
             this.errorMessage = "Не более 10 файлов в одном сообщении";

@@ -99,6 +99,20 @@ describe("timeline/AttachmentTile", () => {
     expect(target.textContent).toContain("Вложение");
   });
 
+  it("an_empty_file_is_a_download_tile_with_zero_bytes_even_with_an_image_name", () => {
+    for (const [name, mime] of [["empty.txt", "text/plain"], ["empty.png", "application/octet-stream"], ["clip.mp4", "application/octet-stream"]]) {
+      const { target } = render(ref({ name, mime, image: false, size: 0 }));
+      expect(target.querySelector("img")).toBeNull();
+      const tile = target.querySelector("a")!;
+      expect(tile.getAttribute("data-kind")).toBe("file");
+      expect(tile.textContent).toContain(name);
+      expect(tile.querySelector(".meta")!.textContent).toBe("0 Б");
+      void unmount(instance!);
+      instance = undefined;
+      document.body.textContent = "";
+    }
+  });
+
   it("an_image_that_fails_to_load_falls_back_to_the_tile", () => {
     const { target } = render(ref({}));
     target.querySelector("img")!.dispatchEvent(new Event("error"));

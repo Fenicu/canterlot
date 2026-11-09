@@ -17,7 +17,9 @@
   const name = $derived(file.name || 'Вложение');
   const url = $derived(attachmentUrl(file.attachment_id));
   const thumb = $derived(showsThumb(file) && !broken);
-  const size = $derived(file.size > 0 ? fmt.bytes(file.size) : '');
+  // Заготовка без метаданных (`blankAttachment`) несёт размер 0 без имени: её размер неизвестен.
+  // Пустой файл с именем — настоящие «0 Б».
+  const size = $derived(file.size > 0 || (file.size === 0 && file.name !== '') ? fmt.bytes(file.size) : '');
   const office = $derived(isOfficeKind(kind) ? kind : null);
   const meta = $derived([office ? officeLabel(office) : '', size].filter(Boolean).join(' · '));
   const extension = $derived.by(() => {

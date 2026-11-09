@@ -37,7 +37,9 @@ function extensionOf(name: string): string {
 	return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
 }
 
-export function attachmentKind(file: Pick<AttachmentRef, 'name' | 'mime' | 'image'>): AttachmentKind {
+export function attachmentKind(file: Pick<AttachmentRef, 'name' | 'mime' | 'image'> & { size?: number }): AttachmentKind {
+	// Пустой файл с именем не бывает картинкой, видео или документом: только скачивание.
+	if (file.size === 0 && file.name !== '') return 'file';
 	const generic = file.mime === '' || file.mime === 'application/octet-stream';
 	if (file.image || IMAGE_MIMES.has(file.mime) || (generic && IMAGE_EXTENSIONS.has(extensionOf(file.name)))) return 'image';
 	if (file.mime.startsWith('video/') || (generic && VIDEO_EXTENSIONS.has(extensionOf(file.name)))) return 'video';

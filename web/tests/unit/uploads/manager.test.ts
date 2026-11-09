@@ -20,23 +20,56 @@ describe("uploads/manager", () => {
     manager = new UploadManager({ db });
   });
 
-  it("uploads_reject_empty_oversize_and_the_eleventh_file_with_russian_reasons", async () => {
-    // 1. Empty file (size === 0)
-    const emptyFile = new File([], "empty.txt");
-    expect(() => manager.add("c-1", emptyFile, 0)).toThrow("Файл пустой");
-
-    // 2. Oversize file (> 104857600 bytes)
+  it("uploads_reject_oversize_and_the_eleventh_file_with_russian_reasons", async () => {
+    // 1. Oversize file (> 104857600 bytes)
     const oversizeFile = new File(["x"], "big.bin");
     Object.defineProperty(oversizeFile, "size", { value: 104857601 });
     expect(() => manager.add("c-1", oversizeFile, 0)).toThrow(
       "Файл больше 100 МиБ",
     );
 
-    // 3. 11th file (currentDraftCount + 1 > 10)
+    // 2. 11th file (currentDraftCount + 1 > 10)
     const normalFile = new File(["valid content"], "file.txt");
     expect(() => manager.add("c-1", normalFile, 10)).toThrow(
       "Не более 10 файлов в одном сообщении",
     );
+  });
+
+  it("an_empty_file_is_created_and_completed_without_any_patch_and_shows_full_progress", async () => {
+    const empty = new File([], "empty.txt", { type: "text/plain" });
+    const mockApi = {
+      createAttachment: vi.fn().mockResolvedValue({
+        id: "att-empty",
+        state: "created",
+        upload: { offset: 0, upload_chunk_bytes: 1024 },
+      }),
+      headContent: vi.fn().mockResolvedValue({ offset: 0, length: 0 }),
+      patchContent: vi.fn(),
+      completeAttachment: vi
+        .fn()
+        .mockResolvedValue({ id: "att-empty", state: "ready" }),
+      deleteAttachment: vi.fn(),
+    };
+    const uploading = new UploadManager({
+      db: await openDb(ownerId),
+      api: mockApi,
+    });
+    const upload = uploading.add("c-1", empty, 0);
+    await vi.waitFor(() => expect(upload.phase).toBe("ready"));
+    expect(mockApi.createAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "empty.txt",
+        size: 0,
+        sha256:
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      }),
+      expect.anything(),
+    );
+    expect(mockApi.patchContent).not.toHaveBeenCalled();
+    expect(mockApi.completeAttachment).toHaveBeenCalledOnce();
+    expect(upload.size).toBe(0);
+    expect(upload.sent).toBe(0);
+    expect(upload.attachmentId).toBe("att-empty");
   });
 
   it("slice_size_is_the_upload_chunk_bytes_from_config", async () => {
@@ -345,9 +378,7 @@ describe("uploads/manager", () => {
       expect(() => limited.add("c-1", edge, 10)).toThrow(
         "Не более 10 файлов в одном сообщении",
       );
-      expect(() => limited.add("c-1", new File([], "empty.bin"), 0)).toThrow(
-        "Файл пустой",
-      );
+      expect(() => limited.add("c-1", new File([], "empty.bin"), 9)).not.toThrow();
       expect(hasher.sha256).not.toHaveBeenCalled();
     });
   });

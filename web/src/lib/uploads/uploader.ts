@@ -22,15 +22,13 @@ export function attachmentName(name: string): string {
 }
 
 export class UploadLimitError extends Error {
-  readonly reason: "empty" | "too_large" | "too_many";
+  readonly reason: "too_large" | "too_many";
 
-  constructor(reason: "empty" | "too_large" | "too_many") {
+  constructor(reason: "too_large" | "too_many") {
     const message =
-      reason === "empty"
-        ? "Файл пустой"
-        : reason === "too_large"
-          ? "Файл больше 100 МиБ"
-          : "Не более 10 файлов в одном сообщении";
+      reason === "too_large"
+        ? "Файл больше 100 МиБ"
+        : "Не более 10 файлов в одном сообщении";
     super(message);
     this.name = "UploadLimitError";
     this.reason = reason;
@@ -128,10 +126,7 @@ export async function uploadFile(
   conversationId: string,
   options?: UploadFileOptions,
 ): Promise<UploadFileResult> {
-  // 1. Валидация
-  if (file.size === 0) {
-    throw new UploadLimitError("empty");
-  }
+  // 1. Валидация. Пустой файл законен: тел PATCH нет, хаб публикует его при завершении.
   if (file.size > 104857600) {
     throw new UploadLimitError("too_large");
   }
@@ -224,6 +219,7 @@ export async function uploadFile(
       throw err;
     }
   }
+  if (file.size === 0) options?.onProgress?.({ uploaded: 0, total: 0 });
 
   options?.onPhase?.("completing");
   while (true) {
