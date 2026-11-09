@@ -230,3 +230,87 @@ describe("share_file: one card per share", () => {
     expect(carry.kind === "block" && isShareCarrier(carry.block)).toBe(true);
   });
 });
+
+// Codex зовёт MCP `сервер.инструмент` (codex/events.rs, `mcp_summary`): вызов модели —
+// `canterlot.share_file` от `orchestrator`; носитель воркера 1.24.1 — `share_file`
+// без модели, без хода и с меткой `main`.
+function codexText(id: string, run: string | null = RUN): TimelineEntry {
+  const made = text(id, run);
+  if (made.kind === "block") made.block.model = "gpt-5.5-codex";
+  return made;
+}
+
+function codexCall(id: string, input: { path: string; title?: string }, opts: { run?: string | null; at?: number } = {}): TimelineEntry {
+  const made = mcpCall(id, input, { ...opts, tool: "canterlot.share_file" });
+  if (made.kind === "block") made.block.model = "gpt-5.5-codex";
+  return made;
+}
+
+function runOf(row: Row): string | null {
+  for (const item of row.entries) if (item.kind === "block" && item.block.inputCommandId) return item.block.inputCommandId;
+  return null;
+}
+
+describe("share_file: an unpaired carrier has no group of its own", () => {
+  const TITLE = "Улучшенный скриншот — JPG";
+  const JPG = { attachment_id: "att", name: "shot.jpg", mime: "image/jpeg", size: 1_363_148, title: TITLE, note: "", width: 1920, height: 1080 };
+
+  it("codex_carrier_far_from_its_call_joins_the_answer_before_it", () => {
+    // Пара не сложилась (больше получаса после вызова): носитель встаёт в карточку хода рядом.
+    const call = codexCall("call", { path: "/tmp/shot.jpg", title: TITLE });
+    const said = codexText("said");
+    const carry = carrier("carrier", TITLE, [JPG], { at: AT + 45 * 60_000 });
+    const entries = [call, said, carry];
+    for (const rows of [new RowsCache().build(entries, { now: AT }).rows, buildRows(entries, { now: AT })]) {
+      expect(answers(rows)).toHaveLength(1);
+      expect(shown(rows)).toEqual(["call", "said", "carrier"]);
+      expect(runOf(answers(rows)[0]!)).toBe(RUN);
+    }
+  });
+
+  it("codex_carrier_whose_call_is_on_an_older_page_joins_the_loaded_answer", () => {
+    const said = codexText("said");
+    const carry = carrier("carrier", TITLE, [JPG]);
+    const { rows } = new RowsCache().build([said, carry], { now: AT });
+    expect(answers(rows)).toHaveLength(1);
+    expect(runOf(answers(rows)[0]!)).toBe(RUN);
+  });
+
+  it("live_carrier_after_an_answer_joins_it_without_a_rebuild", () => {
+    const cache = new RowsCache();
+    const said = codexText("said");
+    cache.build([said], { now: AT });
+    const carry = carrier("carrier", TITLE, [JPG]);
+    const { rows } = cache.build([said, carry], { now: AT });
+    expect(rows).toEqual(buildRows([said, carry], { now: AT }));
+    expect(answers(rows)).toHaveLength(1);
+  });
+
+  it("the_owner_message_between_keeps_the_carrier_apart_and_it_has_no_run", () => {
+    const said = codexText("said");
+    const owner: TimelineEntry = {
+      kind: "input",
+      key: "input:owner",
+      seq: "99",
+      input: { placement: "feed", origin: { kind: "owner" }, createdAt: AT + 100 } as never,
+    };
+    const carry = carrier("carrier", TITLE, [JPG]);
+    const rows = answers(buildRows([said, owner, carry], { now: AT }));
+    expect(rows).toHaveLength(2);
+    expect(runOf(rows[1]!)).toBeNull();
+  });
+
+  it("a_subagent_answer_does_not_take_the_carrier", () => {
+    const sub = codexText("sub");
+    if (sub.kind === "block") sub.block.agent = "Explore";
+    const carry = carrier("carrier", TITLE, [JPG]);
+    expect(answers(buildRows([sub, carry], { now: AT }))).toHaveLength(2);
+  });
+
+  it("an_ordinary_block_without_a_turn_still_starts_its_own_card", () => {
+    const said = codexText("said");
+    const loose = codexText("loose", null);
+    expect(answers(buildRows([said, loose], { now: AT }))).toHaveLength(2);
+  });
+});
+

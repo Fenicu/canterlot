@@ -64,6 +64,15 @@ function isShareCall(block: BlockModel): boolean {
   );
 }
 
+/**
+ * Носитель файла без хода, не нашедший вызов, встаёт в соседнюю карточку основного
+ * агента: прежний воркер писал его сразу после вызова, в том же ходе, только без хода.
+ * Отдельная карточка из одного носителя — лишний «Codex 17:13» без сведений о ходе.
+ */
+function joinsNeighbour(block: BlockModel, head: BlockModel): boolean {
+  return isShareCarrier(block) && isMainAgent(block.agent) && isMainAgent(head.agent);
+}
+
 /** Подготовка и передача файла укладываются в полчаса: дальше носитель не ищет вызов. */
 const SHARE_PAIR_MS = 30 * 60_000;
 
@@ -347,11 +356,13 @@ class RowAccumulator {
       return true;
     }
     const run = entry.block.inputCommandId;
+    const first = this.card?.entries[0];
     if (
       this.card &&
-      run &&
-      this.card.entries[0]?.kind === "block" &&
-      this.card.entries[0].block.inputCommandId === run
+      first?.kind === "block" &&
+      (run
+        ? first.block.inputCommandId === run
+        : joinsNeighbour(entry.block, first.block))
     ) {
       this.#replaceLast(this.#withEntry(this.card, entry), fork);
       return true;
