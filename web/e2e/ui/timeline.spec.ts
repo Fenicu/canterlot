@@ -78,25 +78,43 @@ test('dom_is_bounded_with_10000_items_in_a_chat', async ({ page }) => {
 test('memory_is_bounded_after_scrolling_through_10000_items', async ({ page }) => {
   test.setTimeout(120_000);
   await boot(page, 10_000);
-  const feed = page.locator('.feed');
-  for (let step = 0; step < 80; step++) {
-    await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
-    if (await page.getByRole('button', { name: 'К последним сообщениям' }).isVisible()) break;
-    await page.waitForTimeout(150);
-  }
-  await expect.poll(async () => Number(await feed.getAttribute('data-loaded'))).toBeLessThanOrEqual(3000);
+  await detachTail(page);
+  await expect.poll(async () => Number(await page.locator('.feed').getAttribute('data-loaded'))).toBeLessThanOrEqual(3000);
   await expect(page.getByRole('button', { name: 'К последним сообщениям' })).toBeVisible();
 });
 
-async function detachTail(page: import('@playwright/test').Page): Promise<void> {
+/**
+ * Листает ленту к краю, пока не выполнится `done`. Шаг крутит колесо и двигает прокрутку,
+ * как человек, и ждёт, пока лента примет запрошенную страницу (`data-paging`): под
+ * нагрузкой страница идёт дольше любого заранее выбранного шага, поэтому предел — срок
+ * теста, а не число шагов.
+ */
+async function pageUntil(page: import('@playwright/test').Page, edge: 'top' | 'bottom', done: () => Promise<boolean>): Promise<void> {
   const feed = page.locator('.feed');
+  await expect(async () => {
+    const loaded = await feed.evaluate((el, edge) => new Promise<string>((resolve) => {
+      el.dispatchEvent(new WheelEvent('wheel', { deltaY: edge === 'top' ? -100 : 100 }));
+      el.scrollTop = edge === 'top' ? 0 : el.scrollHeight;
+      const idle = (): void => {
+        if (el.hasAttribute('data-paging')) return;
+        watcher.disconnect();
+        resolve(el.dataset.loaded ?? '');
+      };
+      const watcher = new MutationObserver(idle);
+      // Событие прокрутки приходит в следующем кадре, и только оно просит страницу.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        watcher.observe(el, { attributes: true, attributeFilter: ['data-paging'] });
+        idle();
+      }));
+    }), edge);
+    expect(await done(), `окно из ${loaded} записей ещё не у цели`).toBe(true);
+  }).toPass({ intervals: [0], timeout: 0 });
+}
+
+/** Окно оторвалось от хвоста: старшие страницы вытеснили последние сообщения. */
+async function detachTail(page: import('@playwright/test').Page): Promise<void> {
   const jump = page.getByRole('button', { name: 'К последним сообщениям' });
-  for (let step = 0; step < 120; step++) {
-    await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
-    if (await jump.isVisible()) return;
-    await page.waitForTimeout(100);
-  }
-  await expect(jump).toBeVisible();
+  await pageUntil(page, 'top', () => jump.isVisible());
 }
 
 test('detached_window_stays_live_and_the_jump_button_returns_to_the_tail', async ({ page }) => {
@@ -142,11 +160,7 @@ test('scrolling_down_a_detached_window_loads_newer_pages_back_to_the_tail', asyn
   await detachTail(page);
   const feed = page.locator('.feed');
   const jump = page.getByRole('button', { name: 'К последним сообщениям' });
-  for (let step = 0; step < 120 && (await jump.isVisible()); step++) {
-    await feed.evaluate((el) => { el.scrollTop = el.scrollHeight; });
-    await page.waitForTimeout(100);
-  }
-  await expect(jump).toBeHidden();
+  await pageUntil(page, 'bottom', () => jump.isHidden());
   await expect.poll(async () => Number(await feed.getAttribute('data-loaded'))).toBeLessThanOrEqual(3000);
   await expect(page.locator('[data-row]').last()).toContainText('3200');
 });
