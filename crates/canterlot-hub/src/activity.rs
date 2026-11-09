@@ -675,6 +675,8 @@ pub async fn refresh_with_metrics(
         serde_json::to_value(&activity.evidence).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     let unread:i64=sqlx::query_scalar("select count(*) from blocks where conversation_id=$1 and kind in ('text','warning','error') and state in ('streaming','final') and created_seq>$2").bind(conversation_id).bind(read_seq).fetch_one(&mut *conn).await?;
     let last_activity:Option<DateTime<Utc>>=sqlx::query_scalar("select date_trunc('minute',greatest((select max(committed_at) from inputs where conversation_id=$1),(select max(created_at) from blocks where conversation_id=$1)))").bind(conversation_id).fetch_one(&mut *conn).await?;
+    let resolved =
+        crate::model_resolution::conversation_resolved(&mut *conn, conversation_id, &model).await?;
     let old = sqlx::query("select * from conversation_derived where conversation_id=$1 for update")
         .bind(conversation_id)
         .fetch_optional(&mut *conn)
@@ -716,6 +718,7 @@ pub async fn refresh_with_metrics(
             && old.try_get::<Value, _>("hold_reasons")? == holds
             && old.try_get::<Option<DateTime<Utc>>, _>("last_activity_at")? == last_activity
             && old.try_get::<String, _>("effective_model")? == model
+            && old.try_get::<String, _>("effective_model_resolved")? == resolved
             && old.try_get::<String, _>("effective_effort")? == effort
             && old.try_get::<String, _>("effective_permission_mode")? == permission
             && old.try_get::<bool, _>("crunch_enabled")? == crunch
@@ -731,9 +734,14 @@ pub async fn refresh_with_metrics(
         .bind(last_activity)
         .execute(&mut *conn)
         .await?;
-    sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at,effective_model,effective_effort,effective_permission_mode,crunch_enabled) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) on conflict(conversation_id) do update set activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,effective_model=excluded.effective_model,effective_effort=excluded.effective_effort,effective_permission_mode=excluded.effective_permission_mode,crunch_enabled=excluded.crunch_enabled,updated_at=clock_timestamp()")
-        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).execute(&mut *conn).await?;
-    let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":{"model":model,"effort":effort,"permission_mode":permission},"crunch":{"enabled":crunch},"working_ms":working_ms});
+    sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at,effective_model,effective_effort,effective_permission_mode,crunch_enabled,effective_model_resolved) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) on conflict(conversation_id) do update set effective_model_resolved=excluded.effective_model_resolved, activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,effective_model=excluded.effective_model,effective_effort=excluded.effective_effort,effective_permission_mode=excluded.effective_permission_mode,crunch_enabled=excluded.crunch_enabled,updated_at=clock_timestamp()")
+        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).bind(&resolved).execute(&mut *conn).await?;
+    // Конкретная модель приходит, только когда известна: без неё объект настроек прежний.
+    let mut settings = json!({"model":model,"effort":effort,"permission_mode":permission});
+    if !resolved.is_empty() {
+        settings["model_resolved"] = json!(resolved);
+    }
+    let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":settings,"crunch":{"enabled":crunch},"working_ms":working_ms});
     for scope in [
         Scope::Conversation {
             id: conversation_id,

@@ -143,6 +143,9 @@ pub async fn start_block(
     if inserted == 0 {
         return Ok(BlockOutcome::Ignored(BlockIgnored::UnknownBlock));
     }
+    if crate::agents::is_main_agent(&fact.agent) {
+        crate::model_resolution::observe(conn, run, &fact.model).await?;
+    }
     let event = emit(conn, run, "block_started", json!({"block_id": block_id, "rev": fact.rev, "kind": fact.kind, "input_command_id": input, "parent_block_id": parent, "agent": if fact.agent.is_empty(){"main"}else{&fact.agent}, "model": fact.model, "tool_name": non_empty(&fact.tool_name), "summary": non_empty(&fact.summary), "approved_by": non_empty(&fact.approved_by)}), correlation_id).await?;
     sqlx::query("update blocks set created_seq=$2,created_at=$3 where block_id=$1")
         .bind(block_id)

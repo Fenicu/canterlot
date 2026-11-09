@@ -508,6 +508,17 @@
         "model": {
           "type": "string"
         },
+        "model_resolved": {
+          "description": "Конкретная модель за псевдонимом model; null — неизвестна",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "effort": {
           "type": "string"
         },
@@ -2428,6 +2439,17 @@
             },
             "model": {
               "type": "string"
+            },
+            "model_resolved": {
+              "description": "Конкретная модель за псевдонимом model; null — неизвестна",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "effort": {
               "type": "string"

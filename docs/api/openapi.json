@@ -8489,6 +8489,13 @@
               "model": {
                 "type": "string"
               },
+              "model_resolved": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Конкретная модель за псевдонимом `model` (`fable[1m]` → `claude-fable-5-2`): из ходов\nсессии, до первого хода на этой модели — последнее наблюдение на машине; `None` — неизвестно."
+              },
               "permission_mode": {
                 "type": "string"
               },
@@ -11194,6 +11201,13 @@
               "model": {
                 "type": "string"
               },
+              "model_resolved": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Конкретная модель за псевдонимом `model` (`fable[1m]` → `claude-fable-5-2`): из ходов\nсессии, до первого хода на этой модели — последнее наблюдение на машине; `None` — неизвестно."
+              },
               "permission_mode": {
                 "type": "string"
               },
@@ -11817,6 +11831,17 @@
               "null"
             ],
             "description": "Модель принимает картинки; `null`: у харнесса это не свойство модели."
+          },
+          "resolved": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ResolutionView",
+                "description": "Во что псевдоним разрешился на этой машине в последний раз; нет — не наблюдали."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "title": {
             "type": "string"
@@ -13418,6 +13443,37 @@
               "null"
             ],
             "format": "uuid"
+          }
+        }
+      },
+      "ResolutionView": {
+        "type": "object",
+        "description": "Последнее разрешение псевдонима на машине.",
+        "required": [
+          "model",
+          "observed_at"
+        ],
+        "properties": {
+          "changed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Когда псевдоним сменил разрешение."
+          },
+          "model": {
+            "type": "string",
+            "description": "Конкретная модель, например `claude-fable-5-2`."
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "previous": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Прежнее разрешение, если псевдоним его сменил."
           }
         }
       },

@@ -231,6 +231,9 @@ pub struct ListItem {
     #[serde(flatten)]
     pub attributes: AttributeView,
     pub model: String,
+    /// Конкретная модель за псевдонимом `model` (`fable[1m]` → `claude-fable-5-2`): из ходов
+    /// сессии, до первого хода на этой модели — последнее наблюдение на машине; `None` — неизвестно.
+    pub model_resolved: Option<String>,
     pub effort: String,
     pub permission_mode: String,
     pub activity: ActivityView,
@@ -269,6 +272,9 @@ pub struct ConversationDetail {
     #[serde(flatten)]
     pub attributes: AttributeView,
     pub model: String,
+    /// Конкретная модель за псевдонимом `model` (`fable[1m]` → `claude-fable-5-2`): из ходов
+    /// сессии, до первого хода на этой модели — последнее наблюдение на машине; `None` — неизвестно.
+    pub model_resolved: Option<String>,
     pub effort: String,
     pub permission_mode: String,
     pub activity: ActivityView,
@@ -355,7 +361,7 @@ fn optional_time(row: &PgRow, col: &str) -> Result<Option<String>, sqlx::Error> 
 
 const SELECT:&str="select c.*,m.name machine_name,m.capabilities,m.availability,
  h.title harness_title,h.provider,
- coalesce(d.effective_model,'') effective_model,coalesce(d.effective_effort,'') effective_effort,
+ coalesce(d.effective_model,'') effective_model,coalesce(d.effective_model_resolved,'') effective_model_resolved,coalesce(d.effective_effort,'') effective_effort,
  coalesce(d.effective_permission_mode,'') effective_permission_mode,coalesce(d.crunch_enabled,false) derived_crunch,
  coalesce(d.activity_state,'idle') activity_state,coalesce(nullif(d.activity_evidence,'{}'),'{\"kind\":\"idle\",\"last_turn_at\":null,\"background_work\":null}') activity_evidence,
  coalesce(d.activity_since,c.created_at) activity_since,coalesce(d.unread_count,0) unread_count,
@@ -410,6 +416,9 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
                 .and_then(|worktree| serde_json::from_value(worktree).ok()),
         },
         model: row.try_get("effective_model")?,
+        model_resolved: row
+            .try_get::<String, _>("effective_model_resolved")
+            .map(|m| (!m.is_empty()).then_some(m))?,
         effort: row.try_get("effective_effort")?,
         permission_mode: row.try_get("effective_permission_mode")?,
         activity: ActivityView {
@@ -755,6 +764,7 @@ pub async fn detail(
     Ok(Some(ConversationDetail {
         attributes: i.attributes,
         model: i.model,
+        model_resolved: i.model_resolved,
         effort: i.effort,
         permission_mode: i.permission_mode,
         activity: i.activity,

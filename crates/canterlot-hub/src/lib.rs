@@ -40,6 +40,7 @@ pub mod machine_watch;
 pub mod machines;
 pub mod media;
 pub mod model;
+pub mod model_resolution;
 pub mod notify;
 pub mod outbox;
 pub mod presets;

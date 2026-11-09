@@ -155,6 +155,7 @@ pub(crate) async fn load_stored(
         .fetch_optional(&mut *conn)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
+    let resolutions = crate::model_resolution::machine_resolutions(&mut *conn, id).await?;
     let harnesses =
         sqlx::query("select * from machine_harnesses where machine_id=$1 order by harness")
             .bind(id)
@@ -162,15 +163,23 @@ pub(crate) async fn load_stored(
             .await?
             .into_iter()
             .map(|h| -> Result<HarnessView, sqlx::Error> {
+                let harness: String = h.try_get("harness")?;
+                let mut models: Value = h.try_get("models")?;
+                for model in models.as_array_mut().into_iter().flatten() {
+                    let alias = model["id"].as_str().unwrap_or_default().to_owned();
+                    if let Some(resolved) = resolutions.get(&(harness.clone(), alias)) {
+                        model["resolved"] = json!(resolved);
+                    }
+                }
                 Ok(HarnessView {
-                    id: h.try_get("harness")?,
+                    id: harness,
                     title: h.try_get("title")?,
                     provider: h.try_get("provider")?,
                     images: h.try_get("images")?,
                     settings_midsession: h.try_get("settings_midsession")?,
                     settings_midsession_effort: h.try_get("settings_midsession_effort")?,
                     permission_modes: h.try_get("permission_modes")?,
-                    models: h.try_get("models")?,
+                    models,
                 })
             })
             .collect::<Result<_, _>>()?;
@@ -600,6 +609,8 @@ pub struct ModelView {
     pub images: Option<bool>,
     /// Окно контекста модели в токенах, если харнесс его знает.
     pub context_window: Option<u64>,
+    /// Во что псевдоним разрешился на этой машине в последний раз; нет — не наблюдали.
+    pub resolved: Option<crate::model_resolution::ResolutionView>,
 }
 #[derive(ToSchema)]
 pub struct MetricsView {
