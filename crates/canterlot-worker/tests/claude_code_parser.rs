@@ -1805,3 +1805,41 @@ fn model_stream_of_the_compact_command_is_not_a_wake_turn() {
     assert!(adopted(&parsed).is_empty());
     assert!(!parser.wake_turn_open());
 }
+
+/// Псевдоним `--model haiku` CLI разрешает сам: `system/init` и блоки основного
+/// агента несут полное имя, по нему хаб узнаёт версию сессии.
+#[test]
+fn init_model_names_the_concrete_version_behind_the_alias() {
+    let replay = fixtures::replay_evidence("start_stream");
+    for version in ["claude-haiku-5-5", "claude-fable-5-2"] {
+        let lines: Vec<String> = replay
+            .out
+            .iter()
+            .map(|line| line.replace("claude-haiku-5-5", version))
+            .collect();
+        let mut parser = Parser::new();
+        parser.set_input_command(command_id());
+        let parsed = feed_all(&mut parser, &lines);
+        let init = parsed
+            .iter()
+            .find_map(|p| match p {
+                Parsed::Init { model, .. } => Some(model.clone()),
+                _ => None,
+            })
+            .expect("init frame");
+        assert_eq!(init, version);
+        let main: Vec<&str> = parsed
+            .iter()
+            .filter_map(|p| match p {
+                Parsed::Event(AdapterEvent::BlockStarted { agent, model, .. })
+                    if agent == "orchestrator" =>
+                {
+                    Some(model.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!main.is_empty(), "main agent blocks");
+        assert!(main.iter().all(|model| *model == version), "{main:?}");
+    }
+}
