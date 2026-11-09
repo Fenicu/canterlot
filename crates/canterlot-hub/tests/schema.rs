@@ -874,10 +874,8 @@ async fn foreign_keys_into_deleted_history_have_indexes(pool: PgPool) -> Result<
     const SMALL: &[&str] = &[
         "block_files.execution_id",
         "block_media.execution_id",
-        "idempotency_keys.conversation_id",
         "instruction_preset_revisions.edited_conversation_id",
         "instruction_presets.origin_conversation_id",
-        "journal_cursors.execution_id",
     ];
     let missing: Vec<String> = sqlx::query_scalar(
         "select c.conrelid::regclass::text || '.' || a.attname
@@ -926,6 +924,12 @@ async fn command_and_block_lookups_use_indexes(pool: PgPool) -> Result<(), sqlx:
         format!("select id from commands where conversation_id = {id} and kind = 'interrupt'"),
         format!("select 1 from inputs where retry_of = {id}"),
         format!("select 1 from runs where execution_id = {id}"),
+        format!("select journal_id from journal_cursors where execution_id = {id}"),
+        format!("delete from idempotency_keys where conversation_id = {id}"),
+        format!(
+            "select r.execution_id from requests r
+             where (r.id = {id} or r.native_request_id = 'x') and r.winner_decision_id = {id}"
+        ),
         format!(
             "select id from inputs where conversation_id = {id} and state = 'queued'
              and not exists (select 1 from commands where kind = 'steer_input'
