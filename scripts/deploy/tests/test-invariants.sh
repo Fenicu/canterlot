@@ -61,6 +61,14 @@ if SUP_OUT="$(find_control_worker)"; then
 else
     case_ok "supervise is skipped, not a control worker"
 fi
+# Клиент аренды (`lease run` вокруг сборки) тоже не управляющий воркер (выкат 1.23.2).
+setsid bash -c "exec -a '${FAKE_ROOT}/worker/opt/canterlot/releases/aaaaaaaaaaaa/bin/canterlot-worker' '${FAKE_ROOT}/worker/opt/canterlot/releases/aaaaaaaaaaaa/bin/canterlot-worker' lease run --kind gate -- sleep 100" >/dev/null 2>&1 <&- &
+sleep 0.2
+if LEASE_OUT="$(find_control_worker)"; then
+    case_fail "lease client was reported as a control worker: ${LEASE_OUT}"
+else
+    case_ok "lease client is skipped, not a control worker"
+fi
 teardown_case
 case_end
 
