@@ -261,6 +261,14 @@ for (const motion of ['full', 'reduced'] as const) {
 		expect(await ready.evaluate((node) => node.getAnimations().length)).toBe(0);
 		expect(await ready.evaluate((node) => getComputedStyle(node).clipPath)).toMatch(/inset\(0(px)?\)/);
 		await expect(panel(page).locator('.items')).toHaveAttribute('data-settled', '');
+		// Черта идёт полсекунды: под нагрузкой разовый getAnimations() застаёт её уже законченной, поэтому запуск ловим событием.
+		await panel(page).evaluate((root) => {
+			const runs: string[] = [];
+			(root as HTMLElement & { runs?: string[] }).runs = runs;
+			root.addEventListener('transitionrun', (event) => {
+				if ((event.target as Element).classList.contains('strike')) runs.push(event.propertyName);
+			});
+		});
 
 		api.pushTodo(id, [
 			{ text: 'Собрать требования', status: 'completed' },
@@ -270,9 +278,8 @@ for (const motion of ['full', 'reduced'] as const) {
 		await expect(second).toContainText('готово');
 		const strike = second.locator('.strike');
 		await expect(strike).toHaveCount(1);
-		const running = await strike.evaluate((node) => node.getAnimations().map((animation) => (animation as CSSTransition).transitionProperty));
-		if (motion === 'reduced') expect(running).toEqual([]);
-		else expect(running).toContain('clip-path');
+		if (motion === 'reduced') expect(await strike.evaluate((node) => node.getAnimations().length)).toBe(0);
+		else await expect.poll(() => panel(page).evaluate((root) => (root as HTMLElement & { runs?: string[] }).runs ?? [])).toContain('clip-path');
 		// Черта видна для глаза, но не для диктора: текст пункта читается один раз.
 		expect(await second.evaluate((node) => {
 			const copy = node.querySelector('.strike')!;

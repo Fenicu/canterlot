@@ -226,6 +226,8 @@ test('image_export_shares_a_png_file_through_web_share_on_the_phone_project', as
 	const dialog = page.getByRole('dialog', { name: 'Об ответе' });
 
 	const shareBtn = dialog.getByRole('button', { name: 'Поделиться картинкой' });
+	// Вид кнопки зависит от возможностей браузера: сначала дождаться листа с ней, потом выбирать ветку.
+	await expect(dialog.getByRole('button', { name: /(Копировать|Поделиться) картинкой/ })).toBeVisible();
 	if (await shareBtn.isVisible()) {
 		await shareBtn.click();
 		await expect.poll(async () => {
@@ -257,6 +259,7 @@ test('image_export_falls_back_to_the_clipboard_on_desktop', async ({ page }) => 
 	const dialog = page.getByRole('dialog', { name: 'Об ответе' });
 
 	const copyBtn = dialog.getByRole('button', { name: 'Копировать картинкой' });
+	await expect(dialog.getByRole('button', { name: /(Копировать|Поделиться) картинкой/ })).toBeVisible();
 	if (await copyBtn.isVisible()) {
 		await copyBtn.click();
 		await expect(dialog.getByText('Изображение скопировано в буфер обмена')).toBeVisible({ timeout: 5000 });
@@ -277,6 +280,7 @@ test('image_export_over_the_page_cap_splits_pages', async ({ page }) => {
 	const dialog = page.getByRole('dialog', { name: 'Об ответе' });
 
 	const copyBtn = dialog.getByRole('button', { name: 'Копировать картинкой' });
+	await expect(dialog.getByRole('button', { name: /(Копировать|Поделиться) картинкой/ })).toBeVisible();
 	if (await copyBtn.isVisible()) {
 		await copyBtn.click();
 		await expect(dialog.getByText(/Изображение сохранено|Изображение длинное/)).toBeVisible({ timeout: 5000 });
@@ -305,6 +309,7 @@ test('share_needing_a_fresh_gesture_offers_one_tap_retry', async ({ page }) => {
 	const dialog = page.getByRole('dialog', { name: 'Об ответе' });
 
 	const shareBtn = dialog.getByRole('button', { name: 'Поделиться картинкой' });
+	await expect(dialog.getByRole('button', { name: /(Копировать|Поделиться) картинкой/ })).toBeVisible();
 	if (await shareBtn.isVisible()) {
 		await shareBtn.click();
 		// Retry button appears
@@ -317,6 +322,7 @@ test('lane_and_info_have_no_horizontal_scroll_at_360px', async ({ page }) => {
 	await page.setViewportSize({ width: 360, height: 740 });
 	await bootInfo(page);
 	await page.getByRole('button', { name: 'Сведения о ходе' }).first().click();
+	await expect(page.getByRole('dialog', { name: 'Об ответе' })).toBeVisible();
 
 	const hasHorizontalScroll = await page.evaluate(() => {
 		return document.documentElement.scrollWidth > document.documentElement.clientWidth;

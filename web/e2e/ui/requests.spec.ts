@@ -633,27 +633,30 @@ test.describe('E2E Requests and Recovery', () => {
   // Прокручивается сама карточка: закреплённая «Ответить» лежит на её скруглённом низу,
   // под кнопкой не проезжает текст, а отступы справа и слева совпадают.
   async function expectCardScrollsItself(page: Page) {
-    const geometry = await page.locator('.request-cards-slot').evaluate((slot) => {
-      const card = slot.querySelector('.card-root')!;
-      const actions = card.querySelector('.actions')!;
-      const outer = slot.getBoundingClientRect();
-      const box = card.getBoundingClientRect();
-      const bar = actions.getBoundingClientRect();
-      return {
-        slotScrolls: slot.scrollHeight > slot.clientHeight + 1,
-        cardScrolls: card.scrollHeight > card.clientHeight + 1,
-        insetStart: box.left - outer.left,
-        insetEnd: outer.right - box.right,
-        barBottom: bar.bottom,
-        cardBottom: box.bottom,
-        radius: parseFloat(getComputedStyle(card).borderBottomLeftRadius)
-      };
-    });
-    expect(geometry.slotScrolls).toBe(false);
-    expect(geometry.cardScrolls).toBe(true);
-    expect(Math.abs(geometry.insetStart - geometry.insetEnd)).toBeLessThanOrEqual(1);
-    expect(Math.abs(geometry.barBottom - geometry.cardBottom)).toBeLessThanOrEqual(1);
-    expect(geometry.radius).toBeGreaterThan(0);
+    // Карточка въезжает сдвигом вниз: пока идёт вход, сдвиг даёт слоту лишнюю прокрутку.
+    await expect(async () => {
+      const geometry = await page.locator('.request-cards-slot').evaluate((slot) => {
+        const card = slot.querySelector('.card-root')!;
+        const actions = card.querySelector('.actions')!;
+        const outer = slot.getBoundingClientRect();
+        const box = card.getBoundingClientRect();
+        const bar = actions.getBoundingClientRect();
+        return {
+          slotScrolls: slot.scrollHeight > slot.clientHeight + 1,
+          cardScrolls: card.scrollHeight > card.clientHeight + 1,
+          insetStart: box.left - outer.left,
+          insetEnd: outer.right - box.right,
+          barBottom: bar.bottom,
+          cardBottom: box.bottom,
+          radius: parseFloat(getComputedStyle(card).borderBottomLeftRadius)
+        };
+      });
+      expect(geometry.slotScrolls).toBe(false);
+      expect(geometry.cardScrolls).toBe(true);
+      expect(Math.abs(geometry.insetStart - geometry.insetEnd)).toBeLessThanOrEqual(1);
+      expect(Math.abs(geometry.barBottom - geometry.cardBottom)).toBeLessThanOrEqual(1);
+      expect(geometry.radius).toBeGreaterThan(0);
+    }).toPass();
   }
 
   test('docked_question_scrolls_inside_its_card_with_the_answer_bar_on_its_rounded_edge', async ({ page }) => {

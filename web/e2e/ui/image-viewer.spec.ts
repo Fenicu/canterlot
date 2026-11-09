@@ -249,9 +249,12 @@ test('swipe_and_arrow_keys_move_between_images_with_the_counter', async ({ page 
   // Текущая картинка стоит ровно в кадре после перехода, соседи уже загружены.
   const frame = await frameState(page);
   expect(Math.abs(frame.left + frame.width / 2 - (frame.stage.left + frame.stage.width / 2))).toBeLessThan(2);
-  const loaded = await dialog.locator('.slide img.full').evaluateAll((nodes) => nodes.map((node) => (node as HTMLImageElement).complete && (node as HTMLImageElement).naturalWidth > 0));
-  expect(loaded.length).toBeGreaterThanOrEqual(2);
-  expect(loaded.every(Boolean)).toBe(true);
+  // Соседи догружаются после перехода: ждём, а не ловим момент.
+  await expect(async () => {
+    const loaded = await dialog.locator('.slide img.full').evaluateAll((nodes) => nodes.map((node) => (node as HTMLImageElement).complete && (node as HTMLImageElement).naturalWidth > 0));
+    expect(loaded.length).toBeGreaterThanOrEqual(2);
+    expect(loaded.every(Boolean)).toBe(true);
+  }).toPass();
 });
 
 test('swipe_down_closes_and_the_backdrop_fades_with_the_drag', async ({ page }, info) => {
@@ -286,7 +289,7 @@ test('a_short_vertical_drag_springs_back_without_closing', async ({ page }, info
   const start = { x: stage.left + stage.width / 2, y: stage.top + stage.height / 2 };
   await drag(page, phone(info.project.name), start, { x: start.x, y: start.y + 40 }, 16);
   await expect(dialog).toBeVisible();
-  expect(Number(await dialog.locator('.backdrop').evaluate((node) => getComputedStyle(node).opacity))).toBe(1);
+  await expect.poll(async () => Number(await dialog.locator('.backdrop').evaluate((node) => getComputedStyle(node).opacity))).toBe(1);
 });
 
 test('browser_back_closes_the_viewer_and_stays_in_the_chat', async ({ page }) => {
@@ -303,7 +306,7 @@ test('browser_back_closes_the_viewer_and_stays_in_the_chat', async ({ page }) =>
   await viewer(page).getByRole('button', { name: 'Закрыть' }).click();
   await expect(viewer(page)).toHaveCount(0);
   await expect(thumb(page, 'owner', 0)).toBeFocused();
-  expect(page.url()).toBe(url);
+  await expect(page).toHaveURL(url);
 });
 
 // QUARANTINE: в полном гейте 1.22.3 упал на телефоне под нагрузкой; отдельно проходит.
@@ -318,7 +321,8 @@ test.describe('quarantine controls_hide_after_a_tap_and_the_next_tap_brings_them
     const tap = async () => (phone(info.project.name) ? (await Fingers.on(page)).tap(point) : page.mouse.click(point.x, point.y));
     await tap();
     await expect(dialog).toHaveAttribute('data-chrome', 'hidden');
-    expect(Number(await dialog.locator('.chrome').evaluate((node) => getComputedStyle(node).opacity))).toBeLessThan(0.5);
+    // Кнопки гаснут CSS-переходом: атрибут меняется раньше, чем прозрачность.
+    await expect.poll(async () => Number(await dialog.locator('.chrome').evaluate((node) => getComputedStyle(node).opacity))).toBeLessThan(0.5);
     await tap();
     await expect(dialog).toHaveAttribute('data-chrome', 'shown');
   });

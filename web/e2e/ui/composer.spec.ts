@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation, seedHistory } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
-import { expect, test } from './fixtures';
+import { expect, resizeViewport, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const AT = '2026-10-28T12:00:00.000Z';
@@ -451,7 +451,7 @@ test('reload_between_press_and_response_does_not_duplicate_the_input', async ({ 
 
 test('composer_is_usable_at_360px_and_200_percent_text', async ({ page }) => {
   await boot(page);
-  await page.setViewportSize({ width: 360, height: 640 });
+  await resizeViewport(page, { width: 360, height: 640 });
   await page.evaluate(() => {
     document.documentElement.style.fontSize = '32px';
   });

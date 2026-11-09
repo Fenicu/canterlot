@@ -251,6 +251,7 @@ test('list_marker_is_aligned_in_both_themes', async ({ page }) => {
   const text = await page.locator('.prose p').first().evaluate((node) => node.getBoundingClientRect().left);
   expect(left).toBeGreaterThan(text);
   await toggleChatTheme(page);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expect(item).toHaveJSProperty('value', 0);
   expect(await item.evaluate((node) => node.getBoundingClientRect().left)).toBe(left);
   expect(await page.locator('.prose ol[start="3"]').evaluate((node) => (node as HTMLOListElement).start)).toBe(3);
@@ -297,6 +298,7 @@ test('answered_question_stays_where_it_was_asked_live_and_after_reload', async (
   await page.reload();
   await expect(page.locator('[role="log"] .pill[data-state="answer"]')).toHaveText('Продолжить');
   await expect(page.locator('.request-cards-slot')).toHaveCount(0);
+  await expect(page.locator('[role="log"]')).toContainText('Ответ получен');
   const reloaded = await feedOrder(page, marks);
   expect([...reloaded].sort((a, b) => a - b)).toEqual(reloaded);
   expect(new Set(reloaded).size).toBe(2);
@@ -444,8 +446,8 @@ test('the_restore_button_stands_at_the_cut_and_opens_rows_in_place', async ({ pa
   const spot = (await seam.boundingBox())?.y ?? 0;
   await seam.click();
   await expect(seam).toHaveCount(0);
-  const opened = await page.locator(`[data-key="${order[order.indexOf(place.before) + 1]}"]`).boundingBox();
-  expect(Math.abs((opened?.y ?? -9999) - spot)).toBeLessThanOrEqual(20);
+  const opened = page.locator(`[data-key="${order[order.indexOf(place.before) + 1]}"]`);
+  await expect.poll(async () => Math.abs(((await opened.boundingBox())?.y ?? -9999) - spot)).toBeLessThanOrEqual(20);
 });
 
 test('tail_growth_and_an_opened_row_do_not_move_what_the_reader_is_looking_at', async ({ page }) => {

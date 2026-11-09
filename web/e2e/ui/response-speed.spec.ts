@@ -70,7 +70,9 @@ test('limits_page_lists_median_speed_per_model_for_today_and_the_week', async ({
   await expect(rows.nth(1).locator('td').nth(1)).toContainText('71 ток/с');
   await expect(page.getByText(/Codex не передаёт время рассуждений/)).toBeVisible();
   // Сводка стоит рядом с расходом по сессиям (на широком экране сбоку, на узком ниже), но не выше него.
-  const usage = await page.getByRole('table', { name: 'Сегодня по сессиям' }).boundingBox();
+  const usageTable = page.getByRole('table', { name: 'Сегодня по сессиям' });
+  await expect(usageTable).toBeVisible();
+  const usage = await usageTable.boundingBox();
   const speed = await table.boundingBox();
   expect(speed!.y).toBeGreaterThanOrEqual(usage!.y - 2);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

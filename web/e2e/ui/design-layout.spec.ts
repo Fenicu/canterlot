@@ -48,6 +48,7 @@ test.describe('поле ввода', () => {
     const { hub, api, id } = await boot(page);
     await page.getByRole('textbox', { name: 'Сообщение' }).fill('уточнение');
     const send = page.getByRole('button', { name: 'Отправить', exact: true });
+    await expect(send).toBeVisible();
     const before = await send.boundingBox();
     startTurn(hub, api, id);
     await page.getByRole('button', { name: 'Меню сессии' }).click();
@@ -377,11 +378,15 @@ test.describe('листы и панели', () => {
     await row.hover();
     await row.getByRole('button', { name: /^Действия/ }).click();
     const popover = page.getByRole('dialog', { name: 'Сессия' });
-    const list = await page.locator('[data-list-scroll]').boundingBox();
-    const box = (await popover.boundingBox())!;
-    const rowBox = (await row.boundingBox())!;
-    expect(box.y >= rowBox.y + rowBox.height - 1 || box.y + box.height <= rowBox.y + 1).toBe(true);
-    expect(box.y + box.height).toBeLessThanOrEqual(list!.y + list!.height + 80);
+    await expect(popover).toBeVisible();
+    // Окно въезжает со сдвигом и встаёт на место после замера содержимого.
+    await expect(async () => {
+      const list = await page.locator('[data-list-scroll]').boundingBox();
+      const box = (await popover.boundingBox())!;
+      const rowBox = (await row.boundingBox())!;
+      expect(box.y >= rowBox.y + rowBox.height - 1 || box.y + box.height <= rowBox.y + 1).toBe(true);
+      expect(box.y + box.height).toBeLessThanOrEqual(list!.y + list!.height + 80);
+    }).toPass();
     await page.keyboard.press('Escape');
     await expect(popover).toHaveCount(0);
   });
@@ -455,6 +460,7 @@ test.describe('лимиты и баннеры', () => {
     await expect(strip.locator('.pct[data-tone="warning"]')).toHaveCount(0);
     await expect(strip.locator('.meter')).toHaveCount(4);
     await strip.locator('summary').click();
+    await expect(strip).toHaveAttribute('open', '');
     const radius = await strip.evaluate((node) => parseFloat(getComputedStyle(node).borderTopLeftRadius));
     expect(radius).toBeLessThan(40);
   });

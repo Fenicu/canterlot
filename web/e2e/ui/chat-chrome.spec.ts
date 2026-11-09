@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation, seedMachine, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupChat, seedMockup08 } from '../../testing/fixtures/mockup-chat';
-import { expect, test, toggleChatTheme } from './fixtures';
+import { expect, resizeViewport, test, toggleChatTheme } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const EFFORT_RESTART_REASON = 'Агент этой машины меняет усилие только при запуске. Остановите сессию: новое усилие применится при следующем запуске.';
@@ -862,7 +862,7 @@ test('chat_chrome_has_no_horizontal_scroll_at_360px_and_keyboard_reaches_every_a
 		seeder: (api) => seedMockup08(api)
 	});
 
-	await page.setViewportSize({ width: 360, height: 640 });
+	await resizeViewport(page, { width: 360, height: 640 });
 
 	const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
 	expect(scrollWidth).toBeLessThanOrEqual(360);

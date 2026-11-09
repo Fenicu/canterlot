@@ -350,20 +350,20 @@ for (const width of [320, 360, 390]) {
     const { hub, api, id } = await boot(page, { tokens: 960_000 });
     const indicator = page.getByRole('button', { name: /^Контекст/ });
     await expect(indicator).toBeVisible();
-    expect(await truncated(page), 'idle').toEqual([]);
+    await expect.poll(() => truncated(page), 'idle').toEqual([]);
     startTurn(hub, api, id);
     await expect(page.locator('[data-working]')).toBeVisible();
-    expect(await truncated(page), 'running').toEqual([]);
+    await expect.poll(() => truncated(page), 'running').toEqual([]);
     await expect(indicator).toContainText('96');
     // Сжатие показывает в индикаторе свою строку: она тоже помещается.
     hub.append(`conversation:${id}`, { kind: 'phase_changed', conversation_id: id, payload: { phase: 'context_maintenance', tool_name: null, summary: null } });
     hub.flush();
     await expect(indicator).toContainText('Сжимает контекст');
-    expect(await truncated(page), 'compacting').toEqual([]);
+    await expect.poll(() => truncated(page), 'compacting').toEqual([]);
     // С вложением в лотке строка та же.
     await page.locator('[data-composer] input[type="file"]').setInputFiles({ name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from([137, 80, 78, 71]) });
     await expect(page.locator('[data-composer] .tray')).toBeVisible();
-    expect(await truncated(page), 'with attachment').toEqual([]);
+    await expect.poll(() => truncated(page), 'with attachment').toEqual([]);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow).toBeLessThanOrEqual(0);
   });
