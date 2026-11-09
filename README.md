@@ -14,7 +14,7 @@
 
 </p>
 
-Canterlot — self-hosted хаб для агентов программирования. Claude Code, Codex, OpenCode и Antigravity работают на машинах владельца, а сессии открываются с телефона через PWA: лента, разрешения и вопросы, очередь сообщений, лимиты и настройки. Antigravity работает на Google-аккаунте владельца и использует его каталог `~/.gemini`: настройки, MCP-серверы и история разговоров общие с Antigravity владельца.
+Canterlot — self-hosted хаб для агентов программирования. Claude Code, Codex, OpenCode и Antigravity работают на машинах владельца, а сессии открываются с телефона через PWA: лента, разрешения и вопросы, очередь сообщений, доска плана, поиск по истории, лимиты и настройки. Antigravity работает на Google-аккаунте владельца и использует его каталог `~/.gemini`: настройки, MCP-серверы и история разговоров общие с Antigravity владельца.
 
 Хаб написан на Rust и хранит состояние в PostgreSQL. На каждой рабочей машине запущен Rust-воркер, хаб и воркеры общаются по gRPC поверх TLS. Клиент — статическая сборка SvelteKit; её раздаёт обратный прокси, он же закрывает вход (Caddy и Authelia). Отдельного сервера приложений у клиента нет.
 
@@ -26,38 +26,51 @@ Canterlot — self-hosted хаб для агентов программиров�
 - убирать сессию в корзину на 24 часа, возвращать её одним нажатием или удалять окончательно;
 - продолжать черновик с любого устройства: текст и готовые вложения хранятся на хабе, удаление и отправка сразу видны на телефоне и компьютере;
 - прерывать текущий ход, не закрывая сессию: контекст и процесс остаются, следующее сообщение продолжает работу;
+- менять усилие (effort) посреди диалога, в том числе у Claude Code: новое значение действует со следующего хода;
 - видеть заполнение контекста и сжимать его, в том числе между ходами;
-- запускать делегированные сессии через MCP-инструменты: отдельная рабочая копия, вложенный список, приём результата;
+- запускать делегированные сессии через MCP-инструменты: отдельная рабочая копия, вложенный список и панель делегирования, приём результата; итог делегата остаётся в ленте оркестратора и после удаления делегата, а о делегате, который дольше 15 минут простаивает с работающей фоновой командой, оркестратор слышит отдельно;
 - давать агенту будильники: по времени, по состоянию других сессий (в том числе одним сообщением за всю пачку и со сторожем по сроку), по сбросу лимита провайдера, по появлению файла на машине и по освобождению машины; в чате они видны плашками;
-- вести доску плана оркестратора в хабе: задачи с номерами, состоянием, исполнителем, находками и причиной блокировки переживают сжатие контекста и перезапуск, сами переходят в работу при запуске делегата с `plan_task`, на проверку по его завершении и в готовые при приёме результата, а коммиты и отчёт исполнителя подтягиваются при чтении;
+- вести доску плана оркестратора в хабе: задачи с номерами, состоянием, исполнителем, находками и причиной блокировки переживают сжатие контекста и перезапуск, сами переходят в работу при запуске делегата с `plan_task`, на проверку по его завершении и в готовые при приёме результата, а коммиты и отчёт исполнителя подтягиваются при чтении; план открывается вкладкой «План» в панели делегирования, вызовы плана видны в ленте карточками, у сессии в списке — счётчик «План · 2/7», все планы — в меню «Планы»;
 - включать автопинок делегата: хаб сам подталкивает исполнителя, бросившего ход без маркера `STATUS: DONE`, и будит оркестратора один раз, когда толчки кончились; состояние, счётчики и последние сигналы видны в чате, владелец ставит правило на паузу или снимает его, а текст толчка редактируется во вкладке «Текст толчка» экрана «Инструкции»; файл отчёта считается прогрессом, а его отсутствие называется в толчке;
-- искать по истории сессий: ответы агента и сообщения ленты в любых формах слова, с фильтрами по сессии, времени и харнессу; агент ищет тем же поиском через `history_search`;
+- искать по истории сессий: ответы агентов, свои сообщения, сообщения между сессиями и итоги делегатов в любых формах слова, с фильтрами по периоду и виду; найденные слова подсвечены, касание открывает ленту на месте совпадения; поиск запускается из списка («Искать в сообщениях») или из меню сессии, агент ищет тем же поиском через `history_search`;
 - выбирать исполнителя по политике маршрутизации владельца: тип задачи, упорядоченные кандидаты, пороги лимитов и параллельности; предпросмотр показывает выбор и причины по каждому кандидату;
 - следить за лимитами провайдеров по пятичасовому, недельному и месячному окнам и за скоростью ответа; настраивать пороги жёлтого и красного предупреждений и недельный резерв — изменения действуют сразу, без перезапуска хаба; видеть прогноз расхода по темпу и обратный отсчёт до сброса, а маршрутизация пропускает кандидата, которому не хватит лимита на ожидаемую длительность задачи;
 - видеть в сведениях о сессии расход токенов за всю сессию и всех её делегатов, по моделям и с кэшем;
 - вставлять скриншоты и файлы из буфера или перетаскиванием; агент может отдать файл в ленту;
-- открывать вложенные `.md` прямо в ленте: отрендеренный текст, исходник, копирование и скачивание;
+- открывать вложенные `.md`, документы Word (`.docx`) и таблицы Excel (`.xlsx`) прямо в приложении: отрендеренный текст, листы с закреплённой шапкой, копирование и скачивание;
+- получать пуши на телефон через Gotify (`[notify.gotify]`): сессия ждёт ответа или разрешения, ход завершён, сбой, зависание или пауза по лимиту; касание открывает чат;
 - видеть свободное место на машинах и тихое предупреждение в списке сессий, когда его меньше `[machines] disk_warn_free_gb = 30` ГБ (критический уровень — `disk_critical_free_gb = 10`);
+- следить за машиной через сторожа: самые крупные кэши сборки с подсказкой, как их убрать, нехватка памяти (`mem_warn_gb`), процессы, пережившие свою сессию, и сборки вне очереди; об этом слышат и активные оркестраторы на машине;
 - видеть очередь тяжёлых задач машины: кто держит гейт или сборку и сколько, кто ждёт и на каком месте; сессия в очереди пишет «Ждёт очереди на сборку · 2-й» и не считается подвисшей, а об аренде, занятой дольше 90 минут, оркестраторы на машине слышат один раз;
+- запускать сессию в режиме «только чтение»: выход из режима планирования canterlot отклоняет сам, не спрашивая владельца, и сессия заканчивает ход ответом;
 - выбирать одну из пятнадцати тем по карточкам с предпросмотром, в тёмном и светлом режиме; новая тема плавно раскрывается от нажатой кнопки;
 - видеть версию в настройках, окно «Что нового» и историю изменений.
 
 ## Скриншоты
 
-Телефон и рабочий стол: темы Аквамарин, Стандартная и VS Code; остальные темы — в настройках.
+Телефон и рабочий стол: темы Аквамарин, Стандартная, VS Code и Норд, тёмные и светлые; остальные темы — в настройках.
 
 <table align="center">
   <tr>
-    <td align="center"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/sessions-dark.png"><img src="docs/screenshots/sessions-dark.png" width="240" alt="Список сессий с лимитами и группами"></a><br><sub>Сессии, лимиты и группы</sub></td>
-    <td align="center"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/chat-dark.png"><img src="docs/screenshots/chat-dark.png" width="240" alt="Чат с кодом, инструментами и заполнением контекста"></a><br><sub>Чат, код и инструменты</sub></td>
-    <td align="center"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/permission-light.png"><img src="docs/screenshots/permission-light.png" width="240" alt="Карточка разрешения на команду"></a><br><sub>Разрешения агента</sub></td>
+    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/sessions-dark.png"><img src="docs/screenshots/sessions-dark.png" width="240" alt="Список сессий с лимитами и группами"></a><br><sub>Сессии, лимиты и группы</sub></td>
+    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/chat-dark.png"><img src="docs/screenshots/chat-dark.png" width="240" alt="Чат с кодом, инструментами и заполнением контекста"></a><br><sub>Чат, код и инструменты</sub></td>
+    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/permission-light.png"><img src="docs/screenshots/permission-light.png" width="240" alt="Карточка разрешения на команду"></a><br><sub>Разрешения агента</sub></td>
   </tr>
   <tr>
     <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/question-dark.png"><img src="docs/screenshots/question-dark.png" width="240" alt="Карточка вопроса с вариантами ответа"></a><br><sub>Вопросы с вариантами</sub></td>
-    <td align="center" valign="top" colspan="2"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/limits-light.png"><img src="docs/screenshots/limits-light.png" width="200" alt="История лимитов и скорость моделей"></a><br><sub>История лимитов и скорость</sub></td>
+    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/plan-dark.png"><img src="docs/screenshots/plan-dark.png" width="240" alt="Вкладка «План»: задачи по состояниям, исполнители, находки и коммиты"></a><br><sub>Доска плана</sub></td>
+    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/plan-feed-light.png"><img src="docs/screenshots/plan-feed-light.png" width="240" alt="Лента оркестратора с карточками запуска делегата и правки плана"></a><br><sub>Карточки плана в ленте</sub></td>
   </tr>
   <tr>
-    <td align="center" colspan="3"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/desktop.png"><img src="docs/screenshots/desktop.png" width="760" alt="Рабочий стол: список сессий и чат рядом"></a><br><sub>Рабочий стол: список и чат рядом</sub></td>
+    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/delegation-dark.png"><img src="docs/screenshots/delegation-dark.png" width="240" alt="Панель делегирования: делегаты и их состояние"></a><br><sub>Панель делегирования</sub></td>
+    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/search-light.png"><img src="docs/screenshots/search-light.png" width="240" alt="Поиск по истории с подсвеченными совпадениями"></a><br><sub>Поиск по истории</sub></td>
+    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/machines-dark.png"><img src="docs/screenshots/machines-dark.png" width="240" alt="Машина: ресурсы, сторож, крупные кэши и очередь тяжёлых задач"></a><br><sub>Машина, сторож и очередь</sub></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" colspan="3"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/limits-light.png"><img src="docs/screenshots/limits-light.png" width="200" alt="История лимитов и скорость моделей"></a><br><sub>История лимитов и скорость</sub></td>
+  </tr>
+  <tr>
+    <td align="center" colspan="3"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/desktop.png"><img src="docs/screenshots/desktop.png" width="760" alt="Рабочий стол: список сессий, чат оркестратора и доска плана"></a><br><sub>Рабочий стол: список, чат и план рядом</sub></td>
   </tr>
 </table>
 
@@ -69,8 +82,8 @@ Canterlot — self-hosted хаб для агентов программиров�
 `mainpc-build` — Arch с glibc 2.44, и собранные там бинарники на проде не запустятся.
 
 ```bash
-scripts/build-release.sh v1.16.1            # сборочная машина (CANTERLOT_BUILD_HOST, по умолчанию mainpc-build)
-scripts/build-release.sh v1.16.1 --local    # та же сборка на местном docker, для проверки
+scripts/build-release.sh v1.24.0            # сборочная машина (CANTERLOT_BUILD_HOST, по умолчанию mainpc-build)
+scripts/build-release.sh v1.24.0 --local    # та же сборка на местном docker, для проверки
 ```
 
 Тег должен быть локально и на origin. На сборочной машине нужны ssh-доступ (алиас
@@ -104,7 +117,7 @@ CSP, `_app/version.json`, `synthetic-cli` только в синтетическ
 Публикация — из того же каталога:
 
 ```bash
-scripts/publish-release.sh v1.16.1
+scripts/publish-release.sh v1.24.0
 ```
 
 Выкат production — только через `scripts/deploy` (см. §11 `docs/deploy/pilot.md`, ранбук — §11.7): он проверяет готовый dist из `build-release.sh`, `cutover.sh <id> --dry-run` или `--rehearse` (весь путь записи, записи только печатаются) выдаёт токен, а боевой прогон `cutover.sh --execute <id> --confirm <токен>` принимает его 2 часа и только для того же плана.
@@ -166,6 +179,15 @@ Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестов�
 - Caddy и SSO с forward-auth, который передаёт логин в заголовке `Remote-User` (например, Authelia);
 - на рабочих машинах — systemd и CLI агентов, которыми будете пользоваться: `claude`, `codex`, `opencode`, `agy`.
 
+Поддерживаемые версии CLI (более новая запускается, но воркер пишет диагностику `untested_cli_version`):
+
+| Агент | CLI | Минимум | Проверены |
+|---|---|---|---|
+| Claude Code | `claude` | 2.1.311 | 2.1.311 |
+| Codex | `codex` | 0.164.0 | 0.164.0, 0.167.0 |
+| OpenCode | `opencode` | 2.1.4 | 2.1.4, 2.2.5, 2.2.6 (ветка 1.x не поддерживается) |
+| Antigravity | `agy` | 1.4.12 | 1.4.12, 1.5.0 |
+
 **1. Скачать и проверить.**
 
 ```bash
@@ -191,8 +213,8 @@ sudo useradd --system --home-dir /var/lib/canterlot --shell /usr/sbin/nologin ca
 - роль и база PostgreSQL, строка подключения в `/etc/canterlot/db.url` (§2.2);
 - `/etc/canterlot/hub.toml` с таблицей `[http]`: `trusted_proxies` — адрес Caddy, `owner_login` — ваш логин в SSO, `allowed_origins` — адрес PWA (§2.4);
 - секрет прокси, общий для хаба и Caddy (§2.5);
-- сертификат gRPC от своего УЦ, имя хоста хаба в SAN (§3).
-- по желанию — пуши на телефон через Gotify: таблица `[notify.gotify]` с `url` сервера и `token_file` с ключом приложения ([docs/configuration.md](docs/configuration.md)).
+- сертификат gRPC от своего УЦ, имя хоста хаба в SAN (§3);
+- по желанию — пуши на телефон через Gotify: таблица `[notify.gotify]` с `url` сервера и `token_file` с ключом приложения; события включаются ключами `waiting`, `turn_finished` и `failures` ([docs/configuration.md](docs/configuration.md)).
 
 Затем создайте каталоги из §2.6, один раз инициализируйте хаб и включите службу из §2.7:
 
@@ -225,7 +247,7 @@ sudo -u canterlot canterlot-hub machine add --config /etc/canterlot/hub.toml --n
 sudo tar -xzf canterlot-worker-$VER-x86_64-linux-gnu.tar.gz -C /usr/local/bin
 ```
 
-`~/.config/canterlot/worker.toml` заполните по §6.2 и [docs/configuration.md](docs/configuration.md): адрес хаба `https://<хаб>:7443`, три UUID, `allowed_workdir_roots` и таблицы нужных агентов. Пользовательская служба — из §6.4, в ней обязателен `KillMode=process`: с ним идущие сессии переживают перезапуск воркера.
+`~/.config/canterlot/worker.toml` заполните по §6.2 и [docs/configuration.md](docs/configuration.md): адрес хаба `https://<хаб>:7443`, три UUID, `allowed_workdir_roots` и таблицы нужных агентов (`[claude_code]`, `[codex]`, `[opencode]`, `[antigravity]`). Таблица `[machine]` задаёт ёмкость очереди тяжёлых задач (`lease_slots`) и где сторож ищет кэши сборки (`hotspot_roots`). Пользовательская служба — из §6.4, в ней обязателен `KillMode=process`: с ним идущие сессии переживают перезапуск воркера.
 
 ```bash
 loginctl enable-linger "$USER"
@@ -237,7 +259,7 @@ systemctl --user enable --now canterlot-worker
 ## Документация
 
 - [Разработка](docs/development.md) — тулчейн, структура репозитория, проверки, тесты и обновление контракта.
-- [Конфигурация](docs/configuration.md) — `hub.toml` и `worker.toml`, ключи, запуск, отзыв и ротация машин.
+- [Конфигурация](docs/configuration.md) — `hub.toml` и `worker.toml`, ключи, пуши Gotify, пороги машин и лимитов, версии CLI, запуск, отзыв и ротация машин.
 - [HTTP и вход](docs/http.md) — заголовки прокси, CSRF, Caddy и WSS.
 - [PWA](docs/pwa.md) — модули клиента, статическая публикация (CSP и `wss://<origin-host>`), установка и обновление.
 - [Развёртывание](docs/deploy/pilot.md) — пилотный контур: Proxmox LXC, PostgreSQL, Caddy, Authelia.
