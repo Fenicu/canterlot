@@ -7,6 +7,7 @@ import type { InputView } from "#lib/stores/inputs.js";
 import type { CompactionModel, TimelineEntry } from "#lib/stores/timeline.js";
 import { isMainAgent } from "./present";
 import { isEventOrigin } from "./hubEvent";
+import { toolId } from "./cards/toolId";
 import type { RowKind } from "./virtual";
 
 export type { RowKind };
@@ -30,6 +31,8 @@ export interface BlockLinks {
   parent(block: BlockModel): string | null;
   /** Фоновая задача вызова, если он её запустил. */
   background(id: string): BackgroundFact | null;
+  /** Блок-носитель файла, который воркер записал для этого вызова `share_file`. */
+  carrier(id: string): BlockModel | null;
 }
 
 const SUBAGENT_TOOLS = new Set(["Agent", "Task", "spawn_agent"]);
@@ -38,15 +41,72 @@ export function isSubagentCall(block: BlockModel): boolean {
   return block.kind === "tool_call" && SUBAGENT_TOOLS.has(block.toolName ?? "");
 }
 
+/**
+ * Блок-носитель файла `share_file`: его пишет воркер после загрузки, чтобы хаб
+ * привязал вложение. Модели у него нет, имя инструмента голое; вызов модели
+ * (`mcp__canterlot__share_file`, `canterlot.share_file`, `canterlot_share_file`)
+ * идёт отдельным блоком с моделью.
+ */
+export function isShareCarrier(block: BlockModel): boolean {
+  return (
+    block.kind === "tool_call" &&
+    block.toolName === "share_file" &&
+    block.model === "" &&
+    block.parentId === null
+  );
+}
+
+function isShareCall(block: BlockModel): boolean {
+  return (
+    block.kind === "tool_call" &&
+    !isShareCarrier(block) &&
+    toolId(block.toolName) === "canterlot.share_file"
+  );
+}
+
+/** Подготовка и передача файла укладываются в полчаса: дальше носитель не ищет вызов. */
+const SHARE_PAIR_MS = 30 * 60_000;
+
+/** Подпись, которую воркер даст носителю: заголовок, иначе имя файла из пути. */
+function shareLabel(call: BlockModel): string {
+  try {
+    const input: unknown = JSON.parse(call.text);
+    if (!input || typeof input !== "object") return "";
+    const { title, path } = input as { title?: unknown; path?: unknown };
+    if (typeof title === "string" && title) return title;
+    if (typeof path === "string") return path.slice(path.lastIndexOf("/") + 1);
+  } catch {
+    // Вход ещё пишется или не JSON: подпись не сравнить, остаётся порядок.
+  }
+  return "";
+}
+
+function sharePair(call: BlockModel, carrier: BlockModel): boolean {
+  if (call.inputCommandId && carrier.inputCommandId && call.inputCommandId !== carrier.inputCommandId)
+    return false;
+  return Math.abs(carrier.createdAt - call.createdAt) <= SHARE_PAIR_MS;
+}
+
 /** Связи блоков пополняются по одной записи: полный проход нужен только при пересборке окна. */
 class LinksIndex {
   readonly children = new Map<string, BlockModel[]>();
   readonly adopted = new Map<string, string>();
   readonly calls = new Map<string | null, string>();
+  /** Вызовы `share_file` и носители файлов по порядку прихода. */
+  readonly shareCalls: BlockModel[] = [];
+  readonly carriers: BlockModel[] = [];
+  /** Вызов → его носитель и носитель → вызов: носитель не встаёт в ленту отдельно. */
+  readonly carrierOf = new Map<string, BlockModel>();
+  readonly carriedBy = new Map<string, string>();
 
-  add(entry: TimelineEntry): void {
-    if (entry.kind !== "block") return;
+  /**
+   * Добавляет запись. `true` — запись перевязала уже показанный блок (носитель пришёл
+   * раньше вызова): ленту надо пересобрать.
+   */
+  add(entry: TimelineEntry): boolean {
+    if (entry.kind !== "block") return false;
     const block = entry.block;
+    const relinked = this.#pairShare(block);
     if (isSubagentCall(block)) this.calls.set(block.inputCommandId, block.id);
     const lane =
       block.parentId === null &&
@@ -56,15 +116,69 @@ class LinksIndex {
         : undefined;
     if (lane) this.adopted.set(block.id, lane);
     const parent = block.parentId ?? lane;
-    if (!parent) return;
+    if (!parent) return relinked;
     const list = this.children.get(parent);
     // Новый массив, чтобы строка субагента увидела добавленный шаг.
     this.children.set(parent, list ? [...list, block] : [block]);
+    return relinked;
   }
 
-  remove(entry: TimelineEntry): void {
-    if (entry.kind !== "block") return;
+  /**
+   * Один `share_file` — одна карточка: носитель файла прячется за вызов модели.
+   * Пара ищется в том же ходе и рядом по времени; при нескольких файлах сначала по
+   * подписи (заголовок или имя файла), иначе по порядку — воркер грузит файлы по очереди.
+   */
+  #pairShare(block: BlockModel): boolean {
+    if (isShareCarrier(block)) {
+      this.carriers.push(block);
+      const free = this.shareCalls.filter((call) => !this.carrierOf.has(call.id) && sharePair(call, block));
+      const call = free.find((item) => shareLabel(item) === block.summary) ?? free[0];
+      if (call) this.#link(call, block);
+      return false;
+    }
+    if (!isShareCall(block)) return false;
+    this.shareCalls.push(block);
+    // Носитель раньше вызова бывает только у нового воркера, который пишет ход; носитель
+    // без хода мог прийти от вызова со старшей, ещё не загруженной страницы.
+    const free = this.carriers.filter(
+      (carrier) =>
+        !this.carriedBy.has(carrier.id) &&
+        carrier.inputCommandId !== null &&
+        carrier.inputCommandId === block.inputCommandId &&
+        sharePair(block, carrier),
+    );
+    const label = shareLabel(block);
+    const carrier = free.find((item) => item.summary === label) ?? free[0];
+    if (!carrier) return false;
+    this.#link(block, carrier);
+    return true;
+  }
+
+  #link(call: BlockModel, carrier: BlockModel): void {
+    this.carrierOf.set(call.id, carrier);
+    this.carriedBy.set(carrier.id, call.id);
+  }
+
+  /** Снимает запись. `true` — её носитель остался без вызова и должен встать в ленту. */
+  remove(entry: TimelineEntry): boolean {
+    if (entry.kind !== "block") return false;
     const block = entry.block;
+    let orphaned = false;
+    const carrier = this.carrierOf.get(block.id);
+    if (carrier) {
+      this.carrierOf.delete(block.id);
+      this.carriedBy.delete(carrier.id);
+      orphaned = true;
+    }
+    const call = this.carriedBy.get(block.id);
+    if (call) {
+      this.carriedBy.delete(block.id);
+      this.carrierOf.delete(call);
+    }
+    const shareAt = this.shareCalls.indexOf(block);
+    if (shareAt >= 0) this.shareCalls.splice(shareAt, 1);
+    const carrierAt = this.carriers.indexOf(block);
+    if (carrierAt >= 0) this.carriers.splice(carrierAt, 1);
     const parent = block.parentId ?? this.adopted.get(block.id);
     if (parent) {
       const list = this.children.get(parent);
@@ -78,6 +192,7 @@ class LinksIndex {
       this.calls.get(block.inputCommandId) === block.id
     )
       this.calls.delete(block.inputCommandId);
+    return orphaned;
   }
 
   snapshot(background?: ReadonlyMap<string, BackgroundFact>): BlockLinks {
@@ -90,8 +205,10 @@ class LinksIndex {
         ) ?? [];
         return own.find((child) => isMainAgent(child.agent)) ?? own[0] ?? null;
       },
-      parent: (block) => block.parentId ?? this.adopted.get(block.id) ?? null,
+      parent: (block) =>
+        block.parentId ?? this.adopted.get(block.id) ?? this.carriedBy.get(block.id) ?? null,
       background: (id) => background?.get(id) ?? null,
+      carrier: (id) => this.carrierOf.get(id) ?? null,
     };
   }
 }
@@ -562,10 +679,12 @@ export class RowsCache {
       const entry = old[index]!;
       const links = linksIndex.snapshot(background);
       if (!rows.drop(entry, links)) return false;
-      linksIndex.remove(entry);
+      // Носитель файла остался без вызова: он встаёт в ленту, это пересборка.
+      if (linksIndex.remove(entry)) return false;
     }
     for (const entry of shift.appended) {
-      linksIndex.add(entry);
+      // Вызов пришёл после своего носителя, который уже стоит в ленте.
+      if (linksIndex.add(entry)) return false;
       const links = linksIndex.snapshot(background);
       if (entry.kind !== "block" || links.parent(entry.block) === null)
         rows.add(entry, true);

@@ -49,7 +49,8 @@
       session: feed.session,
       events: feed.events,
       previous: () => feed.previous(block),
-      planBefore: (number) => feed.planBefore?.(block, number) ?? null
+      planBefore: (number) => feed.planBefore?.(block, number) ?? null,
+      carrier: links.carrier(block.id)
     })
   );
   const card = $derived(block.kind === 'tool_call' ? resolveCard(call, now) : null);

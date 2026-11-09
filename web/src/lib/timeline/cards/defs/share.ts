@@ -22,12 +22,17 @@ export const share: CardLogic<ShareData> = {
   stays: true,
   label: 'Файл',
   parse(call) {
-    const files = call.block.files;
     const answer = call.answer;
-    // Вложение у блока приходит от хаба; без него — то, что ответил воркер.
+    const shared = answer ? str(answer.attachment_id) : '';
+    // Вложение хаб привязывает к блоку-носителю воркера; у старых записей и у своего
+    // блока харнесса оно может лежать на самом вызове. Ответ воркера главнее: носитель
+    // с чужим вложением не показывается.
+    const carried = call.carrier?.files ?? [];
+    const files = call.block.files.length > 0 ? call.block.files : carried.filter((file) => !shared || file.attachment_id === shared);
+    // Без вложения — то, что ответил воркер.
     const fallback: BlockFile[] =
-      files.length === 0 && answer && str(answer.attachment_id)
-        ? [{ attachment_id: str(answer.attachment_id), name: str(answer.name), mime: str(answer.mime), size: num(answer.size) ?? 0, title: str(answer.title), note: str(answer.note) }]
+      files.length === 0 && answer && shared
+        ? [{ attachment_id: shared, name: str(answer.name), mime: str(answer.mime), size: num(answer.size) ?? 0, title: str(answer.title), note: str(answer.note) }]
         : [];
     const path = str(call.input.path);
     if (files.length === 0 && fallback.length === 0 && !path && call.state !== 'error' && !call.argument) return null;
