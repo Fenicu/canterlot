@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
-import { test, expect } from './fixtures';
+import { test, expect, resizeViewport } from './fixtures';
 import { bootSecondary } from './secondary-fixture';
 
 const SHOTS = process.env.LIMITS_SHOTS_DIR;
@@ -97,7 +97,7 @@ test('huge_token_counts_stay_inside_their_cells_at_every_width', async ({ page }
   for (const index of [0, 1, 3, 4, 6, 7]) await expect(counts.nth(index)).toHaveAttribute('title', /^(вх|вых)\. [\d ]+$/);
   const widths = test.info().project.name === 'phone' ? [320, 360, 390] : [1440];
   for (const width of widths) {
-    await page.setViewportSize({ width, height: 844 });
+    await resizeViewport(page, { width, height: 844 });
     const fits = await counts.evaluateAll((nodes) => nodes.map((node) => {
       const cell = node.closest('td');
       if (!cell) return null;
@@ -215,7 +215,7 @@ test('current_limits_rows_stay_inside_their_card_at_narrow_widths', async ({ pag
   await expect(cards).toHaveCount(2);
   const widths = test.info().project.name === 'phone' ? [320, 360, 390] : [1440];
   for (const width of widths) {
-    await page.setViewportSize({ width, height: 844 });
+    await resizeViewport(page, { width, height: 844 });
     const rows = await page.locator('main .current .row').evaluateAll((items) => items.map((row) => {
       const card = row.closest('section')!.getBoundingClientRect();
       return [...row.children].map((cell) => {

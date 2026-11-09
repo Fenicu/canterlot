@@ -143,7 +143,8 @@ test('refresh_asks_the_hub_shows_pending_and_ends_when_a_new_reading_arrives', a
   const busy = strip.getByRole('button', { name: 'Обновляю лимиты' });
   await expect(busy).toHaveAttribute('aria-disabled', 'true');
   await shot(page, 'strip-refresh-pending');
-  expect(calls).toBe(1);
+  // Кнопка уходит в ожидание по нажатию, раньше, чем запрос доходит до маршрута.
+  await expect.poll(() => calls).toBe(1);
   const five = claude(api).five_hour!;
   hub.append('conversations', {
     kind: 'limits_changed',
@@ -620,6 +621,7 @@ test('expanded_strip_has_one_shared_grid_across_providers', async ({ page }) => 
   });
   const strip = page.locator('.limits').first();
   await strip.locator('summary').click();
+  await expect(strip.locator('.reset').first()).toBeVisible();
   const bars = strip.locator('.bar');
   const barBoxes = await bars.evaluateAll((nodes) => nodes.map((n) => n.getBoundingClientRect().x));
   for (const x of barBoxes) expect(Math.abs(x - barBoxes[0]!)).toBeLessThanOrEqual(1);

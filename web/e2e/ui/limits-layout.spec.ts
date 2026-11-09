@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { PALETTES } from '../../src/lib/palettes';
-import { test, expect } from './fixtures';
+import { test, expect, resizeViewport } from './fixtures';
 import { bootRealisticLimits } from './limits-seed';
 
 const phone = () => test.info().project.name === 'phone';
@@ -29,8 +29,7 @@ test('limits_screen_never_overflows_at_phone_and_desktop_widths', async ({ page 
   await bootRealisticLimits(page);
   const widths = phone() ? [320, 360, 390] : [1280, 1440];
   for (const width of widths) {
-    await page.setViewportSize({ width, height: phone() ? 844 : 900 });
-    await page.waitForTimeout(100);
+    await resizeViewport(page, { width, height: phone() ? 844 : 900 });
     expect(await overflowing(page), `${width}px`).toEqual([]);
     const scroll = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(scroll, `${width}px`).toBeLessThanOrEqual(0);
@@ -40,9 +39,10 @@ test('limits_screen_never_overflows_at_phone_and_desktop_widths', async ({ page 
 test('desktop_layout_uses_the_width_with_regions_side_by_side', async ({ page }) => {
   test.skip(phone(), 'раскладка рабочего стола');
   await bootRealisticLimits(page);
+  await expect(page.locator('main .current .provider')).toHaveCount(3);
+  await expect(page.locator('main .charts > *')).toHaveCount(3);
   for (const width of [1280, 1440]) {
-    await page.setViewportSize({ width, height: 900 });
-    await page.waitForTimeout(100);
+    await resizeViewport(page, { width, height: 900 });
     const pane = (await page.locator('main').boundingBox())!;
     const content = (await page.locator('main .secondary-content').boundingBox())!;
     // Содержимое занимает почти всю панель и стоит по её центру, а не узкой колонкой у края.
@@ -77,6 +77,7 @@ test('phone_layout_stacks_regions_and_keeps_every_card_full_width', async ({ pag
   test.skip(!phone(), 'раскладка телефона');
   await page.setViewportSize({ width: 390, height: 844 });
   await bootRealisticLimits(page);
+  await expect(page.locator('main .current .provider, main .charts > *')).toHaveCount(6);
   const content = (await page.locator('main .secondary-content').boundingBox())!;
   for (const box of await page.locator('main .current .provider, main .charts > *').evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().toJSON() as DOMRect))) {
     expect(Math.abs(box.width - content.width)).toBeLessThanOrEqual(1);
