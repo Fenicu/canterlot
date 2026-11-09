@@ -218,6 +218,33 @@ const RETENTION_INTERVAL: TimeDelta = TimeDelta::hours(3);
 /// Сколько сессий убирает один проход: остальные дождутся следующего.
 const RETENTION_BATCH: i64 = 100;
 
+/// Итог удаления одного кандидата уборки: 1, если удалён. Отказ не останавливает пачку:
+/// застрявший кандидат пропускается, следующий берётся после него по ключу.
+fn retention_outcome(
+    job: &'static str,
+    id: Uuid,
+    outcome: Result<(), crate::deletion::DeleteError>,
+) -> usize {
+    use crate::deletion::DeleteError;
+    match outcome {
+        Ok(()) => 1,
+        Err(DeleteError::Db(error)) => {
+            tracing::warn!(kind = "retention_delete_failed", job, conversation_id = %id, error = %crate::dberr::describe(&error), "candidate skipped");
+            0
+        }
+        Err(
+            DeleteError::NotFound
+            | DeleteError::Deleted
+            | DeleteError::Live
+            | DeleteError::WorktreeNotRemoved
+            | DeleteError::Referenced
+            | DeleteError::NotTrashed
+            | DeleteError::Busy
+            | DeleteError::IdempotencyConflict,
+        ) => 0,
+    }
+}
+
 #[derive(Clone, sqlx::FromRow)]
 struct JobRow {
     id: Uuid,
@@ -1371,41 +1398,37 @@ impl Scheduler {
             return Ok(0);
         }
         let cutoff = now - retention;
-        let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(
-            concat!(
-                "select c.id,c.owner_id from conversations c where ",
-                crate::deletion::accepted_retention_where!(),
-                " order by c.accepted_at,c.id limit $2"
-            ),
-        )
-        .bind(cutoff)
-        .bind(RETENTION_BATCH)
-        .fetch_all(&self.pool)
-        .await?;
+        let mut after: Option<(DateTime<Utc>, Uuid)> = None;
         let mut deleted = 0usize;
-        for (id, owner_id) in candidates {
-            match crate::deletion::delete_accepted_retained(
-                &self.pool,
-                self.blobs.as_deref(),
-                owner_id,
-                id,
-                cutoff,
-                Uuid::now_v7(),
-            )
-            .await
-            {
-                Ok(()) => deleted += 1,
-                Err(crate::deletion::DeleteError::Db(error)) => return Err(error),
-                Err(
-                    crate::deletion::DeleteError::NotFound
-                    | crate::deletion::DeleteError::Deleted
-                    | crate::deletion::DeleteError::Live
-                    | crate::deletion::DeleteError::WorktreeNotRemoved
-                    | crate::deletion::DeleteError::Referenced
-                    | crate::deletion::DeleteError::NotTrashed
-                    | crate::deletion::DeleteError::Busy
-                    | crate::deletion::DeleteError::IdempotencyConflict,
-                ) => {}
+        loop {
+            let candidates: Vec<(Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as(concat!(
+                "select c.id,c.owner_id,c.accepted_at from conversations c where ",
+                crate::deletion::accepted_retention_where!(),
+                " and ($3::timestamptz is null or (c.accepted_at,c.id) > ($3,$4))
+                 order by c.accepted_at,c.id limit $2"
+            ))
+            .bind(cutoff)
+            .bind(RETENTION_BATCH)
+            .bind(after.map(|(at, _)| at))
+            .bind(after.map(|(_, id)| id))
+            .fetch_all(&self.pool)
+            .await?;
+            let full = candidates.len() as i64 == RETENTION_BATCH;
+            for (id, owner_id, at) in candidates {
+                after = Some((at, id));
+                let outcome = crate::deletion::delete_accepted_retained(
+                    &self.pool,
+                    self.blobs.as_deref(),
+                    owner_id,
+                    id,
+                    cutoff,
+                    Uuid::now_v7(),
+                )
+                .await;
+                deleted += retention_outcome("accepted_retention", id, outcome);
+            }
+            if !full {
+                break;
             }
         }
         tracing::info!(
@@ -1424,39 +1447,37 @@ impl Scheduler {
             return Ok(0);
         }
         let cutoff = now - retention;
-        let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(
-            "select c.id,c.owner_id from conversations c
-             where c.trashed_at is not null and c.trashed_at <= $1
-             order by c.trashed_at,c.id limit $2",
-        )
-        .bind(cutoff)
-        .bind(RETENTION_BATCH)
-        .fetch_all(&self.pool)
-        .await?;
+        let mut after: Option<(DateTime<Utc>, Uuid)> = None;
         let mut deleted = 0usize;
-        for (id, owner_id) in candidates {
-            match crate::deletion::purge_retained(
-                &self.pool,
-                self.blobs.as_deref(),
-                owner_id,
-                id,
-                cutoff,
-                Uuid::now_v7(),
+        loop {
+            let candidates: Vec<(Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as(
+                "select c.id,c.owner_id,c.trashed_at from conversations c
+                 where c.trashed_at is not null and c.trashed_at <= $1
+                   and ($3::timestamptz is null or (c.trashed_at,c.id) > ($3,$4))
+                 order by c.trashed_at,c.id limit $2",
             )
-            .await
-            {
-                Ok(()) => deleted += 1,
-                Err(crate::deletion::DeleteError::Db(error)) => return Err(error),
-                Err(
-                    crate::deletion::DeleteError::NotFound
-                    | crate::deletion::DeleteError::Deleted
-                    | crate::deletion::DeleteError::Live
-                    | crate::deletion::DeleteError::WorktreeNotRemoved
-                    | crate::deletion::DeleteError::Referenced
-                    | crate::deletion::DeleteError::NotTrashed
-                    | crate::deletion::DeleteError::Busy
-                    | crate::deletion::DeleteError::IdempotencyConflict,
-                ) => {}
+            .bind(cutoff)
+            .bind(RETENTION_BATCH)
+            .bind(after.map(|(at, _)| at))
+            .bind(after.map(|(_, id)| id))
+            .fetch_all(&self.pool)
+            .await?;
+            let full = candidates.len() as i64 == RETENTION_BATCH;
+            for (id, owner_id, at) in candidates {
+                after = Some((at, id));
+                let outcome = crate::deletion::purge_retained(
+                    &self.pool,
+                    self.blobs.as_deref(),
+                    owner_id,
+                    id,
+                    cutoff,
+                    Uuid::now_v7(),
+                )
+                .await;
+                deleted += retention_outcome("trash_retention", id, outcome);
+            }
+            if !full {
+                break;
             }
         }
         tracing::info!(kind = "trash_purged", deleted, "trashed sessions removed");
