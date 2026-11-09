@@ -161,10 +161,10 @@ test.describe('stack: features and security', () => {
     await expect(dialog.locator('code', { hasText: 'synthetic-large' })).toBeVisible();
     await expect(dialog.locator('code', { hasText: 'synthetic-small' })).toBeVisible();
     await expect(dialog.getByText(/Субагент · Explore/).first()).toBeVisible();
-    const tokens = await dialog.locator('.key-value-list').innerText();
+    const tokens = async () => (await dialog.locator('.key-value-list').innerText()).replace(/\s/g, '');
     // Основной агент: 12 000 на входе и 3 400 на выходе; субагент: 8 000 и 900.
-    expect(tokens.replace(/\s/g, '')).toMatch(/Вход12.?000\+8.?000/);
-    expect(tokens.replace(/\s/g, '')).toMatch(/Выход3.?400\+900/);
+    await expect.poll(tokens).toMatch(/Вход12.?000\+8.?000/);
+    await expect.poll(tokens).toMatch(/Выход3.?400\+900/);
 
     await dialog.getByRole('button', { name: 'Копировать Markdown' }).click();
     await expect(dialog.getByText('Markdown скопирован')).toBeVisible();
