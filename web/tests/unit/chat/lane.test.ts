@@ -24,7 +24,7 @@ describe("laneModel", () => {
     // While streaming
     let model = laneModel(blocks, "agent-tool-1");
     expect(model.title).toBe("Поиск дедупликации");
-    expect(model.subtitle).toBe("Субагент · Explore · haiku · workstation");
+    expect(model.subtitle).toBe("Субагент · Explore · Haiku · workstation");
     expect(model.breadcrumb).toEqual(["Агент", "Explore"]);
     expect(model.task).toBe("Поиск дедупликации");
     expect(model.status).toBe("Работает параллельно с основным агентом");

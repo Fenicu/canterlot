@@ -55,7 +55,7 @@ describe("screens/limits", () => {
       { provider: "opencode", model: "beam", today: empty, period: { runs: 3, tokens_per_second: 1240, first_token_ms: 420 } },
       { provider: "claude", model: "claude-haiku-4-5", today: empty, period: empty },
     ]);
-    expect(rows.map((row) => row.model)).toEqual(["beam", "Opus 5.5"]);
+    expect(rows.map((row) => row.model)).toEqual(["Beam", "Opus 5.5"]);
     expect(rows[0]?.today).toEqual({ speed: null, firstToken: null });
     expect(rows[0]?.period).toEqual({ speed: "1 240 ток/с", firstToken: "старт 0,4 с" });
     expect(rows[1]?.provider).toBe("Claude");
@@ -69,7 +69,7 @@ describe("screens/limits", () => {
       usage({ provider: "opencode", model: "free-small", weekly_delta_permille: 1, input_tokens: 900, output_tokens: 100 }),
     ], "2026-10-29", new Map(), new Set(["claude", "antigravity"]));
 
-    expect(rows.map((row) => row.detail.split(" · ").at(-1))).toEqual(["opus", "gemini", "free-large", "free-small"]);
+    expect(rows.map((row) => row.detail.split(" · ").at(-1))).toEqual(["Opus", "Gemini", "free-large", "free-small"]);
     expect(rows.map((row) => row.weekly)).toEqual([true, true, false, false]);
     expect(rows.map((row) => row.delta)).toEqual([10, 2, 50, 1]);
   });

@@ -159,14 +159,14 @@ test('settings_sheet_keeps_a_session_model_that_left_the_catalog', async ({ page
 	if (detail) detail.model = 'opus';
 	await page.reload();
 	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
-	await expect(page.locator('.subtitle')).toContainText('opus');
+	await expect(page.locator('.subtitle')).toContainText(/opus/i);
 
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
 	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
 
 	const modelSelect = page.locator('#model');
 	await expect(modelSelect).toHaveValue('opus');
-	await expect(modelSelect.locator('option')).toHaveText(['opus-5.5', 'sonnet-5', 'haiku', 'opus']);
+	await expect(modelSelect.locator('option')).toHaveText(['opus-5.5', 'sonnet-5', 'haiku', 'Opus']);
 });
 
 test('unsupported_midsession_setting_is_disabled_with_the_reason_text', async ({ page }) => {

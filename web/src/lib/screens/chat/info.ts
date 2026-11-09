@@ -1,4 +1,4 @@
-import { harnessLabel, modelLabel } from "#lib/format/labels.js";
+import { harnessLabel, modelLabel, resolvedModelLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import type { RunInfo } from "#lib/stores/run.js";
 import { isMainAgent } from "#lib/timeline/present.js";
@@ -29,13 +29,15 @@ export function formatDuration(ms: number): string {
   return remainingMins > 0 ? `${hours} ч ${remainingMins} мин` : `${hours} ч`;
 }
 
-/** Шапка называет модель сессии, лист хода должен называть ту же, пока семейство совпадает. */
+/**
+ * Лист хода называет конкретную версию, как шапка: `claude-fable-5-2` у сессии
+ * на `fable[1m]` — «Fable 5.2 1M». Модель другого семейства называется как есть.
+ */
 function mainModelLabel(model: string, sessionModel?: string | null): string {
   const label = modelLabel(model);
   if (!sessionModel) return label;
-  const session = modelLabel(sessionModel);
   const family = (value: string) => value.split(" ")[0]?.toLowerCase();
-  return family(session) === family(label) ? session : label;
+  return family(modelLabel(sessionModel)) === family(label) ? resolvedModelLabel(sessionModel, model) : label;
 }
 
 export function summarizeRun(

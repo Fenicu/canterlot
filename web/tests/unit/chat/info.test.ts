@@ -62,7 +62,7 @@ describe("summarizeRun", () => {
       {
         title: "Поиск дедупликации",
         sub: "Субагент · Explore",
-        model: "haiku",
+        model: "Haiku",
       },
     ]);
 
@@ -161,7 +161,7 @@ describe("summarizeRun", () => {
     expect(summarizeRun(info).limit?.text).toBe("меньше 0,1% недели");
   });
 
-  test("main_part_carries_the_session_model_label_of_the_same_family", () => {
+  test("main_part_names_the_concrete_version_with_the_session_1m_variant", () => {
     const info = {
       run_id: "00000000-0000-4000-8000-000000000031",
       input_id: "00000000-0000-4000-8000-000000000032",
@@ -176,7 +176,7 @@ describe("summarizeRun", () => {
       usage: [],
     } as unknown as RunInfo;
     const parts = summarizeRun(info, null, "opus[1m]").parts;
-    expect(parts.map((part) => part.model)).toEqual(["Opus 1M", "Opus 5.5", "Haiku 4.5"]);
+    expect(parts.map((part) => part.model)).toEqual(["Opus 5.5 1M", "Opus 5.5", "Haiku 4.5"]);
     expect(summarizeRun(info).parts[0]?.model).toBe("Opus 5.5");
   });
 

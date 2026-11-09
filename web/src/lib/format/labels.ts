@@ -290,14 +290,38 @@ export function harnessLabel(harness: { title?: string; provider?: string } | nu
   return lookup(PROVIDERS, harness?.provider?.toLowerCase()) ?? harness?.title ?? "Агент";
 }
 
-/** Строка сессии не держит каталог машины: `opus[1m]` владельцу показывается названием продукта, у `провайдер/модель` остаётся модель. */
+/**
+ * Человеческое имя модели: `claude-fable-5-2` — «Fable 5.2», `opus[1m]` — «Opus 1M»,
+ * `gpt-6.1-sol` — «GPT-6.1 Sol». У `провайдер/модель` остаётся модель как есть.
+ */
 export const modelLabel = (value: string): string => {
-  const base = value.replace(/\[1m\]$/, '');
-  if (base !== value) return `${base.charAt(0).toUpperCase()}${base.slice(1)} 1M`;
+  const base = value.replace(/\[1m\]$/i, '');
+  if (base !== value) return `${modelLabel(base)} 1M`;
   const claude = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(value);
   if (claude) {
     const [, family = '', major, minor] = claude;
     return `${capitalize(family)} ${minor ? `${major}.${minor}` : major}`;
   }
+  const gpt = /^gpt-(\d+(?:\.\d+)?)((?:-[a-z0-9]+)*)$/.exec(value);
+  if (gpt) {
+    const [, version = '', rest = ''] = gpt;
+    return [`GPT-${version}`, ...rest.split('-').filter(Boolean).map(capitalize)].join(' ');
+  }
+  if (/^[a-z]+$/.test(value)) return capitalize(value);
   return value.slice(value.indexOf('/') + 1);
 };
+
+/**
+ * Модель сессии для шапки и строки: конкретная версия, если хаб её знает
+ * (`fable[1m]` → «Fable 5.2 1M»), иначе имя псевдонима.
+ */
+export function resolvedModelLabel(model: string, resolved?: string | null): string {
+  if (!resolved || resolved === model) return modelLabel(model);
+  const wide = /\[1m\]$/i.test(model) && !/\[1m\]$/i.test(resolved);
+  return `${modelLabel(resolved)}${wide ? ' 1M' : ''}`;
+}
+
+/** Подсказка по требованию: какой псевдоним во что разрешился, `fable[1m] → claude-fable-5-2`. */
+export function modelAliasNote(model: string, resolved?: string | null): string {
+  return resolved && resolved !== model ? `${model} → ${resolved}` : '';
+}

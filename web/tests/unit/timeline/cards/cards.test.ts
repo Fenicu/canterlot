@@ -157,7 +157,7 @@ describe('send and look-ups', () => {
     expect(resolveCard(made('mcp__canterlot__session_interrupt', { session_id: CHILD }, hub({ status: 'interrupted' }), { session, root: false }), NOW)!.line).toBe('Прерывание хода «Карточки ленты»');
     expect(resolveCard(made('mcp__canterlot__nudge_set', { session_id: CHILD, max_nudges: 2, idle_minutes: 5 }, hub({ rule: {}, state: 'watching' }), { session }), NOW)!.line).toBe('Подталкивание «Карточки ленты» · до 2 раз подряд, после 5 мин тишины');
     expect(resolveCard(made('mcp__canterlot__spawn_cancel', { queue_id: 'q' }, hub({ queue_id: 'q', status: 'cancelled' })), NOW)!.line).toBe('Отменила запуск из очереди');
-    expect(resolveCard(made('mcp__canterlot__route_preview', { task_type: 'bugfix' }, hub({ decision: { harness: 'codex', model: 'gpt-6.1-sol', effort: 'high' } })), NOW)!.line).toBe('Маршрут «bugfix»: gpt-6.1-sol · высокое');
+    expect(resolveCard(made('mcp__canterlot__route_preview', { task_type: 'bugfix' }, hub({ decision: { harness: 'codex', model: 'gpt-6.1-sol', effort: 'high' } })), NOW)!.line).toBe('Маршрут «bugfix»: GPT-6.1 Sol · высокое');
     expect(resolveCard(made('mcp__canterlot__canterlot_preset_apply', { id: 'clean' }, hub({ applies: 'next_turn', id: 'clean', revision: null })), NOW)!.line).toBe('Применила пресет «Без инструкций»');
     expect(resolveCard(made('mcp__canterlot__session_subscribe', { session_id: CHILD }, hub({ current_state: 'working', subscribed: true }), { session }), NOW)!.line).toBe('Подписалась на «Карточки ленты»');
   });

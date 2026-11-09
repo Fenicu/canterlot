@@ -42,7 +42,7 @@ describe('reason translation', () => {
 
   test('levels, effort and permission mode', () => {
     expect(reasonText('level xhigh not in candidate levels')).toBe('уровень xhigh не входит в уровни кандидата');
-    expect(reasonText('effort Some("max") not available for model opus')).toBe('усилие max недоступно для модели opus');
+    expect(reasonText('effort Some("max") not available for model opus')).toBe('усилие max недоступно для модели Opus');
     expect(reasonText('permission mode plan not available for opencode')).toBe('режим разрешений plan недоступен для opencode');
   });
 
@@ -112,7 +112,7 @@ describe('route line', () => {
       `Claude — неделя 91${N}% при пороге 90${N}%`
     );
     expect(skippedText({ harness: 'claude_code', model: 'opus', verdict: 'skipped', reason: "not in the owner's list" })).toBe(
-      'opus — не в белом списке владельца'
+      'Opus — не в белом списке владельца'
     );
   });
 
