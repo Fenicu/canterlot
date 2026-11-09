@@ -163,6 +163,17 @@ test('results_load_more_pages_on_scroll_until_the_cursor_ends', async ({ page })
 	await expect(hits.last()).toContainText('Проверка 1');
 });
 
+// Страница, которая не дотягивает до низа экрана, оставляет метку конца списка видимой:
+// наблюдатель пересечений сам по себе второй раз не сработает, и подгрузка не должна на этом встать.
+test('results_keep_loading_while_the_end_of_the_list_stays_in_view', async ({ page }) => {
+	await page.setViewportSize({ width: 412, height: 4000 });
+	const { api } = await boot(page);
+	await searchFromList(page, 'проверка');
+	const hits = page.locator('[data-search-hit]');
+	await expect(hits).toHaveCount(45);
+	expect(api.searchCalls.filter((call) => call.q === 'проверка').map((call) => call.cursor ?? null)).toEqual([null, 'o:20', 'o:40']);
+});
+
 test('empty_query_nothing_found_and_timeout_states', async ({ page }) => {
 	const { api, seed } = await boot(page);
 	await page.goto(`/c/${seed.journal}`);
