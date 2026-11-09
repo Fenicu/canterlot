@@ -838,11 +838,17 @@ async fn approval_card_holds_nothing_and_a_refusal_starts_nothing(pool: PgPool) 
     );
     // Карточка не держит ни очередь, ни активность родителя.
     b.quiet(&[parent]).await;
-    assert_eq!(
-        b.p.detail(parent).await["activity"]["state"],
-        "idle",
-        "the card is not a question"
-    );
+    // Активность — производное состояние: хаб пересчитывает его после уведомления о конце
+    // хода, позже освобождения очереди. `working` здесь — только хвост хода с вызовом
+    // инструмента. Карточка открыта внутри хода, поэтому любой пересчёт после него её
+    // уже видит: держи она активность, состояние застряло бы в `waiting_for_user`.
+    let mut activity = Value::Null;
+    until("activity leaves the spawn turn", async || {
+        activity = b.p.detail(parent).await["activity"]["state"].clone();
+        activity != "working"
+    })
+    .await;
+    assert_eq!(activity, "idle", "the card is not a question");
     b.tool(parent, "sessions.list", json!({}))
         .await
         .expect("parent keeps working");
