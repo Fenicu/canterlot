@@ -1,4 +1,5 @@
 import { test as base, expect } from '@playwright/test';
+import { layoutMode } from '../../src/lib/shell/layout';
 
 export const test = base.extend({
   page: async ({ page }, use, testInfo) => {
@@ -38,6 +39,8 @@ export async function fillWorkdir(page: import('@playwright/test').Page, path: s
 /** Сменить тему из чата: на телефоне переключатель живёт в меню сессии, на рабочем столе в шапке. */
 export async function toggleChatTheme(page: import('@playwright/test').Page) {
   const button = page.locator('.chat-header [data-theme-toggle]');
+  // Переключатель темы и меню сессии рисуются одной шапкой: пока меню нет, отсутствие переключателя ничего не значит.
+  await expect(page.locator('.chat-header').getByRole('button', { name: 'Меню сессии' })).toBeVisible();
   if (await button.count()) return button.click();
   await page.getByRole('button', { name: 'Меню сессии' }).click();
   await page.getByRole('menuitem', { name: /Светлая тема|Тёмная тема/ }).click();
@@ -56,4 +59,15 @@ export async function fillContrast(locator: import('@playwright/test').Locator):
     const [a, b] = [luminance(rgb(own)), luminance(rgb(under))].sort((x, y) => y - x);
     return (a! + 0.05) / (b! + 0.05);
   });
+}
+
+/**
+ * Сменить размер окна и дождаться, пока оболочка перестроится под него.
+ * Раскладку оболочка берёт из события resize, а оно приходит кадром позже:
+ * сразу после setViewportSize страница ещё стоит в прежней раскладке.
+ */
+export async function resizeViewport(page: import('@playwright/test').Page, size: { width: number; height: number }) {
+  await page.setViewportSize(size);
+  const width = await page.evaluate(() => document.documentElement.clientWidth);
+  await expect(page.locator('.shell')).toHaveAttribute('data-layout', layoutMode(width));
 }

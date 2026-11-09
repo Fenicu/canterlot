@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, test } from './fixtures';
+import { expect, resizeViewport, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const SHOTS = process.env.LIMITS_SHOTS_DIR;
@@ -521,17 +521,19 @@ async function expectFourProviderStrip(page: Page, open: boolean): Promise<void>
   const isOpen = await strip.evaluate((node) => (node as HTMLDetailsElement).open);
   if (isOpen !== open) await strip.locator('summary').click();
   await expect(strip.locator('.row')).toHaveCount(4);
+  // Раскрытая полоса показывает каждое окно своей строкой, свёрнутая — 5ч и нед рядом и без месяца.
+  // Меряем, только когда полоса показывает именно этот набор окон.
+  const windows = open ? ['week', 'five', 'week', 'five', 'week', 'five', 'week', 'month'] : ['week', 'five', 'week', 'five', 'week', 'five', 'week'];
+  await expect.poll(async () => (await windowMetrics(page)).filter((item) => item.visible).map((item) => item.window)).toEqual(windows);
 
   const all = await windowMetrics(page);
   const metrics = all.filter((item) => item.visible);
   const month = all.find((item) => item.window === 'month');
   if (open) {
-    // Раскрытая полоса: каждое окно своей строкой, одна колонка полосы на все окна.
-    expect(metrics.map((item) => item.window)).toEqual(['week', 'five', 'week', 'five', 'week', 'five', 'week', 'month']);
+    // Раскрытая полоса: одна колонка полосы на все окна.
     expectColumnsAligned(metrics, 'expanded');
   } else {
-    // Свёрнутая полоса: одна строка на провайдера, 5ч и нед стоят рядом, месяца нет.
-    expect(metrics.map((item) => item.window)).toEqual(['week', 'five', 'week', 'five', 'week', 'five', 'week']);
+    // Свёрнутая полоса: одна строка на провайдера.
     expect(month?.visible).toBe(false);
     expectColumnsAligned(metrics.filter((item) => item.window === 'five'), 'five');
     expectColumnsAligned(metrics.filter((item) => item.window === 'week'), 'week');
@@ -584,7 +586,7 @@ async function expectFourProviderStrip(page: Page, open: boolean): Promise<void>
 test('four_providers_keep_one_aligned_grid_at_the_desktop_sidebar_and_a_390_phone', async ({ page }) => {
   await boot(page, fourProviders);
   for (const width of [2560, 1440, 390]) {
-    await page.setViewportSize({ width, height: 900 });
+    await resizeViewport(page, { width, height: 900 });
     await expectFourProviderStrip(page, false);
     await shot(page, `strip-four-${width}-collapsed`);
     await expectFourProviderStrip(page, true);
@@ -736,7 +738,7 @@ test('stripes_span_the_strip_and_the_chevron_keeps_its_place_in_both_states', as
   // Поворот стрелки и смена темы идут переходами: геометрию меряем после них.
   const settled = () => expect.poll(() => strip.evaluate((node) => node.getAnimations({ subtree: true }).length)).toBe(0);
   for (const width of widths) {
-    await page.setViewportSize({ width, height: 900 });
+    await resizeViewport(page, { width, height: 900 });
     for (const theme of ['dark', 'light']) {
       if ((await page.locator('html').getAttribute('data-theme')) !== theme) {
         await page.getByRole('button', { name: 'Сменить тему' }).click();
