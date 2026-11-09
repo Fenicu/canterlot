@@ -323,7 +323,9 @@
 		flex-direction: column;
 		gap: var(--s3);
 		min-height: 0;
-		overflow: hidden;
+		/* Не hidden: обрезанное тело стало бы прокручиваемым, и прокрутка к ссылке посреди раскрытия
+		   сдвигала бы её из-под пальца, когда браузер поджимает прокрутку растущего тела. */
+		overflow: clip;
 		padding: var(--s3) var(--s6) var(--s0);
 	}
 	.body p {

@@ -207,6 +207,42 @@ test('report_link_without_a_seq_still_finds_the_block_by_paging', async ({ page 
 	await expect(block).toBeInViewport();
 });
 
+test('report_tap_mid_unfold_and_mid_plan_reread_still_opens_the_report', async ({ page }) => {
+	const { api, seed } = await boot(page, (s) => `/c/${s.orchestrator}`);
+	await page.locator('[data-role="plan-strip"] button').click();
+	const task = planTab(page).locator('[data-plan-task="2"]');
+	// Подробности уже пришли: ссылка «Отчёт» есть с первого кадра раскрытия.
+	await expect(task.locator('[data-role="plan-commits-count"]')).toBeVisible();
+	// Раскрытие идёт медленно, чтобы нажатие пришлось на его середину.
+	await page.evaluate(() => document.documentElement.style.setProperty('--motion-scale', '8'));
+	await task.getByRole('button', { name: /#2 Хранилище плана/ }).click();
+	const body = task.locator('[data-role="plan-task-body"]');
+	const link = body.getByRole('link', { name: 'Отчёт' });
+
+	// Прокрутка к ссылке посреди раскрытия не прокручивает обрезанное тело: иначе тело
+	// разжимается, браузер поджимает его прокрутку, и ссылка уезжает из-под пальца.
+	await link.scrollIntoViewIfNeeded();
+	expect(await body.evaluate((el) => el.scrollTop)).toBe(0);
+
+	// Палец ложится, как только ссылка видна в растущей складке.
+	const handle = await link.elementHandle();
+	await page.waitForFunction((el) => {
+		const box = el!.getBoundingClientRect();
+		const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+		return !!hit && el!.contains(hit);
+	}, handle);
+	const box = (await link.boundingBox())!;
+	await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+	await page.mouse.down();
+	// Пока палец лежит, план правится: экран перечитывает его по HTTP, живая задача накладывается.
+	const reread = page.waitForResponse((response) => response.url().includes('/api/v1/plan'));
+	api.pushPlanTask({ ...seed.tasks[0]!, note: 'Правка посреди нажатия' });
+	await reread;
+	await expect(task.locator('[data-role="plan-task-body"] a[data-role="plan-report"]')).toHaveCount(1);
+	await page.mouse.up();
+	await expect(page).toHaveURL(new RegExp(`/c/${seed.executors.review}\\?block=${seed.reportBlockId}`));
+});
+
 test('deleted_orchestrator_drops_its_plan_and_deleted_executor_reads_as_removed', async ({ page }) => {
 	const { api, seed } = await boot(page, () => '/sessions', '[data-list-ready]');
 	const badge = page.locator(`[data-session="${seed.orchestrator}"] [data-role="plan-badge"]`);
