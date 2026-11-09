@@ -56,6 +56,14 @@ fn slot(tracker: &mut LimitTracker, window: LimitWindow) -> &mut WindowState {
     }
 }
 
+/// Сброс окна, если он ещё впереди: прошедший разбудил бы очередь сразу, и следующий
+/// ввод упёрся бы в тот же лимит.
+fn future_reset(tracker: &mut LimitTracker, window: LimitWindow, now_ms: u64) -> Option<u64> {
+    slot(tracker, window)
+        .resets_at_ms
+        .filter(|reset| *reset > now_ms)
+}
+
 fn window_from_duration(mins: u64) -> Option<LimitWindow> {
     match mins {
         300 => Some(LimitWindow::FiveHour),
@@ -208,7 +216,7 @@ impl LimitTracker {
                 let window = exhausted.unwrap_or(highest);
                 facts.push(LimitFact::Reached {
                     window,
-                    resets_at_ms: slot(self, window).resets_at_ms,
+                    resets_at_ms: future_reset(self, window, now_ms),
                 });
             }
             CrunchContext::RateLimitExceeded => {
@@ -216,7 +224,7 @@ impl LimitTracker {
                     let window = exhausted.unwrap_or(highest);
                     facts.push(LimitFact::Reached {
                         window,
-                        resets_at_ms: slot(self, window).resets_at_ms,
+                        resets_at_ms: future_reset(self, window, now_ms),
                     });
                 }
             }

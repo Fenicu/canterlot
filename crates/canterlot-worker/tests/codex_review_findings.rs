@@ -254,7 +254,6 @@ impl Fake {
 /// `apply_settings_override`). The server ran the turn with effort=high, yet the
 /// next plain turn re-sends the stale effort=low and silently reverts it.
 #[tokio::test]
-#[ignore = "bug: смена усилия теряется, если ход кончился до ответа turn/start"]
 async fn adopted_turn_without_response_keeps_effort_change() {
     let mut lines = handshake("th");
     lines.push(w_in(10, "turn/start", json!({})));
@@ -299,7 +298,6 @@ async fn adopted_turn_without_response_keeps_effort_change() {
 /// (e.g. only another `limitId`); `on_read_failed` filters such resets precisely
 /// because a past reset wakes the queue at once.
 #[test]
-#[ignore = "bug: свежее чтение после usageLimitExceeded отдаёт прошедший сброс"]
 fn fresh_read_without_windows_does_not_report_a_past_reset() {
     let now = 2_000_000_000_000u64;
     let mut tracker = LimitTracker::default();

@@ -155,6 +155,11 @@ pub struct CodexAdapter {
     completed_status: HashMap<String, Option<String>>,
     responses: HashMap<i64, RpcResult>,
     resolved: VecDeque<Resolved>,
+    /// Решение владельца, чей `serverRequest/resolved` ждёт `deliver_decision`: только его
+    /// подтверждение копится в `resolved`, прочие (отказы, опоздавшие) не нужны никому.
+    decision_wait: Option<String>,
+    /// Срок мягкой остановки: сколько close ждёт выхода app-server после закрытия stdin.
+    stop_grace: Duration,
     proof_for: Option<Uuid>,
     proof_seen: bool,
     /// Вводы с `Undetermined` по сроку: позднее доказательство уходит `InputAccepted`.
@@ -250,6 +255,8 @@ impl CodexAdapter {
             completed_status: HashMap::new(),
             responses: HashMap::new(),
             resolved: VecDeque::new(),
+            decision_wait: None,
+            stop_grace: Duration::from_secs(5),
             proof_for: None,
             proof_seen: false,
             unconfirmed: HashSet::new(),
@@ -553,9 +560,12 @@ impl CodexAdapter {
             }
             Translated::ServerRequestResolved { request_id } => {
                 match self.requests.on_resolved(&request_id) {
-                    Some(Resolved::Ours { request_id }) => {
+                    Some(Resolved::Ours { request_id })
+                        if self.decision_wait.as_deref() == Some(request_id.as_str()) =>
+                    {
                         self.resolved.push_back(Resolved::Ours { request_id })
                     }
+                    Some(Resolved::Ours { .. }) => {}
                     Some(Resolved::Cleared { request_id }) if self.outbox.active().is_some() => {
                         self.events.push_back(AdapterEvent::RequestClosed {
                             request_id,
@@ -1462,6 +1472,67 @@ impl CodexAdapter {
         self.turn_items.clear();
     }
 
+    async fn deliver_decision_inner(
+        &mut self,
+        request_id: &str,
+        decision: &DecisionPayload,
+    ) -> DecisionOutcome {
+        let Some((kind, payload, item_id)) = self.requests.pending_info(request_id) else {
+            return DecisionOutcome::NotApplied("request_not_pending".into());
+        };
+        if !requests::check_decision(&kind, &payload, decision) {
+            return DecisionOutcome::NotApplied("decision_invalid".into());
+        }
+        let line = match self.requests.answer(request_id, decision) {
+            Ok(line) => line,
+            Err(reason) => return DecisionOutcome::NotApplied(reason.into()),
+        };
+        if !self.write_request(line).await {
+            return DecisionOutcome::Undetermined;
+        }
+        let decision_kind = match decision {
+            DecisionPayload::Permission {
+                behavior: PermissionBehavior::Allow,
+                ..
+            } => "allow",
+            DecisionPayload::Permission { .. } => "deny",
+            DecisionPayload::Question { .. } => "answer",
+        };
+        let limit = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self.outbox.active().is_none() {
+                return DecisionOutcome::Undetermined;
+            }
+            if let Some(position) = self
+                .resolved
+                .iter()
+                .position(|resolved| matches!(resolved, Resolved::Ours { request_id: id } if id.as_str() == request_id))
+            {
+                self.resolved.remove(position);
+                let mut payload = serde_json::Map::new();
+                payload.insert("request_id".to_owned(), request_id.into());
+                payload.insert("decision_kind".to_owned(), decision_kind.into());
+                if let Some(status) = self.completed_status.get(item_id.as_str())
+                    && let Some(status) = status
+                {
+                    payload.insert("item_status".to_owned(), status.clone().into());
+                }
+                return DecisionOutcome::Applied(DecisionProof {
+                    proof_kind: "codex_server_request_resolved".into(),
+                    payload: Value::Object(payload),
+                });
+            }
+            if self.eof || self.exited {
+                return DecisionOutcome::Undetermined;
+            }
+            if timeout_at(limit, self.flush_writes()).await.is_err()
+                || timeout_at(limit, self.pump_once()).await.is_err()
+            {
+                return DecisionOutcome::Undetermined;
+            }
+        }
+    }
+
     // Ответ turn/start после срока: ввод уже назван неподтверждённым. Ход принимается,
     // а отказ освобождает исполнение: иначе конца хода никто не дождётся.
     fn settle_late_turn(&mut self) {
@@ -1471,7 +1542,11 @@ impl CodexAdapter {
         let Some(result) = self.responses.remove(&rpc_id) else {
             if self.outbox.adopted_turn_ended() {
                 self.rpc.forget(rpc_id);
-                self.pending_turn = None;
+                // Ход ввода прошёл: сервер принял ввод с его настройками, и следующий
+                // turn/start должен нести их, а не прежние.
+                if let Some(pending) = self.pending_turn.take() {
+                    self.apply_settings_override(pending.settings.as_ref());
+                }
             }
             return;
         };
@@ -1954,60 +2029,11 @@ impl Adapter for CodexAdapter {
         request_id: &str,
         decision: &DecisionPayload,
     ) -> DecisionOutcome {
-        let Some((kind, payload, item_id)) = self.requests.pending_info(request_id) else {
-            return DecisionOutcome::NotApplied("request_not_pending".into());
-        };
-        if !requests::check_decision(&kind, &payload, decision) {
-            return DecisionOutcome::NotApplied("decision_invalid".into());
-        }
-        let line = match self.requests.answer(request_id, decision) {
-            Ok(line) => line,
-            Err(reason) => return DecisionOutcome::NotApplied(reason.into()),
-        };
-        if !self.write_request(line).await {
-            return DecisionOutcome::Undetermined;
-        }
-        let decision_kind = match decision {
-            DecisionPayload::Permission {
-                behavior: PermissionBehavior::Allow,
-                ..
-            } => "allow",
-            DecisionPayload::Permission { .. } => "deny",
-            DecisionPayload::Question { .. } => "answer",
-        };
-        let limit = Instant::now() + Duration::from_secs(5);
-        loop {
-            if self.outbox.active().is_none() {
-                return DecisionOutcome::Undetermined;
-            }
-            if let Some(position) = self
-                .resolved
-                .iter()
-                .position(|resolved| matches!(resolved, Resolved::Ours { request_id: id } if id.as_str() == request_id))
-            {
-                self.resolved.remove(position);
-                let mut payload = serde_json::Map::new();
-                payload.insert("request_id".to_owned(), request_id.into());
-                payload.insert("decision_kind".to_owned(), decision_kind.into());
-                if let Some(status) = self.completed_status.get(item_id.as_str())
-                    && let Some(status) = status
-                {
-                    payload.insert("item_status".to_owned(), status.clone().into());
-                }
-                return DecisionOutcome::Applied(DecisionProof {
-                    proof_kind: "codex_server_request_resolved".into(),
-                    payload: Value::Object(payload),
-                });
-            }
-            if self.eof || self.exited {
-                return DecisionOutcome::Undetermined;
-            }
-            if timeout_at(limit, self.flush_writes()).await.is_err()
-                || timeout_at(limit, self.pump_once()).await.is_err()
-            {
-                return DecisionOutcome::Undetermined;
-            }
-        }
+        self.decision_wait = Some(request_id.to_owned());
+        let outcome = self.deliver_decision_inner(request_id, decision).await;
+        self.decision_wait = None;
+        self.resolved.clear();
+        outcome
     }
 
     async fn refuse_request(&mut self, request_id: &str, _message: &str) {
@@ -2217,6 +2243,10 @@ impl Adapter for CodexAdapter {
         }
     }
 
+    fn set_stop_grace(&mut self, grace: Duration) {
+        self.stop_grace = grace;
+    }
+
     async fn next_event(&mut self) -> AdapterEvent {
         loop {
             self.compact_timed_out();
@@ -2246,7 +2276,9 @@ impl Adapter for CodexAdapter {
         proc.close_stdin();
         let grace = Duration::from_secs(2);
         if !self.exited {
-            if matches!(mode, CloseMode::Force) || timeout(grace, proc.wait()).await.is_err() {
+            if matches!(mode, CloseMode::Force)
+                || timeout(self.stop_grace, proc.wait()).await.is_err()
+            {
                 group.signal_member(
                     &crate::containment::Member {
                         pid: proc.pid,
