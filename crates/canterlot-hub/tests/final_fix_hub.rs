@@ -514,11 +514,37 @@ async fn sj_successful_batch_has_one_commit_and_cursor_update(pool: PgPool) -> T
     Ok(())
 }
 
+/// Цена дельты меряется строками, которые транзакция пакета прочла и записала в таблицах
+/// хаба и их TOAST, а не временем: время под нагрузкой хоста скачет, а счётчики
+/// `pg_stat_get_xact_*` от нагрузки не зависят. Индексы не считаются: их счётчики включают
+/// мёртвые версии горячих строк (`blocks`, `scope_counters`), а сколько их успела убрать
+/// фоновая очистка, зависит от нагрузки. Перезапись накопленного текста или его чтение на
+/// каждую дельту дали бы рост в разы.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn sj_ingest_cost_does_not_grow_with_block_size(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![run.opened(), start(id)]).await;
+    sqlx::query("create unlogged table ingest_cost (tx bigint not null, phase text not null, tuples bigint not null)")
+        .execute(&pool)
+        .await?;
+    // Ожидающие счётчики backend'а копят и прошлые, ещё не сброшенные транзакции,
+    // поэтому цена пакета считается разностью снимков в начале и в конце его транзакции.
+    sqlx::query("create function snapshot_ingest_cost(phase text) returns void language sql as $$ insert into ingest_cost select txid_current(), phase, sum(pg_stat_get_xact_tuples_returned(c.oid) + pg_stat_get_xact_tuples_fetched(c.oid) + pg_stat_get_xact_tuples_inserted(c.oid) + pg_stat_get_xact_tuples_updated(c.oid) + pg_stat_get_xact_tuples_deleted(c.oid)) from pg_class c where c.oid >= 16384 and c.relkind in ('r', 't') and c.oid <> 'ingest_cost'::regclass $$")
+        .execute(&pool)
+        .await?;
+    sqlx::query("create function ingest_cost_start() returns trigger language plpgsql as $$ begin if current_setting('ingest_cost.tx', true) is distinct from txid_current()::text then perform set_config('ingest_cost.tx', txid_current()::text, true); perform snapshot_ingest_cost('start'); end if; return null; end $$")
+        .execute(&pool)
+        .await?;
+    sqlx::query("create trigger ingest_cost_start after insert on events for each row execute function ingest_cost_start()")
+        .execute(&pool)
+        .await?;
+    sqlx::query("create function ingest_cost_end() returns trigger language plpgsql as $$ begin perform snapshot_ingest_cost('end'); return null; end $$")
+        .execute(&pool)
+        .await?;
+    sqlx::query("create constraint trigger ingest_cost_end after update on journal_cursors deferrable initially deferred for each row when (new.committed_seq <> old.committed_seq) execute function ingest_cost_end()")
+        .execute(&pool)
+        .await?;
     let mut random = 0x9e3779b97f4a7c15_u64;
     let bodies: Vec<_> = (1..=1536)
         .map(|rev| {
@@ -533,10 +559,8 @@ async fn sj_ingest_cost_does_not_grow_with_block_size(pool: PgPool) -> TestResul
             delta(id, rev, text)
         })
         .collect();
-    let mut costs = vec![];
     for chunk in bodies.chunks(256) {
         let batch = run.batch(chunk.to_vec());
-        let now = std::time::Instant::now();
         assert_eq!(
             run.ingest
                 .apply_batch(
@@ -548,17 +572,17 @@ async fn sj_ingest_cost_does_not_grow_with_block_size(pool: PgPool) -> TestResul
                 .await?,
             IngestOutcome::Committed { up_to_seq: run.seq }
         );
-        costs.push(now.elapsed().as_secs_f64() * 1000.0 / 256.0);
     }
+    let costs: Vec<i64> = sqlx::query_scalar("select e.tuples - s.tuples from ingest_cost e join ingest_cost s on s.tx = e.tx and s.phase = 'start' where e.phase = 'end' order by e.tx")
+        .fetch_all(&pool)
+        .await?;
     println!(
-        "sj_ingest_cost_does_not_grow_with_block_size: fresh={:.6} ms/delta; 1.5MiB={:.6} ms/delta; ratio={:.3}",
-        costs[0],
-        costs[5],
-        costs[5] / costs[0]
+        "sj_ingest_cost_does_not_grow_with_block_size: rows per batch of 256 deltas {costs:?}"
     );
+    assert_eq!(costs.len(), 6, "one measurement per batch");
     assert!(
-        costs[5] <= costs[0] * 2.5,
-        "per-delta cost grew with block size"
+        costs.iter().all(|cost| *cost == costs[0]),
+        "per-delta cost grew with block size: {costs:?}"
     );
     Ok(())
 }
