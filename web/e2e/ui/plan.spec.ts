@@ -200,10 +200,7 @@ test('report_link_without_a_seq_still_finds_the_block_by_paging', async ({ page 
 	await installChatRoutes(page, hub, api, OWNER);
 	await page.goto(`/c/${seed.orchestrator}`);
 	await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
-	await page.locator('[data-role="plan-strip"] button').click();
-	const task = planTab(page).locator('[data-plan-task="2"]');
-	await task.getByRole('button', { name: /#2 Хранилище плана/ }).click();
-	await task.getByRole('link', { name: 'Отчёт' }).click();
+	await openReport(page);
 	await expect(page).toHaveURL(new RegExp(`/c/${seed.executors.review}\\?block=${seed.reportBlockId}$`));
 	const block = page.locator(`[data-block="${seed.reportBlockId}"]`);
 	await expect(block).toHaveText(REPORT_TEXT, { timeout: 10_000 });
