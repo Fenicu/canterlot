@@ -3,7 +3,7 @@
   "info": {
     "title": "canterlot hub API",
     "description": "HTTP и WSS контракт хаба. Личность задаёт прокси перед хабом; изменяющим запросам нужны Origin, X-Canterlot-Client: 1 и Idempotency-Key.",
-    "version": "1.24.0"
+    "version": "1.24.1"
   },
   "paths": {
     "/api/v1/attachments": {
