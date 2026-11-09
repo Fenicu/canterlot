@@ -48,16 +48,13 @@ async function boot(page: import('@playwright/test').Page, items: unknown[]) {
 }
 
 async function sendOwn(page: import('@playwright/test').Page, text: string) {
-  let ownKey = '';
-  await page.route('**/api/v1/conversations/*/inputs', async (route) => {
-    if (route.request().method() !== 'POST') return route.fallback();
-    ownKey = route.request().headers()['idempotency-key'] ?? '';
-    return route.fallback();
-  });
+  // Пузырь показывается раньше, чем журнал отправит POST: ключ берём из самого запроса, а не из того, что успел увидеть перехват.
+  const posted = page.waitForRequest((request) => request.method() === 'POST' && /\/api\/v1\/conversations\/[^/]+\/inputs$/.test(request.url()));
   await page.getByRole('textbox', { name: 'Сообщение' }).fill(text);
   await page.getByRole('button', { name: 'Отправить', exact: true }).click();
   const bubble = page.locator('.bubble', { hasText: text });
   await expect(bubble).toBeVisible();
+  const ownKey = (await posted).headers()['idempotency-key'] ?? '';
   return { bubble, ownKey };
 }
 
