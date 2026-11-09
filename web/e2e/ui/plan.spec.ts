@@ -103,6 +103,94 @@ test('expanded_task_lists_commits_and_report_opens_the_executor_chat_at_the_bloc
 	expect(historyCalls.some((url) => url.searchParams.has('before'))).toBe(false);
 });
 
+/** Раскрыть задачу #2 в плане оркестратора и пойти по ссылке «Отчёт». */
+async function openReport(page: Page) {
+	await page.locator('[data-role="plan-strip"] button').click();
+	const task = planTab(page).locator('[data-plan-task="2"]');
+	await task.getByRole('button', { name: /#2 Хранилище плана/ }).click();
+	// Ссылка появляется с подробностями задачи, они приходят отдельным запросом; их признак — коммиты.
+	const body = task.locator('[data-role="plan-task-body"]');
+	await expect(body.locator('[data-role="plan-commits"] li')).toHaveCount(3);
+	await body.getByRole('link', { name: 'Отчёт' }).click();
+	await expect(page).toHaveURL(/\?block=/);
+}
+
+const historyOf = (id: string) => (url: URL) => url.pathname.endsWith(`/conversations/${id}/history`);
+
+test('report_jump_does_not_page_the_tail_window_it_is_about_to_replace', async ({ page }) => {
+	const { seed } = await boot(page, (s) => `/c/${s.orchestrator}`);
+	// Окно вокруг отчёта в пути: лента ещё держит хвост, а прыжок уже снял прижатие к низу.
+	let release!: () => void;
+	const held = new Promise<void>((resolve) => (release = resolve));
+	let asked!: () => void;
+	const around = new Promise<void>((resolve) => (asked = resolve));
+	await page.route(historyOf(seed.executors.review), async (route) => {
+		if (new URL(route.request().url()).searchParams.has('around')) {
+			asked();
+			await held;
+		}
+		await route.fallback();
+	});
+	const historyCalls: URL[] = [];
+	page.on('request', (request) => {
+		if (historyOf(seed.executors.review)(new URL(request.url()))) historyCalls.push(new URL(request.url()));
+	});
+	await openReport(page);
+	await around;
+	const feed = page.locator('.feed[data-loaded="100"]');
+	await expect(feed).toBeVisible();
+	// Верх хвоста на экране: и прокрутка к краю, и наблюдатель верхнего края просят старшую страницу.
+	await feed.evaluate(async (el) => {
+		const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+		el.scrollTop = 600;
+		await frame();
+		el.scrollTop = 0;
+		await frame();
+		await frame();
+	});
+	release();
+	const block = page.locator(`[data-block="${seed.reportBlockId}"]`);
+	await expect(block).toHaveText(REPORT_TEXT, { timeout: 10_000 });
+	await expect(block).toBeInViewport();
+	await expect(page.locator('[data-row][data-jump]')).toContainText(REPORT_TEXT);
+	await expect(page.locator('.feed')).not.toHaveAttribute('data-paging');
+	expect(historyCalls.some((url) => url.searchParams.has('around'))).toBe(true);
+	expect(historyCalls.filter((url) => url.searchParams.has('before')).map(String)).toEqual([]);
+});
+
+test('report_at_the_top_edge_pulls_the_older_page_once_placed_and_stays_in_place', async ({ page }) => {
+	const { api, seed } = await boot(page, (s) => `/c/${s.orchestrator}`);
+	// Окно вокруг отчёта начинается с него самого, а история старше есть: цель встаёт у верхнего края.
+	await page.route(
+		(url) => historyOf(seed.executors.review)(url) && url.searchParams.has('around'),
+		async (route) => {
+			const around = new URL(route.request().url()).searchParams.get('around')!;
+			await route.fulfill({ json: await api.history(seed.executors.review, { around, limit: 7 }) });
+		}
+	);
+	const older: URL[] = [];
+	page.on('request', (request) => {
+		const url = new URL(request.url());
+		if (historyOf(seed.executors.review)(url) && url.searchParams.has('before')) older.push(url);
+	});
+	await openReport(page);
+	const feed = page.locator('.feed');
+	const block = page.locator(`[data-block="${seed.reportBlockId}"]`);
+	await expect(block).toHaveText(REPORT_TEXT, { timeout: 10_000 });
+	// Прыжок держал край окна, пока ставил цель; на месте старшая страница приходит один раз.
+	await expect.poll(() => older.length).toBe(1);
+	// Короткое окно касается и нижнего края: младшая страница ложится под цель и её не двигает.
+	await expect(feed).not.toHaveAttribute('data-paging');
+	await expect(block).toBeInViewport();
+	const row = page.locator('[data-row]').filter({ has: block });
+	const offset = await row.evaluate((node) => {
+		const host = node.closest<HTMLElement>('.feed')!;
+		return node.getBoundingClientRect().top - host.getBoundingClientRect().top - (Number.parseFloat(getComputedStyle(host).paddingTop) || 0);
+	});
+	expect(Math.abs(offset)).toBeLessThanOrEqual(2);
+	expect(older[0]!.searchParams.get('before')).toBe(String(seed.reportSeq));
+});
+
 test('report_link_without_a_seq_still_finds_the_block_by_paging', async ({ page }) => {
 	const hub = new FakeHub();
 	const api = new FakeHubApi(hub);

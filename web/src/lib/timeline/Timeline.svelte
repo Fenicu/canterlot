@@ -79,6 +79,9 @@
   const OLDER_PAGE = 100;
   let highlightKey = $state<string | null>(null);
   let jumpSerial = 0;
+  // Прыжок в пути: окно вот-вот заменится окном вокруг цели. Страница истории для прежнего
+  // окна была бы лишним запросом, а её вставка — рывком, поэтому края окна ждут постановки цели.
+  let jumping = 0;
   let highlightTimer: ReturnType<typeof setTimeout> | null = null;
   const JUMP_HOLD_MS = 1300;
   // Во время прыжка окно монтирует только то, что нужно у цели: иначе первый кадр
@@ -388,14 +391,14 @@
   }
 
   async function pullOlder(): Promise<void> {
-    if (loading || !hasOlder) return;
+    if (loading || !hasOlder || jumping > 0) return;
     loading = true;
     try { await (feed ? feed.loadOlder() : chat.loadOlder()); }
     finally { loading = false; }
   }
 
   async function pullNewer(): Promise<void> {
-    if (loading || feed || !chat.timeline.tailDetached) return;
+    if (loading || feed || jumping > 0 || !chat.timeline.tailDetached) return;
     loading = true;
     try { await chat.loadNewer(); }
     catch { /* следующая прокрутка вниз попробует снова */ }
@@ -414,11 +417,39 @@
     new Promise((resolve) => requestAnimationFrame(() => resolve()));
 
   /**
+   * Окно у верхнего края подтягивает старшую страницу, у нижнего края оторванного окна — младшую.
+   * `keep` ставит якорь на видимую строку перед запросом: прокрутки владельца, которая его ставит, не было.
+   */
+  function pageAtEdges(keep = false): void {
+    if (!host) return;
+    const overflow = host.scrollHeight - host.clientHeight;
+    const older = host.scrollTop < PIN_PX && !(controller?.pinned && overflow > PIN_PX);
+    if (!older && overflow - host.scrollTop >= host.clientHeight) return;
+    if (keep && !loading && (older ? hasOlder : !feed && chat.timeline.tailDetached)) hold();
+    if (older) void pullOlder();
+    else void pullNewer();
+  }
+
+  /**
    * Прыжок к своему сообщению: старые блоки не монтируются, пока летим, —
    * лента заменяется окном вокруг цели, а высоты строк доводят её до верха.
    */
   async function jumpTo(request: { inputId: string; seq: string; nonce: number; blockId?: string }): Promise<void> {
     const serial = ++jumpSerial;
+    jumping += 1;
+    try {
+      await placeJump(request, serial);
+    } finally {
+      jumping -= 1;
+    }
+    if (jumping > 0 || serial !== jumpSerial || !host) return;
+    // Края, которых прыжок не дал коснуться, проверяются один раз уже на месте;
+    // пришедшая страница держит цель там, где её поставил прыжок.
+    pageAtEdges(true);
+  }
+
+  /** Окно вокруг цели прыжка и доводка цели до верха; края окна в это время не листаются. */
+  async function placeJump(request: { inputId: string; seq: string; nonce: number; blockId?: string }, serial: number): Promise<void> {
     overscan = 0.1;
     held = null;
     controller?.release();
@@ -649,9 +680,7 @@
       else hold();
       layout(rows, top, host.clientHeight || 1);
       settle();
-      const overflow = host.scrollHeight - host.clientHeight;
-      if (host.scrollTop < PIN_PX && !(controller?.pinned && overflow > PIN_PX)) void pullOlder();
-      else if (overflow - host.scrollTop < host.clientHeight) void pullNewer();
+      pageAtEdges();
     };
     scroller.addEventListener('scroll', onScroll, { passive: true });
     const onVisible = () => { if (document.visibilityState === 'visible') shown += 1; };
