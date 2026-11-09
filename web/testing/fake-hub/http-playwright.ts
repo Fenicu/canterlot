@@ -1297,7 +1297,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       await route.fulfill({
         status: 404,
         headers: headers(),
-        json: { error: { code: 'not_found', message: 'Run not found' } }
+        json: errorBody('not_found', 'Run not found')
       });
       return;
     }

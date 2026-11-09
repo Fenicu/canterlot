@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { errorText } from '#lib/api/errors.js';
+	import { ApiError } from '#lib/api/http.js';
 	import { onMount } from 'svelte';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import { getRun } from '#lib/api/client.js';
@@ -21,6 +22,7 @@
 	let info = $state<RunInfo | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let missing = $state(false);
 
 	const sessionModel = $derived(
 		((chat.settings as { effective?: { model?: string } } | null)?.effective?.model ||
@@ -40,7 +42,9 @@
 			info = res.data as RunInfo;
 			loading = false;
 		} catch (err: unknown) {
-			error = errorText(err, 'Не удалось загрузить сведения о ходе');
+			// Хода нет у хаба (ответ без хода или стёртая история): это не сбой, сведений просто нет.
+			if (err instanceof ApiError && err.code === 'not_found') missing = true;
+			else error = errorText(err, 'Не удалось загрузить сведения о ходе');
 			loading = false;
 		}
 	}
@@ -80,6 +84,8 @@
 	<div class="info-sheet-body">
 		{#if loading && !info}
 			<p class="meta">Загрузка сведений…</p>
+		{:else if missing}
+			<p class="meta" data-role="info-missing">Сведения об этом ответе недоступны</p>
 		{:else if error}
 			<p class="error-msg">{error}</p>
 		{:else if summary}
