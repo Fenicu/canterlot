@@ -1933,3 +1933,48 @@ async fn a_queued_spawn_links_its_plan_task_only_at_start(pool: PgPool) {
         "{notes:?}"
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_now_takes_the_queue_before_the_parent_row(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    low_disk(&f.pool, f.machine).await;
+    let queued = f.spawn_direct().await.unwrap();
+    assert_eq!(queued["status"], "queued", "{queued}");
+    let queue_id: Uuid = serde_json::from_value(queued["queue_id"].clone()).unwrap();
+    // Продолжение родителя держит его очередь и затем правит строку разговора.
+    let mut resume = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(f.parent)
+        .execute(&mut *resume)
+        .await
+        .unwrap();
+    let (started, ()) = tokio::join!(f.runtime_call(queue_id, true), async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "select exists(select 1 from pg_stat_activity
+                      where datname=current_database() and wait_event_type='Lock'
+                        and query like '%queue_state%')",
+                )
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("start_now waits for the parent's queue");
+        // Ожидая очередь, «Запустить сейчас» ещё не держит строку родителя.
+        sqlx::query("select id from conversations where id=$1 for no key update nowait")
+            .bind(f.parent)
+            .execute(&mut *resume)
+            .await
+            .expect("the parent row must be free while start_now waits for the queue");
+        resume.rollback().await.unwrap();
+    });
+    let started = started.unwrap();
+    assert_eq!(started.status, "started", "{started:?}");
+}

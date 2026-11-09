@@ -849,13 +849,15 @@ pub async fn start_now_in_tx(
     let Some(parent_session) = access::session_in_tx(conn, owner_id, parent).await? else {
         return Err(ToolError::new(ToolErrorCode::SessionNotFound));
     };
+    // Очередь раньше строки разговора (README, шаги 6–7): продолжение остановленного
+    // родителя (`executions::start_in_tx`) держит очередь и правит ту же строку.
+    crate::session_tools::send::lock_queue(conn, parent).await?;
     sqlx::query("select id from conversations where id=$1 and owner_id=$2 for no key update")
         .bind(parent)
         .bind(owner_id)
         .fetch_optional(&mut *conn)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
-    crate::session_tools::send::lock_queue(conn, parent).await?;
     let stopped = parent_stopped_in_tx(&mut *conn, parent).await?;
     let mut row: QueueRow = sqlx::query_as(
         "select * from spawn_queue where id=$1 and parent_id=$2 and owner_id=$3 for update",
