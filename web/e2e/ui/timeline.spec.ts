@@ -36,12 +36,31 @@ async function settled<T>(read: () => Promise<T>, same: (a: T, b: T) => boolean)
   return last;
 }
 
+/**
+ * Ключ и верх n-й строки окна, прочитанные после кадра одним вызовом. Событие прокрутки
+ * перестраивает окно только в следующем кадре: чтение до него берёт строку прежнего окна,
+ * которая тут же уходит из DOM, и два таких чтения в одном кадре сходятся на ней.
+ */
+async function rowAt(page: import('@playwright/test').Page, n: number): Promise<{ key: string; y: number }> {
+  return page.locator('.feed').evaluate((el, n) => new Promise<{ key: string; y: number }>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const row = el.querySelectorAll<HTMLElement>('[data-row]')[n];
+      resolve({ key: row?.dataset.key ?? '', y: row ? row.getBoundingClientRect().top : Number.NaN });
+    }));
+  }), n);
+}
+
 async function rowAnchor(page: import('@playwright/test').Page, n: number): Promise<{ key: string; y: number }> {
-  return settled(async () => {
-    const key = (await page.locator('[data-row]').nth(n).getAttribute('data-key')) ?? '';
-    const box = await page.locator(`[data-key="${key}"]`).boundingBox();
-    return { key, y: box?.y ?? Number.NaN };
-  }, (a, b) => a.key === b.key && Math.abs(a.y - b.y) <= 0.5);
+  return settled(() => rowAt(page, n), (a, b) => a.key !== '' && a.key === b.key && Math.abs(a.y - b.y) <= 0.5);
+}
+
+/** Сдвиг строки от замера; строки нет в DOM — 99, а не ожидание её возвращения. */
+async function drift(page: import('@playwright/test').Page, anchor: { key: string; y: number }): Promise<number> {
+  const top = await page.locator('.feed').evaluate((el, key) => {
+    const node = [...el.querySelectorAll<HTMLElement>('[data-key]')].find((item) => item.dataset.key === key);
+    return node ? node.getBoundingClientRect().top : null;
+  }, anchor.key);
+  return top === null ? 99 : Math.abs(top - anchor.y);
 }
 
 test('dom_is_bounded_with_10000_items_in_a_chat', async ({ page }) => {
@@ -174,13 +193,9 @@ test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the
     const feed = page.locator('.feed');
     await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
     const before = await rowAnchor(page, 1);
-    const key = before.key;
     await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
     release();
-    await expect.poll(async () => {
-      const box = await page.locator(`[data-key="${key}"]`).boundingBox();
-      return box && before ? Math.abs(box.y - before.y) : 99;
-    }).toBeLessThanOrEqual(1);
+    await expect.poll(() => drift(page, before)).toBeLessThanOrEqual(1);
   });
 });
 
@@ -189,7 +204,6 @@ test('reading_old_history_during_stream_keeps_the_anchor_within_one_pixel', asyn
   const feed = page.locator('.feed');
   await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 40; });
   const before = await rowAnchor(page, 2);
-  const key = before.key;
   const blockId = api.id();
   const scope = `conversation:${id}`;
   hub.append(scope, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
@@ -197,10 +211,7 @@ test('reading_old_history_during_stream_keeps_the_anchor_within_one_pixel', asyn
     hub.append(scope, { kind: 'block_delta', conversation_id: id, payload: { block_id: blockId, base_rev: rev - 1, rev, append: 'ещё ' } });
   }
   hub.flush();
-  await expect.poll(async () => {
-    const box = await page.locator(`[data-key="${key}"]`).boundingBox();
-    return box && before ? Math.abs(box.y - before.y) : 99;
-  }).toBeLessThanOrEqual(1);
+  await expect.poll(() => drift(page, before)).toBeLessThanOrEqual(1);
 });
 
 test('pinned_to_bottom_follows_the_stream_and_unpins_on_user_scroll', async ({ page }) => {
