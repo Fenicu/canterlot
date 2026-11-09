@@ -37,8 +37,9 @@ describe("ops/intent", () => {
     expect(intents.busy("stop:c")).toBe(false);
   });
 
-  it("retry_after_a_network_error_reuses_the_key_until_settled", async () => {
-    const intents = new Intents();
+  it("retry_after_a_network_error_reuses_the_key_within_the_retry_window", async () => {
+    let now = 0;
+    const intents = new Intents({ now: () => now });
     const keys: string[] = [];
     await intents
       .run("resume:c", async (key) => {
@@ -46,6 +47,7 @@ describe("ops/intent", () => {
         throw new NetworkError("timeout");
       })
       .catch(() => undefined);
+    now += 60_000;
     await intents.run("resume:c", async (key) => {
       keys.push(key);
     });
@@ -54,6 +56,59 @@ describe("ops/intent", () => {
     });
     expect(keys[0]).toBe(keys[1]);
     expect(keys[2]).not.toBe(keys[1]);
+  });
+
+  it("a_later_separate_press_after_a_lost_answer_gets_a_fresh_key", async () => {
+    // Хаб принял «Стоп», ответ потерян; через полчаса сессию снова останавливают.
+    // Тот же ключ хаб узнал бы и вернул старый ответ, не остановив сессию.
+    let now = 0;
+    const intents = new Intents({ now: () => now });
+    const keys: string[] = [];
+    await intents
+      .run("stop:c:false", async (key) => {
+        keys.push(key);
+        throw new NetworkError("timeout");
+      })
+      .catch(() => undefined);
+    now += 30 * 60_000;
+    await intents.run("stop:c:false", async (key) => {
+      keys.push(key);
+    });
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it("an_outcome_seen_in_the_stream_releases_the_key", async () => {
+    const intents = new Intents({ now: () => 0 });
+    const keys: string[] = [];
+    await intents
+      .run("stop:c:false", async (key) => {
+        keys.push(key);
+        throw new NetworkError("timeout");
+      })
+      .catch(() => undefined);
+    intents.forget("stop:c:");
+    await intents.run("stop:c:false", async (key) => {
+      keys.push(key);
+    });
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it("forget_does_not_touch_other_sessions", async () => {
+    const intents = new Intents({ now: () => 0 });
+    const keys: string[] = [];
+    const lose = (scope: string) =>
+      intents
+        .run(scope, async (key) => {
+          keys.push(key);
+          throw new NetworkError("timeout");
+        })
+        .catch(() => undefined);
+    await lose("stop:c2:false");
+    intents.forget("stop:c:");
+    await intents.run("stop:c2:false", async (key) => {
+      keys.push(key);
+    });
+    expect(keys[1]).toBe(keys[0]);
   });
 
   it("a_refusal_releases_the_key", async () => {

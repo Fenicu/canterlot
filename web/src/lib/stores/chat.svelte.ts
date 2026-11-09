@@ -1,6 +1,7 @@
 import { untrack } from "svelte";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type { OpJournal } from "#lib/ops/journal.js";
+import { intents } from "#lib/ops/intent.js";
 import type { DraftStore } from "#lib/drafts/store.js";
 import type { DraftRecord } from "#lib/drafts/sync.js";
 import type { ConnectionManager } from "#lib/sync/connection.js";
@@ -994,6 +995,7 @@ export class ChatStore {
         return;
       case "compaction_finished":
         this.#settleCompactRequest();
+        intents.forget(`compact:${this.id}`);
         // Тихая строка уже в истории: подтягиваем хвост, переживает перезагрузку.
         // Оторванное окно получит её со страницей: перечитанный хвост увёл бы владельца из чтения.
         if (!this.timeline.tailDetached) this.reloadTail().catch(() => undefined);
@@ -1002,6 +1004,8 @@ export class ChatStore {
         if (event.kind === "compaction_started") {
           // Дальше идёт сама строка эпизода.
           this.#settleCompactRequest();
+          // Исход «Сжать» виден: следующее нажатие — новое намерение, а не повтор с прежним ключом.
+          intents.forget(`compact:${this.id}`);
           const id = event.payload.id;
           const key = `compaction:${id}`;
           const known = this.timeline.entries.find((entry) => entry.key === key);
@@ -1034,6 +1038,7 @@ export class ChatStore {
         this.queuePausedCount += 1;
         return;
       case "queue_resumed":
+        intents.forget(`continue:${this.id}`);
         if (event.kind === "queue_resumed") {
           this.queue.pause_reasons = event.payload.pause_reasons;
           this.#demoteWaiting();
@@ -1048,6 +1053,9 @@ export class ChatStore {
           };
           // Исполнение кончилось: просьба о сжатии уже не исполнится.
           if (!executionLive(this.execution)) this.#settleCompactRequest();
+          // Исход «Стоп» и «Продолжить» виден в потоке: потерянный ответ повторять незачем.
+          intents.forget(`stop:${this.id}:`);
+          intents.forget(`resume:${this.id}:`);
         }
         return;
       case "conversation_settings_changed":
