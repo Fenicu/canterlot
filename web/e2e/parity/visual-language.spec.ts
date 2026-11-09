@@ -84,7 +84,7 @@ test('keyboard_only_flow_reaches_send_sheets_and_back', async ({ page }) => {
   await expect(page.getByRole('menu')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menu')).toHaveCount(0);
-  expect(await focused()).toMatch(/^Меню сессии\|BUTTON/);
+  await expect.poll(focused).toMatch(/^Меню сессии\|BUTTON/);
 
   // «Отправить позже» открывается сочетанием, фокус уходит в окно и возвращается.
   const composer = page.getByRole('textbox', { name: 'Сообщение' });

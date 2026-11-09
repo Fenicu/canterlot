@@ -4,7 +4,7 @@ import { PALETTES } from '../../src/lib/palettes';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { bootSecondary } from './secondary-fixture';
-import { expect, test } from './fixtures';
+import { expect, test, toggleChatTheme } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const AT = '2026-10-28T12:00:00.000Z';
@@ -156,15 +156,9 @@ test('long_chat_keeps_its_scroll_position_across_a_theme_change', async ({ page 
     return { key: row.dataset.key, offset: Math.round(row.getBoundingClientRect().top - top), scroll: Math.round(el.scrollTop) };
   });
   const before = await anchor();
-  const toggle = page.locator('[data-theme-toggle]');
-  if (await toggle.isVisible()) await toggle.click();
-  else {
-    await page.getByRole('button', { name: 'Меню сессии' }).click();
-    await page.getByRole('menuitem', { name: 'Светлая тема' }).click();
-  }
+  await toggleChatTheme(page);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expect(page.locator('html')).not.toHaveAttribute('data-theme-reveal', '');
-  await page.waitForTimeout(200);
-  expect(await anchor()).toEqual(before);
+  await expect.poll(anchor).toEqual(before);
   expect(await transitions(page)).toBe(await supported(page) ? 1 : 0);
 });

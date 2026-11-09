@@ -12,11 +12,13 @@ test('first_visit_keeps_whats_new_closed_and_remembers_the_version', async ({ pa
   await bootSecondary(page, '/settings');
 
   await expect(page.getByRole('dialog', { name: 'Что нового' })).toHaveCount(0);
-  expect(await seen(page)).toBe(APP_VERSION);
+  await expect.poll(() => seen(page)).toBe(APP_VERSION);
 });
 
 test('update_shows_new_entries_once_and_not_after_reload', async ({ page }) => {
   await bootSecondary(page, '/settings');
+  // Первый вход сам запишет текущую версию: подменять её раньше этой записи бесполезно.
+  await expect.poll(() => seen(page)).toBe(APP_VERSION);
   await page.evaluate(([key]) => localStorage.setItem(key, '0.9.0'), [SEEN_KEY]);
   await page.reload();
 

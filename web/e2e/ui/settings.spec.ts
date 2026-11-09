@@ -40,10 +40,13 @@ test('chosen_palette_and_mode_stand_out_in_every_palette_and_mode', async ({ pag
   const main = page.locator('main');
   const palettes = main.getByRole('radiogroup', { name: 'Тема' });
   const modes = main.getByRole('radiogroup', { name: 'Режим' });
-  for (const { name } of PALETTES) {
+  for (const { key, name } of PALETTES) {
     await palettes.getByRole('radio', { name, exact: true }).check();
     for (const mode of ['Тёмный', 'Светлый']) {
       await modes.getByRole('radio', { name: mode, exact: true }).check();
+      // Отмеченная радиокнопка ещё не значит, что страница уже перекрашена.
+      await expect(page.locator('html')).toHaveAttribute('data-palette', key);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', mode === 'Тёмный' ? 'dark' : 'light');
       // Кольцо и метка выбранной карточки отличимы от её фона и от фона страницы на 3:1.
       const ring = await palettes.locator('label:has(input:checked)').evaluate((node) => {
         const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
@@ -68,7 +71,7 @@ test('palette_and_mode_apply_before_paint_and_survive_reload', async ({ page }) 
   await main.getByRole('radio', { name: 'Светлый', exact: true }).check();
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'sepia');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
-  expect(await page.evaluate(() => [localStorage.getItem('canterlot.palette'), localStorage.getItem('canterlot.theme')])).toEqual(['sepia', 'light']);
+  await expect.poll(() => page.evaluate(() => [localStorage.getItem('canterlot.palette'), localStorage.getItem('canterlot.theme')])).toEqual(['sepia', 'light']);
 
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'sepia');
