@@ -213,28 +213,27 @@ async fn redelivered_attempt_does_not_refetch_published_files(pool: PgPool) {
     assert!(timeout(Duration::from_millis(100), no_fetch).await.is_err());
     assert_eq!(fs::metadata(f.published(id)).unwrap().ino(), inode);
     steps.step("no refetch");
-    until(async || {
-        f.store_probe
-            .snapshots()
-            .iter()
-            .flat_map(|s| &s.cj)
-            .filter(|r| {
-                r.kind
-                    == Some(std::mem::discriminant(&Body::AttachmentReady(
-                        Default::default(),
-                    )))
-            })
-            .map(|r| r.seq)
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            >= 2
-    })
-    .await;
+    // Хаб видит каждую запись CJ до подтверждения; снимки хранилища делаются только при
+    // приёме команды и подтверждении, и запись, сжатая между ними, в них не попадает.
+    until(async || shipped_ready(&f).len() >= 2).await;
     steps.step("second AttachmentReady");
     fs::write(f.exec_dir().join("fault_release"), b"1").unwrap();
     f.accepted(&input).await;
     steps.step("accepted");
     assert_eq!(f.sj_transmissions(input.command_id).len(), 1);
+}
+
+/// Записи `AttachmentReady` из CJ, дошедшие до хаба: (журнал, seq).
+fn shipped_ready(f: &Fixture) -> std::collections::BTreeSet<(String, u64)> {
+    let ready = std::mem::discriminant(&Body::AttachmentReady(Default::default()));
+    f.hub()
+        .faults
+        .batches()
+        .iter()
+        .flat_map(|b| b.records.iter().map(move |r| (b.journal_id.clone(), r)))
+        .filter(|(_, r)| r.kind == Some(ready))
+        .map(|(journal, r)| (journal, r.seq))
+        .collect()
 }
 
 /// Журнал сопровождения при падении теста: оно живёт отдельным процессом.
