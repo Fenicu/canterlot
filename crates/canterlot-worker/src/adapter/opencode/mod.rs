@@ -482,12 +482,19 @@ async fn resubscribe(http: Http, session: String, children: Vec<String>) -> Opti
     None
 }
 
+// Поток жив, поэтому сбой чтения (500, срок, замок базы) повторяется с теми же паузами,
+// что и подписка: потерянный кадр мог быть концом хода, и без проекции его не узнать.
 async fn reread(http: Http, session: String, children: Vec<String>) -> Option<Resynced> {
-    let snapshot = reconcile::read(&http, &session, children).await.ok()?;
-    Some(Resynced {
-        stream: None,
-        snapshot,
-    })
+    for delay in RECONNECT_DELAYS {
+        tokio::time::sleep(delay).await;
+        if let Ok(snapshot) = reconcile::read(&http, &session, children.clone()).await {
+            return Some(Resynced {
+                stream: None,
+                snapshot,
+            });
+        }
+    }
+    None
 }
 
 /// Настройки сессии на случай отказа во вводе.
@@ -1297,6 +1304,11 @@ impl OpenCodeAdapter {
             self.delivery.unconfirmed = None;
             self.lookup = None;
         }
+        // Запросы корня сервер снял сам, а потомок (фоновый субагент) и форма MCP ещё ждут.
+        // Супервизор закроет их карточки с концом хода, и ответить будет некому: отказ сейчас.
+        for reply in self.requests.refuse_all(requests::REFUSED) {
+            self.send_refusal(reply);
+        }
         if let Some(translator) = self.translator.as_mut() {
             self.events.push_back(translator.finish_run(command));
         }
@@ -1707,6 +1719,10 @@ impl OpenCodeAdapter {
         let Some(done) = done else {
             if self.stream.is_none() {
                 self.give_up_stream();
+            } else {
+                // Перечитать не вышло при живом потоке: подписка заново с чтением, как при
+                // разрыве. Не выйдет и она — поток снимается в `on_resynced` следующего круга.
+                self.on_stream_end();
             }
             return;
         };
@@ -2420,8 +2436,11 @@ impl Adapter for OpenCodeAdapter {
         let Some(http) = self.http.clone() else {
             return InterruptOutcome::NotApplicable;
         };
+        // Пауза замка базы: сервер простаивает, а ход у супервизора идёт. Отложенный
+        // `continue` снимается до запроса к серверу, иначе он возобновил бы ход после стопа.
+        let paused = self.db_retry.take().map(|retry| retry.command);
         let path = format!("/api/session/{}/interrupt", self.session);
-        let outcome = match http.post_empty(&path, INTERRUPT_WAIT).await {
+        let mut outcome = match http.post_empty(&path, INTERRUPT_WAIT).await {
             Ok(reply) => match reply.get("interrupted").and_then(Value::as_bool) {
                 Some(true) => InterruptOutcome::Acknowledged,
                 Some(false) => InterruptOutcome::NotApplicable,
@@ -2430,11 +2449,26 @@ impl Adapter for OpenCodeAdapter {
             Err(HttpError::Status { status: 404, .. }) => InterruptOutcome::NotApplicable,
             Err(_) => InterruptOutcome::Undetermined,
         };
-        if matches!(outcome, InterruptOutcome::Acknowledged) {
-            self.requests.drop_all();
-        } else {
+        if paused.is_some() && !matches!(outcome, InterruptOutcome::Acknowledged) {
+            // Прерывать на сервере нечего: ход кончается здесь же как прерванный.
             for reply in self.requests.refuse_all(requests::REFUSED) {
                 self.send_refusal(reply);
+            }
+            self.on_run_ended(RunOutcome::Interrupted);
+            outcome = InterruptOutcome::Acknowledged;
+        } else {
+            match outcome {
+                InterruptOutcome::Acknowledged => self.requests.drop_all(),
+                // Сервер ничего не прервал: запросы на нём живы, а супервизор оставляет их
+                // карточки открытыми, и ответ владельца должен дойти. Конец хода, если он уже
+                // в пути, откажет оставшимся сам (`on_run_ended`).
+                InterruptOutcome::NotApplicable => {}
+                // Исход неизвестен, карточки супервизор закрыл: вызовы не должны ждать вечно.
+                InterruptOutcome::Undetermined => {
+                    for reply in self.requests.refuse_all(requests::REFUSED) {
+                        self.send_refusal(reply);
+                    }
+                }
             }
         }
         outcome

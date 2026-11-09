@@ -208,7 +208,6 @@ fn ready() -> Script {
 // ever answers the child: the subagent blocks until the execution is closed.
 // ---------------------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "bug: запрос дочерней сессии остаётся открытым после конца хода корня"]
 async fn child_request_open_at_the_end_of_the_root_period_is_refused() {
     let capture = Script::from_capture("permissions", None);
     let session = session_of(&capture);
@@ -323,7 +322,6 @@ fn script_with_one_locked_run(script: &mut Script) {
 }
 
 #[tokio::test]
-#[ignore = "bug: прерывание в паузе замка базы не отменяет continue"]
 async fn interrupt_during_the_db_lock_pause_stops_the_turn() {
     let mut script = ready();
     let session = session_of(&script);
@@ -386,7 +384,6 @@ fn recorded(scenario: &str) -> Script {
 }
 
 #[tokio::test]
-#[ignore = "bug: один неудачный reread после потерянного конца хода вешает ход"]
 async fn failed_reread_after_a_lost_terminal_is_retried() {
     let mut script = recorded("cut_terminal_lost");
     let drop_at = script
@@ -434,6 +431,62 @@ async fn failed_reread_after_a_lost_terminal_is_retried() {
     bench.close().await;
 }
 
+#[tokio::test]
+async fn rereads_exhausted_fall_back_to_a_full_resync() {
+    let mut script = recorded("cut_terminal_lost");
+    let drop_at = script
+        .steps
+        .iter()
+        .position(|step| matches!(step, Step::DropSse))
+        .unwrap();
+    // The terminal frame arrives broken instead of a cut stream.
+    script.steps[drop_at] = Step::Frame {
+        raw: "data: {\"type\":\"session.execution.succ\n\n".to_owned(),
+    };
+    script.steps.remove(drop_at + 1);
+    // Every reread attempt fails; only the read after resubscribing succeeds.
+    let active = script
+        .route("GET", "/api/session/active")
+        .map(|route| route.replies.last().cloned().unwrap())
+        .unwrap_or(Reply {
+            body: Some(json!({"data": {}})),
+            ..Default::default()
+        });
+    script.set_route(
+        "GET",
+        "/api/session/active",
+        (0..4)
+            .map(|_| Reply {
+                status: 500,
+                body: Some(json!({"_tag": "UnknownError"})),
+                ..Default::default()
+            })
+            .chain([active])
+            .collect(),
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("начни");
+    bench.accepted(&input).await;
+    let finished = bench
+        .finished_within(input.command_id, Duration::from_secs(12))
+        .await;
+    let reads = bench.count("GET", "/api/session/active");
+    assert!(
+        finished,
+        "rereads ran out and the resubscribe fallback did not finish the turn ({reads} reads)"
+    );
+    assert!(
+        reads >= 5,
+        "four failed rereads and a read after resubscribing ({reads})"
+    );
+    assert!(
+        bench.count("GET", "/api/event") >= 2,
+        "the fallback must subscribe to the event stream again"
+    );
+    bench.close().await;
+}
+
 /// Control for the test above: with a healthy first reread the same broken terminal is
 /// recovered from the projection, so the 500 alone is what keeps the turn open.
 #[tokio::test]
@@ -457,5 +510,89 @@ async fn control_lost_terminal_with_a_healthy_reread_finishes() {
             .finished_within(input.command_id, Duration::from_secs(5))
             .await
     );
+    bench.close().await;
+}
+
+// ---------------------------------------------------------------------------------------
+// An interrupt the server answers `interrupted: false` leaves the supervisor's turn and
+// cards as they were; the adapter must keep the request answerable too, otherwise the
+// owner's later decision hits `request_not_pending`.
+// ---------------------------------------------------------------------------------------
+#[tokio::test]
+async fn not_applicable_interrupt_keeps_the_open_request_answerable() {
+    let capture = Script::from_capture("permissions", None);
+    let session = session_of(&capture);
+    let asked = emitted(&capture, &["permission.asked"]).remove(0);
+    let request = asked["data"]["id"].as_str().unwrap().to_owned();
+    let mut script = capture
+        .clone()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit {
+                events: vec![asked],
+            },
+            Step::Stall { ms: 3000 },
+        ],
+    );
+    script.set_route(
+        "POST",
+        &format!("/api/session/{session}/interrupt"),
+        vec![Reply {
+            body: Some(json!({"interrupted": false})),
+            ..Default::default()
+        }],
+    );
+    script.set_route(
+        "POST",
+        &format!("/api/session/{session}/permission/{request}/reply"),
+        vec![Reply {
+            status: 204,
+            ..Default::default()
+        }],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    loop {
+        if let AdapterEvent::RequestOpened { .. } = bench.event().await {
+            break;
+        }
+    }
+    let outcome = tokio::time::timeout(WAIT, bench.adapter.interrupt())
+        .await
+        .expect("interrupt must finish");
+    assert!(
+        matches!(outcome, InterruptOutcome::NotApplicable),
+        "{outcome:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let tail = format!("/permission/{request}/reply");
+    assert_eq!(
+        bench.count("POST", &tail),
+        0,
+        "a not-applicable interrupt must not refuse the request behind the owner's card"
+    );
+    let allow = canterlot_proto::requests::DecisionPayload::Permission {
+        behavior: canterlot_proto::requests::PermissionBehavior::Allow,
+        message: None,
+    };
+    let decided = tokio::time::timeout(WAIT, bench.adapter.deliver_decision(&request, &allow))
+        .await
+        .expect("decision must finish");
+    assert!(
+        matches!(
+            decided,
+            canterlot_worker::adapter::DecisionOutcome::Applied(_)
+        ),
+        "{decided:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(bench.count("POST", &tail), 1);
     bench.close().await;
 }

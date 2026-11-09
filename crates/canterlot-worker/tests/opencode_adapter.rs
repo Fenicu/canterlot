@@ -4091,7 +4091,7 @@ async fn interrupt_without_an_answer_is_undetermined() {
     bench.close(CloseMode::Graceful).await;
 }
 
-/// Запрос потомка и прерывание, которое ничего не сняло: потомок ждал бы ответа вечно.
+/// Запрос потомка и прерывание, которое ничего не сняло: запрос жив на сервере.
 fn child_request_with_a_refused_interrupt() -> (Script, String, String) {
     let capture = Script::from_capture("permissions", None);
     let session = session_of(&capture);
@@ -4133,8 +4133,11 @@ fn child_request_with_a_refused_interrupt() -> (Script, String, String) {
     (script, child, request)
 }
 
+// Сервер ничего не прервал, а супервизор оставляет ход и карточки как были: запрос должен
+// остаться отвечаемым, иначе решение владельца упрётся в `request_not_pending`. Отказ
+// оставшимся даёт конец хода (`on_run_ended`).
 #[tokio::test]
-async fn interrupt_that_stopped_nothing_refuses_the_open_requests() {
+async fn interrupt_that_stopped_nothing_keeps_the_open_requests_answerable() {
     let (script, child, request) = child_request_with_a_refused_interrupt();
     let mut bench = Bench::new(script);
     bench.spec.permission_mode = "ask".into();
@@ -4146,16 +4149,23 @@ async fn interrupt_that_stopped_nothing_refuses_the_open_requests() {
         bench.interrupt().await,
         InterruptOutcome::NotApplicable
     ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(bench.replies().is_empty(), "{:?}", bench.replies());
+    let allow = DecisionPayload::Permission {
+        behavior: PermissionBehavior::Allow,
+        message: None,
+    };
+    assert!(bench.deliver(&request, &allow).await.is_applied());
     tokio::time::timeout(WAIT, async {
         while bench.replies().is_empty() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("refusal");
+    .expect("owner decision");
     let reply = bench.replies().remove(0);
     assert!(path_of(&reply).ends_with(&format!("{child}/permission/{request}/reply")));
-    assert_eq!(reply["body"]["decision"], "reject");
+    assert_eq!(reply["body"]["decision"], "once");
     bench.close(CloseMode::Graceful).await;
 }
 
