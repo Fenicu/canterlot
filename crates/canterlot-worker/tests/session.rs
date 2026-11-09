@@ -339,36 +339,50 @@ async fn no_listening_socket_on_worker(pool: PgPool) {
     })
     .await
     .unwrap();
+    // Сокеты проверяются через копии дескрипторов воркера, а не по
+    // /proc/<pid>/net/tcp: эта таблица общая для сетевого пространства, и
+    // пока соседние тесты открывают и закрывают соединения, постраничное
+    // чтение отдаёт одни строки дважды, а другие пропускает.
     let pid = child.id().unwrap();
-    let sockets: Vec<String> = fs::read_dir(format!("/proc/{pid}/fd"))
-        .unwrap()
-        .filter_map(|entry| {
-            fs::read_link(entry.ok()?.path())
-                .ok()?
-                .to_str()
-                .map(str::to_owned)
-        })
-        .filter_map(|target| {
-            target
-                .strip_prefix("socket:[")?
-                .strip_suffix(']')
-                .map(str::to_owned)
-        })
-        .collect();
+    let pidfd = rustix::process::pidfd_open(
+        rustix::process::Pid::from_raw(pid as i32).unwrap(),
+        rustix::process::PidfdFlags::empty(),
+    )
+    .unwrap();
     let mut connected = 0;
-    for table in ["tcp", "tcp6"] {
-        for row in fs::read_to_string(format!("/proc/{pid}/net/{table}"))
-            .unwrap()
-            .lines()
-            .skip(1)
+    for entry in fs::read_dir(format!("/proc/{pid}/fd")).unwrap() {
+        let entry = entry.unwrap();
+        let Ok(target) = fs::read_link(entry.path()) else {
+            continue;
+        };
+        if !target.to_str().is_some_and(|t| t.starts_with("socket:[")) {
+            continue;
+        }
+        let number: i32 = entry.file_name().to_str().unwrap().parse().unwrap();
+        let socket = match rustix::process::pidfd_getfd(
+            &pidfd,
+            number,
+            rustix::process::PidfdGetfdFlags::empty(),
+        ) {
+            Ok(socket) => socket,
+            // Дескриптор закрылся между чтением каталога и копированием.
+            Err(rustix::io::Errno::BADF) => continue,
+            Err(error) => panic!("pidfd_getfd({number}): {error}"),
+        };
+        let domain = rustix::net::sockopt::socket_domain(&socket).unwrap();
+        if domain != rustix::net::AddressFamily::INET && domain != rustix::net::AddressFamily::INET6
         {
-            let fields: Vec<_> = row.split_whitespace().collect();
-            if sockets.iter().any(|inode| inode == fields[9]) {
-                assert_ne!(fields[3], "0A", "worker owns a listener");
-                if fields[3] == "01" {
-                    connected += 1;
-                }
-            }
+            continue;
+        }
+        if rustix::net::sockopt::socket_type(&socket).unwrap() != rustix::net::SocketType::STREAM {
+            continue;
+        }
+        assert!(
+            !rustix::net::sockopt::socket_acceptconn(&socket).unwrap(),
+            "worker owns a listener"
+        );
+        if rustix::net::getpeername(&socket).is_ok_and(|peer| peer.is_some()) {
+            connected += 1;
         }
     }
     assert_eq!(connected, 2);
