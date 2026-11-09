@@ -43,7 +43,8 @@ async function boot(page: Page) {
 /** Уводит ленту от хвоста и выбирает шапку блока посреди экрана. */
 async function pickMiddleHead(page: Page): Promise<string> {
 	const feed = page.locator('.feed');
-	await feed.evaluate((el) => el.scrollBy(0, -el.clientHeight * 3));
+	// Уход вверх — жест владельца: колесо приходит раньше сдвига, иначе прижатая лента вернётся к низу.
+	await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollBy(0, -el.clientHeight * 3); });
 	await expect(feed).not.toHaveAttribute('data-pinned', '');
 	await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 	// Окно ленты перерисовывается после прокрутки не в фиксированный кадр: ищем, пока шапка не встанет в середину.
@@ -160,7 +161,7 @@ test('open_block_returning_to_the_window_does_not_unfold_again', async ({ page }
 	const feed = page.locator('.feed');
 	// Строка уходит из окна ленты и возвращается: окно монтирует её заново уже раскрытой.
 	const away = await feed.evaluate((el) => el.clientHeight * 4);
-	await feed.evaluate((el, away) => el.scrollBy(0, -away), away);
+	await feed.evaluate((el, away) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollBy(0, -away); }, away);
 	await expect(page.locator(`[data-row][data-key="${key}"]`)).toHaveCount(0);
 	// Подгрузка старых страниц сдвигает позицию: назад идём шагами, пока строка не вернётся в окно.
 	const row = page.locator(`[data-row][data-key="${key}"]`);
