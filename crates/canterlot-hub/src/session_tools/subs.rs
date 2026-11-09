@@ -394,6 +394,16 @@ pub async fn evaluate_in_tx(
     {
         return Ok(false);
     }
+    // Пуш владельцу о корневой сессии: то же решение «итог», что у подписок и плана.
+    crate::notify::on_settled_in_tx(
+        conn,
+        target_id,
+        state,
+        &fingerprint,
+        facts,
+        &activity.evidence,
+    )
+    .await?;
     // Удаление подписчика держит его строку и потом удаляет подписку: без блокировки строки
     // разговора здесь вставка задания ждала бы его, а оно ждало бы подписку.
     let open: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(

@@ -358,6 +358,7 @@ dependencies = [
  "jsonschema",
  "prost",
  "rcgen",
+ "reqwest",
  "rustix",
  "serde",
  "serde_json",

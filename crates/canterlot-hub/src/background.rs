@@ -23,6 +23,8 @@ pub struct BackgroundDeps {
         std::sync::Arc<dyn crate::attachments::BlobStore>,
         crate::config::AttachmentsConfig,
     )>,
+    /// Отправитель пушей владельцу; `None`, когда `[notify.gotify]` не задан.
+    pub owner_push: Option<crate::notify::Sender>,
 }
 
 /// Фоновая служба, завершившаяся паникой.
@@ -51,6 +53,7 @@ impl Background {
             lease_warn_hold,
             multi_process,
             attachments,
+            owner_push,
         } = deps;
         let bus = crate::bus::EventBus::spawn(pool.clone(), multi_process, stopped.clone());
         let mut tasks = vec![
@@ -125,6 +128,12 @@ impl Background {
                 )),
             ),
         ];
+        if let Some(sender) = owner_push {
+            tasks.push((
+                "owner_push_task_error",
+                tokio::spawn(crate::notify::run(pool.clone(), sender, stopped.clone())),
+            ));
+        }
         if let Some((store, config)) = attachments {
             tasks.push((
                 "attachment_gc_task_error",

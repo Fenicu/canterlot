@@ -554,6 +554,7 @@ async fn trash_in_tx(
     crate::session_tools::alarms::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
     subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
     origin::scrub_sender_in_tx(conn, id).await?;
+    crate::notify::cancel_for_conversation_in_tx(conn, id).await?;
     // Список и открытый чат узнают о корзине тем же обновлением атрибутов.
     conversations::emit_attributes(conn, owner_id, id, correlation_id).await?;
     Ok(json!({"trashed": true}))
@@ -613,6 +614,7 @@ async fn purge_rows(
 ) -> Result<(), sqlx::Error> {
     const BY_CONVERSATION: &[&str] = &[
         "delete from requests where conversation_id=$1",
+        "delete from owner_pushes where conversation_id=$1",
         "delete from input_attachments where input_id in
            (select id from inputs where conversation_id=$1)",
         "delete from scheduled_jobs where conversation_id=$1",

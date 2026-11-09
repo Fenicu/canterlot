@@ -1026,8 +1026,9 @@ async fn open_card(
     sqlx::query("update requests set created_seq=$2 where id=$1")
         .bind(id)
         .bind(event.scope_seq)
-        .execute(conn)
+        .execute(&mut *conn)
         .await?;
+    crate::notify::on_request_opened_in_tx(conn, caller.conversation_id, id).await?;
     Ok(id)
 }
 

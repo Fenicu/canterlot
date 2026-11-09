@@ -306,6 +306,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         lease_warn_hold: crate::config::OrchestratorConfig::default().lease_warn_hold(),
         multi_process: http.as_ref().is_some_and(|config| config.multi_process),
         attachments: Some((blobs.clone(), attachments.clone())),
+        owner_push: None,
     });
     let (http_addr, app, http_listener) = match http {
         Some(config) => {

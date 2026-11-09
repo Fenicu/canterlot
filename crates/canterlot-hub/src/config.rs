@@ -37,6 +37,8 @@ pub struct HubConfig {
     pub sessions: SessionsConfig,
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
+    #[serde(default)]
+    pub notify: NotifyConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,8 +144,140 @@ impl HubConfig {
                 error
             })?;
         }
+        if let Some(gotify) = &mut config.notify.gotify {
+            if gotify.token_file.is_relative() {
+                gotify.token_file = base.join(&gotify.token_file);
+            }
+            let origins = config
+                .http
+                .as_ref()
+                .map(|http| http.allowed_origins.as_slice())
+                .unwrap_or_default();
+            gotify.resolve(path, origins)?;
+        }
         Ok(config)
     }
+}
+
+/// Пуши владельцу. Без `[notify.gotify]` выключены.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotifyConfig {
+    pub gotify: Option<GotifyConfig>,
+}
+
+/// Ключ приложения Gotify. Значение не печатается ни в `Debug`, ни в журнал.
+#[derive(Clone, Default)]
+pub struct GotifyToken(String);
+
+impl GotifyToken {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for GotifyToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GotifyToken([redacted])")
+    }
+}
+
+/// `[notify.gotify]`: сервер Gotify, файл с ключом приложения и выбор событий.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GotifyConfig {
+    /// Адрес сервера Gotify, например `https://gotify.example.com`.
+    pub url: String,
+    /// Файл с ключом приложения. Читается один раз при старте.
+    pub token_file: PathBuf,
+    /// Адрес PWA для ссылки в пуше. По умолчанию первый из `[http].allowed_origins`.
+    #[serde(default)]
+    pub app_url: Option<String>,
+    /// Часовой пояс времени в тексте пуша (IANA), по умолчанию `UTC`.
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
+    /// Сессия ждёт владельца: вопрос, разрешение, план, одобрение запуска.
+    #[serde(default = "enabled")]
+    pub waiting: bool,
+    /// Корневая сессия закончила ход.
+    #[serde(default = "enabled")]
+    pub turn_finished: bool,
+    /// Корневая сессия упала, застряла, потеряла воркера или встала на паузу по лимиту.
+    #[serde(default = "enabled")]
+    pub failures: bool,
+    /// Общий предел пушей в минуту.
+    #[serde(default = "default_max_per_minute")]
+    pub max_per_minute: u32,
+    #[serde(skip)]
+    pub token: GotifyToken,
+}
+
+fn default_timezone() -> String {
+    "UTC".into()
+}
+
+fn enabled() -> bool {
+    true
+}
+
+fn default_max_per_minute() -> u32 {
+    20
+}
+
+impl GotifyConfig {
+    /// Проверяет адреса, читает ключ и подставляет адрес PWA из `allowed_origins`.
+    fn resolve(&mut self, config_path: &Path, origins: &[String]) -> Result<(), ConfigError> {
+        let invalid = |category| ConfigError {
+            path: config_path.to_owned(),
+            category,
+            location: None,
+        };
+        self.url = base_url(&self.url).ok_or_else(|| invalid("config_invalid_notify_url"))?;
+        let app_url = self
+            .app_url
+            .as_deref()
+            .or(origins.first().map(String::as_str))
+            .ok_or_else(|| invalid("config_notify_app_url_missing"))?;
+        self.app_url =
+            Some(base_url(app_url).ok_or_else(|| invalid("config_invalid_notify_app_url"))?);
+        if self.timezone.trim().is_empty() || self.max_per_minute == 0 {
+            return Err(invalid("config_invalid_notify"));
+        }
+        let token_error = |category| ConfigError {
+            path: self.token_file.clone(),
+            category,
+            location: None,
+        };
+        let bytes =
+            fs::read(&self.token_file).map_err(|_| token_error("notify_token_file_unreadable"))?;
+        let token = std::str::from_utf8(&bytes)
+            .map(str::trim)
+            .ok()
+            .filter(|token| {
+                !token.is_empty()
+                    && token.len() <= 256
+                    && token.bytes().all(|byte| byte.is_ascii_graphic())
+            })
+            .ok_or_else(|| token_error("notify_token_file_invalid"))?;
+        self.token = GotifyToken(token.to_owned());
+        Ok(())
+    }
+
+    /// Адрес PWA без завершающей косой черты. После загрузки конфига задан всегда.
+    pub fn app_url(&self) -> &str {
+        self.app_url.as_deref().unwrap_or_default()
+    }
+}
+
+/// Абсолютный адрес http(s) без запроса и фрагмента; завершающая косая черта снимается.
+fn base_url(value: &str) -> Option<String> {
+    let uri = absolute_http_uri(value.trim())?;
+    if uri.query().is_some() || value.contains('#') {
+        return None;
+    }
+    let path = uri.path().trim_end_matches('/');
+    let authority = uri.authority()?;
+    Some(format!("{}://{authority}{path}", uri.scheme_str()?))
 }
 
 #[derive(Debug, Clone, Deserialize)]

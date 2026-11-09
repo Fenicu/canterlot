@@ -535,6 +535,7 @@ async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPo
         lease_warn_hold: std::time::Duration::from_secs(90 * 60),
         multi_process: false,
         attachments: Some((blobs, attachments)),
+        owner_push: None,
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     tokio::time::timeout(Duration::from_secs(10), background.stop())

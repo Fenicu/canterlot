@@ -3024,6 +3024,8 @@ async fn apply_request_opened(
         .bind(event.scope_seq)
         .execute(&mut *conn)
         .await?;
+    // Повторно открытый запрос пуша не повторяет: ключ — идентификатор запроса.
+    crate::notify::on_request_opened_in_tx(conn, run.conversation_id, id).await?;
 
     Ok(false)
 }

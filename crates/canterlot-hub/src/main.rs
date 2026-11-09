@@ -214,8 +214,26 @@ async fn serve(
         session_tools,
         sessions,
         orchestrator,
+        notify,
         ..
     } = config;
+    let push_settings = notify
+        .gotify
+        .as_ref()
+        .map(canterlot_hub::notify::PushSettings::from);
+    canterlot_hub::notify::configure(&pool, push_settings.as_ref())
+        .await
+        .map_err(str::to_owned)?;
+    let owner_push = notify
+        .gotify
+        .as_ref()
+        .map(canterlot_hub::notify::Sender::new)
+        .transpose()
+        .map_err(str::to_owned)?;
+    match &owner_push {
+        Some(_) => tracing::info!(kind = "owner_push_enabled", "gotify pushes enabled"),
+        None => tracing::info!(kind = "owner_push_disabled", "no [notify.gotify] table"),
+    }
     let blobs: std::sync::Arc<dyn canterlot_hub::attachments::BlobStore> = std::sync::Arc::new(
         canterlot_hub::attachments::LocalBlobStore::open(
             &attachments,
@@ -287,6 +305,7 @@ async fn serve(
             .as_ref()
             .is_some_and(|(config, _, _)| config.multi_process),
         attachments: Some((blobs.clone(), attachments.clone())),
+        owner_push,
     });
     let root = tokio_util::sync::CancellationToken::new();
     let trigger = root.clone();
