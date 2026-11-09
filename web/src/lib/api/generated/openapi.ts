@@ -3610,7 +3610,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Содержимое готового вложения, всегда как скачиваемый файл */
+            /** @description Содержимое готового вложения: проверенная картинка показывается на месте, остальное скачивается; имя файла в Content-Disposition */
             200: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */

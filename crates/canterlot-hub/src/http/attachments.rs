@@ -239,8 +239,15 @@ async fn served_type(mime: &str, file: &mut tokio::fs::File) -> io::Result<&'sta
 }
 
 /// `filename*` по RFC 8187: всё вне attr-char кодируется процентами.
-fn disposition(name: &str) -> HeaderValue {
-    let mut value = String::from("attachment; filename*=UTF-8''");
+/// Проверенная растровая картинка показывается на месте: браузер даёт её открыть,
+/// скопировать и сохранить своим меню. Всё остальное только скачивается.
+fn disposition(name: &str, content_type: &str) -> HeaderValue {
+    let kind = if content_type.starts_with("image/") {
+        "inline"
+    } else {
+        "attachment"
+    };
+    let mut value = format!("{kind}; filename*=UTF-8''");
     for b in name.bytes() {
         if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) {
             value.push(b as char);
@@ -251,7 +258,7 @@ fn disposition(name: &str) -> HeaderValue {
     HeaderValue::from_str(&value).unwrap_or(HeaderValue::from_static("attachment"))
 }
 
-#[utoipa::path(get,path="/api/v1/attachments/{id}/content",tag="attachments",params(("id"=Uuid,Path)),responses((status=200,description="Содержимое готового вложения, всегда как скачиваемый файл",content_type="application/octet-stream",body=BinaryContent)))]
+#[utoipa::path(get,path="/api/v1/attachments/{id}/content",tag="attachments",params(("id"=Uuid,Path)),responses((status=200,description="Содержимое готового вложения: проверенная картинка показывается на месте, остальное скачивается; имя файла в Content-Disposition",content_type="application/octet-stream",body=BinaryContent)))]
 async fn download(
     State(s): State<AppState>,
     o: Owner,
@@ -270,7 +277,10 @@ async fn download(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(header::CONTENT_DISPOSITION, disposition(&found.name));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        disposition(&found.name, content_type),
+    );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("sandbox"),

@@ -1729,7 +1729,7 @@ async fn download_requires_owner_and_sets_safe_headers(pool: PgPool) {
     assert_eq!(h["x-content-type-options"], "nosniff");
     assert_eq!(
         h["content-disposition"],
-        "attachment; filename*=UTF-8''%D0%BE%D1%82%D1%87%D1%91%D1%82%201.png"
+        "inline; filename*=UTF-8''%D0%BE%D1%82%D1%87%D1%91%D1%82%201.png"
     );
     assert_eq!(h["content-security-policy"], "sandbox");
     assert_eq!(h["cache-control"], "private, max-age=86400, immutable");
@@ -1764,9 +1764,15 @@ async fn download_requires_owner_and_sets_safe_headers(pool: PgPool) {
     let forged = f
         .ready("fake.png", "image/png", b"<html>not a png</html>")
         .await;
+    let forged_response = download(&f, &f.client, forged).await;
     assert_eq!(
-        download(&f, &f.client, forged).await.headers["content-type"],
+        forged_response.headers["content-type"],
         "application/octet-stream"
+    );
+    // Подделка под картинку на месте не открывается: только скачивание.
+    assert_eq!(
+        forged_response.headers["content-disposition"],
+        "attachment; filename*=UTF-8''fake.png"
     );
     let pending = f
         .create("pending.bin", "application/octet-stream", b"12345")
