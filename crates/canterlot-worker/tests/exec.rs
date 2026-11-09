@@ -1437,6 +1437,18 @@ async fn cli_carries_the_group_marker_and_the_supervisor_records_the_members() {
             "{expected} missing"
         );
     }
+    // Обёртка `scripts/lease.sh` запустит этот путь: он должен быть исполняемым файлом.
+    let bin = environ
+        .split(|byte| *byte == 0)
+        .find_map(|entry| entry.strip_prefix(b"CANTERLOT_WORKER_BIN="))
+        .map(|value| std::path::PathBuf::from(String::from_utf8(value.to_vec()).unwrap()))
+        .unwrap();
+    let meta = fs::metadata(&bin).unwrap();
+    assert!(
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0,
+        "{} is not executable",
+        bin.display()
+    );
     let path = env.exec_dir().join(GROUP_FILE);
     timeout(WAIT, async {
         loop {

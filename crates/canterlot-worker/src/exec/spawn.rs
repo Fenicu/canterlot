@@ -166,6 +166,7 @@ pub(super) fn spawn_supervisor(
     dir: &Path,
     configured_build_jobs: u32,
     lease_socket: Option<&Path>,
+    worker_bin: &Path,
 ) -> std::io::Result<Spawned> {
     let build_jobs = build_jobs_env(
         configured_build_jobs,
@@ -198,10 +199,11 @@ pub(super) fn spawn_supervisor(
             command.env("CARGO_BUILD_JOBS", value);
         }
         // Сопровождение передаёт их CLI через `prepare_command` рядом с меткой группы.
+        // Бинарник нужен и без пути сокета: клиент аренды найдёт сокет в `XDG_RUNTIME_DIR`.
         if let Some(socket) = lease_socket {
             command.env(crate::containment::LEASE_SOCKET_ENV, socket);
-            command.env(crate::containment::WORKER_BIN_ENV, exe);
         }
+        command.env(crate::containment::WORKER_BIN_ENV, worker_bin);
         command.spawn()
     })?;
     Ok(Spawned(Some(child)))
@@ -294,7 +296,13 @@ mod tests {
     async fn spawn_proceeds_with_null_stdio_when_supervisor_log_cannot_be_opened() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("supervisor.log")).unwrap();
-        let child = spawn_supervisor(std::path::Path::new("/bin/true"), directory.path(), 1, None);
+        let child = spawn_supervisor(
+            std::path::Path::new("/bin/true"),
+            directory.path(),
+            1,
+            None,
+            std::path::Path::new("/bin/true"),
+        );
         assert!(child.is_ok(), "{:?}", child.err());
         drop(child);
     }

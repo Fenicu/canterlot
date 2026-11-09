@@ -1427,9 +1427,15 @@ impl Actor {
                 Ok(())
             })
             .await?;
-        let exe = match &self.shared.config.supervisor_exe {
-            Some(exe) => exe.clone(),
-            None => std::env::current_exe()?,
+        // Сопровождение идёт из того же бинарника, что воркер; детям для аренды отдаётся
+        // путь, который переживёт выкатку (`current/bin`, если воркер запущен по нему).
+        let (exe, worker_bin) = match &self.shared.config.supervisor_exe {
+            Some(exe) => (exe.clone(), exe.clone()),
+            None => {
+                let exe = std::env::current_exe()?;
+                let bin = crate::containment::worker_bin(std::env::args_os().next(), &exe);
+                (exe, bin)
+            }
         };
         if *self.shutdown.borrow() {
             return Ok(false);
@@ -1447,6 +1453,7 @@ impl Actor {
             &dir,
             self.shared.config.build_jobs,
             lease_socket.as_deref(),
+            &worker_bin,
         ) {
             Ok(child) => child,
             Err(_) => {

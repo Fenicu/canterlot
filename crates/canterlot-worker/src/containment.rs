@@ -23,6 +23,26 @@ pub const GROUP_FILE: &str = "group.json";
 pub const LEASE_SOCKET_ENV: &str = "CANTERLOT_LEASE_SOCKET";
 pub const WORKER_BIN_ENV: &str = "CANTERLOT_WORKER_BIN";
 
+/// Путь бинарника воркера для `CANTERLOT_WORKER_BIN`. Прод запускает воркер по ссылке
+/// `~/.local/opt/canterlot/current/bin/canterlot-worker`, а `current_exe` раскрывает её
+/// в каталог релиза, который после выкатки удаляется (`… (deleted)`). Поэтому сначала
+/// абсолютный argv[0], если это исполняемый файл, иначе `exe` без суффикса ` (deleted)`.
+pub fn worker_bin(argv0: Option<std::ffi::OsString>, exe: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(argv0) = argv0.map(std::path::PathBuf::from)
+        && argv0.is_absolute()
+        && fs::metadata(&argv0)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    {
+        return argv0;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    match exe.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+        Some(trimmed) => std::ffi::OsStr::from_bytes(trimmed).into(),
+        None => exe.to_path_buf(),
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Member {
     pub pid: u32,
@@ -448,6 +468,41 @@ impl Containment for TreeContainment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_bin_prefers_an_absolute_executable_argv0() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let release = dir.path().join("releases/abc/bin");
+        fs::create_dir_all(&release).unwrap();
+        let real = release.join("canterlot-worker");
+        fs::write(&real, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("releases/abc", dir.path().join("current")).unwrap();
+        let stable = dir.path().join("current/bin/canterlot-worker");
+        assert_eq!(worker_bin(Some(stable.clone().into()), &real), stable);
+        // Относительный, пропавший или неисполняемый argv[0] не годится: берётся exe.
+        let plain = dir.path().join("plain");
+        fs::write(&plain, "").unwrap();
+        for argv0 in [
+            "canterlot-worker".into(),
+            dir.path().join("missing"),
+            plain,
+            dir.path().to_path_buf(),
+        ] {
+            assert_eq!(worker_bin(Some(argv0.into()), &real), real);
+        }
+        assert_eq!(worker_bin(None, &real), real);
+    }
+
+    #[test]
+    fn worker_bin_drops_the_deleted_suffix_of_a_replaced_release() {
+        let exe = Path::new("/opt/canterlot/releases/abc/bin/canterlot-worker (deleted)");
+        assert_eq!(
+            worker_bin(None, exe),
+            Path::new("/opt/canterlot/releases/abc/bin/canterlot-worker")
+        );
+    }
 
     #[test]
     fn stat_without_process_group_is_a_disappeared_process() {
