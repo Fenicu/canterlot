@@ -103,6 +103,8 @@ setup_case() {
     export DUMP_MIN_BYTES=1
     # Ожидания каталога и переподключения в тестах короче боевых.
     export CATALOG_WAIT="${CATALOG_WAIT:-3}" CONNECT_WAIT="${CONNECT_WAIT:-10}"
+    # Ожидание переходных строк исполнений (starting и т. п.) у супервизоров: секунды, не минута.
+    export SUPERVISOR_SETTLE_WAIT="${SUPERVISOR_SETTLE_WAIT:-2}" SUPERVISOR_SETTLE_POLL="${SUPERVISOR_SETTLE_POLL:-0.2}"
 
     # Конфиг скриптов — на фейковые хосты и пути.
     export HUB_SSH=fakehub WEB_SSH=fakeweb PROXMOX_SSH=fakeproxmox PROXMOX_NODE=bigboy

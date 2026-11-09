@@ -720,6 +720,87 @@ proc_supervisor_ids() {
     done | sort -u
 }
 
+# Состояния исполнения хаба (executions.rs legal_transition), при которых живой
+# супервизор законен, хотя строка ещё (или уже) не running:
+#   created, starting — воркер поднял супервизор, строка дойдёт до running через
+#                       секунды (провал прогона 1.24.0: делегат стартовал за миг до preflight);
+#   stopping          — сессия останавливается, супервизор выходит следом;
+#   owner_lost        — воркер не увидел процесс в отчёте; при живом супервизоре
+#                       владение возвращается (owner_reclaimed) или его решает владелец.
+# Терминальные stopped/failed и отсутствие строки при живом супервизоре — утечка.
+SUPERVISOR_TRANSIENT_STATES="created starting stopping owner_lost"
+SUPERVISOR_SETTLE_WAIT="${SUPERVISOR_SETTLE_WAIT:-60}"
+SUPERVISOR_SETTLE_POLL="${SUPERVISOR_SETTLE_POLL:-5}"
+
+# Строки "id state" хаба для перечисленных id (по строке на найденную строку).
+# Только UUID попадают в SQL: имя каталога в /proc не цитируется в запрос.
+# Использует hub_psql вызывающего скрипта (его провал — провал вызывающего).
+hub_exec_states() {
+    local id list=""
+    for id in "$@"; do
+        [[ "${id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue
+        list+="${list:+,}'${id}'"
+    done
+    [ -n "${list}" ] || return 0
+    hub_psql "select id::text || ' ' || state from executions where id in (${list}) order by 1"
+}
+
+# Сверка супервизоров /proc со строками хаба с коротким ожиданием переходных
+# строк. Ставит:
+#   SETTLED_LIVE    — id строк running (последнее чтение);
+#   SETTLED_PROC    — exec id живых супервизоров (последнее чтение);
+#   SETTLED_EXTRA   — "id state" супервизоров без строки running; state — состояние
+#                     хаба или none, если строки нет.
+# Пока среди лишних есть переходные (или строка стала running между чтениями),
+# ждём до SUPERVISOR_SETTLE_WAIT секунд, опрашивая каждые SUPERVISOR_SETTLE_POLL;
+# каждое чтение заново берёт и хаб, и /proc. Решение (hard/soft) — у вызывающего.
+# Провал запроса к хабу — код 1 (вызывающий обязан умереть, а не считать пустоту).
+# $1 — каталог executions прод-воркера.
+settle_supervisor_rows() {
+    local root="$1" start="${SECONDS}" id state states pending waited_log=0 row_id row_state
+    local -a extra=()
+    while :; do
+        SETTLED_LIVE="$(hub_psql "select id::text from executions where state='running' order by 1")" || return 1
+        SETTLED_PROC="$(proc_supervisor_ids "${root}")" || return 1
+        SETTLED_EXTRA=""
+        pending=""
+        extra=()
+        for id in ${SETTLED_PROC}; do
+            in_lines "${id}" "${SETTLED_LIVE}" || extra+=("${id}")
+        done
+        if [ "${#extra[@]}" -gt 0 ]; then
+            states="$(hub_exec_states "${extra[@]}")" || return 1
+            for id in "${extra[@]}"; do
+                state="none"
+                while read -r row_id row_state; do
+                    if [ "${row_id}" = "${id}" ]; then state="${row_state:-none}"; fi
+                done <<<"${states}"
+                SETTLED_EXTRA+="${id} ${state}"$'\n'
+                case " ${SUPERVISOR_TRANSIENT_STATES} running " in
+                    *" ${state} "*) pending+="${pending:+, }${id} ${state}" ;;
+                esac
+            done
+        fi
+        [ -n "${pending}" ] || break
+        if [ $((SECONDS - start)) -ge "${SUPERVISOR_SETTLE_WAIT}" ]; then
+            log "supervisor rows still transitional after ${SUPERVISOR_SETTLE_WAIT} s: ${pending}"
+            waited_log=0
+            break
+        fi
+        [ "${waited_log}" = "1" ] || log "waiting up to ${SUPERVISOR_SETTLE_WAIT} s for transitional supervisor rows: ${pending}"
+        waited_log=1
+        sleep "${SUPERVISOR_SETTLE_POLL}"
+    done
+    [ "${waited_log}" = "0" ] || log "supervisor rows settled after $((SECONDS - start)) s"
+    SETTLED_EXTRA="${SETTLED_EXTRA%$'\n'}"
+}
+
+# Состояние хаба — переходное (живой супервизор при нём законен).
+is_transient_exec_state() {
+    case " ${SUPERVISOR_TRANSIENT_STATES} " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
 # Все потомки PID (дети, внуки, ...): ps один раз, без pgrep -f.
 # Нужно, чтобы релей находился даже не прямым ребёнком сопровождения.
 proc_descendants() {

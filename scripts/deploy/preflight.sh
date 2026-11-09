@@ -56,15 +56,18 @@ export XDG_RUNTIME_DIR
 hub_psql() { ssh_hub "runuser -u canterlot -- psql -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' -tAc \"$1\"" || die "hub DB query failed"; }
 
 log "gate 1: live executions from hub, /proc supervisors and ownership journal"
-LIVE_EXECS="$(hub_psql "select id::text from executions where state='running' order by 1")"
+# Каждый живой супервизор из /proc, а не только строки хаба (урок: пустой список
+# при живых процессах проходил всухую). Супервизор, чья строка ещё переходная
+# (created/starting, а также stopping/owner_lost), ждём до SUPERVISOR_SETTLE_WAIT
+# секунд: делегат, стартовавший за миг до preflight, не ложный HARD (урок 1.24.0).
+# Хаб и /proc перечитываются вместе, снимок ниже строится по последнему чтению.
+settle_supervisor_rows "${WORKER_DATA}/executions" || die "hub DB query failed while reconciling supervisors"
+LIVE_EXECS="${SETTLED_LIVE}"
+PROC_IDS="${SETTLED_PROC}"
 [ -n "${LIVE_EXECS}" ] || log "no live executions in hub (first deploy or idle hub)"
 # shellcheck disable=SC2086 # newline list, intentional word splitting
 printf 'live execution: %s\n' ${LIVE_EXECS:-none}
 LIVE_CONVS="$(hub_psql "select distinct conversation_id::text from executions where state='running'")"
-
-# Каждый живой супервизор из /proc, а не только строки хаба (урок: пустой список
-# при живых процессах проходил всухую).
-PROC_IDS="$(proc_supervisor_ids "${WORKER_DATA}/executions")"
 [ -n "${PROC_IDS}" ] && log "supervisors in /proc:" && printf '%s\n' "${PROC_IDS}" | sed 's/^/  supervise: /'
 # Каждую неосвобождённую запись ownership на диске декодирует новый ipc.proto
 # (номера полей известны, значения не печатаются).
@@ -78,26 +81,45 @@ if [ "${OWNERSHIP_RC}" -ne 0 ]; then
 else
     OWNERSHIP_UNRELEASED="$(printf '%s\n' "${OWNERSHIP_OUT}" | awk '$1 == "UNRELEASED" {print $2}')"
 fi
-# Пустой список хаба при живых процессах — жёсткая ошибка, а не пропуск.
-if [ -z "${LIVE_EXECS}" ] && { [ -n "${PROC_IDS}" ] || [ -n "${OWNERSHIP_UNRELEASED}" ]; }; then
+# Супервизор без строки running: при переходной строке (ожидание выше истекло) —
+# мягко, с состоянием; без строки или с терминальной строкой — жёстко. Такой
+# супервизор не входит в снимок тиков: cutover его не сторожит, как и супервизор,
+# появившийся после preflight (snapshot_drift сверяет только записанные процессы).
+TRANSIENT_IDS=""
+UNEXPLAINED_IDS=""
+while read -r extra_id extra_state; do
+    [ -n "${extra_id:-}" ] || continue
+    if is_transient_exec_state "${extra_state}"; then
+        TRANSIENT_IDS+="${extra_id}"$'\n'
+        soft "supervisor runs for execution ${extra_id} whose hub row is still ${extra_state} after ${SUPERVISOR_SETTLE_WAIT} s (not in the tick snapshot)"
+    else
+        UNEXPLAINED_IDS+="${extra_id}"$'\n'
+        hard "supervisor runs for execution ${extra_id} with no live hub row (hub row: ${extra_state})"
+    fi
+done <<<"${SETTLED_EXTRA}"
+# Пустой список хаба при живых процессах — жёсткая ошибка, а не пропуск. Переходные
+# строки при живом супервизоре уже записаны мягко выше.
+UNEXPLAINED_OWN=""
+for own_id in ${OWNERSHIP_UNRELEASED:-}; do
+    in_lines "${own_id}" "${TRANSIENT_IDS}" || UNEXPLAINED_OWN+="${own_id}"$'\n'
+done
+if [ -z "${LIVE_EXECS}" ] && { [ -n "${UNEXPLAINED_IDS}" ] || [ -n "${UNEXPLAINED_OWN}" ]; }; then
     hard "hub reports no live executions while supervisors or unreleased ownership exist"
 fi
-# Супервизор без живой строки хаба и живая строка без супервизора — жёстко.
-# shellcheck disable=SC2086
-for pid_id in ${PROC_IDS:-}; do
-    in_lines "${pid_id}" "${LIVE_EXECS}" \
-        || hard "supervisor runs for execution ${pid_id} with no live hub row"
-done
+# Живая строка без супервизора — жёстко.
 # shellcheck disable=SC2086
 for exec_id in ${LIVE_EXECS:-}; do
     in_lines "${exec_id}" "${PROC_IDS}" \
         || hard "live hub execution ${exec_id} has no supervisor process"
 done
 # Неосвобождённая запись без строки хаба и без процесса — утечка: жёстко.
+# Запись супервизора с переходной строкой уже учтена мягко выше.
 # shellcheck disable=SC2086
 for own_id in ${OWNERSHIP_UNRELEASED:-}; do
     if ! in_lines "${own_id}" "${LIVE_EXECS}"; then
-        if ! in_lines "${own_id}" "${PROC_IDS}"; then
+        if in_lines "${own_id}" "${TRANSIENT_IDS}"; then
+            log "unreleased ownership for ${own_id} belongs to a supervisor with a transitional hub row (reported above)"
+        elif ! in_lines "${own_id}" "${PROC_IDS}"; then
             hard "orphan unreleased ownership for ${own_id}: no hub row, no supervisor"
         else
             soft "unreleased ownership for ${own_id} with supervisor but no hub row"

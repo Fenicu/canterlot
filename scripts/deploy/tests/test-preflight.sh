@@ -172,6 +172,86 @@ assert_contains "${FAKE_ROOT}/out.log" "no live hub row" "orphan supervisor repo
 teardown_case
 case_end
 
+# 2a. супервизор делегата, чья строка хаба ещё starting (провал прогона 1.24.0).
+# Третья сессия EXEC3 живёт в /proc, её строка задаётся state/exec-states.
+setup_transient() {
+    setup_live "$1"
+    EXEC3="$(new_exec_id)"
+    spawn_session "${EXEC3}" "${SHA_PREV}" 300
+}
+run_preflight_transient() {
+    if bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" --state "${FAKE_ROOT}/snap.state" \
+            >"${FAKE_ROOT}/out.log" 2>&1; then
+        PF_RC=0
+    else
+        PF_RC=$?
+    fi
+}
+
+case_begin "supervisor with a starting row that becomes running"
+setup_transient startrun
+printf '%s starting 3 running\n' "${EXEC3}" >"${FAKE_ROOT}/state/exec-states"
+run_preflight_transient
+assert_eq "${PF_RC}" "0" "exit 0 once the row reached running"
+assert_contains "${FAKE_ROOT}/out.log" "waiting up to 2 s for transitional supervisor rows: ${EXEC3} starting" "wait reported with the state"
+assert_contains "${FAKE_ROOT}/out.log" "supervisor rows settled after" "settle reported"
+assert_not_contains "${FAKE_ROOT}/out.log" "HARD-FAIL" "no hard failure"
+assert_not_contains "${FAKE_ROOT}/out.log" "SOFT-FAIL: supervisor runs" "no soft failure for the settled row"
+grep -q "^${EXEC3} sup=" "${FAKE_ROOT}/snap.state" \
+    && case_ok "settled execution is in the tick snapshot" || case_fail "settled execution missing from the tick snapshot"
+grep -qx "${EXEC3}" "${FAKE_ROOT}/state/live-ids" && case_fail "fixture leaked into live-ids" || case_ok "row came from the transition only"
+teardown_case
+case_end
+
+case_begin "supervisor with a row that stays starting"
+setup_transient startstay
+printf '%s starting\n' "${EXEC3}" >"${FAKE_ROOT}/state/exec-states"
+run_preflight_transient
+assert_eq "${PF_RC}" "0" "transitional row is not a hard failure"
+assert_contains "${FAKE_ROOT}/out.log" "SOFT-FAIL: supervisor runs for execution ${EXEC3} whose hub row is still starting after 2 s" "soft failure names the state"
+assert_contains "${FAKE_ROOT}/out.log" "supervisor rows still transitional after 2 s: ${EXEC3} starting" "bounded wait expired"
+assert_not_contains "${FAKE_ROOT}/out.log" "HARD-FAIL" "no hard failure"
+grep -q "^${EXEC3} " "${FAKE_ROOT}/snap.state" \
+    && case_fail "transitional execution in the tick snapshot" || case_ok "transitional execution not in the tick snapshot"
+teardown_case
+case_end
+
+case_begin "supervisor with no hub row at all"
+setup_transient norowat
+run_preflight_transient
+assert_eq "${PF_RC}" "1" "exit 1"
+assert_contains "${FAKE_ROOT}/out.log" "HARD-FAIL: supervisor runs for execution ${EXEC3} with no live hub row (hub row: none)" "missing row is hard"
+assert_not_contains "${FAKE_ROOT}/out.log" "waiting up to" "no wait for a missing row"
+teardown_case
+case_end
+
+case_begin "supervisor with a terminal hub row"
+setup_transient terminal
+printf '%s stopped\n' "${EXEC3}" >"${FAKE_ROOT}/state/exec-states"
+run_preflight_transient
+assert_eq "${PF_RC}" "1" "exit 1"
+assert_contains "${FAKE_ROOT}/out.log" "HARD-FAIL: supervisor runs for execution ${EXEC3} with no live hub row (hub row: stopped)" "terminal row is hard"
+assert_not_contains "${FAKE_ROOT}/out.log" "waiting up to" "no wait for a terminal row"
+teardown_case
+case_end
+
+# Все строки ещё переходные, running нет: пустой список хаба при живых супервизорах
+# и неосвобождённом ownership их сессии не превращается в общий HARD.
+case_begin "only transitional rows: no blanket hard failure"
+setup_live alltransient
+: >"${FAKE_ROOT}/state/live-ids"
+printf '%s starting\n%s stopping\n' "${EXEC1}" "${EXEC2}" >"${FAKE_ROOT}/state/exec-states"
+if bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" >"${FAKE_ROOT}/out.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; grep -E 'HARD-FAIL' "${FAKE_ROOT}/out.log" | head -5
+fi
+assert_contains "${FAKE_ROOT}/out.log" "${EXEC2} whose hub row is still stopping" "stopping row reported soft"
+assert_not_contains "${FAKE_ROOT}/out.log" "hub reports no live executions while" "no blanket hard failure"
+assert_contains "${FAKE_ROOT}/out.log" "unreleased ownership for ${EXEC1} belongs to a supervisor with a transitional hub row" "ownership of a transitional supervisor noted"
+teardown_case
+case_end
+
 # 2b. сопровождение тестового воркера из worktree под WORKER_DATA (стек-тест
 # делегата): его exec-dir не прямой каталог WORKER_DATA/executions/<id>, и
 # preflight не принимает его за прод-сессию без строки хаба.

@@ -17,11 +17,40 @@ if [ -f "${db}" ]; then
     migr_max="$(grep '^MIGR_MAX=' "${db}" | cut -d= -f2 || echo 0)"
     failed="$(grep '^FAILED=' "${db}" | cut -d= -f2 || echo 0)"
 fi
+# Строки исполнений не в running: state/exec-states, строки "id state [N final]".
+# С N и final строка отвечает final после N запросов состояний (where id in):
+# так сценарий моделирует делегата, чья строка starting доходит до running.
+states_n=0
+[ -f "${FAKE_ROOT}/state/states-queries" ] && states_n="$(cat "${FAKE_ROOT}/state/states-queries")"
+exec_state_of() {
+    awk -v id="$1" -v n="${states_n}" '$1 == id { if ($3 != "" && n >= $3) print $4; else print $2; exit }' \
+        "${FAKE_ROOT}/state/exec-states" 2>/dev/null || true
+}
+running_ids() {
+    cat "${FAKE_ROOT}/state/live-ids" 2>/dev/null || true
+    if [ -f "${FAKE_ROOT}/state/exec-states" ]; then
+        while read -r id _; do
+            [ "$(exec_state_of "${id}")" = "running" ] && printf '%s\n' "${id}"
+        done <"${FAKE_ROOT}/state/exec-states"
+    fi
+    return 0
+}
 case "${sql}" in
+    *"|| ' ' || state from executions where id in ("*)
+        states_n=$((states_n + 1))
+        printf '%s' "${states_n}" >"${FAKE_ROOT}/state/states-queries"
+        for id in $(printf '%s' "${sql}" | grep -o "'[0-9a-f-]\{36\}'" | tr -d "'"); do
+            if grep -qx "${id}" "${FAKE_ROOT}/state/live-ids" 2>/dev/null; then
+                printf '%s running\n' "${id}"
+            else
+                st="$(exec_state_of "${id}")"
+                [ -z "${st}" ] || printf '%s %s\n' "${id}" "${st}"
+            fi
+        done ;;
     *"select count(*) from executions where state='running'"* | *"select count(*) from executions where state = 'running'"*)
         tr ' ' '\n' <"${FAKE_ROOT}/state/live-ids" 2>/dev/null | grep -c . || true ;;
     *"select id::text from executions where state='running'"*)
-        cat "${FAKE_ROOT}/state/live-ids" 2>/dev/null || true ;;
+        running_ids ;;
     *"select distinct conversation_id"*)
         cat "${FAKE_ROOT}/state/live-convs" 2>/dev/null || true ;;
     *"from commands where conversation_id in"*)
