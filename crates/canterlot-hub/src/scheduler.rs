@@ -1372,22 +1372,11 @@ impl Scheduler {
         }
         let cutoff = now - retention;
         let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(
-            "select c.id,c.owner_id from conversations c
-             where c.accepted_at is not null and c.accepted_at <= $1
-               and c.archived_at is not null and c.spawn_depth > 0
-               and c.trashed_at is null
-               and not c.pinned
-               and not exists (select 1 from conversation_group_members gm
-                                where gm.conversation_id=c.id)
-               and not exists (select 1 from conversation_group_pins gp
-                                where gp.conversation_id=c.id)
-               and coalesce(c.worktree->'branch_kept','false'::jsonb) <> 'true'::jsonb
-               and coalesce(c.worktree->>'state','') not in ('active','removing','dirty','failed')
-               and not exists (select 1 from executions e
-                                where e.conversation_id=c.id and e.state not in ('stopped','failed'))
-               and not exists (select 1 from conversations child
-                                where child.parent_conversation_id=c.id)
-             order by c.accepted_at,c.id limit $2",
+            concat!(
+                "select c.id,c.owner_id from conversations c where ",
+                crate::deletion::accepted_retention_where!(),
+                " order by c.accepted_at,c.id limit $2"
+            ),
         )
         .bind(cutoff)
         .bind(RETENTION_BATCH)
@@ -1395,11 +1384,12 @@ impl Scheduler {
         .await?;
         let mut deleted = 0usize;
         for (id, owner_id) in candidates {
-            match crate::deletion::delete_retained(
+            match crate::deletion::delete_accepted_retained(
                 &self.pool,
                 self.blobs.as_deref(),
                 owner_id,
                 id,
+                cutoff,
                 Uuid::now_v7(),
             )
             .await

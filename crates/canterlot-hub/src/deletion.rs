@@ -54,6 +54,30 @@ impl From<idempotency::IdempotencyConflict> for DeleteError {
     }
 }
 
+/// Условие кандидата уборки принятых делегаций (`$1` — срок). Одно и то же условие
+/// отбирает кандидатов без блокировок и перепроверяется под блокировкой строки
+/// разговора: владелец мог закрепить, вернуть из архива или сгруппировать сессию
+/// между отбором и удалением.
+macro_rules! accepted_retention_where {
+    () => {
+        "c.accepted_at is not null and c.accepted_at <= $1
+           and c.archived_at is not null and c.spawn_depth > 0
+           and c.trashed_at is null
+           and not c.pinned
+           and not exists (select 1 from conversation_group_members gm
+                            where gm.conversation_id=c.id)
+           and not exists (select 1 from conversation_group_pins gp
+                            where gp.conversation_id=c.id)
+           and coalesce(c.worktree->'branch_kept','false'::jsonb) <> 'true'::jsonb
+           and coalesce(c.worktree->>'state','') not in ('active','removing','dirty','failed')
+           and not exists (select 1 from executions e
+                            where e.conversation_id=c.id and e.state not in ('stopped','failed'))
+           and not exists (select 1 from conversations child
+                            where child.parent_conversation_id=c.id)"
+    };
+}
+pub(crate) use accepted_retention_where;
+
 pub async fn tombstoned(pool: &PgPool, owner_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "select exists(select 1 from conversation_tombstones
@@ -318,6 +342,44 @@ pub async fn delete_retained(
     }
 }
 
+/// Уборка принятой делегации планировщиком: условие отбора кандидатов перепроверяется
+/// под блокировкой строки разговора; сессия, которую владелец успел оставить, даёт
+/// `NotTrashed` и не удаляется.
+pub async fn delete_accepted_retained(
+    pool: &PgPool,
+    blobs: Option<&dyn BlobStore>,
+    owner_id: Uuid,
+    id: Uuid,
+    cutoff: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<(), DeleteError> {
+    let files = owned_files(pool, owner_id, id).await?;
+    let mut tx = crate::db::begin(pool).await?;
+    match delete_in_tx(
+        &mut tx,
+        owner_id,
+        id,
+        correlation_id,
+        DeleteMode::Retention,
+        TrashGuard::AcceptedBefore(cutoff),
+    )
+    .await
+    {
+        Ok(_) => {
+            tx.commit().await?;
+            scheduler::notify_pool(pool);
+            if let Some(blobs) = blobs {
+                free_files(pool, blobs, files).await;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
 async fn owned_files(pool: &PgPool, owner_id: Uuid, id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
         "select a.id from attachments a join conversations c on c.id=a.conversation_id
@@ -391,6 +453,9 @@ enum TrashGuard {
     Forbid,
     /// Корзина удаляется только после своего срока.
     Before(DateTime<Utc>),
+    /// Принятая делегация после срока хранения: всё условие отбора кандидатов
+    /// перепроверяется под блокировкой.
+    AcceptedBefore(DateTime<Utc>),
 }
 
 async fn delete_in_tx(
@@ -440,6 +505,20 @@ async fn delete_in_tx(
         TrashGuard::Forbid if trashed_at.is_some() => return Err(DeleteError::NotTrashed),
         TrashGuard::Before(cutoff) if !matches!(trashed_at, Some(at) if at <= cutoff) => {
             return Err(DeleteError::NotTrashed);
+        }
+        TrashGuard::AcceptedBefore(cutoff) => {
+            let candidate: bool = sqlx::query_scalar(concat!(
+                "select exists(select 1 from conversations c where c.id=$2 and ",
+                accepted_retention_where!(),
+                ")"
+            ))
+            .bind(cutoff)
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if !candidate {
+                return Err(DeleteError::NotTrashed);
+            }
         }
         _ => {}
     }
