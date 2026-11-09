@@ -652,6 +652,7 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
                         | "worktree_failed"
                         | "start_failed"
                         | "codex_state_backfill_stuck"
+                        | "invalid_instructions"
                         | "cli_incompatible"
                         | "auth_required"
                         | "crashed"
