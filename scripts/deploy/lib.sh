@@ -682,6 +682,7 @@ read_ack() { od -An -tu8 -N8 "$1" 2>/dev/null | tr -d ' \n'; }
 
 # Снимок exec id живых сопровождений из /proc по точному argv: argv[0] с
 # basename canterlot-worker, argv[1] ровно supervise, значение --exec-dir.
+# $1 — каталог executions прод-воркера (пусто — без ограничения).
 # Подстрока по склеенной командной строке ловила бы обёртки (bash -c "… supervise
 # --exec-dir …") — тот же класс, что самосовпадение сканера (урок 1.16.0).
 # Без fork на процесс: mapfile и встроенные сравнения.
@@ -706,7 +707,11 @@ proc_supervisor_ids() {
         done
         [ -n "${dir}" ] || continue
         if [ -n "${root}" ]; then
+            # Только прямой каталог исполнения <root>/<exec-id>: сопровождения
+            # тестовых воркеров из worktree под WORKER_DATA (worktrees/<id>/…/
+            # executions/<id>) — не прод-сессии.
             case "${dir}" in
+                "${root}"/*/*) continue ;;
                 "${root}"/*) ;;
                 *) continue ;;
             esac

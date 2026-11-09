@@ -64,7 +64,7 @@ LIVE_CONVS="$(hub_psql "select distinct conversation_id::text from executions wh
 
 # Каждый живой супервизор из /proc, а не только строки хаба (урок: пустой список
 # при живых процессах проходил всухую).
-PROC_IDS="$(proc_supervisor_ids "${WORKER_DATA}")"
+PROC_IDS="$(proc_supervisor_ids "${WORKER_DATA}/executions")"
 [ -n "${PROC_IDS}" ] && log "supervisors in /proc:" && printf '%s\n' "${PROC_IDS}" | sed 's/^/  supervise: /'
 # Каждую неосвобождённую запись ownership на диске декодирует новый ipc.proto
 # (номера полей известны, значения не печатаются).

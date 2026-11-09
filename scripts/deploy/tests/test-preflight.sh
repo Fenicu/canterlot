@@ -172,6 +172,29 @@ assert_contains "${FAKE_ROOT}/out.log" "no live hub row" "orphan supervisor repo
 teardown_case
 case_end
 
+# 2b. сопровождение тестового воркера из worktree под WORKER_DATA (стек-тест
+# делегата): его exec-dir не прямой каталог WORKER_DATA/executions/<id>, и
+# preflight не принимает его за прод-сессию без строки хаба.
+case_begin "nested test-stack supervisor is not a production session"
+setup_live nestedsup
+NESTED_ID="$(new_exec_id)"
+NESTED_BIN="${WORKER_DATA}/worktrees/0000/target/debug/canterlot-worker"
+NESTED_DIR="${WORKER_DATA}/worktrees/0000/stack/executions/${NESTED_ID}"
+mkdir -p "${NESTED_BIN%/*}" "${NESTED_DIR}"
+cp "${FAKE_WORKER_BIN}" "${NESTED_BIN}"
+setsid bash -c "exec -a '${NESTED_BIN}' '${NESTED_BIN}' supervise --exec-dir '${NESTED_DIR}'" >/dev/null 2>&1 <&- &
+HARNESS_PIDS+=("$!")
+harness_wait_supervisor "${NESTED_DIR}"
+if bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" >"${FAKE_ROOT}/out.log" 2>&1; then
+    case_ok "exit 0 with a nested test-stack supervisor"
+else
+    case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/out.log"
+fi
+assert_not_contains "${FAKE_ROOT}/out.log" "${NESTED_ID}" "nested supervisor not listed as a production session"
+assert_contains "${FAKE_ROOT}/out.log" "supervise: ${EXEC1}" "production supervisors still listed"
+teardown_case
+case_end
+
 # 3. битый ownership журнал: жёсткая ошибка декодирования.
 case_begin "corrupt ownership"
 setup_live corrupt
