@@ -12,7 +12,7 @@ export function swapLabel(node: HTMLElement, initial: string) {
   }
   function update(value: string) {
     target = value;
-    // Каждый durationMs пересчитывает стиль документа: идущая смена подписи сама подхватит новый target.
+    // Идущая смена подписи сама подхватит новый target.
     if (leaving) return;
     if (!durationMs('--duration-label-out') || !node.animate) { finish(); return; }
     if (node.textContent === target) return;
