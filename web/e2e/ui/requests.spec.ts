@@ -156,6 +156,35 @@ test.describe('E2E Requests and Recovery', () => {
     await expect(page.getByText('Ветка успешно перебазирована.')).toBeVisible();
   });
 
+  test('secret_answer_is_masked_without_a_password_field_and_reaches_the_hub_verbatim', async ({ page }) => {
+    const { hub, api, id } = await bootChat(page);
+    const reqId = api.id();
+    hub.append(`conversation:${id}`, {
+      kind: 'request_opened',
+      conversation_id: id,
+      payload: {
+        request_id: reqId,
+        kind: 'question',
+        payload: { questions: [{ id: 'q1', text: 'Токен доступа', allow_custom: true, is_secret: true }] }
+      }
+    });
+    hub.flush();
+
+    const field = page.getByRole('textbox', { name: 'Токен доступа' });
+    await expect(field).toBeVisible();
+    // Менеджер паролей Chrome смотрит на type=password: поле текстовое, а символы скрывает CSS.
+    await expect(field).toHaveAttribute('type', 'text');
+    await expect(field).toHaveAttribute('autocomplete', 'off');
+    await expect(field).toHaveAttribute('data-lpignore', 'true');
+    await expect(field).toHaveAttribute('data-1p-ignore', '');
+    expect(await page.locator('input[type="password"]').count()).toBe(0);
+    expect(await field.evaluate((node) => getComputedStyle(node).getPropertyValue('-webkit-text-security'))).toBe('disc');
+
+    await field.fill('s3cret-token');
+    await page.getByRole('button', { name: 'Ответить' }).click();
+    await expect.poll(() => JSON.stringify([...api.decisions.values()])).toContain('s3cret-token');
+  });
+
   test('e2e_permission_allow_and_deny_flow_with_proof', async ({ page }) => {
     const { hub, api, id } = await bootChat(page);
 

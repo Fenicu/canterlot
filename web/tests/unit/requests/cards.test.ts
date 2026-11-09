@@ -44,6 +44,42 @@ describe('PWA Request Cards', () => {
       expect(target.querySelector('input')!.placeholder).toBe('Токен не сохранится в истории');
     });
 
+    it('secret_answer_field_is_masked_text_that_password_managers_ignore', () => {
+      vi.stubGlobal('CSS', { supports: (property: string, value: string) => property === '-webkit-text-security' && value === 'disc' });
+      const target = render(QuestionCard, 'question', { questions: [{ id: 's', text: 'Токен', is_secret: true, allow_custom: true, options: [] }] });
+      const input = target.querySelector<HTMLInputElement>('input[data-custom]')!;
+      // Поле пароля Chrome предложил бы сохранить в менеджер паролей и подставлял бы сохранённое.
+      expect(input.type).toBe('text');
+      expect(input.dataset.secret).toBe('masked');
+      expect(input.getAttribute('autocomplete')).toBe('off');
+      expect(input.getAttribute('autocapitalize')).toBe('off');
+      expect(input.getAttribute('autocorrect')).toBe('off');
+      expect(input.getAttribute('spellcheck')).toBe('false');
+      expect(input.hasAttribute('data-1p-ignore')).toBe(true);
+      expect(input.getAttribute('data-lpignore')).toBe('true');
+      expect(input.getAttribute('data-bwignore')).toBe('true');
+      expect(input.getAttribute('aria-labelledby')).toBeTruthy();
+    });
+
+    it('secret_answer_field_falls_back_to_a_masked_password_field_without_text_security', () => {
+      vi.stubGlobal('CSS', { supports: () => false });
+      const target = render(QuestionCard, 'question', { questions: [{ id: 's', text: 'Токен', is_secret: true, allow_custom: true, options: [] }] });
+      const input = target.querySelector<HTMLInputElement>('input[data-custom]')!;
+      expect(input.type).toBe('password');
+      expect(input.dataset.secret).toBe('password');
+      expect(input.getAttribute('autocomplete')).toBe('new-password');
+      expect(input.hasAttribute('data-1p-ignore')).toBe(true);
+      expect(input.getAttribute('data-lpignore')).toBe('true');
+    });
+
+    it('plain_answer_field_keeps_no_secret_markers', () => {
+      const target = render(QuestionCard, 'question', { questions: [{ id: 'p', text: 'Имя', allow_custom: true, options: [] }] });
+      const input = target.querySelector<HTMLInputElement>('input[data-custom]')!;
+      expect(input.type).toBe('text');
+      expect(input.hasAttribute('data-secret')).toBe(false);
+      expect(input.hasAttribute('data-1p-ignore')).toBe(false);
+    });
+
     it('multi_question_card_counts_questions', () => {
       const target = render(QuestionCard, 'question', { questions: [{ id: 'a', text: 'Раз', options: ['Да'] }, { id: 'b', text: 'Два', options: ['Нет'] }] });
       expect(target.textContent).toContain('1 из 2');

@@ -33,6 +33,10 @@
   } = $props();
 
   const uid = $props.id();
+  // Секрет прячет CSS в текстовом поле: поле пароля Chrome предложил бы сохранить в менеджер паролей
+  // (с синхронизацией в аккаунт) и подставлял бы туда сохранённое. Без CSS-маски остаётся поле пароля.
+  const textSecurity =
+    typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('-webkit-text-security', 'disc');
   let formEl: HTMLFormElement | undefined = $state();
   let selectedSingle = $state<Record<string, string>>({});
   let selectedMulti = $state<Record<string, string[]>>({});
@@ -301,9 +305,18 @@
         {#if q.allow_custom || q.is_other}
           <div class="custom-input-wrap">
             <input
-              type={q.is_secret ? 'password' : 'text'}
+              type={q.is_secret && !textSecurity ? 'password' : 'text'}
               class="custom-input"
               data-custom="true"
+              data-secret={q.is_secret ? (textSecurity ? 'masked' : 'password') : undefined}
+              autocomplete={q.is_secret ? (textSecurity ? 'off' : 'new-password') : undefined}
+              autocapitalize={q.is_secret ? 'off' : undefined}
+              autocorrect={q.is_secret ? 'off' : undefined}
+              spellcheck={q.is_secret ? 'false' : undefined}
+              data-1p-ignore={q.is_secret ? '' : undefined}
+              data-lpignore={q.is_secret ? 'true' : undefined}
+              data-bwignore={q.is_secret ? 'true' : undefined}
+              data-form-type={q.is_secret ? 'other' : undefined}
               placeholder={q.is_secret ? 'Токен не сохранится в истории' : 'Свой ответ'}
               aria-labelledby={`${uid}-q${qIndex}`}
               value={customValues[q.id] ?? ''}
@@ -332,6 +345,7 @@
 {/if}
 
 <style>
+  .custom-input[data-secret='masked'] { -webkit-text-security: disc; }
   .answered { display: flex; flex-direction: column; gap: var(--s4); min-width: 0; }
   .answered section { display: flex; flex-direction: column; gap: var(--s2); }
   .answered-text { margin: var(--s0); color: var(--text); font-size: var(--fs-body); overflow-wrap: anywhere; }
