@@ -49,6 +49,10 @@ async function settled(page: Page, targets: Locator[]) {
 
 const banner = (page: Page) => page.locator('[data-banner]');
 
+/** Карточка въезжает сверху: её место меряется, когда сдвиг появления доехал до конца. */
+const arrived = (page: Page) =>
+  banner(page).evaluate((card) => Promise.all(card.getAnimations().map((animation) => animation.finished)).then(() => undefined));
+
 async function cutAndRestore(page: Page, hub: FakeHub, targets: Locator[]) {
   const before = await settled(page, targets);
   hub.acceptConnections = false;
@@ -80,6 +84,7 @@ test('connection_banner_floats_over_a_chat_and_keeps_the_header_free', async ({ 
   await expect(banner(page)).toContainText('Нет связи. Переподключаюсь…', { timeout: 8_000 });
   expect(await positions([header, composer])).toEqual(before);
   // Карточка лежит под шапкой: кнопки «назад» и меню остаются доступны.
+  await arrived(page);
   const head = (await header.boundingBox())!;
   const card = (await banner(page).boundingBox())!;
   expect(card.y).toBeGreaterThanOrEqual(head.y + head.height - 1);
