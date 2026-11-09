@@ -403,7 +403,7 @@ test('reading_a_long_turn_up_and_down_loses_no_row_and_keeps_the_anchor', async 
   await page.locator('.card').first().evaluate((card) => { (card as HTMLElement & { mark?: boolean }).mark = true; });
 
   // Первый экран над разрезом: эти строки владелец читает, пока грузится старшая страница.
-  await feed.evaluate((el) => { el.scrollTop = el.scrollHeight - el.clientHeight - 1400; });
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = el.scrollHeight - el.clientHeight - 1400; });
   await expect(feed).not.toHaveAttribute('data-pinned', '');
   const head = await shownKeys(page);
   for (let pass = 0; pass < 30 && (await feed.getAttribute('data-loaded')) !== '291'; pass++) {
@@ -451,7 +451,7 @@ test('the_restore_button_stands_at_the_cut_and_opens_rows_in_place', async ({ pa
 test('tail_growth_and_an_opened_row_do_not_move_what_the_reader_is_looking_at', async ({ page }) => {
   const { hub, api, id, items } = await longTurn(page, 30, 'text_between');
   const feed = page.locator('.feed');
-  await feed.evaluate((el) => { el.scrollTop = el.scrollHeight - el.clientHeight - 700; });
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = el.scrollHeight - el.clientHeight - 700; });
   await expect(feed).not.toHaveAttribute('data-pinned', '');
   await page.waitForTimeout(100);
   const anchor = await topRow(page);

@@ -227,7 +227,6 @@
   }
 
   function layout(list: Row[], top: number, viewport: number): void {
-    controller?.noteLayout();
     ix.setCount(list.length);
     list.forEach((row, index) => ix.set(index, known.get(row.key) ?? guess(row)));
     // Прижатая лента показывает хвост, где бы ни стоял scrollTop: браузер на миг поджимает его,
@@ -328,8 +327,6 @@
     current.observe(node);
     const key = node.dataset.key ?? '';
     const height = node.getBoundingClientRect().height;
-    // Замер разложил ленту посреди перестройки окна: прижатие scrollTop на этой раскладке — не прокрутка владельца.
-    controller?.noteLayout();
     if (key && height) applyHeight(key, height);
     return { destroy: () => current.unobserve(node) };
   }

@@ -160,7 +160,8 @@ async function finish(
 	if (viewport && viewport.height > 600) await page.setViewportSize({ width: viewport.width, height: 600 });
 	await page.waitForTimeout(100);
 	const feed = page.locator('.feed');
-	await feed.evaluate((el) => { el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 200); });
+	// Уход вверх — жест владельца: колесо приходит раньше сдвига.
+	await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -200 })); el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 200); });
 	await expect(feed).not.toHaveAttribute('data-pinned', '');
 	await waitForScrollStill(page);
 	await settleReveal?.();

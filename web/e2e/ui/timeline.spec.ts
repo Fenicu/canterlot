@@ -127,7 +127,7 @@ test('reading_the_tail_marks_the_chat_read_and_reading_old_history_does_not', as
   await expect(page.locator('[data-ready]')).toBeVisible();
   await expect.poll(() => reads.at(-1)).toBe('30');
   const feed = page.locator('.feed');
-  await feed.evaluate((el) => { el.scrollTop = 0; });
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
   await expect(feed).not.toHaveAttribute('data-pinned', '');
   const blockId = api.id();
   const opened = hub.append(`conversation:${id}`, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
@@ -152,7 +152,7 @@ test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the
       await route.fallback();
     });
     const feed = page.locator('.feed');
-    await feed.evaluate((el) => { el.scrollTop = 0; });
+    await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))));
     const row = page.locator('[data-row]').nth(1);
     const key = await row.getAttribute('data-key');
@@ -169,7 +169,7 @@ test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the
 test('reading_old_history_during_stream_keeps_the_anchor_within_one_pixel', async ({ page }) => {
   const { hub, api, id } = await boot(page, 80);
   const feed = page.locator('.feed');
-  await feed.evaluate((el) => { el.scrollTop = 40; });
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 40; });
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))));
   const key = await page.locator('[data-row]').nth(2).getAttribute('data-key');
   const before = await page.locator(`[data-key="${key}"]`).boundingBox();
@@ -195,14 +195,15 @@ test('pinned_to_bottom_follows_the_stream_and_unpins_on_user_scroll', async ({ p
   hub.append(`conversation:${id}`, { kind: 'block_delta', conversation_id: id, payload: { block_id: blockId, base_rev: 0, rev: 1, append: 'хвост' } });
   hub.flush();
   await expect.poll(() => feed.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThanOrEqual(48);
-  await feed.evaluate((el) => { el.scrollTop = Math.max(0, el.scrollTop - 200); });
+  // Уход вверх — жест владельца: колесо приходит раньше сдвига.
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -200 })); el.scrollTop = Math.max(0, el.scrollTop - 200); });
   await expect(feed).not.toHaveAttribute('data-pinned', '');
 });
 
 test('new_messages_pill_appears_off_bottom_and_returns_to_pinned', async ({ page }) => {
   const { hub, api, id } = await boot(page, 30);
   const feed = page.locator('.feed');
-  await feed.evaluate((el) => { el.scrollTop = Math.max(0, el.scrollTop - 240); });
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = Math.max(0, el.scrollTop - 240); });
   const blockId = api.id();
   hub.append(`conversation:${id}`, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
   hub.flush();
@@ -221,7 +222,7 @@ test('expanding_a_tool_above_the_viewport_keeps_the_anchor', async ({ page }) =>
   await page.reload();
   await expect(page.locator('[data-ready]')).toBeVisible();
   const feed = page.locator('.feed');
-  await feed.evaluate((el) => { el.scrollTop = 280; });
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 280; });
   // Строка из запаса за окном может уйти из DOM при пересчёте высот; якорь проверяется по видимой строке.
   // Выбор делается по устоявшейся раскладке: прокрутка и виртуализатор перемеряют строки не в тот же кадр.
   const anchor = () => feed.evaluate((el) => {

@@ -272,6 +272,7 @@ test('feed_move_in_the_growth_frame_is_not_overridden_by_a_stale_pin', async ({ 
 			requestAnimationFrame(() => {
 				// Владелец уходит вверх в том же кадре, в котором карточка растёт:
 				// событие scroll ещё не доставлено, но решение уже должно быть верным.
+				feed.dispatchEvent(new WheelEvent('wheel', { deltaY: -400 }));
 				feed.scrollTop = target;
 				const row = [...feed.querySelectorAll<HTMLElement>('[data-row]')].at(-1);
 				if (row) {

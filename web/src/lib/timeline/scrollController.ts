@@ -1,7 +1,21 @@
 import { cell } from "#lib/stores/cell.svelte.js";
 
 const PIN_PX = 48;
+/** Сколько после колеса, касания или клавиши прокрутка ещё считается рукой владельца: инерция и плавная прокрутка идут дольше самого жеста. */
+const INTENT_MS = 400;
+/** Прижатие на промежуточной раскладке доходит событием прокрутки не позже следующего кадра после правки ленты. */
+const CHANGE_FRAMES = 2;
 
+/**
+ * Держит ленту у низа, пока владелец сам не уведёт её вверх.
+ *
+ * Уход вверх — это прокрутка, за которой стоит жест владельца: колесо, касание, клавиша или полоса
+ * прокрутки. Браузер двигает scrollTop и сам: прижимает его к пределу на промежуточной раскладке,
+ * когда хвост на миг короче, а к событию прокрутки высота уже другая. По одному положению такое
+ * не отличить от владельца, поэтому подъём без жеста на изменившейся ленте возвращает её к низу.
+ * Подъём без жеста на неизменной ленте остаётся прокруткой владельца: так двигают ленту
+ * программы чтения экрана и тесты.
+ */
 export class ScrollController {
   readonly #pinned = cell(true);
   readonly #showJump = cell(false);
@@ -10,18 +24,55 @@ export class ScrollController {
   #lastHeight = 0;
   #lastView = 0;
   #target: number | null = null;
+  /** Сколько кадров ещё считать раскладку ленты свежей после правки строк, распорок или размера. */
+  #changing = 0;
+  #frame = 0;
+  #touching = false;
+  #dragging = false;
+  #intentUntil = 0;
   #observer: ResizeObserver | null = null;
-  #onScroll: () => void;
+  #mutations: MutationObserver | null = null;
+  #off: (() => void)[] = [];
 
   constructor(el: HTMLElement) {
     this.#el = el;
     this.#last = el.scrollTop;
     this.#remember();
-    this.#onScroll = () => this.#readScroll();
-    el.addEventListener("scroll", this.#onScroll, { passive: true });
+    this.#listen(el, "scroll", () => this.#readScroll());
+    this.#listen(el, "wheel", () => this.#intent());
+    this.#listen(el, "touchstart", () => {
+      this.#touching = true;
+      this.#intent();
+    });
+    this.#listen(el, "touchmove", () => this.#intent());
+    const lift = () => {
+      if (!this.#touching && !this.#dragging) return;
+      this.#touching = false;
+      this.#dragging = false;
+      // Инерция после отпускания пальца ещё несёт ленту: это та же прокрутка владельца.
+      this.#intent();
+    };
+    this.#listen(el, "touchend", lift);
+    this.#listen(el, "touchcancel", lift);
+    // Клавиши прокрутки и переход фокуса двигают ленту рукой владельца.
+    this.#listen(el, "keydown", () => this.#intent());
+    this.#listen(el, "focusin", () => this.#intent());
+    // Нажатие по самой ленте, а не по строке в ней, — это полоса прокрутки.
+    this.#listen(el, "pointerdown", (event) => {
+      if (event.target !== el) return;
+      this.#dragging = true;
+      this.#intent();
+    });
+    if (typeof window !== "undefined") this.#listen(window, "pointerup", lift);
     if (typeof ResizeObserver !== "undefined") {
       this.#observer = new ResizeObserver(() => this.onContentChange("resize"));
       this.#observer.observe(el);
+    }
+    if (typeof MutationObserver !== "undefined" && typeof Node !== "undefined" && el instanceof Node) {
+      this.#mutations = new MutationObserver(() => this.#touch());
+      // Распорки окна меняют высоту через style: промежуточная раскладка бывает и без новых строк.
+      // Текст не в счёт: часы хода тикают каждую секунду, а раскладку правят строки и стили.
+      this.#mutations.observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ["style", "class", "hidden", "open"] });
     }
   }
 
@@ -36,6 +87,7 @@ export class ScrollController {
   onContentChange(
     kind: "tail-growth" | "prepend" | "height-above" | "resize",
   ): void {
+    this.#touch();
     if (kind === "prepend" || kind === "height-above") return;
     if (this.pinned) this.#toBottom();
     if (this.pinned) return;
@@ -52,19 +104,6 @@ export class ScrollController {
     this.#remember();
   }
 
-  /**
-   * Лента только что разложена посреди своей перестройки. Если браузер на этой раскладке прижал
-   * scrollTop к новому, меньшему пределу, это не владелец: подъём ровно к низу ленты прокруткой вверх
-   * не бывает. Без этого высота успевала снова вырасти до события прокрутки, и прижатие читалось как уход вверх.
-   */
-  noteLayout(): void {
-    const top = this.#el.scrollTop;
-    if (top >= this.#last) return;
-    if (top < this.#el.scrollHeight - this.#el.clientHeight - 1) return;
-    this.#last = top;
-    this.#remember();
-  }
-
   /** Владелец раскрыл строку: окно перестаёт следовать за хвостом до возвращения вниз. */
   release(): void {
     this.#pinned.set(false);
@@ -77,8 +116,44 @@ export class ScrollController {
   }
 
   destroy(): void {
-    this.#el.removeEventListener("scroll", this.#onScroll);
+    for (const off of this.#off.splice(0)) off();
     this.#observer?.disconnect();
+    this.#mutations?.disconnect();
+    if (this.#frame) cancelAnimationFrame(this.#frame);
+  }
+
+  #listen(target: EventTarget, type: string, fn: (event: Event) => void): void {
+    target.addEventListener(type, fn, { passive: true });
+    this.#off.push(() => target.removeEventListener(type, fn));
+  }
+
+  #now(): number {
+    return typeof performance === "undefined" ? Date.now() : performance.now();
+  }
+
+  #touch(): void {
+    // Счёт в кадрах, а не в миллисекундах: на медленном телефоне кадр длится дольше любого порога.
+    this.#changing = CHANGE_FRAMES;
+    if (this.#frame || typeof requestAnimationFrame === "undefined") return;
+    const step = () => {
+      this.#changing -= 1;
+      this.#frame = this.#changing > 0 ? requestAnimationFrame(step) : 0;
+    };
+    this.#frame = requestAnimationFrame(step);
+  }
+
+  #intent(): void {
+    this.#intentUntil = this.#now() + INTENT_MS;
+  }
+
+  #owner(): boolean {
+    if (this.#touching || this.#dragging || this.#now() < this.#intentUntil) {
+      // Пока лента едет под жестом, инерция продлевает его.
+      this.#intent();
+      return true;
+    }
+    const { scrollHeight: height, clientHeight: view } = this.#el;
+    return this.#changing === 0 && height === this.#lastHeight && view === this.#lastView;
   }
 
   #toBottom(explicit = false): void {
@@ -92,7 +167,7 @@ export class ScrollController {
     this.ownScroll(this.#el.scrollHeight);
   }
 
-  /** Геометрия запоминается только вместе с положением: так подгонка scrollTop браузером видна как сжатие, а не как уход владельца. */
+  /** Геометрия запоминается вместе с положением: другая высота к событию прокрутки значит, что scrollTop мог сдвинуть браузер. */
   #remember(): void {
     this.#lastHeight = this.#el.scrollHeight;
     this.#lastView = this.#el.clientHeight;
@@ -104,23 +179,23 @@ export class ScrollController {
 
   #readScroll(): void {
     const top = this.#el.scrollTop;
-    const gap = this.#gap();
     const own = this.#target !== null && Math.abs(top - this.#target) <= 1;
     this.#target = null;
-    // Окно стало выше (плашка над полем ввода ушла) или текст стал короче: браузер прижал scrollTop к новому пределу, а владелец не двигал ленту.
-    // Новый хвост мог появиться в том же кадре, поэтому предел считается по меньшей из двух высот.
-    const { scrollHeight: height, clientHeight: view } = this.#el;
-    const shrank = view > this.#lastView || height < this.#lastHeight;
-    const clamped = shrank && top >= Math.min(height, this.#lastHeight) - view - 1;
-    this.#remember();
-    const userUp = !own && !clamped && top + 1 < this.#last;
+    const up = !own && top + 1 < this.#last;
+    const owner = up && this.#owner();
+    if (up && !owner && this.pinned) {
+      // Браузер прижал scrollTop на промежуточной раскладке: лента остаётся у низа.
+      this.ownScroll(this.#el.scrollHeight);
+      return;
+    }
     this.#last = top;
-    if (userUp) {
+    this.#remember();
+    if (owner) {
       this.#pinned.set(false);
       this.#showJump.set(false);
       return;
     }
-    if (gap <= PIN_PX) {
+    if (this.#gap() <= PIN_PX) {
       this.#pinned.set(true);
       this.#showJump.set(false);
     }
