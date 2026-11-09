@@ -2,10 +2,12 @@ import { test, expect, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { FakeHub, FakeHubApi, seedMachine } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, leaseEntry, seedLease, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/http-playwright';
 import { seedConversation } from '../../testing/fake-hub/seed';
+import { Feed, hubText } from '../../testing/fixtures/feed-cards';
 import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelte';
+import type { PlanTask } from '../../src/lib/stores/plan.svelte';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const OUT = resolve(import.meta.dirname, '../../../docs/screenshots');
@@ -322,7 +324,8 @@ function seedRequest(api: FakeHubApi, kind: 'permission' | 'question'): string {
             options: [
               { label: 'Аквамарин', description: 'Тёмный фон и бирюзовый акцент' },
               { label: 'Стандартная', description: 'Нейтральная, ближе к системной' },
-              { label: 'VS Code', description: 'Как в редакторе, без сюрпризов' }
+              { label: 'VS Code', description: 'Как в редакторе, без сюрпризов' },
+              { label: 'Норд', description: 'Холодные приглушённые тона' }
             ],
             multi_select: false,
             allow_custom: true
@@ -339,7 +342,178 @@ function seedRequest(api: FakeHubApi, kind: 'permission' | 'question'): string {
   return id;
 }
 
-async function prepare(page: Page, palette: 'aquamarine' | 'standard' | 'vscode', theme: 'dark' | 'light'): Promise<void> {
+const CLAUDE = { id: 'claude', title: 'Claude Code', provider: 'claude' };
+const CODEX = { id: 'codex', title: 'Codex', provider: 'codex' };
+const OPENCODE = { id: 'opencode', title: 'OpenCode', provider: 'opencode' };
+
+interface OrchestratorSeed {
+  orchestrator: string;
+  executors: { gotify: string; watch: string; search: string; effort: string; board: string };
+  machine: string;
+}
+
+/**
+ * Оркестратор выпуска: доска плана во всех состояниях, делегаты на трёх харнессах
+ * (один ждёт очереди на гейт), лента с карточками вызовов плана и запуска делегата.
+ */
+function seedOrchestrator(api: FakeHubApi): OrchestratorSeed {
+  seedMachines(api);
+  seedLimits(api);
+  const machine = MACHINES.workstation;
+  const orchestrator = seedConversation(api, {
+    title: 'Выпуск 1.24',
+    pinned: true,
+    color: 'accent',
+    model: 'opus-5.5',
+    harness: CLAUDE,
+    machine,
+    created_at: stamp(-140),
+    last_activity_at: stamp(-1),
+    activity: { state: 'idle', evidence: { kind: 'idle', last_turn_at: stamp(-1) }, since: stamp(-1) } as never
+  });
+  const child = (title: string, model: string, harness: typeof CLAUDE, created: number, activity: Record<string, unknown>) =>
+    seedConversation(api, {
+      title,
+      parent_id: orchestrator,
+      spawn_depth: 1,
+      harness,
+      model,
+      machine,
+      created_at: stamp(created),
+      last_activity_at: stamp(-2),
+      activity: activity as never
+    });
+  const board = child('Доска плана', 'opus-5.5', CLAUDE, -130, { state: 'stopped', evidence: { kind: 'stopped', by: 'owner' }, since: stamp(-70) });
+  const search = child('Поиск по истории', 'gpt-6.1-sol', CODEX, -110, { state: 'idle', evidence: { kind: 'idle', last_turn_at: stamp(-6) }, since: stamp(-6) });
+  const effort = child('Смена effort на ходу', 'opus-5.5', CLAUDE, -95, { state: 'failed', evidence: { kind: 'failed', reason: 'process_exited' }, since: stamp(-24) });
+  const gotify = child('Пуши Gotify', 'opus-5.5', CLAUDE, -48, { state: 'working', evidence: { phase: 'generating' }, since: stamp(-3) });
+  const watch = child('Сторож машины', 'deepseek', OPENCODE, -30, {
+    state: 'working',
+    evidence: { phase: 'running_tool', tool_name: 'Bash', summary: 'scripts/check.sh --all', phase_since: stamp(-4), lease_wait: { kind: 'gate', position: 1, since: stamp(-4) } },
+    since: stamp(-4)
+  });
+
+  // Отчёт исполнителя на проверке: ссылка «Отчёт» из плана ведёт на этот ответ.
+  const report = historyItem(api, api.id(), {
+    content: 'Поиск готов: индекс по ответам и сообщениям, подсветка совпадений, прыжок в ленту. Тесты зелёные.',
+    agent: 'Codex',
+    model: 'gpt-6.1-sol',
+    created_seq: '1',
+    created_at: stamp(-6)
+  });
+  api.histories.set(search, [report]);
+  api.blocks.set(report.id, { text: report.content, rev: 1, state: 'final' });
+  api.bindConversation(search);
+
+  const tasks: PlanTask[] = [];
+  const push = (task: Partial<PlanTask> & Pick<PlanTask, 'title'>) => {
+    tasks.push(api.pushPlanTask({ orchestrator_id: orchestrator, created_at: stamp(-135), updated_at: stamp(-5), ...task }));
+  };
+  push({ title: 'Доска плана в хабе', state: 'done', executor_id: board, attempts: 1 });
+  push({ title: 'Поиск по истории с подсветкой', state: 'in_review', executor_id: search, attempts: 1, findings: ['Прыжок к найденному ответу встаёт окном вокруг seq', 'Запрос не попадает в адрес страницы'] });
+  push({ title: 'Пуши на телефон через Gotify', state: 'in_progress', executor_id: gotify, attempts: 1, note: 'Одно уведомление на событие, не больше 20 в минуту.' });
+  push({ title: 'Смена effort посреди диалога', state: 'blocked', executor_id: effort, attempts: 2, blocker: 'CLI откатывает effort после отложенного перезапуска: нужен повтор на свежей версии' });
+  push({ title: 'Сторож памяти и утёкших процессов', state: 'in_progress', executor_id: watch, attempts: 1 });
+  push({ title: 'Скриншоты для README', state: 'waiting' });
+  push({ title: 'Отдельный экран очереди', state: 'cancelled', note: 'Очередь живёт на экране машины.' });
+  api.planDetails.set(tasks[1]!.id, {
+    commits: [
+      { sha: 'a41c9e07d2b3f6158e0a7c4d9b2e1f3a5c6d7e80', subject: 'Искать по ответам и сообщениям с морфологией' },
+      { sha: 'b52dae18e3c4071690b18d5eac3f204b6d7e8f91', subject: 'Подсвечивать найденные слова в выдаче' },
+      { sha: 'c63ebf29f4d5182701c29e6fbd40315c7e8f90a2', subject: 'Открывать ленту на месте совпадения' }
+    ],
+    commits_truncated: false,
+    files_changed: 11,
+    report_block_id: report.id,
+    report_seq: 1
+  });
+  api.planDetails.set(tasks[2]!.id, {
+    commits: [{ sha: 'd74fc03a05e6293812d3af70ce51426d8f90a1b3', subject: 'Добавить секцию [notify.gotify] в hub.toml' }],
+    commits_truncated: false,
+    files_changed: 4,
+    report_block_id: null
+  });
+
+  const asOf = (task: PlanTask, patch: Partial<PlanTask>): PlanTask => ({ ...task, ...patch });
+  const feed = new Feed(api, NOW_MS - 45 * 60_000);
+  const run = api.id();
+  feed.input('Разложи выпуск 1.24 на задачи и раздай делегатам. Гейт гоняй через очередь машины.');
+  feed.text(run, 'Завожу план выпуска.');
+  feed.call(run, 'add', 'mcp__canterlot__plan_add', { tasks: tasks.slice(1, 6).map((task) => ({ title: task.title })) }, hubText({
+    numbers: [2, 3, 4, 5, 6],
+    tasks: tasks.slice(1, 6).map((task) => asOf(task, { state: 'waiting', blocker: null, findings: [], executor_id: null, attempts: 0 }))
+  }));
+  feed.text(run, 'Запускаю делегата на пуши.');
+  feed.call(run, 'spawn', 'mcp__canterlot__session_spawn', { title: 'Пуши Gotify', brief: 'Добавь пуши через Gotify: ожидание ответа, конец хода, сбой.', harness: 'claude', model: 'opus-5.5', effort: 'high', isolated: true, plan_task: 3 }, hubText({
+    permission_mode: 'bypass', session_id: gotify, status: 'started', subscribed: true, plan_task: { number: 3, linked: true }, worktree: { branch: 'canterlot/7f3a91c2', path: '/srv/worktrees/7f3a91c2' }
+  }, 'Session created. Linked to plan task #3: it moves to in_review when the session finishes.'));
+  feed.call(run, 'blocked', 'mcp__canterlot__plan_update', { number: 4, blocker: tasks[3]!.blocker }, hubText({ status: 'updated', task: tasks[3] }));
+  feed.call(run, 'review', 'mcp__canterlot__plan_update', { number: 2, state: 'in_review', findings: tasks[1]!.findings }, hubText({ status: 'updated', task: tasks[1] }));
+  feed.text(run, 'Поиск ждёт проверки, смена effort заблокирована. Сторож машины стоит первым в очереди на гейт.');
+  api.histories.set(orchestrator, feed.items);
+  api.bindConversation(orchestrator);
+  api.hub.reach(`conversation:${orchestrator}`, String(feed.seq));
+
+  return { orchestrator, executors: { gotify, watch, search, effort, board }, machine: machine.id };
+}
+
+/** Сессии с совпадениями для поиска «гейт» разного происхождения: ответ, своё сообщение, итог делегата. */
+function seedSearchHits(api: FakeHubApi, seed: OrchestratorSeed): void {
+  const answer = (text: string, seq: number, at: number, agent: string, model: string): HistoryBlock => {
+    const block = historyItem(api, api.id(), { content: text, agent, model, created_seq: String(seq), created_at: stamp(at) });
+    api.blocks.set(block.id, { text, rev: 1, state: 'final' });
+    return block;
+  };
+  const gotify = [
+    input(api, 'Перед слиянием прогони полный гейт, но через очередь машины.', '1', -40),
+    answer('Полный гейт встал в очередь вторым: машину держит сборка соседней сессии. Пока жду, дописываю тесты пушей.', 2, -36, 'Claude Code', 'opus-5.5'),
+    answer('Гейт зелёный: fmt, clippy, nextest и Playwright прошли. Коммит готов к проверке.', 3, -12, 'Claude Code', 'opus-5.5')
+  ];
+  api.histories.set(seed.executors.gotify, gotify);
+  api.bindConversation(seed.executors.gotify);
+  const watch = [
+    answer('Сторож видит две сборки вне очереди: они запущены мимо гейта и не делят слоты с остальными.', 1, -20, 'OpenCode', 'deepseek')
+  ];
+  api.histories.set(seed.executors.watch, watch);
+  api.bindConversation(seed.executors.watch);
+  const items = api.histories.get(seed.orchestrator) ?? [];
+  const result: HistoryInput = {
+    ...input(api, 'Итог: поиск готов, гейтом проверен на телефоне и столе.', String(items.length + 1), -5),
+    origin: { kind: 'event', from: seed.executors.search, title: 'Поиск по истории', chain_depth: 1, event: { kind: 'session_result', state: 'idle', session_id: seed.executors.search, commits: [] } as never }
+  } as HistoryInput;
+  api.histories.set(seed.orchestrator, [...items, result]);
+  api.hub.reach(`conversation:${seed.orchestrator}`, result.feed_seq!);
+}
+
+function seedMachineReport(api: FakeHubApi, seed: OrchestratorSeed): void {
+  seedLease(api, seed.machine, [
+    leaseEntry({ lease_id: 'h1', kind: 'build', conversation_id: seed.executors.gotify, since: stamp(-12) }),
+    leaseEntry({ lease_id: 'h2', kind: 'build', label: 'check.sh --fast', dir: 'canterlot', since: stamp(-7) })
+  ], [
+    leaseEntry({ lease_id: 'w1', kind: 'gate', conversation_id: seed.executors.watch, requested_at: stamp(-4), position: 1 }),
+    leaseEntry({ lease_id: 'w2', kind: 'build', label: 'npm run build', dir: 'canterlot-web', requested_at: stamp(-2), position: 2 })
+  ]);
+  const machine = api.machines.get(seed.machine)!;
+  const HOUR = 60;
+  const MIB = 1024 ** 2;
+  machine.watch = {
+    observed_at: stamp(0),
+    hotspots: [
+      { path: '/home/owner/src/canterlot/target', kind: 'target', bytes: 64_000_000_000, incremental_bytes: 22_000_000_000, newest_at: stamp(-2 * HOUR), measured_at: stamp(-1), conversation_id: null, title: null },
+      { path: '/home/owner/.local/state/canterlot-worker/worktrees/019a6c1b-2d90-7e11-8c4f-a3b6e0d29174/target', kind: 'target', bytes: 9_400_000_000, incremental_bytes: 3_100_000_000, newest_at: stamp(-5 * HOUR), measured_at: stamp(-1), conversation_id: seed.executors.effort, title: 'Смена effort на ходу' },
+      { path: '/home/owner/src/canterlot/web/node_modules', kind: 'node_modules', bytes: 1_100_000_000, incremental_bytes: 0, newest_at: stamp(-26 * HOUR), measured_at: stamp(-1), conversation_id: null, title: null }
+    ],
+    leaked: [
+      { execution_id: '019a6c1b-2d90-7e11-8c4f-a3b6e0d29174', conversation_id: seed.executors.effort, title: 'Смена effort на ходу', pid: 48211, comm: 'cargo', rss_bytes: 610 * MIB, age_s: 3 * 3600 + 20 * 60 },
+      { execution_id: '019a6c1b-2d90-7e11-8c4f-a3b6e0d29174', conversation_id: seed.executors.effort, title: 'Смена effort на ходу', pid: 48390, comm: 'cargo', rss_bytes: 370 * MIB, age_s: 3 * 3600 + 18 * 60 }
+    ],
+    unleased_count: 1
+  } as never;
+  machine.warnings = [...new Set([...machine.warnings, 'disk_usage_high', 'memory_low', 'processes_leaked'])];
+  if (machine.metrics) machine.metrics = { ...machine.metrics, mem_available_bytes: Math.round(2.4 * 1024 ** 3) };
+}
+
+async function prepare(page: Page, palette: 'aquamarine' | 'standard' | 'vscode' | 'nord', theme: 'dark' | 'light'): Promise<void> {
   await page.addInitScript(({ palette, theme }) => {
     localStorage.setItem('canterlot.palette', palette);
     localStorage.setItem('canterlot.theme', theme);
@@ -557,13 +731,103 @@ test.describe('скриншоты README для телефона', () => {
     await expect(page.getByRole('table', { name: 'Скорость моделей' })).toContainText('deepseek');
     // Расход по сессиям показывает все четыре провайдера, а не только Claude и Codex.
     const usage = page.getByRole('table', { name: 'Сегодня по сессиям' });
-    await expect(usage.locator('tbody tr')).toHaveCount(5);
-    await expect(usage.locator('tbody tr').filter({ hasText: 'OpenCode · deepseek' })).toHaveCount(1);
-    await expect(usage.locator('tbody tr').filter({ hasText: 'Antigravity · gemini-3-pro' })).toHaveCount(1);
+    // Строки сессий идут под заголовками провайдеров: считаем только строки со ссылкой на сессию.
+    await expect(usage.locator('tbody tr').filter({ has: page.getByRole('link') })).toHaveCount(5);
+    await expect(usage.getByRole('rowheader', { name: 'OpenCode' })).toHaveCount(1);
+    await expect(usage.getByRole('rowheader', { name: 'Antigravity' })).toHaveCount(1);
+    await expect(usage.locator('tbody tr').filter({ hasText: 'gemini-3-pro' })).toHaveCount(1);
     // Прокручиваем весь экран истории: в кадр попадают график, текущие лимиты, расход и скорость.
     await page.setViewportSize({ width: 390, height: Math.max(844, await page.locator('.secondary-body').evaluate((node) => node.scrollHeight + 120)) });
     await page.locator('.secondary-body').evaluate((node) => { node.scrollTop = 0; });
     await shoot(page, 'limits-light.png');
+  });
+
+  test('доска плана в Норде, тёмная', async ({ page }) => {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const seed = seedOrchestrator(api);
+    await prepare(page, 'nord', 'dark');
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto(`/c/${seed.orchestrator}`);
+    await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+    const strip = page.locator('[data-role="plan-strip"]');
+    await expect(strip).toHaveText('План: 1 заблокирована · 1 на проверке');
+    await strip.getByRole('button').click();
+    const plan = page.locator('[data-role="plan-tab"]');
+    await expect(plan.locator('[data-plan-group="in_progress"]')).toBeVisible();
+    const task = plan.locator('[data-plan-task="2"]');
+    await task.getByRole('button', { name: /#2 Поиск/ }).click();
+    await expect(task.locator('[data-role="plan-task-body"]')).toContainText('3 коммита · 11 файлов изменено');
+    await shoot(page, 'plan-dark.png');
+  });
+
+  test('карточки плана в ленте в Норде, светлая', async ({ page }) => {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const seed = seedOrchestrator(api);
+    await prepare(page, 'nord', 'light');
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto(`/c/${seed.orchestrator}`);
+    await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.feed .feed-card').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-role="plan-strip"]')).toBeVisible();
+    await shoot(page, 'plan-feed-light.png');
+  });
+
+  test('панель делегирования в VS Code, тёмная', async ({ page }) => {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const seed = seedOrchestrator(api);
+    await prepare(page, 'vscode', 'dark');
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto(`/c/${seed.orchestrator}`);
+    await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('button', { name: /^Делегирование/ }).first().click();
+    const sheet = page.getByRole('dialog', { name: 'Делегирование' });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.locator(`a.tree-node[href$="/c/${seed.executors.watch}"]`)).toContainText('Ждёт очереди на гейт');
+    await shoot(page, 'delegation-dark.png');
+  });
+
+  test('поиск по истории в Аквамарине, светлая', async ({ page }) => {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const seed = seedOrchestrator(api);
+    seedSearchHits(api, seed);
+    await prepare(page, 'aquamarine', 'light');
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('button', { name: 'Поиск', exact: true }).click();
+    await page.getByRole('textbox', { name: 'Поиск сессий' }).fill('гейт');
+    await page.locator('[data-deep-search]').click();
+    await expect(page.locator('[data-search-view]')).toBeVisible();
+    await expect(page.locator('[data-search-total]')).toHaveText('Найдено 7 совпадений');
+    await expect(page.locator('[data-search-hit] mark').first()).toBeVisible();
+    await page.locator('input:focus, textarea:focus').evaluateAll((nodes) => nodes.forEach((node) => (node as HTMLElement).blur()));
+    await shoot(page, 'search-light.png');
+  });
+
+  test('очередь и сторож машины в Норде, тёмная', async ({ page }) => {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const seed = seedOrchestrator(api);
+    await prepare(page, 'nord', 'dark');
+    await installChatRoutes(page, hub, api, OWNER);
+    await seedSecondaryScreens(page, api, { machine: seed.machine, pinned: seed.orchestrator }, null);
+    seedMachineReport(api, seed);
+    await page.goto('/machines');
+    await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
+    const main = page.locator('main');
+    await expect(main.locator('[data-lease-queue] [data-lease-holder]')).toHaveCount(2);
+    await expect(main.locator('[data-lease-queue] [data-lease-waiter]')).toHaveCount(2);
+    await expect(main.locator('[data-watch="memory"]')).toBeVisible();
+    await expect(main.getByRole('region', { name: 'Крупные кэши сборки' })).toBeVisible();
+    await page.setViewportSize({ width: 390, height: Math.max(844, await page.locator('.secondary-body').evaluate((node) => node.scrollHeight + 120)) });
+    await page.locator('.secondary-body').evaluate((node) => { node.scrollTop = 0; });
+    // Кадр кончается очередью: список сессий машины ниже ничего нового не показывает.
+    const queue = (await main.locator('[data-lease-queue]').boundingBox())!;
+    await shoot(page, 'machines-dark.png', { clip: { x: 0, y: 0, width: 390, height: Math.ceil(queue.y + queue.height + 6) } });
   });
 });
 
@@ -575,19 +839,23 @@ test.describe('скриншот README для стола', () => {
     hasTouch: false
   });
 
-  test('список и чат рядом в Аквамарине, тёмная', async ({ page }) => {
+  test('список, чат оркестратора и план рядом в Норде, тёмная', async ({ page }) => {
     const hub = new FakeHub();
     const api = new FakeHubApi(hub);
-    const ids = seedReadmeSessions(api);
-    const id = seedChat(api, ids.themes);
-    await prepare(page, 'aquamarine', 'dark');
+    seedReadmeSessions(api);
+    const seed = seedOrchestrator(api);
+    api.counts = api.recount();
+    await prepare(page, 'nord', 'dark');
     await installChatRoutes(page, hub, api, OWNER);
-    await page.goto(`/c/${id}`);
+    await page.goto(`/c/${seed.orchestrator}`);
     await expect(page.locator('[data-layout="desktop"]')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('[data-pane="list"] [data-list-ready]')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('[data-pane="chat"] [data-ready]')).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('.tool .head')).toHaveCount(2);
-    await page.locator('.tool .head').last().click();
+    await page.locator('[data-role="plan-strip"] button').click();
+    const plan = page.locator('[data-pane="lane"] [data-role="plan-tab"]');
+    await expect(plan.locator('[data-plan-group="in_progress"]')).toBeVisible();
+    await plan.locator('[data-plan-task="2"]').getByRole('button', { name: /#2 Поиск/ }).click();
+    await expect(plan.locator('[data-role="plan-task-body"]')).toContainText('3 коммита');
     await shoot(page, 'desktop.png');
   });
 });
