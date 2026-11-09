@@ -22,6 +22,7 @@
 	import { executionLive, type ChatStore } from '#lib/stores/chat.svelte.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import { updateSettings, updateCrunch, type SettingsPatch } from './controls';
+	import { SettingsFormSync, type SettingsFormValues } from './settingsForm';
 	import { listPresets } from '#lib/api/client.js';
 	import { untrack } from 'svelte';
 	import type { components } from '#lib/api/generated/openapi.js';
@@ -140,14 +141,40 @@
 	let generalError = $state<string | null>(null);
 	let saving = $state(false);
 
-	// Sync local values when effective/pending changes
+	// Поля следуют за хабом при открытии листа, новой ревизии настроек и смене кранча;
+	// снимок после переподключения с теми же значениями и правки владельца их не сбрасывают.
+	const form = new SettingsFormSync();
+	function formValues(): SettingsFormValues {
+		return {
+			model: selectedModel,
+			effort: selectedEffort,
+			permission: selectedPermission,
+			preset: selectedPreset,
+			crunchEnabled,
+			resumeText
+		};
+	}
 	$effect(() => {
-		selectedModel = pending?.model ?? effective.model ?? 'opus';
-		selectedEffort = pending?.effort ?? effective.effort ?? 'medium';
-		selectedPermission = permissionValue(pending?.permission_mode ?? effective.permission_mode);
-		selectedPreset = (pending as PresetSettings | null)?.instruction_profile ?? effectiveRef;
-		crunchEnabled = chat.crunch.enabled;
-		if (chat.crunch.resume_text) resumeText = chat.crunch.resume_text;
+		const rev = chat.settings?.rev ?? 0;
+		const crunchKey = JSON.stringify([chat.crunch.enabled, chat.crunch.resume_text ?? null]);
+		const source = {
+			model: pending?.model ?? effective.model ?? 'opus',
+			effort: pending?.effort ?? effective.effort ?? 'medium',
+			permission: permissionValue(pending?.permission_mode ?? effective.permission_mode),
+			preset: (pending as PresetSettings | null)?.instruction_profile ?? effectiveRef,
+			crunchEnabled: chat.crunch.enabled,
+			resumeText: chat.crunch.resume_text || untrack(() => resumeText)
+		};
+		untrack(() => {
+			const next = form.sync({ rev, crunchKey, source, current: formValues() });
+			if (!next) return;
+			selectedModel = next.model;
+			selectedEffort = next.effort;
+			selectedPermission = next.permission;
+			selectedPreset = next.preset;
+			crunchEnabled = next.crunchEnabled;
+			resumeText = next.resumeText;
+		});
 	});
 
 	async function loadPresets(): Promise<void> {
@@ -229,6 +256,7 @@
 				enabled: crunchEnabled,
 				resume_text: resumeText
 			});
+			form.saved(formValues());
 
 			if (onclose && !desktop) onclose();
 		} catch (err) {
