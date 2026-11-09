@@ -29,7 +29,7 @@ test('dom_is_bounded_with_10000_items_in_a_chat', async ({ page }) => {
   await boot(page, 10_000);
   const feed = page.locator('.feed');
   for (let step = 0; step < 40; step++) {
-    await feed.evaluate((el) => { el.scrollTop = 0; });
+    await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
     await page.waitForTimeout(80);
   }
   await expect.poll(async () => page.locator('[data-row]').count()).toBeLessThanOrEqual(80);
@@ -41,7 +41,7 @@ test('memory_is_bounded_after_scrolling_through_10000_items', async ({ page }) =
   await boot(page, 10_000);
   const feed = page.locator('.feed');
   for (let step = 0; step < 80; step++) {
-    await feed.evaluate((el) => { el.scrollTop = 0; });
+    await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
     if (await page.getByRole('button', { name: 'К последним сообщениям' }).isVisible()) break;
     await page.waitForTimeout(150);
   }
@@ -53,7 +53,7 @@ async function detachTail(page: import('@playwright/test').Page): Promise<void> 
   const feed = page.locator('.feed');
   const jump = page.getByRole('button', { name: 'К последним сообщениям' });
   for (let step = 0; step < 120; step++) {
-    await feed.evaluate((el) => { el.scrollTop = 0; });
+    await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
     if (await jump.isVisible()) return;
     await page.waitForTimeout(100);
   }
@@ -157,7 +157,7 @@ test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the
     const row = page.locator('[data-row]').nth(1);
     const key = await row.getAttribute('data-key');
     const before = await row.boundingBox();
-    await feed.evaluate((el) => { el.scrollTop = 0; });
+    await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
     release();
     await expect.poll(async () => {
       const box = await page.locator(`[data-key="${key}"]`).boundingBox();

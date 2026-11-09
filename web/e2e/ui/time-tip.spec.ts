@@ -231,7 +231,7 @@ test('only_one_tooltip_is_open_at_a_time', async ({ page }) => {
 test('the_tip_flips_below_at_the_top_of_the_feed', async ({ page }) => {
   await boot(page);
   const feed = page.locator('.feed');
-  await feed.evaluate((node) => { node.scrollTop = 0; });
+  await feed.evaluate((node) => { node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); node.scrollTop = 0; });
   await page.waitForTimeout(250);
   // Лента виртуализирует строки: двигаем саму прокрутку, а отметку ставим к её верхнему краю.
   await answerTimes(page).first().evaluate((node) => {

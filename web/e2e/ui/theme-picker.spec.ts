@@ -148,7 +148,7 @@ test('long_chat_keeps_its_scroll_position_across_a_theme_change', async ({ page 
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
   const feed = page.locator('.feed');
   // Владелец отлистал вверх: лента не прилипает к низу, и смена темы не должна её сдвинуть.
-  await feed.evaluate(el => { el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight * 4); });
+  await feed.evaluate(el => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight * 4); });
   await page.waitForTimeout(400);
   const anchor = () => feed.evaluate(el => {
     const top = el.getBoundingClientRect().top;

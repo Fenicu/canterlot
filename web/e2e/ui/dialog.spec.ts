@@ -425,7 +425,7 @@ test('reading_a_long_turn_up_and_down_loses_no_row_and_keeps_the_anchor', async 
 
   await feed.evaluate((el) => { el.scrollTop = el.scrollHeight; });
   await expect(page.getByRole('button', { name: 'К новым сообщениям' })).toHaveCount(0);
-  await feed.evaluate((el) => { el.scrollTop = 0; });
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
   expect((await shownKeys(page)).length).toBe(after.length);
 });
 
@@ -479,7 +479,7 @@ test('tail_growth_and_an_opened_row_do_not_move_what_the_reader_is_looking_at', 
 test('long_turn_folds_into_one_row_and_the_final_answer_stays_outside', async ({ page }) => {
   await longTurn(page, 58, 'steps');
   const feed = page.locator('.feed');
-  await feed.evaluate((el) => { el.scrollTop = 0; });
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
   await expect(feed).toHaveAttribute('data-loaded', '134');
   await feed.evaluate((el) => { el.scrollTop = 0; });
   const group = page.locator('.steps');

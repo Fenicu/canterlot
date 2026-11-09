@@ -24,6 +24,7 @@ const card = (page: Page, id: string) => page.locator(`[data-key="block:${id}"] 
 async function reveal(page: Page, target: Locator): Promise<Locator> {
   const settle = () => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
   await feed(page).evaluate((node) => {
+    node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
     node.scrollTop = 0;
   });
   await settle();

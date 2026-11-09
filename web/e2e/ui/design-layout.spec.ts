@@ -177,7 +177,7 @@ test.describe('шапка и сообщения', () => {
     await expect(page.locator('[data-row]').first()).toBeVisible();
     const feed = page.locator('.feed');
     await expect.poll(() => feed.evaluate((node) => node.scrollHeight - node.clientHeight)).toBeGreaterThan(500);
-    await feed.evaluate((node) => { node.scrollTop -= 500; });
+    await feed.evaluate((node) => { node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); node.scrollTop -= 500; });
     await page.waitForTimeout(200);
     hub.append(`conversation:${id}`, { kind: 'block_started', conversation_id: id, payload: { block_id: api.id(), rev: 0, kind: 'text', input_command_id: null, parent_block_id: null, agent: 'claude', model: 'opus-5.5', tool_name: null, summary: null, approved_by: null } });
     hub.flush();

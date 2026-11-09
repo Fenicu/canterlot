@@ -202,7 +202,7 @@ async function measure(page: Page, seconds: number, each?: (second: number) => P
 async function place(page: Page, mode: 'pinned' | 'mid_feed'): Promise<void> {
 	const feed = page.locator('.feed');
 	// Середина ленты: живая карточка на экране, но до хвоста ещё далеко.
-	if (mode === 'mid_feed') await feed.evaluate((el) => { el.scrollTop = el.scrollHeight - el.clientHeight - 260; });
+	if (mode === 'mid_feed') await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = el.scrollHeight - el.clientHeight - 260; });
 	else await feed.evaluate((el) => { el.scrollTop = el.scrollHeight; });
 	await page.waitForTimeout(900);
 	expect(await page.locator('.sub').count()).toBeGreaterThanOrEqual(2);
