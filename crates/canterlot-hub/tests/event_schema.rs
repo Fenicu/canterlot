@@ -603,3 +603,37 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         assert!(seen.contains(k), "scenario did not emit {k}");
     }
 }
+#[test]
+fn an_empty_shared_file_event_fits_the_schema() {
+    let conversation = Uuid::now_v7();
+    let event = |size: i64| {
+        json!({
+            "v": 1,
+            "id": Uuid::now_v7(),
+            "scope": format!("conversation:{conversation}"),
+            "scope_seq": "7",
+            "scope_seq_from": "7",
+            "committed_at": "2026-11-09T12:00:00.000Z",
+            "committed_at_from": "2026-11-09T12:00:00.000Z",
+            "conversation_id": conversation,
+            "execution_id": Uuid::now_v7(),
+            "correlation_id": Uuid::now_v7(),
+            "kind": "block_file_attached",
+            "payload": {
+                "block_id": Uuid::now_v7(),
+                "attachment_id": Uuid::now_v7(),
+                "name": "empty.txt",
+                "mime": "text/plain",
+                "size": size,
+                "title": "",
+                "note": "",
+                "width": null,
+                "height": null
+            }
+        })
+    };
+    let schema = validator("block_file_attached");
+    assert!(schema.is_valid(&event(0)));
+    assert!(!schema.is_valid(&event(-1)));
+    assert!(!schema.is_valid(&event(52_428_801)));
+}
