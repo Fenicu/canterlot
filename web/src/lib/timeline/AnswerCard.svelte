@@ -63,6 +63,8 @@
     return list.filter((entry, index) => !(entry.kind === 'block' && cardYieldsToRequest(entry.block) && list[index + 1]?.kind === 'request'));
   });
   const head = $derived(all[0]);
+  // Сведения хаб отдаёт по ходу; у карточки без хода (носитель файла прежних версий) их нет.
+  const run = $derived(all.find((block) => block.inputCommandId)?.inputCommandId ?? null);
   const streaming = $derived(all.some((block) => block.state === 'streaming'));
   const active = $derived(all.findLast((block) => block.state === 'streaming'));
   const started = $derived(all.find((block) => block.state === 'streaming')?.startedAt ?? head?.createdAt ?? now);
@@ -121,7 +123,9 @@
   {#if head}
     <footer class="byline" data-role="answer-footer">
       <p><strong>{agent}</strong><time datetime={new Date(head.createdAt).toISOString()} use:timeTip={head.createdAt}>{fmt.clock(head.createdAt)}</time></p>
-      <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(head.inputCommandId || head.id)} />
+      {#if run}
+        <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(run)} />
+      {/if}
     </footer>
   {/if}
 </article>
@@ -136,7 +140,8 @@
     gap: var(--s2);
     min-width: 0;
   }
-  .byline { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); margin-top: var(--s2); margin-right: calc(var(--s3) * -1); }
+  /* Высота кнопки (i) и без неё: футер карточки без хода не ниже остальных. */
+  .byline { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); margin-top: var(--s2); margin-right: calc(var(--s3) * -1); min-height: var(--target); }
   .byline p { display: flex; align-items: baseline; gap: var(--s4); min-width: 0; margin: 0; }
   strong { font-weight: var(--weight-semibold); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }

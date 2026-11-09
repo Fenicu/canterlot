@@ -753,11 +753,27 @@ test('error_and_warning_blocks_carry_text_not_colour_alone', async ({ page }) =>
 });
 
 test('answer_card_footer_shows_agent_time_and_info_button_and_leaves_the_model_to_the_sheet', async ({ page }) => {
-  await boot(page, 1);
+  const { api, id } = await boot(page, 0);
+  api.histories.set(id, [{ ...textBlock(api, 'ответ', '1'), agent: 'agent', input_command_id: api.id() }]);
+  api.bindConversation(id);
+  await page.reload();
   const footer = page.locator('footer[data-role="answer-footer"]');
   await expect(footer).toContainText('Agent');
   await expect(footer).not.toContainText('opus');
   await expect(footer.getByRole('button', { name: 'Сведения о ходе' })).toBeVisible();
+});
+
+test('answer_card_without_a_turn_has_no_info_button_but_keeps_the_footer_height', async ({ page }) => {
+  const { api, id } = await boot(page, 0);
+  api.histories.set(id, [{ ...textBlock(api, 'с ходом', '1'), input_command_id: api.id() }, textBlock(api, 'без хода', '2')]);
+  api.bindConversation(id);
+  await page.reload();
+  const footers = page.locator('footer[data-role="answer-footer"]');
+  await expect(footers).toHaveCount(2);
+  await expect(footers.nth(0).getByRole('button', { name: 'Сведения о ходе' })).toBeVisible();
+  await expect(footers.nth(1).getByRole('button', { name: 'Сведения о ходе' })).toHaveCount(0);
+  const heights = await footers.evaluateAll((list) => list.map((node) => node.getBoundingClientRect().height));
+  expect(Math.abs(heights[0]! - heights[1]!)).toBeLessThanOrEqual(0.5);
 });
 
 test('reduced_motion_stops_caret_and_expand_transitions', async ({ page }) => {
