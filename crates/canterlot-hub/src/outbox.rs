@@ -820,6 +820,12 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             } else if registry.availability(machine) != Availability::Available {
                 continue;
             }
+            // Запуск ждёт применения отчёта сверки этого сеанса: отчёт снят воркером до
+            // запуска, и сверка, увидев исполнение в `starting` без наблюдения, сочла бы
+            // живой процесс потерянным (`owner_lost`). Применённая сверка будит outbox.
+            if row.kind == "start_execution" && !registry.is_reconciled(machine) {
+                continue;
+            }
             let (row, fresh) = match claim_for_send(&pool, &row).await {
                 Ok(Some(claim)) => (claim.row, claim.newly_claimed),
                 Ok(None) => continue,

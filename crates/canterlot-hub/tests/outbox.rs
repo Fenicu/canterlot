@@ -1704,3 +1704,61 @@ async fn command_without_capability_completes_as_capability_missing(pool: PgPool
     assert_eq!(result, json!({"rejected": "capability_missing"}));
     stop(hub).await;
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_execution_waits_until_the_session_is_reconciled(pool: PgPool) {
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let machine = machines::add(&pool, hub.installation.owner_id, "synthetic")
+        .await
+        .unwrap();
+    let conversation =
+        testkit::seed_conversation(&pool, hub.installation.owner_id, machine.machine_id).await;
+    let mut worker = Worker::connect_with_capabilities(
+        &hub,
+        &machine,
+        Uuid::now_v7(),
+        &["instructions_v1", "exec_v1"],
+    )
+    .await;
+    assert!(!hub.registry.is_reconciled(machine.machine_id));
+    let started = executions::start(
+        &pool,
+        hub.installation.owner_id,
+        conversation,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("select pg_notify('canterlot_outbox', $1)")
+        .bind(machine.machine_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Отчёт сверки ещё не применён: запуск, отправленный сейчас, сверка сочла бы потерянным.
+    assert!(
+        timeout(Duration::from_millis(500), worker.down.message())
+            .await
+            .is_err(),
+        "start_execution must wait for the reconcile report"
+    );
+    worker
+        .control
+        .send(ControlUp {
+            msg: Some(control_up::Msg::ReconcileReport(Default::default())),
+        })
+        .await
+        .unwrap();
+    let command = worker.command().await;
+    assert_eq!(command.command_id, started.command_id.to_string());
+    assert!(matches!(
+        command.kind,
+        Some(command::Kind::StartExecution(_))
+    ));
+    let state: String = sqlx::query_scalar("select state from executions where id=$1")
+        .bind(started.execution_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "created");
+    stop(hub).await;
+}
