@@ -37,7 +37,16 @@ export class PlanModel {
 
 	/** План, прочитанный по HTTP (`GET /api/v1/plan`): правда хаба на момент чтения. */
 	loaded(orchestratorId: string, tasks: readonly PlanTask[]): void {
-		this.#loaded.set(orchestratorId, tasks);
+		// Задача той же ревизии не менялась: прежний объект остаётся, и строка плана не пересчитывается.
+		const known: Record<string, PlanTask> = {};
+		for (const task of this.#loaded.get(orchestratorId) ?? []) known[task.id] = task;
+		this.#loaded.set(
+			orchestratorId,
+			tasks.map((task) => {
+				const prev = known[task.id];
+				return prev && prev.revision === task.revision ? prev : task;
+			})
+		);
 	}
 
 	/** Оркестратор удалён: его план уходит вместе с ним. */

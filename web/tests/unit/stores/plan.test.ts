@@ -167,6 +167,24 @@ describe('PlanModel: план, прочитанный по HTTP', () => {
 		expect(plan.has(OTHER)).toBe(false);
 	});
 
+	it('plan_reread_keeps_the_task_object_while_its_revision_holds', () => {
+		const plan = new PlanModel();
+		plan.loaded(ORCH, [task({ id: A, revision: 2 }), task({ id: B, number: 2, revision: 1 })]);
+		const [first, second] = plan.of(ORCH);
+		// Повторное чтение хаба приносит новые объекты тех же ревизий: на экране остаются прежние.
+		plan.loaded(ORCH, [task({ id: A, revision: 2 }), task({ id: B, number: 2, revision: 2, title: 'Правка' })]);
+		const [again, changed] = plan.of(ORCH);
+		expect(again).toBe(first);
+		expect(changed).not.toBe(second);
+		expect(changed!.title).toBe('Правка');
+		// Живая задача той же ревизии поверх прочитанной тоже не меняет объект от чтения к чтению.
+		const live = task({ id: A, revision: 3, title: 'Живая' });
+		plan.apply(live);
+		plan.loaded(ORCH, [task({ id: A, revision: 3, title: 'Живая' }), task({ id: B, number: 2, revision: 2, title: 'Правка' })]);
+		expect(plan.of(ORCH)[0]).toBe(live);
+		expect(plan.of(ORCH)[1]).toBe(changed);
+	});
+
 	it('plan_loaded_does_not_bump_the_revision_counter', () => {
 		const plan = new PlanModel();
 		plan.loaded(ORCH, [task({ id: A })]);
