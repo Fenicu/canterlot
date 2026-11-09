@@ -1022,3 +1022,83 @@ async fn send_now_emits_event_and_respects_closed_queue(pool: PgPool) -> TestRes
     ));
     Ok(())
 }
+
+async fn settings_row(pool: &PgPool, conversation_id: Uuid) -> (String, Value, i64) {
+    sqlx::query_as("select model, pending_settings, settings_rev from conversations where id = $1")
+        .bind(conversation_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Ожидающие настройки принадлежат разговору, а не вводу: «Отправить сейчас»
+/// их не везёт и не делает действующими, они честно остаются ожидающими
+/// и уходят со следующим обычным ходом.
+#[sqlx::test(migrations = "./migrations")]
+async fn steered_input_leaves_pending_settings_for_the_next_turn(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    testkit::seed_catalog(&pool, seed.machine_id).await;
+    sqlx::query("update machine_harnesses set harness = 'codex' where machine_id = $1")
+        .bind(seed.machine_id)
+        .execute(&pool)
+        .await?;
+    harness(&pool, &seed, "codex").await;
+    sqlx::query(
+        "update conversations set model = 'synthetic-small', effort = 'high' where id = $1",
+    )
+    .bind(seed.conversation_id)
+    .execute(&pool)
+    .await?;
+    let execution_id = running(&pool, &seed).await;
+    let (_, first_cmd) = input(&pool, &seed, "first").await;
+    gate_dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first_cmd).await;
+    // Смена модели во время хода ждёт следующего ввода.
+    sqlx::query(
+        "update conversations set pending_settings = '{\"model\":\"synthetic-large\"}',
+                settings_rev = settings_rev + 1 where id = $1",
+    )
+    .bind(seed.conversation_id)
+    .execute(&pool)
+    .await?;
+    let (_, _, rev) = settings_row(&pool, seed.conversation_id).await;
+    let (second_id, second_cmd) = input(&pool, &seed, "second").await;
+
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second_id, "k", &caps()).await?
+    else {
+        panic!("not requested");
+    };
+    let (_, _, steer_payload) = steer_row(&pool, second_cmd).await;
+    assert!(steer_payload.get("settings").is_none());
+    apply_steer(&pool, steer_command_id, InputReceipt::Accepted).await;
+    assert_eq!(state(&pool, second_id).await, InputState::Accepted);
+    // Влитый ввод модель не сменил: она по-прежнему ждёт, ревизия та же.
+    assert_eq!(
+        settings_row(&pool, seed.conversation_id).await,
+        (
+            "synthetic-small".to_owned(),
+            json!({"model": "synthetic-large"}),
+            rev
+        )
+    );
+
+    // Следующий обычный ход везёт ожидающую смену и делает её действующей.
+    apply_run_finished(&pool, execution_id, first_cmd, Uuid::now_v7()).await?;
+    let (third_id, third_cmd) = input(&pool, &seed, "third").await;
+    assert!(matches!(
+        gate_dispatch(&pool, seed.conversation_id).await,
+        DispatchOutcome::Dispatched { input_id, .. } if input_id == third_id
+    ));
+    let payload: Value = sqlx::query_scalar("select payload from commands where id = $1")
+        .bind(third_cmd)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(payload["settings"], json!({"model": "synthetic-large"}));
+    assert_eq!(payload["settings_rev"], json!(rev));
+    accept_turn(&pool, third_cmd).await;
+    let (model, pending, _) = settings_row(&pool, seed.conversation_id).await;
+    assert_eq!(model, "synthetic-large");
+    assert_eq!(pending, json!({}));
+    Ok(())
+}
