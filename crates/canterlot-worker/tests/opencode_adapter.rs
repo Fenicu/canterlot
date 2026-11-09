@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 #[path = "support/opencode.rs"]
 mod opencode;
-use opencode::{Fake, find, path_of};
+use opencode::{Fake, find, find_exact, path_of};
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -3835,7 +3835,12 @@ fn form_cancel_script(change: impl Fn(&mut Value)) -> (Script, String) {
     (script, path)
 }
 
-fn assert_cancelled(bench: &Bench, events: &[AdapterEvent], tail: &str) {
+/// Путь отмены в этом запуске: записанную сессию корня двойник заменил живой.
+fn live_path(bench: &Bench, script: &Script, path: &str) -> String {
+    path.replace(&session_of(script), &bench.fake.session())
+}
+
+fn assert_cancelled(bench: &Bench, events: &[AdapterEvent], path: &str) {
     assert!(
         events
             .iter()
@@ -3850,7 +3855,8 @@ fn assert_cancelled(bench: &Bench, events: &[AdapterEvent], tail: &str) {
         }
     )));
     let requests = bench.fake.requests();
-    let cancel = find(&requests, "DELETE", tail).expect("form cancel");
+    let cancel = find_exact(&requests, "DELETE", path)
+        .unwrap_or_else(|| panic!("form cancel on {path}: {requests:?}"));
     assert!(cancel["query"].as_str().unwrap().contains("message="));
 }
 
@@ -3867,8 +3873,11 @@ async fn form_with_too_many_questions_is_cancelled_with_a_message() {
             list.push(field);
         }
     });
+    let recorded = script.clone();
     let (mut bench, events) = cancelled_form(script).await;
-    assert_cancelled(&bench, &events, path.rsplit('/').next().unwrap());
+    let path = live_path(&bench, &recorded, &path);
+    assert!(path.starts_with(&format!("/api/session/{}/form/", bench.fake.session())));
+    assert_cancelled(&bench, &events, &path);
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -3882,8 +3891,8 @@ async fn elicitation_form_is_cancelled_with_a_message() {
             json!({"kind": "mcp-elicitation", "server": "ask", "message": "Which one?"});
     });
     let (mut bench, events) = cancelled_form(script).await;
-    assert!(path.contains("/session/global/form/"));
-    assert_cancelled(&bench, &events, path.rsplit('/').next().unwrap());
+    assert!(path.starts_with("/api/session/global/form/"));
+    assert_cancelled(&bench, &events, &path);
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -3891,15 +3900,16 @@ async fn elicitation_form_is_cancelled_with_a_message() {
 #[tokio::test]
 async fn refused_question_carries_a_message() {
     let (mut script, path) = form_cancel_script(|_| {});
-    let tail = path.rsplit('/').next().unwrap().to_owned();
     script
         .steps
         .retain(|step| !matches!(step, Step::Stall { .. }));
     let finish = script.steps.pop().unwrap();
     script.steps.push(Step::Stall { ms: 300 });
     script.steps.push(finish);
+    let recorded = script.clone();
     let mut bench = Bench::new(script);
     bench.start_ok().await;
+    let path = live_path(&bench, &recorded, &path);
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, ..) = bench.until_request().await;
@@ -3909,7 +3919,8 @@ async fn refused_question_carries_a_message() {
         .await;
     bench.until_finished(input.command_id).await;
     let requests = bench.fake.requests();
-    let cancel = find(&requests, "DELETE", &tail).expect("form cancel");
+    let cancel = find_exact(&requests, "DELETE", &path)
+        .unwrap_or_else(|| panic!("form cancel on {path}: {requests:?}"));
     assert!(
         cancel["query"]
             .as_str()
@@ -3978,9 +3989,10 @@ async fn invalid_answer_cancels_the_form_with_a_message() {
     };
     let cancel = path.trim_end_matches("/reply").to_owned();
     script.set_route("DELETE", &cancel, vec![reply_204()]);
-    let tail = cancel.rsplit('/').next().unwrap().to_owned();
+    let recorded = script.clone();
     let mut bench = Bench::new(script);
     bench.start_ok().await;
+    let cancel = live_path(&bench, &recorded, &cancel);
     let input = bench.input("x");
     bench.accepted(&input).await;
     let (request, ..) = bench.until_request().await;
@@ -3990,7 +4002,7 @@ async fn invalid_answer_cancels_the_form_with_a_message() {
     };
     assert_eq!(reason, "decision_invalid");
     tokio::time::timeout(WAIT, async {
-        while find(&bench.fake.requests(), "DELETE", &tail).is_none() {
+        while find_exact(&bench.fake.requests(), "DELETE", &cancel).is_none() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
@@ -6359,11 +6371,11 @@ async fn failed_steer_reconciliation_leaves_the_running_turn_alone() {
     }
     assert!(!stray_finish, "uncertain steer must not finish any turn");
     let requests = bench.fake.requests();
+    // Двойник отдаёт пустую очередь на любую сессию: только путь живой сессии доказывает сверку.
+    let inbox = format!("/api/session/{}/inbox", bench.fake.session());
     assert!(
-        requests
-            .iter()
-            .any(|request| path_of(request).ends_with("/inbox")),
-        "the steer was reconciled through projections"
+        find_exact(&requests, "GET", &inbox).is_some(),
+        "the steer was reconciled through projections: {requests:?}"
     );
     // Исходный ход жив: новый ввод отклоняется занятостью.
     assert!(

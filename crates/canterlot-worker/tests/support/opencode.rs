@@ -114,6 +114,17 @@ impl Fake {
             .collect()
     }
 
+    /// Сессия этого запуска: идентификатор создаёт адаптер, двойник подставляет его вместо
+    /// записанного во всех путях. Проверки путей идут по нему, записанный в запросах не
+    /// встретится никогда.
+    pub fn session(&self) -> String {
+        let requests = self.requests();
+        find_exact(&requests, "POST", "/api/session")
+            .and_then(|create| create["body"]["id"].as_str())
+            .expect("session.create with an id")
+            .to_owned()
+    }
+
     pub fn pids(&self) -> Vec<u32> {
         let needle = self.script.as_os_str().as_encoded_bytes();
         let Ok(entries) = fs::read_dir("/proc") else {
@@ -162,6 +173,13 @@ pub fn find<'a>(requests: &'a [Value], method: &str, tail: &str) -> Option<&'a V
     requests
         .iter()
         .find(|request| request["method"] == method && path_of(request).ends_with(tail))
+}
+
+/// Запрос ровно на этот путь: хвост совпал бы и с путём чужой сессии.
+pub fn find_exact<'a>(requests: &'a [Value], method: &str, path: &str) -> Option<&'a Value> {
+    requests
+        .iter()
+        .find(|request| request["method"] == method && path_of(request) == path)
 }
 
 pub fn workdir(fake: &Fake) -> PathBuf {
