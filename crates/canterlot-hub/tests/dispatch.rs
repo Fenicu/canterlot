@@ -745,3 +745,39 @@ async fn dispatch_after_conversation_deletion_is_benign(pool: PgPool) -> TestRes
     assert_eq!((inputs, queues, commands), (0, 0, 0));
     Ok(())
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn preset_without_its_current_text_is_dropped_not_stalled(pool: PgPool) -> TestResult {
+    let (seed, preset) = preset_seed(&pool).await;
+    running(&pool, &seed).await;
+    set_pending_preset(&pool, seed.conversation_id, &preset).await;
+    // Текста текущей версии нет: снимок инструкций собрать нельзя.
+    sqlx::query("delete from instruction_preset_revisions where preset_id=$1::uuid")
+        .bind(&preset)
+        .execute(&pool)
+        .await?;
+    let head = input(&pool, &seed).await;
+    let outcome = dispatch_next(
+        &pool,
+        seed.conversation_id,
+        GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into(), "instructions_v1".into()],
+        },
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert!(
+        matches!(outcome, DispatchOutcome::Dispatched { input_id, .. } if input_id == head.input_id),
+        "{outcome:?}"
+    );
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(head.command_id)
+        .fetch_one(&pool)
+        .await?;
+    assert!(payload.get("settings").is_none(), "{payload}");
+    let event: Value = sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' order by scope_seq desc limit 1").bind(format!("conversation:{}", seed.conversation_id)).fetch_one(&pool).await?;
+    assert_eq!(event["rejected"]["keys"], json!(["instruction_profile"]));
+    Ok(())
+}

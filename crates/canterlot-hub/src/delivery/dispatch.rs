@@ -202,18 +202,40 @@ pub async fn dispatch_next(
                 .bind(conversation_id)
                 .fetch_one(&mut *conn)
                 .await?;
-        let reference = crate::presets::PresetRef::parse(&profile)
-            .map_err(|_| sqlx::Error::RowNotFound)?;
-        let resolved = crate::presets::resolve_in_tx(&mut *conn, owner_id, &reference, None)
-            .await
-            .map_err(|_| sqlx::Error::RowNotFound)?;
-        pending["instructions"] = serde_json::json!({
-            "mode": resolved.mode,
-            "preset_id": resolved.preset_id.map(|id| id.to_string()).unwrap_or_default(),
-            "revision": resolved.revision.unwrap_or(0),
-            "title": resolved.title,
-            "text": resolved.text.unwrap_or_default(),
-        });
+        let resolved = match crate::presets::PresetRef::parse(&profile) {
+            Ok(reference) => {
+                match crate::presets::resolve_in_tx(&mut *conn, owner_id, &reference, None).await {
+                    Ok(resolved) => Some(resolved),
+                    Err(crate::presets::PresetError::Db(error)) => return Err(error),
+                    Err(_) => None,
+                }
+            }
+            Err(_) => None,
+        };
+        if let Some(resolved) = resolved {
+            pending["instructions"] = serde_json::json!({
+                "mode": resolved.mode,
+                "preset_id": resolved.preset_id.map(|id| id.to_string()).unwrap_or_default(),
+                "revision": resolved.revision.unwrap_or(0),
+                "title": resolved.title,
+                "text": resolved.text.unwrap_or_default(),
+            });
+        } else {
+            // Пресет пропал после повторной проверки: ссылка отбрасывается так же, как
+            // в ней, а ввод уходит без смены инструкций вместо вечного простоя очереди.
+            if let Some(settings) = pending.as_object_mut() {
+                settings.remove("instruction_profile");
+            }
+            crate::conversations::reject_pending_in_tx(
+                &mut *conn,
+                owner_id,
+                conversation_id,
+                &pending,
+                &["instruction_profile"],
+                correlation_id,
+            )
+            .await?;
+        }
     }
     // Ссылки на вложения и настройки понимает только сеанс с `pilot_v1`.
     let carries_refs: bool = sqlx::query_scalar(

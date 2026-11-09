@@ -1912,8 +1912,11 @@ pub(crate) async fn revalidate_pending_in_tx(
         let stale = match PresetRef::parse(profile) {
             Err(_) => true,
             Ok(PresetRef::Custom(_)) => {
+                // Живой пресет с текстом текущей версии: иначе диспетчер не соберёт снимок.
                 let alive: bool = sqlx::query_scalar(
-                    "select exists(select 1 from instruction_presets where owner_id=$1 and id::text=$2 and purpose='instructions' and deleted_at is null)",
+                    "select exists(select 1 from instruction_presets p
+                       join instruction_preset_revisions r on r.preset_id=p.id and r.revision=p.revision
+                      where p.owner_id=$1 and p.id::text=$2 and p.purpose='instructions' and p.deleted_at is null)",
                 )
                 .bind(owner)
                 .bind(profile)
@@ -1968,29 +1971,40 @@ pub(crate) async fn revalidate_pending_in_tx(
         }
     }
     if !rejected.is_empty() {
-        sqlx::query("update conversations set pending_settings=$2 where id=$1")
-            .bind(id)
-            .bind(&pending)
-            .execute(&mut *conn)
-            .await?;
-        let view = detail(conn, owner, id)
-            .await?
-            .ok_or(sqlx::Error::RowNotFound)?
-            .settings;
-        let mut payload =
-            serde_json::to_value(view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-        payload["rejected"] = json!({"keys":rejected,"reason":"settings_unavailable"});
-        append(
-            conn,
-            Scope::Conversation { id },
-            "conversation_settings_changed",
-            Some(id),
-            payload,
-            correlation,
-        )
-        .await?;
+        reject_pending_in_tx(conn, owner, id, &pending, &rejected, correlation).await?;
     }
     Ok((pending, rev))
+}
+
+/// Записывает очищенные ожидающие настройки и сообщает, какие ключи отброшены.
+pub(crate) async fn reject_pending_in_tx(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    id: Uuid,
+    pending: &Value,
+    rejected: &[&str],
+    correlation: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("update conversations set pending_settings=$2 where id=$1")
+        .bind(id)
+        .bind(pending)
+        .execute(&mut *conn)
+        .await?;
+    let view = detail(conn, owner, id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?
+        .settings;
+    let mut payload = serde_json::to_value(view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    payload["rejected"] = json!({"keys":rejected,"reason":"settings_unavailable"});
+    append(
+        conn,
+        Scope::Conversation { id },
+        "conversation_settings_changed",
+        Some(id),
+        payload,
+        correlation,
+    )
+    .await
 }
 
 /// Новое исполнение стартует с ожидающими значениями, поэтому первому вводу нечего менять.
