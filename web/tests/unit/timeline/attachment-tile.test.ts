@@ -36,7 +36,17 @@ describe("timeline/AttachmentTile", () => {
     expect(img.getAttribute("src")).toBe("/api/v1/attachments/att-1/content");
     expect(img.getAttribute("loading")).toBe("lazy");
     expect(img.getAttribute("decoding")).toBe("async");
-    target.querySelector("button")!.click();
+    // Миниатюра — ссылка на сам файл: меню браузера видит и картинку, и ссылку.
+    const link = target.querySelector("a.thumb")!;
+    expect(link.getAttribute("href")).toBe("/api/v1/attachments/att-1/content");
+    const plain = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    link.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(true);
+    expect(onopen).toHaveBeenCalledOnce();
+    // Щелчок с Ctrl открывает файл в новой вкладке средствами браузера, просмотрщик не нужен.
+    const modified = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ctrlKey: true });
+    link.dispatchEvent(modified);
+    expect(modified.defaultPrevented).toBe(false);
     expect(onopen).toHaveBeenCalledOnce();
   });
 

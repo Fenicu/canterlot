@@ -159,7 +159,7 @@ test('share_file_card_opens_the_media_viewer', async ({ page }) => {
   const { seed } = await boot(page);
   const share = await reveal(page, card(page, seed.blocks.share!));
   await expect(share.locator('[data-role="share-note"]')).toHaveText('Телефон, тёмная тема: запуск, задачи, лимиты.');
-  await share.locator('button.thumb').click();
+  await share.locator('a.thumb').click();
   const dialog = page.locator('dialog[open]');
   await expect(dialog).toHaveAttribute('aria-label', 'Файл');
   await expect(dialog.locator('img')).toBeVisible();

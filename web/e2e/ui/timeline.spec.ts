@@ -981,7 +981,7 @@ for (const theme of ['dark', 'light'] as const) {
     const viewport = page.viewportSize()!;
     expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
     await page.screenshot({ path: `/tmp/shots-t10/attachments-${theme}-${info.project.name}.png` });
-    await bubble.getByRole('button', { name: 'Открыть картинку Screenshot.png' }).click();
+    await bubble.getByRole('link', { name: 'Открыть картинку Screenshot.png' }).click();
     const dialog = page.getByRole('dialog');
     await expect(dialog).toBeVisible();
     await expect(dialog.locator('.slide[data-current] img.full')).toHaveAttribute('src', '/api/v1/attachments/att-img/content');

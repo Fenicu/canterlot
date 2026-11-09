@@ -248,7 +248,7 @@
     const stageBox = stage.getBoundingClientRect();
     if (duration > 0 && natural && target && rect) {
       const { view: from, clip: cut } = coverRect({ x: rect.left - stageBox.left, y: rect.top - stageBox.top, width: rect.width, height: rect.height }, natural);
-      const radius = parseFloat(getComputedStyle(thumbOf(index)!.closest('button') ?? document.body).borderTopLeftRadius) || 0;
+      const radius = parseFloat(getComputedStyle(thumbOf(index)!.closest('button, a') ?? document.body).borderTopLeftRadius) || 0;
       target.animate(
         [
           { transform: transformOf(from), clipPath: clip(cut, radius / from.scale) },
@@ -282,7 +282,7 @@
       paintNow();
       target.style.transform = transformOf(current);
       const { view: to, clip: cut } = coverRect({ x: rect.left - stageBox.left, y: rect.top - stageBox.top, width: rect.width, height: rect.height }, natural);
-      const radius = parseFloat(getComputedStyle(thumb!.closest('button') ?? document.body).borderTopLeftRadius) || 0;
+      const radius = parseFloat(getComputedStyle(thumb!.closest('button, a') ?? document.body).borderTopLeftRadius) || 0;
       chrome = false;
       const motion = target.animate(
         [
@@ -589,7 +589,7 @@
   }
 
   onMount(() => {
-    opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : thumbOf(index)?.closest('button') ?? null;
+    opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : thumbOf(index)?.closest('button, a') ?? null;
     shell = document.getElementById('app-shell');
     previousInert = shell?.inert ?? false;
     collectPreviews();
@@ -730,10 +730,10 @@
   .stage {
     position: absolute;
     inset: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    /* Жесты ведёт сама сцена. Долгое нажатие и правая кнопка остаются браузеру: его меню копирует и сохраняет картинку. */
     touch-action: none;
     user-select: none;
     -webkit-user-select: none;
-    -webkit-touch-callout: none;
     cursor: zoom-in;
   }
   .stage:focus, .stage:focus-visible { outline: none; }
@@ -742,7 +742,9 @@
   .slide { position: absolute; inset: 0; will-change: transform; }
   .slide:not([data-current]) { pointer-events: none; }
   .frame { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
-  .frame img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; max-width: none; pointer-events: none; }
+  .frame img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; max-width: none; }
+  /* Под пальцем и мышью настоящая картинка: пока оригинал не готов, это миниатюра, потом оригинал. */
+  .frame:not([data-ready]) .full, .frame[data-ready] .preview { pointer-events: none; }
   .frame .full { opacity: 0; }
   .frame[data-ready] .full { opacity: 1; }
   .stage:global([data-settling]) .slide, .stage:global([data-settling]) .frame { transition: transform var(--duration-expand) var(--ease-expand); }

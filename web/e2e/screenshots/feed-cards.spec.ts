@@ -124,7 +124,7 @@ async function record(browser: Browser, opts: { width: number; height: number; t
   // Файл для владельца: миниатюра открывает просмотрщик.
   await scrollTo(page, '.feed-card[data-card="canterlot.share_file"]', 1800);
   await page.waitForTimeout(800);
-  await page.locator('.feed-card[data-card="canterlot.share_file"] button.thumb').click();
+  await page.locator('.feed-card[data-card="canterlot.share_file"] a.thumb').click();
   await expect(page.locator('dialog[open]')).toBeVisible();
   await page.waitForTimeout(2500);
   await page.keyboard.press('Escape');

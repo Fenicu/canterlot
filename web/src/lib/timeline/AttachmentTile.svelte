@@ -3,6 +3,7 @@
   import type { AttachmentRef } from '#lib/stores/inputs.js';
   import { attachmentKind, attachmentUrl, isOfficeKind, officeLabel, showsThumb, type OfficeKind } from '#lib/timeline/attachments.js';
   import Icon from '#lib/ui/Icon.svelte';
+  import { opensViewer } from '#lib/viewer/shots.js';
   import type { Component } from 'svelte';
 
   let { file, onopen }: { file: AttachmentRef; onopen: () => void } = $props();
@@ -39,9 +40,11 @@
 </script>
 
 {#if thumb}
-  <button type="button" class="thumb" aria-label={`Открыть картинку ${name}`} onclick={onopen}>
+  <!-- Ссылка на сам файл: долгое нажатие и правая кнопка дают меню браузера с картинкой. -->
+  <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+  <a class="thumb" href={url} aria-label={`Открыть картинку ${name}`} onclick={(event) => { if (!opensViewer(event)) return; event.preventDefault(); onopen(); }}>
     <img src={url} alt="" loading="lazy" decoding="async" fetchpriority="low" data-viewer-thumb={file.attachment_id} onerror={() => { broken = true; }} />
-  </button>
+  </a>
 {:else if kind === 'image'}
   <button type="button" class="tile" aria-label={`Открыть картинку ${name}`} onclick={onopen}>
     <span class="glyph" aria-hidden="true">{extension}</span>
@@ -73,6 +76,8 @@
 
 <style>
   .thumb { display: block; flex: none; width: calc(var(--s15) * 2.5); max-width: 100%; aspect-ratio: 1; padding: var(--s0); overflow: hidden; border-radius: var(--radius-sm); background: var(--chat-bg); }
+  /* Ссылка нажимается так же, как кнопка. */
+  .thumb:active { transform: scale(var(--scale-press)); }
   img { display: block; width: 100%; height: 100%; object-fit: cover; }
   .tile { display: flex; align-items: center; gap: var(--s4); min-width: 0; max-width: 100%; min-height: var(--target); padding: var(--s2) var(--s6) var(--s2) var(--s2); border-radius: var(--radius-sm); background: var(--raised); color: inherit; text-align: left; }
   .document-tile { display: flex; align-items: center; gap: var(--s2); min-width: 0; max-width: 100%; }

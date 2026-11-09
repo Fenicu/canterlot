@@ -50,3 +50,12 @@ export function downloadName(shot: ViewerShot): string {
   const extension = format === 'jpeg' ? 'jpg' : format || 'png';
   return `картинка-${shot.media_id.slice(0, 8)}.${extension}`;
 }
+
+/**
+ * Миниатюра в ленте — ссылка на сам файл: меню браузера видит картинку и ссылку
+ * (копировать, скачать, открыть в новой вкладке). Обычный щелчок открывает просмотрщик,
+ * щелчок с клавишей или средней кнопкой остаётся браузеру.
+ */
+export function opensViewer(event: Pick<MouseEvent, 'button' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'defaultPrevented'>): boolean {
+  return !event.defaultPrevented && event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey;
+}

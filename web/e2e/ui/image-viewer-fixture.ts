@@ -125,9 +125,9 @@ export async function openChat(page: Page, source: Source, pictures: Picture[] =
 
 /** Кнопка миниатюры картинки `n` (с нуля) в выбранном источнике. */
 export function thumb(page: Page, source: Source, n: number) {
-  if (source === 'owner') return page.locator('.bubble button.thumb').nth(n);
-  if (source === 'shared') return page.locator('.files button.thumb').nth(n);
-  return page.locator('.shot button').nth(n);
+  if (source === 'owner') return page.locator('.bubble a.thumb').nth(n);
+  if (source === 'shared') return page.locator('.files a.thumb').nth(n);
+  return page.locator('.shot a').nth(n);
 }
 
 export function viewer(page: Page) {

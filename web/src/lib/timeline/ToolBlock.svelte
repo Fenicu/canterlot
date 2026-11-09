@@ -9,7 +9,7 @@
   import StepHead from '#lib/timeline/StepHead.svelte';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
-  import type { ViewerShot } from '#lib/viewer/shots.js';
+  import { opensViewer, type ViewerShot } from '#lib/viewer/shots.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
   let {
@@ -114,9 +114,11 @@
       {#each shots as shot (shot.media_id)}
         <figure class="shot" data-state={shot.ready ? 'ready' : shot.failed ? 'failed' : 'loading'} style:max-width={`${shot.width}px`} style:aspect-ratio={`${shot.width} / ${shot.height}`}>
           {#if shot.ready}
-            <button type="button" aria-label="Открыть картинку" onclick={() => void view(readyShots.indexOf(shot))}>
+            <!-- Ссылка на сам файл: долгое нажатие и правая кнопка дают меню браузера с картинкой. -->
+            <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+            <a href={`/api/v1/media/${shot.media_id}`} aria-label="Открыть картинку" onclick={(event) => { if (!opensViewer(event)) return; event.preventDefault(); void view(readyShots.indexOf(shot)); }}>
               <img src={`/api/v1/media/${shot.media_id}`} alt="" width={shot.width} height={shot.height} loading="lazy" data-viewer-thumb={shot.media_id} />
-            </button>
+            </a>
           {:else if shot.failed}
             <span>Картинка недоступна</span>
           {:else}
@@ -163,6 +165,8 @@
   .shot[data-state='failed'] { background: var(--danger-soft); }
   .shot:not([data-state='ready']) { display: flex; align-items: center; justify-content: center; min-height: var(--target); padding: var(--s4); color: var(--secondary); font-size: var(--fs-sm); text-align: center; }
   .shot[data-state='failed'] { color: var(--danger); }
-  .shot button { display: block; width: 100%; height: 100%; padding: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); }
+  .shot a { display: block; width: 100%; height: 100%; padding: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); }
+  /* Ссылка нажимается так же, как кнопка. */
+  .shot a:active { transform: scale(var(--scale-press)); }
   img { display: block; width: 100%; height: 100%; object-fit: cover; }
 </style>

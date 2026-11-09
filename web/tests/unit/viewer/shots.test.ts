@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { declaredSize, downloadName, preloads, shotCaption, shotFormat, shotSrc } from "#lib/viewer/shots.js";
+import { declaredSize, downloadName, opensViewer, preloads, shotCaption, shotFormat, shotSrc } from "#lib/viewer/shots.js";
 
 describe("viewer/shots", () => {
   it("media_and_attachments_have_their_own_addresses", () => {
@@ -31,5 +31,17 @@ describe("viewer/shots", () => {
     expect(preloads({ media_id: "m" })).toBe(true);
     expect(preloads({ media_id: "m", size: 300_000 })).toBe(true);
     expect(preloads({ media_id: "m", size: 60 * 1024 * 1024 })).toBe(false);
+  });
+
+  it("plain_click_opens_the_viewer_and_modified_clicks_stay_with_the_browser", () => {
+    const click = { button: 0, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, defaultPrevented: false };
+    expect(opensViewer(click)).toBe(true);
+    // Новая вкладка, новое окно, сохранение и средняя кнопка остаются браузеру.
+    expect(opensViewer({ ...click, ctrlKey: true })).toBe(false);
+    expect(opensViewer({ ...click, metaKey: true })).toBe(false);
+    expect(opensViewer({ ...click, shiftKey: true })).toBe(false);
+    expect(opensViewer({ ...click, altKey: true })).toBe(false);
+    expect(opensViewer({ ...click, button: 1 })).toBe(false);
+    expect(opensViewer({ ...click, defaultPrevented: true })).toBe(false);
   });
 });
