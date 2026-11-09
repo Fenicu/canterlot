@@ -1024,3 +1024,170 @@ async fn late_block_file_after_release_is_not_attached(pool: PgPool) {
     stop.cancel();
     timeout(WAIT, task).await.unwrap().unwrap();
 }
+
+fn share_header(
+    f: &Media,
+    id: Uuid,
+    block: Uuid,
+    name: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> MediaHeader {
+    MediaHeader {
+        media_id: id.to_string(),
+        execution_id: f.execution.to_string(),
+        block_id: block.to_string(),
+        mime: mime.into(),
+        size: bytes.len() as u64,
+        sha256: sha(bytes),
+        name: name.into(),
+        share: true,
+        ..Default::default()
+    }
+}
+
+/// Пустой файл агента: blob нулевой длины с SHA-256 пустого ввода, готовое вложение, строка
+/// `block_files`, файл в ленте и скачивание `200` с `Content-Length: 0`. Второй пустой файл
+/// с тем же checksum — отдельное вложение.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn empty_shared_file_is_a_zero_byte_attachment(pool: PgPool) {
+    let mut f = Media::new(pool).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let mut ids = Vec::new();
+    for name in ["empty.txt", "empty-2.txt"] {
+        let id = Uuid::now_v7();
+        let header = share_header(&f, id, block, name, "text/plain", b"");
+        let stored = put(&mut client, &f.token, header, b"").await.unwrap();
+        assert_eq!(stored.media_id, id.to_string());
+        assert_eq!(std::fs::metadata(f.files.blob_path(id)).unwrap().len(), 0);
+        let row: (String, i64, String) =
+            sqlx::query_as("select state,size_bytes,sha256 from attachments where id=$1")
+                .bind(id)
+                .fetch_one(f.pool())
+                .await
+                .unwrap();
+        assert_eq!(row, ("ready".into(), 0, sha(b"")));
+        let size: i64 = sqlx::query_scalar("select size_bytes from block_files where id=$1")
+            .bind(id)
+            .fetch_one(f.pool())
+            .await
+            .unwrap();
+        assert_eq!(size, 0);
+        ids.push(id);
+    }
+    f.committed(vec![Body::BlockFile(BlockFile {
+        block_id: block.to_string(),
+        attachment_id: ids[0].to_string(),
+        name: "empty.txt".into(),
+        mime: "text/plain".into(),
+        size: 0,
+        sha256: sha(b""),
+        ..Default::default()
+    })])
+    .await;
+    let item = f.history_block(block).await;
+    assert_eq!(item["files"][0]["attachment_id"], ids[0].to_string());
+    assert_eq!(item["files"][0]["size"], 0);
+    for id in &ids {
+        let download = f
+            .files
+            .client
+            .send(
+                Method::GET,
+                &format!("/api/v1/attachments/{id}/content"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(download.status, 200);
+        assert!(download.body.is_empty());
+        assert_eq!(download.headers["content-length"], "0");
+        assert!(
+            download.headers["content-disposition"]
+                .to_str()
+                .unwrap()
+                .starts_with("attachment; filename*=UTF-8''empty")
+        );
+    }
+    stop.cancel();
+    task.await.unwrap();
+}
+
+/// Отказ хаба называет причину в сообщении статуса: воркер переводит её в свой `share_*`.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn share_refusals_carry_a_specific_reason(pool: PgPool) {
+    let mut f = Media::new(pool).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let cases: Vec<(MediaHeader, Vec<u8>, &str)> = vec![
+        // Пустой файл не бывает картинкой или видео.
+        (
+            share_header(&f, Uuid::now_v7(), block, "empty.png", "image/png", b""),
+            vec![],
+            "media_invalid_type",
+        ),
+        (
+            share_header(&f, Uuid::now_v7(), block, "clip.mp4", "video/mp4", b""),
+            vec![],
+            "media_invalid_type",
+        ),
+        // Объявленная картинка без её сигнатуры.
+        (
+            share_header(
+                &f,
+                Uuid::now_v7(),
+                block,
+                "fake.png",
+                "image/png",
+                b"not a png",
+            ),
+            b"not a png".to_vec(),
+            "media_invalid_type",
+        ),
+        (
+            share_header(&f, Uuid::now_v7(), block, "bad.bin", "not a mime", b"x"),
+            b"x".to_vec(),
+            "media_invalid_type",
+        ),
+        (
+            share_header(&f, Uuid::now_v7(), block, "", "text/plain", b"x"),
+            b"x".to_vec(),
+            "media_invalid_name",
+        ),
+        (
+            MediaHeader {
+                size: canterlot_proto::limits::MAX_SHARE_BYTES + 1,
+                ..share_header(
+                    &f,
+                    Uuid::now_v7(),
+                    block,
+                    "big.bin",
+                    "application/octet-stream",
+                    b"x",
+                )
+            },
+            vec![],
+            "media_too_large",
+        ),
+        (
+            MediaHeader {
+                title: "a\nb".into(),
+                ..share_header(&f, Uuid::now_v7(), block, "t.txt", "text/plain", b"x")
+            },
+            b"x".to_vec(),
+            "media_invalid_text",
+        ),
+    ];
+    for (header, bytes, reason) in cases {
+        let id: Uuid = header.media_id.parse().unwrap();
+        let error = put(&mut client, &f.token, header, &bytes)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument, "{reason}");
+        assert_eq!(error.message(), reason);
+        assert!(!f.files.blob_path(id).exists(), "{reason}");
+    }
+    stop.cancel();
+    task.await.unwrap();
+}

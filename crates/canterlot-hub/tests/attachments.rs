@@ -187,12 +187,10 @@ async fn create_validates_size_name_and_ceiling(pool: PgPool) {
         }
     };
     let body = |name: &str, size: u64| json!({"conversation_id": f.conversation, "name": name, "size": size, "sha256": "ab".repeat(32)});
-    assert_error(
-        &post(body("a.txt", 0)).await,
-        400,
-        "invalid_request",
-        "never",
-    );
+    // Пустой файл законен: объявленный размер 0 принимается.
+    let empty = post(body(".gitkeep", 0)).await;
+    assert_eq!(empty.status, 201, "{:?}", empty.body);
+    assert_eq!(empty.json::<Value>()["size"], 0);
     assert_error(
         &post(body("a.txt", MAX_ATTACHMENT_BYTES + 1)).await,
         413,
@@ -2454,4 +2452,90 @@ async fn gc_skipped_upload_rolls_back_immediately_leaving_no_lingering_locks(poo
         row.is_some(),
         "attachment row was skipped because gc expire early-return did not roll back synchronously"
     );
+}
+
+/// Пустой файл: создание с размером 0, завершение без единого тела (или с пустым телом),
+/// blob нулевой длины, скачивание `200` с `Content-Length: 0`. Два пустых файла с одним
+/// SHA-256 живут независимо и оба уходят агенту во вводе.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn empty_file_uploads_completes_and_downloads_as_zero_bytes(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool).await;
+    let empty_sha = sha(b"");
+    assert_eq!(
+        empty_sha,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+
+    let first = f.create("empty.txt", "text/plain", b"").await;
+    let head = f.head(first).await;
+    assert_eq!(head.status, 200);
+    assert_eq!(upload_offset(&head), Some(0));
+    assert_eq!(head.headers["upload-length"], "0");
+    let done = f.complete(first, "empty_done", None).await;
+    assert_eq!(done.status, 200, "{:?}", done.body);
+    let view: Value = done.json();
+    assert_eq!(view["state"], "ready");
+    assert_eq!(view["size"], 0);
+    assert_eq!(view["uploaded_bytes"], 0);
+    assert_eq!(view["sha256"], empty_sha);
+    assert_eq!(std::fs::metadata(f.blob_path(first)).unwrap().len(), 0);
+    assert!(!f.staging_path(first).exists());
+    // Повтор того же завершения отдаёт сохранённый ответ.
+    let replay = f.complete(first, "empty_done", None).await;
+    assert_eq!(replay.status, 200);
+    assert_eq!(replay.body, done.body);
+
+    // Второй пустой файл с пустым телом PATCH: тот же SHA-256, отдельный blob.
+    let second = f.create(".gitkeep", "application/octet-stream", b"").await;
+    let patched = f.patch_bytes(second, 0, b"").await;
+    assert_eq!(patched.status, 204, "{:?}", patched.body);
+    assert_eq!(upload_offset(&patched), Some(0));
+    let done = f
+        .complete(second, "gitkeep_done", Some(json!({"sha256": empty_sha})))
+        .await;
+    assert_eq!(done.status, 200, "{:?}", done.body);
+    assert_ne!(first, second);
+
+    for (id, name) in [(first, "empty.txt"), (second, ".gitkeep")] {
+        let download = f
+            .client
+            .send(
+                Method::GET,
+                &format!("/api/v1/attachments/{id}/content"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(download.status, 200);
+        assert!(download.body.is_empty());
+        assert_eq!(download.headers["content-length"], "0");
+        assert_eq!(download.headers["content-type"], "application/octet-stream");
+        assert_eq!(
+            download.headers["content-disposition"],
+            format!("attachment; filename*=UTF-8''{name}").as_str()
+        );
+        assert_eq!(download.headers["x-content-type-options"], "nosniff");
+    }
+
+    // Пустой файл с типом картинки не становится картинкой: отдаётся как поток байтов.
+    let picture = f.create("empty.png", "image/png", b"").await;
+    assert_eq!(f.complete(picture, "picture_done", None).await.status, 200);
+    let download = f
+        .client
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{picture}/content"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(download.status, 200);
+    assert_eq!(download.headers["content-type"], "application/octet-stream");
+
+    let submitted = f
+        .submit("empty_input", "пустые файлы", &[first, second])
+        .await;
+    assert_eq!(submitted.status, 201, "{:?}", submitted.body);
+    assert_eq!(f.count("select count(*) from input_attachments").await, 2);
 }

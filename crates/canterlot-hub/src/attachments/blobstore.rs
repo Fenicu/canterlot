@@ -237,6 +237,14 @@ impl LocalBlobStore {
         let staging = self.staging_path(id);
         let mut file = match fs::File::open(&staging) {
             Ok(file) => file,
+            // Пустой файл не требует ни одного тела: staging нулевой длины заводится при публикации.
+            Err(error) if not_found(&error) && expected_len == 0 => fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(&staging)?,
             Err(error) if not_found(&error) => {
                 return Err(BlobError::LengthMismatch { actual: 0 });
             }

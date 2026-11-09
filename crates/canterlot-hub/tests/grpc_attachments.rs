@@ -789,3 +789,57 @@ async fn new_attempt_clears_attachment_failure_reason_and_retryability(pool: PgP
     ));
     assert_eq!(f.link().await, ("pending".into(), None, None));
 }
+
+/// Пустое вложение уходит машине одним кадром: смещение 0, без данных, `last`.
+#[sqlx::test(migrations = "./migrations")]
+async fn fetch_of_an_empty_attachment_is_one_last_empty_chunk(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let empty = f.files.ready("empty.txt", "text/plain", b"").await;
+    let response = f
+        .files
+        .submit(
+            &format!("fetch_{}", Uuid::now_v7().simple()),
+            "empty",
+            &[empty],
+        )
+        .await;
+    assert_eq!(response.status, 201, "{:?}", response.body);
+    let value: Value = response.json();
+    let input: Uuid = value["input_id"].as_str().unwrap().parse().unwrap();
+    let command: Uuid = value["command_id"].as_str().unwrap().parse().unwrap();
+    sqlx::query("update inputs set state='on_machine' where id=$1")
+        .bind(input)
+        .execute(&f.files.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update commands set dispatch_attempt=1, delivery_state='stored_on_machine' where id=$1",
+    )
+    .bind(command)
+    .execute(&f.files.pool)
+    .await
+    .unwrap();
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let mut stream = client
+        .fetch_attachment(f.request(empty, 0))
+        .await
+        .unwrap()
+        .into_inner();
+    let chunk = timeout(WAIT, stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("one chunk");
+    assert_eq!((chunk.offset, chunk.data.len(), chunk.last), (0, 0, true));
+    assert!(
+        timeout(WAIT, stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let error = f.fetch(empty, 1).await.err().expect("offset beyond end");
+    assert_eq!(error.code(), tonic::Code::OutOfRange);
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap().unwrap();
+}

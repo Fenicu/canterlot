@@ -318,9 +318,6 @@ pub async fn create(
     let name = normalize_name(&req.name)?;
     let mime = normalize_mime(req.mime.as_deref())?;
     let sha256 = normalize_sha256(&req.sha256)?;
-    if req.size == 0 {
-        return Err(AttachmentError::Invalid);
-    }
     if req.size > MAX_ATTACHMENT_BYTES {
         return Err(AttachmentError::TooLarge);
     }

@@ -50,7 +50,12 @@ impl UploadSlots {
 fn status(error: &MediaError) -> Status {
     let kind = error.kind();
     match error {
-        MediaError::Invalid => Status::invalid_argument(kind),
+        // Сообщение статуса — стабильный код: воркер переводит его в свой `share_*`.
+        MediaError::Invalid
+        | MediaError::TooLarge
+        | MediaError::InvalidName
+        | MediaError::InvalidType
+        | MediaError::InvalidText => Status::invalid_argument(kind),
         MediaError::NotFound => Status::not_found(kind),
         MediaError::Conflict => Status::already_exists(kind),
         MediaError::ChecksumMismatch => Status::data_loss(kind),

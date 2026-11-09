@@ -49,6 +49,15 @@ pub struct Header {
 
 pub enum MediaError {
     Invalid,
+    /// Объявленный размер больше потолка (`MAX_SHARE_BYTES`, `MAX_MEDIA_BYTES`).
+    TooLarge,
+    /// Имя файла не проходит нормализацию вложений.
+    InvalidName,
+    /// Тип не принимается: неизвестный MIME, сигнатура не совпала с картинкой,
+    /// пустой файл с типом картинки или видео.
+    InvalidType,
+    /// Заголовок или подпись длиннее предела либо с управляющими символами.
+    InvalidText,
     NotFound,
     Conflict,
     Busy,
@@ -74,6 +83,10 @@ impl MediaError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Invalid => "media_invalid",
+            Self::TooLarge => "media_too_large",
+            Self::InvalidName => "media_invalid_name",
+            Self::InvalidType => "media_invalid_type",
+            Self::InvalidText => "media_invalid_text",
             Self::NotFound => "media_not_found",
             Self::Conflict => "media_conflict",
             Self::Busy => "media_upload_in_progress",
@@ -117,15 +130,16 @@ fn optional_dimension(value: u32) -> Option<u32> {
 pub fn parse_header(raw: &MediaHeader) -> Result<Header, MediaError> {
     let share = if raw.share {
         let name =
-            crate::attachments::normalize_name(&raw.name).map_err(|_| MediaError::Invalid)?;
-        if raw.size == 0 || raw.size > MAX_SHARE_BYTES {
-            return Err(MediaError::Invalid);
+            crate::attachments::normalize_name(&raw.name).map_err(|_| MediaError::InvalidName)?;
+        // Пустой файл законен (.gitkeep, пустой журнал): blob нулевой длины с SHA-256 пустого ввода.
+        if raw.size > MAX_SHARE_BYTES {
+            return Err(MediaError::TooLarge);
         }
         if raw.title.len() > MAX_SHARE_TITLE_BYTES
             || raw.title.chars().any(char::is_control)
             || raw.note.len() > MAX_SHARE_NOTE_BYTES
         {
-            return Err(MediaError::Invalid);
+            return Err(MediaError::InvalidText);
         }
         Some(Share {
             name,
@@ -138,16 +152,19 @@ pub fn parse_header(raw: &MediaHeader) -> Result<Header, MediaError> {
         None
     };
     let mime = match &share {
-        Some(_) => {
-            crate::attachments::normalize_mime(Some(&raw.mime)).map_err(|_| MediaError::Invalid)?
-        }
+        Some(_) => crate::attachments::normalize_mime(Some(&raw.mime))
+            .map_err(|_| MediaError::InvalidType)?,
         None => MEDIA_MIMES
             .iter()
             .copied()
             .find(|mime| *mime == raw.mime)
-            .ok_or(MediaError::Invalid)?
+            .ok_or(MediaError::InvalidType)?
             .to_owned(),
     };
+    // Пустой файл не бывает картинкой или видео: лента не должна открывать его плеером.
+    if raw.size == 0 && (mime.starts_with("image/") || mime.starts_with("video/")) {
+        return Err(MediaError::InvalidType);
+    }
     let sha256 = raw.sha256.as_str();
     if sha256.len() != 64
         || !sha256
@@ -156,8 +173,8 @@ pub fn parse_header(raw: &MediaHeader) -> Result<Header, MediaError> {
     {
         return Err(MediaError::Invalid);
     }
-    if !raw.share && (raw.size == 0 || raw.size > MAX_MEDIA_BYTES) {
-        return Err(MediaError::Invalid);
+    if !raw.share && raw.size > MAX_MEDIA_BYTES {
+        return Err(MediaError::TooLarge);
     }
     Ok(Header {
         id: uuid(&raw.media_id)?,
@@ -410,7 +427,7 @@ pub async fn put(
     let image = header.mime.starts_with("image/");
     if (header.share.is_none() || image) && !signature_matches(&header.mime, &head) {
         store.delete_blob(id).await?;
-        return Err(MediaError::Invalid);
+        return Err(MediaError::InvalidType);
     }
     if let Some(share) = share {
         return insert_share(pool, conversation_id, header, &share).await;
