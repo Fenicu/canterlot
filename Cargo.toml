@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["spikes"]
 
 [workspace.package]
-version = "1.24.3"
+version = "1.24.4"
 edition = "2024"
 rust-version = "1.99"
 publish = false
