@@ -3,7 +3,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { FakeHub, FakeHubApi, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, fillWorkdir, test } from './fixtures';
+import { expect, fillWorkdir, resizeViewport, test } from './fixtures';
 
 async function boot(page: Page, options: { solo?: boolean; home?: string | null; histories?: boolean; models?: { id: string; title: string; efforts: string[] }[]; extraHarness?: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[] }[]; permission_modes: string[] } } = {}) {
   const hub = new FakeHub();
@@ -486,16 +486,18 @@ test('new_session_defaults_to_clean_and_offers_custom_presets', async ({ page })
 test('list_and_new_session_have_no_horizontal_scroll_at_360px_and_320px_and_200_percent_text', async ({ page }) => {
   await boot(page);
   for (const width of [360, 320]) {
-    await page.setViewportSize({ width, height: 640 });
+    await resizeViewport(page, { width, height: 640 });
     await page.evaluate(() => {
       document.documentElement.style.fontSize = '32px';
     });
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow).toBeLessThanOrEqual(1);
     await page.goto('/new');
+    await expect(page.getByRole('combobox', { name: 'Инструкции' })).toHaveValue('clean');
     const again = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(again).toBeLessThanOrEqual(1);
     await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible();
   }
 });
 

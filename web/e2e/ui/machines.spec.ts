@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, resizeViewport } from './fixtures';
 import { bootSecondary } from './secondary-fixture';
 import { machineWatchSeed, seedMachineWatch } from '../../testing/fake-hub';
 
@@ -11,7 +11,7 @@ test('machine_screen_follows_mockup_09_and_updates_metrics_live', async ({ page 
   await expect(main.getByRole('meter', { name: 'CPU' })).toHaveAttribute('aria-valuenow', '24');
   await expect(main.getByRole('meter', { name: 'RAM' })).toHaveAttribute('aria-valuenow', '40');
   await expect(main.getByRole('meter')).not.toHaveCount(0);
-  expect(await main.getByRole('meter').count()).toBeGreaterThan(2);
+  await expect.poll(() => main.getByRole('meter').count()).toBeGreaterThan(2);
   // Шкалы всех карточек начинаются с одного края и одной ширины, даже когда подпись диска переносится.
   const gauges = await main.getByRole('meter').evaluateAll((nodes) => nodes.map((node) => { const box = node.getBoundingClientRect(); return [Math.round(box.left), Math.round(box.width)]; }));
   expect(new Set(gauges.map(([left]) => left)).size).toBe(1);
@@ -97,7 +97,7 @@ test('secondary_screens_reflow_with_large_text_and_support_the_light_theme', asy
     if (await page.locator('html').getAttribute('data-theme') !== 'light') await toggle.click();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
     for (const width of [360, 320]) {
-      await page.setViewportSize({ width, height: 800 });
+      await resizeViewport(page, { width, height: 800 });
       await page.evaluate(() => { document.documentElement.style.fontSize = '32px'; });
       const size = await page.evaluate(() => ({ page: document.documentElement.scrollWidth, width: document.documentElement.clientWidth, outside: [...document.querySelectorAll('main *')].map(node => ({ tag: node.tagName, cls: node.className, right: node.getBoundingClientRect().right, width: node.getBoundingClientRect().width })).filter(node => node.right > document.documentElement.clientWidth + 1).slice(0, 12) }));
       expect(size.page, `${route} at ${width}: ${JSON.stringify(size)}`).toBeLessThanOrEqual(size.width);

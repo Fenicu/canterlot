@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions, type MockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, fillContrast, test } from './fixtures';
+import { expect, fillContrast, resizeViewport, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 
@@ -376,12 +376,12 @@ test('session_menu_opens_whole_and_above_the_row_at_any_list_position', async ({
   await page.setViewportSize({ width: 1707, height: 960 });
   await boot(page);
   const actions = page.getByRole('button', { name: /^Действия:/ });
-  const last = (await actions.count()) - 1;
   for (const [width, height] of [[1707, 960], [388, 760], [388, 587]] as const) {
-    await page.setViewportSize({ width, height });
-    for (const index of [0, last]) {
-      await actions.nth(index).scrollIntoViewIfNeeded();
-      await actions.nth(index).click();
+    await resizeViewport(page, { width, height });
+    for (const action of [actions.first(), actions.last()]) {
+      await action.scrollIntoViewIfNeeded();
+      await action.click();
+      await expect(page.locator('.popover')).toBeVisible();
       const report = await page.locator('.popover').evaluate(async (panel) => {
         await new Promise((done) => setTimeout(done, 250));
         const box = panel.getBoundingClientRect();
@@ -397,6 +397,7 @@ test('session_menu_opens_whole_and_above_the_row_at_any_list_position', async ({
       // Внутренняя прокрутка остаётся только там, где меню выше самого списка.
       if (report.room > 560) expect(report.overflow).toBeLessThanOrEqual(1);
       await page.getByRole('button', { name: 'Закрыть' }).click();
+      await expect(page.locator('.popover')).toHaveCount(0);
     }
   }
 });

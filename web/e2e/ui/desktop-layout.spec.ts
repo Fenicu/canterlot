@@ -3,7 +3,7 @@ import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { bootScreen, SCREENS, type Theme } from '../parity/states';
-import { expect, test } from './fixtures';
+import { expect, resizeViewport, test } from './fixtures';
 import { bootSecondary } from './secondary-fixture';
 
 // Безголовый Firefox в Playwright прячет полосы прокрутки агентским `scrollbar-width: none !important`,
@@ -256,7 +256,7 @@ test('type_and_panes_scale_with_the_viewport', async ({ page }, testInfo) => {
   expect(wide.sidebar).toBeGreaterThanOrEqual(20 * wide.root - 0.5);
   expect(wide.sidebar).toBeLessThanOrEqual(28 * wide.root + 0.5);
   // Снимок владельца: 3839 физических точек при масштабе 1,5 дают окно чуть уже 2560 CSS-пикселей.
-  await page.setViewportSize({ width: size(page).width - 1, height: Math.round(size(page).height * 0.89) });
+  await resizeViewport(page, { width: size(page).width - 1, height: Math.round(size(page).height * 0.89) });
   await expect.poll(async () => (await measure()).body).toBeCloseTo(expected.body, 1);
   await expect(page.getByText('Выберите сессию')).toBeVisible();
   await expectCentred(page.getByText('Выберите сессию'), pane(page));
@@ -289,7 +289,7 @@ test('no_screen_scrolls_the_document_or_overflows_sideways', async ({ page }) =>
   await check('/c');
   for (const path of ['/machines', '/limits', '/presets', '/settings']) {
     await bootSecondary(page, path);
-    await page.waitForTimeout(150);
+    await expect(page.locator('main[data-secondary-ready], main[data-presets-ready]')).toBeVisible();
     await check(path);
   }
 });

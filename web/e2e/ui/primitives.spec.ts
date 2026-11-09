@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, resizeViewport } from './fixtures';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { productionCsp } from '../../csp.mjs';
@@ -156,7 +156,7 @@ test('motion_scale_changes_all_computed_durations_live', async ({ page }) => {
 });
 test('primitives_reflow_in_both_themes', async ({ page }) => {
   for (const theme of ['dark', 'light']) for (const width of [360, 320]) {
-    await page.setViewportSize({ width, height: 900 }); await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    await resizeViewport(page, { width, height: 900 }); await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     await page.evaluate(() => document.documentElement.style.fontSize = '200%'); expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     await page.evaluate(() => document.documentElement.style.removeProperty('font-size'));

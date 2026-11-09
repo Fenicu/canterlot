@@ -157,7 +157,11 @@ async function finish(
 	// Подвал стоит на месте, пока лента прижата к низу: для проверки высоты готовой
 	// разметки отрываемся от низа. Уменьшаем окно, чтобы даже короткий ответ прокручивался.
 	const viewport = page.viewportSize();
-	if (viewport && viewport.height > 600) await page.setViewportSize({ width: viewport.width, height: 600 });
+	if (viewport && viewport.height > 600) {
+		await page.setViewportSize({ width: viewport.width, height: 600 });
+		// Высоту оболочки задаёт --app-height, а его пересчитывают кадром позже resize.
+		await expect.poll(() => page.evaluate(() => document.documentElement.style.getPropertyValue('--app-height'))).toBe('600px');
+	}
 	await page.waitForTimeout(100);
 	const feed = page.locator('.feed');
 	// Уход вверх — жест владельца: колесо приходит раньше сдвига.

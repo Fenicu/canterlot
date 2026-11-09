@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, test } from './fixtures';
+import { expect, resizeViewport, test } from './fixtures';
 
 async function boot(page: Page) {
   const hub = new FakeHub();
@@ -65,8 +65,9 @@ test('phone_document_does_not_scroll_and_dock_stays_in_viewport_after_reload', a
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.dock')).toBeVisible();
   await expectPinned();
-  await page.setViewportSize({ width: 384, height: 832 });
-  await expectPinned();
+  await resizeViewport(page, { width: 384, height: 832 });
+  // Высота оболочки (--app-height) догоняет новое окно кадром позже resize.
+  await expect(expectPinned).toPass();
   await page.reload();
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   await expectPinned();

@@ -171,8 +171,10 @@ test('first_paint_and_tab_switch_build_rows_without_motion', async ({ page }) =>
 	expect(await moving()).toBe(0);
 	const tabs = page.getByRole('tab');
 	await tabs.nth(1).click();
+	await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true');
 	expect(await moving()).toBe(0);
 	await tabs.nth(0).click();
+	await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
 	expect(await moving()).toBe(0);
 });
 
