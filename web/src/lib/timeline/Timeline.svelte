@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from 'svelte';
+  import { flushSync, onMount, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { announce } from '#lib/a11y/announce.js';
   import RequestCard from '#lib/requests/RequestCard.svelte';
@@ -263,54 +263,79 @@
     });
   }
 
-  function applyHeight(key: string, height: number): void {
+  /**
+   * Замеры строк ложатся пачкой: индекс строк и расклад окна считаются один раз на пачку,
+   * а не на каждую строку — страница истории приносит сотню строк, а окно держит тысячи.
+   */
+  function applyHeights(items: { key: string; height: number }[]): void {
     if (measuring) {
-      queued.push({ key, height });
+      queued.push(...items);
       return;
     }
-    const prev = known.get(key);
-    if (prev !== undefined && Math.abs(prev - height) < 1) return;
     measuring = true;
+    let touched = false;
     try {
       const list = rows;
-      const index = list.findIndex((row) => row.key === key);
-      if (index < 0 || !host || !controller) {
+      let index: Map<string, number> | null = null;
+      let changed = false;
+      let moved = false;
+      for (const { key, height } of items) {
+        const prev = known.get(key);
+        if (prev !== undefined && Math.abs(prev - height) < 1) continue;
+        touched = true;
+        if (!host || !controller) {
+          known.set(key, height);
+          continue;
+        }
+        index ??= new Map(list.map((row, at) => [row.key, at]));
+        const at = index.get(key);
+        if (at === undefined) {
+          known.set(key, height);
+          continue;
+        }
+        const baseline = prev ?? guess(list[at]!);
+        typical.set(list[at]!.kind, height);
         known.set(key, height);
-        return;
+        ix.set(at, height);
+        changed = true;
+        if (Math.abs(height - baseline) >= 1) moved = true;
       }
-      const baseline = prev ?? guess(list[index]!);
-      typical.set(list[index]!.kind, height);
-      const delta = height - baseline;
-      known.set(key, height);
-      ix.set(index, height);
-      layout(list, host.scrollTop, host.clientHeight || 1);
-      if (Math.abs(delta) >= 1 && controller.pinned) controller.onContentChange('resize');
+      if (changed && host && controller) {
+        layout(list, host.scrollTop, host.clientHeight || 1);
+        if (moved && controller.pinned) controller.onContentChange('resize');
+      }
     } finally {
       measuring = false;
       const pending = queued;
       queued = [];
-      for (const item of pending) applyHeight(item.key, item.height);
-      settle();
+      if (pending.length > 0) applyHeights(pending);
+      if (touched) settle();
     }
   }
 
   function watch(): ResizeObserver {
     if (observer) return observer;
     observer = new ResizeObserver((entries) => {
+      // Сначала все чтения, потом записи: расклад и прокрутка между замерами заставляли бы
+      // браузер пересчитывать раскладку на каждой строке.
+      const sizes: { key: string; height: number }[] = [];
+      let hostResized = false;
+      let spacerResized = false;
       for (const entry of entries) {
         const node = entry.target as HTMLElement;
-        if (node === host) {
-          if (host) layout(rows, host.scrollTop, host.clientHeight || 1);
-          controller?.onContentChange('resize');
-          continue;
+        if (node === host) hostResized = true;
+        else if (spacers.has(node)) spacerResized = true;
+        else if (node.dataset.key) {
+          // Размер рамки наблюдатель уже посчитал: строки не трансформируются, он равен высоте прямоугольника.
+          const box = entry.borderBoxSize?.[0];
+          sizes.push({ key: node.dataset.key, height: box ? box.blockSize : node.getBoundingClientRect().height });
         }
-        if (spacers.has(node)) {
-          if (controller?.pinned) controller.onContentChange('resize');
-          continue;
-        }
-        const key = node.dataset.key;
-        if (key) applyHeight(key, node.getBoundingClientRect().height);
       }
+      if (sizes.length > 0) applyHeights(sizes);
+      if (hostResized) {
+        if (host) layout(rows, host.scrollTop, host.clientHeight || 1);
+        controller?.onContentChange('resize');
+      } else if (spacerResized && controller?.pinned) controller.onContentChange('resize');
     });
     return observer;
   }
@@ -325,12 +350,28 @@
     return { destroy: () => current.unobserve(node) };
   }
 
+  // Новые строки меряются одним проходом после монтажа всей пачки: замер прямо в действии
+  // шёл вперемешку с правками DOM соседних строк, и каждое чтение снова считало раскладку.
+  let mounted: HTMLElement[] = [];
+  function measureMounted(): void {
+    const nodes = mounted;
+    mounted = [];
+    const sizes: { key: string; height: number }[] = [];
+    for (const node of nodes) {
+      const key = node.dataset.key ?? '';
+      const height = key && node.isConnected ? node.getBoundingClientRect().height : 0;
+      if (height) sizes.push({ key, height });
+    }
+    if (sizes.length === 0) return;
+    applyHeights(sizes);
+    // Окно по новым высотам встаёт в DOM до того, как дождавшиеся монтажа читают положение строк.
+    flushSync();
+  }
+
   function measure(node: HTMLElement): { destroy: () => void } {
     const current = watch();
     current.observe(node);
-    const key = node.dataset.key ?? '';
-    const height = node.getBoundingClientRect().height;
-    if (key && height) applyHeight(key, height);
+    if (mounted.push(node) === 1) queueMicrotask(measureMounted);
     return { destroy: () => current.unobserve(node) };
   }
 
