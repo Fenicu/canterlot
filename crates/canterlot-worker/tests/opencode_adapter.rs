@@ -196,6 +196,12 @@ impl Bench {
     }
 }
 
+/// Отказы адаптер шлёт в фоне, после события. Проверка «отказа не было» сразу после
+/// события прошла бы и с отказом в пути: сначала даём ему дойти до двойника.
+async fn refusals_settle() {
+    tokio::time::sleep(Duration::from_millis(500)).await;
+}
+
 trait Applied {
     fn is_applied(&self) -> bool;
 }
@@ -3567,7 +3573,8 @@ async fn aborted_tool_closes_its_request() {
         AdapterEvent::RequestClosed { request_id, reason }
             if *request_id == request && reason == "cli_cancelled"
     )));
-    assert!(bench.replies().is_empty());
+    refusals_settle().await;
+    assert!(bench.replies().is_empty(), "{:?}", bench.replies());
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -4240,7 +4247,8 @@ async fn acknowledged_interrupt_sends_no_refusals() {
             .all(|event| !matches!(event, AdapterEvent::RequestClosed { .. })),
         "the supervisor has closed the cards: {events:?}"
     );
-    assert!(bench.replies().is_empty());
+    refusals_settle().await;
+    assert!(bench.replies().is_empty(), "{:?}", bench.replies());
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -4765,7 +4773,8 @@ async fn refused_request_outside_our_sessions_is_ignored() {
     let input = bench.input("x");
     bench.accepted(&input).await;
     bench.until_finished(input.command_id).await;
-    assert!(find(&bench.fake.requests(), "POST", "/reply").is_none());
+    refusals_settle().await;
+    assert!(bench.replies().is_empty(), "{:?}", bench.replies());
     bench.close(CloseMode::Graceful).await;
 }
 

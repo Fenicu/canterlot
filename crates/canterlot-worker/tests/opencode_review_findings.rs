@@ -321,6 +321,8 @@ fn script_with_one_locked_run(script: &mut Script) {
     );
 }
 
+const PAUSE: Duration = Duration::from_millis(800);
+
 #[tokio::test]
 async fn interrupt_during_the_db_lock_pause_stops_the_turn() {
     let mut script = ready();
@@ -335,9 +337,7 @@ async fn interrupt_during_the_db_lock_pause_stops_the_turn() {
         }],
     );
     let mut bench = Bench::new(script);
-    bench
-        .adapter
-        .set_db_lock_delays(vec![Duration::from_millis(800), Duration::from_millis(800)]);
+    bench.adapter.set_db_lock_delays(vec![PAUSE, PAUSE]);
     bench.start_ok().await;
     let input = bench.input("x");
     bench.accepted(&input).await;
@@ -354,11 +354,15 @@ async fn interrupt_during_the_db_lock_pause_stops_the_turn() {
     let outcome = tokio::time::timeout(WAIT, bench.adapter.interrupt())
         .await
         .expect("interrupt must finish");
-    // The owner pressed stop; let the pause run out.
+    let interrupted = std::time::Instant::now();
     let finished = bench
         .finished_within(input.command_id, Duration::from_secs(3))
         .await;
     assert!(finished, "the turn must end");
+    // The owner pressed stop; let the pause run out. The turn ends at once, a `continue`
+    // left scheduled would fire only after the pause, so counting earlier proves nothing.
+    tokio::time::sleep(PAUSE.saturating_sub(interrupted.elapsed()) + Duration::from_millis(700))
+        .await;
     assert_eq!(
         bench.count("POST", "/prompt"),
         1,
