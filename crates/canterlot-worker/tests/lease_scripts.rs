@@ -35,6 +35,35 @@ fn fake_worker(dir: &Path, knows_lease: bool) -> PathBuf {
     path
 }
 
+/// Дом с пустым `~/.cargo/env`: `check.sh` подключает его до обёртки.
+fn home_at(home: &Path) {
+    std::fs::create_dir_all(home.join(".cargo")).unwrap();
+    std::fs::write(home.join(".cargo/env"), "").unwrap();
+}
+
+/// Пустой дом: без установки воркера в `~/.local/opt/canterlot/current`.
+fn empty_home() -> &'static Path {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        home_at(dir.path());
+        dir
+    })
+    .path()
+}
+
+/// Дом с установленным воркером, как у прод-юнита.
+fn installed_home(dir: &Path, knows_lease: bool) -> PathBuf {
+    let home = dir.join("home");
+    home_at(&home);
+    let bin = home.join(".local/opt/canterlot/releases/abc/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let worker = fake_worker(dir, knows_lease);
+    std::fs::rename(worker, bin.join("canterlot-worker")).unwrap();
+    std::os::unix::fs::symlink("releases/abc", home.join(".local/opt/canterlot/current")).unwrap();
+    home
+}
+
 fn script(name: &str, args: &[&str], bin: Option<&Path>, env: &[(&str, &str)]) -> Command {
     let mut command = Command::new("bash");
     command
@@ -43,8 +72,9 @@ fn script(name: &str, args: &[&str], bin: Option<&Path>, env: &[(&str, &str)]) -
         .env_remove("CANTERLOT_LEASE_HELD")
         .env_remove("CANTERLOT_NO_LEASE")
         .env_remove("CANTERLOT_WORKER_BIN")
-        // Без настоящего canterlot-worker на PATH.
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin");
+        // Без настоящего canterlot-worker на PATH и в доме.
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("HOME", empty_home());
     if let Some(bin) = bin {
         command.env("CANTERLOT_WORKER_BIN", bin);
     }
@@ -196,7 +226,8 @@ fn fallback_prints_one_line_and_marks_nested_calls() {
             .env_remove("CANTERLOT_LEASE_HELD")
             .env_remove("CANTERLOT_NO_LEASE")
             .env_remove("CANTERLOT_WORKER_BIN")
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin");
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("HOME", empty_home());
         if let Some(bin) = bin {
             command.env("CANTERLOT_WORKER_BIN", bin);
         }
@@ -208,4 +239,70 @@ fn fallback_prints_one_line_and_marks_nested_calls() {
         assert!(stderr.contains(reason), "{stderr}");
         assert!(stderr.contains("running without lease"), "{stderr}");
     }
+}
+
+/// Сессия без `CANTERLOT_WORKER_BIN` и без воркера в PATH находит установку воркера в доме.
+#[test]
+fn installed_worker_in_home_is_the_last_resort() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = installed_home(dir.path(), true);
+    let home = home.to_str().unwrap();
+    for name in ["check.sh", "check-web.sh"] {
+        assert_eq!(
+            dry(name, &[], None, &[("HOME", home)]),
+            "kind=build wrap=yes"
+        );
+        // Вложенный вызов и явный отказ по-прежнему важнее найденного бинарника.
+        for (key, want) in [
+            ("CANTERLOT_LEASE_HELD", "wrap=held"),
+            ("CANTERLOT_NO_LEASE", "wrap=disabled"),
+        ] {
+            let decision = dry(name, &[], None, &[("HOME", home), (key, "1")]);
+            assert!(decision.ends_with(want), "{name} {key}: {decision}");
+        }
+    }
+    let out = script("check.sh", &["--fast"], None, &[("HOME", home)])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
+    assert_eq!(
+        argv.lines().take(4).collect::<Vec<_>>(),
+        ["lease", "run", "--kind", "build"]
+    );
+
+    // Рабочий `CANTERLOT_WORKER_BIN` важнее дома; пропавший — нет.
+    let old = installed_home(&dir.path().join("old"), false);
+    let new = fake_worker(dir.path(), true);
+    assert_eq!(
+        dry(
+            "check.sh",
+            &[],
+            Some(&new),
+            &[("HOME", old.to_str().unwrap())]
+        ),
+        "kind=build wrap=yes"
+    );
+    assert_eq!(
+        dry(
+            "check.sh",
+            &[],
+            Some(&dir.path().join("gone")),
+            &[("HOME", home)]
+        ),
+        "kind=build wrap=yes"
+    );
+    assert_eq!(
+        dry(
+            "check.sh",
+            &[],
+            Some(&dir.path().join("gone")),
+            &[("HOME", old.to_str().unwrap())]
+        ),
+        "kind=build wrap=old-binary"
+    );
 }
