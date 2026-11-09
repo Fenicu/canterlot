@@ -166,7 +166,8 @@ async function feedCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
   await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.feed-card').first()).toBeVisible();
   if (at === 'top') {
-    await page.locator('.feed').evaluate((node) => { node.scrollTop = 0; });
+    // Уход вверх — жест владельца: колесо приходит раньше сдвига, иначе лента у низа вернётся к нему.
+    await page.locator('.feed').evaluate((node) => { node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); node.scrollTop = 0; });
     await page.locator('[data-role="quiet-group"] .head').click();
     await page.locator('.feed-card[data-card="todo.write"] .hit').first().click();
     await expect(page.locator('[data-role="card-raw"]').first()).toBeVisible();
@@ -182,7 +183,8 @@ async function planCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
   await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.feed-card').first()).toBeVisible();
   if (at === 'top') {
-    await page.locator('.feed').evaluate((node) => { node.scrollTop = 0; });
+    // Уход вверх — жест владельца: колесо приходит раньше сдвига, иначе лента у низа вернётся к нему.
+    await page.locator('.feed').evaluate((node) => { node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); node.scrollTop = 0; });
     await page.getByRole('button', { name: /^Все задачи · 5$/ }).first().click();
     await expect(page.locator('[data-role="plan-add-tasks"] [data-plan-task]')).toHaveCount(5);
   }
