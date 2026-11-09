@@ -688,11 +688,13 @@ elif [ "${STOP_STATE}" != "inactive" ] && [ "${STOP_STATE}" != "failed" ]; then
 fi
 # Остановка юнита не доказывает отсутствие воркера: управляющий `canterlot-worker run`,
 # запущенный вне systemd, пережил бы бэкапы и миграцию хаба. Тот же охранник, что в
-# rollback-db: супервизоры и релеи сессий пропускаются, любой другой воркер — отказ.
+# rollback-db: супервизоры, релеи и клиенты аренды пропускаются, тестовые воркеры вне
+# корня установки и не на прод-конфиге только печатаются, любой прод-воркер — отказ.
 # В репетиции воркер жив: охранник обязан найти ровно его (и ничего чужого).
 if FOREIGN_WORKER="$(find_control_worker)"; then
     if is_rehearse; then
         case "${FOREIGN_WORKER}" in
+            *"; worker process "*) cutover_hard "rehearse: the control-worker scan matched more than the unit MainPID ${LIVE_MAIN_PID:-none}: ${FOREIGN_WORKER}" ;;
             "worker process ${LIVE_MAIN_PID} "*) log "rehearse: the control-worker scan finds exactly the live unit process (${FOREIGN_WORKER}); supervise/mcp-relay skipped" ;;
             *) cutover_hard "rehearse: the control-worker scan matched something other than the unit MainPID ${LIVE_MAIN_PID:-none}: ${FOREIGN_WORKER}" ;;
         esac

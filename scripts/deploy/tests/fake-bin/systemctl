@@ -127,7 +127,7 @@ case "${op}" in
         if [ -f "${pid_file}" ]; then kill "$(cat "${pid_file}")" 2>/dev/null || true; rm -f "${pid_file}"; fi
         # Сценарий гонки: воркер пытается подняться между ранней проверкой и dropdb.
         if [ "${unit}" = "canterlot-hub" ] && [ -n "${FAKE_SPAWN_WORKER_ON_HUB_STOP:-}" ]; then
-            setsid "${FAKE_SPAWN_WORKER_ON_HUB_STOP}" run >/dev/null 2>&1 <&- &
+            setsid "${FAKE_SPAWN_WORKER_ON_HUB_STOP}" run --config "${WORKER_CONFIG:?}" >/dev/null 2>&1 <&- &
         fi
         ;;
     daemon-reload)

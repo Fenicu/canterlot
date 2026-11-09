@@ -370,15 +370,15 @@ grep -q 'stop canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "hub st
 teardown_case
 case_end
 
-# R19: воркер-процесс вне дерева релизов (чужой путь, но тот же бинарь по имени):
-# отказ по basename exe/argv[0], а не только по точному пути релиза.
-case_begin "rollback refuses a worker binary outside the release tree"
+# R19: воркер-процесс вне дерева релизов (чужой путь, но тот же бинарь по имени)
+# на прод-конфиге: отказ по --config, а не только по пути релиза.
+case_begin "rollback refuses a worker binary outside the release tree on the production config"
 setup_rollback outsidetree
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
 mkdir -p "${FAKE_ROOT}/outside"
 cp "${FAKE_WORKER_BIN}" "${FAKE_ROOT}/outside/canterlot-worker"
 chmod +x "${FAKE_ROOT}/outside/canterlot-worker"
-setsid "${FAKE_ROOT}/outside/canterlot-worker" run >/dev/null 2>&1 <&- &
+setsid "${FAKE_ROOT}/outside/canterlot-worker" run --config "${WORKER_CONFIG}" >/dev/null 2>&1 <&- &
 OUTSIDE_PID=$!
 HARNESS_PIDS+=("${OUTSIDE_PID}")
 for _ in $(seq 1 50); do kill -0 "${OUTSIDE_PID}" 2>/dev/null && break; sleep 0.02; done

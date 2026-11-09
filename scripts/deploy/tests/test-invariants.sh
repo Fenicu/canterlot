@@ -72,6 +72,119 @@ fi
 teardown_case
 case_end
 
+# I1b: тестовый воркер стека (worktree/target/debug, свой конфиг) не мешает выкату
+# (репетиция 1.23.2); прод-воркер из корня установки по-прежнему находится —
+# по exe, по удалённому бинарю релиза, по одному argv[0] и по прод-конфигу.
+case_begin "control-worker scan recognises only production workers"
+setup_case "inv-prod-only"
+source_deploy_lib
+# Запуск с заданным argv[0]; печатает pid настоящего процесса (не обёртки setsid).
+# Уже живые процессы того же бинаря исключаются: нужен именно новый.
+pids_of_exe() {
+    local d
+    for d in /proc/[0-9]*; do
+        [ "$(readlink "${d}/exe" 2>/dev/null)" = "$1" ] && printf ' %s ' "${d#/proc/}"
+    done
+    return 0
+}
+start_named() {
+    local exe="$1" argv0="$2"; shift 2
+    local before pid="" _i p
+    before="$(pids_of_exe "${exe}")"
+    # shellcheck disable=SC2016 # позиционные аргументы раскрывает внутренний bash
+    setsid bash -c 'exec -a "$1" "$2" "${@:3}"' _ "${argv0}" "${exe}" "$@" >/dev/null 2>&1 <&- &
+    for _i in $(seq 1 50); do
+        pid=""
+        for p in $(pids_of_exe "${exe}"); do
+            case "${before}" in *" ${p} "*) ;; *) pid="${p}"; break ;; esac
+        done
+        [ -n "${pid}" ] && break
+        command sleep 0.02
+    done
+    printf '%s' "${pid}"
+}
+stop_pid() { [ -n "${1:-}" ] && kill "$1" 2>/dev/null; command sleep 0.1; }
+TEST_BIN="${FAKE_ROOT}/worktrees/0000/target/debug/canterlot-worker"
+mkdir -p "${TEST_BIN%/*}" "${FAKE_ROOT}/stack"
+cp "${FAKE_WORKER_BIN}" "${TEST_BIN}"
+TEST_PID="$(start_named "${TEST_BIN}" "${TEST_BIN}" run --config "${FAKE_ROOT}/stack/worker.toml" --secret-marker-xyz)"
+[ -n "${TEST_PID}" ] && case_ok "test worker started (pid ${TEST_PID})" || case_fail "setup: test worker not started"
+if TEST_OUT="$(find_control_worker 2>"${FAKE_ROOT}/scan.err")"; then
+    case_fail "worktree test worker matched the scan: ${TEST_OUT}"
+else
+    case_ok "worktree target/debug worker is ignored"
+fi
+assert_contains "${FAKE_ROOT}/scan.err" "ignoring non-production canterlot-worker processes" "ignored workers are listed"
+assert_contains "${FAKE_ROOT}/scan.err" "${TEST_PID} ${TEST_BIN}" "ignored worker listed with pid and path"
+assert_not_contains "${FAKE_ROOT}/scan.err" "secret-marker-xyz" "ignored worker argv is not printed"
+assert_not_contains "${FAKE_ROOT}/scan.err" "stack/worker.toml" "ignored worker config path is not printed"
+# Тот же тестовый бинарь, но на прод-конфиге (относительный --config от cwd) — прод-воркер.
+mkdir -p "${WORKER_CONFIG%/*}"
+: >"${WORKER_CONFIG}"
+CONF_PID="$(cd "${WORKER_CONFIG%/*}" && start_named "${TEST_BIN}" "${TEST_BIN}" run "--config=./${WORKER_CONFIG##*/}")"
+if CONF_OUT="$(find_control_worker 2>/dev/null)"; then
+    case "${CONF_OUT}" in
+        "worker process ${CONF_PID} "*"matched by config)") case_ok "binary outside the install root on the production config is found" ;;
+        *) case_fail "unexpected scan result for the production config: ${CONF_OUT}" ;;
+    esac
+else
+    case_fail "worker on the production config not found"
+fi
+stop_pid "${CONF_PID}"
+# Воркер из корня установки (через current) находится по exe, тестовый — нет.
+REL_DIR="${WORKER_RELEASES}/bbbbbbbbbbbb"
+mkdir -p "${REL_DIR}/bin"
+cp "${FAKE_WORKER_BIN}" "${REL_DIR}/bin/canterlot-worker"
+ln -sfn "releases/bbbbbbbbbbbb" "${WORKER_CURRENT}"
+PROD_PID="$(start_named "${REL_DIR}/bin/canterlot-worker" canterlot-worker run --config /elsewhere/worker.toml)"
+if PROD_OUT="$(find_control_worker 2>/dev/null)"; then
+    case "${PROD_OUT}" in
+        "worker process ${PROD_PID} still runs ${REL_DIR}/bin/canterlot-worker (argv[1]=run, matched by exe)") case_ok "install-root worker found by exe, test worker not reported" ;;
+        *) case_fail "unexpected scan result for the install-root worker: ${PROD_OUT}" ;;
+    esac
+else
+    case_fail "install-root worker not found"
+fi
+# Бинарь релиза удалён после старта: exe кончается на " (deleted)", argv[0] голое имя.
+rm -f "${REL_DIR}/bin/canterlot-worker"
+case "$(readlink "/proc/${PROD_PID}/exe")" in
+    *" (deleted)") case_ok "release binary really unlinked under the running worker" ;;
+    *) case_fail "setup: exe is not marked deleted" ;;
+esac
+if DEL_OUT="$(find_control_worker 2>/dev/null)"; then
+    case "${DEL_OUT}" in
+        "worker process ${PROD_PID} "*"matched by exe)") case_ok "worker with a deleted release binary is found" ;;
+        *) case_fail "unexpected scan result for the deleted binary: ${DEL_OUT}" ;;
+    esac
+else
+    case_fail "worker with a deleted release binary not found"
+fi
+stop_pid "${PROD_PID}"
+# Только argv[0] под корнем установки (exe — посторонний бинарь вне корня).
+ARGV_PID="$(start_named "${FAKE_WORKER_BIN}" "${WORKER_CURRENT}/bin/canterlot-worker" run)"
+if ARGV_OUT="$(find_control_worker 2>/dev/null)"; then
+    case "${ARGV_OUT}" in
+        "worker process ${ARGV_PID} "*"matched by argv0)") case_ok "argv[0]-only match under the install root is found" ;;
+        *) case_fail "unexpected scan result for the argv[0] match: ${ARGV_OUT}" ;;
+    esac
+else
+    case_fail "argv[0]-only match under the install root not found"
+fi
+stop_pid "${ARGV_PID}"
+# Два прод-воркера: оба в отчёте (репетиция отличит лишний от MainPID).
+mkdir -p "${REL_DIR}/bin"
+cp "${FAKE_WORKER_BIN}" "${REL_DIR}/bin/canterlot-worker"
+TWO_A="$(start_named "${REL_DIR}/bin/canterlot-worker" canterlot-worker run)"
+TWO_B="$(start_named "${FAKE_WORKER_BIN}" "${WORKER_CURRENT}/bin/canterlot-worker" run)"
+TWO_OUT="$(find_control_worker 2>/dev/null || true)"
+case "${TWO_OUT}" in
+    *"worker process ${TWO_A} "*"; worker process "*|*"worker process ${TWO_B} "*"; worker process "*) case_ok "both production workers reported" ;;
+    *) case_fail "two production workers not both reported: ${TWO_OUT}" ;;
+esac
+stop_pid "${TWO_A}"; stop_pid "${TWO_B}"; stop_pid "${TEST_PID}"
+teardown_case
+case_end
+
 # I2: time="…" без state="live" не удовлетворяет ожидание; голое state="live"
 # удовлетворяет, а первый неудачный poll под set -e не обрывает цикл (1.16.0).
 case_begin "live wait parses the bare state=live journal line"

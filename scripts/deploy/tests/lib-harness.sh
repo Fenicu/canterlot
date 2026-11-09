@@ -87,10 +87,9 @@ setup_case() {
     mkdir -p "${FAKE_ROOT}/hub/backups" "${FAKE_ROOT}/web/sites/canterlot/releases"
     mkdir -p "${FAKE_ROOT}/web" "${FAKE_ROOT}/container" "${FAKE_ROOT}/worker/opt/canterlot/releases"
     mkdir -p "${FAKE_ROOT}/worker/config" "${FAKE_ROOT}/worker/data" "${FAKE_ROOT}/dist"
-    # Hermetic-скоуп для проверки процессов воркера: на машине воркера живёт
-    # настоящий прод-воркер, и rollback-db не должен считать его участником
-    # фейкового прогона. Прод-код без этой переменной сканирует /proc целиком.
-    export WORKER_PROC_GUARD_ROOT="${FAKE_ROOT}"
+    # Скан управляющего воркера (find_control_worker) признаёт только процессы под
+    # WORKER_BASE или на WORKER_CONFIG; оба ниже ведут в FAKE_ROOT, поэтому
+    # настоящий прод-воркер на этой машине тестам не виден.
     : >"${FAKE_ROOT}/state/calls.log"
 
     # Настоящий worker-процесс в тестах: отдельный бинарь, который игнорирует

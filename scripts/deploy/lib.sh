@@ -430,19 +430,68 @@ deployed_sha() {
     printf '%s' "${out}"
 }
 
-# Ни один управляющий процесс воркера не должен жить. Признак — basename exe ИЛИ
-# argv[0] (бинарь мог быть удалён из релиза после запуска: тогда /proc/pid/exe
-# кончается на " (deleted)", а argv[0] сохраняет имя). Тот же бинарь запускает
-# супервизор и mcp-relay сессий, а также клиент аренды тяжёлых задач (`lease run`
-# вокруг сборок и проверок): их argv[1] — точная подкоманда, и только эти три
-# можно пропустить. Клиент аренды переживает остановку воркера: 30 с ждёт его и
-# продолжает команду без аренды. Любая другая подкоманда (включая run) — живой
-# воркер, даже если в её аргументах встречается слово supervise.
-# Возврат 0 и описание на stdout — найден; 1 — нет. WORKER_PROC_GUARD_ROOT —
-# опциональный скоуп только для hermetic-тестов (на машине разработчика рядом
-# работает настоящий воркер); в проде не задан, скан идёт по всему /proc.
+# Ни один управляющий процесс прод-воркера не должен жить. Кандидат — процесс, у
+# которого basename exe ИЛИ argv[0] равен canterlot-worker (бинарь мог быть удалён
+# из релиза после запуска: тогда /proc/pid/exe кончается на " (deleted)", а argv[0]
+# сохраняет имя). Тот же бинарь запускает супервизор и mcp-relay сессий, а также
+# клиент аренды тяжёлых задач (`lease run` вокруг сборок и проверок): их argv[1] —
+# точная подкоманда, и только эти три можно пропустить. Клиент аренды переживает
+# остановку воркера: 30 с ждёт его и продолжает команду без аренды.
+#
+# Прод-воркер отличается от тестовых (стек-тесты делегатов запускают
+# <worktree>/target/debug/canterlot-worker run против одноразового хаба, выкат
+# 1.23.2) путём бинаря и конфигом. Кандидат считается прод-воркером, если:
+#   - exe (без " (deleted)") лежит под корнем установки WORKER_BASE: current и
+#     releases/<sha>, включая удалённый после старта релиз;
+#   - или абсолютный argv[0] лежит под WORKER_BASE;
+#   - или это `run` с --config, указывающим на прод-конфиг WORKER_CONFIG, откуда
+#     бы ни был запущен бинарь (копия бинаря на прод-конфиге — тот же воркер);
+#   - или классифицировать нельзя: exe не читается, а argv[0] не абсолютный.
+# Остальные кандидаты (worktree, target/, /tmp) не мешают выкату; их pid и путь
+# бинаря (без прочих аргументов) печатаются одной строкой в stderr.
+# Возврат 0 и описание на stdout — найден (все найденные через "; "); 1 — нет.
+# Тесты направляют WORKER_BASE и
+# WORKER_CONFIG в фейковый корень, поэтому настоящий прод-воркер рядом им не виден.
+path_under() {
+    local path="$1" root="$2"
+    [ -n "${path}" ] && [ -n "${root}" ] || return 1
+    case "${path}" in "${root}"/*) return 0 ;; esac
+    return 1
+}
+_worker_root_match() {
+    local path="$1" roots="$2" root
+    for root in ${roots}; do
+        path_under "${path}" "${root}" && return 0
+    done
+    return 1
+}
+# Значение --config у `run` (форма "--config X" и "--config=X"), относительный путь
+# разрешается от cwd процесса. Печатает нормализованный путь или ничего.
+_worker_run_config() {
+    local pid="$1"; shift
+    local prev="" arg cfg="" cwd
+    for arg in "$@"; do
+        case "${arg}" in
+            --config=*) cfg="${arg#--config=}" ;;
+            *) if [ "${prev}" = "--config" ]; then cfg="${arg}"; fi ;;
+        esac
+        prev="${arg}"
+    done
+    [ -n "${cfg}" ] || return 0
+    case "${cfg}" in
+        /*) ;;
+        *) cwd="$(readlink "/proc/${pid}/cwd" 2>/dev/null)" || return 0
+           cfg="${cwd}/${cfg}" ;;
+    esac
+    readlink -m "${cfg}"
+}
 find_control_worker() {
     local proc_dir proc_pid exe_target exe_base argv0_base proc_argv
+    local roots base_real conf_real cfg found="" ignored="" why
+    base_real="$(readlink -m "${WORKER_BASE}")"
+    roots="${WORKER_BASE}"
+    [ "${base_real}" = "${WORKER_BASE}" ] || roots="${roots} ${base_real}"
+    conf_real="$(readlink -m "${WORKER_CONFIG}")"
     for proc_dir in /proc/[0-9]*; do
         proc_pid="${proc_dir#/proc/}"
         exe_target="$(readlink "${proc_dir}/exe" 2>/dev/null || true)"
@@ -451,30 +500,41 @@ find_control_worker() {
         esac
         proc_argv=()
         [ -r "${proc_dir}/cmdline" ] || continue
-        mapfile -d '' -t proc_argv <"${proc_dir}/cmdline" || true
+        mapfile -d '' -t proc_argv <"${proc_dir}/cmdline" 2>/dev/null || true
         [ "${#proc_argv[@]}" -gt 0 ] || continue
         exe_base="${exe_target##*/}"
         argv0_base="${proc_argv[0]##*/}"
         if [ "${exe_base}" != "canterlot-worker" ] && [ "${argv0_base}" != "canterlot-worker" ]; then
             continue
         fi
-        if [ -n "${WORKER_PROC_GUARD_ROOT:-}" ]; then
-            case "${exe_target}" in
-                "${WORKER_PROC_GUARD_ROOT}"/*) ;;
-                *)
-                    case "${proc_argv[0]}" in
-                        "${WORKER_PROC_GUARD_ROOT}"/*) ;;
-                        *) continue ;;
-                    esac ;;
-            esac
-        fi
         case "${proc_argv[1]:-}" in
             supervise|mcp-relay|lease) continue ;;
         esac
-        printf 'worker process %s still runs %s (argv[1]=%s)' "${proc_pid}" "${exe_target:-${proc_argv[0]}}" "${proc_argv[1]:-none}"
-        return 0
+        why=""
+        if _worker_root_match "${exe_target}" "${roots}"; then
+            why="exe"
+        elif case "${proc_argv[0]}" in /*) true ;; *) false ;; esac \
+            && { _worker_root_match "${proc_argv[0]}" "${roots}" \
+                || _worker_root_match "$(readlink -m "${proc_argv[0]}")" "${roots}"; }; then
+            why="argv0"
+        elif [ "${proc_argv[1]:-}" = "run" ] \
+            && cfg="$(_worker_run_config "${proc_pid}" "${proc_argv[@]:2}")" \
+            && [ -n "${cfg}" ] && [ "${cfg}" = "${conf_real}" ]; then
+            why="config"
+        elif [ -z "${exe_target}" ]; then
+            case "${proc_argv[0]}" in /*) ;; *) why="unclassifiable" ;; esac
+        fi
+        if [ -z "${why}" ]; then
+            ignored="${ignored:+${ignored}, }${proc_pid} ${exe_target:-${proc_argv[0]}}"
+            continue
+        fi
+        found="${found:+${found}; }worker process ${proc_pid} still runs ${exe_target:-${proc_argv[0]}} (argv[1]=${proc_argv[1]:-none}, matched by ${why})"
     done
-    return 1
+    if [ -n "${ignored}" ]; then
+        log "control-worker scan: ignoring non-production canterlot-worker processes outside ${WORKER_BASE} and not on ${WORKER_CONFIG}: ${ignored}" >&2
+    fi
+    [ -n "${found}" ] || return 1
+    printf '%s' "${found}"
 }
 
 # Версия PWA внутри контейнера Caddy: голый sha без JSON-обёртки.
