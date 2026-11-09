@@ -198,6 +198,7 @@ pub async fn run_once(
            and not exists(select 1 from input_attachments ia where ia.attachment_id=a.id)
            and not exists(select 1 from scheduled_job_attachments sa where sa.attachment_id=a.id)
            and not exists(select 1 from block_files bf where bf.attachment_id=a.id and bf.attached_at is not null)
+           and not exists(select 1 from composer_drafts d where d.attachment_ids ? a.id::text)
          order by a.id limit $2",
     )
     .bind(cutoff)
