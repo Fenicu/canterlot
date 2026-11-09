@@ -24,6 +24,26 @@ async function boot(page: import('@playwright/test').Page, count = 40) {
   return { hub, api, id };
 }
 
+/** Замер, переставший меняться между двумя чтениями: прокрутка и виртуализатор догоняют раскладку не в тот же кадр. */
+async function settled<T>(read: () => Promise<T>, same: (a: T, b: T) => boolean): Promise<T> {
+  let last = await read();
+  await expect.poll(async () => {
+    const next = await read();
+    const still = same(next, last);
+    last = next;
+    return still;
+  }).toBe(true);
+  return last;
+}
+
+async function rowAnchor(page: import('@playwright/test').Page, n: number): Promise<{ key: string; y: number }> {
+  return settled(async () => {
+    const key = (await page.locator('[data-row]').nth(n).getAttribute('data-key')) ?? '';
+    const box = await page.locator(`[data-key="${key}"]`).boundingBox();
+    return { key, y: box?.y ?? Number.NaN };
+  }, (a, b) => a.key === b.key && Math.abs(a.y - b.y) <= 0.5);
+}
+
 test('dom_is_bounded_with_10000_items_in_a_chat', async ({ page }) => {
   test.setTimeout(120_000);
   await boot(page, 10_000);
@@ -108,7 +128,7 @@ test('scrolling_down_a_detached_window_loads_newer_pages_back_to_the_tail', asyn
     await page.waitForTimeout(100);
   }
   await expect(jump).toBeHidden();
-  expect(Number(await feed.getAttribute('data-loaded'))).toBeLessThanOrEqual(3000);
+  await expect.poll(async () => Number(await feed.getAttribute('data-loaded'))).toBeLessThanOrEqual(3000);
   await expect(page.locator('[data-row]').last()).toContainText('3200');
 });
 
@@ -153,10 +173,8 @@ test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the
     });
     const feed = page.locator('.feed');
     await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))));
-    const row = page.locator('[data-row]').nth(1);
-    const key = await row.getAttribute('data-key');
-    const before = await row.boundingBox();
+    const before = await rowAnchor(page, 1);
+    const key = before.key;
     await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
     release();
     await expect.poll(async () => {
@@ -170,9 +188,8 @@ test('reading_old_history_during_stream_keeps_the_anchor_within_one_pixel', asyn
   const { hub, api, id } = await boot(page, 80);
   const feed = page.locator('.feed');
   await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 40; });
-  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))));
-  const key = await page.locator('[data-row]').nth(2).getAttribute('data-key');
-  const before = await page.locator(`[data-key="${key}"]`).boundingBox();
+  const before = await rowAnchor(page, 2);
+  const key = before.key;
   const blockId = api.id();
   const scope = `conversation:${id}`;
   hub.append(scope, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
@@ -204,6 +221,8 @@ test('new_messages_pill_appears_off_bottom_and_returns_to_pinned', async ({ page
   const { hub, api, id } = await boot(page, 30);
   const feed = page.locator('.feed');
   await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = Math.max(0, el.scrollTop - 240); });
+  // Событие, пришедшее раньше отрыва от низа, лента просто догонит, и плашка не появится.
+  await expect(feed).not.toHaveAttribute('data-pinned', '');
   const blockId = api.id();
   hub.append(`conversation:${id}`, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
   hub.flush();
@@ -826,7 +845,7 @@ test('feed_after_resync_shows_exact_text_without_a_jump_when_pinned', async ({ p
   canonical.id = blockId;
   api.blocks.set(blockId, { text: 'точно', rev: 1, state: 'final' });
   api.histories.set(id, [...(api.histories.get(id) ?? []), canonical]);
-  const before = await feed.evaluate((el) => el.scrollTop);
+  const before = await settled(() => feed.evaluate((el) => el.scrollTop), (a, b) => Math.abs(a - b) <= 0.5);
   hub.chaos.forceResync('cursor_ahead');
   hub.flush();
   await expect(page.locator('.caret')).toHaveCount(0);

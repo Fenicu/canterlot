@@ -172,7 +172,7 @@ test('owner_messages_list_opens_scrolled_to_the_newest_with_origins_and_times', 
 	// Будильники и события хаба не опорные точки владельца: хаб их не отдаёт.
 	await expect(list.getByText('Сработал будильник')).toHaveCount(0);
 	await expect(list.getByText('Вложений: 1')).toHaveCount(1);
-	expect(await list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+	await expect.poll(() => list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
 });
 
 test('owner_messages_list_has_an_empty_state', async ({ page }) => {
@@ -201,7 +201,7 @@ test('jump_to_an_early_message_loads_only_its_window_and_pauses_following', asyn
 	await expect.poll(async () => Number(await page.locator('.feed').getAttribute('data-loaded'))).toBeLessThan(500);
 	await expect(page.getByRole('button', { name: 'К последним сообщениям' })).toBeVisible();
 	await expect(page.locator('.feed')).not.toHaveAttribute('data-pinned', '');
-	expect(await page.locator('[data-row]').count()).toBeLessThan(80);
+	await expect.poll(() => page.locator('[data-row]').count()).toBeLessThan(80);
 
 	await page.getByRole('button', { name: 'К последним сообщениям' }).click();
 	await expect(page.getByRole('button', { name: 'К последним сообщениям' })).toBeHidden();
@@ -216,7 +216,7 @@ test('owner_messages_list_is_virtualized_with_thousands_of_messages', async ({ p
 	await expect(list).toBeVisible();
 	await expect.poll(async () => page.locator('[data-owner-message]').count()).toBeLessThan(100);
 	await expect(list.getByText('Моё сообщение 3000')).toBeVisible();
-	expect(await list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+	await expect.poll(() => list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
 });
 
 test('owner_messages_refresh_when_the_owner_sends_while_the_panel_is_open', async ({ page }, info) => {

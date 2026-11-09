@@ -221,9 +221,9 @@ test('a_tap_elsewhere_closes_the_tip', async ({ page }) => {
 test('only_one_tooltip_is_open_at_a_time', async ({ page }) => {
   await boot(page);
   const times = answerTimes(page);
-  const count = await times.count();
-  await reveal(page, times.nth(count - 2));
-  await reveal(page, times.nth(count - 1));
+  // Хвост ленты ещё может дорисовываться: индексы с конца, а не снятый заранее count().
+  await reveal(page, times.nth(-2));
+  await reveal(page, times.last());
   await expect(tip(page)).toHaveCount(1);
   await expect(tip(page)).toHaveText(LAST);
 });
@@ -242,6 +242,8 @@ test('the_tip_flips_below_at_the_top_of_the_feed', async ({ page }) => {
   const time = answerTimes(page).first();
   await reveal(page, time);
   await expect(tip(page)).toHaveAttribute('data-placement', 'below');
+  // Вход сдвигает и масштабирует подсказку: меряем после него.
+  await settle(tip(page));
   const [box, anchor] = await Promise.all([tip(page).boundingBox(), time.boundingBox()]);
   expect(box!.y).toBeGreaterThanOrEqual(0);
   expect(box!.y).toBeGreaterThanOrEqual(anchor!.y + anchor!.height);

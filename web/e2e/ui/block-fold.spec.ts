@@ -46,15 +46,23 @@ async function pickMiddleHead(page: Page): Promise<string> {
 	await feed.evaluate((el) => el.scrollBy(0, -el.clientHeight * 3));
 	await expect(feed).not.toHaveAttribute('data-pinned', '');
 	await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-	return feed.evaluate((el) => {
-		const box = el.getBoundingClientRect();
-		const heads = [...el.querySelectorAll<HTMLElement>('.tool > .head')];
-		const head = heads.find((node) => {
-			const top = node.getBoundingClientRect().top;
-			return top > box.top + box.height * 0.25 && top < box.top + box.height * 0.5;
-		})!;
-		return head.closest<HTMLElement>('[data-row]')!.dataset.key!;
-	});
+	// Окно ленты перерисовывается после прокрутки не в фиксированный кадр: ищем, пока шапка не встанет в середину.
+	let key = '';
+	await expect
+		.poll(async () => {
+			key = await feed.evaluate((el) => {
+				const box = el.getBoundingClientRect();
+				const heads = [...el.querySelectorAll<HTMLElement>('.tool > .head')];
+				const head = heads.find((node) => {
+					const top = node.getBoundingClientRect().top;
+					return top > box.top + box.height * 0.25 && top < box.top + box.height * 0.5;
+				});
+				return head?.closest<HTMLElement>('[data-row]')?.dataset.key ?? '';
+			});
+			return key;
+		})
+		.not.toBe('');
+	return key;
 }
 
 /**

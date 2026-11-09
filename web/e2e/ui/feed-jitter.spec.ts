@@ -205,7 +205,7 @@ async function place(page: Page, mode: 'pinned' | 'mid_feed'): Promise<void> {
 	if (mode === 'mid_feed') await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = el.scrollHeight - el.clientHeight - 260; });
 	else await feed.evaluate((el) => { el.scrollTop = el.scrollHeight; });
 	await page.waitForTimeout(900);
-	expect(await page.locator('.sub').count()).toBeGreaterThanOrEqual(2);
+	await expect.poll(() => page.locator('.sub').count()).toBeGreaterThanOrEqual(2);
 }
 
 for (const mode of ['pinned', 'mid_feed'] as const) {

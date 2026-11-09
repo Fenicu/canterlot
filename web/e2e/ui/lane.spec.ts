@@ -168,7 +168,10 @@ test('desktop_pane_opens_and_closes_without_losing_chat_scroll', async ({ page }
 	const stream = page.locator('.feed');
 	await expect(stream).toBeVisible();
 
-	// Measure scroll before opening pane
+	// Замер до открытия панели: лента доезжает до низа, пока строки домериваются.
+	await expect
+		.poll(() => stream.evaluate((node) => Math.round(node.scrollHeight - node.scrollTop - node.clientHeight)))
+		.toBeLessThanOrEqual(2);
 	const initialScroll = await stream.evaluate((node) => node.scrollTop);
 
 	// Open lane pane
@@ -180,9 +183,8 @@ test('desktop_pane_opens_and_closes_without_losing_chat_scroll', async ({ page }
 	await panel.getByRole('button', { name: 'Закрыть боковую панель' }).click();
 	await expect(panel).toHaveCount(0);
 
-	// Measure scroll after closing pane
-	const finalScroll = await stream.evaluate((node) => node.scrollTop);
-	expect(finalScroll).toBe(initialScroll);
+	// Замер после закрытия панели: строки перемериваются под прежнюю ширину не в том же кадре.
+	await expect.poll(() => stream.evaluate((node) => node.scrollTop)).toBe(initialScroll);
 });
 
 test('finished_lane_reads_as_done_with_named_steps_and_the_report_open', async ({ page }) => {
