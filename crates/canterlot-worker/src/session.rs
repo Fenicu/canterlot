@@ -1384,23 +1384,18 @@ impl Worker {
         // Команда могла быть принята в хранилище (квитанция CommandStored уже
         // ушла в хаб), но прошлый сеанс оборвался до передачи её исполнению.
         // Хаб такую команду больше не пришлёт, поэтому в начале каждой попытки
-        // отдаём менеджеру всё принятое и непогашенное. Погашенные команды
-        // хранилище уже не возвращает, а повтор для живых исполнений разбирают
-        // те же проверки, что и дубли от хаба.
-        for command in self
+        // возвращаем принятое и непогашенное в общую очередь: повторный приём
+        // даст `Duplicate`, и менеджер отдаст команду исполнению, если она ещё
+        // не погашена. Очередь разбирается через тот же слот
+        // `execution_operation`, что и новые команды, — повтор не блокирует
+        // пульс, ввод и пакеты журнала.
+        let replay: Vec<Command> = self
             .store
             .call(|slot| Ok(store_mut(slot)?.stored_commands()?))
-            .await?
-        {
-            if exec_enabled || matches!(command.kind, Some(command::Kind::StartExecution(_))) {
-                // `cj_seq` на этом пути не читается: менеджер только решает,
-                // отдать команду или нет.
-                manager
-                    .handle(command, Accept::Redelivered { cj_seq: 0 })
-                    .await
-                    .map_err(|_| WorkerError::Execution)?;
-            }
-        }
+            .await?;
+        commands.extend(replay.into_iter().filter(|command| {
+            exec_enabled || matches!(command.kind, Some(command::Kind::StartExecution(_)))
+        }));
         loop {
             if limits_operation.is_none()
                 && limits_outbound.is_none()

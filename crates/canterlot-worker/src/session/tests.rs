@@ -492,6 +492,46 @@ async fn stored_but_unhanded_command_is_routed_after_reconnect() {
     join.await.unwrap().unwrap();
 }
 
+// Повторная отдача принятой команды идёт через обычный слот исполнения:
+// пока передача ждёт, пульс и приём журнала не останавливаются.
+#[tokio::test]
+async fn replay_does_not_block_the_session_loop_while_handoff_pends() {
+    let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+        capabilities: vec!["exec_v1".to_owned()],
+        ..Default::default()
+    })
+    .await;
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mut worker = Worker::new(hub.config.clone(), store);
+    worker.command_gate = Some(gate.clone());
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    wait_live(&mut state).await;
+    let (command, command_id, _) = cancel_command();
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::Command(command)),
+    })
+    .await;
+    wait_command_stored(&mut hub, &command_id).await;
+    let mut heartbeats = 0;
+    timeout(Duration::from_secs(5), async {
+        while heartbeats < 5 {
+            if let support::Observed::Control(message) = hub.event().await
+                && let Some(control_up::Msg::Heartbeat(_)) = message.msg
+            {
+                heartbeats += 1;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*state.borrow(), SessionState::Live);
+    gate.notify_one();
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+}
+
 // Команда, уже отданная исполнению, после переподключения не исполняется
 // дважды: повторная отдача пропущенных команд не должна дублировать итог.
 #[tokio::test]
