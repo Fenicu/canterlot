@@ -10,7 +10,10 @@ use std::{
     fs, io,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -91,6 +94,8 @@ struct Shared {
     changes: watch::Sender<Snapshot>,
     state_file: PathBuf,
     nproc: u32,
+    /// Ошибка чтения `/proc` уже залогирована: не повторять её каждые 500 мс.
+    liveness_warned: AtomicBool,
 }
 
 /// Работающий сервер; снимок очереди идёт в хаб.
@@ -110,6 +115,7 @@ impl LeaseServer {
             changes: watch::channel(Snapshot::default()).0,
             state_file: config.state_file.clone(),
             nproc: super::nproc(),
+            liveness_warned: AtomicBool::new(false),
         });
         {
             let state = shared.state.lock().expect("lease state");
@@ -158,9 +164,16 @@ fn restore(path: &Path, scheduler: &mut Scheduler<Meta>) -> bool {
         }
     };
     for grant in file.grants {
-        if !is_same_process(grant.wrapper_pid, grant.start_ticks) {
-            tracing::info!(lease_id = %grant.lease_id, "lease holder gone during restart, released");
-            continue;
+        match liveness(grant.wrapper_pid, grant.start_ticks) {
+            Liveness::Alive => {}
+            Liveness::Dead => {
+                tracing::info!(lease_id = %grant.lease_id, "lease holder gone during restart, released");
+                continue;
+            }
+            Liveness::Unknown(error) => {
+                // Ошибка чтения /proc — не доказательство смерти: аренду держим.
+                tracing::warn!(lease_id = %grant.lease_id, %error, "lease holder unreadable, keeping restored lease");
+            }
         }
         scheduler.restore(
             grant.lease_id,
@@ -215,16 +228,58 @@ fn persist(path: &Path, scheduler: &Scheduler<Meta>) {
     }
 }
 
-fn proc_stat(pid: u32) -> Option<(char, u64)> {
-    let text = crate::containment::read_stat(format!("/proc/{pid}/stat")).ok()?;
-    let fields: Vec<_> = text[text.rfind(')')? + 1..].split_whitespace().collect();
-    let state = fields.first()?.chars().next()?;
-    Some((state, fields.get(19)?.parse().ok()?))
+fn proc_stat(pid: u32) -> io::Result<Option<(char, u64)>> {
+    proc_stat_at(Path::new("/proc"), pid)
 }
 
-fn is_same_process(pid: u32, start_ticks: u64) -> bool {
-    proc_stat(pid).is_some_and(|(state, ticks)| ticks == start_ticks && !matches!(state, 'Z' | 'X'))
+/// Состояние и время старта из `<root>/<pid>/stat`. `Ok(None)` — процесса нет или stat
+/// пустой; ошибка чтения — не «процесс умер», а «неизвестно»: при EMFILE нельзя
+/// освобождать все аренды.
+fn proc_stat_at(root: &Path, pid: u32) -> io::Result<Option<(char, u64)>> {
+    let text = match crate::containment::read_stat(root.join(pid.to_string()).join("stat")) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(end) = text.rfind(')') else {
+        return Ok(None);
+    };
+    let fields: Vec<_> = text[end + 1..].split_whitespace().collect();
+    let Some(state) = fields.first().and_then(|field| field.chars().next()) else {
+        return Ok(None);
+    };
+    let Some(ticks) = fields.get(19).and_then(|field| field.parse().ok()) else {
+        return Ok(None);
+    };
+    Ok(Some((state, ticks)))
 }
+
+/// Что говорит `/proc` об обёртке: жива, умерла или прочитать не удалось.
+#[derive(Debug)]
+enum Liveness {
+    Alive,
+    Dead,
+    Unknown(io::Error),
+}
+
+fn classify(stat: io::Result<Option<(char, u64)>>, start_ticks: u64) -> Liveness {
+    match stat {
+        Ok(Some((state, ticks))) if ticks == start_ticks && !matches!(state, 'Z' | 'X') => {
+            Liveness::Alive
+        }
+        Ok(_) => Liveness::Dead,
+        Err(error) => Liveness::Unknown(error),
+    }
+}
+
+fn liveness_at(root: &Path, pid: u32, start_ticks: u64) -> Liveness {
+    classify(proc_stat_at(root, pid), start_ticks)
+}
+
+fn liveness(pid: u32, start_ticks: u64) -> Liveness {
+    classify(proc_stat(pid), start_ticks)
+}
+
 
 fn view(entry: &Entry<Meta>, position: Option<usize>) -> EntryView {
     EntryView {
@@ -298,24 +353,44 @@ impl Shared {
 
     fn sweep(&self) {
         let mut state = self.state.lock().expect("lease state");
-        let dead: Vec<String> = state
+        let now = super::now_ms();
+        let mut dead = Vec::new();
+        let mut unknown = None;
+        for entry in state
             .scheduler
             .holders()
             .iter()
             .chain(state.scheduler.waiters())
-            .filter(|e| !is_same_process(e.meta.wrapper_pid, e.meta.start_ticks))
-            .map(|e| e.id.clone())
-            .collect();
+        {
+            match liveness(entry.meta.wrapper_pid, entry.meta.start_ticks) {
+                Liveness::Alive => {}
+                Liveness::Dead => dead.push(entry.id.clone()),
+                Liveness::Unknown(error) => unknown = Some(error),
+            }
+        }
+        self.report_liveness(unknown);
         if dead.is_empty() {
             return;
         }
-        let now = super::now_ms();
         for id in &dead {
             state.scheduler.release(id, now);
             tracing::info!(lease_id = %id, "lease wrapper died, released");
         }
         persist(&self.state_file, &state.scheduler);
         self.publish(&state);
+    }
+
+    /// Ошибку чтения `/proc` показываем один раз до первого успешного чтения:
+    /// аренды при ней не снимаются, иначе EMFILE обнулил бы всю очередь.
+    fn report_liveness(&self, unknown: Option<io::Error>) {
+        match unknown {
+            Some(error) => {
+                if !self.liveness_warned.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(%error, "lease wrapper state unreadable, keeping leases");
+                }
+            }
+            None => self.liveness_warned.store(false, Ordering::Relaxed),
+        }
     }
 }
 
@@ -471,6 +546,8 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
             };
             for entry in snapshot.holders.iter_mut().chain(&mut snapshot.waiters) {
                 entry.state = proc_stat(entry.wrapper_pid)
+                    .ok()
+                    .flatten()
                     .map(|(state, _)| state.to_string())
                     .unwrap_or_default();
             }
@@ -480,7 +557,12 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
             let attached = {
                 let state = shared.state.lock().expect("lease state");
                 state.scheduler.holder(&lease_id).is_some_and(|entry| {
-                    entry.meta.wrapper_pid == pid && is_same_process(pid, entry.meta.start_ticks)
+                    // Ошибка чтения /proc не отменяет переподключение: pid уже совпал.
+                    entry.meta.wrapper_pid == pid
+                        && !matches!(
+                            liveness(pid, entry.meta.start_ticks),
+                            Liveness::Dead
+                        )
                 })
             };
             if !attached {
@@ -754,6 +836,7 @@ mod tests {
             changes: watch::channel(Snapshot::default()).0,
             state_file: directory.path().join("leases.json"),
             nproc: 4,
+            liveness_warned: AtomicBool::new(false),
         };
         shared.sweep();
         assert_eq!(
@@ -765,6 +848,34 @@ mod tests {
                 .unwrap();
         assert_eq!(saved.grants[0].lease_id, "next");
         assert_eq!(shared.changes.borrow().holders[0].lease_id, "next");
+    }
+
+    #[test]
+    fn unreadable_stat_is_unknown_not_dead() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let stat = |pid: u32, state: char, ticks: u64| {
+            let mut text = format!("{pid} (sh) {state}");
+            for field in 1..=19 {
+                if field == 19 {
+                    text.push_str(&format!(" {ticks}"));
+                } else {
+                    text.push_str(" 0");
+                }
+            }
+            text
+        };
+
+        fs::create_dir(root.join("42")).unwrap();
+        fs::write(root.join("42/stat"), stat(42, 'S', 7)).unwrap();
+        assert!(matches!(liveness_at(root, 42, 7), Liveness::Alive));
+        assert!(matches!(liveness_at(root, 42, 8), Liveness::Dead));
+        assert!(matches!(liveness_at(root, 99, 7), Liveness::Dead));
+
+        // stat не читается (каталог вместо файла): это не смерть обёртки.
+        fs::create_dir(root.join("43")).unwrap();
+        fs::create_dir(root.join("43/stat")).unwrap();
+        assert!(matches!(liveness_at(root, 43, 7), Liveness::Unknown(_)));
     }
 
     #[test]
