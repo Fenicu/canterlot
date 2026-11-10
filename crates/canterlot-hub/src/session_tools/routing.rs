@@ -878,15 +878,10 @@ fn check_window(
             )),
         };
     };
-    if let Some(reset) = reading.resets_at
-        && reset > now
-        && nearest_reset.is_none_or(|known| reset < known)
-    {
-        *nearest_reset = Some(reset);
-    }
     // Расход внутри окна не падает: превышение с известным будущим сбросом остаётся
     // превышением и после того, как показание перестало быть свежим.
     if reading.resets_at.is_some_and(|reset| reset > now) && reading.used_percent > threshold {
+        note_reset(nearest_reset, reading, now);
         return Some((
             "limits_over",
             format!(
@@ -902,23 +897,26 @@ fn check_window(
     if reset_passed || age.to_std().is_ok_and(|age| age > stale) {
         return match unknown {
             UnknownLimits::Allow => None,
-            UnknownLimits::Skip => Some((
-                "limits_unknown",
-                if reset_passed {
-                    format!(
-                        "{} {} limits unknown (reset passed)",
-                        provider,
-                        window_name(window)
-                    )
-                } else {
-                    format!(
-                        "{} {} limits unknown (observed {})",
-                        provider,
-                        window_name(window),
-                        ago(age)
-                    )
-                },
-            )),
+            UnknownLimits::Skip => {
+                note_reset(nearest_reset, reading, now);
+                Some((
+                    "limits_unknown",
+                    if reset_passed {
+                        format!(
+                            "{} {} limits unknown (reset passed)",
+                            provider,
+                            window_name(window)
+                        )
+                    } else {
+                        format!(
+                            "{} {} limits unknown (observed {})",
+                            provider,
+                            window_name(window),
+                            ago(age)
+                        )
+                    },
+                ))
+            }
         };
     }
     if reading.used_percent > threshold {
@@ -940,6 +938,7 @@ fn check_window(
             let pace = forecast.pace_permille_per_hour() / 10.0;
             let projected = reading.used_percent + pace * expected_minutes as f64 / 60.0;
             if projected > threshold {
+                note_reset(nearest_reset, reading, now);
                 return Some((
                     "projected_over_threshold",
                     format!(
@@ -955,6 +954,21 @@ fn check_window(
         }
     }
     None
+}
+
+/// Ближайший сброс среди окон, которые действительно блокируют кандидата: окно,
+/// прошедшее порог, а не любое просмотренное.
+fn note_reset(
+    nearest_reset: &mut Option<DateTime<Utc>>,
+    reading: &WindowReading,
+    now: DateTime<Utc>,
+) {
+    if let Some(reset) = reading.resets_at
+        && reset > now
+        && nearest_reset.is_none_or(|known| reset < known)
+    {
+        *nearest_reset = Some(reset);
+    }
 }
 
 /// Имя окна в причине прогноза: у пятичасового окна дефис, как в контракте PWA.
@@ -2229,6 +2243,113 @@ mod tests {
             );
             assert_eq!(verdict.map(|(verdict, _)| verdict), expected, "{unknown:?}");
         }
+    }
+
+    fn single_candidate_policy() -> Policy {
+        let mut policy = Policy::default();
+        policy.task_types.insert(
+            "one".to_owned(),
+            TaskType {
+                title: "Один".to_owned(),
+                candidates: vec![Candidate {
+                    harness: "opencode".to_owned(),
+                    model: "opencode-go/deepseek-v4.1-flash".to_owned(),
+                    effort: Some("high".to_owned()),
+                    levels: None,
+                    preset: None,
+                    nudge: None,
+                    exclude_workdirs: vec![],
+                    watchdog_minutes: None,
+                }],
+                preset: None,
+                isolated: None,
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
+            },
+        );
+        policy.providers.insert(
+            "opencode".to_owned(),
+            ProviderThresholds {
+                max_weekly_percent: Some(95.0),
+                max_five_hour_percent: Some(95.0),
+                max_monthly_percent: Some(95.0),
+            },
+        );
+        policy
+    }
+
+    fn window_at(percent: f64, reset: chrono::TimeDelta) -> WindowReading {
+        WindowReading {
+            used_percent: percent,
+            observed_at: now() - chrono::TimeDelta::minutes(5),
+            resets_at: Some(now() + reset),
+            forecast: None,
+        }
+    }
+
+    fn route_one(limits: &HashMap<String, ProviderView>) -> Result<Decision, RouteError> {
+        route(RouteInputs {
+            policy: &single_candidate_policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("one"),
+            bypass_limits: false,
+        })
+    }
+
+    #[test]
+    fn only_the_blocking_window_sets_the_nearest_reset() {
+        let limits = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(window_at(10.0, chrono::TimeDelta::hours(4))),
+                five_hour: Some(window_at(10.0, chrono::TimeDelta::hours(1))),
+                monthly: Some(window_at(96.0, chrono::TimeDelta::days(20))),
+                ..ProviderView::default()
+            },
+        )]);
+        let error = route_one(&limits).unwrap_err();
+        let RouteError::NoExecutor { considered, reset } = error else {
+            panic!("expected no executor");
+        };
+        assert_eq!(reset, Some(now() + chrono::TimeDelta::days(20)));
+        assert!(
+            considered
+                .iter()
+                .any(|entry| entry.verdict == "limits_over" && entry.reason.contains("monthly"))
+        );
+        assert_eq!(
+            queue_reason(&considered, reset, now(), Duration::from_secs(6 * 3600)),
+            None,
+            "a reset beyond the horizon is not a reason to queue"
+        );
+    }
+
+    #[test]
+    fn a_blocking_five_hour_window_queues_with_its_own_reset() {
+        let limits = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(window_at(10.0, chrono::TimeDelta::hours(4))),
+                five_hour: Some(window_at(96.0, chrono::TimeDelta::hours(1))),
+                ..ProviderView::default()
+            },
+        )]);
+        let error = route_one(&limits).unwrap_err();
+        let RouteError::NoExecutor { considered, reset } = error else {
+            panic!("expected no executor");
+        };
+        let reset = reset.unwrap();
+        assert_eq!(reset, now() + chrono::TimeDelta::hours(1));
+        assert_eq!(
+            queue_reason(&considered, Some(reset), now(), Duration::from_secs(6 * 3600)),
+            Some("limits")
+        );
+        assert!(no_executor_message(&considered, Some(reset)).contains("13:00 UTC"));
     }
 
     #[test]
