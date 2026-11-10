@@ -1280,6 +1280,8 @@ impl Scheduler {
                     &self.thresholds,
                     Some(&runtime),
                     probe,
+                    &self.limits,
+                    self.service.config.retry_queue_full,
                 )
                 .await
                 {

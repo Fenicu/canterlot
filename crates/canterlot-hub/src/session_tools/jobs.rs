@@ -1,6 +1,8 @@
 //! Задание `session_task`: в его транзакции живёт только очередь адресата, поэтому
 //! две очереди вместе никогда не блокируются.
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -8,6 +10,7 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::{
+    config::LimitsConfig,
     crunch::JobOutcome,
     delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
     scheduler::ClaimedJob,
@@ -42,6 +45,9 @@ struct NoteJob {
     text: String,
     #[serde(default)]
     origin: Option<Value>,
+    /// Ключ идемпотентности заметки: повтор той же паузы не ставит второй ввод.
+    #[serde(default)]
+    dedupe_key: Option<String>,
 }
 
 /// Событие простоя машины: текст собирается при доставке, потому что состояние цели
@@ -130,6 +136,8 @@ pub async fn run_in_tx(
     thresholds: &crate::activity::Thresholds,
     spawn_runtime: Option<&crate::session_tools::spawn_queue::Runtime<'_>>,
     probe: Option<crate::session_tools::probe::PathProbe>,
+    limits: &LimitsConfig,
+    retry_delay: Duration,
 ) -> Result<JobOutcome, SubmitError> {
     let Some(subscriber) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -145,6 +153,19 @@ pub async fn run_in_tx(
             let Ok(event) = serde_json::from_value::<EventJob>(job.payload.clone()) else {
                 return Ok(JobOutcome::Cancelled("invalid_payload"));
             };
+            // Удаление не ждёт лимита: подписки уже нет, второго такого события не будет.
+            if event.state != "deleted"
+                && let Some(at) = crate::crunch::notification_hold_in_tx(
+                    conn,
+                    subscriber,
+                    now,
+                    limits.reset_grace,
+                    retry_delay,
+                )
+                .await?
+            {
+                return Ok(JobOutcome::Retry { at, poll: false });
+            }
             if event.state == IDLE_BACKGROUND {
                 let Some((text, origin)) =
                     idle_background_message(conn, job.owner_id, &event, now).await?
@@ -159,6 +180,7 @@ pub async fn run_in_tx(
                     subscriber,
                     text,
                     Some(origin),
+                    None,
                     now,
                     correlation_id,
                 )
@@ -171,6 +193,7 @@ pub async fn run_in_tx(
                 subscriber,
                 text,
                 Some(origin),
+                None,
                 now,
                 correlation_id,
             )
@@ -193,6 +216,7 @@ pub async fn run_in_tx(
                 subscriber,
                 text,
                 Some(origin),
+                None,
                 now,
                 correlation_id,
             )
@@ -202,12 +226,24 @@ pub async fn run_in_tx(
             let Ok(note) = serde_json::from_value::<NoteJob>(job.payload.clone()) else {
                 return Ok(JobOutcome::Cancelled("invalid_payload"));
             };
+            if let Some(at) = crate::crunch::notification_hold_in_tx(
+                conn,
+                subscriber,
+                now,
+                limits.reset_grace,
+                retry_delay,
+            )
+            .await?
+            {
+                return Ok(JobOutcome::Retry { at, poll: false });
+            }
             deliver(
                 conn,
                 job,
                 subscriber,
                 note.text,
                 note.origin,
+                note.dedupe_key,
                 now,
                 correlation_id,
             )
@@ -549,10 +585,12 @@ async fn deliver(
     subscriber: Uuid,
     text: String,
     origin: Option<Value>,
+    dedupe_key: Option<String>,
     now: DateTime<Utc>,
     correlation_id: Uuid,
 ) -> Result<JobOutcome, SubmitError> {
-    let key = format!("sub:{}", job.id);
+    // Заметка с ключом эпизода не повторяется, даже если задание поставлено дважды.
+    let key = dedupe_key.map_or_else(|| format!("sub:{}", job.id), |key| format!("note:{key}"));
     let existing: Option<Uuid> =
         sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
             .bind(job.owner_id)

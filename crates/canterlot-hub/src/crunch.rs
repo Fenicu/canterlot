@@ -146,6 +146,67 @@ pub fn poll_interval(config: &LimitsConfig, provider: &str, attempt: i32) -> Dur
     }
 }
 
+/// Очередь получателя удерживается лимитом провайдера: до какого времени не отдавать
+/// уведомление. `None` — удержания нет, уведомление идёт сразу.
+///
+/// Ждём того же срока, что и пробуждение «кранча»: `run_at` уже включает `reset_grace`
+/// и сдвигается повторами самой проверки. Если задания пробуждения нет (недельный резерв),
+/// берём срок из удержания; срок в прошлом повторяем через обычную паузу планировщика.
+pub async fn notification_hold_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    now: DateTime<Utc>,
+    grace: Duration,
+    retry_delay: Duration,
+) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+    let holds: Option<Json<Vec<HoldReason>>> =
+        sqlx::query_scalar("select hold_reasons from queue_state where conversation_id=$1")
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(Json(holds)) = holds else {
+        return Ok(None);
+    };
+    let mut earliest: Option<DateTime<Utc>> = None;
+    let mut held = false;
+    for hold in &holds {
+        match hold {
+            HoldReason::QuotaExhausted { wake_at, .. } => {
+                held = true;
+                earliest = Some(earliest.map_or(*wake_at, |at| at.min(*wake_at)));
+            }
+            HoldReason::WeeklyReserve {
+                resets_at: Some(at),
+                ..
+            } => {
+                held = true;
+                earliest = Some(earliest.map_or(*at, |prev| prev.min(*at)));
+            }
+            HoldReason::WeeklyReserve {
+                resets_at: None, ..
+            } => held = true,
+            _ => {}
+        }
+    }
+    if !held {
+        return Ok(None);
+    }
+    let grace = delta(grace)?;
+    let legacy = earliest.map(|at| at + grace);
+    let pending: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "select min(run_at) from scheduled_jobs
+         where conversation_id=$1 and kind='wake' and state='pending'",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let retry_at = now + delta(retry_delay)?;
+    Ok(Some(match pending {
+        Some(at) if at > now => at,
+        _ => legacy.unwrap_or(retry_at).max(retry_at),
+    }))
+}
+
 async fn append(
     conn: &mut PgConnection,
     id: Uuid,

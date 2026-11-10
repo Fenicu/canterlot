@@ -1028,6 +1028,8 @@ async fn deliver_event(
         ),
         None,
         None,
+        &canterlot_hub::config::LimitsConfig::default(),
+        Duration::from_secs(60),
     )
     .await
     .unwrap();

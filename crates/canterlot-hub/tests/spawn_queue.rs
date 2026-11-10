@@ -242,6 +242,8 @@ impl Fx {
             &thresholds,
             Some(&runtime),
             None,
+            &canterlot_hub::config::LimitsConfig::default(),
+            std::time::Duration::from_secs(60),
         )
         .await
         .unwrap();
@@ -1235,6 +1237,8 @@ async fn a_queued_start_publishes_attributes_from_a_separate_job(pool: PgPool) {
         &thresholds,
         None,
         None,
+        &canterlot_hub::config::LimitsConfig::default(),
+        std::time::Duration::from_secs(60),
     )
     .await
     .unwrap();

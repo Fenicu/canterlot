@@ -816,6 +816,8 @@ async fn deleted_event_after_trash_has_only_the_minimal_notice(pool: PgPool) {
         &Thresholds::from(&ActivityConfig::default()),
         None,
         None,
+        &canterlot_hub::config::LimitsConfig::default(),
+        std::time::Duration::from_secs(60),
     )
     .await
     .unwrap();

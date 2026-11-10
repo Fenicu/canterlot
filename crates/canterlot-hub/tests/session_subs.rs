@@ -2110,3 +2110,177 @@ async fn a_stale_idle_background_warning_is_not_delivered(pool: PgPool) {
         "{result}"
     );
 }
+
+fn quota_hold(provider: &str, window: &str, wake_at: DateTime<Utc>) -> HoldReason {
+    HoldReason::QuotaExhausted {
+        provider: provider.into(),
+        window: window.into(),
+        wake_at,
+    }
+}
+
+/// Подписчик сам стоит на паузе лимита: удержание в очереди и ожидающее пробуждение.
+async fn hold_subscriber(
+    pool: &PgPool,
+    p: &Pair,
+    provider: &str,
+    window: &str,
+    wake_at: DateTime<Utc>,
+    wake_run_at: DateTime<Utc>,
+) {
+    sqlx::query("update queue_state set hold_reasons=$2 where conversation_id=$1")
+        .bind(p.subscriber)
+        .bind(json!([quota_hold(provider, window, wake_at)]))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set resume_pending=true where id=$1")
+        .bind(p.subscriber)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
+         values($1,'wake',$2,$3,$4,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(p.owner)
+    .bind(p.subscriber)
+    .bind(wake_run_at)
+    .bind(json!({
+        "provider": provider,
+        "window": window,
+        "hold_key": format!("quota:{provider}:{window}"),
+    }))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Цель устоялась в `quota_paused`: проектор ставит подписчику задание события.
+async fn paused_target(pool: &PgPool, p: &Pair, now: DateTime<Utc>) -> DateTime<Utc> {
+    let wake_at = now + TimeDelta::hours(1);
+    // Удержание видно в состоянии активности только при живом исполнении: без него цель
+    // сразу считается простаивающей.
+    start(pool, p.owner, p.target).await;
+    sqlx::query("update queue_state set hold_reasons=$2 where conversation_id=$1")
+        .bind(p.target)
+        .bind(json!([quota_hold("claude", "five_hour", wake_at)]))
+        .execute(pool)
+        .await
+        .unwrap();
+    refresh_at(pool, p.target, now).await;
+    wake_at
+}
+
+#[derive(sqlx::FromRow)]
+struct ScheduledTask {
+    state: String,
+    run_at: DateTime<Utc>,
+    attempts: i32,
+}
+
+async fn scheduled_tasks(pool: &PgPool, subscriber: Uuid) -> Vec<ScheduledTask> {
+    sqlx::query_as(
+        "select state,run_at,attempts from scheduled_jobs
+         where kind='session_task' and conversation_id=$1 order by created_at,id",
+    )
+    .bind(subscriber)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn notifications_wait_for_a_limit_held_subscriber(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    let wake_at = now + TimeDelta::hours(1);
+    let wake_run_at = wake_at + TimeDelta::seconds(20);
+    hold_subscriber(&pool, &p, "claude", "five_hour", wake_at, wake_run_at).await;
+    subscribe(&pool, &p).await;
+    let paused_at = paused_target(&pool, &p, now).await;
+    assert_eq!(paused_at, wake_at);
+    assert_eq!(scheduled_tasks(&pool, p.subscriber).await.len(), 1);
+
+    scheduler(&pool).tick(now).await.unwrap();
+    assert!(
+        delivered(&pool, p.subscriber).await.is_empty(),
+        "a notification must not enter a queue held by a limit"
+    );
+    let job = &scheduled_tasks(&pool, p.subscriber).await[0];
+    assert_eq!(job.state, "pending");
+    assert_eq!(
+        job.run_at.timestamp_millis(),
+        wake_run_at.timestamp_millis(),
+        "the wake time plus the grace"
+    );
+    assert_eq!(job.attempts, 0);
+
+    // Срок пробуждения прошёл, но удержание ещё не снято: откладывание не тратит попытки.
+    scheduler(&pool).tick(wake_run_at).await.unwrap();
+    assert!(delivered(&pool, p.subscriber).await.is_empty());
+    let job = &scheduled_tasks(&pool, p.subscriber).await[0];
+    assert_eq!(job.state, "pending");
+    assert_eq!(job.attempts, 0, "max_attempts must not be spent on a hold");
+
+    sqlx::query("update queue_state set hold_reasons='[]' where conversation_id=$1")
+        .bind(p.subscriber)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update scheduled_jobs set state='cancelled' where kind='wake' and conversation_id=$1",
+    )
+    .bind(p.subscriber)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let at = scheduled_tasks(&pool, p.subscriber).await[0].run_at;
+    scheduler(&pool)
+        .tick(at + TimeDelta::seconds(1))
+        .await
+        .unwrap();
+    let delivered = delivered(&pool, p.subscriber).await;
+    assert_eq!(delivered.len(), 1, "exactly one delivery after the hold");
+    assert_eq!(delivered[0].1["event"]["kind"], "quota_paused");
+    assert_eq!(scheduled_tasks(&pool, p.subscriber).await[0].state, "fired");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn notifications_are_delivered_immediately_without_a_hold(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    subscribe(&pool, &p).await;
+    paused_target(&pool, &p, now).await;
+    scheduler(&pool).tick(now).await.unwrap();
+    let delivered = delivered(&pool, p.subscriber).await;
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].1["event"]["kind"], "quota_paused");
+    assert_eq!(scheduled_tasks(&pool, p.subscriber).await[0].state, "fired");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_deleted_event_reaches_a_limit_held_subscriber(pool: PgPool) {
+    let p = pair(&pool).await;
+    subscribe(&pool, &p).await;
+    let now = Utc::now();
+    let mut tx = pool.begin().await.unwrap();
+    subs::on_target_deleted_in_tx(&mut tx, p.target, now)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    hold_subscriber(
+        &pool,
+        &p,
+        "claude",
+        "five_hour",
+        now + TimeDelta::hours(1),
+        now + TimeDelta::hours(1) + TimeDelta::seconds(20),
+    )
+    .await;
+    scheduler(&pool).tick(now).await.unwrap();
+    let delivered = delivered(&pool, p.subscriber).await;
+    assert_eq!(delivered.len(), 1, "deletion is not a notification to hold");
+    assert!(delivered[0].0.contains("was deleted"), "{}", delivered[0].0);
+}
