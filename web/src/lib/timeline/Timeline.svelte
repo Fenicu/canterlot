@@ -254,7 +254,9 @@
     held = host && !controller?.pinned ? viewAnchor(host) : null;
   }
 
-  function keepInPlace(closing: boolean): void {
+  function keepInPlace(closing: boolean, auto = false): void {
+    // Прижатая лента сама держится хвоста: автоматическое сворачивание не должно отрывать её от низа.
+    if (auto && controller?.pinned) return;
     controller?.release();
     hold();
     if (!closing) return;

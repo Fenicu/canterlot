@@ -1,4 +1,4 @@
-import { SvelteSet } from "svelte/reactivity";
+import { SvelteMap } from "svelte/reactivity";
 
 const CUT_ABOVE = 60;
 const CUT_EDGE = 20;
@@ -15,30 +15,45 @@ export interface CutView<T> {
   hidden: number;
 }
 
+/** Явный выбор владельца по строке: `true` — раскрыл, `false` — закрыл, `undefined` — не касался. */
+type Choice = boolean | undefined;
+
 /** Что владелец раскрыл в ленте: окно виртуализации снимает строки с экрана, а раскрытое живёт дольше них. */
 export class FeedFolds {
-  readonly #open = new SvelteSet<string>();
+  /** Выбор запоминается в обе стороны: закрытый вручную блок не раскрывается настройкой по умолчанию. */
+  readonly #choice = new SvelteMap<string, boolean>();
   readonly #cuts = new Map<string, Cut | null>();
   readonly #groups = new Map<string, string>();
-  readonly #beforeChange: (closing: boolean) => void;
+  readonly #beforeChange: (closing: boolean, auto?: boolean) => void;
 
   /** `beforeChange` зовётся до правки ленты: раскрытие открывается на месте и не тянет окно к хвосту. */
-  constructor(beforeChange: (closing: boolean) => void = () => undefined) {
+  constructor(beforeChange: (closing: boolean, auto?: boolean) => void = () => undefined) {
     this.#beforeChange = beforeChange;
   }
 
   isOpen(id: string): boolean {
-    return this.#open.has(id);
+    return this.#choice.get(id) === true;
   }
 
-  toggle(id: string): void {
-    this.#beforeChange(this.#open.has(id));
-    if (!this.#open.delete(id)) this.#open.add(id);
+  /** Выбор владельца, отличимый от «не трогали»: по нему решает настройка устройства. */
+  choice(id: string): Choice {
+    return this.#choice.get(id);
+  }
+
+  /** `open` — видимое сейчас состояние строки: тап по раскрытому по умолчанию блоку его закрывает. */
+  toggle(id: string, open = this.isOpen(id)): void {
+    this.#beforeChange(open);
+    this.#choice.set(id, !open);
+  }
+
+  /** Автоматическое сворачивание: прижатая лента остаётся у хвоста, отведённая держится за якорь. */
+  autoChange(closing: boolean): void {
+    this.#beforeChange(closing, true);
   }
 
   reveal(id: string): void {
     this.#beforeChange(false);
-    this.#open.add(`cut:${id}`);
+    this.#choice.set(`cut:${id}`, true);
   }
 
   /** Группа растёт с двух концов: живыми шагами в хвосте и старшей страницей в голове. Имя у неё одно на всё время. */
@@ -58,7 +73,7 @@ export class FeedFolds {
     }
     const cut = this.#cuts.get(id);
     const whole = { shown: list, seam: null, hidden: 0 };
-    if (!cut || this.#open.has(`cut:${id}`)) return whole;
+    if (!cut || this.isOpen(`cut:${id}`)) return whole;
     const from = list.findIndex((item) => item.key === cut.from);
     const to = list.findIndex((item) => item.key === cut.to);
     if (from < 0 || to < from) return whole;
