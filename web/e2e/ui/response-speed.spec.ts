@@ -58,7 +58,7 @@ test('limits_page_lists_median_speed_per_model_for_today_and_the_week', async ({
   const rows = table.locator('tbody tr');
   await expect(rows).toHaveCount(2);
   // Быстрая модель за неделю идёт первой; без ходов сегодня ячейка так и говорит.
-  await expect(rows.nth(0)).toContainText('beam');
+  await expect(rows.nth(0)).toContainText('Beam');
   await expect(rows.nth(0)).toContainText('OpenCode');
   // Модель стоит заголовком строки (th), поэтому ячейки «Сегодня» и «За неделю» — первые две td.
   await expect(rows.nth(0).locator('td').nth(0)).toHaveText('нет ходов');
