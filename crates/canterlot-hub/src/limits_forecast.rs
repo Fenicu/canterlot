@@ -77,6 +77,12 @@ fn rules(window: Window) -> Rules {
             recent_lookback: TimeDelta::hours(6),
             min_recent_span: TimeDelta::hours(2),
         },
+        Window::WeeklyFable => Rules {
+            nominal: TimeDelta::days(7),
+            min_elapsed: TimeDelta::hours(12),
+            recent_lookback: TimeDelta::hours(6),
+            min_recent_span: TimeDelta::hours(2),
+        },
     }
 }
 

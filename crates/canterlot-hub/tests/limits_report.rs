@@ -112,8 +112,10 @@ async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgP
     let claude = &find("claude")["windows"];
     assert_eq!(claude[0]["fresh"], true);
     assert_eq!(claude[1]["window"], "weekly");
-    assert_eq!(claude[2]["window"], "monthly");
+    assert_eq!(claude[2]["window"], "weekly_fable");
     assert_eq!(claude[2]["absent"], true);
+    assert_eq!(claude[3]["window"], "monthly");
+    assert_eq!(claude[3]["absent"], true);
     let codex = &find("codex")["windows"];
     assert_eq!(codex[0]["fresh"], false);
     assert_eq!(codex[0]["stale"], false);

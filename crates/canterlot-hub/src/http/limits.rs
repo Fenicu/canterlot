@@ -66,6 +66,7 @@ pub struct ProviderView {
     pub weekly: Option<WindowView>,
     pub five_hour: Option<WindowView>,
     pub monthly: Option<WindowView>,
+    pub weekly_fable: Option<WindowView>,
     pub weekly_reserve_active: bool,
     /// Сброс недели, в окне которой включился резерв.
     pub weekly_reserve_resets_at: Option<String>,
@@ -81,6 +82,7 @@ impl From<limits::ProviderLimits> for ProviderView {
             weekly: p.weekly.map(window),
             five_hour: p.five_hour.map(window),
             monthly: p.monthly.map(window),
+            weekly_fable: p.weekly_fable.map(window),
             weekly_reserve_active: p.weekly_reserve_active,
             weekly_reserve_resets_at: p.weekly_reserve_resets_at.map(time),
             five_hour_absent: p.five_hour_absent,
@@ -116,6 +118,7 @@ pub struct ProviderSeries {
     pub provider: String,
     pub five_hour: Vec<Point>,
     pub weekly: Vec<Point>,
+    pub weekly_fable: Vec<Point>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct History {
@@ -192,10 +195,14 @@ async fn history(
             points(limits::series(&s.pool, &provider, limits::Window::FiveHour, from, to).await?);
         let weekly =
             points(limits::series(&s.pool, &provider, limits::Window::Weekly, from, to).await?);
+        let weekly_fable = points(
+            limits::series(&s.pool, &provider, limits::Window::WeeklyFable, from, to).await?,
+        );
         series.push(ProviderSeries {
             provider,
             five_hour,
             weekly,
+            weekly_fable,
         });
     }
     Ok(Json(History {

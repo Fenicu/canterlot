@@ -946,7 +946,7 @@ export interface LimitsChanged {
   kind: "limits_changed";
   payload: {
     provider: string;
-    window: "five_hour" | "weekly" | "monthly";
+    window: "five_hour" | "weekly" | "monthly" | "weekly_fable";
     used_permille: number | null;
     resets_at: Time | null;
     observed_at: Time;
@@ -991,7 +991,7 @@ export interface LimitReached {
   kind: "limit_reached";
   payload: {
     provider: string;
-    window: "five_hour" | "weekly";
+    window: "five_hour" | "weekly" | "weekly_fable";
     resets_at: Time | null;
   };
 }

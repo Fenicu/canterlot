@@ -4436,7 +4436,8 @@
               "enum": [
                 "five_hour",
                 "weekly",
-                "monthly"
+                "monthly",
+                "weekly_fable"
               ]
             },
             "used_permille": {
@@ -4618,7 +4619,8 @@
             "window": {
               "enum": [
                 "five_hour",
-                "weekly"
+                "weekly",
+                "weekly_fable"
               ]
             },
             "resets_at": {

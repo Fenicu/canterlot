@@ -2820,6 +2820,7 @@ export interface components {
             five_hour: components["schemas"]["Point"][];
             provider: string;
             weekly: components["schemas"]["Point"][];
+            weekly_fable: components["schemas"]["Point"][];
         };
         /** @description Пороги провайдера в процентах расхода. */
         ProviderThresholds: {
@@ -2848,6 +2849,7 @@ export interface components {
             monthly?: components["schemas"]["WindowView"] | null;
             provider: string;
             weekly?: components["schemas"]["WindowView"] | null;
+            weekly_fable?: components["schemas"]["WindowView"] | null;
             weekly_reserve_active: boolean;
             /** @description Сброс недели, в окне которой включился резерв. */
             weekly_reserve_resets_at?: string | null;

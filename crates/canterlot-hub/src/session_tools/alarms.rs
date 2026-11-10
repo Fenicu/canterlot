@@ -624,6 +624,7 @@ fn window_from_str(value: &str) -> Option<Window> {
         "five_hour" => Some(Window::FiveHour),
         "weekly" => Some(Window::Weekly),
         "monthly" => Some(Window::Monthly),
+        "weekly_fable" => Some(Window::WeeklyFable),
         _ => None,
     }
 }
@@ -1297,6 +1298,7 @@ async fn limit_status_in_tx(
             Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at,data_confidence from provider_limits where provider=$1",
             Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at,data_confidence from provider_limits where provider=$1",
             Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at,data_confidence from provider_limits where provider=$1",
+            Window::WeeklyFable => "select weekly_fable_used_permille,weekly_fable_resets_at,weekly_fable_observed_at,data_confidence from provider_limits where provider=$1",
         })
         .bind(&condition.provider)
         .fetch_optional(&mut *conn)
@@ -2250,6 +2252,7 @@ pub async fn set(
                             Window::Weekly => "select weekly_resets_at,weekly_used_permille from provider_limits where provider=$1",
                             Window::FiveHour => "select five_hour_resets_at,five_hour_used_permille from provider_limits where provider=$1",
                             Window::Monthly => "select monthly_resets_at,monthly_used_permille from provider_limits where provider=$1",
+                            Window::WeeklyFable => "select weekly_fable_resets_at,weekly_fable_used_permille from provider_limits where provider=$1",
                         },
                     )
                     .bind(&provider)

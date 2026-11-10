@@ -13023,7 +13023,8 @@
         "required": [
           "provider",
           "five_hour",
-          "weekly"
+          "weekly",
+          "weekly_fable"
         ],
         "properties": {
           "five_hour": {
@@ -13036,6 +13037,12 @@
             "type": "string"
           },
           "weekly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Point"
+            }
+          },
+          "weekly_fable": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Point"
@@ -13115,6 +13122,16 @@
             "type": "string"
           },
           "weekly": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WindowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "weekly_fable": {
             "oneOf": [
               {
                 "$ref": "#/components/schemas/WindowView"

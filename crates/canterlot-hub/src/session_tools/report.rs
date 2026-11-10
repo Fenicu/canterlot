@@ -129,6 +129,14 @@ fn line(
     for (name, state) in [
         ("five-hour", row.five_hour.as_ref()),
         ("weekly", row.weekly.as_ref()),
+        (
+            "Fable weekly",
+            if row.provider == "claude" {
+                row.weekly_fable.as_ref()
+            } else {
+                None
+            },
+        ),
         ("monthly", row.monthly.as_ref()),
     ] {
         if let Some(state) = state {
@@ -223,6 +231,7 @@ pub async fn report(
                 "windows": [
                     window("five_hour", row.five_hour.as_ref(), now, stale_after),
                     window("weekly", row.weekly.as_ref(), now, stale_after),
+                    window("weekly_fable", row.weekly_fable.as_ref(), now, stale_after),
                     window("monthly", row.monthly.as_ref(), now, stale_after),
                 ],
                 "five_hour_absent": row.five_hour_absent,
@@ -252,6 +261,7 @@ pub async fn report(
                     .five_hour
                     .as_ref()
                     .or(row.weekly.as_ref())
+                    .or(row.weekly_fable.as_ref())
                     .or(row.monthly.as_ref())?
                     .observed_at;
                 Some(format!("{} {}", row.provider, age(at, now)))

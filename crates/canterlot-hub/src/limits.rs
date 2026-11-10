@@ -40,6 +40,7 @@ pub enum Window {
     FiveHour,
     Weekly,
     Monthly,
+    WeeklyFable,
 }
 impl Window {
     pub fn as_str(self) -> &'static str {
@@ -47,6 +48,7 @@ impl Window {
             Self::FiveHour => "five_hour",
             Self::Weekly => "weekly",
             Self::Monthly => "monthly",
+            Self::WeeklyFable => "weekly_fable",
         }
     }
     pub fn from_proto(value: i32) -> Result<Self, sqlx::Error> {
@@ -54,6 +56,7 @@ impl Window {
             Ok(LimitWindow::FiveHour) => Ok(Self::FiveHour),
             Ok(LimitWindow::Weekly) => Ok(Self::Weekly),
             Ok(LimitWindow::Monthly) => Ok(Self::Monthly),
+            Ok(LimitWindow::WeeklyFable) => Ok(Self::WeeklyFable),
             _ => Err(sqlx::Error::InvalidArgument("invalid limit window".into())),
         }
     }
@@ -62,6 +65,7 @@ impl Window {
             Self::FiveHour => LimitWindow::FiveHour as i32,
             Self::Weekly => LimitWindow::Weekly as i32,
             Self::Monthly => LimitWindow::Monthly as i32,
+            Self::WeeklyFable => LimitWindow::WeeklyFable as i32,
         }
     }
 }
@@ -131,6 +135,7 @@ pub struct ProviderLimits {
     pub weekly: Option<WindowState>,
     pub five_hour: Option<WindowState>,
     pub monthly: Option<WindowState>,
+    pub weekly_fable: Option<WindowState>,
     pub weekly_reserve_active: bool,
     pub weekly_reserve_resets_at: Option<DateTime<Utc>>,
     /// У провайдера нет пятичасового окна: клиенты прячут счётчик, история остаётся.
@@ -235,6 +240,7 @@ pub(crate) async fn record_in_tx(
         Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at,data_confidence from provider_limits where provider=$1",
         Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at,data_confidence from provider_limits where provider=$1",
         Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at,data_confidence from provider_limits where provider=$1",
+        Window::WeeklyFable => "select weekly_fable_used_permille,weekly_fable_resets_at,weekly_fable_observed_at,data_confidence from provider_limits where provider=$1",
     }).bind(&o.provider).fetch_optional(&mut *conn).await?;
     let (used, reset, seen, stored_confidence) =
         current.unwrap_or((None, None, None, DataConfidence::Exact.as_str().into()));
@@ -262,6 +268,7 @@ pub(crate) async fn record_in_tx(
             Window::Weekly => "update provider_limits set weekly_used_permille=$2,weekly_resets_at=$3,weekly_observed_at=$4,data_confidence=$5,updated_at=$6 where provider=$1",
             Window::FiveHour => "update provider_limits set five_hour_used_permille=$2,five_hour_resets_at=$3,five_hour_observed_at=$4,five_hour_absent_at=null,data_confidence=$5,updated_at=$6 where provider=$1",
             Window::Monthly => "update provider_limits set monthly_used_permille=$2,monthly_resets_at=$3,monthly_observed_at=$4,data_confidence=$5,updated_at=$6 where provider=$1",
+            Window::WeeklyFable => "update provider_limits set weekly_fable_used_permille=$2,weekly_fable_resets_at=$3,weekly_fable_observed_at=$4,data_confidence=$5,updated_at=$6 where provider=$1",
         }).bind(&o.provider).bind(i32::from(o.used_permille)).bind(o.resets_at).bind(observed_at).bind(o.data_confidence.as_str()).bind(now).execute(&mut *conn).await?;
     }
     if newer && o.window == Window::Weekly {
@@ -371,6 +378,7 @@ pub(crate) async fn emit_changed(
             Window::Weekly => p.weekly,
             Window::FiveHour => p.five_hour,
             Window::Monthly => p.monthly,
+            Window::WeeklyFable => p.weekly_fable,
         };
         let wire = |at: DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let reserve = p.weekly_reserve_resets_at.map(wire);
@@ -589,6 +597,15 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
             .await?,
             monthly: window_state(&mut *conn, &provider, "monthly", Window::Monthly, row, now)
                 .await?,
+            weekly_fable: window_state(
+                &mut *conn,
+                &provider,
+                "weekly_fable",
+                Window::WeeklyFable,
+                row,
+                now,
+            )
+            .await?,
             provider,
             weekly_reserve_active: row.try_get("weekly_reserve_active")?,
             weekly_reserve_resets_at: row.try_get("weekly_reserve_resets_at")?,
@@ -655,7 +672,12 @@ pub(crate) async fn emit_offered_changed(
     )
     .await?;
     for provider in after.iter().filter(|p| !before.contains(p)) {
-        for window in [Window::FiveHour, Window::Weekly, Window::Monthly] {
+        for window in [
+            Window::FiveHour,
+            Window::Weekly,
+            Window::Monthly,
+            Window::WeeklyFable,
+        ] {
             emit_changed(&mut *conn, owner_id, provider, window, correlation_id).await?;
         }
     }
@@ -682,6 +704,7 @@ fn snapshot_message(
             (Window::FiveHour, &p.five_hour),
             (Window::Weekly, &p.weekly),
             (Window::Monthly, &p.monthly),
+            (Window::WeeklyFable, &p.weekly_fable),
         ] {
             if let Some(s) = state {
                 let seen = s.observed_at - offset.unwrap_or_default();

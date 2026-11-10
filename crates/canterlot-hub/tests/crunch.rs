@@ -60,6 +60,7 @@ fn proto_window(window: Window) -> i32 {
         Window::FiveHour => LimitWindow::FiveHour as i32,
         Window::Weekly => LimitWindow::Weekly as i32,
         Window::Monthly => LimitWindow::Monthly as i32,
+        Window::WeeklyFable => LimitWindow::WeeklyFable as i32,
     }
 }
 fn weekly_hold(provider: &str, resets_at: Option<DateTime<Utc>>) -> HoldReason {
