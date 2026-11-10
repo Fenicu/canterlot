@@ -423,6 +423,8 @@ impl Interceptor for Bearer {
 pub struct Worker {
     #[cfg(feature = "fault-injection")]
     probe: crate::fault_injection::SessionProbe,
+    #[cfg(test)]
+    command_gate: Option<std::sync::Arc<tokio::sync::Notify>>,
     config: WorkerConfig,
     store: StoreThread,
     state: watch::Sender<SessionState>,
@@ -601,6 +603,8 @@ impl Worker {
             lease: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
+            #[cfg(test)]
+            command_gate: None,
             config,
             store: StoreThread::new(store),
             state: watch::channel(SessionState::Disconnected).0,
@@ -1676,6 +1680,12 @@ impl Worker {
                     match result? {
                         StoreReply::Command(command, accept) => {
                             dirty |= matches!(accept, Accept::Stored { .. } | Accept::Redelivered { .. } | Accept::Rejected { .. });
+                            // Только для тестов: пауза между приёмом команды
+                            // в хранилище и передачей её исполнению.
+                            #[cfg(test)]
+                            if let Some(gate) = self.command_gate.clone() {
+                                gate.notified().await;
+                            }
                             // Без exec_v1 сохраняется протокол воркеров 1.2a.
                             if exec_enabled || matches!(command.kind, Some(command::Kind::StartExecution(_))) {
                                 execution_operation = Some(Box::pin(async move {

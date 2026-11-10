@@ -382,3 +382,112 @@ async fn a_command_against_a_closed_store_slot_enters_storage_wait_without_panic
     })
     .await;
 }
+
+async fn wait_live(state: &mut watch::Receiver<SessionState>) {
+    timeout(Duration::from_secs(8), async {
+        while *state.borrow_and_update() != SessionState::Live {
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn wait_backoff(state: &mut watch::Receiver<SessionState>) {
+    timeout(Duration::from_secs(8), async {
+        while !matches!(*state.borrow_and_update(), SessionState::Backoff { .. }) {
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+fn cancel_command() -> (Command, String, String) {
+    let target = Uuid::now_v7().to_string();
+    let command = Command {
+        command_id: Uuid::now_v7().to_string(),
+        dispatch_attempt: 1,
+        execution_id: Uuid::now_v7().to_string(),
+        execution_generation: 1,
+        kind: Some(command::Kind::CancelInput(CancelInput {
+            target_command_id: target.clone(),
+            target_dispatch_attempt: 1,
+        })),
+    };
+    let command_id = command.command_id.clone();
+    (command, command_id, target)
+}
+
+async fn wait_command_stored(hub: &mut support::ProtocolHub, command_id: &str) {
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if let support::Observed::Control(message) = hub.event().await
+                && let Some(control_up::Msg::CjRecords(batch)) = message.msg
+                && batch.records.iter().any(|record| {
+                    matches!(
+                        record.body.as_ref().and_then(|body| body.body.as_ref()),
+                        Some(record_body::Body::CommandStored(fact))
+                            if fact.command_id == command_id
+                    )
+                })
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn wait_cancel_won(hub: &mut support::ProtocolHub, target: &str) {
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if let support::Observed::Control(message) = hub.event().await
+                && let Some(control_up::Msg::CjRecords(batch)) = message.msg
+                && batch.records.iter().any(|record| {
+                    matches!(
+                        record.body.as_ref().and_then(|body| body.body.as_ref()),
+                        Some(record_body::Body::CancelWon(fact))
+                            if fact.command_id == target
+                    )
+                })
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+// Команда принята в хранилище и подтверждена хабу, но сеанс оборвался до передачи
+// её исполнению: после переподключения команда должна дойти до исполнения.
+#[tokio::test]
+async fn stored_but_unhanded_command_is_routed_after_reconnect() {
+    let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+        capabilities: vec!["exec_v1".to_owned()],
+        ..Default::default()
+    })
+    .await;
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mut worker = Worker::new(hub.config.clone(), store);
+    worker.command_gate = Some(gate.clone());
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    wait_live(&mut state).await;
+    let (command, command_id, target) = cancel_command();
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::Command(command)),
+    })
+    .await;
+    wait_command_stored(&mut hub, &command_id).await;
+    hub.fail(Status::unavailable("drop")).await;
+    wait_backoff(&mut state).await;
+    wait_live(&mut state).await;
+    gate.notify_one();
+    wait_cancel_won(&mut hub, &target).await;
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+}
