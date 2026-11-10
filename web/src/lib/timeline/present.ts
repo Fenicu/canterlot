@@ -68,12 +68,17 @@ export function deliveryIndex(state: InputUiState): number {
   }
 }
 
+/** Часы живой строки и шапки рассуждения идут от одного счёта: иначе две надписи расходятся. */
+export function liveElapsed(elapsedMs: number): number {
+  return Math.max(0, Math.floor(elapsedMs / 1000) * 1000);
+}
+
 export function liveLineText(
   phase: string,
   elapsedMs: number,
   tool = "",
 ): string {
-  const whole = Math.max(0, Math.floor(elapsedMs / 1000) * 1000);
+  const whole = liveElapsed(elapsedMs);
   const label =
     phase === "error"
       ? "Ошибка в ответе"
