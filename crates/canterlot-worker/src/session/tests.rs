@@ -747,7 +747,23 @@ async fn cj_ack_beyond_the_sent_sequence_keeps_the_store_healthy() {
 
 // Зависший сбор метрик не должен держать переподключение и остановку:
 // результат не нужен сеансу, который уже рвётся.
-struct HangingMetrics(std::sync::Arc<tokio::sync::Notify>);
+struct HangingMetrics {
+    started: std::sync::Arc<tokio::sync::Notify>,
+    calls: std::sync::atomic::AtomicU32,
+}
+
+impl HangingMetrics {
+    fn new() -> Self {
+        Self {
+            started: std::sync::Arc::new(tokio::sync::Notify::new()),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn calls(&self) -> u32 {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 #[async_trait::async_trait]
 impl crate::machine::metrics::MetricsSource for HangingMetrics {
@@ -755,7 +771,8 @@ impl crate::machine::metrics::MetricsSource for HangingMetrics {
         &self,
         _executions: Vec<crate::machine::metrics::ExecutionProbe>,
     ) -> Result<MachineMetrics, crate::machine::metrics::MetricsError> {
-        self.0.notify_one();
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.started.notify_one();
         std::future::pending().await
     }
 }
@@ -768,18 +785,51 @@ async fn a_hung_metrics_sample_does_not_block_reconnect() {
     })
     .await;
     hub.config.machine.metrics_interval = Duration::from_millis(20);
-    let started = std::sync::Arc::new(tokio::sync::Notify::new());
-    let worker = Worker::new(hub.config.clone(), store)
-        .with_metrics_source(std::sync::Arc::new(HangingMetrics(started.clone())));
+    let metrics = std::sync::Arc::new(HangingMetrics::new());
+    let worker = Worker::new(hub.config.clone(), store).with_metrics_source(metrics.clone());
     let mut state = worker.state();
     let (stop, shutdown) = watch::channel(false);
     let join = tokio::spawn(worker.run(shutdown));
     wait_live(&mut state).await;
-    timeout(Duration::from_secs(2), started.notified())
+    timeout(Duration::from_secs(2), metrics.started.notified())
         .await
         .expect("the metrics sample started");
     hub.fail(Status::unavailable("drop")).await;
     wait_backoff(&mut state).await;
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_hung_metrics_sample_is_not_started_again_after_reconnects() {
+    let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+        capabilities: vec!["pilot_v1".to_owned()],
+        ..Default::default()
+    })
+    .await;
+    hub.config.machine.metrics_interval = Duration::from_millis(20);
+    let metrics = std::sync::Arc::new(HangingMetrics::new());
+    let worker = Worker::new(hub.config.clone(), store).with_metrics_source(metrics.clone());
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    wait_live(&mut state).await;
+    timeout(Duration::from_secs(2), metrics.started.notified())
+        .await
+        .expect("the metrics sample started");
+    for _ in 0..3 {
+        hub.fail(Status::unavailable("drop")).await;
+        wait_backoff(&mut state).await;
+        wait_live(&mut state).await;
+        // Даём новому подключению дойти до срока метрик: без общей задачи оно
+        // запустило бы ещё один зависший сбор.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    assert_eq!(
+        metrics.calls(),
+        1,
+        "a hung sample must not be started again across reconnects"
+    );
     stop.send_replace(true);
     join.await.unwrap().unwrap();
 }

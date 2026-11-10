@@ -441,7 +441,10 @@ pub struct Worker {
     live_limits: crate::machine::limits::LiveLimits,
     idle_ticker: crate::machine::limits::IdleTicker,
     metrics: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
-    metrics_task: Option<MetricsFuture>,
+    /// Сбор метрик живёт дольше одного подключения: в полёте не больше одного.
+    /// Эпоха отличает результат, начатый до переподключения.
+    metrics_task: Option<(u64, MetricsFuture)>,
+    metrics_epoch: u64,
     watchdog: std::sync::Arc<crate::machine::watch::Watchdog>,
     workdirs: crate::machine::workdirs::WorkdirSuggester,
     catalogs: std::sync::Arc<catalog::Catalogs>,
@@ -601,6 +604,7 @@ impl Worker {
             idle_ticker,
             metrics: std::sync::Arc::new(metrics),
             metrics_task: None,
+            metrics_epoch: 0,
             workdirs,
             catalogs: std::sync::Arc::new(catalog::Catalogs::new()),
             catalog_retry_delays: None,
@@ -816,6 +820,7 @@ impl Worker {
         let mut read_retries = 0;
         let mut refusal = None;
         loop {
+            self.metrics_epoch = self.metrics_epoch.wrapping_add(1);
             if *shutdown.borrow() {
                 self.transition(SessionState::Disconnected);
                 return Ok(());
@@ -830,9 +835,8 @@ impl Worker {
                 }
                 result = self.attempt(&boot_id, &mut live_since) => result,
             };
-            // Зависший сбор метрик не должен держать переподключение: его результат
-            // относится к оборванной попытке и сеансу больше не нужен.
-            self.metrics_task = None;
+            // Зависший сбор метрик не держит переподключение: задача остаётся в полёте
+            // одна, а её результат из прошлой эпохи будет отброшен при завершении.
             self.manager.as_ref().unwrap().set_attachment_source(None);
             self.manager.as_ref().unwrap().set_media_sink(None);
             self.manager.as_ref().unwrap().set_agent_caller(None);
@@ -1784,17 +1788,20 @@ impl Worker {
                     metrics_at=Instant::now()+self.config.machine.metrics_interval;
                     if self.metrics_task.is_none() {
                         let source=self.metrics.clone();let probes=manager.probes();
-                        self.metrics_task=Some(Box::pin(async move{source.sample(probes).await}));
+                        self.metrics_task=Some((self.metrics_epoch,Box::pin(async move{source.sample(probes).await})));
                     }
                 }
-                result = async {self.metrics_task.as_mut().unwrap().await}, if self.metrics_task.is_some() => {
-                    self.metrics_task=None;
-                    if watch_enabled && let Ok(sample)=&result && let Some(free)=sample.disks.iter().map(|d| d.free_bytes).min() {
+                result = async {self.metrics_task.as_mut().unwrap().1.as_mut().await}, if self.metrics_task.is_some() => {
+                    let (epoch, _) = self.metrics_task.take().expect("metrics task");
+                    // Результат сбора, пережившего переподключение, относится к оборванной
+                    // попытке: метрики исполнений могли устареть, поэтому он отбрасывается.
+                    let current = epoch == self.metrics_epoch;
+                    if current && watch_enabled && let Ok(sample)=&result && let Some(free)=sample.disks.iter().map(|d| d.free_bytes).min() {
                         let (fire, above) = crate::machine::watch::crossed_below(disk_above, free, disk_warn);
                         disk_above = Some(above);
                         if fire { watch_at = Instant::now(); }
                     }
-                    if let Ok(sample)=result && heartbeat_outbound.is_none() && Instant::now()<heartbeat_deadline {try_send_metrics(&tx,sample);}
+                    if current && let Ok(sample)=result && heartbeat_outbound.is_none() && Instant::now()<heartbeat_deadline {try_send_metrics(&tx,sample);}
                 }
                 due = idle_ticker.tick(), if pilot => {
                     for provider in due {
