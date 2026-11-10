@@ -297,7 +297,18 @@ fn question_batch(
     request: Uuid,
     text: &str,
 ) -> JournalRecords {
-    let payload = json!({"questions": [{"id": "q1", "text": text, "is_secret": true}]});
+    question_batch_with(
+        execution,
+        request,
+        &json!({"questions": [{"id": "q1", "text": text, "is_secret": true}]}),
+    )
+}
+
+fn question_batch_with(
+    execution: &executions::StartedExecution,
+    request: Uuid,
+    payload: &Value,
+) -> JournalRecords {
     let bodies = [
         record_body::Body::JournalOpened(JournalOpened {
             execution_id: execution.execution_id.to_string(),
@@ -309,7 +320,7 @@ fn question_batch(
             execution_id: execution.execution_id.to_string(),
             generation: execution.generation as u64,
             kind: "question".into(),
-            payload_json: serde_json::to_vec(&payload).unwrap(),
+            payload_json: serde_json::to_vec(payload).unwrap(),
         }),
     ];
     JournalRecords {
@@ -398,6 +409,27 @@ async fn a_question_of_any_session_is_pushed_once_with_the_key_in_the_header(poo
         [(delegate, "waiting".into(), "sent".into())]
     );
     assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_question_in_another_payload_shape_keeps_its_text(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    open_question(
+        &pool,
+        &s,
+        &question_batch_with(
+            &execution,
+            Uuid::now_v7(),
+            &json!({"ask_question": {"questions": ["Выкатить?"]}}),
+        ),
+    )
+    .await;
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 1);
+    assert_eq!(fake.seen()[0].body["message"], "Ждёт ответа: Выкатить?");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

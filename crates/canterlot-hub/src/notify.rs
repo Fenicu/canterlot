@@ -663,29 +663,37 @@ fn text_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .find(|text| !text.is_empty())
 }
 
+/// Сколько вопросов в запросе: тот же набор форм, что понимает `extract_request_summary`.
+fn question_count(payload: &Value) -> usize {
+    payload
+        .get("questions")
+        .or_else(|| payload.get("ask_question").and_then(|a| a.get("questions")))
+        .or_else(|| payload.get("payload").and_then(|p| p.get("questions")))
+        .and_then(Value::as_array)
+        .map_or(1, Vec::len)
+}
+
 /// Текст пуша о запросе. Ответов в нём нет: запрос ещё открыт, а секретный ответ
 /// хаб и так нигде не показывает.
 pub fn waiting_text(kind: &str, payload: &Value) -> String {
     match kind {
         "question" => {
-            let questions: Vec<&Value> = payload
-                .get("questions")
-                .or_else(|| payload.get("payload").and_then(|p| p.get("questions")))
-                .and_then(Value::as_array)
-                .map(|list| list.iter().collect())
-                .unwrap_or_else(|| vec![payload]);
-            let first = questions
-                .first()
-                .and_then(|q| text_field(q, &["text", "question", "message", "header"]));
-            match first {
+            let first = crate::activity::extract_request_summary(
+                crate::requests::RequestKind::Question,
+                payload,
+            );
+            match first
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+            {
                 Some(text) => {
-                    let more = questions.len().saturating_sub(1);
+                    let more = question_count(payload).saturating_sub(1);
                     let suffix = if more > 0 {
                         format!(" (+{more})")
                     } else {
                         String::new()
                     };
-                    format!("Ждёт ответа: {}{suffix}", clip(text, DETAIL_CHARS))
+                    format!("Ждёт ответа: {}{suffix}", clip(&text, DETAIL_CHARS))
                 }
                 None => "Ждёт ответа".into(),
             }
@@ -814,6 +822,17 @@ mod tests {
         assert_eq!(
             waiting_text("question", &question),
             "Ждёт ответа: Деплоить? (+1)"
+        );
+        assert_eq!(
+            waiting_text(
+                "question",
+                &json!({"ask_question":{"questions":["Деплоить?"]}})
+            ),
+            "Ждёт ответа: Деплоить?"
+        );
+        assert_eq!(
+            waiting_text("question", &json!({"questions":[{"prompt":"Деплоить?"}]})),
+            "Ждёт ответа: Деплоить?"
         );
         assert_eq!(
             waiting_text(
