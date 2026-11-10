@@ -87,15 +87,19 @@ impl<M: Clone> Scheduler<M> {
     }
 
     /// Выданная до рестарта аренда: держится как есть, даже если слотов стало меньше.
+    /// Гейт после подъёма ёмкости по-прежнему занимает весь станок.
     pub fn restore(
         &mut self,
         id: String,
         kind: Kind,
-        weight: u32,
+        mut weight: u32,
         since_ms: u64,
         requested_at_ms: u64,
         meta: M,
     ) {
+        if kind == Kind::Gate {
+            weight = weight.max(self.slots);
+        }
         let seq = self.bump();
         self.holders.push(Entry {
             id,
@@ -330,6 +334,13 @@ mod tests {
                 ],
                 holders: vec!["old", "b1"],
                 waiters: vec!["b2"],
+            },
+            Case {
+                name: "восстановленный гейт занимает выросший станок",
+                slots: 4,
+                steps: vec![Restore("gate", Kind::Gate, 2), Request("b", Kind::Build, 1)],
+                holders: vec!["gate"],
+                waiters: vec!["b"],
             },
             Case {
                 name: "одинаковое время — порядок прихода",
