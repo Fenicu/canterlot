@@ -1110,6 +1110,12 @@ pub async fn spawn(
                         queued_by_route = Some((reason, detail));
                         None
                     }
+                    // Прошедший сброс и неизвестные лимиты при политике skip тоже
+                    // лечатся ожиданием: первый заход должен вести себя как повтор.
+                    None if routing::retry_blocked_by_unknown_limits(&considered) => {
+                        queued_by_route = Some(("limits", detail));
+                        None
+                    }
                     None => {
                         return Err(ToolError::with_message(
                             ToolErrorCode::NoExecutorAvailable,

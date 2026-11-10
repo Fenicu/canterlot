@@ -1041,6 +1041,85 @@ async fn a_blocked_head_does_not_hold_a_ready_later_item(pool: PgPool) {
     assert_eq!(model, "opencode-go/beam-free");
 }
 
+/// Политика с единственным кандидатом opencode и показание недели за прошедшим
+/// сбросом: маршрут либо пропускает его (allow), либо считает лимит неизвестным (skip).
+async fn past_reset_limits_fixture(f: &Fx, unknown: &str) -> Uuid {
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {"bugfix": {"title": "Починка", "candidates": [
+                {"harness":"opencode","model":"opencode-go/deepseek-v4.1-flash","effort":"high"}
+            ]}},
+            "providers": {"opencode": {"max_weekly_percent": 95}},
+            "unknown_limits": unknown
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into provider_limits(provider,weekly_used_permille,weekly_observed_at,weekly_resets_at)
+         values('opencode',960,now(),now()-interval '1 minute')
+         on conflict(provider) do update set weekly_used_permille=960,weekly_observed_at=now(),
+           weekly_resets_at=now()-interval '1 minute'",
+    )
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let queue_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,$5,'limits',now()-interval '1 second')",
+    )
+    .bind(queue_id)
+    .bind(f.owner)
+    .bind(f.parent)
+    .bind(Uuid::now_v7())
+    .bind(json!({"chain_depth":0,"args":{"route":{"task_type":"bugfix"},"brief":"b"}}))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    queue_id
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_queued_spawn_runs_when_the_reading_reset_just_passed(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let queue_id = past_reset_limits_fixture(&f, "allow").await;
+    let outcome = f.run_dequeue(queue_id, Utc::now()).await;
+    assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
+    let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "started");
+    assert!(child.is_some());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_queued_spawn_keeps_waiting_when_the_reading_reset_just_passed(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let queue_id = past_reset_limits_fixture(&f, "skip").await;
+    let outcome = f.run_dequeue(queue_id, Utc::now()).await;
+    assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
+    let (state, reason, _detail, child, not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "queued", "a past reset is not a terminal failure");
+    assert_eq!(reason, "limits");
+    assert!(child.is_none());
+    assert!(not_before > Utc::now());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_first_spawn_waits_when_the_reading_reset_just_passed(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    past_reset_limits_fixture(&f, "skip").await;
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"bugfix"},"brief":"b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "queued", "{answer}");
+    assert_eq!(answer["reason"], "limits", "{answer}");
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_blocked_item_is_rescheduled_and_the_tick_returns(pool: PgPool) {
     let f = Fx::new(pool).await;

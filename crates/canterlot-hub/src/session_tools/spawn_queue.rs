@@ -1083,6 +1083,15 @@ async fn try_start(
                             at: retry_at(runtime.spawn_queue, now),
                         });
                     }
+                    // Лимит без срока сброса впереди (прошедший сброс, неизвестное
+                    // показание) — не постоянный отказ: элемент ждёт до `expires_at`.
+                    _ if !start_now && routing::blocked_by_limits(&considered) => {
+                        return Ok(Attempt::Blocked {
+                            reason: "limits",
+                            detail,
+                            at: retry_at(runtime.spawn_queue, now),
+                        });
+                    }
                     _ => {
                         return Ok(Attempt::Failed {
                             code: "no_executor_available",

@@ -885,17 +885,26 @@ fn check_window(
         *nearest_reset = Some(reset);
     }
     let age = now.signed_duration_since(reading.observed_at);
-    if age.to_std().is_ok_and(|age| age > stale) {
+    let reset_passed = reading.resets_at.is_some_and(|reset| reset <= now);
+    if reset_passed || age.to_std().is_ok_and(|age| age > stale) {
         return match unknown {
             UnknownLimits::Allow => None,
             UnknownLimits::Skip => Some((
                 "limits_unknown",
-                format!(
-                    "{} {} limits unknown (observed {})",
-                    provider,
-                    window_name(window),
-                    ago(age)
-                ),
+                if reset_passed {
+                    format!(
+                        "{} {} limits unknown (reset passed)",
+                        provider,
+                        window_name(window)
+                    )
+                } else {
+                    format!(
+                        "{} {} limits unknown (observed {})",
+                        provider,
+                        window_name(window),
+                        ago(age)
+                    )
+                },
             )),
         };
     }
@@ -1051,6 +1060,24 @@ pub fn queue_reason(
         return Some("limits");
     }
     None
+}
+
+/// Вердикты, которые лечатся ожиданием: лимит, а не постоянная причина отказа.
+pub fn blocked_by_limits(considered: &[Considered]) -> bool {
+    considered.iter().any(|entry| {
+        matches!(
+            entry.verdict.as_str(),
+            "limits_over" | "projected_over_threshold" | "quota_paused" | "limits_unknown"
+        )
+    })
+}
+
+/// Неизвестные лимиты при политике skip лечатся повтором: срока сброса у них нет,
+/// поэтому `queue_reason` сам очередь не назначает.
+pub fn retry_blocked_by_unknown_limits(considered: &[Considered]) -> bool {
+    considered
+        .iter()
+        .any(|entry| entry.verdict == "limits_unknown")
 }
 
 // ---------------------------------------------------------------------------
@@ -2103,6 +2130,35 @@ mod tests {
                 .iter()
                 .any(|entry| entry.reason.contains("observed"))
         );
+    }
+
+    #[test]
+    fn a_reading_after_its_reset_is_unknown_not_over() {
+        let past = WindowReading {
+            used_percent: 96.0,
+            observed_at: now() - chrono::TimeDelta::minutes(10),
+            resets_at: Some(now() - chrono::TimeDelta::minutes(1)),
+            forecast: None,
+        };
+        for (unknown, expected) in [
+            (UnknownLimits::Allow, None),
+            (UnknownLimits::Skip, Some("limits_unknown")),
+        ] {
+            let mut nearest_reset = None;
+            let verdict = check_window(
+                "opencode",
+                "weekly",
+                Some(95.0),
+                Some(&past),
+                unknown,
+                Duration::from_secs(1800),
+                now(),
+                60,
+                &mut nearest_reset,
+            );
+            assert_eq!(verdict.map(|(verdict, _)| verdict), expected, "{unknown:?}");
+            assert_eq!(nearest_reset, None, "a past reset is not a waiting target");
+        }
     }
 
     #[test]
