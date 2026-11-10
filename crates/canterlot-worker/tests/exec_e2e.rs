@@ -656,19 +656,29 @@ impl Fixture {
     }
 
     fn sj(&self) -> (Uuid, u64, Vec<Body>) {
+        self.sj_of(None)
+    }
+
+    /// `known` — журнал исполнения по данным хаба: без снимка на диске первый пересланный
+    /// журнал после `resume` принадлежит прежнему исполнению.
+    fn sj_of(&self, known: Option<Uuid>) -> (Uuid, u64, Vec<Body>) {
         let disk = self.sj_snapshot();
         let batches = self
             .hub
             .as_ref()
             .map(|hub| hub.faults.batches())
             .unwrap_or_default();
-        let journal_id = disk.as_ref().map(|(_, j)| j.id().0).unwrap_or_else(|| {
-            batches
-                .iter()
-                .find(|b| b.records.iter().any(|r| r.sj_fact.is_some()))
-                .map(|b| Uuid::parse_str(&b.journal_id).unwrap())
-                .expect("missing SJ trace")
-        });
+        let journal_id = disk
+            .as_ref()
+            .map(|(_, j)| j.id().0)
+            .or(known)
+            .unwrap_or_else(|| {
+                batches
+                    .iter()
+                    .find(|b| b.records.iter().any(|r| r.sj_fact.is_some()))
+                    .map(|b| Uuid::parse_str(&b.journal_id).unwrap())
+                    .expect("missing SJ trace")
+            });
         let mut last_seq = disk.as_ref().map_or(0, |(_, j)| j.last_seq());
         let mut bodies = BTreeMap::new();
         if let Some((_, journal)) = &disk {
@@ -725,9 +735,18 @@ impl Fixture {
     }
 
     async fn assert_cursor(&self, closed: bool) {
-        let journal = self.sj().0;
+        // Каталог исполнения удаляется сразу после подтверждённого закрытия журнала: к этому
+        // моменту снимка на диске может уже не быть.
+        let known: Option<Uuid> = sqlx::query_scalar(
+            "select journal_id from journal_cursors where execution_id = $1 and kind = 'sj'",
+        )
+        .bind(self.execution)
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap();
+        let journal = self.sj_of(known).0;
         until("SJ cursor caught up", async || {
-            let length = self.sj().1;
+            let length = self.sj_of(known).1;
             sqlx::query_scalar::<_, i64>(
                 "select committed_seq from journal_cursors where journal_id = $1",
             )
