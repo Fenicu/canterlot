@@ -104,12 +104,6 @@ function finite(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function gb(bytes: number): string {
-  const value = bytes / 1e9;
-  const text = Number.isInteger(value) ? String(value) : value.toFixed(1).replace('.', ',');
-  return `${text} ГБ`;
-}
-
 function plural(count: number, forms: [string, string, string]): string {
   return `${count} ${fmt.plural(count, forms)}`;
 }
@@ -224,7 +218,8 @@ export function machineView(
     const free = finite(details.free_gb);
     const pct = finite(details.free_pct);
     if (free !== null || pct !== null) {
-      const parts = [free !== null ? `${fmt.number(free)} ГБ` : '', pct !== null ? `(${fmt.number(pct)} %)` : ''];
+      // Хаб отдаёт округлённые гигабайты; в пузыре все размеры — двоичные, как у `fmt.bytes`.
+      const parts = [free !== null ? fmt.bytes(free * 1e9) : '', pct !== null ? `(${fmt.number(pct)} %)` : ''];
       facts.push({ label: 'Свободно', value: parts.filter(Boolean).join(' ') });
     }
     for (const spot of (details.hotspots ?? []).slice(0, 5)) {
@@ -240,7 +235,7 @@ export function machineView(
     const available = finite(details.available_bytes);
     const total = finite(details.total_bytes);
     if (available !== null && total !== null)
-      facts.push({ label: 'Память', value: `${gb(available)} из ${gb(total)}` });
+      facts.push({ label: 'Память', value: `${fmt.bytes(available)} из ${fmt.bytes(total)}` });
     for (const entry of (details.heaviest ?? []).slice(0, 5)) {
       const title = entry.title?.trim() || `execution ${entry.execution_id ?? ''}`.trim();
       if (title)

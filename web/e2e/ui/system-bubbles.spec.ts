@@ -65,7 +65,7 @@ test('machine_bubbles_show_numbers_and_open_the_machines_screen', async ({ page 
   await boot(page, 'machine');
   const disk = page.locator('article.system[data-event-kind="machine"]').filter({ hasText: 'Машина dev-vm: мало места' });
   await disk.scrollIntoViewIfNeeded();
-  await expect(disk).toContainText('23 ГБ (8 %)');
+  await expect(disk).toContainText('21,4 ГиБ (8 %)');
   await expect(disk).toContainText('/w/target');
   await expect(disk).toContainText('Баннер связи');
 
@@ -74,7 +74,7 @@ test('machine_bubbles_show_numbers_and_open_the_machines_screen', async ({ page 
 
   const memory = page.locator('article.system[data-event-kind="machine"]').filter({ hasText: 'мало памяти' });
   await expect(memory).toHaveAttribute('data-tone', 'warning');
-  await expect(memory).toContainText('3,1 ГБ из 32 ГБ');
+  await expect(memory).toContainText('2,9 ГиБ из 29,8 ГиБ');
   await expect(memory).toContainText('Toolkit');
 
   const leaked = page.locator('article.system[data-event-kind="machine"]').filter({ hasText: 'остались процессы' });

@@ -167,7 +167,7 @@ describe('timeline/system machine', () => {
       tone: 'neutral',
       action: { kind: 'link', label: 'Открыть машины', href: '/machines' }
     });
-    expect(view?.facts).toEqual([{ label: 'Свободно', value: '23 ГБ (8 %)' }]);
+    expect(view?.facts).toEqual([{ label: 'Свободно', value: '21,4 ГиБ (8 %)' }]);
     expect(view?.rows).toEqual([{ title: '/w/target', value: '71,7 ГиБ' }]);
   });
 
@@ -193,7 +193,7 @@ describe('timeline/system machine', () => {
       'текст'
     );
     expect(memory?.tone).toBe('warning');
-    expect(memory?.facts).toEqual([{ label: 'Память', value: '3,1 ГБ из 32 ГБ' }]);
+    expect(memory?.facts).toEqual([{ label: 'Память', value: '2,9 ГиБ из 29,8 ГиБ' }]);
     expect(memory?.rows).toEqual([{ title: 'Toolkit', value: '5,8 ГиБ' }]);
   });
 
@@ -228,6 +228,63 @@ describe('timeline/system machine', () => {
       { label: 'Аренда', value: 'build' },
       { label: 'Держит', value: '95 мин' }
     ]);
+  });
+
+  it('machine_bubbles_use_binary_units_only', () => {
+    const disk = machineView(
+      origin({
+        kind: 'event',
+        event: {
+          kind: 'machine_disk_low',
+          machine_name: 'dev-vm',
+          details: {
+            free_gb: 23,
+            free_pct: 8,
+            hotspots: [{ path: '/w/target', bytes: 77_000_000_000 }]
+          }
+        }
+      }),
+      'текст'
+    );
+    const memory = machineView(
+      origin({
+        kind: 'event',
+        event: {
+          kind: 'machine_mem_low',
+          machine_name: 'dev-vm',
+          details: {
+            available_bytes: 3_100_000_000,
+            total_bytes: 32_000_000_000,
+            heaviest: [{ title: 'Toolkit', rss_bytes: 6_200_000_000 }]
+          }
+        }
+      }),
+      'текст'
+    );
+    const leaked = machineView(
+      origin({
+        kind: 'event',
+        event: {
+          kind: 'machine_processes_leaked',
+          machine_name: 'dev-vm',
+          details: { leaked: [{ comm: 'cargo', title: 'Toolkit', rss_bytes: 600_000_000 }] }
+        }
+      }),
+      'текст'
+    );
+    for (const view of [disk, memory, leaked]) {
+      expect(view).not.toBeNull();
+      const strings = [
+        view!.title,
+        view!.reason ?? '',
+        ...view!.facts.flatMap((fact) => [fact.label, fact.value]),
+        ...view!.rows.flatMap((row) => [row.title, row.value ?? ''])
+      ];
+      for (const value of strings)
+        expect(value.includes(' ГБ') && value.includes(' ГиБ')).toBe(false);
+      expect(strings.join(' ')).not.toContain(' ГБ');
+    }
+    expect(JSON.stringify([disk, memory])).toContain('ГиБ');
   });
 
   it('an old machine event without details falls back', () => {
