@@ -49,6 +49,7 @@
 | Разговор | `block_file_attached` | Файл, отданный агентом, опубликован и прикреплён к блоку |
 | Разговор, список | `conversation_updated` | Атрибуты разговора; в списке также `counts` |
 | Список | `conversation_deleted` | Разговор удалён: `id`, `counts` |
+| Список | `bookmark_changed` | Избранное изменилось: `{conversation_id, target_kind, target_id, bookmarked, bookmark?}`; на добавлении полная закладка, на удалении только признак |
 | Разговор | `conversation_settings_changed` | Настройки следующего хода и их применение |
 | Разговор | `crunch_changed` | Настройки «кранча» и переопределение резерва |
 | Разговор | `crunch_held` | Удержание по лимиту |
@@ -204,6 +205,10 @@
 | `DELETE /api/v1/scheduled/{id}` | Отменить до отправки |
 | `GET /api/v1/conversations/{id}/draft` | Общий черновик: текст, готовые вложения, ревизия и время |
 | `PUT /api/v1/conversations/{id}/draft` | Полная замена черновика; пустой черновик удаляет строку |
+| `GET /api/v1/conversations/{id}/bookmarks` | Все закладки разговора в порядке ленты, до 500 |
+| `PUT /api/v1/conversations/{id}/bookmarks/{kind}/{target_id}` | 201 новая закладка, 200 уже есть; `kind` — `input` или `block` |
+| `DELETE /api/v1/conversations/{id}/bookmarks/{kind}/{target_id}` | 204; повтор безвреден |
+| `GET /api/v1/bookmarks?limit=&cursor=` | Избранное владельца, новые закладки первыми, курсор |
 
 Отложенные сообщения принимают `run_at` от секунды до 366 дней вперёд, `content` как обычный ввод и `attachment_ids` готовых вложений (раздел «Вложения»). Создание возвращает 201, изменение и отмена 200; повтор ключа возвращает сохранённый ответ. Список содержит до 200 сообщений, сначала ожидающие, внутри каждой группы по `run_at` и `id`. `scheduled_changed` несёт полное представление сообщения в области разговора. Планировщик ставит ввод с ключом `sched:<id>` в той же транзакции, в которой помечает задание отправленным; паузы и удержания очереди действуют как обычно.
 
@@ -217,6 +222,18 @@
 
 Соответствие экранам пилота и полный список маршрутов и видов событий: раздел [«Покрытие экранов пилота»](#покрытие-экранов-пилота).
 
+
+### Избранное
+
+Закладка отмечает одно место ленты: ввод владельца (`target_kind: "input"`) или верхний блок ответа (`target_kind: "block"`, только `parent_block_id is null`). Строка `bookmarks` хранит `id`, владельца, разговор, вид и ID цели; текст не дублируется и читается при выдаче, поэтому правка ввода и сжатие истории не оставляют устаревший фрагмент. Одна цель — одна закладка на разговор (`unique (conversation_id, target_kind, target_id)`); область владельца проверяется в каждом запросе.
+
+`PUT /api/v1/conversations/{id}/bookmarks/{kind}/{target_id}` добавляет закладку и отвечает `201` с полной записью; повтор возвращает существующую запись с `200` и не публикует событие. `DELETE` отвечает `204` независимо от того, была ли закладка. Оба маршрута естественно идемпотентны и не требуют ключа. Неизвестный `kind` — `422 invalid_request` в стандартном конверте; чужая, отсутствующая или вложенная цель — `404 not_found`; разговор в корзине для изменения тоже `404`.
+
+`GET /api/v1/conversations/{id}/bookmarks` отдаёт все закладки разговора в порядке целей в ленте (по `seq` цели), не больше 500. `GET /api/v1/bookmarks` отдаёт избранное владельца по всем разговорам, новые закладки первыми (`created_at desc`, `id`), с непрозрачным курсором: `limit` 1–100, по умолчанию 50, ответ `{bookmarks, next_cursor}`. Разговоры в корзине исключены. Если цель исчезла из истории, закладка не показывается и удаляется лениво в том же запросе.
+
+Запись закладки: `id`, `conversation_id`, `target_kind`, `target_id`, `created_at` (время закладки), `target_created_at`, поля перехода как у совпадения поиска — `kind` (`answer` или `message`), `block_id` или `input_id`, `seq` места в ленте и `jump_seq` (у закладки равен `seq`: вложенные блоки не бронируются), `harness`, `model`, `archived`, `origin_kind`; `role` равен `owner` у ввода и `agent` у блока, имя агента — в `agent`; `excerpt` — текст цели без разметки, пробелы склеены, не длиннее 300 символов (пустая строка у блока без текста, например вызова инструмента); в общем списке ещё `conversation_title`. PWA переходит к сообщению так же, как по совпадению поиска: `block_id` (или `input_id`) и `jump_seq` через `history?around=`.
+
+Добавление и удаление публикуют `bookmark_changed` в область списка владельца: `{conversation_id, target_kind, target_id, bookmarked, bookmark?}`. На добавлении `bookmark` — полная запись, на удалении поля нет. Окончательная уборка разговора отдельных событий не шлёт: клиент убирает закладки по `conversation_deleted`.
 
 ## Сессии, группы и чтение данных машин
 
@@ -588,6 +605,7 @@ Pump читает журнал только при доступной ёмкос
 | 31 | Поиск по истории: ответы агента и сообщения ленты с фильтрами, фрагменты и переход к месту в ленте (pilot.md §12.1 п. 6) | `POST /api/v1/search` | – | этап 7 |
 | 27 | Белый список делегирования: какие пары харнесса и модели агент запускает без вопроса, карточка запуска вне списка и приём результата делегированной сессии (§12) | `GET /api/v1/spawn-whitelist`, `PUT /api/v1/spawn-whitelist`, `GET /api/v1/routing-policy`, `PUT /api/v1/routing-policy`, `POST /api/v1/routing-policy/preview`, `GET /api/v1/conversations/{id}/spawn-queue`, `DELETE /api/v1/conversations/{id}/spawn-queue/{queue_id}`, `POST /api/v1/conversations/{id}/spawn-queue/{queue_id}/start-now`, `POST /api/v1/conversations/{id}/accept`, решение по запросу `spawn_approval` (строка 12) | `request_opened` (с видом запроса spawn_approval), `request_closed`, `request_decided`, `conversation_updated`, `routing_policy_changed`, `spawn_queue_changed` | межсессионные инструменты |
 | 29 | Пороги лимитов владельца: жёлтый и красный остаток, недельный резерв; хранение на владельца, сразу применяется к удержаниям и окраске в PWA | `GET /api/v1/limit-settings`, `PUT /api/v1/limit-settings`, `limit_thresholds` в `GET /api/v1/config` | `limits_changed` | лимиты |
+| 32 | Избранное: отметка сообщения владельца или верхнего блока ответа, возврат к месту в ленте с телефона и компьютера, общий список по всем разговорам (pilot.md §12.1) | `GET /api/v1/conversations/{id}/bookmarks`, `PUT /api/v1/conversations/{id}/bookmarks/{kind}/{target_id}`, `DELETE /api/v1/conversations/{id}/bookmarks/{kind}/{target_id}`, `GET /api/v1/bookmarks` (`limit`, `cursor`) | `bookmark_changed` | этап 8 |
 
 `resync_required`, `lagged` и `close` - служебные кадры WSS (`ServerOp`), а не виды событий. `queue_resumed` публикуется при продолжении очереди без оставшихся пауз, вместе с `queue_state_changed`; полезная нагрузка совпадает с `queue_paused` и содержит пустой `pause_reasons`.
 

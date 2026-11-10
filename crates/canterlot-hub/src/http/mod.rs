@@ -29,6 +29,7 @@ use crate::{
 pub mod alarms;
 pub mod attachments;
 pub mod auth;
+pub mod bookmarks;
 mod connection;
 pub mod conversations;
 pub mod crunch;
@@ -178,6 +179,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(search::routes())
         .merge(conversations::routes())
         .merge(drafts::routes())
+        .merge(bookmarks::routes())
         .merge(crunch::routes())
         .merge(groups::routes())
         .merge(presets::routes())

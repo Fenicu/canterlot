@@ -220,7 +220,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 31, "screen coverage rows");
+    assert_eq!(rows, 32, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -298,6 +298,7 @@ fn exempt(method: &str, path: &str) -> bool {
         || (method == "POST" && path == "/api/v1/routing-policy/preview")
         || (method == "POST" && path == "/api/v1/search")
         || (method == "PUT" && path.ends_with("/draft"))
+        || (matches!(method, "PUT" | "DELETE") && path.contains("/bookmarks/"))
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
