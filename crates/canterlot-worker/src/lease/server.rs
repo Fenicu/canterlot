@@ -516,6 +516,69 @@ async fn send(write: &mut OwnedWriteHalf, message: ServerMessage) -> io::Result<
     write.write_all(encode(message).as_bytes()).await
 }
 
+/// Предел строки протокола: сообщения короткие, а клиент без перевода строки не должен
+/// копить память воркера.
+const MAX_LINE: usize = 64 * 1024;
+
+/// Построчный разбор с пределом длины: `BufReader::lines()` без предела копил бы
+/// память по чужому потоку без перевода строки.
+struct CappedLines<R> {
+    reader: BufReader<R>,
+    line: Vec<u8>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> CappedLines<R> {
+    fn new(read: R) -> Self {
+        Self {
+            reader: BufReader::new(read),
+            line: Vec::new(),
+        }
+    }
+
+    async fn next_line(&mut self) -> io::Result<Option<String>> {
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                if self.line.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(self.finish()?));
+            }
+            match available.iter().position(|byte| *byte == b'\n') {
+                Some(end) => {
+                    if self.line.len() + end > MAX_LINE {
+                        return Err(too_long());
+                    }
+                    self.line.extend_from_slice(&available[..end]);
+                    self.reader.consume(end + 1);
+                    return Ok(Some(self.finish()?));
+                }
+                None => {
+                    if self.line.len() + available.len() > MAX_LINE {
+                        return Err(too_long());
+                    }
+                    let taken = available.len();
+                    self.line.extend_from_slice(available);
+                    self.reader.consume(taken);
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) -> io::Result<String> {
+        let mut line = std::mem::take(&mut self.line);
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        String::from_utf8(line)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "lease line is not utf-8"))
+    }
+}
+
+fn too_long() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "lease line too long")
+}
+
 async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Result<()> {
     let peer = stream.peer_cred()?;
     if peer.uid() != uid {
@@ -526,7 +589,7 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
         .and_then(|pid| u32::try_from(pid).ok())
         .ok_or_else(|| io::Error::other("peer pid unknown"))?;
     let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
+    let mut lines = CappedLines::new(read);
     let first = tokio::time::timeout(FIRST_LINE_TIMEOUT, lines.next_line())
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??
@@ -666,7 +729,7 @@ async fn wait(
     shared: &Shared,
     id: &str,
     write: &mut OwnedWriteHalf,
-    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    lines: &mut CappedLines<tokio::net::unix::OwnedReadHalf>,
     changes: &mut watch::Receiver<Snapshot>,
 ) -> bool {
     let mut last: Option<(u32, Vec<String>)> = None;
@@ -748,7 +811,7 @@ async fn wait(
 async fn hold(
     shared: &Shared,
     id: &str,
-    mut lines: tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    mut lines: CappedLines<tokio::net::unix::OwnedReadHalf>,
 ) {
     while let Ok(Some(_)) = lines.next_line().await {}
     shared.release(id, "client closed");
@@ -876,6 +939,36 @@ mod tests {
         fs::create_dir(root.join("43")).unwrap();
         fs::create_dir(root.join("43/stat")).unwrap();
         assert!(matches!(liveness_at(root, 43, 7), Liveness::Unknown(_)));
+    }
+
+    #[tokio::test]
+    async fn capped_lines_bounds_lines_and_keeps_last_partial() {
+        let (mut client, server) = tokio::io::duplex(MAX_LINE * 2);
+        let mut lines = CappedLines::new(server);
+        async fn write(client: &mut tokio::io::DuplexStream, bytes: &[u8]) {
+            tokio::io::AsyncWriteExt::write_all(client, bytes)
+                .await
+                .unwrap();
+        }
+
+        write(&mut client, b"one\r\ntwo").await;
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("one"));
+        drop(client);
+        assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("two"));
+        assert_eq!(lines.next_line().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn capped_lines_drop_overlong_line() {
+        let (mut client, server) = tokio::io::duplex(MAX_LINE * 2);
+        let mut lines = CappedLines::new(server);
+        let long = vec![b'a'; MAX_LINE + 1];
+        tokio::io::AsyncWriteExt::write_all(&mut client, &long)
+            .await
+            .unwrap();
+        let error = lines.next_line().await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("too long"));
     }
 
     #[test]
