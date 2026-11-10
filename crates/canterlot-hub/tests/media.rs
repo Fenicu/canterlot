@@ -1009,6 +1009,28 @@ async fn media_quota_is_per_machine_and_freed_by_deletion(pool: PgPool) {
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
+/// Предел по умолчанию выключен: недели уже собранного медиа не должны внезапно начать
+/// отказывать `share_file` и снимкам после обновления хаба.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn media_quota_is_off_by_default(pool: PgPool) {
+    let mut f = Media::new(pool).await;
+    assert_eq!(f.hub.media_quota_bytes, 0, "the default quota is off");
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    // Больше тестового предела в 1 МиБ: такой файл отклоняется только включённой квотой.
+    let bytes = png(1, 1, 2 * 1024 * 1024, 5);
+    put(
+        &mut client,
+        &f.token,
+        f.header(Uuid::now_v7(), block, &bytes),
+        &bytes,
+    )
+    .await
+    .expect("the default quota accepts the upload");
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap();
+}
+
 // Файл, который сборщик освободил, пока запись BlockFile ждала в журнале: его blob удалён,
 // поэтому поздняя ссылка не появляется, а строка без ссылки уходит вместе с вложением.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

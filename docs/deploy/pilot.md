@@ -270,7 +270,7 @@ idle_poll = "1s"
 [attachments]
 blob_dir = "/var/lib/canterlot/attachments"
 max_concurrent_uploads = 4
-max_media_bytes_per_machine = 10737418240       # общий объём медиа одной машины, байт; 0 выключает
+max_media_bytes_per_machine = 0                 # общий объём медиа одной машины, байт; 0 выключен, включайте после оценки накопленного
 gc_grace = "24h"
 gc_interval = "1h"
 

@@ -160,6 +160,7 @@ fn pilot_sections_parse_with_defaults() {
     assert_eq!(config.scheduler.max_attempts, 20);
     assert_eq!(config.scheduler.idle_poll, D::from_secs(1));
     assert_eq!(config.attachments.max_concurrent_uploads, 4);
+    assert_eq!(config.attachments.max_media_bytes_per_machine, 0);
     assert_eq!(config.attachments.gc_grace, D::from_secs(86400));
     assert_eq!(config.attachments.gc_interval, D::from_secs(3600));
     assert_eq!(config.machines.disk_warn_free_gb, 30);

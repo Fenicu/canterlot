@@ -791,7 +791,7 @@ impl Default for GuardsConfig {
 pub struct AttachmentsConfig {
     pub blob_dir: PathBuf,
     pub max_concurrent_uploads: usize,
-    /// Суммарный объём медиа `PutMedia` одной машины; `0` выключает предел.
+    /// Суммарный объём медиа `PutMedia` одной машины; `0` (по умолчанию) выключает предел.
     pub max_media_bytes_per_machine: u64,
     #[serde(with = "humantime_serde")]
     pub gc_grace: Duration,
@@ -804,7 +804,7 @@ impl Default for AttachmentsConfig {
         Self {
             blob_dir: "data/attachments".into(),
             max_concurrent_uploads: 4,
-            max_media_bytes_per_machine: 10 * 1024 * 1024 * 1024,
+            max_media_bytes_per_machine: 0,
             gc_grace: Duration::from_secs(86400),
             gc_interval: Duration::from_secs(3600),
         }
