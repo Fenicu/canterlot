@@ -122,6 +122,9 @@ struct ShareQueue {
     preparing: usize,
     ready: VecDeque<PendingShare>,
     inflight: Option<Uuid>,
+    /// Недавно истёкшие в полёте: поздний ответ хаба «сохранено» ещё должен
+    /// связать вложение с блоком, иначе оно останется сиротой.
+    expired: HashMap<Uuid, (PendingShare, Instant)>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -992,6 +995,9 @@ impl Supervisor {
     /// Просроченные вызовы получают `hub_timeout`; вызывается после каждого события.
     async fn expire_agent_calls(&mut self) {
         let now = Instant::now();
+        self.shares
+            .expired
+            .retain(|_, (_, at)| now.duration_since(*at) < SHARE_TRANSFER_MAX);
         let expired: Vec<Uuid> = self
             .agent_calls
             .iter()
@@ -1008,17 +1014,21 @@ impl Supervisor {
                 .position(|pending| pending.call_id == call_id)
             {
                 let pending = self.shares.ready.remove(position).expect("found share");
-                if self.shares.inflight == Some(pending.prepared.id) {
+                let share_id = pending.prepared.id;
+                let in_flight = self.shares.inflight == Some(share_id);
+                if in_flight {
                     self.shares.inflight = None;
                     // Загрузка на управляющей службе больше не нужна: её задача снимается.
                     self.send(up::Msg::ShareCancel(
                         canterlot_proto::worker::ipc::ShareCancel {
-                            share_id: pending.prepared.id.to_string(),
+                            share_id: share_id.to_string(),
                         },
                     ));
                 }
-                let _ =
-                    std::fs::remove_file(media::media_path(&self.exec_dir, pending.prepared.id));
+                let _ = std::fs::remove_file(media::media_path(&self.exec_dir, share_id));
+                if in_flight {
+                    self.shares.expired.insert(share_id, (pending, now));
+                }
                 self.pump_share();
             }
             if let Some(adapter) = self.adapter.as_mut() {
@@ -1553,52 +1563,24 @@ impl Supervisor {
         let Ok(id) = Uuid::parse_str(&result.share_id) else {
             return Ok(());
         };
-        if self.shares.inflight != Some(id)
-            || self.shares.ready.front().map(|p| p.prepared.id) != Some(id)
-        {
+        if self.shares.inflight != Some(id) {
+            // Хаб успел сохранить файл, хотя вызов уже получил hub_timeout:
+            // вложение не должно остаться без блока и ссылки в ленте.
+            if let Some((pending, _)) = self.shares.expired.remove(&id)
+                && result.stored
+            {
+                self.record_share(&pending, id)?;
+            }
+            return Ok(());
+        }
+        if self.shares.ready.front().map(|p| p.prepared.id) != Some(id) {
             return Ok(());
         }
         self.shares.inflight = None;
         let pending = self.shares.ready.pop_front().expect("front share");
         let _ = std::fs::remove_file(media::media_path(&self.exec_dir, id));
         if result.stored {
-            // Блок-носитель вложения стоит в том же ходе, что и вызов модели (ход
-            // запомнен при вызове: загрузка может закончиться и после хода): лента
-            // держит его в карточке хода, а не открывает новую. Метка агента — та же,
-            // что у основного агента в адаптерах.
-            self.record(Body::BlockStarted(BlockStarted {
-                block_id: pending.block_id.to_string(),
-                rev: 1,
-                kind: "tool_call".into(),
-                input_command_id: pending.turn.map(|id| id.to_string()).unwrap_or_default(),
-                tool_name: "share_file".into(),
-                summary: if pending.prepared.title.is_empty() {
-                    pending.prepared.name.clone()
-                } else {
-                    pending.prepared.title.clone()
-                },
-                model: String::new(),
-                agent: "orchestrator".into(),
-                ..Default::default()
-            }))?;
-            self.record(Body::BlockFinal(BlockFinal {
-                block_id: pending.block_id.to_string(),
-                rev: 2,
-                text: pending.prepared.note.clone(),
-                ..Default::default()
-            }))?;
-            self.record(Body::BlockFile(canterlot_proto::worker::v1::BlockFile {
-                block_id: pending.block_id.to_string(),
-                attachment_id: id.to_string(),
-                name: pending.prepared.name.clone(),
-                mime: pending.prepared.mime.clone(),
-                size: pending.prepared.size,
-                sha256: pending.prepared.sha256.clone(),
-                title: pending.prepared.title.clone(),
-                note: pending.prepared.note.clone(),
-                width: pending.prepared.width.unwrap_or_default(),
-                height: pending.prepared.height.unwrap_or_default(),
-            }))?;
+            self.record_share(&pending, id)?;
             let kind = if pending.prepared.mime.starts_with("image/") {
                 "image"
             } else if pending.prepared.mime.starts_with("video/") {
@@ -1633,6 +1615,47 @@ impl Supervisor {
             .await;
         }
         self.pump_share();
+        Ok(())
+    }
+
+    fn record_share(&mut self, pending: &PendingShare, id: Uuid) -> Result<(), SupervisorError> {
+        // Блок-носитель вложения стоит в том же ходе, что и вызов модели (ход
+        // запомнен при вызове: загрузка может закончиться и после хода): лента
+        // держит его в карточке хода, а не открывает новую. Метка агента — та же,
+        // что у основного агента в адаптерах.
+        self.record(Body::BlockStarted(BlockStarted {
+            block_id: pending.block_id.to_string(),
+            rev: 1,
+            kind: "tool_call".into(),
+            input_command_id: pending.turn.map(|id| id.to_string()).unwrap_or_default(),
+            tool_name: "share_file".into(),
+            summary: if pending.prepared.title.is_empty() {
+                pending.prepared.name.clone()
+            } else {
+                pending.prepared.title.clone()
+            },
+            model: String::new(),
+            agent: "orchestrator".into(),
+            ..Default::default()
+        }))?;
+        self.record(Body::BlockFinal(BlockFinal {
+            block_id: pending.block_id.to_string(),
+            rev: 2,
+            text: pending.prepared.note.clone(),
+            ..Default::default()
+        }))?;
+        self.record(Body::BlockFile(canterlot_proto::worker::v1::BlockFile {
+            block_id: pending.block_id.to_string(),
+            attachment_id: id.to_string(),
+            name: pending.prepared.name.clone(),
+            mime: pending.prepared.mime.clone(),
+            size: pending.prepared.size,
+            sha256: pending.prepared.sha256.clone(),
+            title: pending.prepared.title.clone(),
+            note: pending.prepared.note.clone(),
+            width: pending.prepared.width.unwrap_or_default(),
+            height: pending.prepared.height.unwrap_or_default(),
+        }))?;
         Ok(())
     }
 
@@ -4114,6 +4137,43 @@ mod tests {
         );
         assert_eq!(supervisor.shares.ready.len(), 1);
         assert_eq!(supervisor.shares.ready[0].call_id, call_id);
+    }
+
+    // Поздний ответ хаба «сохранено» после истечения срока: вложение уже принято,
+    // значит записи блока должны появиться, иначе оно остаётся сиротой.
+    #[tokio::test]
+    async fn late_stored_share_result_records_the_block_after_expiry() {
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        let (share_id, call_id, pending) = queued_share();
+        let block_id = pending.block_id;
+        supervisor.shares.ready.push_back(pending);
+        supervisor.shares.inflight = Some(share_id);
+        supervisor
+            .agent_calls
+            .insert(call_id, Instant::now() - Duration::from_secs(1));
+        let (tx, _rx) = mpsc::channel(8);
+        supervisor.conns.insert(0, Conn { tx, attached: true });
+        supervisor.attached = Some(0);
+        supervisor.expire_agent_calls().await;
+        assert!(supervisor.shares.ready.is_empty(), "the call expired");
+        supervisor
+            .on_share_result(canterlot_proto::worker::ipc::ShareResult {
+                share_id: share_id.to_string(),
+                stored: true,
+                reason: String::new(),
+            })
+            .await
+            .unwrap();
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(
+            bodies.iter().any(|body| matches!(
+                body,
+                Body::BlockFile(file)
+                    if file.attachment_id == share_id.to_string()
+                        && file.block_id == block_id.to_string()
+            )),
+            "a late stored result still links the attachment to its block"
+        );
     }
 
     #[tokio::test]
