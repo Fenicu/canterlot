@@ -112,6 +112,10 @@ fn denied_dir(part: &str) -> bool {
             | ".docker"
             | ".kube"
             | ".aws"
+            | ".azure"
+            | ".password-store"
+            | ".terraform.d"
+            | ".mozilla"
     )
 }
 
@@ -119,7 +123,7 @@ fn denied_dir(part: &str) -> bool {
 fn denied_config_dir(part: &str) -> bool {
     matches!(
         part,
-        "opencode" | "canterlot" | "gh" | "rclone" | "codexbar" | "forgejo"
+        "opencode" | "canterlot" | "gh" | "rclone" | "codexbar" | "forgejo" | "gcloud" | "glab-cli"
     )
 }
 
@@ -170,39 +174,87 @@ fn denied_secret_name(name: &str) -> bool {
         || denied_token_name(&lower)
 }
 
-/// Файлы с токенами и паролями инструментов, где бы они ни лежали.
+/// Файлы с токенами и паролями инструментов, где бы они ни лежали. Шаблоны имён
+/// действуют только на имя самого файла: каталог `token` или `api-keys` ничего не
+/// запрещает.
 fn denied_share_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
     denied_secret_name(name)
+        || denied_env_name(&lower)
         || matches!(
-            name,
+            lower.as_str(),
             ".git-credentials"
                 | ".netrc"
                 | ".npmrc"
                 | ".pypirc"
                 | ".pgpass"
-                | "credentials.toml"
                 | ".bash_history"
                 | ".zsh_history"
+                | "fish_history"
+                | ".python_history"
+                | ".psql_history"
+                | ".mysql_history"
+                | "secret"
+                | "secrets"
+                | "credentials"
+                | ".dockercfg"
+                | ".htpasswd"
+                | ".my.cnf"
+                | "kubeconfig"
         )
-        || name.starts_with(".claude.json")
+        || lower.starts_with(".claude.json")
+        || (lower.starts_with("id_") && !lower.ends_with(".pub"))
+        || lower.ends_with(".ppk")
+        || lower.starts_with("secret.")
+        || lower.starts_with("client_secret")
+        || lower.starts_with("credentials.")
+        || (lower.starts_with("service-account") && lower.ends_with(".json"))
+        || (lower.starts_with("service_account") && lower.ends_with(".json"))
+        || lower.ends_with(".kubeconfig")
+        || lower.ends_with(".tfstate")
+        || lower.ends_with(".tfstate.backup")
+        || lower.ends_with(".tfvars")
+        || lower.ends_with(".jks")
+        || lower.ends_with(".keystore")
+        || lower.ends_with(".kdbx")
+        || lower.ends_with(".sqlite3")
+        || lower.ends_with(".db")
+        || lower.starts_with("krb5cc_")
+}
+
+/// Файлы окружения: `.env`, `.env.*`, `*.env`, `.envrc`; шаблоны отдаются.
+fn denied_env_name(lower: &str) -> bool {
+    if matches!(
+        lower,
+        ".env.example" | ".env.sample" | ".env.template" | ".env.dist"
+    ) {
+        return false;
+    }
+    lower == ".env" || lower.starts_with(".env.") || lower.ends_with(".env") || lower == ".envrc"
+}
+
+/// Запрет по каталогам в любом компоненте пути: секретные каталоги и псевдофайловые
+/// системы. Имена файлов здесь не проверяются — компонент может быть каталогом.
+fn denied_directory_parts(parts: &[&str]) -> bool {
+    parts.iter().any(|part| denied_dir(part))
+        || parts
+            .windows(2)
+            .any(|pair| pair[0] == ".config" && denied_config_dir(pair[1]))
+        || parts
+            .windows(3)
+            .any(|triple| triple == [".local", "share", "keyrings"])
 }
 
 /// Разрешённый путь после раскрытия ссылок в родителях: секретные каталоги
 /// (`~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.codex`, `~/.gemini`, `~/.docker`, `~/.kube`, `~/.aws`,
-/// `~/.config/{opencode,canterlot,gh,rclone}`), секретные имена и любой `.env` не отдаются.
+/// `~/.azure`, `~/.password-store`, `~/.terraform.d`, `~/.mozilla`,
+/// `~/.config/{opencode,canterlot,gh,rclone,gcloud,glab-cli}`, `~/.local/share/keyrings`),
+/// секретные имена последнего компонента и любой `.env` не отдаются.
 fn denied_parts(parts: &[&str]) -> bool {
-    if parts.iter().any(|part| denied_dir(part)) {
-        return true;
-    }
-    if parts
-        .windows(2)
-        .any(|pair| pair[0] == ".config" && denied_config_dir(pair[1]))
-    {
-        return true;
-    }
-    parts
-        .last()
-        .is_some_and(|name| denied_name(name) || denied_share_name(name))
+    denied_directory_parts(parts)
+        || parts
+            .last()
+            .is_some_and(|name| denied_name(name) || denied_share_name(name))
 }
 
 /// Псевдофайловые системы: `/proc/<pid>/environ` проходит все проверки дескриптора.
@@ -419,10 +471,20 @@ fn path_of_names(names: &[String]) -> PathBuf {
     path
 }
 
-/// Секретное имя или псевдофайловая система в раскрытом префиксе: дальше не идём.
-fn refuse_names(names: &[String]) -> Result<(), ShareError> {
+/// Запрет по каталогам в раскрытом префиксе: секретные каталоги и псевдофайловые
+/// системы. Имена файлов здесь не проверяются — префикс может быть каталогом.
+fn refuse_directories(names: &[String]) -> Result<(), ShareError> {
     let parts: Vec<&str> = names.iter().map(String::as_str).collect();
-    if denied_parts(&parts) || denied_system(&path_of_names(names)) {
+    if denied_directory_parts(&parts) || denied_system(&path_of_names(names)) {
+        return Err(ShareError::Denied);
+    }
+    Ok(())
+}
+
+/// Имя самого файла: шаблоны токенов, ключей и секретов действуют только на
+/// последний компонент пути.
+fn refuse_file_name(name: &str) -> Result<(), ShareError> {
+    if denied_name(name) || denied_share_name(name) {
         return Err(ShareError::Denied);
     }
     Ok(())
@@ -463,7 +525,7 @@ fn refuse_component_names(parts: &[OsString]) -> Result<(), ShareError> {
             None => return Ok(()),
         }
     }
-    if denied_parts(&names) {
+    if denied_directory_parts(&names) {
         return Err(ShareError::Denied);
     }
     Ok(())
@@ -490,12 +552,12 @@ fn expand_link(
         let (root, depth) = root_prefix(&parts, roots).ok_or(outside)?;
         let canonical = fs::canonicalize(&root).map_err(resolve_error)?;
         let root_names = resolved_names(&canonical)?;
-        refuse_names(&root_names)?;
+        refuse_directories(&root_names)?;
         let rest = &parts[depth..];
         let mut projected = root_names.clone();
         for part in rest {
             projected.push(part.to_str().ok_or(ShareError::Unreadable)?.to_owned());
-            refuse_names(&projected)?;
+            refuse_directories(&projected)?;
         }
         *root_depth = root_names.len();
         *names = root_names;
@@ -522,7 +584,7 @@ fn expand_link(
                         );
                     }
                     projected.push(name.to_owned());
-                    refuse_names(&projected)?;
+                    refuse_directories(&projected)?;
                     pending.push(part.to_os_string());
                 }
                 Component::ParentDir => {
@@ -555,7 +617,7 @@ fn open_beneath(
     let canonical = fs::canonicalize(&root).map_err(resolve_error)?;
     let mut names = resolved_names(&canonical)?;
     let mut root_depth = names.len();
-    refuse_names(&names)?;
+    refuse_directories(&names)?;
     let mut stack = vec![nofollow::open_dir(&canonical).map_err(open_error)?];
     let mut pending: VecDeque<OsString> = rest
         .components()
@@ -575,10 +637,10 @@ fn open_beneath(
         // `alias -> .cursor` отвечал бы `Missing` при отсутствующем `.cursor`.
         let mut projected = names.clone();
         projected.push(part.to_owned());
-        refuse_names(&projected)?;
+        refuse_directories(&projected)?;
         if pending.is_empty() {
-            // Повторная проверка окончательного раскрытого пути относительно корня.
-            refuse_names(&projected[root_depth..])?;
+            // Имя файла проверяется только на последнем компоненте пути.
+            refuse_file_name(part)?;
             if !inside_roots(&path_of_names(&projected), roots) {
                 return Err(outside);
             }
@@ -941,6 +1003,153 @@ mod tests {
                 String::new()
             )
             .unwrap_err(),
+            ShareError::Denied
+        );
+    }
+
+    #[test]
+    fn refuses_common_secret_file_names() {
+        let dir = dir();
+        let denied = [
+            // Окружение: любые варианты, кроме шаблонов.
+            ".env",
+            ".env.local",
+            ".env.production",
+            "prod.env",
+            ".envrc",
+            // Ключи SSH: любое `id_*` без `.pub`, плюс PuTTY.
+            "id_ed25519",
+            "id_ed25519_sk",
+            "id_ecdsa_sk",
+            "id_rsa.bak",
+            "id_rsa.old",
+            "backup.ppk",
+            // Секреты.
+            "secret",
+            "secret.json",
+            "secrets",
+            "client_secret.json",
+            "service-account.json",
+            "service_account_1.json",
+            // Учётные данные.
+            "credentials",
+            "credentials.yml",
+            ".dockercfg",
+            ".htpasswd",
+            ".my.cnf",
+            ".netrc",
+            ".pgpass",
+            "kubeconfig",
+            "prod.kubeconfig",
+            // Инфраструктура и хранилища ключей.
+            "terraform.tfstate",
+            "terraform.tfstate.backup",
+            "prod.tfvars",
+            "app.jks",
+            "app.keystore",
+            "app.kdbx",
+            "app.p12",
+            "app.pfx",
+            // Базы.
+            "app.sqlite3",
+            "app.db",
+            // Истории.
+            "fish_history",
+            ".python_history",
+            ".psql_history",
+            ".mysql_history",
+            ".bash_history",
+            ".zsh_history",
+            // Билеты Kerberos.
+            "krb5cc_1000",
+        ];
+        for name in denied {
+            let path = dir.path().join(name);
+            fs::write(&path, b"secret").unwrap();
+            assert_eq!(
+                share(&path, Some(dir.path())).unwrap_err(),
+                ShareError::Denied,
+                "{name}"
+            );
+        }
+        for name in [
+            ".env.example",
+            ".env.sample",
+            ".env.template",
+            ".env.dist",
+            "id_ed25519.pub",
+        ] {
+            let path = dir.path().join(name);
+            fs::write(&path, b"public").unwrap();
+            assert!(
+                share(&path, Some(dir.path())).is_ok(),
+                "{name} must stay shareable"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_secret_directories_and_everything_beneath_them() {
+        let home = dir();
+        for path in [
+            ".azure/credentials",
+            ".password-store/site.gpg",
+            ".terraform.d/plugins",
+            ".mozilla/profile",
+            ".config/gcloud/access_tokens.db",
+            ".config/glab-cli/config.yml",
+            ".local/share/keyrings/login.keyring",
+        ] {
+            let path = home.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"secret").unwrap();
+            assert_eq!(
+                share(&path, Some(home.path())).unwrap_err(),
+                ShareError::Denied,
+                "{}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn file_name_patterns_apply_only_to_the_final_component() {
+        let workdir = dir();
+        for path in [
+            "src/token/report.md",
+            "tokens/usage.csv",
+            "api-keys/README.md",
+            "certs.key/notes.txt",
+            "locks/report.lock/data.md",
+        ] {
+            let path = workdir.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"report").unwrap();
+            assert!(
+                share(&path, Some(workdir.path())).is_ok(),
+                "{} must stay shareable",
+                path.display()
+            );
+        }
+        // Рабочий каталог с «секретным» именем не запрещает файлы внутри него.
+        let named = workdir.path().join("api-key-manager");
+        fs::create_dir(&named).unwrap();
+        let notes = named.join("notes.md");
+        fs::write(&notes, b"notes").unwrap();
+        assert!(share(&notes, Some(&named)).is_ok());
+
+        // Настоящий секрет по-прежнему закрыт на последнем компоненте.
+        let env = workdir.path().join(".env.local");
+        fs::write(&env, b"A=1").unwrap();
+        assert_eq!(
+            share(&env, Some(workdir.path())).unwrap_err(),
+            ShareError::Denied
+        );
+        let ssh = workdir.path().join(".ssh/config");
+        fs::create_dir_all(ssh.parent().unwrap()).unwrap();
+        fs::write(&ssh, b"Host *").unwrap();
+        assert_eq!(
+            share(&ssh, Some(workdir.path())).unwrap_err(),
             ShareError::Denied
         );
     }
