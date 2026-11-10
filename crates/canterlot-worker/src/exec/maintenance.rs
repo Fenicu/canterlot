@@ -195,14 +195,11 @@ pub(crate) fn trash_root(data_dir: &Path) -> PathBuf {
     data_dir.join("worktrees").join(TRASH_DIR)
 }
 
-/// Последняя запись сборки; без каталогов сборки — время самого `target`.
+/// Последняя запись сборки cargo; у каталога без `CACHEDIR.TAG` возраста нет.
 pub(crate) fn build_newest(target: &Path) -> Option<SystemTime> {
-    crate::machine::hotspots::target_newest(target).or_else(|| {
-        fs::symlink_metadata(target)
-            .ok()
-            .filter(|meta| meta.is_dir())
-            .and_then(|meta| meta.modified().ok())
-    })
+    crate::machine::hotspots::is_cargo_target(target)
+        .then(|| crate::machine::hotspots::target_newest(target))
+        .flatten()
 }
 
 pub(crate) fn build_candidates(
@@ -230,7 +227,9 @@ pub(crate) fn build_candidates(
             continue;
         }
         let worktree = entry.path();
-        let Some(target) = direct_dir(&worktree, "target") else {
+        let Some(target) = direct_dir(&worktree, "target")
+            .filter(|target| crate::machine::hotspots::is_cargo_target(target))
+        else {
             continue;
         };
         let Some(newest) = build_newest(&target) else {
@@ -455,6 +454,11 @@ pub(crate) fn stage_build(
     let Some(target) = direct_dir(worktree, "target") else {
         return Ok(None);
     };
+    // Каталог мог измениться между перечислением и переименованием: без подписи
+    // это не кэш cargo, а обычный каталог репозитория.
+    if !crate::machine::hotspots::is_cargo_target(&target) {
+        return Ok(None);
+    }
     let mut doomed = Vec::new();
     match grade {
         Grade::Released => {
@@ -550,6 +554,13 @@ mod tests {
         fs::File::open(path).unwrap().set_modified(old).unwrap();
     }
 
+    /// Подпись настоящего кэша cargo: без неё `target` — обычный каталог.
+    const TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55";
+
+    fn cargo_tag(target: &Path) {
+        fs::write(target.join("CACHEDIR.TAG"), TAG).unwrap();
+    }
+
     fn old_tree(path: &Path) {
         old(path);
         if let Ok(entries) = fs::read_dir(path) {
@@ -587,8 +598,11 @@ mod tests {
         let idle = Uuid::now_v7();
         let idle_tree = worktrees.join(idle.to_string());
         fs::create_dir_all(idle_tree.join("target/debug")).unwrap();
+        cargo_tag(&idle_tree.join("target"));
+        fs::create_dir_all(idle_tree.join("target/debug/deps")).unwrap();
         fs::create_dir_all(idle_tree.join("node_modules/.cache")).unwrap();
         fs::write(idle_tree.join("target/debug/old"), "old").unwrap();
+        fs::write(idle_tree.join("target/debug/deps/dep"), "dep").unwrap();
         fs::write(idle_tree.join("node_modules/.cache/old"), "old").unwrap();
         fs::write(idle_tree.join("keep.txt"), "keep").unwrap();
         old_tree(&idle_tree.join("target"));
@@ -597,15 +611,17 @@ mod tests {
 
         let live = Uuid::now_v7();
         let live_tree = worktrees.join(live.to_string());
-        fs::create_dir_all(live_tree.join("target")).unwrap();
-        fs::write(live_tree.join("target/old"), "old").unwrap();
+        fs::create_dir_all(live_tree.join("target/debug/deps")).unwrap();
+        cargo_tag(&live_tree.join("target"));
+        fs::write(live_tree.join("target/debug/deps/old"), "old").unwrap();
         old_tree(&live_tree.join("target"));
         let live_conversation = live.to_string();
 
         let fresh = Uuid::now_v7();
         let fresh_tree = worktrees.join(fresh.to_string());
-        fs::create_dir_all(fresh_tree.join("target")).unwrap();
-        fs::write(fresh_tree.join("target/new"), "new").unwrap();
+        fs::create_dir_all(fresh_tree.join("target/debug/deps")).unwrap();
+        cargo_tag(&fresh_tree.join("target"));
+        fs::write(fresh_tree.join("target/debug/deps/new"), "new").unwrap();
 
         let foreign = worktrees.join("not-a-conversation");
         fs::create_dir_all(foreign.join("target")).unwrap();
@@ -622,8 +638,9 @@ mod tests {
 
         let cache_link = Uuid::now_v7();
         let cache_tree = worktrees.join(cache_link.to_string());
-        fs::create_dir_all(cache_tree.join("target")).unwrap();
-        fs::write(cache_tree.join("target/old"), "old").unwrap();
+        fs::create_dir_all(cache_tree.join("target/debug/deps")).unwrap();
+        cargo_tag(&cache_tree.join("target"));
+        fs::write(cache_tree.join("target/debug/deps/dep"), "dep").unwrap();
         old_tree(&cache_tree.join("target"));
         let cache_outside = root.path().join("cache-outside");
         fs::create_dir_all(&cache_outside).unwrap();
@@ -649,8 +666,8 @@ mod tests {
         assert!(!idle_tree.join("target").exists());
         assert!(!idle_tree.join("node_modules/.cache").exists());
         assert!(idle_tree.join("keep.txt").exists());
-        assert!(live_tree.join("target/old").exists());
-        assert!(fresh_tree.join("target/new").exists());
+        assert!(live_tree.join("target/debug/deps/old").exists());
+        assert!(fresh_tree.join("target/debug/deps/new").exists());
         assert!(foreign.join("target/old").exists());
         assert!(outside.join("keep").exists());
         assert!(linked_tree.join("target").is_symlink());
@@ -658,6 +675,134 @@ mod tests {
         assert!(cache_tree.join("node_modules").is_symlink());
         assert!(cache_outside.exists());
         assert_eq!(fs::read_dir(&trash).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn untagged_target_is_not_a_released_candidate() {
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let data = root.path().join("data");
+        let worktree = data.join("worktrees").join(Uuid::now_v7().to_string());
+        fs::create_dir_all(worktree.join("target/src")).unwrap();
+        fs::write(worktree.join("target/src/main.rs"), "fn main() {}").unwrap();
+        fs::write(worktree.join("target/Makefile"), "all:").unwrap();
+        old_tree(&worktree.join("target"));
+        old(&worktree);
+        let trash = trash_root(&data);
+
+        let candidates =
+            build_candidates(&data, SystemTime::now(), Duration::from_secs(6 * 3600)).unwrap();
+        assert!(
+            candidates.is_empty(),
+            "an untagged target is not a cargo build directory"
+        );
+        assert!(
+            stage_build(&worktree, Grade::Released, &trash)
+                .unwrap()
+                .is_none()
+        );
+        assert!(worktree.join("target/src/main.rs").exists());
+        assert!(worktree.join("target/Makefile").exists());
+        assert!(!trash.exists());
+    }
+
+    #[test]
+    fn untagged_target_keeps_idle_output() {
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let worktree = root.path().join("wt");
+        let target = worktree.join("target");
+        fs::create_dir_all(target.join("debug/incremental/crate-abc")).unwrap();
+        fs::create_dir_all(target.join("lint/debug")).unwrap();
+        fs::write(target.join("debug/incremental/crate-abc/q"), "q").unwrap();
+        fs::write(target.join("lint/debug/out"), "out").unwrap();
+        old_tree(&target);
+        let trash = root.path().join("trash");
+
+        assert!(
+            stage_build(&worktree, Grade::Idle, &trash)
+                .unwrap()
+                .is_none()
+        );
+        assert!(target.join("debug/incremental/crate-abc/q").exists());
+        assert!(target.join("lint/debug/out").exists());
+        assert!(!trash.exists());
+    }
+
+    #[test]
+    fn only_a_regular_cachedir_tag_with_the_signature_makes_target_a_candidate() {
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let data = root.path().join("data");
+        let worktrees = data.join("worktrees");
+        let trash = trash_root(&data);
+
+        let wrong = worktrees.join(Uuid::now_v7().to_string());
+        fs::create_dir_all(wrong.join("target/debug")).unwrap();
+        fs::write(wrong.join("target/CACHEDIR.TAG"), "not a signature").unwrap();
+        fs::write(wrong.join("target/debug/old"), "old").unwrap();
+        old_tree(&wrong.join("target"));
+
+        let valid = root.path().join("valid.tag");
+        fs::write(&valid, TAG).unwrap();
+        let linked = worktrees.join(Uuid::now_v7().to_string());
+        fs::create_dir_all(linked.join("target/debug")).unwrap();
+        std::os::unix::fs::symlink(&valid, linked.join("target/CACHEDIR.TAG")).unwrap();
+        fs::write(linked.join("target/debug/old"), "old").unwrap();
+        old_tree(&linked.join("target"));
+
+        let candidates =
+            build_candidates(&data, SystemTime::now(), Duration::from_secs(6 * 3600)).unwrap();
+        assert!(candidates.is_empty());
+        assert!(
+            stage_build(&wrong, Grade::Released, &trash)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            stage_build(&linked, Grade::Released, &trash)
+                .unwrap()
+                .is_none()
+        );
+        assert!(wrong.join("target/debug/old").exists());
+        assert!(linked.join("target/debug/old").exists());
+        assert!(!trash.exists());
+    }
+
+    #[test]
+    fn stage_build_rechecks_the_tag_before_renaming() {
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let data = root.path().join("data");
+        let worktree = data.join("worktrees").join(Uuid::now_v7().to_string());
+        let target = worktree.join("target");
+        fs::create_dir_all(target.join("debug/deps")).unwrap();
+        cargo_tag(&target);
+        fs::write(target.join("debug/deps/old"), "old").unwrap();
+        old_tree(&target);
+        old(&worktree);
+        let trash = trash_root(&data);
+
+        let candidates =
+            build_candidates(&data, SystemTime::now(), Duration::from_secs(6 * 3600)).unwrap();
+        assert!(candidates.iter().any(|c| c.path == worktree));
+        fs::remove_file(target.join("CACHEDIR.TAG")).unwrap();
+
+        assert!(
+            stage_build(&worktree, Grade::Released, &trash)
+                .unwrap()
+                .is_none()
+        );
+        assert!(target.join("debug/deps/old").exists());
+        assert!(!trash.exists());
     }
 
     fn binary(path: &Path, age_hours: u64) {
@@ -678,6 +823,7 @@ mod tests {
         let target = worktree.join("target");
         let deps = target.join("debug/deps");
         fs::create_dir_all(&deps).unwrap();
+        cargo_tag(&target);
         fs::create_dir_all(target.join("debug/incremental/crate-abc")).unwrap();
         fs::create_dir_all(target.join("lint/debug/incremental")).unwrap();
         fs::write(target.join("debug/incremental/crate-abc/q"), "q").unwrap();

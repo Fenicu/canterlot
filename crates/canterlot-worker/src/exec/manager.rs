@@ -3346,6 +3346,11 @@ mod tests {
         let conversation = Uuid::now_v7();
         let worktree = data.join("worktrees").join(conversation.to_string());
         fs::create_dir_all(worktree.join("target/debug")).unwrap();
+        fs::write(
+            worktree.join("target/CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55",
+        )
+        .unwrap();
         fs::write(worktree.join("target/debug/old"), "old").unwrap();
         age_tree(&worktree.join("target"));
 
@@ -3396,6 +3401,11 @@ mod tests {
         let worktree = data.join("worktrees").join(conversation.to_string());
         let target = worktree.join("target");
         fs::create_dir_all(target.join("debug/deps")).unwrap();
+        fs::write(
+            target.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55",
+        )
+        .unwrap();
         fs::create_dir_all(target.join("debug/incremental/crate-1")).unwrap();
         fs::create_dir_all(target.join("lint/debug")).unwrap();
         fs::write(target.join("debug/.cargo-lock"), "").unwrap();

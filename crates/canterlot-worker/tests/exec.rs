@@ -633,11 +633,17 @@ async fn startup_sweeps_stale_runtime_state() {
         .path()
         .join("store/worktrees")
         .join(Uuid::now_v7().to_string());
-    fs::create_dir_all(worktree.join("target")).unwrap();
-    fs::write(worktree.join("target/old"), "old").unwrap();
+    fs::create_dir_all(worktree.join("target/debug/deps")).unwrap();
+    fs::write(
+        worktree.join("target/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55",
+    )
+    .unwrap();
+    fs::write(worktree.join("target/debug/deps/old"), "old").unwrap();
     let old = SystemTime::now() - Duration::from_secs(8 * 3600);
     for path in [
-        worktree.join("target/old"),
+        worktree.join("target/debug/deps/old"),
+        worktree.join("target/debug/deps"),
         worktree.join("target"),
         worktree.clone(),
     ] {

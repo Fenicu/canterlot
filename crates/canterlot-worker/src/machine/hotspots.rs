@@ -56,9 +56,26 @@ pub struct Discovery {
     pub truncated: bool,
 }
 
+/// Подпись файла `CACHEDIR.TAG`: каталог объявлен кэшем.
+const CACHEDIR_SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
+/// Каталог `target` — настоящий кэш сборки cargo: рядом лежит `CACHEDIR.TAG`,
+/// обычный файл (не ссылка), начинающийся с подписи. Имя `target` без него ничего
+/// не значит: в нём могут лежать исходники репозитория.
+pub(crate) fn is_cargo_target(target: &Path) -> bool {
+    let tag = target.join("CACHEDIR.TAG");
+    let Ok(meta) = fs::symlink_metadata(&tag) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    fs::read(&tag).is_ok_and(|bytes| bytes.starts_with(CACHEDIR_SIGNATURE))
+}
+
 fn classify(path: &Path, name: &str) -> Option<Kind> {
     match name {
-        "target" => path.join("CACHEDIR.TAG").is_file().then_some(Kind::Target),
+        "target" => is_cargo_target(path).then_some(Kind::Target),
         "node_modules" => Some(Kind::NodeModules),
         ".svelte-kit" => Some(Kind::SvelteKit),
         _ if name.starts_with("build")
