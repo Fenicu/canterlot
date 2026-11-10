@@ -138,15 +138,23 @@ pub(super) fn prepare(
     let secret: [u8; 32] = rand::random();
     private_file(&dir.join("secret"), &secret)?;
     let spec = format!(
-        "execution_id = \"{execution_id}\"\ngeneration = {generation}\nconversation_id = \"{conversation_id}\"\nprotocol_version = {IPC_PROTOCOL_VERSION}\n\n[timers]\nattach_wait = {}\nready_deadline = {}\ntransmit_deadline = {}\nstop_grace = {}\nstop_retry = {}\n",
+        "execution_id = \"{execution_id}\"\ngeneration = {generation}\nconversation_id = \"{conversation_id}\"\nprotocol_version = {IPC_PROTOCOL_VERSION}\n\n[timers]\nattach_wait = {}\nready_deadline = {}\ntransmit_deadline = {}\ncli_version_probe = {}\nstop_grace = {}\nstop_retry = {}\n",
         millis(timers.attach_wait),
         millis(timers.ready_deadline),
         millis(timers.transmit_deadline),
+        millis(timers.cli_version_probe),
         millis(timers.stop_grace),
         millis(timers.stop_retry),
     );
     let socket_spec = toml::Value::String(socket.to_string_lossy().into_owned()).to_string();
-    let spec = format!("ipc_socket = {socket_spec}\n{spec}");
+    let cache_spec = toml::Value::String(
+        data_dir
+            .join(".cli-versions.json")
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .to_string();
+    let spec = format!("ipc_socket = {socket_spec}\nversion_cache = {cache_spec}\n{spec}");
     private_file(&dir.join("spec.toml"), spec.as_bytes())?;
     fs::File::open(&dir)?.sync_all()?;
     Ok(Prepared {

@@ -174,7 +174,16 @@ pub async fn discover(
     cfg: &OpenCodeConfig,
     data_dir: &Path,
 ) -> Result<OpenCodeCatalog, DiscoverError> {
-    discover_within(cfg, data_dir, DISCOVER_WAIT).await
+    discover_with_cache(cfg, data_dir, None).await
+}
+
+/// То же с общим на процессы файлом кэша версии.
+pub async fn discover_with_cache(
+    cfg: &OpenCodeConfig,
+    data_dir: &Path,
+    cache: Option<&Path>,
+) -> Result<OpenCodeCatalog, DiscoverError> {
+    discover_within_with_cache(cfg, data_dir, cache, DISCOVER_WAIT).await
 }
 
 /// Отмена по сроку безопасна: брошенный процесс снимают EOF stdin и SIGTERM при `Drop`.
@@ -183,7 +192,16 @@ pub async fn discover_within(
     data_dir: &Path,
     limit: Duration,
 ) -> Result<OpenCodeCatalog, DiscoverError> {
-    tokio::time::timeout(limit, discover_inner(cfg, data_dir))
+    discover_within_with_cache(cfg, data_dir, None, limit).await
+}
+
+async fn discover_within_with_cache(
+    cfg: &OpenCodeConfig,
+    data_dir: &Path,
+    cache: Option<&Path>,
+    limit: Duration,
+) -> Result<OpenCodeCatalog, DiscoverError> {
+    tokio::time::timeout(limit, discover_inner(cfg, data_dir, cache))
         .await
         .map_err(|_| DiscoverError::Timeout)?
 }
@@ -191,14 +209,20 @@ pub async fn discover_within(
 async fn discover_inner(
     cfg: &OpenCodeConfig,
     data_dir: &Path,
+    cache: Option<&Path>,
 ) -> Result<OpenCodeCatalog, DiscoverError> {
     let layout = DataLayout::for_worker(cfg, data_dir);
     let env = prepared_env(cfg, &layout, layout.tmp())
         .await
         .map_err(DiscoverError::DataRoot)?;
-    let version = version::check(&cfg.executable, &env)
-        .await
-        .map_err(DiscoverError::Version)?;
+    let version = version::check_with_cache(
+        &cfg.executable,
+        &env,
+        crate::adapter::cli_version::DEFAULT_PROBE_DEADLINE,
+        cache,
+    )
+    .await
+    .map_err(DiscoverError::Version)?;
     let models = probe_models(cfg, env, &layout.tmp())
         .await
         .map_err(|_| DiscoverError::Catalog)?;
@@ -262,6 +286,7 @@ fn version_failure(error: VersionError) -> AdapterError {
     AdapterError::StartFailed(match error {
         VersionError::NotFound => "cli_not_found",
         VersionError::BelowMinimum(_) => "cli_too_old",
+        VersionError::Timeout => "cli_version_timeout",
         _ => "cli_version_failed",
     })
 }
@@ -520,6 +545,10 @@ pub struct OpenCodeAdapter {
     cfg: OpenCodeConfig,
     exec_dir: PathBuf,
     deadline: Duration,
+    /// Первый срок пробы `--version`; повтор идёт с удвоенным сроком.
+    cli_version_probe: Duration,
+    /// Общий на процессы файл успешных проб: переживает смену сопровождения.
+    cli_version_cache: Option<PathBuf>,
     stop_grace: Duration,
     ready_wait: Duration,
     relay_executable: Option<PathBuf>,
@@ -597,6 +626,8 @@ impl OpenCodeAdapter {
             cfg,
             exec_dir,
             deadline,
+            cli_version_probe: crate::adapter::cli_version::DEFAULT_PROBE_DEADLINE,
+            cli_version_cache: None,
             stop_grace: Duration::from_secs(5),
             ready_wait: READY_WAIT,
             relay_executable: None,
@@ -958,9 +989,14 @@ impl OpenCodeAdapter {
                     LayoutError::Io(_) => "data_root_failed",
                 })
             })?;
-        let version = version::check(&self.cfg.executable, &env)
-            .await
-            .map_err(version_failure)?;
+        let version = version::check_with_cache(
+            &self.cfg.executable,
+            &env,
+            self.cli_version_probe,
+            self.cli_version_cache.as_deref(),
+        )
+        .await
+        .map_err(version_failure)?;
         if matches!(version, CliVersion::UntestedNewer(_)) {
             self.diagnostic("untested_cli_version", false);
         }
@@ -2496,6 +2532,14 @@ impl Adapter for OpenCodeAdapter {
 
     fn set_stop_grace(&mut self, grace: Duration) {
         self.stop_grace = grace;
+    }
+
+    fn set_cli_version_probe(&mut self, deadline: Duration) {
+        self.cli_version_probe = deadline;
+    }
+
+    fn set_cli_version_cache(&mut self, cache: Option<PathBuf>) {
+        self.cli_version_cache = cache;
     }
 
     async fn next_event(&mut self) -> AdapterEvent {

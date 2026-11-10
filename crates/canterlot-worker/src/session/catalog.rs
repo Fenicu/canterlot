@@ -102,20 +102,27 @@ impl Probe {
     }
 
     pub(super) async fn discover(&self, data_dir: &Path) -> Result<Slot, String> {
+        let cache = data_dir.join(".cli-versions.json");
         match self {
-            Self::Claude(cfg) => match claude_version::check(&cfg.executable).await {
+            Self::Claude(cfg) => match claude_version::check_with_cache(
+                &cfg.executable,
+                crate::adapter::cli_version::DEFAULT_PROBE_DEADLINE,
+                Some(&cache),
+            )
+            .await
+            {
                 Ok(version) => Ok(Slot::Claude(version)),
                 Err(reason) => Err(format!("{reason:?}")),
             },
-            Self::Codex(cfg) => codex::discover(cfg)
+            Self::Codex(cfg) => codex::discover_with_cache(cfg, Some(&cache))
                 .await
                 .map(Slot::Codex)
                 .map_err(|reason| format!("{reason:?}")),
-            Self::OpenCode(cfg) => opencode::discover(cfg, data_dir)
+            Self::OpenCode(cfg) => opencode::discover_with_cache(cfg, data_dir, Some(&cache))
                 .await
                 .map(Slot::OpenCode)
                 .map_err(|reason| format!("{reason:?}")),
-            Self::Antigravity(cfg) => antigravity::catalog::discover(cfg)
+            Self::Antigravity(cfg) => antigravity::catalog::discover_with_cache(cfg, Some(&cache))
                 .await
                 .map(Slot::Antigravity)
                 .map_err(|reason| format!("{reason:?}")),

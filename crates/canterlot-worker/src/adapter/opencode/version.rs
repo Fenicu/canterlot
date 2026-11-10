@@ -6,7 +6,9 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::adapter::cli_version::{CliVersion, Triple, VersionError, VersionPolicy};
+use crate::adapter::cli_version::{
+    CliVersion, DEFAULT_PROBE_DEADLINE, Triple, VersionError, VersionPolicy, cached_check,
+};
 use crate::adapter::codex::process::GroupKill;
 use crate::adapter::{reaped, spawn_with_retry_io};
 
@@ -30,7 +32,29 @@ pub async fn check(
     executable: &Path,
     env: &[(OsString, OsString)],
 ) -> Result<CliVersion, VersionError> {
-    check_within(executable, env, Duration::from_secs(5)).await
+    check_with_deadline(executable, env, DEFAULT_PROBE_DEADLINE).await
+}
+
+/// Проба старта: кэш по бинарнику и повтор только по таймауту.
+pub async fn check_with_deadline(
+    executable: &Path,
+    env: &[(OsString, OsString)],
+    first: Duration,
+) -> Result<CliVersion, VersionError> {
+    check_with_cache(executable, env, first, None).await
+}
+
+/// То же с общим на процессы файлом кэша.
+pub async fn check_with_cache(
+    executable: &Path,
+    env: &[(OsString, OsString)],
+    first: Duration,
+    cache: Option<&Path>,
+) -> Result<CliVersion, VersionError> {
+    cached_check(executable, first, cache, |limit| {
+        check_within(executable, env, limit)
+    })
+    .await
 }
 
 /// `opencode --version` даже без запроса заводит каталоги XDG и журнал, поэтому
@@ -78,7 +102,8 @@ pub async fn check_within(
     };
     let (status, output) = match timeout(limit, work).await {
         Ok(Ok(out)) => out,
-        _ => return Err(VersionError::Failed),
+        Ok(Err(_)) => return Err(VersionError::Failed),
+        Err(_) => return Err(VersionError::Timeout),
     };
     group.disarm();
     if status.is_some_and(|status| !status.success()) {

@@ -7,7 +7,10 @@ use tokio::time::timeout;
 
 use super::process::GroupKill;
 pub use crate::adapter::cli_version::{CliVersion, VersionError};
-use crate::adapter::{cli_version::VersionPolicy, reaped, spawn_with_retry_io};
+use crate::adapter::{
+    cli_version::{DEFAULT_PROBE_DEADLINE, VersionPolicy, cached_check},
+    reaped, spawn_with_retry_io,
+};
 
 const OUTPUT_CAP: u64 = 64 * 1024;
 
@@ -27,7 +30,27 @@ pub fn parse_version(output: &str) -> Result<(u32, u32, u32), VersionError> {
 }
 
 pub async fn check(executable: &Path) -> Result<CliVersion, VersionError> {
-    check_within(executable, Duration::from_secs(5)).await
+    check_with_deadline(executable, DEFAULT_PROBE_DEADLINE).await
+}
+
+/// Проба старта: кэш по бинарнику и повтор только по таймауту.
+pub async fn check_with_deadline(
+    executable: &Path,
+    first: Duration,
+) -> Result<CliVersion, VersionError> {
+    check_with_cache(executable, first, None).await
+}
+
+/// То же с общим на процессы файлом кэша.
+pub async fn check_with_cache(
+    executable: &Path,
+    first: Duration,
+    cache: Option<&Path>,
+) -> Result<CliVersion, VersionError> {
+    cached_check(executable, first, cache, |limit| {
+        check_within(executable, limit)
+    })
+    .await
 }
 
 pub async fn check_within(executable: &Path, limit: Duration) -> Result<CliVersion, VersionError> {
@@ -74,7 +97,8 @@ pub async fn check_within(executable: &Path, limit: Duration) -> Result<CliVersi
     };
     let (status, output) = match timeout(limit, work).await {
         Ok(Ok(out)) => out,
-        _ => return Err(VersionError::Failed),
+        Ok(Err(_)) => return Err(VersionError::Failed),
+        Err(_) => return Err(VersionError::Timeout),
     };
     group.disarm();
     if status.is_some_and(|status| !status.success()) {

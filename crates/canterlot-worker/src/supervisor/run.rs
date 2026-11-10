@@ -1693,6 +1693,12 @@ impl Supervisor {
             self.fail_start("unknown_profile")?;
             return self.begin_stop(StopCause::StartFailed, false);
         };
+        adapter.set_cli_version_probe(timers.cli_version_probe);
+        adapter.set_cli_version_cache(self.spec.version_cache.clone().or_else(|| {
+            self.exec_dir
+                .parent()
+                .map(|dir| dir.join(".cli-versions.json"))
+        }));
         if start.isolate_mcp && !adapter.isolates_mcp() {
             self.fail_start("mcp_isolation_unsupported")?;
             return self.begin_stop(StopCause::StartFailed, false);
@@ -3545,6 +3551,7 @@ mod tests {
                 conversation_id: Uuid::now_v7(),
                 protocol_version: canterlot_proto::limits::IPC_PROTOCOL_VERSION,
                 ipc_socket: None,
+                version_cache: None,
                 timers: Default::default(),
                 claude_code: None,
                 codex: None,

@@ -611,6 +611,80 @@ async fn cli_start_failures_have_stable_reasons() {
     }
 }
 
+fn version_count(f: &Fake) -> u32 {
+    std::fs::read_to_string(f.dir.path().join("version-count"))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn process_alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !matches!(
+            stat[stat.rfind(')').unwrap() + 1..]
+                .trim_start()
+                .chars()
+                .next(),
+            Some('Z' | 'X')
+        )
+    })
+}
+
+#[tokio::test]
+async fn slow_version_probe_is_retried_not_failed() {
+    let mut f = Fake::new(vec![]);
+    // Первая проба не уложится в срок; вторая ответит сразу.
+    std::fs::write(f.dir.path().join("version-delay"), "300").unwrap();
+    f.adapter.set_cli_version_probe(Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    f.start().await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(90),
+        "the first probe was expected to hit its deadline"
+    );
+    assert_eq!(
+        version_count(&f),
+        2,
+        "the first probe timed out and was retried"
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+async fn hung_version_probe_fails_with_timeout_and_leaves_no_process() {
+    let _permit = CLI_GATE.lock().await;
+    let mut f = Fake::new(vec![]);
+    let marker = f.dir.path().join("probe-pid");
+    let exe = f.dir.path().join("fake-cli");
+    fake_exec::write_executable(
+        &exe,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo $$ > '{}'; exec sleep 300; fi\nexit 1\n",
+            marker.display()
+        ),
+        0o700,
+    );
+    f.adapter.set_cli_version_probe(Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    let error = f.adapter.start(&f.spec, &f.group).await.unwrap_err();
+    assert_eq!(error.to_string(), "cli_version_timeout");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the retries are bounded: {:?}",
+        started.elapsed()
+    );
+    let pid: u32 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while process_alive(pid) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!process_alive(pid), "probe process {pid} survived");
+}
+
 async fn error_turn(mut frames: Vec<Value>) -> Vec<AdapterEvent> {
     let id = Uuid::now_v7();
     for frame in &mut frames {
@@ -2690,6 +2764,9 @@ async fn steer_without_a_cli_after_a_failed_restart_is_deferred() {
     f.finish().await;
     // Ни новый, ни запасной запуск не проходят проверку версии: процесса больше нет.
     std::fs::write(f.dir.path().join("version"), "failed").unwrap();
+    // Успешная проба кэшируется по бинарнику: без его замены перезапуск не станет её повторять.
+    let exe = f.dir.path().join("fake-cli");
+    fake_exec::write_executable(&exe, format!("{FAKE}\n# changed\n"), 0o700);
     let mut change = tx(Uuid::now_v7());
     change.settings = Some(SettingsChange {
         instructions: Some(InstructionSpec {

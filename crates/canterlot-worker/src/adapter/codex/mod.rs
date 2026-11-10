@@ -75,9 +75,21 @@ pub enum DiscoverError {
 
 // `codex --version` и model/list без запроса к модели; три попытки за минуту.
 pub async fn discover(cfg: &CodexConfig) -> Result<CodexCatalog, DiscoverError> {
-    let version = version::check(&cfg.executable)
-        .await
-        .map_err(DiscoverError::Version)?;
+    discover_with_cache(cfg, None).await
+}
+
+/// То же с общим на процессы файлом кэша версии.
+pub async fn discover_with_cache(
+    cfg: &CodexConfig,
+    cache: Option<&std::path::Path>,
+) -> Result<CodexCatalog, DiscoverError> {
+    let version = version::check_with_cache(
+        &cfg.executable,
+        crate::adapter::cli_version::DEFAULT_PROBE_DEADLINE,
+        cache,
+    )
+    .await
+    .map_err(DiscoverError::Version)?;
     let mut failure = None;
     for attempt in 0..3 {
         match probe::probe_pages(
@@ -124,6 +136,10 @@ pub struct CodexAdapter {
     cfg: CodexConfig,
     exec_dir: PathBuf,
     deadline: Duration,
+    /// Первый срок пробы `--version`; повтор идёт с удвоенным сроком.
+    cli_version_probe: Duration,
+    /// Общий на процессы файл успешных проб: переживает смену сопровождения.
+    cli_version_cache: Option<PathBuf>,
     /// Срок шага рукопожатия; в тестах короче, чтобы не ждать 20 с.
     handshake_step: Duration,
     /// Сколько ждать `initialize`, пока app-server переносит состояние в sqlite.
@@ -221,6 +237,8 @@ impl CodexAdapter {
             cfg,
             exec_dir,
             deadline,
+            cli_version_probe: crate::adapter::cli_version::DEFAULT_PROBE_DEADLINE,
+            cli_version_cache: None,
             handshake_step: HANDSHAKE_STEP,
             backfill_timeout: BACKFILL_TIMEOUT,
             proc: None,
@@ -1161,7 +1179,14 @@ impl CodexAdapter {
         home: Option<&CodexHome>,
         group: &dyn Containment,
     ) -> Option<AppServerProcess> {
-        if version::check(&self.cfg.executable).await.is_err() {
+        if version::check_with_cache(
+            &self.cfg.executable,
+            self.cli_version_probe,
+            self.cli_version_cache.as_deref(),
+        )
+        .await
+        .is_err()
+        {
             return None;
         }
         let relay = self
@@ -1945,7 +1970,13 @@ impl Adapter for CodexAdapter {
             return Err(AdapterError::AlreadyStarted);
         }
         self.start_attempted = true;
-        match version::check(&self.cfg.executable).await {
+        match version::check_with_cache(
+            &self.cfg.executable,
+            self.cli_version_probe,
+            self.cli_version_cache.as_deref(),
+        )
+        .await
+        {
             Ok(version::CliVersion::UntestedNewer(_)) => {
                 self.diagnostic("untested_cli_version", false)
             }
@@ -1955,6 +1986,9 @@ impl Adapter for CodexAdapter {
             }
             Err(version::VersionError::BelowMinimum(_)) => {
                 return Err(AdapterError::StartFailed("cli_too_old"));
+            }
+            Err(version::VersionError::Timeout) => {
+                return Err(AdapterError::StartFailed("cli_version_timeout"));
             }
             Err(_) => return Err(AdapterError::StartFailed("cli_version_failed")),
         }
@@ -2245,6 +2279,14 @@ impl Adapter for CodexAdapter {
 
     fn set_stop_grace(&mut self, grace: Duration) {
         self.stop_grace = grace;
+    }
+
+    fn set_cli_version_probe(&mut self, deadline: Duration) {
+        self.cli_version_probe = deadline;
+    }
+
+    fn set_cli_version_cache(&mut self, cache: Option<PathBuf>) {
+        self.cli_version_cache = cache;
     }
 
     async fn next_event(&mut self) -> AdapterEvent {

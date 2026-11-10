@@ -227,6 +227,7 @@ build_jobs = 6
 attach_wait = "30s"
 ready_deadline = "30s"
 transmit_deadline = "10s"
+cli_version_probe = "5s"
 stop_grace = "5s"
 stop_retry = "2s"
 
@@ -406,7 +407,10 @@ CANTERLOT_CLAUDE_CODE_SMOKE=1 cargo test -p canterlot-worker --all-features --te
 `spawn_timeout` — срок, за который запущенное сопровождение должно принять `Attach`.
 `build_jobs` — предел параллельной сборки для запускаемых сессий (по умолчанию 6); уже заданный
 в окружении воркера `CARGO_BUILD_JOBS` не перекрывается.
-`[execution.supervisor]` задаёт таймеры сопровождения. Каталоги исполнений лежат в
+`[execution.supervisor]` задаёт таймеры сопровождения. `cli_version_probe` — первый срок пробы
+`<cli> --version`: успешная проба запоминается по неизменённому бинарнику (путь, размер, mtime и
+inode) в общем файле `<data_dir>/.cli-versions.json`, а таймаут повторяется с удвоенным сроком,
+всего три попытки; ошибка CLI или неразборчивый вывод отказ не смягчают. Каталоги исполнений лежат в
 `data_dir/executions/<execution_id>` с правами `0700`; секрет IPC и `spec.toml` — `0600`.
 Второй экземпляр службы на том же `data_dir` завершается с ошибкой блокировки журнала.
 

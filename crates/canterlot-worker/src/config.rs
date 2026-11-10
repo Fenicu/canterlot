@@ -94,6 +94,8 @@ pub struct SupervisorTimers {
     #[serde(with = "humantime_serde")]
     pub transmit_deadline: Duration,
     #[serde(with = "humantime_serde")]
+    pub cli_version_probe: Duration,
+    #[serde(with = "humantime_serde")]
     pub stop_grace: Duration,
     #[serde(with = "humantime_serde")]
     pub stop_retry: Duration,
@@ -105,6 +107,7 @@ impl Default for SupervisorTimers {
             attach_wait: Duration::from_secs(30),
             ready_deadline: Duration::from_secs(30),
             transmit_deadline: Duration::from_secs(10),
+            cli_version_probe: Duration::from_secs(5),
             stop_grace: Duration::from_secs(5),
             stop_retry: Duration::from_secs(2),
         }

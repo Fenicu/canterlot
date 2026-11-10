@@ -81,7 +81,21 @@ pub enum ProbeError {
 
 /// Закреплённая копия и один короткий `agy acp` без хода.
 pub async fn discover(cfg: &AntigravityConfig) -> Result<AntigravityCatalog, DiscoverError> {
-    let pinned = prepare_pinned(cfg).await.map_err(DiscoverError::Prepare)?;
+    discover_with_cache(cfg, None).await
+}
+
+/// То же с общим на процессы файлом кэша версии.
+pub async fn discover_with_cache(
+    cfg: &AntigravityConfig,
+    cache: Option<&std::path::Path>,
+) -> Result<AntigravityCatalog, DiscoverError> {
+    let pinned = prepare_pinned(
+        cfg,
+        crate::adapter::cli_version::DEFAULT_PROBE_DEADLINE,
+        cache,
+    )
+    .await
+    .map_err(DiscoverError::Prepare)?;
     let data_dir = cfg
         .data_dir
         .clone()

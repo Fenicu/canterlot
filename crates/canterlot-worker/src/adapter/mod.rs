@@ -962,6 +962,10 @@ pub trait Adapter: Send {
     /// Срок мягкой остановки из таймеров сопровождения: сколько `Graceful`
     /// close ждёт выхода после SIGTERM, прежде чем убить CLI.
     fn set_stop_grace(&mut self, _grace: Duration) {}
+    /// Первый срок пробы `<cli> --version`; повтор идёт с удвоенным сроком.
+    fn set_cli_version_probe(&mut self, _deadline: Duration) {}
+    /// Общий на процессы файл успешных проб версии; `None` — только память.
+    fn set_cli_version_cache(&mut self, _cache: Option<PathBuf>) {}
     async fn close(&mut self, mode: CloseMode, group: &dyn Containment)
     -> Result<(), AdapterError>;
 }

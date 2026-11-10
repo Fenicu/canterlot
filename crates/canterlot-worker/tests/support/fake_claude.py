@@ -2,6 +2,15 @@
 import json, os, sys, pathlib, signal, select, time, subprocess
 d=pathlib.Path(__file__).parent
 if '--version' in sys.argv:
+    count=d/'version-count'
+    try: n=int(count.read_text())
+    except Exception: n=0
+    count.write_text(str(n+1))
+    delay=d/'version-delay'
+    if delay.exists():
+        wait=float(delay.read_text())/1000
+        delay.unlink()
+        time.sleep(wait)
     v=(d/'version').read_text() if (d/'version').exists() else '2.1.311'
     print(v); sys.exit(1 if v=='failed' else 0)
 (d/'args.json').write_text(json.dumps(sys.argv[1:]))

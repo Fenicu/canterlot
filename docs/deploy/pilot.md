@@ -625,6 +625,7 @@ build_jobs = 6                                      # CARGO_BUILD_JOBS для с
 attach_wait = "30s"
 ready_deadline = "30s"
 transmit_deadline = "10s"
+cli_version_probe = "5s"
 stop_grace = "5s"
 stop_retry = "2s"
 

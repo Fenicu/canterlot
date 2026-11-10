@@ -89,7 +89,7 @@ async fn hung_version_check_is_cut_off_with_its_group() {
     let started = std::time::Instant::now();
     assert_eq!(
         version::check_within(&exe, &[], Duration::from_millis(300)).await,
-        Err(VersionError::Failed)
+        Err(VersionError::Timeout)
     );
     assert!(started.elapsed() < Duration::from_secs(5));
     let pid = std::fs::read_to_string(&marker).unwrap();

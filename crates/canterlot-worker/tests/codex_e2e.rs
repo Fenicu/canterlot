@@ -1941,12 +1941,16 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
         (PathBuf::from("/nonexistent-codex-binary"), "cli_not_found"),
         (dir.path().join("old"), "cli_too_old"),
         (dir.path().join("broken"), "cli_version_failed"),
+        (dir.path().join("hung"), "cli_version_timeout"),
     ] {
         if expected == "cli_too_old" {
             fake_exec::write_executable(&executable, "#!/bin/sh\necho 'codex-cli 0.1.0'\n", 0o700);
         }
         if expected == "cli_version_failed" {
             fake_exec::write_executable(&executable, "#!/bin/sh\nexit 1\n", 0o700);
+        }
+        if expected == "cli_version_timeout" {
+            fake_exec::write_executable(&executable, "#!/bin/sh\nexec sleep 300\n", 0o700);
         }
         let context = AdapterContext {
             transmit_deadline: WAIT,
@@ -1961,6 +1965,7 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
             antigravity: None,
         };
         let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
+        adapter.set_cli_version_probe(Duration::from_millis(100));
         let mut spec = StartSpec {
             execution_id: Uuid::now_v7(),
             generation: 1,

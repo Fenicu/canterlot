@@ -46,6 +46,10 @@ pub struct ClaudeCodeAdapter {
     deadline: Duration,
     /// Срок до первого `system/init`: CLI шлёт его после первого ввода и после подключения серверов MCP.
     ready_deadline: Duration,
+    /// Первый срок пробы `--version`; повтор идёт с удвоенным сроком.
+    cli_version_probe: Duration,
+    /// Общий на процессы файл успешных проб: переживает смену сопровождения.
+    cli_version_cache: Option<PathBuf>,
     stop_grace: Duration,
     cli: Option<CliProcess>,
     broker: Option<Broker>,
@@ -98,6 +102,8 @@ impl ClaudeCodeAdapter {
             exec_dir,
             deadline,
             ready_deadline: deadline,
+            cli_version_probe: crate::adapter::cli_version::DEFAULT_PROBE_DEADLINE,
+            cli_version_cache: None,
             stop_grace: Duration::from_secs(5),
             cli: None,
             broker: None,
@@ -665,7 +671,14 @@ impl ClaudeCodeAdapter {
         launch: &process::LaunchSpec<'_>,
         group: &dyn Containment,
     ) -> Option<CliProcess> {
-        if version::check(&self.cfg.executable).await.is_err() {
+        if version::check_with_cache(
+            &self.cfg.executable,
+            self.cli_version_probe,
+            self.cli_version_cache.as_deref(),
+        )
+        .await
+        .is_err()
+        {
             return None;
         }
         if let Some(broker) = &self.broker {
@@ -1300,7 +1313,13 @@ impl Adapter for ClaudeCodeAdapter {
             return Err(AdapterError::AlreadyStarted);
         }
         self.start_attempted = true;
-        match version::check(&self.cfg.executable).await {
+        match version::check_with_cache(
+            &self.cfg.executable,
+            self.cli_version_probe,
+            self.cli_version_cache.as_deref(),
+        )
+        .await
+        {
             Ok(version::CliVersion::UntestedNewer(_)) => {
                 self.diagnostic("untested_cli_version", false)
             }
@@ -1309,6 +1328,7 @@ impl Adapter for ClaudeCodeAdapter {
                 return Err(AdapterError::StartFailed(match e {
                     version::VersionError::NotFound => "cli_not_found",
                     version::VersionError::BelowMinimum(_) => "cli_too_old",
+                    version::VersionError::Timeout => "cli_version_timeout",
                     _ => "cli_version_failed",
                 }));
             }
@@ -1370,6 +1390,12 @@ impl Adapter for ClaudeCodeAdapter {
     }
     fn set_stop_grace(&mut self, grace: Duration) {
         self.stop_grace = grace;
+    }
+    fn set_cli_version_probe(&mut self, deadline: Duration) {
+        self.cli_version_probe = deadline;
+    }
+    fn set_cli_version_cache(&mut self, cache: Option<PathBuf>) {
+        self.cli_version_cache = cache;
     }
     fn validate_transmission(&self, input: &Transmission) -> Result<(), &'static str> {
         // Смена инструкций обрабатывается перезапуском CLI, а не управляющими запросами.

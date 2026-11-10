@@ -212,10 +212,15 @@ fn source_binary(cfg: &AntigravityConfig) -> Result<PathBuf, PrepareError> {
 }
 
 /// Закреплённая копия `<data_dir>/antigravity/bin/agy-<version>`.
-/// Копия создаётся один раз; исходник проверяется `--version` при каждом запуске.
-pub async fn prepare_pinned(cfg: &AntigravityConfig) -> Result<Pinned, PrepareError> {
+/// Копия создаётся один раз; исходник проверяется `--version` при запуске
+/// (успешная проба кэшируется по неизменённому бинарнику).
+pub async fn prepare_pinned(
+    cfg: &AntigravityConfig,
+    first: std::time::Duration,
+    cache: Option<&Path>,
+) -> Result<Pinned, PrepareError> {
     let source = source_binary(cfg)?;
-    let version = version::check(&source)
+    let version = version::check_with_cache(&source, first, cache)
         .await
         .map_err(PrepareError::Version)?;
     let data_dir = cfg.data_dir.clone().ok_or(PrepareError::MissingDataDir)?;

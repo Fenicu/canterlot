@@ -47,6 +47,9 @@ pub struct SupervisorSpec {
     pub protocol_version: u32,
     #[serde(default)]
     pub ipc_socket: Option<PathBuf>,
+    /// Общий кэш успешных проб `<cli> --version`; без ключа кэш только в памяти.
+    #[serde(default)]
+    pub version_cache: Option<PathBuf>,
     #[serde(default)]
     pub timers: SupervisorTimers,
     #[serde(default)]

@@ -235,12 +235,16 @@ impl AntigravityLimitsSource {
 
     /// Один запуск без учёта интервала и живых показаний.
     pub async fn fetch(&self) -> Result<Vec<LimitObservation>, UsageError> {
-        let pinned = prepare_pinned(&self.cfg)
-            .await
-            .map_err(|error| match error {
-                PrepareError::Version(_) | PrepareError::MissingBinary => UsageError::Prepare,
-                _ => UsageError::Prepare,
-            })?;
+        let pinned = prepare_pinned(
+            &self.cfg,
+            crate::adapter::cli_version::DEFAULT_PROBE_DEADLINE,
+            None,
+        )
+        .await
+        .map_err(|error| match error {
+            PrepareError::Version(_) | PrepareError::MissingBinary => UsageError::Prepare,
+            _ => UsageError::Prepare,
+        })?;
         let data_dir = self.cfg.data_dir.clone().ok_or(UsageError::Prepare)?;
         let env = process_env(std::env::vars_os());
         let mut child = crate::adapter::spawn_with_retry_io(|| {

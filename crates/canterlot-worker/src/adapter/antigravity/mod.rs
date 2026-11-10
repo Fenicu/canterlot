@@ -67,6 +67,10 @@ pub struct AntigravityAdapter {
     cfg: AntigravityConfig,
     exec_dir: PathBuf,
     deadline: Duration,
+    /// Первый срок пробы `--version`; повтор идёт с удвоенным сроком.
+    cli_version_probe: Duration,
+    /// Общий на процессы файл успешных проб: переживает смену сопровождения.
+    cli_version_cache: Option<PathBuf>,
     ready_deadline: Duration,
     stop_grace: Duration,
     interrupt_deadline: Duration,
@@ -111,6 +115,8 @@ impl AntigravityAdapter {
             cfg,
             exec_dir,
             deadline,
+            cli_version_probe: crate::adapter::cli_version::DEFAULT_PROBE_DEADLINE,
+            cli_version_cache: None,
             ready_deadline: STEP,
             stop_grace: Duration::from_secs(5),
             interrupt_deadline: INTERRUPT_WAIT,
@@ -1112,13 +1118,22 @@ impl Adapter for AntigravityAdapter {
         if !self.cfg.enabled {
             return Err(AdapterError::StartFailed("harness_disabled"));
         }
-        let pinned = match process::prepare_pinned(&self.cfg).await {
+        let pinned = match process::prepare_pinned(
+            &self.cfg,
+            self.cli_version_probe,
+            self.cli_version_cache.as_deref(),
+        )
+        .await
+        {
             Ok(pinned) => pinned,
             Err(PrepareError::Version(version::VersionError::NotFound)) => {
                 return Err(AdapterError::StartFailed("cli_not_found"));
             }
             Err(PrepareError::Version(version::VersionError::BelowMinimum(_))) => {
                 return Err(AdapterError::StartFailed("cli_too_old"));
+            }
+            Err(PrepareError::Version(version::VersionError::Timeout)) => {
+                return Err(AdapterError::StartFailed("cli_version_timeout"));
             }
             Err(PrepareError::Version(_)) => {
                 return Err(AdapterError::StartFailed("cli_version_failed"));
@@ -1602,6 +1617,14 @@ impl Adapter for AntigravityAdapter {
 
     fn set_stop_grace(&mut self, grace: Duration) {
         self.stop_grace = grace;
+    }
+
+    fn set_cli_version_probe(&mut self, deadline: Duration) {
+        self.cli_version_probe = deadline;
+    }
+
+    fn set_cli_version_cache(&mut self, cache: Option<PathBuf>) {
+        self.cli_version_cache = cache;
     }
 
     async fn close(

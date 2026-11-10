@@ -648,7 +648,7 @@ async fn version_timeout_kills_the_whole_cli_group() {
             .unwrap_err();
     assert_eq!(
         err,
-        canterlot_worker::adapter::codex::version::VersionError::Failed
+        canterlot_worker::adapter::codex::version::VersionError::Timeout
     );
     let native: u32 = fs::read_to_string(dir.path().join("native.pid"))
         .unwrap()
