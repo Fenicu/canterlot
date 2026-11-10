@@ -772,6 +772,31 @@ test('many_unconfirmed_deliveries_collapse_into_one_pause_card', async ({ page }
   await expect(entries.nth(0)).toContainText('Уведомление 1');
   await expect(card.getByRole('button', { name: 'Показать все (12)' })).toBeVisible();
 
+  // Свёрнутая карточка: действие каждой записи стоит на строке с её текстом, а не отдельной кнопкой под ним.
+  await page.setViewportSize({ width: 412, height: 900 });
+  // Потолок из раскладки: три строки записи по тап-таргету 44 px плюс разделители s4 (156), шапка,
+  // зазоры s2, «Показать все» и действие очереди по 44 px, поля карточки — около 318; прежняя
+  // стопка полноширинных кнопок давала 418,5.
+  const collapsedHeight = await card.evaluate((element) => element.getBoundingClientRect().height);
+  expect(collapsedHeight, 'collapsed card height at 412px').toBeLessThanOrEqual(340);
+  for (let index = 0; index < 3; index += 1) {
+    const row = entries.nth(index);
+    const excerpt = await row.locator('.entry-text').boundingBox();
+    const action = await row
+      .getByRole('button', { name: `Отправить повторно как новое: сообщение ${index + 1}` })
+      .boundingBox();
+    expect(excerpt).not.toBeNull();
+    expect(action).not.toBeNull();
+    expect(action!.height).toBeGreaterThanOrEqual(44);
+    expect(action!.width).toBeGreaterThanOrEqual(44);
+    const top = Math.max(excerpt!.y, action!.y);
+    const bottom = Math.min(excerpt!.y + excerpt!.height, action!.y + action!.height);
+    expect(bottom, `entry ${index + 1} action shares the row with its excerpt`).toBeGreaterThan(top);
+  }
+  await expect(
+    entries.nth(1).getByRole('button', { name: 'Отправить повторно как новое: сообщение 2' })
+  ).toHaveText('Повторить');
+
   await card.getByRole('button', { name: 'Показать все (12)' }).click();
   await expect(entries).toHaveCount(12);
   await expect(card.getByRole('button', { name: 'Свернуть' })).toBeVisible();

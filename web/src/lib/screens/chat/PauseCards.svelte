@@ -12,6 +12,7 @@
 	import { announce } from '#lib/a11y/announce.js';
 	import { errorText } from '#lib/api/errors.js';
 	import { retryAsNew } from '#lib/timeline/QueueActions.js';
+	import Button from '#lib/ui/Button.svelte';
 	import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
 
 	let {
@@ -183,17 +184,20 @@
 								{#if entry.from}
 									<p class="entry-origin">{entry.from}</p>
 								{/if}
-								<p class="entry-text" class:entry-unavailable={entry.unavailable}>
-									{entry.excerpt}
-								</p>
-								<button
-									type="button"
-									class="button secondary full"
-									aria-label="Отправить повторно как новое: сообщение {idx + 1}"
-									onclick={() => handleAction(entry.action)}
-								>
-									{entry.action.label}
-								</button>
+								<div class="entry-row">
+									<p class="entry-text" class:entry-unavailable={entry.unavailable}>
+										{entry.excerpt}
+									</p>
+									<span class="entry-action">
+										<Button
+											variant="text"
+											label="{entry.action.label}: сообщение {idx + 1}"
+											onclick={() => handleAction(entry.action)}
+										>
+											Повторить
+										</Button>
+									</span>
+								</div>
 							</li>
 						{/each}
 					</ul>
@@ -323,7 +327,21 @@
 		font-size: var(--fs-sm);
 		font-weight: var(--weight-medium);
 	}
+	/* Действие записи стоит на строке с текстом: стопка полноширинных кнопок не нужна. */
+	.entry-row {
+		display: flex;
+		align-items: center;
+		gap: var(--s3);
+		min-width: 0;
+	}
+	.entry-action {
+		flex: none;
+		display: flex;
+		align-items: center;
+	}
 	.pause-card .entry-text {
+		flex: 1 1 auto;
+		min-width: 0;
 		display: -webkit-box;
 		-webkit-box-orient: vertical;
 		-webkit-line-clamp: 2;
