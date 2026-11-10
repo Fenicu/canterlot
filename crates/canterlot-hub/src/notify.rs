@@ -172,9 +172,12 @@ pub async fn on_settled_in_tx(
 ) -> Result<(), sqlx::Error> {
     let kind = match state {
         // Ход должен быть и быть недавним: новая пустая сессия и давно осевшая
-        // после перезапуска хаба пуша не дают.
+        // после перезапуска хаба пуша не дают. Свежесть — от последнего события:
+        // сессию, которую держала фоновая задача, пуш обязан догнать после её конца.
         Settled::Idle => match facts.last_turn_at {
-            Some(turn) if facts.now - turn <= FRESH => KIND_TURN_FINISHED,
+            Some(turn) if facts.now - turn.max(facts.last_event_at.unwrap_or(turn)) <= FRESH => {
+                KIND_TURN_FINISHED
+            }
             _ => return Ok(()),
         },
         Settled::Failed | Settled::OwnerLost | Settled::Stalled | Settled::QuotaPaused => {

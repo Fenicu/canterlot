@@ -839,9 +839,9 @@ async fn evaluate_subscriptions(
 
 /// Корневая сессия без подписчиков после хода больше не пересчитывается: окно тишины
 /// `idle` проходит без нового события. Пока включены пуши об итоге хода, недавно
-/// ставшая `idle` корневая сессия идёт в обход ещё несколько минут.
+/// ставшая `idle` корневая сессия идёт в обход столько же, сколько живёт свежесть пуша.
 async fn sweep(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id and p.state='in_progress') or exists(select 1 from nudge_rules nr where nr.conversation_id=c.id and nr.state in ('watching','pending')) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) or (c.parent_conversation_id is null and d.activity_state='idle' and d.updated_at > now()-interval '5 minutes' and exists(select 1 from push_settings ps where ps.turn_finished)) order by c.id").fetch_all(pool).await
+    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id and p.state='in_progress') or exists(select 1 from nudge_rules nr where nr.conversation_id=c.id and nr.state in ('watching','pending')) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) or (c.parent_conversation_id is null and d.activity_state='idle' and d.updated_at > now()-interval '10 minutes' and exists(select 1 from push_settings ps where ps.turn_finished)) order by c.id").fetch_all(pool).await
 }
 
 pub async fn run(
@@ -974,6 +974,50 @@ pub(crate) mod time {
         DateTime::<Utc>::deserialize(d)
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::notify::{self, PushSettings};
+    use chrono::TimeDelta;
+
+    /// Обход обязан видеть недавно осевшую корневую сессию столько же, сколько живёт
+    /// свежесть пуша: иначе после перезапуска хаба итог в окне десяти минут теряется.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn sweep_keeps_a_root_idle_session_within_the_push_freshness(pool: PgPool) {
+        let seed = crate::testkit::seed(&pool).await;
+        notify::configure(
+            &pool,
+            Some(&PushSettings {
+                waiting: true,
+                turn_finished: true,
+                failures: true,
+                timezone: "UTC".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        refresh(
+            &pool,
+            seed.conversation_id,
+            Utc::now() - TimeDelta::minutes(6),
+            &Thresholds::from(&ActivityConfig::default()),
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "update conversation_derived set updated_at=clock_timestamp()-interval '6 minutes'
+             where conversation_id=$1",
+        )
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let swept = sweep(&pool).await.unwrap();
+        assert!(swept.contains(&seed.conversation_id), "{swept:?}");
+    }
+}
+
 mod optional_time {
     use super::*;
     pub fn serialize<S: serde::Serializer>(

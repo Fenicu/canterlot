@@ -462,6 +462,36 @@ async fn a_finished_turn_of_a_root_session_is_pushed_once_and_a_delegate_turn_is
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_turn_held_by_a_background_task_is_pushed_when_the_background_ends(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    long_idle(&pool, s.conversation_id, now).await;
+    // Ход кончился двадцать минут назад, но последнее событие сессии — конец фоновой
+    // задачи десять секунд назад: итог свежий, хотя конец хода давно за окном.
+    finish_turn(
+        &pool,
+        s.machine_id,
+        s.conversation_id,
+        &execution,
+        now - TimeDelta::minutes(20),
+    )
+    .await;
+    sqlx::query("update executions set last_event_at=$2 where conversation_id=$1")
+        .bind(s.conversation_id)
+        .bind(now - TimeDelta::seconds(10))
+        .execute(&pool)
+        .await
+        .unwrap();
+    refresh_at(&pool, s.conversation_id, now).await;
+    assert_eq!(
+        pushes(&pool).await,
+        [(s.conversation_id, "turn_finished".into(), "pending".into())]
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_old_idle_session_does_not_push_after_a_restart(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
