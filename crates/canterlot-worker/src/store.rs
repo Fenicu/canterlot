@@ -37,6 +37,8 @@ pub enum StoreError {
     Io(#[from] io::Error),
     #[error("journal error: {0}")]
     Journal(#[from] JournalError),
+    #[error("CJ acknowledgement is beyond the journal end")]
+    CjAckBeyondEnd,
     #[error("CJ is sealed; local recovery is required before connecting")]
     CjSealed,
     #[error("local journal {0} is sealed; local recovery is required")]
@@ -890,6 +892,11 @@ impl WorkerStore {
 
     pub fn on_cj_ack(&mut self, up_to: u64) -> Result<(), StoreError> {
         self.ensure_open()?;
+        // Подтверждение за концом журнала — ошибка протокола, а не порча диска:
+        // журнал не трогаем и не закрываем хранилище.
+        if up_to > self.cj.last_seq() {
+            return Err(StoreError::CjAckBeyondEnd);
+        }
         let result = (|| {
             self.cj.ack(up_to)?;
             let mut next = self.cj.first_seq();

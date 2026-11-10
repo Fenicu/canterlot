@@ -229,14 +229,16 @@ fn write_failure_after_inbox_poison_all_calls_until_reopen() {
 }
 
 #[test]
-fn ack_and_generation_errors_poison_the_store() {
+fn ack_beyond_end_is_not_store_loss_and_generation_errors_poison_the_store() {
     let dir = private_dir();
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    assert!(store.on_cj_ack(1).is_err());
+    // Ошибка протокола хаба: журнал не тронут, хранилище не закрыто.
     assert!(matches!(
-        store.restore_generation(),
-        Err(StoreError::NeedsReopen)
+        store.on_cj_ack(1),
+        Err(StoreError::CjAckBeyondEnd)
     ));
+    assert!(store.on_cj_ack(0).is_ok());
+    assert!(store.restore_generation().is_ok());
     drop(store);
     let mut store = WorkerStore::open(dir.path()).unwrap();
     std::fs::create_dir(dir.path().join("hub.toml")).unwrap();

@@ -174,6 +174,7 @@ pub enum StoreErrorKind {
     NeedsReopen,
     Io,
     Journal,
+    CjAckBeyondEnd,
     CjSealed,
     LocalSealed,
     InvalidCommandId,
@@ -191,6 +192,7 @@ impl StoreError {
             Self::NeedsReopen => StoreErrorKind::NeedsReopen,
             Self::Io(_) => StoreErrorKind::Io,
             Self::Journal(_) => StoreErrorKind::Journal,
+            Self::CjAckBeyondEnd => StoreErrorKind::CjAckBeyondEnd,
             Self::CjSealed => StoreErrorKind::CjSealed,
             Self::LocalSealed(_) => StoreErrorKind::LocalSealed,
             Self::InvalidCommandId(_) => StoreErrorKind::InvalidCommandId,
@@ -1600,7 +1602,12 @@ impl Worker {
             if operation.is_none() {
                 if let Some(up_to) = store_ack.take() {
                     operation = Some(Box::pin(self.store.call(move |slot| {
-                        store_mut(slot)?.on_cj_ack(up_to)?;
+                        store_mut(slot)?
+                            .on_cj_ack(up_to)
+                            .map_err(|error| match error {
+                                StoreError::CjAckBeyondEnd => WorkerError::Protocol,
+                                error => WorkerError::Store(error),
+                            })?;
                         Ok(StoreReply::Ack(up_to))
                     })));
                 } else if dirty && ready_batch.is_none() && pending_batches.len() < 8 {

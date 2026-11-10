@@ -277,8 +277,11 @@ fn cursor_and_ack_preserve_unacknowledged_records() {
     let second = store.cj_records_from(2, 1).unwrap();
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].seq, 2);
-    assert!(store.on_cj_ack(4).is_err());
-    assert!(matches!(store.cj_cursor(), Err(StoreError::NeedsReopen)));
+    assert!(matches!(
+        store.on_cj_ack(4),
+        Err(StoreError::CjAckBeyondEnd)
+    ));
+    assert!(store.cj_cursor().is_ok());
     drop(store);
     let mut store = WorkerStore::open(dir.path()).unwrap();
     assert_eq!(store.cj_cursor().unwrap().acked_seq_known_to_worker, 0);

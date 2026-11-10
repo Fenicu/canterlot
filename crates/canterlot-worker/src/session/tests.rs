@@ -669,6 +669,35 @@ async fn a_replay_backlog_is_handed_over_in_inbox_order() {
 
 // Команда, уже отданная исполнению, после переподключения не исполняется
 // дважды: повторная отдача пропущенных команд не должна дублировать итог.
+// Подтверждение за пределами отправленного — ошибка протокола хаба,
+// а не повод отравить журнал и уйти в ожидание диска.
+#[tokio::test]
+async fn cj_ack_beyond_the_sent_sequence_keeps_the_store_healthy() {
+    let (hub, mut store) = support::ProtocolHub::start(support::Behavior {
+        ack_override: Some(100),
+        ..Default::default()
+    })
+    .await;
+    seed_stored_cancels(&mut store, 1);
+    let worker = Worker::new(hub.config.clone(), store);
+    let client = worker.store.client();
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    wait_backoff(&mut state).await;
+    client
+        .call(|slot| {
+            store_mut(slot)?;
+            Ok(())
+        })
+        .await
+        .expect("a foreign ack must not poison the store");
+    assert!(!join.is_finished(), "the worker keeps retrying");
+    drop(client);
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn handled_command_is_not_routed_twice_after_reconnect() {
     let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
