@@ -3340,6 +3340,52 @@ async fn wake_without_a_live_execution_notes_the_parent_once(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn wake_without_a_live_execution_notes_each_pause_episode(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let parent = env.conversation(true, false).await;
+    let child = delegate_of(&env, parent).await;
+    let now = start();
+    let weekly_reset = now + TimeDelta::days(3);
+    env.observe("claude", Window::Weekly, 10, Some(weekly_reset), now)
+        .await;
+
+    let first_reset = now + secs(3600);
+    env.limit_reached(child, "claude", Window::FiveHour, Some(first_reset), now)
+        .await;
+    dead_turn(&pool, child).await;
+    verified_reset(&env, first_reset).await;
+    env.tick(first_reset + secs(60)).await;
+    assert_eq!(parent_note_texts(&pool, parent).await.len(), 1);
+
+    // Второй пятичасовой предел в том же недельном окне: срок `resume_pending_until`
+    // не меняется, но это уже другой эпизод паузы.
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state) values($1,$2,2,'running')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(child)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let second_reset = first_reset + TimeDelta::hours(5);
+    let second_at = first_reset + secs(60);
+    env.limit_reached(
+        child,
+        "claude",
+        Window::FiveHour,
+        Some(second_reset),
+        second_at,
+    )
+    .await;
+    dead_turn(&pool, child).await;
+    verified_reset(&env, second_reset).await;
+    env.tick(second_reset + secs(60)).await;
+
+    let notes = parent_note_texts(&pool, parent).await;
+    assert_eq!(notes.len(), 2, "one note per pause episode: {notes:?}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn wake_without_a_live_execution_sends_no_note_to_an_owner_stopped_child(pool: PgPool) {
     let mut env = Env::new(&pool).await;
     let parent = env.conversation(true, false).await;

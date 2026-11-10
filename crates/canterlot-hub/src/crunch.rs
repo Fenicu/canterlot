@@ -894,6 +894,7 @@ pub async fn handle_wake_in_tx(
     // Порядок блокировок: задание, строка провайдера, очередь, разговор.
     limits::share_provider(conn, provider).await?;
     let mut by_clock = false;
+    let mut episode_wake_at = None;
     if !payload.verified {
         let holds: Option<Json<Vec<HoldReason>>> =
             sqlx::query_scalar("select hold_reasons from queue_state where conversation_id=$1")
@@ -913,6 +914,7 @@ pub async fn handle_wake_in_tx(
         let Some(wake_at) = wake_at else {
             return Ok(JobOutcome::Cancelled("hold_gone"));
         };
+        episode_wake_at = Some(wake_at);
         let due = wake_at + delta(config.reset_grace)?;
         if now < due {
             return Ok(JobOutcome::Retry {
@@ -1063,10 +1065,31 @@ pub async fn handle_wake_in_tx(
         && resume_pending
         && !queue.pause_reasons.0.contains(&PauseReason::UserStop)
     {
-        let dedupe = pending_until.map_or_else(
-            || format!("crunch-reset:{}", job.id),
-            |at| format!("crunch-reset:{id}:{}", at.timestamp_millis()),
-        );
+        // Ключ заметки — срок сброса этого эпизода. У двух пятичасовых пауз в одной
+        // неделе `resume_pending_until` совпадает, а срок сброса разный; повтор той же
+        // паузы видит тот же срок. Недельный резерв срока в задании не несёт, для него
+        // остаётся `resume_pending_until`, который меняется вместе с неделей.
+        let mut episode = episode_wake_at.map(wire);
+        if episode.is_none()
+            && let Some(hold_key) = job.payload.get("hold_key").and_then(Value::as_str)
+        {
+            episode = sqlx::query_scalar(
+                "select payload->>'resets_at' from scheduled_jobs
+                 where conversation_id=$1 and kind='wake' and payload->>'hold_key'=$2
+                   and payload->>'resets_at' is not null
+                 order by created_at desc,id desc limit 1",
+            )
+            .bind(id)
+            .bind(hold_key)
+            .fetch_optional(&mut *conn)
+            .await?;
+        }
+        let dedupe = episode
+            .or_else(|| pending_until.map(|at| at.timestamp_millis().to_string()))
+            .map_or_else(
+                || format!("crunch-reset:{}", job.id),
+                |key| format!("crunch-reset:{id}:{key}"),
+            );
         queue_no_live_note_in_tx(conn, job.owner_id, id, provider, window, &dedupe, now).await?;
     }
     let result = json!({"input_id":input_id,"skipped":skipped,"resume_pending":resume_pending,"by_clock":by_clock});
