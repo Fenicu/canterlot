@@ -81,6 +81,16 @@ pub async fn configure(pool: &PgPool, settings: Option<&PushSettings>) -> Result
         .execute(&mut *tx)
         .await
         .map_err(|_| "db_error")?;
+        // Уборка не должна зависеть от работающей службы пушей: без таблицы она
+        // не запускается, и готовые строки иначе оставались бы до удаления сессий.
+        sqlx::query(
+            "delete from owner_pushes where state<>'pending'
+               and updated_at<clock_timestamp()-$1*interval '1 second'",
+        )
+        .bind(RETENTION.num_seconds() as f64)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "db_error")?;
         return tx.commit().await.map_err(|_| "db_error");
     };
     let known: bool =

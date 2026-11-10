@@ -1002,6 +1002,37 @@ async fn disabling_at_start_cancels_what_was_pending(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn finished_rows_are_cleaned_without_the_section(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let stale = Uuid::now_v7();
+    let fresh = Uuid::now_v7();
+    for request in [stale, fresh] {
+        open_question(&pool, &s, &question_batch(&execution, request, "Да?")).await;
+    }
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 2);
+    assert_eq!(fake.seen().len(), 2);
+    sqlx::query(
+        "update owner_pushes set updated_at=clock_timestamp()-interval '8 days'
+         where dedupe_key=$1",
+    )
+    .bind(format!("waiting:{stale}"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    notify::configure(&pool, None).await.unwrap();
+    let left: Vec<String> =
+        sqlx::query_scalar("select dedupe_key from owner_pushes order by dedupe_key")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(left, [format!("waiting:{fresh}")]);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn trash_cancels_pending_pushes_and_purge_removes_them(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
