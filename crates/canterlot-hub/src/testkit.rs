@@ -262,6 +262,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())
             .with_orchestrator(&orchestrator)
+            .with_session_tools(session_tools.clone())
             .with_activity(&activity)
             .with_dispatcher(dispatcher.clone());
     let ingest = ingest::Ingest::new(pool.clone())

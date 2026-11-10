@@ -12,7 +12,7 @@ use std::{
 };
 
 use canterlot_hub::{
-    config::{ActivityConfig, HubTimers, LimitsConfig, SchedulerConfig},
+    config::{ActivityConfig, HubTimers, LimitsConfig, SchedulerConfig, SessionToolsConfig},
     events::{CLIENT_KINDS, is_client_visible},
     machines,
     testkit::{
@@ -441,6 +441,11 @@ impl Pilot {
                 activity: options.activity,
                 scheduler: SchedulerConfig {
                     idle_poll: ms(100),
+                    ..Default::default()
+                },
+                // Сценарии запускают детей вплотную: пауза проверяется в тестах очереди хаба.
+                session_tools: SessionToolsConfig {
+                    spawn_stagger: Duration::ZERO,
                     ..Default::default()
                 },
                 ..Default::default()
