@@ -174,6 +174,17 @@ fn denied_secret_name(name: &str) -> bool {
         || denied_token_name(&lower)
 }
 
+/// Имена ключей SSH: узкий набор префиксов, а не любое `id_*`, чтобы обычные
+/// `id_mapping.json` и `id_list.csv` оставались обычными файлами.
+const SSH_KEY_PREFIXES: &[&str] = &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_xmss"];
+
+fn denied_ssh_key_name(lower: &str) -> bool {
+    !lower.ends_with(".pub")
+        && SSH_KEY_PREFIXES
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+}
+
 /// Файлы с токенами и паролями инструментов, где бы они ни лежали. Шаблоны имён
 /// действуют только на имя самого файла: каталог `token` или `api-keys` ничего не
 /// запрещает.
@@ -203,7 +214,7 @@ fn denied_share_name(name: &str) -> bool {
                 | "kubeconfig"
         )
         || lower.starts_with(".claude.json")
-        || (lower.starts_with("id_") && !lower.ends_with(".pub"))
+        || denied_ssh_key_name(&lower)
         || lower.ends_with(".ppk")
         || lower.starts_with("secret.")
         || lower.starts_with("client_secret")
@@ -1017,8 +1028,12 @@ mod tests {
             ".env.production",
             "prod.env",
             ".envrc",
-            // Ключи SSH: любое `id_*` без `.pub`, плюс PuTTY.
+            // Ключи SSH: узкие префиксы без `.pub`, плюс PuTTY.
+            "id_rsa",
+            "id_dsa",
+            "id_ecdsa",
             "id_ed25519",
+            "id_xmss",
             "id_ed25519_sk",
             "id_ecdsa_sk",
             "id_rsa.bak",
@@ -1078,6 +1093,9 @@ mod tests {
             ".env.template",
             ".env.dist",
             "id_ed25519.pub",
+            "id_mapping.json",
+            "id_list.csv",
+            "id_card.png",
         ] {
             let path = dir.path().join(name);
             fs::write(&path, b"public").unwrap();
@@ -1150,6 +1168,57 @@ mod tests {
         fs::write(&ssh, b"Host *").unwrap();
         assert_eq!(
             share(&ssh, Some(workdir.path())).unwrap_err(),
+            ShareError::Denied
+        );
+    }
+
+    #[test]
+    fn symlinks_near_the_final_component_do_not_hide_secrets() {
+        // a) Обычное имя — ссылка на секретный файл. Конечная ссылка не
+        // раскрывается: отказ `Symlink`, до секрета дело не доходит.
+        let workdir = dir();
+        fs::write(workdir.path().join(".env.local"), b"A=1").unwrap();
+        let notes = workdir.path().join("notes.txt");
+        symlink(".env.local", &notes).unwrap();
+        assert_eq!(
+            share(&notes, Some(workdir.path())).unwrap_err(),
+            ShareError::Symlink
+        );
+
+        // b) Секретное имя — ссылка на обычный файл: запрет по имени срабатывает
+        // до обращения к файловой системе.
+        let workdir = dir();
+        fs::write(workdir.path().join("plain.txt"), b"plain").unwrap();
+        let env = workdir.path().join(".env");
+        symlink("plain.txt", &env).unwrap();
+        assert_eq!(
+            share(&env, Some(workdir.path())).unwrap_err(),
+            ShareError::Denied
+        );
+
+        // c) Ссылка-каталог с обычным именем раскрывается, файл внутри отдаётся.
+        let workdir = dir();
+        let data = workdir.path().join("data");
+        fs::create_dir(&data).unwrap();
+        fs::write(data.join("usage.csv"), b"a,b").unwrap();
+        symlink("data", workdir.path().join("tokens")).unwrap();
+        assert!(
+            share(
+                &workdir.path().join("tokens/usage.csv"),
+                Some(workdir.path())
+            )
+            .is_ok()
+        );
+
+        // d) Ссылка-каталог ведёт в `.ssh`: запрет каталога срабатывает после
+        // раскрытия ссылки, ещё до открытия файла.
+        let workdir = dir();
+        let ssh = workdir.path().join(".ssh");
+        fs::create_dir(&ssh).unwrap();
+        fs::write(ssh.join("config"), b"Host *").unwrap();
+        symlink(".ssh", workdir.path().join("data")).unwrap();
+        assert_eq!(
+            share(&workdir.path().join("data/config"), Some(workdir.path())).unwrap_err(),
             ShareError::Denied
         );
     }
