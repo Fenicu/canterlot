@@ -3252,7 +3252,11 @@ async fn startup_verify_then_redelivered_start_spawns_once() {
         .unwrap();
     env.wait_running().await;
     let supervisors = supervisors_of(env.root.path());
-    assert_eq!(supervisors.len(), 1, "single supervisor, got {supervisors:?}");
+    assert_eq!(
+        supervisors.len(),
+        1,
+        "single supervisor, got {supervisors:?}"
+    );
     env.stop().await;
     assert_eq!(env.stored_commands().await, 0, "nothing stays in the inbox");
 }
@@ -3290,9 +3294,8 @@ async fn redelivered_cancel_after_restart_cancels_once() {
         .unwrap();
     let cj = env
         .wait_cj("cancel won", |cj| {
-            cj.iter().any(|b| {
-                matches!(b, Body::CancelWon(f) if f.command_id == target)
-            })
+            cj.iter()
+                .any(|b| matches!(b, Body::CancelWon(f) if f.command_id == target))
         })
         .await;
     let won = cj
