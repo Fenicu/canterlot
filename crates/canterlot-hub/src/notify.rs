@@ -545,18 +545,34 @@ async fn compose(
             }
         }
         KIND_TURN_FINISHED => {
-            let query = format!(
-                "select left(content,4000) from blocks
-                 where conversation_id=$1 and kind='text' and parent_block_id is null
-                   and btrim(content) <> '' and created_at <= $2 and {}
-                 order by created_seq desc nulls last,created_at desc limit 1",
-                crate::agents::main_agent_filter("agent")
-            );
-            let answer: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
-                .bind(row.conversation_id)
-                .bind(row.created_at)
-                .fetch_optional(pool)
-                .await?;
+            // Ответ берём только из последнего хода: текст прошлого хода не должен
+            // выдаваться за итог хода, кончившегося без ответа.
+            let started: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "select max(started_at) from runs where conversation_id=$1 and finished_at <= $2",
+            )
+            .bind(row.conversation_id)
+            .bind(row.created_at)
+            .fetch_one(pool)
+            .await?;
+            let answer: Option<String> = match started {
+                Some(started) => {
+                    let query = format!(
+                        "select left(content,4000) from blocks
+                         where conversation_id=$1 and kind='text' and parent_block_id is null
+                           and btrim(content) <> '' and created_at >= $2 and created_at <= $3
+                           and {}
+                         order by created_seq desc nulls last,created_at desc limit 1",
+                        crate::agents::main_agent_filter("agent")
+                    );
+                    sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+                        .bind(row.conversation_id)
+                        .bind(started)
+                        .bind(row.created_at)
+                        .fetch_optional(pool)
+                        .await?
+                }
+                None => None,
+            };
             (turn_text(answer.as_deref()), PRIORITY_TURN_FINISHED)
         }
         KIND_FAILURE => {

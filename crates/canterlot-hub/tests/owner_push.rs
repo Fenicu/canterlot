@@ -501,6 +501,88 @@ async fn turn_finished(pool: &PgPool, conversation: Uuid) -> i64 {
     .unwrap()
 }
 
+async fn block(
+    pool: &PgPool,
+    execution: Uuid,
+    conversation: Uuid,
+    kind: &str,
+    content: &str,
+    at: DateTime<Utc>,
+) {
+    sqlx::query(
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,created_at,agent)
+         values($1,$2,$3,$4,'final',1,$5,$6,'main')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution)
+    .bind(conversation)
+    .bind(kind)
+    .bind(content)
+    .bind(at)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_finished_turn_without_text_does_not_show_the_previous_answer(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    long_idle(&pool, s.conversation_id, now).await;
+    // Прошлый ход оставил ответ, текущий кончился только вызовом инструмента.
+    finish_turn(
+        &pool,
+        s.machine_id,
+        s.conversation_id,
+        &execution,
+        now - TimeDelta::minutes(30),
+    )
+    .await;
+    block(
+        &pool,
+        execution.execution_id,
+        s.conversation_id,
+        "text",
+        "Прошлый ответ",
+        now - TimeDelta::minutes(30) + TimeDelta::seconds(1),
+    )
+    .await;
+    finish_turn(
+        &pool,
+        s.machine_id,
+        s.conversation_id,
+        &execution,
+        now - TimeDelta::seconds(10),
+    )
+    .await;
+    block(
+        &pool,
+        execution.execution_id,
+        s.conversation_id,
+        "tool_call",
+        "",
+        now - TimeDelta::seconds(9),
+    )
+    .await;
+    for step in [6, 10] {
+        refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(step)).await;
+    }
+    assert_eq!(
+        sender(&config)
+            .deliver_due(&pool, later())
+            .await
+            .unwrap()
+            .sent,
+        1
+    );
+    let seen = fake.seen();
+    assert_eq!(seen[0].body["message"], "Ход завершён");
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_turn_is_pushed_once_even_when_the_state_flaps(pool: PgPool) {
     enable(&pool).await;
