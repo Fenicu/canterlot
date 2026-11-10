@@ -328,6 +328,16 @@ pub(super) async fn sweep_runtime(shared: &Shared) -> Result<(), ExecError> {
     .map_err(|_| ExecError::Shutdown)??;
     for execution in executions {
         before_recheck(&execution.id.to_string()).await;
+        // Актор регистрируется до создания каталога: если он есть, это запуск
+        // в подготовке, и уборка не имеет права забрать его каталог.
+        if shared
+            .actors
+            .lock()
+            .expect("actors lock")
+            .contains_key(&execution.id)
+        {
+            continue;
+        }
         shared
             .store
             .call(move |slot| {
@@ -3772,6 +3782,33 @@ mod tests {
         super::sweep_runtime(&manager.shared).await.unwrap();
         *BEFORE_RECHECK.lock().unwrap() = None;
         assert!(exec_dir.exists());
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_execution_that_has_a_starting_actor() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let id = Uuid::now_v7();
+        let exec_dir = data.join("executions").join(id.to_string());
+        fs::create_dir_all(&exec_dir).unwrap();
+        age_tree(&exec_dir);
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        // Актор уже зарегистрирован, а запись о владении ещё не успела появиться:
+        // это запуск в процессе подготовки, а не брошенный каталог.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        manager.shared.actors.lock().unwrap().insert(id, tx);
+        super::sweep_runtime(&manager.shared).await.unwrap();
+        assert!(exec_dir.exists(), "a starting actor keeps its exec dir");
         manager.shutdown().await;
         thread.close().await.unwrap();
     }
