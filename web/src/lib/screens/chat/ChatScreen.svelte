@@ -12,7 +12,8 @@
 	import { turnIsLive } from '#lib/composer/sendRules.js';
 	import type { ChatStore, OwnerInputView } from '#lib/stores/chat.svelte.js';
 	import PendingStrip from '#lib/timeline/PendingStrip.svelte';
-	import { sessionBookmarks } from '#lib/bookmarks/store.svelte.js';
+	import { sessionBookmarks, type ConversationBookmarks } from '#lib/bookmarks/store.svelte.js';
+	import type { BookmarkView } from '#lib/bookmarks/model.js';
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
@@ -100,6 +101,7 @@
 	let showDiagnostics = $state(false);
 	let showDelegation = $state(false);
 	let showMessages = $state(false);
+	let showBookmarks = $state(false);
 	let showAlarms = $state(false);
 	let showNudge = $state(false);
 	let showRoute = $state(false);
@@ -112,6 +114,7 @@
 	let InfoSheet = $state<Component<{ chat: ChatStore; runId: string; onclose: () => void }> | null>(null);
 	let OwnerMessagesSheet = $state<Component<{ chat: ChatStore; onpick: (item: OwnerInputView) => void; onclose: () => void }> | null>(null);
 	let AlarmsSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
+	let BookmarksSheet = $state<Component<{ marks: ConversationBookmarks; now: number; onclose: () => void; onpick: (entry: BookmarkView) => void }> | null>(null);
 	let NudgeSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	let RouteSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	const todos = $derived(chat.todos.lane(null));
@@ -135,6 +138,9 @@
 	});
 	$effect(() => {
 		if (showMessages && !OwnerMessagesSheet) import('./OwnerMessagesSheet.svelte').then((m) => { OwnerMessagesSheet = m.default; });
+	});
+	$effect(() => {
+		if (showBookmarks && !BookmarksSheet) import('./BookmarksSheet.svelte').then((m) => { BookmarksSheet = m.default; });
 	});
 	$effect(() => {
 		if (showAlarms && !AlarmsSheet) import('./AlarmsSheet.svelte').then((m) => { AlarmsSheet = m.default; });
@@ -252,6 +258,8 @@
 		}}
 		onOpenMessages={() => (showMessages = true)}
 		onOpenSearch={() => openSearch('', { id: chat.id, title: (chat.detail as { title?: string } | null)?.title ?? '' })}
+		onOpenBookmarks={() => (showBookmarks = true)}
+		bookmarkCount={marks?.count ?? 0}
 		onOpenAlarms={() => (showAlarms = true)}
 		onOpenNudge={() => (showNudge = true)}
 		onOpenRoute={() => (showRoute = true)}
@@ -380,6 +388,19 @@
 			onpick={(item) => {
 				showMessages = false;
 				chat.requestJump(item.id, item.seq);
+			}}
+		/>
+	{/if}
+
+	{#if showBookmarks && BookmarksSheet && marks}
+		<BookmarksSheet
+			{marks}
+			{now}
+			onclose={() => (showBookmarks = false)}
+			onpick={(entry) => {
+				showBookmarks = false;
+				if (entry.block_id) chat.requestBlockJump(entry.block_id, String(entry.jump_seq));
+				else if (entry.input_id) chat.requestJump(entry.input_id, String(entry.jump_seq));
 			}}
 		/>
 	{/if}

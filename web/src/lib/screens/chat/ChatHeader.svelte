@@ -62,6 +62,8 @@
 		onOpenDelegation,
 		onOpenMessages,
 		onOpenSearch,
+		onOpenBookmarks,
+		bookmarkCount = 0,
 		onOpenAlarms,
 		onOpenNudge,
 		onOpenRoute,
@@ -80,6 +82,9 @@
 		onOpenDelegation?: () => void;
 		onOpenMessages?: () => void;
 		onOpenSearch?: () => void;
+		/** Избранное разговора: лист с закладками и их число. */
+		onOpenBookmarks?: () => void;
+		bookmarkCount?: number;
 		onOpenAlarms?: () => void;
 		onOpenNudge?: () => void;
 		/** Решение маршрута, выбравшее исполнителя этой сессии. */
@@ -374,6 +379,10 @@
 
 				{#if onOpenSearch}
 					<MenuItem icon="search" onclick={() => { menuOpen = false; onOpenSearch(); }}>Искать в этой сессии</MenuItem>
+				{/if}
+
+				{#if onOpenBookmarks}
+					<MenuItem icon="bookmark" onclick={() => { menuOpen = false; onOpenBookmarks(); }}>Избранное{bookmarkCount > 0 ? ` · ${bookmarkCount}` : ''}</MenuItem>
 				{/if}
 
 				{#if onOpenDiagnostics}
