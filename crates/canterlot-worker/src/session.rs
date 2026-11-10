@@ -673,9 +673,9 @@ impl Worker {
         for task in tasks {
             let _ = task.await;
         }
-        if let Some(task) = self.metrics_task.take() {
-            let _ = task.await;
-        }
+        // Зависший сбор метрик не должен держать ни переподключение, ни остановку:
+        // его результат сеансу больше не нужен.
+        self.metrics_task = None;
         if let Some(lease) = self.lease.take() {
             lease.stop().await;
         }
@@ -830,9 +830,9 @@ impl Worker {
                 }
                 result = self.attempt(&boot_id, &mut live_since) => result,
             };
-            if let Some(task) = self.metrics_task.take() {
-                let _ = task.await;
-            }
+            // Зависший сбор метрик не должен держать переподключение: его результат
+            // относится к оборванной попытке и сеансу больше не нужен.
+            self.metrics_task = None;
             self.manager.as_ref().unwrap().set_attachment_source(None);
             self.manager.as_ref().unwrap().set_media_sink(None);
             self.manager.as_ref().unwrap().set_agent_caller(None);
