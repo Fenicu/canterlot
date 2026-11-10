@@ -1114,6 +1114,19 @@ async fn wake_after_verified_reset_releases_hold_and_queues_resume_text_once(poo
             .timestamp(),
         reset.timestamp()
     );
+    // Продолжение остаётся в списке сообщений владельца, как раньше ввод без origin.
+    sqlx::query("update inputs set feed_seq=1 where id=$1")
+        .bind(input)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let page = canterlot_hub::history::owner_inputs(&mut conn, env.owner, id, None, 10)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, input);
     let woken = events_of(&pool, id, "crunch_woken").await;
     assert_eq!(woken.len(), 1);
     assert_eq!(woken[0]["input_id"], input.to_string());

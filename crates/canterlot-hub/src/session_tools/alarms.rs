@@ -2947,7 +2947,21 @@ fn compact_condition(row: &AlarmRow) -> Value {
         .and_then(Value::as_str)
         .unwrap_or(&row.kind);
     map.insert("kind".to_owned(), json!(kind));
-    for key in ["session_ids", "states", "all", "provider", "window", "path"] {
+    for key in [
+        "session_ids",
+        "states",
+        "all",
+        "provider",
+        "window",
+        "below_percent",
+        "path",
+        "min_bytes",
+        "fresh",
+        "read_head",
+        "free_disk_gb_above",
+        "load_per_core_below",
+        "mem_available_gb_above",
+    ] {
         if let Some(value) = condition.get(key).filter(|value| !value.is_null()) {
             map.insert(key.to_owned(), value.clone());
         }
