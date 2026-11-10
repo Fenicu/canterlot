@@ -3216,3 +3216,91 @@ async fn legacy_supervisor_of_an_older_release_gets_compact_only() {
 async fn legacy_supervisor_of_an_unknown_release_gets_neither() {
     assert_eq!(legacy_release("deadbeefcafe").await, (true, true));
 }
+
+async fn accept_only(env: &Env, command: Command) -> Accept {
+    let copy = command.clone();
+    let accept = env
+        .thread()
+        .call(move |store| Ok(store.as_mut().unwrap().accept_command(&copy)?))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            accept,
+            Accept::Stored { .. } | Accept::Redelivered { .. } | Accept::Duplicate
+        ),
+        "{accept:?}"
+    );
+    accept
+}
+
+// Перезапуск + первая попытка отдают принятый `StartExecution` дважды:
+// исполнение должно запуститься ровно один раз.
+#[tokio::test]
+async fn startup_verify_then_redelivered_start_spawns_once() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    let start = start_command(env.execution, 1, env.conversation, "synthetic", &env.work);
+    // Команда принята в хранилище, но не отдана исполнению.
+    accept_only(&env, start.clone()).await;
+    // Перезапуск воркера: `startup_verify` отдаёт команду.
+    env.manager().startup_verify().await.unwrap();
+    // Первая попытка: повторная отдача той же команды.
+    env.manager()
+        .handle(start.clone(), Accept::Redelivered { cj_seq: 0 })
+        .await
+        .unwrap();
+    env.wait_running().await;
+    let supervisors = supervisors_of(env.root.path());
+    assert_eq!(supervisors.len(), 1, "single supervisor, got {supervisors:?}");
+    env.stop().await;
+    assert_eq!(env.stored_commands().await, 0, "nothing stays in the inbox");
+}
+
+// Перезапуск + первая попытка отдают принятую отмену дважды:
+// итог должен записаться ровно один раз.
+#[tokio::test]
+async fn redelivered_cancel_after_restart_cancels_once() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let target = Uuid::now_v7().to_string();
+    let cancel = command(
+        Uuid::now_v7(),
+        1,
+        env.execution,
+        env.generation_of_execution(),
+        Kind::CancelInput(CancelInput {
+            target_command_id: target.clone(),
+            target_dispatch_attempt: 1,
+        }),
+    );
+    // Команда принята в хранилище, но не отдана исполнению.
+    accept_only(&env, cancel.clone()).await;
+    // Перезапуск воркера: `startup_verify` отдаёт команду.
+    env.close_manager().await;
+    env.reopen();
+    env.manager().startup_verify().await.unwrap();
+    env.hub_session();
+    // Первая попытка: повторная отдача той же команды.
+    env.manager()
+        .handle(cancel.clone(), Accept::Redelivered { cj_seq: 0 })
+        .await
+        .unwrap();
+    let cj = env
+        .wait_cj("cancel won", |cj| {
+            cj.iter().any(|b| {
+                matches!(b, Body::CancelWon(f) if f.command_id == target)
+            })
+        })
+        .await;
+    let won = cj
+        .iter()
+        .filter(|b| matches!(b, Body::CancelWon(f) if f.command_id == target))
+        .count();
+    assert_eq!(won, 1, "cancel outcome must be recorded exactly once");
+    assert!(env.terminal(&cancel).await);
+    env.stop().await;
+    assert_eq!(env.stored_commands().await, 0, "nothing stays in the inbox");
+}
