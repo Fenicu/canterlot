@@ -21,7 +21,7 @@ use rustix::process::Signal;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
     net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
-    signal::unix::{SignalKind, signal},
+    signal::unix::{Signal as SignalStream, SignalKind, signal},
 };
 
 use super::{
@@ -47,6 +47,45 @@ pub struct RunArgs {
 
 fn note(text: impl AsRef<str>) {
     let _ = writeln!(io::stderr(), "canterlot lease: {}", text.as_ref());
+}
+
+/// Маска игнорируемых сигналов, унаследованная от родителя: `nohup` и фоновые задания
+/// ставят SIG_IGN. Перехват tokio перебил бы её, и `exec` вернул бы команде SIG_DFL.
+fn inherited_ignored() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("SigIgn:"))
+                .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+        })
+        .unwrap_or(0)
+}
+
+fn initially_ignored(mask: u64, sig: Signal) -> bool {
+    let raw = u32::try_from(sig.as_raw()).unwrap_or(0);
+    (1..=64).contains(&raw) && mask & (1 << (raw - 1)) != 0
+}
+
+/// Обработчик ставится только для сигналов, которые родитель не игнорировал:
+/// унаследованный SIG_IGN должен дойти и до команды.
+fn watch(kind: SignalKind, sig: Signal, ignored: u64) -> io::Result<Option<SignalStream>> {
+    if initially_ignored(ignored, sig) {
+        Ok(None)
+    } else {
+        signal(kind).map(Some)
+    }
+}
+
+/// Ждёт сигнал; у унаследованного SIG_IGN обработчика нет — не ждём никогда.
+async fn caught(signal: &mut Option<SignalStream>) {
+    match signal {
+        Some(signal) => {
+            let _ = signal.recv().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// Путь сокета: переменная исполнения, иначе `$XDG_RUNTIME_DIR/canterlot/lease.sock`.
@@ -288,11 +327,13 @@ pub async fn run(args: RunArgs) -> ExitCode {
     // Сигналы ловятся с самого начала: пока ждём, они завершают обёртку тем же сигналом,
     // а после запуска команды INT и QUIT игнорируются. Перехваченный (не игнорируемый)
     // сигнал при exec возвращается к умолчанию, поэтому команда получает обычные.
+    // Унаследованный SIG_IGN не перехватываем: так он доживает до команды.
+    let ignored = inherited_ignored();
     let (Ok(mut sigint), Ok(mut sigquit), Ok(mut sigterm), Ok(mut sighup)) = (
-        signal(SignalKind::interrupt()),
-        signal(SignalKind::quit()),
-        signal(SignalKind::terminate()),
-        signal(SignalKind::hangup()),
+        watch(SignalKind::interrupt(), Signal::INT, ignored),
+        watch(SignalKind::quit(), Signal::QUIT, ignored),
+        watch(SignalKind::terminate(), Signal::TERM, ignored),
+        watch(SignalKind::hangup(), Signal::HUP, ignored),
     ) else {
         return unwrapped(&args.command, "signal setup failed");
     };
@@ -322,10 +363,10 @@ pub async fn run(args: RunArgs) -> ExitCode {
         tokio::pin!(waiting);
         let outcome = tokio::select! {
             outcome = &mut waiting => outcome,
-            _ = sigint.recv() => reraise(Signal::INT),
-            _ = sigquit.recv() => reraise(Signal::QUIT),
-            _ = sigterm.recv() => reraise(Signal::TERM),
-            _ = sighup.recv() => reraise(Signal::HUP),
+            _ = caught(&mut sigint) => reraise(Signal::INT),
+            _ = caught(&mut sigquit) => reraise(Signal::QUIT),
+            _ = caught(&mut sigterm) => reraise(Signal::TERM),
+            _ = caught(&mut sighup) => reraise(Signal::HUP),
         };
         match outcome {
             Wait::Granted(granted) => break granted,
@@ -386,10 +427,10 @@ pub async fn run(args: RunArgs) -> ExitCode {
     let status = loop {
         tokio::select! {
             status = child.wait() => break status,
-            _ = sigint.recv() => {}
-            _ = sigquit.recv() => {}
-            _ = sigterm.recv() => forward(Signal::TERM),
-            _ = sighup.recv() => forward(Signal::HUP),
+            _ = caught(&mut sigint) => {}
+            _ = caught(&mut sigquit) => {}
+            _ = caught(&mut sigterm) => forward(Signal::TERM),
+            _ = caught(&mut sighup) => forward(Signal::HUP),
             line = lines.next_line(), if connected => {
                 if matches!(line, Ok(Some(_))) { continue; }
                 // Воркер ушёл (рестарт): снова прицепиться к своей аренде, команда работает дальше.

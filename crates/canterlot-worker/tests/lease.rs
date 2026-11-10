@@ -413,7 +413,7 @@ fn unanswered_worker_times_out_and_runs_unwrapped() {
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let (release, wait) = std::sync::mpsc::channel::<()>();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
+        let (stream, _) = listener.accept().unwrap();
         let mut line = String::new();
         std::io::BufRead::read_line(
             &mut std::io::BufReader::new(stream.try_clone().unwrap()),
@@ -534,6 +534,35 @@ async fn interrupt_to_group_and_term_to_wrapper_leave_no_orphan() {
         );
     }
     wait_for("released", || fixture.snapshot().holders.is_empty()).await;
+}
+
+/// Унаследованный SIG_IGN (`nohup`, фоновое задание) переживает обёртку: иначе перехват
+/// tokio вернул бы команде SIG_DFL, и HUP убил бы её вместе с закрытием терминала.
+#[tokio::test(flavor = "multi_thread")]
+async fn inherited_ignored_signal_stays_ignored() {
+    let fixture = Fixture::new(1).await;
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(
+            "trap '' HUP; exec \"$0\" lease run --kind build -- \
+             sh -c 'kill -HUP $$; echo survived'",
+        )
+        .arg(WORKER)
+        .current_dir(fixture.root.path())
+        .env(LEASE_SOCKET_ENV, fixture.socket())
+        .env_remove(lease::HELD_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let (status, stdout, stderr) = output(command);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "signal {:?}: {stderr}",
+        status.signal()
+    );
+    assert_eq!(stdout.trim(), "survived", "{stderr}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
