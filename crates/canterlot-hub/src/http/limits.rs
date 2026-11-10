@@ -20,7 +20,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
 /// Прогноз окна: средний и недавний темп, ожидаемое исчерпание.
 #[derive(Serialize, ToSchema)]
 pub struct ForecastView {
-    /// Средний темп от начала окна, промилле в час.
+    /// Средний темп по приросту расхода между снимками окна, промилле в час.
     pub rate_permille_per_hour: i64,
     /// Темп за последний час (пятичасовое окно) или шесть часов (неделя, месяц).
     pub recent_rate_permille_per_hour: Option<i64>,

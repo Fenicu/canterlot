@@ -16,6 +16,8 @@ use crate::limits::Window;
 const RESET_TOLERANCE: TimeDelta = TimeDelta::minutes(2);
 /// Ниже этого расхода прогноз не строится: шум раннего окна слишком велик.
 const MIN_USED_PERMILLE: u16 = 20;
+/// Минимальный промежуток между снимками для темпа по приросту расхода.
+const DELTA_MIN_SPAN: TimeDelta = TimeDelta::minutes(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reading {
@@ -27,7 +29,8 @@ pub struct Reading {
 /// Прогноз одного окна. Темпы — промилле в час.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Forecast {
-    /// Средний темп от начала окна: `used / часы(последнее - начало окна)`.
+    /// Средний темп по приросту расхода между снимками окна; без пары снимков —
+    /// `used / часы(показание - номинальное начало окна)`.
     pub rate_permille_per_hour: f64,
     /// Темп за последний час (пятичасовое окно) или шесть часов (неделя, месяц).
     pub recent_rate_permille_per_hour: Option<f64>,
@@ -98,23 +101,32 @@ pub fn forecast(
     if current.used_permille < MIN_USED_PERMILLE {
         return None;
     }
-    // Начало окна — самое раннее показание с тем же временем сброса. Если истории
-    // нет, окно считается номинальным: сброс минус длина окна.
-    let window_start = snapshots
-        .iter()
-        .filter(|reading| same_window(reading, resets_at))
-        .map(|reading| reading.observed_at)
-        .min()
-        .unwrap_or(resets_at - rules.nominal);
-    let elapsed = current.observed_at - window_start;
-    if elapsed < rules.min_elapsed {
+    // Номинальное начало окна — сброс минус длина окна: окно моложе `min_elapsed`
+    // прогноза не получает, как и раньше.
+    let nominal_start = resets_at - rules.nominal;
+    let window_age = current.observed_at - nominal_start;
+    if window_age < rules.min_elapsed {
         return None;
     }
-    let hours = elapsed.num_seconds() as f64 / 3600.0;
+    let hours = window_age.num_seconds() as f64 / 3600.0;
     if hours <= 0.0 {
         return None;
     }
-    let rate = f64::from(current.used_permille) / hours;
+    // Темп — прирост расхода между первым снимком того же окна и текущим показанием:
+    // поздний первый снимок не раздувает темп всем накопленным расходом. Без пары
+    // снимков с достаточным промежутком считаем от номинального начала окна.
+    let first = snapshots
+        .iter()
+        .filter(|reading| same_window(reading, resets_at))
+        .min_by_key(|reading| reading.observed_at);
+    let rate = match first {
+        Some(first) if current.observed_at - first.observed_at >= DELTA_MIN_SPAN => {
+            let span = current.observed_at - first.observed_at;
+            let span_hours = span.num_seconds() as f64 / 3600.0;
+            (f64::from(current.used_permille) - f64::from(first.used_permille)) / span_hours
+        }
+        _ => f64::from(current.used_permille) / hours,
+    };
     if rate <= 0.0 {
         return Some(Forecast {
             rate_permille_per_hour: 0.0,
@@ -247,19 +259,46 @@ mod tests {
     }
 
     #[test]
-    fn average_pace_comes_from_the_window_start() {
+    fn a_late_first_snapshot_does_not_inflate_the_rate() {
+        // Окно впервые увидено за 12 часов до текущего показания на 600 промилле.
+        let current = reading(620, Some(reset(120)), 0);
+        let snapshots = [reading(600, Some(reset(120)), 12 * 60)];
+        let got = forecast(Window::Weekly, current, &snapshots, at(0)).unwrap();
+        close(got.rate_permille_per_hour, 20.0 / 12.0);
+        assert!(!got.before_reset);
+    }
+
+    #[test]
+    fn a_single_snapshot_uses_the_nominal_window_start() {
+        let current = reading(200, Some(reset(3)), 0);
+        let got = forecast(Window::FiveHour, current, &[], at(0)).unwrap();
+        // Номинальное начало пятичасового окна — за два часа до сброса.
+        close(got.rate_permille_per_hour, 100.0);
+    }
+
+    #[test]
+    fn a_short_gap_falls_back_to_the_nominal_window_start() {
+        let current = reading(200, Some(reset(3)), 0);
+        let snapshots = [reading(150, Some(reset(3)), 5)];
+        let got = forecast(Window::FiveHour, current, &snapshots, at(0)).unwrap();
+        close(got.rate_permille_per_hour, 100.0);
+    }
+
+    #[test]
+    fn average_pace_uses_the_usage_delta_between_snapshots() {
         let current = reading(200, Some(reset(3)), 0);
         let snapshots = [
             reading(100, Some(reset(3)), 120),
             reading(150, Some(reset(3)), 60),
         ];
         let got = forecast(Window::FiveHour, current, &snapshots, at(0)).unwrap();
-        close(got.rate_permille_per_hour, 100.0);
+        // Прирост 100 промилле за два часа — 50 в час.
+        close(got.rate_permille_per_hour, 50.0);
         // Недавний темп: 50 промилле за час.
         close(got.recent_rate_permille_per_hour.unwrap(), 50.0);
-        close(got.pace_permille_per_hour(), 100.0);
-        // 800 промилле при 100/ч — через 8 часов, сброс через 3 часа.
-        assert_eq!(got.exhausts_at, Some(at(8 * 60)));
+        close(got.pace_permille_per_hour(), 50.0);
+        // 800 промилле при 50/ч — через 16 часов, сброс через 3 часа.
+        assert_eq!(got.exhausts_at, Some(at(16 * 60)));
         assert!(!got.before_reset);
     }
 
@@ -272,8 +311,8 @@ mod tests {
             reading(150, Some(reset(1)), 60),
         ];
         let got = forecast(Window::FiveHour, current, &snapshots, at(0)).unwrap();
-        // Начало окна — 3 часа назад, а не номинальные 4 часа.
-        close(got.rate_permille_per_hour, 200.0 / 3.0);
+        // Первый снимок окна — 3 часа назад: прирост 100 промилле за 3 часа.
+        close(got.rate_permille_per_hour, 100.0 / 3.0);
     }
 
     #[test]
@@ -286,8 +325,8 @@ mod tests {
             reading(150, Some(reset(4)), 60),
         ];
         let got = forecast(Window::FiveHour, current, &snapshots, at(0)).unwrap();
-        // Считается только новое окно: 2 часа от 100 до 200.
-        close(got.rate_permille_per_hour, 100.0);
+        // Считается только новое окно: 2 часа от 100 до 200 — 50 в час.
+        close(got.rate_permille_per_hour, 50.0);
     }
 
     #[test]
@@ -299,8 +338,10 @@ mod tests {
             reading(200, Some(reset(3)), 30),
         ];
         let got = forecast(Window::FiveHour, current, &snapshots, at(0)).unwrap();
-        close(got.rate_permille_per_hour, 100.0);
-        assert_eq!(got.recent_rate_permille_per_hour, Some(0.0));
+        // Прирост нулевой: средний темп нулевой, исчерпания нет.
+        close(got.rate_permille_per_hour, 0.0);
+        assert_eq!(got.recent_rate_permille_per_hour, None);
+        assert_eq!(got.exhausts_at, None);
     }
 
     #[test]
@@ -308,9 +349,9 @@ mod tests {
         let current = reading(900, Some(reset(2)), 0);
         let snapshots = [reading(100, Some(reset(2)), 180)];
         let got = forecast(Window::FiveHour, current, &snapshots, at(0)).unwrap();
-        // 100 промилле при 300/ч — через 20 минут, сброс через 2 часа.
-        close(got.rate_permille_per_hour, 300.0);
-        assert_eq!(got.exhausts_at, Some(at(20)));
+        // Прирост 800 промилле за 3 часа; остаток 100 — через 22,5 минуты.
+        close(got.rate_permille_per_hour, 800.0 / 3.0);
+        assert_eq!(got.exhausts_at, Some(at(0) + TimeDelta::seconds(1350)));
         assert!(got.before_reset);
     }
 

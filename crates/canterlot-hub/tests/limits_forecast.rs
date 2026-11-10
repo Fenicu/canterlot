@@ -99,10 +99,10 @@ async fn the_forecast_lasts_until_the_reset(pool: PgPool) {
     seed_window(&f, "claude", "weekly", 610, reset, now, &snapshots).await;
     let view = f.get("/api/v1/limits").await;
     let forecast = &view[0]["weekly"]["forecast"];
-    // 610 промилле за 120 часов — около 5 промилле в час.
+    // Прирост 410 промилле за 120 часов — около 3 промилле в час.
     assert_eq!(
         forecast["rate_permille_per_hour"].as_i64(),
-        Some(5),
+        Some(3),
         "{forecast}"
     );
     assert!(
@@ -135,10 +135,10 @@ async fn the_forecast_runs_out_before_the_reset(pool: PgPool) {
     seed_window(&f, "claude", "weekly", 900, reset, now, &snapshots).await;
     let view = f.get("/api/v1/limits").await;
     let forecast = &view[0]["weekly"]["forecast"];
-    // 900 промилле за сутки — 37.5 в час, остаток 100 кончится за 2ч 40м.
+    // Прирост 800 промилле за сутки — 33.3 в час, остаток 100 кончится за 3 часа.
     assert_eq!(
         forecast["rate_permille_per_hour"].as_i64(),
-        Some(38),
+        Some(33),
         "{forecast}"
     );
     // Недавний темп: 100 промилле за 3 часа — 33.3 в час.
@@ -226,7 +226,7 @@ async fn a_new_observation_emits_the_recomputed_forecast(pool: PgPool) {
         ],
         "{payload}"
     );
-    assert_eq!(forecast["rate_permille_per_hour"].as_i64(), Some(38));
+    assert_eq!(forecast["rate_permille_per_hour"].as_i64(), Some(33));
     assert_eq!(forecast["recent_rate_permille_per_hour"].as_i64(), Some(33));
     assert_eq!(forecast["before_reset"].as_bool(), Some(true));
     assert!(forecast["exhausts_at"].is_string(), "{payload}");

@@ -9671,7 +9671,7 @@
           "rate_permille_per_hour": {
             "type": "integer",
             "format": "int64",
-            "description": "Средний темп от начала окна, промилле в час."
+            "description": "Средний темп по приросту расхода между снимками окна, промилле в час."
           },
           "recent_rate_permille_per_hour": {
             "type": [
