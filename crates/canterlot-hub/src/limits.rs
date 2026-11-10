@@ -247,9 +247,16 @@ pub(crate) async fn record_in_tx(
     } else {
         None
     };
+    // Отметка из будущего (старая версия или сдвинутые часы) не должна отбрасывать
+    // верные показания до тех пор, пока реальное время её не догонит.
+    let future = now + FUTURE_TOLERANCE;
     let newer = mapped
-        && seen.is_none_or(|seen| seen < observed_at)
-        && absent_at.is_none_or(|absent| absent < observed_at);
+        && seen
+            .filter(|seen| *seen <= future)
+            .is_none_or(|seen| seen < observed_at)
+        && absent_at
+            .filter(|absent| *absent <= future)
+            .is_none_or(|absent| absent < observed_at);
     if newer {
         sqlx::query(match o.window {
             Window::Weekly => "update provider_limits set weekly_used_permille=$2,weekly_resets_at=$3,weekly_observed_at=$4,data_confidence=$5,updated_at=$6 where provider=$1",
@@ -424,7 +431,15 @@ pub async fn record_absence_in_tx(
     .fetch_one(&mut *conn)
     .await?;
     // Более позднее показание окна сильнее устаревшего отчёта об отсутствии.
-    if seen.is_some_and(|seen| seen >= observed_at) || absent.is_some_and(|at| at >= observed_at) {
+    // Отметка из будущего недействительна и не блокирует верный отчёт.
+    let future = Utc::now() + FUTURE_TOLERANCE;
+    if seen
+        .filter(|seen| *seen <= future)
+        .is_some_and(|seen| seen >= observed_at)
+        || absent
+            .filter(|at| *at <= future)
+            .is_some_and(|at| at >= observed_at)
+    {
         return Ok(false);
     }
     sqlx::query("update provider_limits set five_hour_used_permille=null,five_hour_resets_at=null,five_hour_observed_at=null,five_hour_absent_at=$2,updated_at=clock_timestamp() where provider=$1")

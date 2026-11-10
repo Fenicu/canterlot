@@ -126,6 +126,82 @@ async fn a_future_absence_is_clamped_and_does_not_hide_a_later_window(pool: PgPo
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stored_future_observation_does_not_block_a_new_reading(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
+    let future = at(24 * 60);
+    sqlx::query(
+        "insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,
+           weekly_observed_at)
+         values('claude',100,$1,$2)",
+    )
+    .bind(future + Duration::hours(3))
+    .bind(future)
+    .execute(&pool)
+    .await?;
+    let reading_at = at(0);
+    observe(&pool, &s, Window::Weekly, 200, reading_at).await;
+    let weekly = claude(&pool).await.weekly.unwrap();
+    assert_eq!(weekly.used_permille, 200);
+    assert_eq!(
+        weekly.observed_at,
+        DateTime::from_timestamp_micros(reading_at.timestamp_micros()).unwrap()
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stored_future_absence_does_not_block_a_new_reading(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
+    let future = at(24 * 60);
+    sqlx::query(
+        "insert into provider_limits(provider,five_hour_used_permille,five_hour_resets_at,
+           five_hour_observed_at,five_hour_absent_at)
+         values('claude',300,$1,$2,$3)",
+    )
+    .bind(future + Duration::hours(3))
+    .bind(at(-30))
+    .bind(future)
+    .execute(&pool)
+    .await?;
+    let reading_at = at(0);
+    observe(&pool, &s, Window::FiveHour, 440, reading_at).await;
+    let state = claude(&pool).await;
+    assert!(!state.five_hour_absent);
+    let five_hour = state.five_hour.unwrap();
+    assert_eq!(five_hour.used_permille, 440);
+    assert_eq!(
+        five_hour.observed_at,
+        DateTime::from_timestamp_micros(reading_at.timestamp_micros()).unwrap()
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stored_timestamp_inside_the_future_tolerance_still_wins(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
+    let ahead = at(1);
+    sqlx::query(
+        "insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,
+           weekly_observed_at)
+         values('claude',100,$1,$2)",
+    )
+    .bind(ahead + Duration::hours(3))
+    .bind(ahead)
+    .execute(&pool)
+    .await?;
+    observe(&pool, &s, Window::Weekly, 200, at(0)).await;
+    assert_eq!(
+        claude(&pool).await.weekly.unwrap().used_permille,
+        100,
+        "a stored timestamp inside the tolerance is not invalidated"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn absence_hides_the_window_keeps_history_and_tells_clients(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
