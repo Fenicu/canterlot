@@ -2,8 +2,8 @@
 //!
 //! Чистая функция `route` идёт по кандидатам типа задачи по порядку и возвращает
 //! первого прошедшего все фильтры (§5.2): уровень, канонизация через каталог машины
-//! родителя, белый список, совместимость режима, лимиты провайдера (с резервом,
-//! паузой и несвежими показаниями), параллельность, `exclude_workdirs`.
+//! родителя, белый список, совместимость режима, `exclude_workdirs`, лимиты
+//! провайдера (с резервом, паузой и несвежими показаниями), параллельность.
 //! Никто не прошёл — ошибка `no_executor_available` с причинами по каждому
 //! кандидату. Очередь запусков — C2: шов `queue_reason` уже здесь, но C1 всегда
 //! отвечает ошибкой.
@@ -666,7 +666,7 @@ pub struct RouteInputs<'a> {
 }
 
 /// Чистая функция выбора (§5.2 + §C1 пп. 5–7): уровень, канонизация через каталог,
-/// белый список, совместимость режима, лимиты, параллельность, `exclude_workdirs`.
+/// белый список, совместимость режима, `exclude_workdirs`, лимиты, параллельность.
 /// Первый прошедший кандидат выбран.
 pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
     let RouteInputs {
@@ -761,7 +761,16 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
             ));
             continue;
         }
-        // 5. Лимиты провайдера.
+        // 5. Исключённые рабочие каталоги: постоянный отказ, ждать его бессмысленно.
+        if let Some(prefix) = excluded_prefix(&candidate.exclude_workdirs, &request.workdir) {
+            considered.push(skip(
+                candidate,
+                "excluded_workdir",
+                format!("excluded for workdir {prefix}"),
+            ));
+            continue;
+        }
+        // 6. Лимиты провайдера.
         let provider = canterlot_proto::harness::provider_of(&candidate.harness)
             .unwrap_or_default()
             .to_owned();
@@ -783,7 +792,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
             considered.push(skip(candidate, verdict, reason));
             continue;
         }
-        // 6. Параллельность.
+        // 7. Параллельность.
         let pair = format!("{}/{}", candidate.harness, resolved.id);
         if let Some(limit) = policy.max_parallel.get(&pair) {
             let busy = live
@@ -798,15 +807,6 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
                 ));
                 continue;
             }
-        }
-        // 7. Исключённые рабочие каталоги.
-        if let Some(prefix) = excluded_prefix(&candidate.exclude_workdirs, &request.workdir) {
-            considered.push(skip(
-                candidate,
-                "excluded_workdir",
-                format!("excluded for workdir {prefix}"),
-            ));
-            continue;
         }
         considered.push(Considered {
             harness: candidate.harness.clone(),
@@ -2293,8 +2293,16 @@ mod tests {
     }
 
     fn route_one(limits: &HashMap<String, ProviderView>) -> Result<Decision, RouteError> {
+        route_with(&single_candidate_policy(), limits, &request("one"))
+    }
+
+    fn route_with(
+        policy: &Policy,
+        limits: &HashMap<String, ProviderView>,
+        request: &RouteRequest,
+    ) -> Result<Decision, RouteError> {
         route(RouteInputs {
-            policy: &single_candidate_policy(),
+            policy,
             revision: 0,
             whitelist: &entries(),
             catalogs: &catalogs(),
@@ -2302,7 +2310,7 @@ mod tests {
             live: &HashMap::new(),
             stale: Duration::from_secs(1800),
             now: now(),
-            request: &request("one"),
+            request,
             bypass_limits: false,
         })
     }
@@ -2473,6 +2481,86 @@ mod tests {
                 .iter()
                 .any(|entry| entry.reason.contains("sessions busy"))
         );
+    }
+
+    fn excluded_single_candidate_policy() -> Policy {
+        let mut policy = single_candidate_policy();
+        policy.task_types.get_mut("one").unwrap().candidates[0].exclude_workdirs =
+            vec!["/tmp/w".to_owned()];
+        policy
+    }
+
+    #[test]
+    fn an_excluded_workdir_is_decided_before_limits() {
+        let limits = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(window_at(96.0, chrono::TimeDelta::hours(1))),
+                ..ProviderView::default()
+            },
+        )]);
+        let error = route_with(
+            &excluded_single_candidate_policy(),
+            &limits,
+            &request("one"),
+        )
+        .unwrap_err();
+        let RouteError::NoExecutor { considered, reset } = error else {
+            panic!("expected no executor");
+        };
+        assert_eq!(considered.len(), 1);
+        assert_eq!(considered[0].verdict, "excluded_workdir");
+        assert_eq!(
+            queue_reason(&considered, reset, now(), Duration::from_secs(6 * 3600)),
+            None
+        );
+        assert_eq!(reset, None, "an excluded candidate does not feed the reset");
+        assert!(!blocked_by_limits(&considered));
+    }
+
+    #[test]
+    fn an_excluded_workdir_does_not_retry_unknown_limits() {
+        let mut policy = excluded_single_candidate_policy();
+        policy.unknown_limits = UnknownLimits::Skip;
+        let error = route_with(&policy, &HashMap::new(), &request("one")).unwrap_err();
+        let RouteError::NoExecutor { considered, reset } = error else {
+            panic!("expected no executor");
+        };
+        assert_eq!(considered.len(), 1);
+        assert_eq!(considered[0].verdict, "excluded_workdir");
+        assert!(!retry_blocked_by_unknown_limits(&considered));
+        assert_eq!(reset, None);
+    }
+
+    #[test]
+    fn an_excluded_candidate_does_not_hide_the_next_one() {
+        let mut policy = excluded_single_candidate_policy();
+        policy
+            .task_types
+            .get_mut("one")
+            .unwrap()
+            .candidates
+            .push(Candidate {
+                harness: "claude_code".to_owned(),
+                model: "opus[1m]".to_owned(),
+                effort: Some("high".to_owned()),
+                levels: None,
+                preset: None,
+                nudge: None,
+                exclude_workdirs: Vec::new(),
+                watchdog_minutes: None,
+            });
+        let limits = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(window_at(96.0, chrono::TimeDelta::hours(1))),
+                ..ProviderView::default()
+            },
+        )]);
+        let decision = route_with(&policy, &limits, &request("one"))
+            .expect("the second candidate is eligible");
+        assert_eq!(decision.harness, "claude_code");
+        assert_eq!(decision.considered[0].verdict, "excluded_workdir");
     }
 
     #[test]
