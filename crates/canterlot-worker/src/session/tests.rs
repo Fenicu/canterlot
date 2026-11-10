@@ -491,3 +491,50 @@ async fn stored_but_unhanded_command_is_routed_after_reconnect() {
     stop.send_replace(true);
     join.await.unwrap().unwrap();
 }
+
+// Команда, уже отданная исполнению, после переподключения не исполняется
+// дважды: повторная отдача пропущенных команд не должна дублировать итог.
+#[tokio::test]
+async fn handled_command_is_not_routed_twice_after_reconnect() {
+    let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+        capabilities: vec!["exec_v1".to_owned()],
+        ..Default::default()
+    })
+    .await;
+    let worker = Worker::new(hub.config.clone(), store);
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    wait_live(&mut state).await;
+    let (command, _, target) = cancel_command();
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::Command(command)),
+    })
+    .await;
+    wait_cancel_won(&mut hub, &target).await;
+    hub.fail(Status::unavailable("drop")).await;
+    wait_backoff(&mut state).await;
+    wait_live(&mut state).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut won = 0;
+    while let Ok(event) = hub.events.try_recv() {
+        if let support::Observed::Control(message) = event
+            && let Some(control_up::Msg::CjRecords(batch)) = message.msg
+        {
+            won += batch
+                .records
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.body.as_ref().and_then(|body| body.body.as_ref()),
+                        Some(record_body::Body::CancelWon(fact))
+                            if fact.command_id == target
+                    )
+                })
+                .count();
+        }
+    }
+    assert_eq!(won, 1, "command outcome must be delivered exactly once");
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+}

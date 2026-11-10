@@ -1381,6 +1381,26 @@ impl Worker {
         type ExecutionFuture<'a> =
             Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send + 'a>>;
         let mut execution_operation: Option<ExecutionFuture<'_>> = None;
+        // Команда могла быть принята в хранилище (квитанция CommandStored уже
+        // ушла в хаб), но прошлый сеанс оборвался до передачи её исполнению.
+        // Хаб такую команду больше не пришлёт, поэтому в начале каждой попытки
+        // отдаём менеджеру всё принятое и непогашенное. Погашенные команды
+        // хранилище уже не возвращает, а повтор для живых исполнений разбирают
+        // те же проверки, что и дубли от хаба.
+        for command in self
+            .store
+            .call(|slot| Ok(store_mut(slot)?.stored_commands()?))
+            .await?
+        {
+            if exec_enabled || matches!(command.kind, Some(command::Kind::StartExecution(_))) {
+                // `cj_seq` на этом пути не читается: менеджер только решает,
+                // отдать команду или нет.
+                manager
+                    .handle(command, Accept::Redelivered { cj_seq: 0 })
+                    .await
+                    .map_err(|_| WorkerError::Execution)?;
+            }
+        }
         loop {
             if limits_operation.is_none()
                 && limits_outbound.is_none()
@@ -1680,15 +1700,17 @@ impl Worker {
                     match result? {
                         StoreReply::Command(command, accept) => {
                             dirty |= matches!(accept, Accept::Stored { .. } | Accept::Redelivered { .. } | Accept::Rejected { .. });
-                            // Только для тестов: пауза между приёмом команды
-                            // в хранилище и передачей её исполнению.
-                            #[cfg(test)]
-                            if let Some(gate) = self.command_gate.clone() {
-                                gate.notified().await;
-                            }
                             // Без exec_v1 сохраняется протокол воркеров 1.2a.
                             if exec_enabled || matches!(command.kind, Some(command::Kind::StartExecution(_))) {
+                                // Только для тестов: пауза перед передачей команды
+                                // исполнению; цикл сеанса при этом продолжает работу.
+                                #[cfg(test)]
+                                let gate = self.command_gate.clone();
                                 execution_operation = Some(Box::pin(async move {
+                                    #[cfg(test)]
+                                    if let Some(gate) = gate {
+                                        gate.notified().await;
+                                    }
                                     manager.handle(*command, accept).await.map_err(|_| WorkerError::Execution)
                                 }));
                             }
