@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { fmt } from "#lib/format/ru.js";
 import {
+  UNCONFIRMED_TEXT_FALLBACK,
+  inputExcerpt,
   pauseHoldCards,
   runLabel,
   type Card,
   type CardAction,
 } from "#lib/screens/chat/pauseCards.js";
+import type { InputView } from "#lib/stores/inputs.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
 type PauseReason = components["schemas"]["PauseReason"];
@@ -24,6 +27,47 @@ const OPENCODE = {
   resumeText: null,
   now: NOW,
 };
+
+function inputView(
+  id: string,
+  text: string,
+  origin: InputView["origin"] = null,
+): InputView {
+  return {
+    key: id,
+    id,
+    text,
+    attachments: [],
+    state: "acceptance_unconfirmed",
+    revision: 1,
+    placement: "feed",
+    marks: { saved: true, accepted: false },
+    cancelRequested: false,
+    attempt: null,
+    createdSeq: "1",
+    feedSeq: "1",
+    createdAt: NOW,
+    retryOf: null,
+    origin,
+    localOnly: false,
+    optimistic: false,
+    stripUntil: null,
+  };
+}
+
+function unconfirmedCards(inputs: InputView[], ids: string[]): Card[] {
+  return pauseHoldCards(
+    {
+      pause_reasons: ids.map((input_id) => ({
+        reason: "unconfirmed_delivery",
+        input_id,
+      })),
+      hold_reasons: [],
+      queued: ids.length,
+    },
+    { ...OPENCODE, liveExecution: true, inputs },
+  );
+}
 
 function stuckCard(compaction?: "requested" | "failed", liveExecution = true) {
   const reason: PauseReason = { reason: "session_stuck", compaction };
@@ -147,7 +191,7 @@ describe("chat/pauseCards", () => {
         },
         expectedTitle: "Приём сообщения не подтверждён",
         expectedTone: "warning",
-        expectedActionIds: ["retry_as_new", "run"],
+        expectedActionIds: ["run"],
       },
       {
         reason: { reason: "owner_lost" },
@@ -665,7 +709,104 @@ describe("chat/pauseCards", () => {
       { pause_reasons: [{ reason: "unconfirmed_delivery", input_id: inputId }], hold_reasons: [], queued: 0 },
       { ...base, liveExecution: true },
     );
-    expect(cards[0]!.actions[0]).toMatchObject({ id: "retry_as_new", inputId });
-    expect(cards[0]!.actions[1]?.id).toBe("continue_queue");
+    expect(cards[0]!.entries![0]!.action).toMatchObject({
+      id: "retry_as_new",
+      inputId,
+    });
+    expect(cards[0]!.actions.map((action) => action.id)).toEqual([
+      "continue_queue",
+    ]);
+  });
+
+  it("one_unconfirmed_delivery_shows_the_input_text", () => {
+    const inputId = "00000000-0000-4000-8000-000000000001";
+    const cards = unconfirmedCards(
+      [inputView(inputId, "  Первое\n сообщение  ")],
+      [inputId],
+    );
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.title).toBe("Приём сообщения не подтверждён");
+    expect(cards[0]!.entries).toHaveLength(1);
+    expect(cards[0]!.entries![0]!.excerpt).toBe("Первое сообщение");
+    expect(cards[0]!.entries![0]!.unavailable).toBe(false);
+    expect(cards[0]!.entries![0]!.from).toBeNull();
+  });
+
+  it("several_unconfirmed_deliveries_collapse_into_one_card_with_a_count", () => {
+    const ids = [
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+      "00000000-0000-4000-8000-000000000003",
+    ];
+    const cards = unconfirmedCards(
+      ids.map((id, index) => inputView(id, `Сообщение ${index + 1}`)),
+      ids,
+    );
+    expect(cards).toHaveLength(1);
+    expect(cards[0]!.title).toBe("Приём 3 сообщений не подтверждён");
+    expect(cards[0]!.entries).toHaveLength(3);
+    expect(cards[0]!.entries!.map((entry) => entry.excerpt)).toEqual([
+      "Сообщение 1",
+      "Сообщение 2",
+      "Сообщение 3",
+    ]);
+    expect(cards[0]!.entries!.map((entry) => entry.action.inputId)).toEqual(ids);
+  });
+
+  it("missing_input_text_falls_back_instead_of_an_empty_body", () => {
+    const inputId = "00000000-0000-4000-8000-000000000001";
+    for (const inputs of [[], [inputView(inputId, "   ")]]) {
+      const cards = unconfirmedCards(inputs, [inputId]);
+      expect(cards[0]!.entries![0]!.excerpt).toBe(
+        UNCONFIRMED_TEXT_FALLBACK,
+      );
+      expect(cards[0]!.entries![0]!.unavailable).toBe(true);
+    }
+  });
+
+  it("unconfirmed_message_from_the_hub_names_its_sender", () => {
+    const inputId = "00000000-0000-4000-8000-000000000001";
+    const cards = unconfirmedCards(
+      [
+        inputView(inputId, "Итог другой сессии", {
+          kind: "event",
+          chain_depth: 0,
+        }),
+      ],
+      [inputId],
+    );
+    expect(cards[0]!.entries![0]!.from).toBe("Сообщение хаба");
+  });
+
+  it("long_input_text_is_cut_with_an_ellipsis", () => {
+    const inputId = "00000000-0000-4000-8000-000000000001";
+    const cards = unconfirmedCards(
+      [inputView(inputId, "слово ".repeat(60))],
+      [inputId],
+    );
+    const excerpt = cards[0]!.entries![0]!.excerpt;
+    expect(excerpt.length).toBeLessThanOrEqual(161);
+    expect(excerpt.endsWith("…")).toBe(true);
+    expect(inputExcerpt("   ")).toBeNull();
+  });
+
+  it("other_pauses_stay_separate_cards", () => {
+    const inputId = "00000000-0000-4000-8000-000000000001";
+    const cards = pauseHoldCards(
+      {
+        pause_reasons: [
+          { reason: "user_stop" },
+          { reason: "unconfirmed_delivery", input_id: inputId },
+        ],
+        hold_reasons: [],
+        queued: 1,
+      },
+      { ...base, liveExecution: true, inputs: [inputView(inputId, "текст")] },
+    );
+    expect(cards.map((card) => card.key)).toEqual([
+      "pause:user_stop",
+      "pause:unconfirmed_delivery",
+    ]);
+    expect(cards[0]!.entries).toBeUndefined();
   });
 });

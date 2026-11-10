@@ -736,6 +736,78 @@ test('transmitting_bubble_waits_quietly_and_escalates_only_when_unconfirmed', as
   await expect(bubble).toContainText(/Принято агентом|Агент работает/);
 });
 
+test('many_unconfirmed_deliveries_collapse_into_one_pause_card', async ({ page }) => {
+  const { hub, api, id } = await boot(page, 0);
+  const texts = Array.from({ length: 12 }, (_, index) =>
+    index === 1
+      ? `Второе уведомление с оченьдлиннымнеразрывнымсловом${'х'.repeat(120)}`
+      : `Уведомление ${index + 1}`
+  );
+  const items = texts.map((text, index) =>
+    inputItem(api, `unconfirmed-${index + 1}`, 'acceptance_unconfirmed', String(index + 1), text)
+  );
+  api.histories.set(id, items);
+  api.bindConversation(id);
+  await page.reload();
+  for (const item of items) {
+    await expect(page.getByText(item.content[0]!.text, { exact: true })).toBeVisible();
+  }
+
+  const scope = `conversation:${id}`;
+  hub.append(scope, {
+    kind: 'queue_state_changed',
+    conversation_id: id,
+    payload: {
+      pause_reasons: items.map((item) => ({ reason: 'unconfirmed_delivery', input_id: item.id })),
+      hold_reasons: [],
+      run_slot: 'free'
+    }
+  });
+  hub.flush();
+
+  const card = page.locator('.pause-card').filter({ hasText: 'Приём 12 сообщений не подтверждён' });
+  await expect(card).toHaveCount(1);
+  const entries = card.locator('.entry');
+  await expect(entries).toHaveCount(3);
+  await expect(entries.nth(0)).toContainText('Уведомление 1');
+  await expect(card.getByRole('button', { name: 'Показать все (12)' })).toBeVisible();
+
+  await card.getByRole('button', { name: 'Показать все (12)' }).click();
+  await expect(entries).toHaveCount(12);
+  await expect(card.getByRole('button', { name: 'Свернуть' })).toBeVisible();
+
+  const request = page.waitForRequest((item) =>
+    item.method() === 'POST' && new URL(item.url()).pathname.endsWith(`/conversations/${id}/inputs`)
+  );
+  await card.getByRole('button', { name: 'Отправить повторно как новое: сообщение 2' }).click();
+  await page
+    .getByRole('dialog', { name: 'Повторная отправка' })
+    .getByRole('button', { name: 'Отправить' })
+    .click();
+  expect((await request).postDataJSON()).toMatchObject({
+    content: [{ type: 'text', text: texts[1] }],
+    retry_of: items[1]!.id
+  });
+
+  for (const width of [320, 412]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    );
+    const size = await card.evaluate(
+      (element) =>
+        new Promise<{ scroll: number; client: number }>((resolve) => {
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() =>
+              resolve({ scroll: element.scrollWidth, client: element.clientWidth })
+            )
+          );
+        })
+    );
+    expect(size.scroll, `overflow at ${width}px`).toBeLessThanOrEqual(size.client + 1);
+  }
+});
+
 test('incomplete_block_is_marked_and_partial_text_stays', async ({ page }) => {
   const { api, id } = await boot(page, 0);
   const block = textBlock(api, 'частичный текст', '1', 'incomplete');

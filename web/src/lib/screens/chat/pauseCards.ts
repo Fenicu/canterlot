@@ -1,6 +1,8 @@
 import { compactionLabel, failureLabel, providerLabel } from "#lib/format/labels.js";
 import { untilText } from "#lib/format/countdown.js";
 import { fmt } from "#lib/format/ru.js";
+import { originLabel } from "#lib/timeline/origin.js";
+import type { InputView } from "#lib/stores/inputs.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
 export type PauseReason = components["schemas"]["PauseReason"];
@@ -13,7 +15,23 @@ export interface Card {
   title: string;
   body: string[];
   actions: CardAction[];
+  /** Вводы неподтверждённой доставки: карточка показывает их списком. */
+  entries?: CardEntry[];
 }
+
+export interface CardEntry {
+  key: string;
+  /** Подпись отправителя из ленты; у ввода владельца пусто. */
+  from: string | null;
+  /** Первые ~160 знаков текста одной строкой или честная заглушка. */
+  excerpt: string;
+  /** Текста ввода нет на клиенте: показана заглушка. */
+  unavailable: boolean;
+  action: CardAction;
+}
+
+export const UNCONFIRMED_TEXT_FALLBACK = "Текст сообщения недоступен";
+const EXCERPT_LIMIT = 160;
 
 export type CardAction = {
   id:
@@ -42,6 +60,8 @@ export interface PauseCardsContext {
   executionOwnerLost?: boolean;
   /** Причина сбоя из активности сессии. */
   failureReason?: string | null;
+  /** Вводы разговора: из них карточка неподтверждённой доставки берёт текст и отправителя. */
+  inputs?: Iterable<InputView>;
 }
 
 const ACTION_LABELS: Record<Exclude<CardAction["id"], "run">, string> = {
@@ -71,8 +91,22 @@ export function runLabel(turnRecorded: boolean | undefined): string {
   return turnRecorded ? "Возобновить" : "Запустить";
 }
 
+/** Начало текста ввода для списка: пробелы схлопнуты, обрезка отмечена многоточием. */
+export function inputExcerpt(text: string | null | undefined): string | null {
+  const flat = (text ?? "").replace(/\s+/g, " ").trim();
+  if (!flat) return null;
+  return flat.length > EXCERPT_LIMIT
+    ? `${flat.slice(0, EXCERPT_LIMIT).trimEnd()}…`
+    : flat;
+}
+
 export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
   const cards: Card[] = [];
+  const inputsById = new Map<string, InputView>();
+  for (const input of ctx.inputs ?? []) {
+    if (input.id) inputsById.set(input.id, input);
+  }
+  let unconfirmed: Card | null = null;
   const hasNoLiveExecutionHold = q.hold_reasons.some(
     (h) => h.reason === "no_live_execution",
   );
@@ -145,19 +179,29 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
         break;
       }
       case "unconfirmed_delivery": {
-        cards.push({
-          key: `pause:unconfirmed_delivery:${p.input_id}`,
-          tone: "warning",
-          title: "Приём сообщения не подтверждён",
-          body: [],
-          actions: [
-            {
-              id: "retry_as_new",
-              label: ACTION_LABELS.retry_as_new,
-              inputId: p.input_id,
-            },
-            ...forward,
-          ],
+        if (!unconfirmed) {
+          unconfirmed = {
+            key: "pause:unconfirmed_delivery",
+            tone: "warning",
+            title: "Приём сообщения не подтверждён",
+            body: [],
+            entries: [],
+            actions: forward,
+          };
+          cards.push(unconfirmed);
+        }
+        const input = inputsById.get(p.input_id);
+        const excerpt = inputExcerpt(input?.text);
+        unconfirmed.entries!.push({
+          key: p.input_id,
+          from: originLabel(input?.origin),
+          excerpt: excerpt ?? UNCONFIRMED_TEXT_FALLBACK,
+          unavailable: excerpt === null,
+          action: {
+            id: "retry_as_new",
+            label: ACTION_LABELS.retry_as_new,
+            inputId: p.input_id,
+          },
         });
         break;
       }
@@ -209,6 +253,13 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
         });
         break;
       }
+    }
+  }
+
+  if (unconfirmed) {
+    const count = unconfirmed.entries!.length;
+    if (count > 1) {
+      unconfirmed.title = `Приём ${count} ${fmt.plural(count, ["сообщение", "сообщений", "сообщений"])} не подтверждён`;
     }
   }
 

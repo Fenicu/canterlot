@@ -37,7 +37,8 @@
 			now,
 			turnRecorded: chat.turnRecorded,
 			executionOwnerLost: chat.execution?.state === 'owner_lost',
-			failureReason: failure?.state === 'failed' ? (failure.evidence?.reason ?? null) : null
+			failureReason: failure?.state === 'failed' ? (failure.evidence?.reason ?? null) : null,
+			inputs: chat.inputs.values()
 		})
 	);
 
@@ -50,6 +51,12 @@
 	let ask = $state<string | null>(null);
 	let askResolve = $state(false);
 	let decided = $state<((ok: boolean) => void) | null>(null);
+	/** Развёрнутые списки карточек: свёрнутая карточка показывает первые три ввода. */
+	let expandedCards = $state<Record<string, boolean>>({});
+
+	function toggleEntries(key: string) {
+		expandedCards[key] = !expandedCards[key];
+	}
 
 	function confirm(message: string): Promise<boolean> {
 		ask = message;
@@ -168,11 +175,45 @@
 					<p>{paragraph}</p>
 				{/each}
 
+				{#if card.entries && card.entries.length > 0}
+					{@const shown = expandedCards[card.key] ? card.entries : card.entries.slice(0, 3)}
+					<ul class="entry-list">
+						{#each shown as entry, idx (entry.key)}
+							<li class="entry">
+								{#if entry.from}
+									<p class="entry-origin">{entry.from}</p>
+								{/if}
+								<p class="entry-text" class:entry-unavailable={entry.unavailable}>
+									{entry.excerpt}
+								</p>
+								<button
+									type="button"
+									class="button secondary full"
+									aria-label="Отправить повторно как новое: сообщение {idx + 1}"
+									onclick={() => handleAction(entry.action)}
+								>
+									{entry.action.label}
+								</button>
+							</li>
+						{/each}
+					</ul>
+					{#if card.entries.length > 3}
+						<button
+							type="button"
+							class="button secondary full"
+							aria-expanded={Boolean(expandedCards[card.key])}
+							onclick={() => toggleEntries(card.key)}
+						>
+							{expandedCards[card.key] ? 'Свернуть' : `Показать все (${card.entries.length})`}
+						</button>
+					{/if}
+				{/if}
+
 				{#if spendMessage && card.actions.some((a) => a.id === 'spend_reserve')}
 					<p class="card-note" role="status">{spendMessage}</p>
 				{/if}
 
-				{#if actionError && card.actions.length > 0}
+				{#if actionError && (card.actions.length > 0 || (card.entries?.length ?? 0) > 0)}
 					<p class="card-error" role="alert">{actionError}</p>
 				{/if}
 
@@ -256,6 +297,44 @@
 		margin: 0;
 		font-size: var(--fs-body);
 		color: var(--muted);
+	}
+	.entry-list {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s4);
+		margin: var(--s2) 0 0;
+		padding: 0;
+		list-style: none;
+	}
+	.entry {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s2);
+		min-width: 0;
+		padding-top: var(--s4);
+		border-top: var(--hairline) solid var(--line);
+	}
+	.entry:first-child {
+		padding-top: var(--s0);
+		border-top: var(--s0);
+	}
+	.pause-card .entry-origin {
+		color: var(--secondary);
+		font-size: var(--fs-sm);
+		font-weight: var(--weight-medium);
+	}
+	.pause-card .entry-text {
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		overflow: hidden;
+		color: var(--text);
+		overflow-wrap: anywhere;
+	}
+	.pause-card .entry-text.entry-unavailable {
+		color: var(--muted);
+		font-style: italic;
 	}
 	.card-note {
 		color: var(--accent);
