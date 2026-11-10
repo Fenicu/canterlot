@@ -299,6 +299,7 @@ struct PushRow {
     payload: Value,
     attempts: i32,
     created_at: DateTime<Utc>,
+    stale: bool,
 }
 
 /// Отправитель пушей. Ключ живёт только здесь и уходит лишь в заголовке `X-Gotify-Key`.
@@ -391,22 +392,22 @@ impl Sender {
     }
 
     /// Один проход: забирает созревшие строки и отправляет их по одной.
-    pub async fn deliver_due(
-        &self,
-        pool: &PgPool,
-        now: DateTime<Utc>,
-    ) -> Result<DeliveryReport, sqlx::Error> {
+    /// И готовность, и протухание считает база: часы хаба и базы могут расходиться.
+    pub async fn deliver_due(&self, pool: &PgPool) -> Result<DeliveryReport, sqlx::Error> {
         let rows: Vec<PushRow> = sqlx::query_as(
-            "select id,conversation_id,kind,payload,attempts,created_at from owner_pushes
-             where state='pending' and run_at<=$1 order by run_at,id limit $2",
+            "select id,conversation_id,kind,payload,attempts,created_at,
+                    clock_timestamp()-created_at > $1 * interval '1 second' as stale
+             from owner_pushes
+             where state='pending' and run_at<=clock_timestamp()
+             order by run_at,id limit $2",
         )
-        .bind(now)
+        .bind(STALE.num_seconds() as f64)
         .bind(BATCH)
         .fetch_all(pool)
         .await?;
         let mut report = DeliveryReport::default();
         for row in rows {
-            if now - row.created_at > STALE {
+            if row.stale {
                 finish(pool, row.id, "dropped", None).await?;
                 warn_dropped(&row, None, "stale");
                 report.dropped += 1;
@@ -429,14 +430,15 @@ impl Sender {
                 .get(usize::try_from(row.attempts).unwrap_or(usize::MAX))
                 .copied()
                 .unwrap_or_default();
-            let run_at = now + TimeDelta::from_std(pause).unwrap_or(TimeDelta::MAX);
             sqlx::query(
-                "update owner_pushes set attempts=$2,run_at=$3,updated_at=clock_timestamp()
+                "update owner_pushes set attempts=$2,
+                   run_at=clock_timestamp()+$3*interval '1 second',
+                   updated_at=clock_timestamp()
                  where id=$1 and state='pending'",
             )
             .bind(row.id)
             .bind(attempts)
-            .bind(run_at)
+            .bind(pause.as_secs_f64())
             .execute(pool)
             .await?;
             match self.post(&message).await {
@@ -751,16 +753,17 @@ pub async fn run(pool: PgPool, sender: Sender, shutdown: watch::Receiver<bool>) 
                 if cleaned_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(3600)) {
                     cleaned_at = Some(Instant::now());
                     if let Err(error) = sqlx::query(
-                        "delete from owner_pushes where state<>'pending' and updated_at<$1",
+                        "delete from owner_pushes where state<>'pending'
+                           and updated_at<clock_timestamp()-$1*interval '1 second'",
                     )
-                    .bind(Utc::now() - RETENTION)
+                    .bind(RETENTION.num_seconds() as f64)
                     .execute(&pool)
                     .await
                     {
                         log_error(&error);
                     }
                 }
-                match sender.deliver_due(&pool, Utc::now()).await {
+                match sender.deliver_due(&pool).await {
                     Ok(report) if !report.is_empty() => tracing::info!(
                         kind = "owner_push_delivery",
                         sent = report.sent,

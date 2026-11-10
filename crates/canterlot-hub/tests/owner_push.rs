@@ -351,10 +351,6 @@ fn sender(config: &GotifyConfig) -> Sender {
         .with_backoff(vec![Duration::from_millis(1), Duration::from_millis(1)])
 }
 
-fn later() -> DateTime<Utc> {
-    Utc::now() + TimeDelta::seconds(1)
-}
-
 // ---------- тесты ----------
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -378,7 +374,7 @@ async fn a_question_of_any_session_is_pushed_once_with_the_key_in_the_header(poo
         )
         .await;
 
-    let report = sender(&config).deliver_due(&pool, later()).await.unwrap();
+    let report = sender(&config).deliver_due(&pool).await.unwrap();
     assert_eq!(report.sent, 1);
     let seen = fake.seen();
     assert_eq!(seen.len(), 1);
@@ -401,14 +397,7 @@ async fn a_question_of_any_session_is_pushed_once_with_the_key_in_the_header(poo
         pushes(&pool).await,
         [(delegate, "waiting".into(), "sent".into())]
     );
-    assert_eq!(
-        sender(&config)
-            .deliver_due(&pool, later())
-            .await
-            .unwrap()
-            .sent,
-        0
-    );
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 0);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -428,7 +417,7 @@ async fn a_question_answered_before_delivery_is_not_pushed(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let report = sender(&config).deliver_due(&pool, later()).await.unwrap();
+    let report = sender(&config).deliver_due(&pool).await.unwrap();
     assert_eq!((report.sent, report.cancelled), (0, 1));
     assert!(fake.seen().is_empty());
 }
@@ -464,7 +453,7 @@ async fn a_finished_turn_of_a_root_session_is_pushed_once_and_a_delegate_turn_is
         pushes(&pool).await,
         [(s.conversation_id, "turn_finished".into(), "pending".into())]
     );
-    let report = sender(&config).deliver_due(&pool, later()).await.unwrap();
+    let report = sender(&config).deliver_due(&pool).await.unwrap();
     assert_eq!(report.sent, 1);
     let seen = fake.seen();
     assert_eq!(seen.len(), 1);
@@ -594,14 +583,7 @@ async fn a_finished_turn_without_text_does_not_show_the_previous_answer(pool: Pg
     for step in [6, 10] {
         refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(step)).await;
     }
-    assert_eq!(
-        sender(&config)
-            .deliver_due(&pool, later())
-            .await
-            .unwrap()
-            .sent,
-        1
-    );
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 1);
     let seen = fake.seen();
     assert_eq!(seen[0].body["message"], "Ход завершён");
 }
@@ -690,7 +672,7 @@ async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left(pool: Pg
     open_question(&pool, &s, &question_batch(&execution, first, "Первый?")).await;
     // Запрос закрылся потерей воркера, доставка отменила строку: пуша не было.
     owner_lost(&pool, execution.execution_id).await;
-    let cancelled = sender(&config).deliver_due(&pool, later()).await.unwrap();
+    let cancelled = sender(&config).deliver_due(&pool).await.unwrap();
     assert_eq!((cancelled.sent, cancelled.cancelled), (0, 1));
     assert!(fake.seen().is_empty());
     // Воркер вернулся и снова ждёт ответа на тот же запрос.
@@ -700,27 +682,13 @@ async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left(pool: Pg
         pushes(&pool).await,
         [(s.conversation_id, "waiting".into(), "pending".into())]
     );
-    assert_eq!(
-        sender(&config)
-            .deliver_due(&pool, later())
-            .await
-            .unwrap()
-            .sent,
-        1
-    );
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 1);
     assert_eq!(fake.seen().len(), 1);
 
     // А ушедший пуш повторно открытый запрос не повторяет.
     let second = Uuid::now_v7();
     open_question(&pool, &s, &question_batch(&execution, second, "Второй?")).await;
-    assert_eq!(
-        sender(&config)
-            .deliver_due(&pool, later())
-            .await
-            .unwrap()
-            .sent,
-        1
-    );
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 1);
     owner_lost(&pool, execution.execution_id).await;
     owner_reclaimed(&pool, execution.execution_id).await;
     open_question(&pool, &s, &question_batch(&execution, second, "Второй?")).await;
@@ -783,18 +751,41 @@ async fn a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_no
         pushes(&pool).await,
         [(s.conversation_id, "failure".into(), "pending".into())]
     );
-    assert_eq!(
-        sender(&config)
-            .deliver_due(&pool, later())
-            .await
-            .unwrap()
-            .sent,
-        1
-    );
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 1);
     let seen = fake.seen();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].body["priority"], 7);
     assert_eq!(seen[0].body["message"], "Сессия упала: воркер потерян");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delivery_uses_the_database_clock(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    open_question(
+        &pool,
+        &s,
+        &question_batch(&execution, Uuid::now_v7(), "Да?"),
+    )
+    .await;
+    // Часы хаба ушли на час вперёд: по ним свежий пуш был бы протухшим, по часам базы — нет.
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 1);
+    // А строка, протухшая по часам базы, не уходит даже при тех же часах хаба.
+    let second = Uuid::now_v7();
+    open_question(&pool, &s, &question_batch(&execution, second, "Старый?")).await;
+    sqlx::query(
+        "update owner_pushes set created_at=clock_timestamp()-interval '1 hour'
+         where dedupe_key=$1",
+    )
+    .bind(format!("waiting:{second}"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().dropped, 1);
+    assert_eq!(fake.seen().len(), 1);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -813,7 +804,7 @@ async fn an_attempt_is_recorded_before_the_request_goes_out(pool: PgPool) {
     fake.probe(&pool);
     // Обычная пауза повтора: после ответа строка не должна быть готова к отправке.
     let sender = Sender::new(&config).unwrap();
-    assert_eq!(sender.deliver_due(&pool, later()).await.unwrap().sent, 1);
+    assert_eq!(sender.deliver_due(&pool).await.unwrap().sent, 1);
     let seen = fake.seen();
     assert_eq!(
         seen[0].attempts,
@@ -842,9 +833,10 @@ async fn a_server_error_is_retried_and_then_delivered(pool: PgPool) {
     )
     .await;
     let sender = sender(&config);
-    let first = sender.deliver_due(&pool, Utc::now()).await.unwrap();
+    let first = sender.deliver_due(&pool).await.unwrap();
     assert_eq!((first.sent, first.retried), (0, 1));
-    let second = sender.deliver_due(&pool, later()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let second = sender.deliver_due(&pool).await.unwrap();
     assert_eq!(second.sent, 1);
     assert_eq!(fake.seen().len(), 2);
     let (state, attempts, status): (String, i32, Option<i32>) =
@@ -872,12 +864,10 @@ async fn delivery_gives_up_after_the_last_attempt_without_leaking_the_key(pool: 
     .await;
     let sender = sender(&config);
     let mut dropped = 0;
-    for pass in 0..5 {
-        let report = sender
-            .deliver_due(&pool, Utc::now() + TimeDelta::seconds(pass))
-            .await
-            .unwrap();
+    for _ in 0..5 {
+        let report = sender.deliver_due(&pool).await.unwrap();
         dropped += report.dropped;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     assert_eq!(dropped, 1);
     assert_eq!(
@@ -915,10 +905,10 @@ async fn a_client_error_is_not_retried(pool: PgPool) {
         &question_batch(&execution, Uuid::now_v7(), "Да?"),
     )
     .await;
-    let report = sender(&config).deliver_due(&pool, later()).await.unwrap();
+    let report = sender(&config).deliver_due(&pool).await.unwrap();
     assert_eq!(report.dropped, 1);
     assert_eq!(
-        sender(&config).deliver_due(&pool, later()).await.unwrap(),
+        sender(&config).deliver_due(&pool).await.unwrap(),
         Default::default()
     );
     assert_eq!(fake.seen().len(), 1);
@@ -940,13 +930,10 @@ async fn the_rate_limit_defers_the_rest(pool: PgPool) {
         .await;
     }
     let sender = sender(&config);
-    let report = sender.deliver_due(&pool, later()).await.unwrap();
+    let report = sender.deliver_due(&pool).await.unwrap();
     assert_eq!((report.sent, report.deferred), (2, 1));
     assert_eq!(fake.seen().len(), 2);
-    assert_eq!(
-        sender.deliver_due(&pool, later()).await.unwrap().deferred,
-        1
-    );
+    assert_eq!(sender.deliver_due(&pool).await.unwrap().deferred, 1);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -1023,7 +1010,7 @@ async fn trash_cancels_pending_pushes_and_purge_removes_them(pool: PgPool) {
         [(s.conversation_id, "waiting".into(), "cancelled".into())]
     );
     assert_eq!(
-        sender(&config).deliver_due(&pool, later()).await.unwrap(),
+        sender(&config).deliver_due(&pool).await.unwrap(),
         Default::default()
     );
     assert!(fake.seen().is_empty());
