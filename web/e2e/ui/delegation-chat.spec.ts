@@ -78,8 +78,9 @@ test('approval_card_allow_and_deny', async ({ page }) => {
 test('parent_link_opens_parent', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
   const { parent } = await boot(page);
-  const bubble = page.locator('article[data-origin="spawn"]');
-  await expect(bubble.getByText('От сессии Оркестратор · модель sonnet-5')).toBeVisible();
+  const bubble = page.locator('[data-role="session-message"][data-origin="spawn"]');
+  await expect(bubble.getByText('Задание от сессии «Оркестратор»')).toBeVisible();
+  await expect(bubble.getByText('sonnet-5')).toBeVisible();
   await expect(page.locator('article[data-origin]')).toHaveCount(1);
   await noOverflow(page);
 

@@ -16,6 +16,7 @@ import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
 import { seedPlan } from '../../testing/fixtures/plan';
 import { seedSearch } from '../../testing/fixtures/search';
 import { seedBookmarks } from '../../testing/fixtures/bookmarks';
+import { seedSystemBubbles } from '../../testing/fixtures/system-bubbles';
 
 export type Theme = 'dark' | 'light';
 
@@ -339,6 +340,17 @@ export const SCREENS: Screen[] = [
     await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('region', { name: 'Крупные кэши сборки' })).toBeVisible();
   })),
+  // Служебные пузыри ленты: будильники, сторож машины, контекст, лимиты и чужая сессия.
+  screen('system-bubbles', false, PHONE, 'dark', async (page) => {
+    const { hub, api } = fresh();
+    const id = seedConversation(api, { title: 'Оркестратор' });
+    seedSystemBubbles(api, id);
+    api.bindConversation(id);
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto(`/c/${id}`);
+    await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('article.system').first()).toBeVisible();
+  }),
   screen('settings', false, PHONE, 'dark', async (page) => {
     await bootSecondary(page, '/settings');
     await expect(page.locator('[data-secondary-ready]')).toBeVisible();

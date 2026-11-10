@@ -3,6 +3,8 @@
   import { fmt } from '#lib/format/ru.js';
   import type { InputView } from '#lib/stores/inputs.js';
   import TextBlock from '#lib/timeline/TextBlock.svelte';
+  import SystemBubble from '#lib/timeline/SystemBubble.svelte';
+  import { compactSessionContext } from '#lib/screens/chat/controls.js';
   import {
     LEGACY_CAPTION,
     alarmEntryLine,
@@ -15,11 +17,17 @@
     isSessionEvent,
     sessionStatus
   } from '#lib/timeline/hubEvent.js';
+  import { alarmView, contextView, limitView, machineView } from '#lib/timeline/system.js';
   import { nudgeEntryLine, nudgeExhaustedLine } from '#lib/timeline/nudge.js';
   import Icon from '#lib/ui/Icon.svelte';
   import { timeTip } from '#lib/ui/time-tip.js';
 
-  let { input, open, onToggle }: { input: InputView; open: boolean; onToggle: () => void } = $props();
+  let {
+    input,
+    conversationId,
+    open,
+    onToggle
+  }: { input: InputView; conversationId: string; open: boolean; onToggle: () => void } = $props();
 
   const origin = $derived(input.origin);
   const event = $derived(origin?.event ?? null);
@@ -30,6 +38,12 @@
   // Строка будильника считается только для его ввода: у остальных записей текст доставки не читается.
   const alarm = $derived(origin?.kind === 'alarm' ? alarmEntryLine(origin, input.text) : null);
   const nudge = $derived(origin?.kind === 'nudge' ? nudgeEntryLine(origin) : null);
+  const system = $derived(
+    alarmView(origin, input.text, input.createdAt) ??
+      machineView(origin, input.text) ??
+      contextView(origin, input.text, conversationId) ??
+      limitView(origin, input.text)
+  );
   // Подпись события не зависит от строки будильника: правка плашки не пересчитывает её.
   const line = $derived(
     event && !session && origin?.kind !== 'alarm' && origin?.kind !== 'nudge'
@@ -42,7 +56,15 @@
   const long = $derived(isLongText(input.text));
 </script>
 
-{#if session && event}
+{#if system}
+  <SystemBubble
+    view={system}
+    createdAt={input.createdAt}
+    {open}
+    {onToggle}
+    onCompact={() => void compactSessionContext(conversationId).catch(() => undefined)}
+  />
+{:else if session && event}
   <article class="card" data-event-kind={event.kind} data-event-state={event.state}>
     <header>
       {#if link}

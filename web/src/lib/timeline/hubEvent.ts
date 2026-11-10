@@ -72,7 +72,7 @@ const PHASES: Record<string, string> = {
   no_link: 'нет связи с машиной'
 };
 
-function windowLabel(value: string): string {
+export function windowLabel(value: string): string {
   return LIMIT_WINDOWS[value] ?? 'другое окно';
 }
 

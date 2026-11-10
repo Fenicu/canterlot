@@ -14,6 +14,7 @@
   import { INTERRUPT_FAILED, INTERRUPT_FAILED_OUTCOME, INTERRUPT_IDLE, type InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import CompactionRow from '#lib/timeline/CompactionRow.svelte';
   import EventEntry from '#lib/timeline/EventEntry.svelte';
+  import SessionMessageBubble from '#lib/timeline/SessionMessageBubble.svelte';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
   import { activityLiveLine } from '#lib/timeline/present.js';
@@ -721,9 +722,13 @@
         {#if row.kind === 'day'}
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
-          <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} highlight={row.key === highlightKey} {bookmarks} />
+          {#if row.entries[0].input.origin?.kind === 'message' || row.entries[0].input.origin?.kind === 'spawn'}
+            <SessionMessageBubble input={row.entries[0].input} {bookmarks} />
+          {:else}
+            <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} highlight={row.key === highlightKey} {bookmarks} />
+          {/if}
         {:else if row.kind === 'event' && row.entries[0]?.kind === 'input'}
-          <EventEntry input={row.entries[0].input} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
+          <EventEntry input={row.entries[0].input} conversationId={chat.id} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
           <RequestCard request={row.entries[0].request} onDecision={async () => undefined} {harnessId} {permissionMode} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}

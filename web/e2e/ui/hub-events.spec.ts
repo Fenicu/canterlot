@@ -303,7 +303,7 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
 });
 
 test('asked_failed_quota_and_stalled_cards_show_what_the_owner_needs', async ({ page }) => {
-  await boot(page);
+  const { child } = await boot(page);
 
   const asked = page.locator('[data-event-kind="asked"]');
   await expect(asked.getByText('задала вопрос')).toBeVisible();
@@ -315,14 +315,11 @@ test('asked_failed_quota_and_stalled_cards_show_what_the_owner_needs', async ({ 
   await expect(failed.getByText('причина', { exact: true })).toBeVisible();
   await expect(failed.getByText('агенту нужна авторизация')).toBeVisible();
 
-  const quota = page.locator('[data-event-kind="quota_paused"]');
-  await expect(quota.getByText('ждёт лимита')).toBeVisible();
-  await expect(quota.getByText('провайдер', { exact: true })).toBeVisible();
-  await expect(quota.getByText('Claude', { exact: true })).toBeVisible();
-  await expect(quota.getByText('окно лимита', { exact: true })).toBeVisible();
-  await expect(quota.getByText('5 часов', { exact: true })).toBeVisible();
-  await expect(quota.getByText('лимит до', { exact: true })).toBeVisible();
-  await expect(quota.getByText(/октября/)).toBeVisible();
+  // Пауза делегата теперь служебный пузырь: провайдер, окно и срок сброса в заголовке.
+  const quota = page.locator('article.system[data-event-kind="quota_paused"]');
+  await expect(quota).toContainText('Помощник «Карантин Rust-тестов» упёрся в лимит Claude (5 часов)');
+  await expect(quota).toContainText('сброс');
+  await expect(quota.getByRole('link')).toHaveAttribute('href', `/c/${child}`);
 
   const stalled = page.locator('[data-event-kind="stalled"]');
   await expect(stalled.getByText('зависла')).toBeVisible();
