@@ -1263,8 +1263,30 @@ export interface components {
             since: string;
             state: components["schemas"]["ActivityState"];
         };
+        /** @description Один сработавший будильник пачки: те же поля, что и у одиночного события. */
+        AlarmEvent: {
+            /** Format: uuid */
+            alarm_id?: string | null;
+            alarm_key?: string | null;
+            alarm_path?: string | null;
+            /** Format: int64 */
+            alarm_size?: number | null;
+            /** Format: date-time */
+            armed_at?: string | null;
+            condition?: unknown;
+            fired_reason?: string | null;
+            note?: string | null;
+            sessions?: components["schemas"]["AlarmSession"][] | null;
+        };
         AlarmList: {
             alarms: components["schemas"]["AlarmView"][];
+        };
+        /** @description Одна цель условия `session_state` на момент срабатывания. */
+        AlarmSession: {
+            /** Format: uuid */
+            id: string;
+            state: string;
+            title: string;
         };
         /** @description То, что видят PWA и HTTP: без заметки и без внутренних отметок. */
         AlarmView: {
@@ -2120,11 +2142,18 @@ export interface components {
             alarm_path?: string | null;
             /** Format: int64 */
             alarm_size?: number | null;
+            /** @description Пачка сработавших будильников: по объекту на каждый. */
+            alarms?: components["schemas"]["AlarmEvent"][] | null;
             answer?: string | null;
             /** Format: uuid */
             answer_block_id?: string | null;
             /** Format: int64 */
             answer_bytes?: number | null;
+            /**
+             * Format: date-time
+             * @description `alarm`: когда будильник взвели.
+             */
+            armed_at?: string | null;
             /** @description Ответ кончается вопросом в тексте, а не карточкой. */
             asks_in_text?: boolean | null;
             branch?: string | null;
@@ -2136,10 +2165,14 @@ export interface components {
             /** @description `accepted`: событие ушло другому подписчику, а не принявшему родителю. */
             closed?: boolean | null;
             commits?: components["schemas"]["HubCommit"][] | null;
+            /** @description `alarm`: разобранное условие в именах полей `alarm_set`. */
+            condition?: unknown;
             cpu_busy?: boolean | null;
             /** @description `approval`: `allowed`, `denied`, `failed` или `lapsed`. */
             decision?: string | null;
             detail?: string | null;
+            /** @description `machine_*` и `lease_long_hold`: числа и имена, из которых собран английский текст. */
+            details?: unknown;
             /** Format: int64 */
             duration_ms?: number | null;
             fired_reason?: string | null;
@@ -2150,6 +2183,13 @@ export interface components {
             kind: string;
             /** Format: date-time */
             last_event_at?: string | null;
+            /**
+             * Format: uuid
+             * @description `machine_*`: машина, о которой говорит предупреждение.
+             */
+            machine_id?: string | null;
+            /** @description `alarm`: заметка себе, доставленная вместе с событием. */
+            note?: string | null;
             /** @description `true`: толчки кончились без маркера, итог отпущен правилом. */
             nudge_exhausted?: boolean | null;
             /**
@@ -2165,8 +2205,15 @@ export interface components {
             reason?: string | null;
             /** Format: uuid */
             request_id?: string | null;
+            /**
+             * Format: date-time
+             * @description `limit_resumed` и `quota_paused`: когда лимит сбросится или сбросился.
+             */
+            resets_at?: string | null;
             /** Format: uuid */
             session_id?: string | null;
+            /** @description `alarm` с условием `session_state`: цели и их состояние на момент срабатывания. */
+            sessions?: components["schemas"]["AlarmSession"][] | null;
             state?: string | null;
             /** Format: int64 */
             tokens_in?: number | null;

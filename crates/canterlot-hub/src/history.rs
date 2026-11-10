@@ -481,7 +481,8 @@ pub async fn owner_inputs(
          (select count(*) from jsonb_array_elements(i.content) as e(b) where b->>'type'='attachment') attachments_count
          from inputs i join conversations c on c.id=i.conversation_id
          where i.conversation_id=$1 and c.owner_id=$2 and i.feed_seq is not null
-           and coalesce(i.origin->>'kind','') not in ('event','alarm','nudge')
+           and (coalesce(i.origin->>'kind','') not in ('event','alarm','nudge')
+                or i.origin->'event'->>'kind' = 'limit_resumed')
            and (not $3 or i.feed_seq<$4)
          order by i.feed_seq desc limit $5",
     )

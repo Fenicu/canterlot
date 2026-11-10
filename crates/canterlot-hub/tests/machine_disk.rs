@@ -319,6 +319,8 @@ async fn delivered_text_names_the_machine_free_gb_and_percent(pool: PgPool) -> T
          Builds and new sessions may fail."
     );
     assert_eq!(inputs[0].1["event"]["kind"], "machine_disk_low");
+    assert_eq!(inputs[0].1["event"]["details"]["free_gb"], 24);
+    assert_eq!(inputs[0].1["event"]["details"]["free_pct"], 8);
     Ok(())
 }
 
@@ -509,6 +511,17 @@ async fn disk_text_names_the_largest_build_caches(pool: PgPool) -> TestResult {
          scripts/prune-target.sh or remove target/debug/incremental in idle checkouts."
     );
     assert_eq!(inputs[0].1["event"]["kind"], "machine_disk_low");
+    assert_eq!(inputs[0].1["event"]["details"]["free_gb"], 28);
+    let hotspots = inputs[0].1["event"]["details"]["hotspots"]
+        .as_array()
+        .unwrap();
+    assert_eq!(hotspots.len(), 2);
+    assert_eq!(
+        hotspots[1]["path"],
+        format!("/data/worktrees/{worktree}/target")
+    );
+    assert_eq!(hotspots[1]["incremental_bytes"], 4 * GB);
+    assert_eq!(hotspots[1]["title"], "Баннер связи");
     assert_eq!(inputs[0].1["from"], json!(f.subscriber));
     Ok(())
 }
@@ -570,6 +583,12 @@ async fn low_memory_needs_three_samples_and_recovers_with_hysteresis(pool: PgPoo
          there now."
     );
     assert_eq!(inputs[0].1["event"]["kind"], "machine_mem_low");
+    assert_eq!(inputs[0].1["event"]["details"]["available_bytes"], 2 * GB);
+    assert_eq!(inputs[0].1["event"]["details"]["total_bytes"], 64 * GB);
+    assert_eq!(
+        inputs[0].1["event"]["details"]["heaviest"][0]["title"],
+        "делегат"
+    );
     Ok(())
 }
 
@@ -611,6 +630,13 @@ async fn leaked_processes_are_announced_once_per_episode(pool: PgPool) -> TestRe
          1.4 GB RSS): from «делегат». Nothing is stopped automatically."
     );
     assert_eq!(inputs[0].1["event"]["kind"], "machine_processes_leaked");
+    let leaked = inputs[0].1["event"]["details"]["leaked"]
+        .as_array()
+        .unwrap();
+    assert_eq!(leaked.len(), 3);
+    assert_eq!(leaked[0]["comm"], "cargo");
+    assert_eq!(leaked[0]["rss_bytes"], 600_000_000u64);
+    assert_eq!(leaked[0]["title"], "делегат");
     Ok(())
 }
 

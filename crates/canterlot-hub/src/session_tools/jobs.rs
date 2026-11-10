@@ -490,6 +490,17 @@ async fn machine_watch_message(
         _ => return Ok(None),
     };
     let id = event.target_id;
+    let facts = super::origin::HubEvent {
+        kind: kind.to_owned(),
+        session_id: Some(id),
+        state: Some(machine_state(&state, &reason)),
+        machine_id: Some(machine_id),
+        details: Some(super::machine_text::view_details(
+            &event.kind,
+            &event.details,
+        )),
+        ..Default::default()
+    };
     let origin = json!({
         "kind": "event",
         "from": id,
@@ -497,12 +508,7 @@ async fn machine_watch_message(
         "harness": harness,
         "model": model,
         "chain_depth": event.chain_depth,
-        "event": {
-            "kind": kind,
-            "session_id": id,
-            "state": machine_state(&state, &reason),
-            "machine_id": machine_id,
-        },
+        "event": facts,
     });
     Ok(Some((text, origin)))
 }

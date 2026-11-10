@@ -300,7 +300,8 @@ const INPUT_WHERE: &str = "i.feed_seq is not null
    and canterlot_input_doc(i.content) @@ websearch_to_tsquery('pg_catalog.russian', $2)
    and (i.origin is null or i.origin->>'kind' in ('message','spawn')
         or (i.origin->>'kind' = 'event'
-            and (i.origin->>'from' is not null or i.origin->'sender_deleted' = 'true'::jsonb)))
+            and (i.origin->>'from' is not null or i.origin->'sender_deleted' = 'true'::jsonb
+                 or i.origin->'event'->>'kind' = 'limit_resumed')))
    and c.owner_id = $1 and c.trashed_at is null
    and ($3::uuid[] is null or i.conversation_id = any($3::uuid[]))
    and ($4::uuid is null or i.conversation_id = $4::uuid)

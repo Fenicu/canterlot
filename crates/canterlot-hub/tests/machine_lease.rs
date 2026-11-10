@@ -585,6 +585,8 @@ async fn long_hold_warns_holder_subscribers_once_and_only_from_fresh_state(
         let event = &origin.as_ref().unwrap()["event"];
         assert_eq!(event["kind"], "lease_long_hold");
         assert_eq!(event["machine_id"], json!(s.machine_id));
+        assert_eq!(event["details"]["held_minutes"], 95);
+        assert_eq!(event["details"]["lease_kind"], "build");
     }
     Ok(())
 }

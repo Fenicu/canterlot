@@ -125,6 +125,30 @@ pub struct HubEvent {
     pub alarm_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alarm_size: Option<i64>,
+    /// `alarm`: когда будильник взвели.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub armed_at: Option<DateTime<Utc>>,
+    /// `alarm`: разобранное условие в именах полей `alarm_set`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Value>,
+    /// `alarm`: заметка себе, доставленная вместе с событием.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// `alarm` с условием `session_state`: цели и их состояние на момент срабатывания.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Vec<AlarmSession>>,
+    /// Пачка сработавших будильников: по объекту на каждый.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alarms: Option<Vec<AlarmEvent>>,
+    /// `machine_*` и `lease_long_hold`: числа и имена, из которых собран английский текст.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+    /// `machine_*`: машина, о которой говорит предупреждение.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<Uuid>,
+    /// `limit_resumed` и `quota_paused`: когда лимит сбросится или сбросился.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<DateTime<Utc>>,
     /// Сколько автоматических толчков получила цель до этого итога.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nudges: Option<i64>,
@@ -195,6 +219,36 @@ impl HubEvent {
             ..Self::default()
         }
     }
+}
+
+/// Одна цель условия `session_state` на момент срабатывания.
+#[derive(Serialize, utoipa::ToSchema, Clone, Debug)]
+pub struct AlarmSession {
+    pub id: Uuid,
+    pub title: String,
+    pub state: String,
+}
+
+/// Один сработавший будильник пачки: те же поля, что и у одиночного события.
+#[derive(Serialize, utoipa::ToSchema, Clone, Debug, Default)]
+pub struct AlarmEvent {
+    pub alarm_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alarm_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fired_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alarm_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alarm_size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub armed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Vec<AlarmSession>>,
 }
 
 /// Кладёт факты рядом с отправителем, не трогая остальные поля origin.

@@ -7701,6 +7701,67 @@
           }
         }
       },
+      "AlarmEvent": {
+        "type": "object",
+        "description": "Один сработавший будильник пачки: те же поля, что и у одиночного события.",
+        "properties": {
+          "alarm_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "alarm_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "alarm_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "alarm_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "armed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "condition": {},
+          "fired_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AlarmSession"
+            }
+          }
+        }
+      },
       "AlarmList": {
         "type": "object",
         "required": [
@@ -7712,6 +7773,27 @@
             "items": {
               "$ref": "#/components/schemas/AlarmView"
             }
+          }
+        }
+      },
+      "AlarmSession": {
+        "type": "object",
+        "description": "Одна цель условия `session_state` на момент срабатывания.",
+        "required": [
+          "id",
+          "title",
+          "state"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
           }
         }
       },
@@ -10896,6 +10978,16 @@
             ],
             "format": "int64"
           },
+          "alarms": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AlarmEvent"
+            },
+            "description": "Пачка сработавших будильников: по объекту на каждый."
+          },
           "answer": {
             "type": [
               "string",
@@ -10915,6 +11007,14 @@
               "null"
             ],
             "format": "int64"
+          },
+          "armed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "`alarm`: когда будильник взвели."
           },
           "asks_in_text": {
             "type": [
@@ -10965,6 +11065,9 @@
               "$ref": "#/components/schemas/HubCommit"
             }
           },
+          "condition": {
+            "description": "`alarm`: разобранное условие в именах полей `alarm_set`."
+          },
           "cpu_busy": {
             "type": [
               "boolean",
@@ -10983,6 +11086,9 @@
               "string",
               "null"
             ]
+          },
+          "details": {
+            "description": "`machine_*` и `lease_long_hold`: числа и имена, из которых собран английский текст."
           },
           "duration_ms": {
             "type": [
@@ -11007,6 +11113,21 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "machine_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`machine_*`: машина, о которой говорит предупреждение."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`alarm`: заметка себе, доставленная вместе с событием."
           },
           "nudge_exhausted": {
             "type": [
@@ -11066,12 +11187,30 @@
             ],
             "format": "uuid"
           },
+          "resets_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "`limit_resumed` и `quota_paused`: когда лимит сбросится или сбросился."
+          },
           "session_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "sessions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AlarmSession"
+            },
+            "description": "`alarm` с условием `session_state`: цели и их состояние на момент срабатывания."
           },
           "state": {
             "type": [

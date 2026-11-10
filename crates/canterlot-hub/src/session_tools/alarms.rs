@@ -2928,6 +2928,87 @@ fn file_facts(row: &AlarmRow) -> (Option<String>, Option<i64>) {
     )
 }
 
+/// Условие в именах полей `alarm_set`: клиент не разбирает английский текст и не
+/// зависит от внутренних отметок взвода.
+fn compact_condition(row: &AlarmRow) -> Value {
+    let mut map = serde_json::Map::new();
+    if row.kind == "at" {
+        map.insert("kind".to_owned(), json!("at"));
+        if let Some(at) = row.fire_at {
+            map.insert("at".to_owned(), json!(at));
+        }
+        return Value::Object(map);
+    }
+    let Some(condition) = row.condition.as_ref() else {
+        return json!({"kind": row.kind});
+    };
+    let kind = condition
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or(&row.kind);
+    map.insert("kind".to_owned(), json!(kind));
+    for key in ["session_ids", "states", "all", "provider", "window", "path"] {
+        if let Some(value) = condition.get(key).filter(|value| !value.is_null()) {
+            map.insert(key.to_owned(), value.clone());
+        }
+    }
+    Value::Object(map)
+}
+
+/// Цели условия `session_state` на момент срабатывания: имя и состояние из проекции.
+async fn alarm_sessions_in_tx(
+    conn: &mut PgConnection,
+    row: &AlarmRow,
+) -> Result<Option<Vec<origin::AlarmSession>>, sqlx::Error> {
+    let Some(condition) = row.condition.as_ref() else {
+        return Ok(None);
+    };
+    if condition.get("kind").and_then(Value::as_str) != Some("session_state") {
+        return Ok(None);
+    }
+    let ids: Vec<Uuid> = condition
+        .get("session_ids")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "select c.id,c.title,coalesce(d.activity_state,'unknown')
+         from conversations c
+         left join conversation_derived d on d.conversation_id=c.id
+         where c.id=any($1)
+         order by array_position($1::uuid[],c.id)",
+    )
+    .bind(&ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(Some(
+        rows.into_iter()
+            .map(|(id, title, state)| origin::AlarmSession { id, title, state })
+            .collect(),
+    ))
+}
+
+/// Один сработавший будильник для `origin`: те же поля, что видит пачка.
+async fn alarm_event_in_tx(
+    conn: &mut PgConnection,
+    row: &AlarmRow,
+) -> Result<origin::AlarmEvent, sqlx::Error> {
+    let (alarm_path, alarm_size) = file_facts(row);
+    Ok(origin::AlarmEvent {
+        alarm_id: Some(row.id),
+        alarm_key: row.key.clone(),
+        fired_reason: row.fired_reason.clone(),
+        alarm_path,
+        alarm_size,
+        armed_at: Some(row.created_at),
+        condition: Some(compact_condition(row)),
+        note: row.note.clone().filter(|note| !note.is_empty()),
+        sessions: alarm_sessions_in_tx(conn, row).await?,
+    })
+}
+
 pub async fn deliver_job_in_tx(
     conn: &mut PgConnection,
     job: &ClaimedJob,
@@ -3085,6 +3166,15 @@ pub async fn deliver_job_in_tx(
         input_id
     } else {
         let (alarm_path, alarm_size) = file_facts(first);
+        let single = alarm_event_in_tx(conn, first).await?;
+        let mut alarms = None;
+        if part.end - part.start > 1 {
+            let mut list = Vec::with_capacity(part.end - part.start);
+            for row in &rows[part.start..part.end] {
+                list.push(alarm_event_in_tx(conn, row).await?);
+            }
+            alarms = Some(list);
+        }
         let submitted = submit_input_in_tx(
             conn,
             &SubmitInput {
@@ -3103,10 +3193,15 @@ pub async fn deliver_job_in_tx(
                     "event": origin::HubEvent {
                         kind: "alarm".into(),
                         alarm_id: Some(first.id),
-                        alarm_key: first.key.clone(),
-                        fired_reason: first.fired_reason.clone(),
+                        alarm_key: single.alarm_key,
+                        fired_reason: single.fired_reason,
                         alarm_path,
                         alarm_size,
+                        armed_at: single.armed_at,
+                        condition: single.condition,
+                        note: single.note,
+                        sessions: single.sessions,
+                        alarms,
                         ..Default::default()
                     },
                 })),

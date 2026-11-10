@@ -761,6 +761,8 @@ struct WakePayload {
     window: String,
     #[serde(default)]
     verified: bool,
+    #[serde(default)]
+    resets_at: Option<DateTime<Utc>>,
 }
 
 /// Что говорят показания о сбросе окна после срока `wake_at`.
@@ -1036,6 +1038,7 @@ pub async fn handle_wake_in_tx(
         let text = resume_text
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| config.default_resume_text.clone());
+        let resets_at = payload.resets_at.or(episode_wake_at);
         let request = SubmitInput {
             owner_id: job.owner_id,
             conversation_id: id,
@@ -1043,7 +1046,17 @@ pub async fn handle_wake_in_tx(
             content: vec![ContentBlock::Text { text }],
             received_at: now,
             correlation_id,
-            origin: None,
+            origin: Some(json!({
+                "kind": "event",
+                "chain_depth": 0,
+                "event": crate::session_tools::origin::HubEvent {
+                    kind: "limit_resumed".into(),
+                    provider: Some(provider.into()),
+                    window: Some(window.as_str().into()),
+                    resets_at,
+                    ..Default::default()
+                },
+            })),
         };
         match submit_input_in_tx(conn, &request).await {
             Ok(submitted) => input_id = Some(submitted.input_id),
@@ -1090,7 +1103,18 @@ pub async fn handle_wake_in_tx(
                 || format!("crunch-reset:{}", job.id),
                 |key| format!("crunch-reset:{id}:{key}"),
             );
-        queue_no_live_note_in_tx(conn, job.owner_id, id, provider, window, &dedupe, now).await?;
+        let resets_at = payload.resets_at.or(episode_wake_at).or(pending_until);
+        queue_no_live_note_in_tx(
+            conn,
+            job.owner_id,
+            id,
+            provider,
+            window,
+            resets_at,
+            &dedupe,
+            now,
+        )
+        .await?;
     }
     let result = json!({"input_id":input_id,"skipped":skipped,"resume_pending":resume_pending,"by_clock":by_clock});
     append(
@@ -1114,6 +1138,7 @@ async fn queue_no_live_note_in_tx(
     conversation_id: Uuid,
     provider: &str,
     window: Window,
+    resets_at: Option<DateTime<Utc>>,
     dedupe_key: &str,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
@@ -1157,6 +1182,7 @@ async fn queue_no_live_note_in_tx(
             session_id: Some(conversation_id),
             provider: Some(provider.into()),
             window: Some(window.as_str().into()),
+            resets_at,
             reason: Some("no_live_execution".into()),
             ..Default::default()
         },

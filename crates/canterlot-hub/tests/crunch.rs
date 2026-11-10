@@ -1096,6 +1096,24 @@ async fn wake_after_verified_reset_releases_hold_and_queues_resume_text_once(poo
             .await
             .unwrap();
     assert_eq!(job.result.as_ref().unwrap()["input_id"], input.to_string());
+    let origin: Value = sqlx::query_scalar("select origin from inputs where id=$1")
+        .bind(input)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(origin["kind"], "event");
+    assert_eq!(origin["event"]["kind"], "limit_resumed");
+    assert_eq!(origin["event"]["provider"], "claude");
+    assert_eq!(origin["event"]["window"], "five_hour");
+    assert_eq!(
+        origin["event"]["resets_at"]
+            .as_str()
+            .unwrap()
+            .parse::<DateTime<Utc>>()
+            .unwrap()
+            .timestamp(),
+        reset.timestamp()
+    );
     let woken = events_of(&pool, id, "crunch_woken").await;
     assert_eq!(woken.len(), 1);
     assert_eq!(woken[0]["input_id"], input.to_string());
@@ -1716,6 +1734,52 @@ async fn wake_with_no_live_execution_releases_the_hold_and_keeps_resume_pending(
     let job = &jobs(&pool, "wake").await[0];
     assert_eq!(job.state, "fired");
     assert_eq!(job.result.as_ref().unwrap()["skipped"], "no_live_execution");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn no_live_execution_note_to_the_parent_carries_the_reset_time(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let parent = env.conversation(true, true).await;
+    let id = env.conversation(true, true).await;
+    sqlx::query("update conversations set parent_conversation_id=$2 where id=$1")
+        .bind(id)
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    sqlx::query(
+        "update executions set state='stopped',outcome='normal_exit' where conversation_id=$1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    verified_reset(&env, reset).await;
+    env.tick(reset + secs(60)).await;
+    let origin: Value = sqlx::query_scalar(
+        "select origin from inputs where conversation_id=$1
+           and origin->'event'->>'kind'='quota_paused'",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(origin["event"]["provider"], "claude");
+    assert_eq!(origin["event"]["window"], "five_hour");
+    assert_eq!(origin["event"]["reason"], "no_live_execution");
+    assert_eq!(
+        origin["event"]["resets_at"]
+            .as_str()
+            .unwrap()
+            .parse::<DateTime<Utc>>()
+            .unwrap()
+            .timestamp(),
+        reset.timestamp()
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

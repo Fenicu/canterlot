@@ -435,6 +435,17 @@ async fn time_alarms_firing_within_five_seconds_coalesce_into_one_input(pool: Pg
     assert!(text.contains("\"disk\""), "{text}");
     assert_eq!(origin["kind"], "alarm");
     assert_eq!(origin["event"]["kind"], "alarm");
+    assert!(origin["event"]["armed_at"].is_string());
+    assert_eq!(origin["event"]["condition"]["kind"], "at");
+    assert_eq!(origin["event"]["note"], "wave C");
+    let alarms = origin["event"]["alarms"].as_array().unwrap();
+    assert_eq!(alarms.len(), 2);
+    for alarm in alarms {
+        assert_eq!(alarm["condition"]["kind"], "at");
+        assert_eq!(alarm["note"], "wave C");
+        assert!(alarm["armed_at"].is_string());
+        assert!(alarm["alarm_id"].is_string());
+    }
 
     let delivered: Vec<(Option<Uuid>, String)> = sqlx::query_as(
         "select delivered_input_id,state from alarms where conversation_id=$1 order by key",
@@ -463,6 +474,45 @@ async fn time_alarms_firing_within_five_seconds_coalesce_into_one_input(pool: Pg
         .await,
         1
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn delivered_alarm_origin_carries_the_armed_condition_and_note(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let fire_at = now + TimeDelta::seconds(31);
+    f.arm_at("gate", fire_at).await;
+    scheduler(&f.pool, Default::default())
+        .tick(now + TimeDelta::seconds(36))
+        .await
+        .unwrap();
+    let (text, origin): (String, Value) =
+        sqlx::query_as("select content->0->>'text',origin from inputs where conversation_id=$1")
+            .bind(f.orchestrator)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "[canterlot] Alarm \"gate\" fired at {} (set 0 min ago).\n\
+             Note: wave C\n\n\
+             This is canterlot automation, not the owner.",
+            fire_at.format("%Y-%m-%d %H:%M UTC")
+        )
+    );
+    assert!(origin["event"]["armed_at"].is_string());
+    assert_eq!(origin["event"]["condition"]["kind"], "at");
+    assert_eq!(
+        origin["event"]["condition"]["at"]
+            .as_str()
+            .unwrap()
+            .parse::<DateTime<Utc>>()
+            .unwrap()
+            .timestamp(),
+        fire_at.timestamp()
+    );
+    assert_eq!(origin["event"]["note"], "wave C");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -652,7 +702,8 @@ async fn session_state_condition_fires_after_the_target_settles(pool: PgPool) {
             "alarms.set",
             json!({
                 "when": {"kind": "session_state", "session_ids": [f.child]},
-                "key": "watch"
+                "key": "watch",
+                "note": "смотри за ним"
             }),
         )
         .await
@@ -676,6 +727,24 @@ async fn session_state_condition_fires_after_the_target_settles(pool: PgPool) {
     assert_eq!(state, "fired");
     assert_eq!(reason.as_deref(), Some("condition"));
     assert!(delivered.is_some());
+    let origin: Value = sqlx::query_scalar(
+        "select origin from inputs where conversation_id=$1 order by input_seq desc limit 1",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(origin["event"]["condition"]["kind"], "session_state");
+    assert_eq!(
+        origin["event"]["condition"]["session_ids"][0],
+        json!(f.child)
+    );
+    assert_eq!(origin["event"]["note"], "смотри за ним");
+    let sessions = origin["event"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["id"], json!(f.child));
+    assert!(sessions[0]["title"].is_string());
+    assert_eq!(sessions[0]["state"], "idle");
 }
 
 #[sqlx::test(migrations = "./migrations")]

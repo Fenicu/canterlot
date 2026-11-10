@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const GB: f64 = 1e9;
 /// Каталогов сборки в тексте; в задании их больше.
@@ -203,6 +203,83 @@ pub fn lease_long_hold(machine: &str, details: &Value) -> String {
          Nothing is stopped automatically.",
         details["held_minutes"].as_i64().unwrap_or(0).max(1)
     )
+}
+
+/// Числа и имена события для PWA: только то, из чего собран английский текст.
+/// Списки урезаны, служебных полей воркера здесь нет.
+pub fn view_details(kind: &str, details: &Value) -> Value {
+    match kind {
+        "disk_low" | "disk_critical" => {
+            let hotspots: Vec<Value> = details["hotspots"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(5)
+                .map(|h| {
+                    json!({
+                        "path": h["path"],
+                        "kind": h["kind"],
+                        "bytes": h["bytes"],
+                        "incremental_bytes": h["incremental_bytes"],
+                        "newest_at": h["newest_at"],
+                        "title": h["title"],
+                    })
+                })
+                .collect();
+            json!({
+                "free_gb": details["free_gb"],
+                "free_pct": details["free_pct"],
+                "hotspots": hotspots,
+            })
+        }
+        "mem_low" => {
+            let heaviest: Vec<Value> = details["heaviest"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(5)
+                .map(|e| {
+                    json!({
+                        "execution_id": e["execution_id"],
+                        "title": e["title"],
+                        "rss_bytes": e["rss_bytes"],
+                    })
+                })
+                .collect();
+            json!({
+                "available_bytes": details["available_bytes"],
+                "total_bytes": details["total_bytes"],
+                "heaviest": heaviest,
+            })
+        }
+        "processes_leaked" => {
+            let leaked: Vec<Value> = details["leaked"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(5)
+                .map(|e| {
+                    json!({
+                        "execution_id": e["execution_id"],
+                        "comm": e["comm"],
+                        "rss_bytes": e["rss_bytes"],
+                        "title": e["title"],
+                    })
+                })
+                .collect();
+            json!({"leaked": leaked})
+        }
+        "lease_long_hold" => json!({
+            "lease_kind": details["lease_kind"],
+            "holder": details["holder"],
+            "holder_title": details["holder_title"],
+            "conversation_id": details["conversation_id"],
+            "execution_id": details["execution_id"],
+            "label": details["label"],
+            "held_minutes": details["held_minutes"],
+        }),
+        _ => Value::Null,
+    }
 }
 
 #[cfg(test)]

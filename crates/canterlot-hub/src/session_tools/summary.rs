@@ -937,6 +937,7 @@ impl SessionSummary {
                 event.provider.clone_from(provider);
                 event.window.clone_from(window);
                 event.until = *until;
+                event.resets_at = *until;
             }
             Detail::Stopped { outcome } => event.outcome = Some(outcome.clone()),
             Detail::None => {}

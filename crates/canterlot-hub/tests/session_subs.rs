@@ -2331,6 +2331,17 @@ async fn a_hold_removed_early_delivers_postponed_notifications_right_away(pool: 
     let delivered = delivered(&pool, p.subscriber).await;
     assert_eq!(delivered.len(), 1, "exactly one delivery after the hold");
     assert_eq!(delivered[0].1["event"]["kind"], "quota_paused");
+    assert_eq!(delivered[0].1["event"]["provider"], "claude");
+    assert_eq!(delivered[0].1["event"]["window"], "five_hour");
+    assert_eq!(
+        delivered[0].1["event"]["resets_at"]
+            .as_str()
+            .unwrap()
+            .parse::<DateTime<Utc>>()
+            .unwrap()
+            .timestamp(),
+        wake_at.timestamp()
+    );
     assert_eq!(scheduled_tasks(&pool, p.subscriber).await[0].state, "fired");
 }
 
