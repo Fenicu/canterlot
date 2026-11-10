@@ -15,6 +15,7 @@
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
   import type { Stage } from '#lib/ui/stage-track.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import type { ConversationBookmarks } from '#lib/bookmarks/store.svelte.js';
   import type { InputView } from '#lib/stores/inputs.js';
   import { STEER_RETURNED_LABEL, retryAsNew, returnToDraft, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
   import { editInput, editInputCaption } from '#lib/timeline/QueueActions.js';
@@ -23,7 +24,7 @@
   import { originLabel } from '#lib/timeline/origin.js';
   import { timeTip } from '#lib/ui/time-tip.js';
 
-  let { input, chat, agentWorking = false, highlight = false }: { input: InputView; chat: ChatStore; agentWorking?: boolean; highlight?: boolean } = $props();
+  let { input, chat, agentWorking = false, highlight = false, bookmarks = null }: { input: InputView; chat: ChatStore; agentWorking?: boolean; highlight?: boolean; bookmarks?: ConversationBookmarks | null } = $props();
   let ask = $state<string | null>(null);
   let decided = $state<((ok: boolean) => void) | null>(null);
 
@@ -87,6 +88,7 @@
     );
   }
   const from = $derived(originLabel(input.origin));
+  const bookmarked = $derived(input.id !== null && bookmarks?.has('input', input.id) === true);
   // Разделитель собирается в скрипте: Svelte срезает пробелы в начале и конце блока.
   const stampSeparator = ' · ';
   const stampAt = $derived(input.state === 'accepted' && input.createdAt !== null ? input.createdAt : null);
@@ -254,6 +256,18 @@
             chat
           })}
       >Вернуть в черновик</Button>
+    </div>
+  {/if}
+  {#if input.id && bookmarks && !editing}
+    <div class="actions message-actions" data-role="bubble-actions">
+      <IconButton
+        icon="bookmark"
+        solid={bookmarked}
+        pressed={bookmarked}
+        active={bookmarked}
+        label={bookmarked ? 'Убрать из избранного' : 'В избранное'}
+        onclick={() => void bookmarks.toggle('input', input.id!)}
+      />
     </div>
   {/if}
 </article>

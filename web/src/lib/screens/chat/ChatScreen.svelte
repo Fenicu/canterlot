@@ -10,7 +10,9 @@
 	import Composer from '#lib/composer/Composer.svelte';
 	import { InterruptControl } from '#lib/composer/interrupt.svelte.js';
 	import { turnIsLive } from '#lib/composer/sendRules.js';
-	import type { ChatStore, OwnerInputView } from '#lib/stores/chat.svelte.js';	import PendingStrip from '#lib/timeline/PendingStrip.svelte';
+	import type { ChatStore, OwnerInputView } from '#lib/stores/chat.svelte.js';
+	import PendingStrip from '#lib/timeline/PendingStrip.svelte';
+	import { sessionBookmarks } from '#lib/bookmarks/store.svelte.js';
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
@@ -113,6 +115,14 @@
 	let NudgeSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	let RouteSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	const todos = $derived(chat.todos.lane(null));
+	// Закладки живут, пока открыт разговор: при уходе набор снимается вместе с подпиской ленты.
+	const marks = $derived(sessionBookmarks.get(chat.id));
+	const bookmarkError = $derived(marks?.toggleError ?? null);
+	$effect(() => {
+		const id = chat.id;
+		untrack(() => sessionBookmarks.open(id));
+		return () => sessionBookmarks.close(id);
+	});
 
 	$effect(() => {
 		if (showSettings && !SessionSettings) import('./SessionSettings.svelte').then((m) => { SessionSettings = m.default; });
@@ -265,6 +275,7 @@
 			onInfo?.(runId);
 		}}
 		{now}
+		bookmarks={marks}
 		onOpenPlan={(id) => {
 			if (id !== chat.id || !hasPlan) return false;
 			openPlan();
@@ -301,6 +312,9 @@
 		<WorktreeNotice error={acceptError} onforce={() => (showAccept = true)} />
 	{:else if acceptError}
 		<p class="accept-error" role="alert">{acceptError}</p>
+	{/if}
+	{#if bookmarkError}
+		<p class="bookmark-error" role="alert">{bookmarkError}</p>
 	{/if}
 
 	<PauseCards {chat} {now} />
@@ -392,6 +406,11 @@
 </section>
 
 <style>
+	.bookmark-error {
+		margin: 0 var(--s6);
+		color: var(--danger);
+		font-size: var(--fs-sm);
+	}
 	.continuation {
 		margin: 0;
 		padding: 0 var(--s6);

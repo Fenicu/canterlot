@@ -21,6 +21,8 @@
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import { timeTip } from '#lib/ui/time-tip.js';
+  import type { ConversationBookmarks } from '#lib/bookmarks/store.svelte.js';
+  import { bookmarkAnchor, cardBookmarked } from '#lib/bookmarks/model.js';
 
   let {
     cardKey,
@@ -35,7 +37,8 @@
     onInfo,
     load,
     interrupt = null,
-    leaseWait = null
+    leaseWait = null,
+    bookmarks = null
   }: {
     cardKey: string;
     laneRoot?: string;
@@ -52,6 +55,8 @@
     interrupt?: InterruptControl | null;
     /** Процесс текущего хода ждёт очереди тяжёлых задач машины. */
     leaseWait?: LeaseWait | null;
+    /** Закладки открытого разговора: карточка держит одну отметку на верхнем блоке. */
+    bookmarks?: ConversationBookmarks | null;
   } = $props();
 
   const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
@@ -80,6 +85,9 @@
   // Карточки делегирования, плана и файлов не прячутся в свёрнутые шаги: реестр говорит, какие.
   const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: (block) => report(block) || cardStays(block), quiet: cardQuiet, label: cardLabel }));
   const view = $derived(folds.view(cardKey, items, live));
+  const topBlocks = $derived(all.filter((block) => block.parentId === null));
+  const anchor = $derived(bookmarkAnchor(topBlocks));
+  const marked = $derived(cardBookmarked(topBlocks, (id) => bookmarks?.has('block', id) ?? false));
 </script>
 
 {#snippet entryRow(entry: TimelineEntry)}
@@ -127,9 +135,21 @@
   {#if head}
     <footer class="byline" data-role="answer-footer">
       <p><strong>{agent}</strong><time datetime={new Date(head.createdAt).toISOString()} use:timeTip={head.createdAt}>{fmt.clock(head.createdAt)}</time></p>
-      {#if run}
-        <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(run)} />
-      {/if}
+      <div class="footer-actions">
+        {#if anchor && bookmarks}
+          <IconButton
+            icon="bookmark"
+            solid={marked}
+            pressed={marked}
+            active={marked}
+            label={marked ? 'Убрать из избранного' : 'В избранное'}
+            onclick={() => void bookmarks.toggle('block', anchor.id)}
+          />
+        {/if}
+        {#if run}
+          <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(run)} />
+        {/if}
+      </div>
     </footer>
   {/if}
 </article>
@@ -150,6 +170,7 @@
   strong { font-weight: var(--weight-semibold); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .byline :global(button) { color: var(--secondary); }
+  .footer-actions { display: flex; align-items: center; gap: var(--s1); }
   .entry { min-width: 0; }
   .entry:has(> :global(.text)) { margin-block: var(--s2); }
   .report { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }

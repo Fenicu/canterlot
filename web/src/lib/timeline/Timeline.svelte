@@ -8,6 +8,7 @@
   import { probe } from '#lib/perf/probe.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import type { ConversationBookmarks } from '#lib/bookmarks/store.svelte.js';
   import type { TimelineSource } from '#lib/stores/timeline.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
   import { INTERRUPT_FAILED, INTERRUPT_FAILED_OUTCOME, INTERRUPT_IDLE, type InterruptControl } from '#lib/composer/interrupt.svelte.js';
@@ -40,7 +41,8 @@
     laneRoot,
     feed,
     interrupt = null,
-    onOpenPlan
+    onOpenPlan,
+    bookmarks = null
   }: {
     chat: ChatStore;
     /** Прерывание идущего хода: кнопка в живой строке хода. Только у ленты разговора. */
@@ -52,6 +54,8 @@
     feed?: TimelineSource;
     /** Открыть план оркестратора на месте; `false` — ссылка карточки ведёт на страницу плана. */
     onOpenPlan?: (orchestratorId: string) => boolean;
+    /** Закладки разговора: переключатель в футере карточки ответа и в пузыре владельца. */
+    bookmarks?: ConversationBookmarks | null;
   } = $props();
   let host = $state<HTMLDivElement | null>(null);
   let controller = $state<ScrollController | null>(null);
@@ -717,13 +721,13 @@
         {#if row.kind === 'day'}
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
-          <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} highlight={row.key === highlightKey} />
+          <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} highlight={row.key === highlightKey} {bookmarks} />
         {:else if row.kind === 'event' && row.entries[0]?.kind === 'input'}
           <EventEntry input={row.entries[0].input} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
           <RequestCard request={row.entries[0].request} onDecision={async () => undefined} {harnessId} {permissionMode} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
-          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} />
+          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} />
         {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}
           <CompactionRow compaction={row.entries[0].compaction} />
         {/if}
