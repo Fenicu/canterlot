@@ -336,7 +336,7 @@ cp /bin/sleep "${FAKE_ROOT}/fake-bin/decoy-sleep" && chmod +x "${FAKE_ROOT}/fake
 setsid bash -c "exec -a 'profile-holder ${EXEC1}' ${FAKE_ROOT}/fake-bin/decoy-sleep 1000" >/dev/null 2>&1 <&- &
 HARNESS_PIDS+=("$!")
 mkdir -p "${WORKER_DATA}/executions/${EXEC1}/sj"
-cp "${REPO_ROOT}/crates/canterlot-worker/tests/fixtures/spec/1dbdd180ffce.toml" \
+cp "${REPO_ROOT}/crates/canterlot-worker/tests/it/fixtures/spec/1dbdd180ffce.toml" \
     "${WORKER_DATA}/executions/${EXEC1}/spec.toml"
 spawn_session "${EXEC1}" "bbbbbbbbbbbb" 100
 mkdir -p "${WORKER_DATA}/cj"

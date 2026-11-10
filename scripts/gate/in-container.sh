@@ -49,7 +49,7 @@ export PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}
 
 # Короткий TMPDIR: путь сокета исполнения — <runtime>/canterlot/<uuid>.sock, а
 # canterlot-worker::supervisor::ipc отвергает путь длиннее 107 байт. Ровно /tmp,
-# а не подкаталог: tests/exec.rs создаёт runtime через tempdir_in("/tmp"), а
+# а не подкаталог: tests/it/exec.rs создаёт runtime через tempdir_in("/tmp"), а
 # уборка в maintenance пускает её только внутри std::env::temp_dir().
 export TMPDIR=/tmp
 # /tmp — смонтированный каталог кэша, он переживает прогон: чистим его, чтобы

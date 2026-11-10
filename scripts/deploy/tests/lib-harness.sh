@@ -215,7 +215,7 @@ spawn_session() {
     mkdir -p "${bindir}" "${WORKER_DATA}/executions/${exec_id}/sj"
     [ -x "${bindir}/canterlot-worker" ] || cp "${FAKE_WORKER_BIN}" "${bindir}/canterlot-worker"
     [ -x "${bindir}/sleep-cli" ] || cp /bin/sleep "${bindir}/sleep-cli"
-    cp "${REPO_ROOT}/crates/canterlot-worker/tests/fixtures/spec/1dbdd180ffce.toml" \
+    cp "${REPO_ROOT}/crates/canterlot-worker/tests/it/fixtures/spec/1dbdd180ffce.toml" \
         "${WORKER_DATA}/executions/${exec_id}/spec.toml"
     python3 -c "import struct,sys; sys.stdout.buffer.write(struct.pack('<Q', ${cursor}) + b'\0'*4)" \
         >"${WORKER_DATA}/executions/${exec_id}/sj/ack"

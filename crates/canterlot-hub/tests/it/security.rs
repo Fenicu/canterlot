@@ -232,7 +232,7 @@ fn security_panic_payload_is_sanitized_in_subprocess() {
     let marker = format!("PRIVATE_PANIC_{}", Uuid::now_v7());
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
-            "security_panic_subprocess",
+            "security::security_panic_subprocess",
             "--exact",
             "--ignored",
             "--nocapture",

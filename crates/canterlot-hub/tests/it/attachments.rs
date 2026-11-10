@@ -2152,7 +2152,7 @@ async fn two_hub_processes_cannot_mutate_a_ready_linked_blob(pool: PgPool) {
     use sqlx::ConnectOptions;
     let database = pool.connect_options().to_url_lossy().to_string();
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "cross_process_upload_child"])
+        .args(["--exact", "attachments::cross_process_upload_child"])
         .env("ATTACHMENT_TEST_DB", database)
         .env("ATTACHMENT_TEST_BLOBS", &f.config.blob_dir)
         .env("ATTACHMENT_TEST_OWNER", f.owner.to_string())
@@ -2253,7 +2253,7 @@ fn directory_trace() -> (tempfile::TempDir, Vec<String>) {
         .args(["-f", "-qq", "-yy", "-e", "trace=fsync,mkdir,rename", "-o"])
         .arg(&trace)
         .arg(std::env::current_exe().unwrap())
-        .args(["--exact", "directory_durability_child"])
+        .args(["--exact", "attachments::directory_durability_child"])
         .env("ATTACHMENT_TRACE_ROOT", root.path())
         .status()
         .unwrap();

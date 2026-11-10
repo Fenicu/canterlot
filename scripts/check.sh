@@ -4,7 +4,7 @@
 #   scripts/check.sh --fast    быстрая для небольшой правки: fmt, clippy, тесты изменённых крейтов, web check и vitest по diff
 #   scripts/check.sh --all     полная без учёта путей
 #   scripts/check.sh --base REF  сравнивать с REF вместо main
-#   scripts/check.sh --fast -E EXPR  свой фильтр тестов nextest вместо выбора по diff (например 'binary(ws)')
+#   scripts/check.sh --fast -E EXPR  свой фильтр тестов nextest вместо выбора по diff (например 'binary(it) & test(/^ws::/)')
 # Скрипт для рабочей копии берёт CANTERLOT_TEST_PG_PORT (своя тестовая PostgreSQL, scripts/test-db.sh).
 # Прогон встаёт в очередь тяжёлых задач воркера: --all берёт аренду gate (весь станок),
 # остальные режимы — build (слот). CANTERLOT_NO_LEASE=1 отключает очередь.

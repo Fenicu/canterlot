@@ -309,7 +309,7 @@ rate_limits_poll_interval_s = 300
 
 ```bash
 scripts/codex-schema-check.sh
-CANTERLOT_CODEX_SMOKE=1 cargo test -p canterlot-worker --all-features --test codex_e2e -- --nocapture
+CANTERLOT_CODEX_SMOKE=1 cargo test -p canterlot-worker --all-features --test it codex_e2e:: -- --nocapture
 ```
 
 Скрипт берёт манифесты по версии CLI (`docs/stage0/evidence/codex/schema-<версия>/`) и сверяет каждый файл схемы: изменённый, пропавший и новый файл — расхождение. Новый CLI проверяется до обновления глобальной установки из изолированного префикса: `CODEX_BIN` указывает скрипту бинарник, `CANTERLOT_CODEX_BIN` — живым тестам (прежнее имя `CANTERLOT_CODEX_EXECUTABLE` тоже понимается), `CODEX_SCHEMA_MANIFEST_DIR` — другой каталог манифестов. Короткий зонд `live_probe` (три дешёвых хода: короткий ответ, смена усилия с командой оболочки и вливанием `turn/steer`, прерывание) дешевле полного `live_smoke`:
@@ -318,7 +318,7 @@ CANTERLOT_CODEX_SMOKE=1 cargo test -p canterlot-worker --all-features --test cod
 npm i --prefix /tmp/cli-codex @openai/codex@<версия>
 CODEX_BIN=/tmp/cli-codex/node_modules/.bin/codex scripts/codex-schema-check.sh
 CANTERLOT_CODEX_SMOKE=1 CANTERLOT_CODEX_BIN=/tmp/cli-codex/node_modules/.bin/codex \
-    cargo test -p canterlot-worker --all-features --test codex_e2e live_probe -- --nocapture
+    cargo test -p canterlot-worker --all-features --test it codex_e2e::live_probe -- --nocapture
 ```
 
 Адаптер OpenCode (`src/adapter/opencode`) говорит с `opencode serve --stdio --port 0` по HTTP и SSE на loopback, один сервер на исполнение. Харнесс спрятан за таблицей `[opencode]`: без неё каталог, реестр и оба других адаптера работают как раньше. Ключи таблицы: `executable` (по умолчанию `opencode` из `PATH`), `data_root` — корень данных canterlot (по умолчанию `<data_dir>/opencode`, внутри `data/`, `state/`, `cache/`, `tmp/`), `refuse_paths` — каталоги, где базу держать нельзя, `providers` — провайдеры в каталоге моделей сверх `opencode-go`, `provider_models` — фильтр моделей провайдера по шаблонам, `default_model` — модель, которая идёт первой в каталоге, и `owner_config` — каталог конфигурации владельца; каталог `opencode` в данных владельца запрещён всегда: управляемая служба на общей базе подхватывает чужие живые исполнения. Минимум 2.1.4, проверены 2.1.4, 2.2.5 и 2.2.6, более новая допускается с диагностикой `untested_cli_version`, ветка 1.x не поддерживается. Даже `opencode --version` заводит каталоги и журнал, поэтому проверка идёт с теми же каталогами XDG, что и сервер. Окружение собирается заново: от воркера берутся только `PATH`, `HOME`, `USER`, `LANG`, `TERM` и `XDG_CONFIG_HOME`; `TMPDIR` — каталог исполнения, пароль `OPENCODE_PASSWORD` случаен на запуск, `OPENCODE_CONFIG_CONTENT` несёт слой canterlot (`update`, `share`, `snapshots`, `experimental.todo` и MCP-сервер с `codemode: false`).
@@ -356,13 +356,13 @@ XDG_DATA_HOME="$data/data" XDG_STATE_HOME="$data/state" XDG_CACHE_HOME="$data/ca
 Тесты с настоящим `opencode` и локальной заглушкой провайдера собираются с feature `opencode-live`, помечены `ignore` и в `check.sh` не входят, хотя тот собирает `--all-features`. Каталоги, `HOME` и конфигурация изолированы, запросов к внешним моделям нет:
 
 ```bash
-cargo test -p canterlot-worker --features opencode-live --test opencode_live -- --ignored --test-threads=1
+cargo test -p canterlot-worker --features opencode-live --test it opencode_live:: -- --ignored --test-threads=1
 ```
 
 Изоляцию MCP делегированных сессий (D24) на настоящих `claude` и `codex` проверяет `delegated_mcp_live.rs`: поддельный дом владельца с сервером `nanokvm`, входа в аккаунт и платных запросов нет, настоящие `~/.claude` и `~/.codex` не открываются. Для OpenCode то же делает тест `delegated_session_never_starts_owner_or_project_servers` в `opencode_live.rs`.
 
 ```bash
-cargo test -p canterlot-worker --test delegated_mcp_live -- --ignored --test-threads=1
+cargo test -p canterlot-worker --test it delegated_mcp_live:: -- --ignored --test-threads=1
 ```
 
 При обновлении CLI схема работающего сервера сверяется с манифестом этапа 0; каталоги изолированы, запросов к модели нет:
@@ -377,7 +377,7 @@ scripts/opencode-schema-check.sh
 npm i --prefix /tmp/cli-opencode @opencode/cli@<версия>
 OPENCODE_BIN=/tmp/cli-opencode/node_modules/.bin/opencode scripts/opencode-schema-check.sh
 CANTERLOT_OPENCODE_BIN=/tmp/cli-opencode/node_modules/.bin/opencode \
-    cargo test -p canterlot-worker --features opencode-live --test opencode_live -- --ignored --test-threads=1
+    cargo test -p canterlot-worker --features opencode-live --test it opencode_live:: -- --ignored --test-threads=1
 ```
 
 OpenCode включается таблицей `[opencode]`: без неё харнесс не показывается и не запускается.
@@ -391,7 +391,7 @@ OpenCode включается таблицей `[opencode]`: без неё ха�
 Обычные тесты используют поддельный CLI и записанные кадры, без настоящих запросов. Владелец запускает live smoke отдельно: около дюжины коротких ходов Haiku, усилие `low`, временный git-репозиторий, пресет «Как у владельца» (`owner`), режим `ask`. Проверяются текст, окна лимитов из `rate_limit_event` и ответ `canterlot_limits`, разрешение Bash на команду записи (команды чтения вроде `printf` или `sleep` CLI разрешает сам, не спрашивая), вопрос, чтение PNG, `set_model`, SIGINT во время долгой команды на переднем плане и resume. Затем идёт проверка пресетов в репозитории под `$HOME`: `/context` в «Без инструкций» без автопамяти и с `CLAUDE.md` репозитория, две канарейки текста пресета при смене между ходами, возврат к «Без инструкций» и отчёт `cache_read_input_tokens` на неизменных ходах. При успехе тест печатает подтверждённые факты; открытые вопросы плана закрываются только после этого запуска.
 
 ```bash
-CANTERLOT_CLAUDE_CODE_SMOKE=1 cargo test -p canterlot-worker --all-features --test claude_code_e2e -- --nocapture
+CANTERLOT_CLAUDE_CODE_SMOKE=1 cargo test -p canterlot-worker --all-features --test it claude_code_e2e:: -- --nocapture
 ```
 
 Для нестандартного пути CLI добавьте `CANTERLOT_CLAUDE_CODE_EXECUTABLE=/absolute/path/to/claude`; без этой переменной используется `claude` из `PATH`. Без флага smoke пропускается. Не запускайте его в обычном CI.

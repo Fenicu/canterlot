@@ -1,6 +1,6 @@
 //! Повтор captured app-server для тестов: читает свидетельство, ждёт методы
 //! адаптера и пишет ответы с перезаписями id. Только тесты и ручной прогон
-//! (feature `synthetic-adapter`); боевые тесты реплея живут в tests/codex_e2e.rs.
+//! (feature `synthetic-adapter`); боевые тесты реплея живут в tests/it/codex_e2e.rs.
 
 use serde_json::Value;
 use std::collections::HashMap;

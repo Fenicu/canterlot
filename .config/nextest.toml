@@ -30,13 +30,13 @@ fail-fast = true
 
 # Первое совпавшее правило задаёт параметр: сначала узкие правила, потом общие.
 [[profile.default.overrides]]
-filter = 'package(canterlot-worker) & (test(=large_attachment_does_not_starve_control_session) | test(=media_upload_does_not_starve_control_or_sj) | test(=large_answer_backlog_does_not_starve_control_session))'
+filter = 'package(canterlot-worker) & binary(it) & (test(=exec_attachments::large_attachment_does_not_starve_control_session) | test(=exec_media::media_upload_does_not_starve_control_or_sj) | test(=exec_e2e::large_answer_backlog_does_not_starve_control_session))'
 test-group = "starvation"
 threads-required = 12
 slow-timeout = { period = "30s", terminate-after = 8 }
 
 [[profile.default.overrides]]
-filter = 'package(canterlot-worker) & (binary(attachments) | binary(claude_code_large_result) | binary(e2e) | binary(exec_attachments) | binary(exec_e2e) | binary(exec_media) | binary(opencode_worker) | binary(pilot_e2e) | binary(session_tools_e2e) | binary(supervisor) | binary(supervisor_requests))'
+filter = 'package(canterlot-worker) & binary(it) & test(/^(attachments|claude_code_large_result|e2e|exec_attachments|exec_e2e|exec_media|opencode_worker|pilot_e2e|session_tools_e2e|supervisor|supervisor_requests)::/)'
 test-group = "heavy-e2e"
 slow-timeout = { period = "30s", terminate-after = 8 }
 
@@ -50,7 +50,7 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 # нагрузкой; отдельно и под нагрузкой из 24 ядер тест проходит (50 из 50). Повтор разрешён, чтобы не
 # перезапускать гейт руками.
 [[profile.default.overrides]]
-filter = 'test(=large_attachment_does_not_starve_control_session)'
+filter = 'test(=exec_attachments::large_attachment_does_not_starve_control_session)'
 retries = 2
 
 # QUARANTINE: ловушка на взаимную блокировку с окном 20 с на 30 раундов; под нагрузкой полного гейта
@@ -68,23 +68,23 @@ retries = 2
 # QUARANTINE: ожидание подъёма сессии (60 с) после убийства супервизора не укладывается в полный гейт
 # под нагрузкой; отдельно проходит. Повтор разрешён.
 [[profile.default.overrides]]
-filter = 'test(=killed_supervisor_with_nothing_left_fails_and_the_session_resumes)'
+filter = 'test(=exec_e2e::killed_supervisor_with_nothing_left_fails_and_the_session_resumes)'
 retries = 2
 
 # QUARANTINE: внутреннее ожидание 10 с на подъём сессии и подтверждение журнала мало для полного гейта
 # под нагрузкой; отдельно проходит. Повтор разрешён.
 [[profile.default.overrides]]
-filter = 'test(=task8::real::sj_batches_are_acked_and_compacted)'
+filter = 'test(=session::task8::real::sj_batches_are_acked_and_compacted)'
 retries = 2
 
 # QUARANTINE: в полном гейте 1.22.3 тест шёл 67 с и упал при нагрузке; отдельно проходит за 12 с.
 # Повтор разрешён.
 [[profile.default.overrides]]
-filter = 'test(=transport_errors_never_stop_an_execution)'
+filter = 'test(=exec_e2e::transport_errors_never_stop_an_execution)'
 retries = 2
 
 # QUARANTINE: в полном гейте 1.23.2 (51 с) и в check.sh --fast 09.11 (37 с) под нагрузкой падал
 # «stale batches forced another handshake» (3 вместо 2); отдельно проходит за ~15 с. Повтор разрешён.
 [[profile.default.overrides]]
-filter = 'test(=wave_w_data_reattach_discards_stale_sj_batches)'
+filter = 'test(=exec_e2e::wave_w_data_reattach_discards_stale_sj_batches)'
 retries = 2

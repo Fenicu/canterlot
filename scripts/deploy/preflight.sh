@@ -175,7 +175,7 @@ log "gate 2: spec.toml shapes and binary compatibility"
 # отставными ключами; эталон — не всегда самый новый файл) и быть допустима структурам
 # ЦЕЛИ. Необязательные ключи, которые цель знает (например opencode.provider_models с
 # 1.4.0), форму не ломают: допустимые ключи выводит spec-shape.py из кода цели.
-FIXTURES="$(find "${SOURCE_DIR}/crates/canterlot-worker/tests/fixtures/spec" -maxdepth 1 -name '*.toml' -printf '%p\n' | sort)"
+FIXTURES="$(find "${SOURCE_DIR}/crates/canterlot-worker/tests/it/fixtures/spec" -maxdepth 1 -name '*.toml' -printf '%p\n' | sort)"
 [ -n "${FIXTURES}" ] || die "no spec fixtures in ${SOURCE_DIR}"
 for exec_id in ${LIVE_EXECS:-}; do
     SPEC="${WORKER_DATA}/executions/${exec_id}/spec.toml"
@@ -202,7 +202,7 @@ for old_bin in ${OLD_BINS:-}; do
         # shellcheck source=/dev/null
         source ~/.cargo/env
         CANTERLOT_OLD_RELEASE_BIN="${old_bin}" TMPDIR=/tmp \
-            cargo test --locked -p canterlot-worker --all-features --test spec_compat
+            cargo test --locked -p canterlot-worker --all-features --test it spec_compat::
     ) || hard "spec_compat failed against ${old_bin}"
 done
 

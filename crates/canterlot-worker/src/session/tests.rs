@@ -1,7 +1,7 @@
 use super::*;
 
 #[allow(dead_code)]
-#[path = "../../tests/support/mod.rs"]
+#[path = "../../tests/it/support/mod.rs"]
 pub(super) mod support;
 
 #[test]
@@ -155,7 +155,7 @@ async fn stalled_store_does_not_delay_inbound_or_heartbeat_timers() {
 }
 
 #[allow(dead_code)]
-#[path = "../../tests/support/frozen_clock.rs"]
+#[path = "../../tests/it/support/frozen_clock.rs"]
 mod frozen_clock;
 
 struct WaitingWorker {

@@ -170,7 +170,7 @@ else
 fi
 watch_stop
 [ ! -f "${FAKE_ROOT}/snap.state" ] && case_ok "no state file written" || case_fail "state file written in dry-run"
-if grep -q "^cargo test --locked -p canterlot-worker --all-features --test spec_compat \[CANTERLOT_OLD_RELEASE_BIN=${WORKER_RELEASES}/${DEPLOYED}/bin/canterlot-worker TMPDIR=/tmp\]" "${FAKE_ROOT}/state/calls.log"; then
+if grep -q "^cargo test --locked -p canterlot-worker --all-features --test it spec_compat:: \[CANTERLOT_OLD_RELEASE_BIN=${WORKER_RELEASES}/${DEPLOYED}/bin/canterlot-worker TMPDIR=/tmp\]" "${FAKE_ROOT}/state/calls.log"; then
     case_ok "spec_compat ran against the live supervisor release with a short TMPDIR"
 else
     case_fail "spec_compat did not run for the live release"; grep '^cargo' "${FAKE_ROOT}/state/calls.log" | head -3
