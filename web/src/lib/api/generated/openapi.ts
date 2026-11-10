@@ -1841,7 +1841,7 @@ export interface components {
             exhausts_at?: string | null;
             /**
              * Format: int64
-             * @description Средний темп от начала окна, промилле в час.
+             * @description Средний темп по приросту расхода между снимками окна, промилле в час.
              */
             rate_permille_per_hour: number;
             /**
