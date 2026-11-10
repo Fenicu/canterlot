@@ -229,6 +229,9 @@ const LIMITS_REFRESH = /^\/api\/v1\/limits\/refresh$/;
 const ROUTING_PREVIEW = /^\/api\/v1\/routing-policy\/preview$/;
 // Поиск по истории читает, а не меняет: POST только прячет запрос из адреса.
 const HISTORY_SEARCH = /^\/api\/v1\/search$/;
+// Закладка ставится и снимается по самой цели: повтор того же запроса даёт тот же итог.
+const BOOKMARK_WRITE =
+  /^\/api\/v1\/conversations\/[^/]+\/bookmarks\/(?:input|block)\/[^/]+$/;
 
 export function requestPathname(path: string): string {
   const bare = path.split("#")[0]?.split("?")[0] ?? path;
@@ -249,6 +252,7 @@ function isMutationExempt(method: HttpMethod, path: string): boolean {
   if (method === "POST" && HISTORY_SEARCH.test(pathname)) return true;
   // Полная замена черновика идемпотентна: повтор того же тела даёт тот же текст.
   if (method === "PUT" && DRAFT_PUT.test(pathname)) return true;
+  if ((method === "PUT" || method === "DELETE") && BOOKMARK_WRITE.test(pathname)) return true;
   return false;
 }
 

@@ -1146,3 +1146,66 @@ export function searchHistory(
 ): Promise<HttpResponse<Ok<operations["post__api_v1_search"]>>> {
   return http("POST", "/api/v1/search", body, opts);
 }
+
+/** Все закладки разговора в порядке ленты. */
+export function listConversationBookmarks(
+  conversationId: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["get__api_v1_conversations__id__bookmarks"]>
+  >
+> {
+  return http(
+    "GET",
+    `/api/v1/conversations/${id(conversationId)}/bookmarks`,
+    undefined,
+    opts,
+  );
+}
+
+/** Поставить закладку: 201 — новая, 200 — уже была. */
+export function putBookmark(
+  conversationId: string,
+  kind: "input" | "block",
+  targetId: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["put__api_v1_conversations__id__bookmarks__kind___target_id_"]>
+  >
+> {
+  return http(
+    "PUT",
+    `/api/v1/conversations/${id(conversationId)}/bookmarks/${kind}/${id(targetId)}`,
+    undefined,
+    opts,
+  );
+}
+
+/** Снять закладку; повтор безвреден. */
+export function deleteBookmark(
+  conversationId: string,
+  kind: "input" | "block",
+  targetId: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["delete__api_v1_conversations__id__bookmarks__kind___target_id_"]>
+  >
+> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/bookmarks/${kind}/${id(targetId)}`,
+    undefined,
+    opts,
+  );
+}
+
+/** Избранное владельца по всем разговорам, новые закладки первыми. */
+export function listBookmarks(
+  query?: Query,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_bookmarks"]>>> {
+  return http("GET", withQuery("/api/v1/bookmarks", query), undefined, opts);
+}
