@@ -427,7 +427,7 @@ async fn free_files(pool: &PgPool, blobs: &dyn BlobStore, files: Vec<Uuid>) {
     {
         Ok(gone) => gone,
         Err(error) => {
-            tracing::warn!(kind = "conversation_delete_file_failed", error = %error, "files left for the orphan sweep");
+            tracing::warn!(kind = "conversation_delete_file_failed", error = %crate::dberr::describe(&error), "files left for the orphan sweep");
             return;
         }
     };
