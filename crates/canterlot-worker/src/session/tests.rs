@@ -419,6 +419,52 @@ fn cancel_command() -> (Command, String, String) {
     (command, command_id, target)
 }
 
+fn seed_stored_cancels(store: &mut WorkerStore, count: usize) -> Vec<String> {
+    let mut targets = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (command, _, target) = cancel_command();
+        assert!(matches!(
+            store.accept_command(&command).unwrap(),
+            Accept::Stored { .. }
+        ));
+        targets.push(target);
+    }
+    targets
+}
+
+async fn collect_cancel_wons(
+    hub: &mut support::ProtocolHub,
+    count: usize,
+    gate: &tokio::sync::Notify,
+) -> Vec<String> {
+    let mut seen = Vec::with_capacity(count);
+    let result = timeout(Duration::from_secs(15), async {
+        while seen.len() < count {
+            // Тестовый шлагбаум открывает по одной передаче, как и боевой слот.
+            gate.notify_one();
+            if let support::Observed::Control(message) = hub.event().await
+                && let Some(control_up::Msg::CjRecords(batch)) = message.msg
+            {
+                for record in batch.records {
+                    if let Some(record_body::Body::CancelWon(fact)) =
+                        record.body.and_then(|body| body.body)
+                    {
+                        seen.push(fact.command_id);
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    if result.is_err() {
+        panic!(
+            "only {} of {count} cancel outcomes arrived: {seen:?}",
+            seen.len()
+        );
+    }
+    seen
+}
+
 async fn wait_command_stored(hub: &mut support::ProtocolHub, command_id: &str) {
     timeout(Duration::from_secs(8), async {
         loop {
@@ -528,6 +574,95 @@ async fn replay_does_not_block_the_session_loop_while_handoff_pends() {
     .unwrap();
     assert_eq!(*state.borrow(), SessionState::Live);
     gate.notify_one();
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+}
+
+// Накопленная очередь доигрывания не должна закрывать приём входящего потока:
+// иначе пульс перестаёт подтверждаться и попытка рвётся на том же backlog.
+#[tokio::test]
+async fn a_replay_backlog_does_not_stop_heartbeats() {
+    let (mut hub, mut store) = support::ProtocolHub::start(support::Behavior {
+        capabilities: vec!["exec_v1".to_owned()],
+        ..Default::default()
+    })
+    .await;
+    let _targets = seed_stored_cancels(&mut store, 40);
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mut worker = Worker::new(hub.config.clone(), store);
+    worker.command_gate = Some(gate.clone());
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    wait_live(&mut state).await;
+    let mut heartbeats = 0;
+    timeout(Duration::from_secs(5), async {
+        while heartbeats < 5 {
+            tokio::select! {
+                event = hub.event() => {
+                    if let support::Observed::Control(message) = event
+                        && let Some(control_up::Msg::Heartbeat(_)) = message.msg
+                    {
+                        heartbeats += 1;
+                    }
+                }
+                changed = state.changed() => {
+                    changed.unwrap();
+                    assert_eq!(
+                        *state.borrow_and_update(),
+                        SessionState::Live,
+                        "the replay backlog must not reconnect the session"
+                    );
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*state.borrow(), SessionState::Live);
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+}
+
+// После переподключения большой backlog доигрывается по одной команде
+// в порядке inbox, и каждая команда доходит до исполнения ровно один раз.
+#[tokio::test]
+async fn a_replay_backlog_is_handed_over_in_inbox_order() {
+    let (mut hub, mut store) = support::ProtocolHub::start(support::Behavior {
+        capabilities: vec!["exec_v1".to_owned()],
+        ..Default::default()
+    })
+    .await;
+    let targets = seed_stored_cancels(&mut store, 40);
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let mut worker = Worker::new(hub.config.clone(), store);
+    worker.command_gate = Some(gate.clone());
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    wait_live(&mut state).await;
+    hub.fail(Status::unavailable("drop")).await;
+    wait_backoff(&mut state).await;
+    wait_live(&mut state).await;
+    let delivered = collect_cancel_wons(&mut hub, targets.len(), &gate).await;
+    assert_eq!(delivered, targets, "inbox order, each command once");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut extra = 0;
+    while let Ok(support::Observed::Control(message)) = hub.events.try_recv() {
+        if let Some(control_up::Msg::CjRecords(batch)) = message.msg {
+            extra += batch
+                .records
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.body.as_ref().and_then(|body| body.body.as_ref()),
+                        Some(record_body::Body::CancelWon(_))
+                    )
+                })
+                .count();
+        }
+    }
+    assert_eq!(extra, 0, "no command outcome may be repeated");
     stop.send_replace(true);
     join.await.unwrap().unwrap();
 }

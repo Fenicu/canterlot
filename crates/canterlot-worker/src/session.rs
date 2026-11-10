@@ -1389,13 +1389,17 @@ impl Worker {
         // не погашена. Очередь разбирается через тот же слот
         // `execution_operation`, что и новые команды, — повтор не блокирует
         // пульс, ввод и пакеты журнала.
-        let replay: Vec<Command> = self
+        // Очередь доигрывания отдельная: её длина не должна закрывать приём
+        // входящего потока (пульс и квитанции), но отдаётся она раньше новых команд.
+        let mut replay: VecDeque<Command> = self
             .store
             .call(|slot| Ok(store_mut(slot)?.stored_commands()?))
-            .await?;
-        commands.extend(replay.into_iter().filter(|command| {
-            exec_enabled || matches!(command.kind, Some(command::Kind::StartExecution(_)))
-        }));
+            .await?
+            .into_iter()
+            .filter(|command| {
+                exec_enabled || matches!(command.kind, Some(command::Kind::StartExecution(_)))
+            })
+            .collect();
         loop {
             if limits_operation.is_none()
                 && limits_outbound.is_none()
@@ -1609,7 +1613,7 @@ impl Worker {
                     })));
                     dirty = false;
                 } else if execution_operation.is_none()
-                    && let Some(command) = commands.pop_front()
+                    && let Some(command) = replay.pop_front().or_else(|| commands.pop_front())
                 {
                     operation = Some(Box::pin(self.store.call(move |slot| {
                         let accept = store_mut(slot)?.accept_command_with_pilot(&command, pilot)?;
