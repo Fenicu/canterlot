@@ -63,6 +63,22 @@ export interface paths {
         patch: operations["patch__api_v1_attachments__id__content"];
         trace?: never;
     };
+    "/api/v1/bookmarks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_bookmarks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/config": {
         parameters: {
             query?: never;
@@ -171,6 +187,38 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{id}/bookmarks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_conversations__id__bookmarks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{id}/bookmarks/{kind}/{target_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["put__api_v1_conversations__id__bookmarks__kind___target_id_"];
+        post?: never;
+        delete: operations["delete__api_v1_conversations__id__bookmarks__kind___target_id_"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1410,6 +1458,44 @@ export interface components {
             state: string;
             summary?: string | null;
             tool_name?: string | null;
+        };
+        BookmarkPage: {
+            bookmarks: components["schemas"]["BookmarkView"][];
+            next_cursor: string | null;
+        };
+        /**
+         * @description Закладка с полями перехода, как у совпадения поиска: `block_id` или `input_id` и `seq`
+         *     открывают ленту на нужном месте, `jump_seq` — место верхнего предка (у закладки это
+         *     всегда сама цель: вложенные блоки не бронируются).
+         */
+        BookmarkView: {
+            agent: string | null;
+            archived: boolean;
+            /** Format: uuid */
+            block_id: string | null;
+            /** Format: uuid */
+            conversation_id: string;
+            conversation_title: string;
+            created_at: string;
+            excerpt: string;
+            harness: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            input_id: string | null;
+            /** Format: int64 */
+            jump_seq: number;
+            kind: components["schemas"]["HitKind"];
+            model: string;
+            origin_kind: components["schemas"]["OriginKind"] | null;
+            /** @description `owner` у ввода и `agent` у блока; имя агента — в `agent`. */
+            role: string;
+            /** Format: int64 */
+            seq: number;
+            target_created_at: string;
+            /** Format: uuid */
+            target_id: string;
+            target_kind: components["schemas"]["TargetKind"];
         };
         CancelOutcome: "cancelled" | {
             cancel_requested: {
@@ -3312,6 +3398,8 @@ export interface components {
             input_seq: number;
             state: components["schemas"]["InputState"];
         };
+        /** @enum {string} */
+        TargetKind: "input" | "block";
         /** @description Тип задачи: русское название для PWA и упорядоченные кандидаты. */
         TaskType: {
             candidates: components["schemas"]["Candidate"][];
@@ -3729,6 +3817,55 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_bookmarks: {
+        parameters: {
+            query?: {
+                /** @description 1–100, по умолчанию 50. */
+                limit?: number;
+                /** @description `next_cursor` предыдущей страницы. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Избранное владельца, новые закладки первыми */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookmarkPage"];
+                };
+            };
+            /** @description Неверный курсор или размер страницы */
+            400: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {
@@ -4172,6 +4309,186 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BlockPage"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__bookmarks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Разговор */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Все закладки разговора в порядке ленты, до 500 */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookmarkView"][];
+                };
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_conversations__id__bookmarks__kind___target_id_: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Разговор */
+                id: string;
+                /** @description input или block */
+                kind: string;
+                /** @description Ввод или верхний блок ленты */
+                target_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Такая закладка уже есть */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookmarkView"];
+                };
+            };
+            /** @description Закладка создана */
+            201: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BookmarkView"];
+                };
+            };
+            /** @description Разговор или цель не найдены */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Неизвестный вид цели */
+            422: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_conversations__id__bookmarks__kind___target_id_: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Разговор */
+                id: string;
+                /** @description input или block */
+                kind: string;
+                /** @description Ввод или верхний блок ленты */
+                target_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Закладка удалена; повтор безвреден */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Неизвестный вид цели */
+            422: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

@@ -30,6 +30,7 @@ export type ServerOp =
         | ConversationCreated
         | ConversationUpdated
         | ConversationDeleted
+        | BookmarkChanged
         | ConversationSettingsChanged
         | CrunchChanged
         | CrunchHeld
@@ -685,6 +686,46 @@ export interface ConversationDeleted {
   payload: {
     id: Uuid;
     counts: Counts;
+  };
+}
+export interface BookmarkChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "bookmark_changed";
+  payload: {
+    conversation_id: Uuid;
+    target_kind: "input" | "block";
+    target_id: Uuid;
+    bookmarked: boolean;
+    bookmark?: {
+      id: Uuid;
+      conversation_id: Uuid;
+      target_kind: "input" | "block";
+      target_id: Uuid;
+      created_at: Time;
+      target_created_at: Time;
+      kind: "answer" | "message";
+      origin_kind: ("owner" | "message" | "spawn" | "result") | null;
+      block_id: Uuid | null;
+      input_id: Uuid | null;
+      seq: Seq;
+      jump_seq: Seq;
+      harness: string;
+      model: string;
+      archived: boolean;
+      role: string;
+      agent: string | null;
+      excerpt: string;
+      conversation_title: string;
+    };
   };
 }
 export interface ConversationSettingsChanged {
