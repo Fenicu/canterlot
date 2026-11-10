@@ -272,6 +272,7 @@ fn classify(stat: io::Result<Option<(char, u64)>>, start_ticks: u64) -> Liveness
     }
 }
 
+#[cfg(test)]
 fn liveness_at(root: &Path, pid: u32, start_ticks: u64) -> Liveness {
     classify(proc_stat_at(root, pid), start_ticks)
 }
@@ -279,7 +280,6 @@ fn liveness_at(root: &Path, pid: u32, start_ticks: u64) -> Liveness {
 fn liveness(pid: u32, start_ticks: u64) -> Liveness {
     classify(proc_stat(pid), start_ticks)
 }
-
 
 fn view(entry: &Entry<Meta>, position: Option<usize>) -> EntryView {
     EntryView {
@@ -622,10 +622,7 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
                 state.scheduler.holder(&lease_id).is_some_and(|entry| {
                     // Ошибка чтения /proc не отменяет переподключение: pid уже совпал.
                     entry.meta.wrapper_pid == pid
-                        && !matches!(
-                            liveness(pid, entry.meta.start_ticks),
-                            Liveness::Dead
-                        )
+                        && !matches!(liveness(pid, entry.meta.start_ticks), Liveness::Dead)
                 })
             };
             if !attached {
@@ -680,10 +677,9 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
                 let mut state = shared.state.lock().expect("lease state");
                 let now = super::now_ms();
                 let phantom = release_phantom(&mut state.scheduler, pid, start_ticks, now);
-                let granted =
-                    state
-                        .scheduler
-                        .request(id.clone(), kind, requested_at_ms, now, meta);
+                let granted = state
+                    .scheduler
+                    .request(id.clone(), kind, requested_at_ms, now, meta);
                 if !phantom.is_empty() || !granted.is_empty() {
                     persist(&shared.state_file, &state.scheduler);
                 }
@@ -819,11 +815,7 @@ async fn wait(
 }
 
 /// Держит аренду до закрытия соединения клиентом.
-async fn hold(
-    shared: &Shared,
-    id: &str,
-    mut lines: CappedLines<tokio::net::unix::OwnedReadHalf>,
-) {
+async fn hold(shared: &Shared, id: &str, mut lines: CappedLines<tokio::net::unix::OwnedReadHalf>) {
     while let Ok(Some(_)) = lines.next_line().await {}
     shared.release(id, "client closed");
 }
@@ -1001,7 +993,9 @@ mod tests {
         reused.start_ticks += 1;
         scheduler.restore("reused".into(), Kind::Build, 1, 10, 1, reused.clone());
         assert!(release_phantom(&mut scheduler, me, mine.start_ticks, 20).is_empty());
-        assert!(release_phantom(&mut scheduler, other.wrapper_pid, reused.start_ticks, 20).is_empty());
+        assert!(
+            release_phantom(&mut scheduler, other.wrapper_pid, reused.start_ticks, 20).is_empty()
+        );
         let ids: Vec<_> = scheduler.holders().iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["other", "reused"]);
     }

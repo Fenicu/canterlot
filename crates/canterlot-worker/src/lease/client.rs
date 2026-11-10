@@ -733,9 +733,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn pending_takes_a_delivered_signal() {
-        let mut child_signal = Some(
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).unwrap(),
-        );
+        let mut child_signal =
+            Some(tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).unwrap());
         let mut child = tokio::process::Command::new("sh")
             .args(["-c", "exit 0"])
             .spawn()
