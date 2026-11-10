@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 use tokio::{sync::watch, time::Instant};
@@ -161,7 +161,8 @@ pub async fn on_request_opened_in_tx(
 }
 
 /// Осевшее состояние корневой сессии после шлюза автопинка — то же решение, что у
-/// подписок. Ключ — отпечаток итога: один пуш на эпизод.
+/// подписок. Ключ итога хода — конец хода: дребезг состояния меняет отпечаток
+/// оседания, но не сам ход, и второго пуша о нём быть не должно.
 pub async fn on_settled_in_tx(
     conn: &mut PgConnection,
     conversation_id: Uuid,
@@ -170,13 +171,13 @@ pub async fn on_settled_in_tx(
     facts: &SettleFacts,
     evidence: &Evidence,
 ) -> Result<(), sqlx::Error> {
-    let kind = match state {
+    let (kind, turn) = match state {
         // Ход должен быть и быть недавним: новая пустая сессия и давно осевшая
         // после перезапуска хаба пуша не дают. Свежесть — от последнего события:
         // сессию, которую держала фоновая задача, пуш обязан догнать после её конца.
         Settled::Idle => match facts.last_turn_at {
             Some(turn) if facts.now - turn.max(facts.last_event_at.unwrap_or(turn)) <= FRESH => {
-                KIND_TURN_FINISHED
+                (KIND_TURN_FINISHED, Some(turn))
             }
             _ => return Ok(()),
         },
@@ -184,16 +185,23 @@ pub async fn on_settled_in_tx(
             if facts.now - facts.since > FRESH {
                 return Ok(());
             }
-            KIND_FAILURE
+            (KIND_FAILURE, None)
         }
         Settled::WaitingForUser | Settled::Stopped => return Ok(()),
+    };
+    let key = match turn {
+        Some(turn) => format!(
+            "{kind}:{conversation_id}:{}",
+            turn.to_rfc3339_opts(SecondsFormat::Micros, true)
+        ),
+        None => format!("{kind}:{conversation_id}:{fingerprint}"),
     };
     let evidence = serde_json::to_value(evidence).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     enqueue_in_tx(
         conn,
         conversation_id,
         kind,
-        &format!("{kind}:{conversation_id}:{fingerprint}"),
+        &key,
         &json!({"state": state_name(state), "evidence": evidence}),
         true,
     )

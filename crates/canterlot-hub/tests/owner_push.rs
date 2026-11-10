@@ -491,6 +491,65 @@ async fn a_turn_held_by_a_background_task_is_pushed_when_the_background_ends(poo
     );
 }
 
+async fn turn_finished(pool: &PgPool, conversation: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "select count(*) from owner_pushes where conversation_id=$1 and kind='turn_finished'",
+    )
+    .bind(conversation)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_turn_is_pushed_once_even_when_the_state_flaps(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let now = Utc::now();
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    long_idle(&pool, s.conversation_id, now).await;
+    finish_turn(
+        &pool,
+        s.machine_id,
+        s.conversation_id,
+        &execution,
+        now - TimeDelta::seconds(2),
+    )
+    .await;
+    for step in [6, 10] {
+        refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(step)).await;
+    }
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 1);
+    // Воркер теряется и возвращается без нового хода: `since` новый, ход прежний.
+    executions::set_state(
+        &pool,
+        execution.execution_id,
+        ExecutionState::OwnerLost,
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(12)).await;
+    executions::set_state(
+        &pool,
+        execution.execution_id,
+        ExecutionState::Running,
+        Some(canterlot_proto::OWNER_RECLAIMED),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    for step in [14, 20, 30] {
+        refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(step)).await;
+    }
+    assert_eq!(
+        turn_finished(&pool, s.conversation_id).await,
+        1,
+        "one push per turn"
+    );
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_old_idle_session_does_not_push_after_a_restart(pool: PgPool) {
     enable(&pool).await;
