@@ -85,6 +85,47 @@ async fn changes(pool: &PgPool) -> i64 {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_future_observation_is_clamped_and_does_not_block_a_newer_one(
+    pool: PgPool,
+) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
+    observe(
+        &pool,
+        &s,
+        Window::Weekly,
+        100,
+        Utc::now() + Duration::hours(1),
+    )
+    .await;
+    let stored = claude(&pool).await.weekly.unwrap();
+    assert!(
+        stored.observed_at <= Utc::now() + Duration::minutes(2),
+        "a future reading is clamped before it is stored: {}",
+        stored.observed_at
+    );
+    observe(&pool, &s, Window::Weekly, 200, at(0)).await;
+    assert_eq!(
+        claude(&pool).await.weekly.unwrap().used_permille,
+        200,
+        "the normal reading must be newer than the clamped future one"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_future_absence_is_clamped_and_does_not_hide_a_later_window(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
+    absent(&pool, &s, Utc::now() + Duration::hours(1)).await;
+    observe(&pool, &s, Window::FiveHour, 440, at(0)).await;
+    let state = claude(&pool).await;
+    assert!(!state.five_hour_absent);
+    assert!(state.five_hour.is_some());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn absence_hides_the_window_keeps_history_and_tells_clients(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;

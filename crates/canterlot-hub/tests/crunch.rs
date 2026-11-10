@@ -790,7 +790,9 @@ async fn an_exact_reset_reading_still_releases_the_hold_on_its_own(pool: PgPool)
 async fn a_missing_five_hour_window_wakes_after_an_estimated_reading(pool: PgPool) {
     let mut env = Env::with_config(&pool, patient_config()).await;
     let id = env.conversation(true, true).await;
-    let now = start();
+    // Вся сцена в прошлом: отметку об отсутствии после сброса нельзя датировать будущим,
+    // хаб прижимает её к now.
+    let now = start() - TimeDelta::hours(2);
     let reset = now + TimeDelta::hours(1);
     env.observe_estimated(
         "claude",
@@ -1109,7 +1111,8 @@ async fn wake_after_verified_reset_releases_hold_and_queues_resume_text_once(poo
 async fn a_five_hour_hold_wakes_when_the_provider_no_longer_has_that_window(pool: PgPool) {
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
-    let now = start();
+    // Сброс и отсутствие окна в прошлом: будущую отметку хаб прижимает к now.
+    let now = start() - TimeDelta::hours(2);
     let reset = now + TimeDelta::hours(1);
     env.observe(
         "claude",

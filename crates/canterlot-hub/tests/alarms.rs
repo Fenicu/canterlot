@@ -3227,13 +3227,15 @@ async fn limit_reset_estimated_confirmation_counts_only_reset_readings(pool: PgP
 async fn limit_reset_missing_window_fires_the_condition(pool: PgPool) {
     let f = Fx::new(pool).await;
     let now = Utc::now();
-    let reset = now + TimeDelta::hours(1);
+    // Отметка об отсутствии не может быть датирована будущим (хаб прижимает её к now),
+    // поэтому сброс окна уже прошёл: отсутствие после него и доказывает сброс.
+    let reset = now - TimeDelta::minutes(10);
     f.observe(
         "claude",
         Window::FiveHour,
         400,
         Some(reset),
-        now,
+        now - TimeDelta::minutes(20),
         DataConfidence::Exact,
     )
     .await;
@@ -3248,7 +3250,7 @@ async fn limit_reset_missing_window_fires_the_condition(pool: PgPool) {
         f.owner,
         "claude",
         Window::FiveHour,
-        reset + TimeDelta::minutes(5),
+        now,
         Uuid::now_v7(),
     )
     .await

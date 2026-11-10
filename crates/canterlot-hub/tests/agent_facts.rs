@@ -852,7 +852,8 @@ async fn limits_changed_of_a_batch_is_appended_once_at_the_end(pool: PgPool) -> 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn snapshots_are_deduplicated_unless_older_than_min_interval(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
-    let at = Utc::now();
+    // Отсчёт в прошлом: будущие отметки хаб прижимает к now.
+    let at = Utc::now() - Duration::seconds(601);
     assert!(record(&pool, &s, &obs(&s, 940, at)).await.snapshot_stored);
     assert!(
         !record(&pool, &s, &obs(&s, 940, at + Duration::seconds(1)))
@@ -1527,7 +1528,10 @@ async fn an_equal_newer_reading_refreshes_the_time_without_limits_changed(
 async fn an_equal_reading_after_a_pause_still_emits_limits_changed(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
-    let at = DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
+    // Второе показание позже первого на окно переотправки, но не в будущем:
+    // будущие отметки хаб прижимает к now.
+    let at = DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap()
+        - Duration::minutes(5);
     record(&pool, &s, &obs(&s, 960, at)).await;
     let later = at + Duration::minutes(5);
     let r = record(&pool, &s, &obs(&s, 960, later)).await;

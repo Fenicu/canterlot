@@ -22,6 +22,18 @@ use serde_json::json;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+/// Допустимое опережение часов машины: более позднее показание прижимается к now,
+/// иначе один сдвиг часов вперёд делал бы несвежими все настоящие показания.
+const FUTURE_TOLERANCE: chrono::TimeDelta = chrono::TimeDelta::minutes(2);
+
+fn clamp_to_now(observed_at: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
+    if observed_at > now + FUTURE_TOLERANCE {
+        now
+    } else {
+        observed_at
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Window {
@@ -207,6 +219,7 @@ pub(crate) async fn record_in_tx(
     // PostgreSQL хранит микросекунды: сравнение идёт с тем же округлением.
     let observed_at = DateTime::from_timestamp_micros(o.observed_at.timestamp_micros())
         .ok_or_else(|| sqlx::Error::InvalidArgument("invalid observation time".into()))?;
+    let observed_at = clamp_to_now(observed_at, now);
     let window = o.window.as_str();
     let previous:Option<(i32,Option<DateTime<Utc>>,DateTime<Utc>)>=sqlx::query_as("select used_permille,resets_at,observed_at from limit_snapshots where provider=$1 and window_kind=$2 order by id desc limit 1").bind(&o.provider).bind(window).fetch_optional(&mut *conn).await?;
     let interval = chrono::Duration::from_std(config.snapshot_min_interval)
@@ -402,6 +415,7 @@ pub async fn record_absence_in_tx(
     }
     let observed_at = DateTime::from_timestamp_micros(observed_at.timestamp_micros())
         .ok_or_else(|| sqlx::Error::InvalidArgument("invalid observation time".into()))?;
+    let observed_at = clamp_to_now(observed_at, Utc::now());
     lock_provider(conn, provider).await?;
     let (seen, absent): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) = sqlx::query_as(
         "select five_hour_observed_at,five_hour_absent_at from provider_limits where provider=$1",
