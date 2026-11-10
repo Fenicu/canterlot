@@ -88,6 +88,18 @@ async fn caught(signal: &mut Option<SignalStream>) {
     }
 }
 
+/// Забирает уже доставленный сигнал, не дожидаясь нового.
+async fn pending(signal: &mut Option<SignalStream>) -> bool {
+    match signal {
+        None => false,
+        Some(signal) => tokio::select! {
+            biased;
+            _ = signal.recv() => true,
+            _ = std::future::ready(()) => false,
+        },
+    }
+}
+
 /// Путь сокета: переменная исполнения, иначе `$XDG_RUNTIME_DIR/canterlot/lease.sock`.
 pub fn discover_socket() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(LEASE_SOCKET_ENV).filter(|p| !p.is_empty()) {
@@ -413,6 +425,14 @@ pub async fn run(args: RunArgs) -> ExitCode {
             let _ = rustix::process::kill_process(pid, sig);
         }
     };
+    // INT и QUIT, пришедшие между выдачей и spawn: команда ещё не существовала, и
+    // групповой сигнал её не застал — пересылаем ей.
+    while pending(&mut sigint).await {
+        forward(Signal::INT);
+    }
+    while pending(&mut sigquit).await {
+        forward(Signal::QUIT);
+    }
     let Granted {
         lease_id,
         mut lines,
@@ -709,5 +729,26 @@ mod tests {
         assert_eq!(signal_from_raw(2), Some(Signal::INT));
         assert_eq!(signal_from_raw(15), Some(Signal::TERM));
         assert_eq!(signal_from_raw(0), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_takes_a_delivered_signal() {
+        let mut child_signal = Some(
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).unwrap(),
+        );
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        child.wait().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !pending(&mut child_signal).await {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("SIGCHLD from the child");
+        let mut ignored = None;
+        assert!(!pending(&mut ignored).await);
     }
 }
