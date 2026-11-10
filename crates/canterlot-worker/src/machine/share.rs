@@ -33,6 +33,7 @@ pub enum ShareError {
     Denied,
     TooLarge,
     Unreadable,
+    InvalidText,
     NotOwned,
     OutsideWorkdir,
     Missing,
@@ -47,6 +48,7 @@ impl ShareError {
             Self::Denied => "share_denied",
             Self::TooLarge => "share_too_large",
             Self::Unreadable => "share_unreadable",
+            Self::InvalidText => "invalid_arguments",
             Self::NotOwned => "share_not_owned",
             Self::OutsideWorkdir => "share_outside_workdir",
             Self::Missing => "share_missing",
@@ -61,6 +63,9 @@ impl ShareError {
             Self::Denied => "This file is on the secret deny list",
             Self::TooLarge => "The file is larger than 50 MiB",
             Self::Unreadable => "The file cannot be read",
+            Self::InvalidText => {
+                "The title or note is too long or contains control characters"
+            }
             Self::NotOwned => "The file belongs to another user",
             Self::OutsideWorkdir => {
                 "Only files under the session workdir or the temp directory can be shared; copy the file there first"
@@ -78,6 +83,7 @@ impl ShareError {
             Self::Denied => "denied",
             Self::TooLarge => "too_large",
             Self::Unreadable => "unreadable",
+            Self::InvalidText => "invalid_text",
             Self::NotOwned => "not_owned",
             Self::OutsideWorkdir => "outside_roots",
             Self::Missing => "missing",
@@ -741,7 +747,7 @@ pub fn prepare(
     workdir: Option<&Path>,
 ) -> Result<Prepared, ShareError> {
     if !valid_title(&title) || note.len() > canterlot_proto::limits::MAX_SHARE_NOTE_BYTES {
-        return Err(ShareError::Unreadable);
+        return Err(ShareError::InvalidText);
     }
     let roots = share_roots(workdir);
     let Checked { file, meta, name } = open_checked(path, &roots, ShareError::OutsideWorkdir)?;
@@ -850,6 +856,40 @@ mod tests {
             String::new(),
             workdir,
         )
+    }
+
+    #[test]
+    fn a_bad_title_or_note_is_a_share_argument_error() {
+        let place = dir();
+        let path = place.path().join("report.txt");
+        fs::write(&path, b"report").unwrap();
+        let exec = dir();
+        for (title, note) in [
+            (
+                "x".repeat(canterlot_proto::limits::MAX_SHARE_TITLE_BYTES + 1),
+                String::new(),
+            ),
+            ("две\nстроки".into(), String::new()),
+            (
+                String::new(),
+                "x".repeat(canterlot_proto::limits::MAX_SHARE_NOTE_BYTES + 1),
+            ),
+        ] {
+            let error = prepare(
+                exec.path(),
+                Uuid::now_v7(),
+                &path,
+                title,
+                note,
+                Some(place.path()),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                ShareError::InvalidText,
+                "bad title/note is not an unreadable file"
+            );
+        }
     }
 
     #[test]
