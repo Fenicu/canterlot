@@ -56,13 +56,13 @@ retries = 2
 # QUARANTINE: ловушка на взаимную блокировку с окном 20 с на 30 раундов; под нагрузкой полного гейта
 # окно мало. Отдельно проходит. Повтор разрешён.
 [[profile.default.overrides]]
-filter = 'test(=deleting_a_subscriber_during_refresh_does_not_deadlock)'
+filter = 'test(=session_subs::deleting_a_subscriber_during_refresh_does_not_deadlock)'
 retries = 2
 
 # QUARANTINE: старт воркера и переподключение ждутся по 45 с; в полном гейте под нагрузкой окно мало,
 # отдельно тест проходит. Повтор разрешён.
 [[profile.default.overrides]]
-filter = 'test(=settings_survive_worker_restart_between_dispatch_and_accept)'
+filter = 'test(=settings::settings_survive_worker_restart_between_dispatch_and_accept)'
 retries = 2
 
 # QUARANTINE: ожидание подъёма сессии (60 с) после убийства супервизора не укладывается в полный гейт

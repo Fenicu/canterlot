@@ -89,14 +89,23 @@ fi
 nextest_filter() {
     # Выражение nextest для изменённых крейтов; зависимые от них проверяет полный прогон.
     local expr="" path crate rest name
-    declare -A src_changed=() test_bins=()
+    declare -A src_changed=() test_bins=() it_modules=() whole_it=()
     while IFS= read -r path; do
         case "$path" in
             crates/*)
                 crate=${path#crates/}
                 crate=${crate%%/*}
                 rest=${path#crates/$crate/}
-                if [[ "$rest" =~ ^tests/([^/]+)\.rs$ ]]; then
+                if [[ "$rest" =~ ^tests/it/([^/]+)\.rs$ ]]; then
+                    # Один бинарник it: модуль выбирает свои тесты, main.rs — весь бинарник.
+                    if [[ "${BASH_REMATCH[1]}" == main ]]; then
+                        whole_it[$crate]=1
+                    else
+                        it_modules[$crate]+=" ${BASH_REMATCH[1]}"
+                    fi
+                elif [[ "$rest" == tests/it/support/* ]]; then
+                    whole_it[$crate]=1
+                elif [[ "$rest" =~ ^tests/([^/]+)\.rs$ ]]; then
                     test_bins[$crate]+=" ${BASH_REMATCH[1]}"
                 else
                     src_changed[$crate]=1
@@ -110,6 +119,16 @@ nextest_filter() {
     done <<<"$changed"
     for crate in "${!src_changed[@]}"; do
         expr+="${expr:+ | }package($crate)"
+    done
+    for crate in "${!whole_it[@]}"; do
+        [[ -n "${src_changed[$crate]:-}" ]] && continue
+        expr+="${expr:+ | }(package($crate) & binary(it))"
+    done
+    for crate in "${!it_modules[@]}"; do
+        [[ -n "${src_changed[$crate]:-}" || -n "${whole_it[$crate]:-}" ]] && continue
+        for name in ${it_modules[$crate]}; do
+            expr+="${expr:+ | }(package($crate) & binary(it) & test(/^${name}::/))"
+        done
     done
     for crate in "${!test_bins[@]}"; do
         [[ -n "${src_changed[$crate]:-}" ]] && continue
