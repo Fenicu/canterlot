@@ -67,6 +67,9 @@
       "$ref": "#/$defs/conversation_deleted"
     },
     {
+      "$ref": "#/$defs/bookmark_changed"
+    },
+    {
       "$ref": "#/$defs/conversation_settings_changed"
     },
     {
@@ -3572,6 +3575,224 @@
       ],
       "additionalProperties": false
     },
+    "bookmark_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "bookmark_changed"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "conversation_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "target_kind": {
+              "enum": [
+                "input",
+                "block"
+              ]
+            },
+            "target_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "bookmarked": {
+              "type": "boolean"
+            },
+            "bookmark": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/Uuid"
+                },
+                "conversation_id": {
+                  "$ref": "#/$defs/Uuid"
+                },
+                "target_kind": {
+                  "enum": [
+                    "input",
+                    "block"
+                  ]
+                },
+                "target_id": {
+                  "$ref": "#/$defs/Uuid"
+                },
+                "created_at": {
+                  "$ref": "#/$defs/Time"
+                },
+                "target_created_at": {
+                  "$ref": "#/$defs/Time"
+                },
+                "kind": {
+                  "enum": [
+                    "answer",
+                    "message"
+                  ]
+                },
+                "origin_kind": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "owner",
+                        "message",
+                        "spawn",
+                        "result"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "block_id": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Uuid"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "input_id": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Uuid"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "seq": {
+                  "$ref": "#/$defs/Seq"
+                },
+                "jump_seq": {
+                  "$ref": "#/$defs/Seq"
+                },
+                "harness": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "archived": {
+                  "type": "boolean"
+                },
+                "role": {
+                  "type": "string"
+                },
+                "agent": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "excerpt": {
+                  "type": "string",
+                  "maxLength": 300
+                },
+                "conversation_title": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "conversation_id",
+                "target_kind",
+                "target_id",
+                "created_at",
+                "target_created_at",
+                "kind",
+                "origin_kind",
+                "block_id",
+                "input_id",
+                "seq",
+                "jump_seq",
+                "harness",
+                "model",
+                "archived",
+                "role",
+                "agent",
+                "excerpt",
+                "conversation_title"
+              ]
+            }
+          },
+          "required": [
+            "conversation_id",
+            "target_kind",
+            "target_id",
+            "bookmarked"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "draft_changed": {
       "type": "object",
       "properties": {
@@ -6252,6 +6473,9 @@
                 },
                 {
                   "$ref": "#/$defs/conversation_deleted"
+                },
+                {
+                  "$ref": "#/$defs/bookmark_changed"
                 },
                 {
                   "$ref": "#/$defs/conversation_settings_changed"

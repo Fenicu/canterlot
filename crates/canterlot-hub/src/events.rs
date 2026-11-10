@@ -298,6 +298,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "conversation_created",
     "conversation_updated",
     "conversation_deleted",
+    "bookmark_changed",
     "conversation_settings_changed",
     "crunch_changed",
     "crunch_held",
