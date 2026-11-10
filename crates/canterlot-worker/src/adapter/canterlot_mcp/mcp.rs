@@ -393,7 +393,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                         "states": {"type": "array", "items": {"enum": ["idle", "waiting_for_user", "stalled", "quota_paused", "failed", "stopped", "deleted"]}},
                         "all": {"type": "boolean", "description": "Wait until every listed session settles (default: any)."},
                         "provider": {"enum": ["claude", "codex", "opencode"]},
-                        "window": {"enum": ["five_hour", "weekly", "monthly"]},
+                        "window": {"enum": ["five_hour", "weekly", "monthly", "weekly_fable"]},
                         "below_percent": {"type": "number", "minimum": 0, "maximum": 100},
                         "path": {"type": "string", "description": "Absolute or relative to your workdir."},
                         "min_bytes": {"type": "integer", "minimum": 0},
@@ -1039,6 +1039,7 @@ pub fn limits_tool_text(
         let name = match observation.window {
             x if x == LimitWindow::FiveHour as i32 => "five-hour",
             x if x == LimitWindow::Weekly as i32 => "weekly",
+            x if x == LimitWindow::WeeklyFable as i32 => "weekly fable",
             _ => continue,
         };
         windows.push((
@@ -1156,7 +1157,7 @@ mod tests {
         );
         assert_eq!(
             when["window"]["enum"],
-            json!(["five_hour", "weekly", "monthly"])
+            json!(["five_hour", "weekly", "monthly", "weekly_fable"])
         );
         assert!(when["below_percent"].is_object());
         assert!(when["free_disk_gb_above"].is_object());

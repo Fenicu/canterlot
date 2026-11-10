@@ -113,6 +113,7 @@ fn rate_limit_event_becomes_observed_permille_and_reset_ms() {
         LimitSnapshot {
             five_hour: Some((500, Some(1_792_919_400_000))),
             weekly: Some((810, Some(1_793_062_800_000))),
+            weekly_fable: None,
         }
     );
 }
@@ -167,6 +168,127 @@ fn rejected_window_becomes_reached_with_its_reset() {
     assert_eq!(
         reached(&facts),
         vec![(LimitWindow::FiveHour, Some(1_793_227_200_000))]
+    );
+}
+
+const FABLE_FRAME: &str =
+    include_str!("../../canterlot-proto/tests/fixtures/fable_rate_limit.json");
+
+#[test]
+fn fable_weekly_window_is_observed_separate_from_the_weekly_one() {
+    let mut tracker = LimitTracker::default();
+    let info: serde_json::Value = serde_json::from_str(FABLE_FRAME).unwrap();
+    let raw = tracker.on_rate_limit(&info);
+    let facts: Vec<Fact> = raw.iter().map(key).collect();
+    assert_eq!(
+        facts,
+        vec![
+            (
+                "observed",
+                LimitWindow::Weekly,
+                Some(30),
+                Some(1_794_877_200_000)
+            ),
+            (
+                "observed",
+                LimitWindow::WeeklyFable,
+                Some(50),
+                Some(1_794_877_200_000)
+            ),
+        ],
+        "no five-hour fact when the frame has no five_hour row"
+    );
+    assert_eq!(
+        tracker.snapshot(),
+        LimitSnapshot {
+            five_hour: None,
+            weekly: Some((30, Some(1_794_877_200_000))),
+            weekly_fable: Some((50, Some(1_794_877_200_000))),
+        }
+    );
+    let observations: Vec<LimitObservation> = raw
+        .into_iter()
+        .filter_map(|fact| match fact {
+            LimitFact::Observed {
+                window,
+                used_permille,
+                resets_at_ms,
+            } => Some(LimitObservation {
+                provider: "claude".into(),
+                window: window.into(),
+                used_permille: u32::from(used_permille),
+                resets_at_ms: resets_at_ms.unwrap_or_default(),
+                ..Default::default()
+            }),
+            LimitFact::Reached { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        observations,
+        vec![
+            LimitObservation {
+                provider: "claude".into(),
+                window: ProtoWindow::Weekly as i32,
+                used_permille: 30,
+                resets_at_ms: 1_794_877_200_000,
+                ..Default::default()
+            },
+            LimitObservation {
+                provider: "claude".into(),
+                window: ProtoWindow::WeeklyFable as i32,
+                used_permille: 50,
+                resets_at_ms: 1_794_877_200_000,
+                ..Default::default()
+            },
+        ]
+    );
+}
+
+#[test]
+fn rejected_fable_window_is_reached_only_for_fable() {
+    let info = json!({
+        "status": "rejected",
+        "rateLimitType": "seven_day_overage_included",
+        "resetsAt": 1_794_877_200_u64,
+        "unifiedWindows": {
+            "seven_day": {"utilization": 0.3, "resetsAt": 1_794_877_200_u64, "status": "allowed"},
+            "seven_day_overage_included": {"utilization": 1.0, "resetsAt": 1_794_877_200_u64, "status": "rejected"}
+        }
+    });
+    let mut tracker = LimitTracker::default();
+    let facts: Vec<Fact> = tracker.on_rate_limit(&info).iter().map(key).collect();
+    assert_eq!(
+        reached(&facts),
+        vec![(LimitWindow::WeeklyFable, Some(1_794_877_200_000))]
+    );
+    assert!(reached(&track(&mut tracker, &[info.to_string()])).is_empty());
+}
+
+#[test]
+fn opus_frame_does_not_clear_a_known_fable_reading() {
+    let mut tracker = LimitTracker::default();
+    let fable: serde_json::Value = serde_json::from_str(FABLE_FRAME).unwrap();
+    tracker.on_rate_limit(&fable);
+    let opus = json!({
+        "status": "allowed",
+        "rateLimitType": "seven_day",
+        "unifiedWindows": {
+            "seven_day": {"utilization": 0.4, "resetsAt": 1_794_877_200_u64, "status": "allowed"}
+        }
+    });
+    let facts: Vec<Fact> = tracker.on_rate_limit(&opus).iter().map(key).collect();
+    assert_eq!(
+        facts,
+        vec![(
+            "observed",
+            LimitWindow::Weekly,
+            Some(400),
+            Some(1_794_877_200_000)
+        )]
+    );
+    assert_eq!(
+        tracker.snapshot().weekly_fable,
+        Some((50, Some(1_794_877_200_000)))
     );
 }
 

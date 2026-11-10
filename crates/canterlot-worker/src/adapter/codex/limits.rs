@@ -52,7 +52,7 @@ pub fn now_ms() -> u64 {
 fn slot(tracker: &mut LimitTracker, window: LimitWindow) -> &mut WindowState {
     match window {
         LimitWindow::FiveHour => &mut tracker.five_hour,
-        LimitWindow::Weekly => &mut tracker.weekly,
+        LimitWindow::Weekly | LimitWindow::WeeklyFable => &mut tracker.weekly,
     }
 }
 

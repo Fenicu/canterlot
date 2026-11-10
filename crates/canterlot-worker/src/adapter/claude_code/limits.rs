@@ -6,26 +6,29 @@ use serde_json::Value;
 pub struct LimitSnapshot {
     pub five_hour: Option<(u16, Option<u64>)>,
     pub weekly: Option<(u16, Option<u64>)>,
+    pub weekly_fable: Option<(u16, Option<u64>)>,
 }
 
-const WINDOWS: [(&str, LimitWindow); 2] = [
+const WINDOWS: [(&str, LimitWindow); 3] = [
     ("five_hour", LimitWindow::FiveHour),
     ("seven_day", LimitWindow::Weekly),
+    ("seven_day_overage_included", LimitWindow::WeeklyFable),
 ];
 
 #[derive(Debug, Default)]
 pub struct LimitTracker {
     snapshot: LimitSnapshot,
-    resets: [Option<u64>; 2],
+    resets: [Option<u64>; 3],
     limiting: Option<LimitWindow>,
     // Упор, уже сообщённый в текущем эпизоде: повтор того же кадра или 429 хода его не дублирует.
-    reached: [Option<Option<u64>>; 2],
+    reached: [Option<Option<u64>>; 3],
 }
 
 fn index(window: LimitWindow) -> usize {
     match window {
         LimitWindow::FiveHour => 0,
         LimitWindow::Weekly => 1,
+        LimitWindow::WeeklyFable => 2,
     }
 }
 
@@ -68,8 +71,8 @@ impl LimitTracker {
         if limiting.is_some() {
             self.limiting = limiting;
         }
-        let mut exhausted = [false; 2];
-        let mut fresh = [false; 2];
+        let mut exhausted = [false; 3];
+        let mut fresh = [false; 3];
         for (key, window) in WINDOWS {
             let i = index(window);
             let Some(row) = windows.and_then(|w| w.get(key)) else {
@@ -89,6 +92,7 @@ impl LimitTracker {
                 match window {
                     LimitWindow::FiveHour => self.snapshot.five_hour = value,
                     LimitWindow::Weekly => self.snapshot.weekly = value,
+                    LimitWindow::WeeklyFable => self.snapshot.weekly_fable = value,
                 }
                 facts.push(LimitFact::Observed {
                     window,
@@ -128,7 +132,7 @@ impl LimitTracker {
         let usage_limit =
             status == Some(429) || error.is_some_and(|e| e.contains("usage_limit_reached"));
         let reported = self.reached.iter().any(Option::is_some);
-        self.reached = [None; 2];
+        self.reached = [None; 3];
         if !usage_limit || reported {
             return None;
         }
@@ -145,10 +149,15 @@ impl LimitTracker {
 
     fn highest(&self) -> LimitWindow {
         let used = |v: Option<(u16, Option<u64>)>| v.map(|(p, _)| p);
-        if used(self.snapshot.weekly) > used(self.snapshot.five_hour) {
-            LimitWindow::Weekly
-        } else {
-            LimitWindow::FiveHour
+        let mut window = LimitWindow::FiveHour;
+        let mut best = used(self.snapshot.five_hour);
+        if used(self.snapshot.weekly) > best {
+            window = LimitWindow::Weekly;
+            best = used(self.snapshot.weekly);
         }
+        if used(self.snapshot.weekly_fable) > best {
+            window = LimitWindow::WeeklyFable;
+        }
+        window
     }
 }

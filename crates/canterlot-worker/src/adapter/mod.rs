@@ -226,6 +226,7 @@ pub enum LimitWindow {
     // Значения берутся из proto: приведение `as i32` не может дать чужое окно.
     FiveHour = ProtoLimitWindow::FiveHour as isize,
     Weekly = ProtoLimitWindow::Weekly as isize,
+    WeeklyFable = ProtoLimitWindow::WeeklyFable as isize,
 }
 
 impl From<LimitWindow> for ProtoLimitWindow {
@@ -233,6 +234,7 @@ impl From<LimitWindow> for ProtoLimitWindow {
         match window {
             LimitWindow::FiveHour => Self::FiveHour,
             LimitWindow::Weekly => Self::Weekly,
+            LimitWindow::WeeklyFable => Self::WeeklyFable,
         }
     }
 }

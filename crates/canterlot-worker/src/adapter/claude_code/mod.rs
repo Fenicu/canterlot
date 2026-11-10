@@ -550,6 +550,7 @@ impl ClaudeCodeAdapter {
                 let current = [
                     (LimitWindow::FiveHour, snap.five_hour),
                     (LimitWindow::Weekly, snap.weekly),
+                    (LimitWindow::WeeklyFable, snap.weekly_fable),
                 ]
                 .into_iter()
                 .filter_map(|(window, observation)| {

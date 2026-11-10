@@ -114,7 +114,7 @@ fn one_warning_per_failure_and_one_recovery_per_provider() {
             clock.advance(Duration::from_secs(15));
             assert_eq!(
                 source.poll_report("claude", true).await.observations.len(),
-                1
+                2
             );
             // Повторный сбой не пишет второе предупреждение.
             clock.advance(Duration::from_secs(1800));

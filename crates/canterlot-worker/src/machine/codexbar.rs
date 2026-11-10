@@ -134,6 +134,31 @@ fn command_for(executable: &Path, provider: &str) -> Command {
 
 /// Окна по `windowMinutes`: `primary` у CodexBar не обязательно пятичасовое
 /// (у Claude без пятичасового окна он повторяет недельное), поэтому имена слотов не используются.
+fn observation_from_row(
+    provider: &str,
+    row: &Value,
+    window: i32,
+    seen_ms: u64,
+    data_confidence: i32,
+) -> Option<LimitObservation> {
+    let used = row
+        .get("usedPercent")
+        .and_then(Value::as_f64)
+        .filter(|used| used.is_finite() && *used >= 0.0)?;
+    Some(LimitObservation {
+        provider: provider.to_owned(),
+        window,
+        used_permille: (used * 10.0).round().min(1000.0) as u32,
+        resets_at_ms: row
+            .get("resetsAt")
+            .and_then(Value::as_str)
+            .and_then(super::limits::rfc3339_ms)
+            .unwrap_or(0),
+        observed_machine_ms: seen_ms,
+        data_confidence,
+    })
+}
+
 pub fn observations_from_output(
     provider: &str,
     stdout: &[u8],
@@ -190,25 +215,44 @@ pub fn reading_from_output(
         if observations.iter().any(|o| o.window == window as i32) {
             continue;
         }
-        let Some(used) = row
-            .get("usedPercent")
-            .and_then(Value::as_f64)
-            .filter(|used| used.is_finite() && *used >= 0.0)
-        else {
-            continue;
-        };
-        observations.push(LimitObservation {
-            provider: provider.to_owned(),
-            window: window as i32,
-            used_permille: (used * 10.0).round().min(1000.0) as u32,
-            resets_at_ms: row
-                .get("resetsAt")
-                .and_then(Value::as_str)
-                .and_then(super::limits::rfc3339_ms)
-                .unwrap_or(0),
-            observed_machine_ms: seen_ms,
-            data_confidence,
-        });
+        if let Some(observation) =
+            observation_from_row(provider, row, window as i32, seen_ms, data_confidence)
+        {
+            observations.push(observation);
+        }
+    }
+    // CodexBar отдаёт недельное окно Fable отдельной строкой `extraRateWindows`.
+    if provider == "claude"
+        && let Some(extra) = usage.get("extraRateWindows").and_then(Value::as_array)
+    {
+        for item in extra {
+            let fable = ["title", "id"].iter().any(|key| {
+                item.get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.to_lowercase().contains("fable"))
+            });
+            let Some(row) = item.get("window").filter(|row| row.is_object()) else {
+                continue;
+            };
+            if !fable || row.get("windowMinutes").and_then(Value::as_u64) != Some(WEEK_MINUTES) {
+                continue;
+            }
+            if observations
+                .iter()
+                .any(|o| o.window == LimitWindow::WeeklyFable as i32)
+            {
+                continue;
+            }
+            if let Some(observation) = observation_from_row(
+                provider,
+                row,
+                LimitWindow::WeeklyFable as i32,
+                seen_ms,
+                data_confidence,
+            ) {
+                observations.push(observation);
+            }
+        }
     }
     let absent = if !five_hour_row && !observations.is_empty() {
         vec![LimitAbsence {

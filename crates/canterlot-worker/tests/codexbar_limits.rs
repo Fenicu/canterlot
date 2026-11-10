@@ -34,6 +34,7 @@ const WEEK_RESET_MS: u64 = 1_793_667_600_000; // 2026-11-03T01:00:00Z
 const FIVE: i32 = LimitWindow::FiveHour as i32;
 const WEEK: i32 = LimitWindow::Weekly as i32;
 const MONTH: i32 = LimitWindow::Monthly as i32;
+const FABLE: i32 = LimitWindow::WeeklyFable as i32;
 
 fn rows(observations: &[LimitObservation]) -> Vec<(i32, u32, u64)> {
     let mut rows: Vec<_> = observations
@@ -48,7 +49,10 @@ fn rows(observations: &[LimitObservation]) -> Vec<(i32, u32, u64)> {
 fn weekly_slot_named_primary_is_not_taken_for_the_five_hour_window() {
     let observed =
         observations_from_output("claude", CLAUDE_WEEKLY_ONLY.as_bytes(), NOW_MS).unwrap();
-    assert_eq!(rows(&observed), vec![(WEEK, 540, WEEK_RESET_MS)]);
+    assert_eq!(
+        rows(&observed),
+        vec![(WEEK, 540, WEEK_RESET_MS), (FABLE, 0, WEEK_RESET_MS)]
+    );
     assert!(observed.iter().all(|o| o.provider == "claude"));
 }
 
@@ -292,7 +296,10 @@ async fn poll_runs_codexbar_with_the_provider_and_json_format() {
     );
 
     let observed = source.poll("claude").await;
-    assert_eq!(rows(&observed), vec![(WEEK, 540, WEEK_RESET_MS)]);
+    assert_eq!(
+        rows(&observed),
+        vec![(WEEK, 540, WEEK_RESET_MS), (FABLE, 0, WEEK_RESET_MS)]
+    );
     assert_eq!(
         calls(dir.path()),
         vec!["usage --provider claude --format json --no-color"]
@@ -554,7 +561,7 @@ async fn poll_report_carries_the_absence_and_a_failed_run_carries_none() {
     let fetched = source.poll_report("claude", false).await;
     assert_eq!(
         rows(&fetched.observations),
-        vec![(WEEK, 540, WEEK_RESET_MS)]
+        vec![(WEEK, 540, WEEK_RESET_MS), (FABLE, 0, WEEK_RESET_MS)]
     );
     assert_eq!(
         fetched.absent.iter().map(|a| a.window).collect::<Vec<_>>(),
@@ -645,7 +652,7 @@ async fn opencode_failure_does_not_delay_claude_or_codex() {
     let clock = TestClock::new();
     let source = source(per_provider(dir.path()), &clock, None);
 
-    assert_eq!(source.poll_idle("claude").await.len(), 1);
+    assert_eq!(source.poll_idle("claude").await.len(), 2);
     assert_eq!(source.poll_idle("codex").await.len(), 2);
     assert!(source.poll_idle("opencode").await.is_empty());
     assert_eq!(runs_of(dir.path(), "claude"), 1);
@@ -654,7 +661,7 @@ async fn opencode_failure_does_not_delay_claude_or_codex() {
 
     // Пауза OpenCode после сбоя не должна останавливать других провайдеров.
     clock.advance(Duration::from_secs(300));
-    assert_eq!(source.poll_idle("claude").await.len(), 1);
+    assert_eq!(source.poll_idle("claude").await.len(), 2);
     assert_eq!(source.poll_idle("codex").await.len(), 2);
     assert_eq!(
         runs_of(dir.path(), "claude"),
@@ -750,7 +757,7 @@ async fn codexbar_runs_at_a_lower_cpu_priority() {
         ),
     );
     let source = source(exe, &clock, None);
-    assert_eq!(source.poll("claude").await.len(), 1);
+    assert_eq!(source.poll("claude").await.len(), 2);
     let child: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
     assert_eq!(
         child,
