@@ -1974,7 +1974,8 @@ fn batch_for_session(
             if batch.records.is_empty() {
                 // Запись больше пакета не влезает ни в один: без замены она
                 // навсегда запирает управляющий поток на одном и том же месте.
-                let journal = Uuid::parse_str(&batch.journal_id).map_err(|_| WorkerError::Protocol)?;
+                let journal =
+                    Uuid::parse_str(&batch.journal_id).map_err(|_| WorkerError::Protocol)?;
                 batch.records.push(data::shippable(journal, record));
                 check_record_batch(&batch).map_err(|_| WorkerError::Protocol)?;
             } else {

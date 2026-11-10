@@ -63,9 +63,7 @@ impl ShareError {
             Self::Denied => "This file is on the secret deny list",
             Self::TooLarge => "The file is larger than 50 MiB",
             Self::Unreadable => "The file cannot be read",
-            Self::InvalidText => {
-                "The title or note is too long or contains control characters"
-            }
+            Self::InvalidText => "The title or note is too long or contains control characters",
             Self::NotOwned => "The file belongs to another user",
             Self::OutsideWorkdir => {
                 "Only files under the session workdir or the temp directory can be shared; copy the file there first"
