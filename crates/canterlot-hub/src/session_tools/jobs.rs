@@ -23,6 +23,11 @@ struct EventJob {
     target_id: Uuid,
     state: String,
     chain_depth: i32,
+    /// Подписка и её отпечаток: по ним видно, устарело ли отложенное событие.
+    #[serde(default)]
+    subscription_id: Option<Uuid>,
+    #[serde(default)]
+    fingerprint: Option<String>,
     #[serde(default)]
     armed_at: Option<DateTime<Utc>>,
     /// Граница отпущенного пачкой итога: у старых заданий её нет.
@@ -165,6 +170,27 @@ pub async fn run_in_tx(
                 .await?
             {
                 return Ok(JobOutcome::Retry { at, poll: false });
+            }
+            // Пока событие ждало, подписка могла оценить более новое состояние: подписчик
+            // должен услышать последнее, а не прошедшее. Удаление не гаснет никогда.
+            if event.state != "deleted"
+                && event.state != IDLE_BACKGROUND
+                && let (Some(subscription_id), Some(fingerprint)) =
+                    (event.subscription_id, event.fingerprint.as_deref())
+            {
+                let latest: Option<Option<String>> = sqlx::query_scalar(
+                    "select last_fingerprint from session_subscriptions
+                     where id=$1 and target_id=$2",
+                )
+                .bind(subscription_id)
+                .bind(event.target_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+                if let Some(Some(latest)) = latest
+                    && latest != fingerprint
+                {
+                    return Ok(JobOutcome::Done(json!({"skipped":"stale_event"})));
+                }
             }
             if event.state == IDLE_BACKGROUND {
                 let Some((text, origin)) =

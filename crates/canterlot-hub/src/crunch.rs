@@ -207,6 +207,26 @@ pub async fn notification_hold_in_tx(
     }))
 }
 
+/// Удержание снято раньше срока: отложенные уведомления получателя больше не ждут.
+/// Срок задания равен сроку удержания, поэтому все события и заметки получают срок
+/// «сейчас»; порядок внутри одного срока задаёт `id` (uuid v7, порядок создания).
+pub async fn release_held_notifications_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update scheduled_jobs set run_at=$2,updated_at=clock_timestamp()
+         where conversation_id=$1 and kind='session_task' and state='pending'
+           and run_at>$2 and payload->>'action' in ('event','note')",
+    )
+    .bind(conversation_id)
+    .bind(now)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 async fn append(
     conn: &mut PgConnection,
     id: Uuid,
@@ -708,6 +728,9 @@ async fn leave(
         }
         let slot = queue.slot()?;
         queue.save(conn, &slot, None, correlation_id).await?;
+        if had {
+            release_held_notifications_in_tx(conn, id, now).await?;
+        }
         if row.reserve_override_until.is_some() {
             sqlx::query("update conversations set reserve_override_until=null where id=$1")
                 .bind(id)
@@ -999,6 +1022,8 @@ pub async fn handle_wake_in_tx(
     }
     let slot = queue.slot()?;
     queue.save(conn, &slot, None, correlation_id).await?;
+    // Удержание снято здесь; доставка сама перепроверит оставшиеся удержания.
+    release_held_notifications_in_tx(conn, id, now).await?;
     let mut input_id = None;
     if skipped.is_none() {
         resume_pending = false;
@@ -1239,7 +1264,11 @@ pub(crate) async fn disable_in_tx(
         .execute(&mut *conn)
         .await?;
     let slot = queue.slot()?;
-    queue.save(conn, &slot, None, correlation_id).await
+    queue.save(conn, &slot, None, correlation_id).await?;
+    let now: DateTime<Utc> = sqlx::query_scalar("select clock_timestamp()")
+        .fetch_one(&mut *conn)
+        .await?;
+    release_held_notifications_in_tx(conn, conversation_id, now).await
 }
 
 /// Ручное продолжение одной сессии за счёт резерва; другие сессии сохраняют удержание.
@@ -1335,6 +1364,7 @@ async fn spend_in_tx(
         .bind(id).bind(until).execute(&mut *conn).await?;
     let slot = queue.slot()?;
     queue.save(conn, &slot, None, correlation_id).await?;
+    release_held_notifications_in_tx(conn, id, now).await?;
     append(
         conn,
         id,

@@ -5,6 +5,7 @@ use canterlot_hub::{
         self, Activity, ActivityState as S, Evidence as E, QueueFacts, Refresh, Thresholds,
     },
     config::{ActivityConfig, MachinesConfig, SchedulerConfig},
+    crunch::{self, SpendOutcome},
     deletion,
     delivery::{
         ContentBlock, SubmitInput,
@@ -2157,6 +2158,46 @@ async fn hold_subscriber(
     .unwrap();
 }
 
+/// Подписчик стоит на паузе недельного резерва: удержание и ожидающее пробуждение.
+async fn hold_subscriber_weekly(
+    pool: &PgPool,
+    p: &Pair,
+    wake_at: DateTime<Utc>,
+    wake_run_at: DateTime<Utc>,
+) {
+    sqlx::query("update queue_state set hold_reasons=$2 where conversation_id=$1")
+        .bind(p.subscriber)
+        .bind(json!([HoldReason::WeeklyReserve {
+            provider: "claude".into(),
+            resets_at: Some(wake_at),
+        }]))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set resume_pending=true where id=$1")
+        .bind(p.subscriber)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
+         values($1,'wake',$2,$3,$4,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(p.owner)
+    .bind(p.subscriber)
+    .bind(wake_run_at)
+    .bind(json!({
+        "provider": "claude",
+        "window": "weekly",
+        "hold_key": "weekly:claude",
+        "verified": true,
+    }))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// Цель устоялась в `quota_paused`: проектор ставит подписчику задание события.
 async fn paused_target(pool: &PgPool, p: &Pair, now: DateTime<Utc>) -> DateTime<Utc> {
     let wake_at = now + TimeDelta::hours(1);
@@ -2245,6 +2286,130 @@ async fn notifications_wait_for_a_limit_held_subscriber(pool: PgPool) {
     assert_eq!(delivered.len(), 1, "exactly one delivery after the hold");
     assert_eq!(delivered[0].1["event"]["kind"], "quota_paused");
     assert_eq!(scheduled_tasks(&pool, p.subscriber).await[0].state, "fired");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_hold_removed_early_delivers_postponed_notifications_right_away(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    let wake_at = now + TimeDelta::hours(1);
+    let wake_run_at = wake_at + TimeDelta::seconds(20);
+    hold_subscriber_weekly(&pool, &p, wake_at, wake_run_at).await;
+    subscribe(&pool, &p).await;
+    paused_target(&pool, &p, now).await;
+
+    scheduler(&pool).tick(now).await.unwrap();
+    assert!(delivered(&pool, p.subscriber).await.is_empty());
+    let job = &scheduled_tasks(&pool, p.subscriber).await[0];
+    assert_eq!(
+        job.run_at.timestamp_millis(),
+        wake_run_at.timestamp_millis(),
+        "the notification waits for the reserve reset"
+    );
+
+    // Владелец тратит резерв раньше срока: держать уведомление больше нечем.
+    let outcome = crunch::spend_reserve(
+        &pool,
+        p.owner,
+        p.subscriber,
+        "spend-before-reset",
+        now,
+        &Dispatcher::channel().0,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, SpendOutcome::Continued);
+    let job = &scheduled_tasks(&pool, p.subscriber).await[0];
+    assert!(
+        job.run_at <= now,
+        "the postponed notification is pulled forward: {}",
+        job.run_at
+    );
+
+    scheduler(&pool).tick(now).await.unwrap();
+    let delivered = delivered(&pool, p.subscriber).await;
+    assert_eq!(delivered.len(), 1, "exactly one delivery after the hold");
+    assert_eq!(delivered[0].1["event"]["kind"], "quota_paused");
+    assert_eq!(scheduled_tasks(&pool, p.subscriber).await[0].state, "fired");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_postponed_event_never_arrives_after_a_newer_one(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    let wake_at = now + TimeDelta::hours(1);
+    let wake_run_at = wake_at + TimeDelta::seconds(20);
+    hold_subscriber_weekly(&pool, &p, wake_at, wake_run_at).await;
+    subscribe(&pool, &p).await;
+    let execution = start(&pool, p.owner, p.target).await;
+
+    // A: цель стоит на паузе лимита.
+    sqlx::query("update queue_state set hold_reasons=$2 where conversation_id=$1")
+        .bind(p.target)
+        .bind(json!([quota_hold("claude", "five_hour", wake_at)]))
+        .execute(&pool)
+        .await
+        .unwrap();
+    refresh_at(&pool, p.target, now).await;
+    let fired = jobs(&pool, p.subscriber).await;
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0]["state"], "quota_paused");
+    scheduler(&pool).tick(now).await.unwrap();
+    assert!(delivered(&pool, p.subscriber).await.is_empty());
+
+    // B: исполнение потеряно, цель устоялась в `failed`.
+    sqlx::query("update queue_state set hold_reasons='[]' where conversation_id=$1")
+        .bind(p.target)
+        .execute(&pool)
+        .await
+        .unwrap();
+    executions::set_state(
+        &pool,
+        execution.execution_id,
+        ExecutionState::OwnerLost,
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(1)).await;
+    let fired = jobs(&pool, p.subscriber).await;
+    assert_eq!(fired.len(), 2);
+    assert_eq!(fired[1]["state"], "failed");
+    scheduler(&pool)
+        .tick(now + TimeDelta::seconds(1))
+        .await
+        .unwrap();
+    assert!(delivered(&pool, p.subscriber).await.is_empty());
+
+    crunch::spend_reserve(
+        &pool,
+        p.owner,
+        p.subscriber,
+        "spend-after-two-events",
+        now,
+        &Dispatcher::channel().0,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    scheduler(&pool)
+        .tick(now + TimeDelta::seconds(2))
+        .await
+        .unwrap();
+
+    let delivered = delivered(&pool, p.subscriber).await;
+    assert!(delivered.len() <= 2, "{delivered:?}");
+    let last = delivered
+        .last()
+        .and_then(|(_, origin, _)| origin["event"]["kind"].as_str());
+    assert_ne!(
+        last,
+        Some("quota_paused"),
+        "the old state must not be the last word: {delivered:?}"
+    );
+    assert_eq!(last, Some("failed"), "{delivered:?}");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
