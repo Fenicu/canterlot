@@ -353,13 +353,18 @@ impl Containment for TreeContainment {
                 .map(|s| s.member.clone());
         }
         let mut members = Vec::new();
+        let own_group = all.get(&self.supervisor.pid).map(|info| info.group);
         for info in all.values().filter(|info| self.belongs(info, &all)) {
             if !info.zombie {
                 members.push(info.member.clone());
                 continue;
             }
-            // Прямой CLI (лидер группы) остаётся за tokio::process::Child.
-            if info.parent == self.supervisor.pid && cli.as_ref() != Some(&info.member) {
+            // Прямой CLI (лидер группы) остаётся за tokio::process::Child; помощники
+            // в группе сопровождения тоже принадлежат своим `Command`, не нам.
+            if info.parent == self.supervisor.pid
+                && Some(info.group) != own_group
+                && cli.as_ref() != Some(&info.member)
+            {
                 self.reap(&info.member)?;
             }
         }
@@ -514,6 +519,29 @@ mod tests {
             parse_stat(42, "invalid"),
             Err(ContainmentError::InvalidStat)
         ));
+    }
+
+    #[test]
+    fn members_do_not_reap_children_in_the_supervisors_process_group() {
+        let containment = TreeContainment::new().unwrap();
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !stat(child.id()).is_ok_and(|info| info.zombie) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "helper child did not become a zombie"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        containment.members().unwrap();
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "the status of a same-group child belongs to its Command"
+        );
     }
 
     #[test]
