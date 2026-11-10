@@ -112,25 +112,38 @@ pub fn forecast(
     if hours <= 0.0 {
         return None;
     }
-    // Темп — прирост расхода между первым снимком того же окна и текущим показанием:
-    // поздний первый снимок не раздувает темп всем накопленным расходом. Без пары
-    // снимков с достаточным промежутком считаем от номинального начала окна.
-    let first = snapshots
+    // Темп — прирост расхода от первого снимка окна после последнего снижения:
+    // поздний первый снимок не раздувает темп всем накопленным расходом, а
+    // коррекция расхода вниз не обнуляет средний темп. Без пары снимков с
+    // достаточным промежутком считаем от номинального начала окна.
+    let mut readings: Vec<&Reading> = snapshots
         .iter()
         .filter(|reading| same_window(reading, resets_at))
-        .min_by_key(|reading| reading.observed_at);
-    let rate = match first {
-        Some(first) if current.observed_at - first.observed_at >= DELTA_MIN_SPAN => {
-            let span = current.observed_at - first.observed_at;
+        .filter(|reading| reading.observed_at <= current.observed_at)
+        .collect();
+    readings.push(&current);
+    readings.sort_by_key(|reading| reading.observed_at);
+    let mut baseline: Option<Reading> = None;
+    let mut previous_used: Option<u16> = None;
+    for reading in readings {
+        if previous_used.is_none_or(|used| reading.used_permille < used) {
+            baseline = Some(*reading);
+        }
+        previous_used = Some(reading.used_permille);
+    }
+    let rate = match baseline {
+        Some(baseline) if current.observed_at - baseline.observed_at >= DELTA_MIN_SPAN => {
+            let span = current.observed_at - baseline.observed_at;
             let span_hours = span.num_seconds() as f64 / 3600.0;
-            (f64::from(current.used_permille) - f64::from(first.used_permille)) / span_hours
+            (f64::from(current.used_permille) - f64::from(baseline.used_permille)) / span_hours
         }
         _ => f64::from(current.used_permille) / hours,
     };
+    let recent = recent_rate(&rules, current, snapshots, resets_at, now);
     if rate <= 0.0 {
         return Some(Forecast {
             rate_permille_per_hour: 0.0,
-            recent_rate_permille_per_hour: None,
+            recent_rate_permille_per_hour: recent,
             exhausts_at: None,
             before_reset: false,
         });
@@ -141,7 +154,7 @@ pub fn forecast(
     let before_reset = exhausts_at < resets_at;
     Some(Forecast {
         rate_permille_per_hour: rate,
-        recent_rate_permille_per_hour: recent_rate(&rules, current, snapshots, resets_at, now),
+        recent_rate_permille_per_hour: recent,
         exhausts_at: Some(exhausts_at),
         before_reset,
     })
@@ -162,14 +175,22 @@ fn recent_rate(
         .filter(|reading| reading.observed_at >= lookback)
         .collect();
     recent.sort_by_key(|reading| reading.observed_at);
-    let first = recent.first()?;
-    let last = recent.last()?;
+    let mut baseline: Option<&Reading> = None;
+    let mut previous_used: Option<u16> = None;
+    for &reading in &recent {
+        if previous_used.is_none_or(|used| reading.used_permille < used) {
+            baseline = Some(reading);
+        }
+        previous_used = Some(reading.used_permille);
+    }
+    let first = baseline?;
+    let last = *recent.last()?;
     let span = last.observed_at - first.observed_at;
     if span < rules.min_recent_span {
         return None;
     }
     let delta = i32::from(last.used_permille) - i32::from(first.used_permille);
-    if delta < 0 {
+    if delta <= 0 {
         return None;
     }
     Some(f64::from(delta) / (span.num_seconds() as f64 / 3600.0))
@@ -300,6 +321,22 @@ mod tests {
         // 800 промилле при 50/ч — через 16 часов, сброс через 3 часа.
         assert_eq!(got.exhausts_at, Some(at(16 * 60)));
         assert!(!got.before_reset);
+    }
+
+    #[test]
+    fn a_usage_drop_restarts_the_average_and_recent_baselines() {
+        // Провайдер скорректировал расход вниз: 800 → 200, затем рост до 700.
+        let current = reading(700, Some(reset(144)), 0);
+        let snapshots = [
+            reading(800, Some(reset(144)), 4 * 60),
+            reading(200, Some(reset(144)), 3 * 60),
+        ];
+        let got = forecast(Window::Weekly, current, &snapshots, at(0)).unwrap();
+        // Средний темп считается от 200: прирост 500 промилле за три часа.
+        close(got.rate_permille_per_hour, 500.0 / 3.0);
+        close(got.recent_rate_permille_per_hour.unwrap(), 500.0 / 3.0);
+        assert!(got.exhausts_at.is_some());
+        assert!(got.before_reset);
     }
 
     #[test]
