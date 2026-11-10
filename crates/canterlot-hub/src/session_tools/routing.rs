@@ -884,6 +884,19 @@ fn check_window(
     {
         *nearest_reset = Some(reset);
     }
+    // Расход внутри окна не падает: превышение с известным будущим сбросом остаётся
+    // превышением и после того, как показание перестало быть свежим.
+    if reading.resets_at.is_some_and(|reset| reset > now) && reading.used_percent > threshold {
+        return Some((
+            "limits_over",
+            format!(
+                "{provider} {} {}% > {}%",
+                window_name(window),
+                percent(reading.used_percent),
+                percent(threshold)
+            ),
+        ));
+    }
     let age = now.signed_duration_since(reading.observed_at);
     let reset_passed = reading.resets_at.is_some_and(|reset| reset <= now);
     if reset_passed || age.to_std().is_ok_and(|age| age > stale) {
@@ -2158,6 +2171,63 @@ mod tests {
             );
             assert_eq!(verdict.map(|(verdict, _)| verdict), expected, "{unknown:?}");
             assert_eq!(nearest_reset, None, "a past reset is not a waiting target");
+        }
+    }
+
+    #[test]
+    fn a_stale_exhausted_window_stays_over_until_its_reset() {
+        let stale = WindowReading {
+            used_percent: 97.0,
+            observed_at: now() - chrono::TimeDelta::minutes(120),
+            resets_at: Some(now() + chrono::TimeDelta::days(3)),
+            forecast: None,
+        };
+        for unknown in [UnknownLimits::Allow, UnknownLimits::Skip] {
+            let mut nearest_reset = None;
+            let verdict = check_window(
+                "claude",
+                "weekly",
+                Some(90.0),
+                Some(&stale),
+                unknown,
+                Duration::from_secs(1800),
+                now(),
+                60,
+                &mut nearest_reset,
+            );
+            assert_eq!(
+                verdict.map(|(verdict, _)| verdict),
+                Some("limits_over"),
+                "{unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_reading_without_a_reset_follows_the_unknown_policy() {
+        let stale = WindowReading {
+            used_percent: 97.0,
+            observed_at: now() - chrono::TimeDelta::minutes(120),
+            resets_at: None,
+            forecast: None,
+        };
+        for (unknown, expected) in [
+            (UnknownLimits::Allow, None),
+            (UnknownLimits::Skip, Some("limits_unknown")),
+        ] {
+            let mut nearest_reset = None;
+            let verdict = check_window(
+                "opencode",
+                "weekly",
+                Some(95.0),
+                Some(&stale),
+                unknown,
+                Duration::from_secs(1800),
+                now(),
+                60,
+                &mut nearest_reset,
+            );
+            assert_eq!(verdict.map(|(verdict, _)| verdict), expected, "{unknown:?}");
         }
     }
 
