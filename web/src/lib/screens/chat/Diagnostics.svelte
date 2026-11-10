@@ -5,12 +5,13 @@
 	import { errorText } from '#lib/api/errors.js';
 	import { conversationUsage } from '#lib/api/client.js';
 	import { buildDiagnosticsReport, type DiagnosticsData } from './diagnostics';
-	import { summarizeUsage } from './usage';
+	import { summarizeUsage, type UsageSection } from './usage';
 	import {
 		diagnosticEventLabel,
 		diagnosticKindLabel,
 		executionOutcomeLabel,
 		executionStateLabel,
+		modelLabel,
 		scopeStatusLabel
 	} from '#lib/format/labels.js';
 	import Button from '#lib/ui/Button.svelte';
@@ -66,6 +67,11 @@
 	});
 
 	const usageSummary = $derived(usage ? summarizeUsage(usage) : null);
+
+	/** Число колонок таблицы: «Вход», «Выход» и кэш, если он есть. */
+	function columns(section: UsageSection): number {
+		return 2 + Number(section.showCacheRead) + Number(section.showCacheWrite);
+	}
 
 	const detail = $derived(chat.detail as DetailLike | null);
 	const execution = $derived(chat.execution);
@@ -125,6 +131,36 @@
 	}
 </script>
 
+{#snippet modelsTable(section: UsageSection)}
+	<table class="usage-table" aria-label="Токены по моделям">
+		<thead>
+			<tr>
+				<th scope="col">Вход</th>
+				<th scope="col">Выход</th>
+				{#if section.showCacheRead}
+					<th scope="col" aria-label="Кэш-чтение"><abbr title="Кэш-чтение">Кэш-чт.</abbr></th>
+				{/if}
+				{#if section.showCacheWrite}
+					<th scope="col" aria-label="Кэш-запись"><abbr title="Кэш-запись">Кэш-зап.</abbr></th>
+				{/if}
+			</tr>
+		</thead>
+		{#each section.models as row (row.model)}
+			<tbody>
+				<tr>
+					<th scope="rowgroup" colspan={columns(section)} class="model" title={row.model}>{modelLabel(row.model)}</th>
+				</tr>
+				<tr>
+					<td title={row.input.exact}>{row.input.compact}</td>
+					<td title={row.output.exact}>{row.output.compact}</td>
+					{#if section.showCacheRead}<td title={row.cacheRead.exact}>{row.cacheRead.compact}</td>{/if}
+					{#if section.showCacheWrite}<td title={row.cacheWrite.exact}>{row.cacheWrite.compact}</td>{/if}
+				</tr>
+			</tbody>
+		{/each}
+	</table>
+{/snippet}
+
 <Sheet open title="Диагностика" subtitle={`${detail?.title ?? 'Сессия'} · ${detail?.machine?.name ?? 'workstation'}`} {onclose}>
 	<div class="diagnostics">
 		<p class="note">Метаданные доставки, без текста сообщений.</p>
@@ -147,28 +183,7 @@
 							{/each}
 						</div>
 						{#if usageSummary.session.models.length > 0}
-							<table class="usage-table">
-								<thead>
-									<tr>
-										<th>Модель</th>
-										<th>Вход</th>
-										<th>Выход</th>
-										{#if usageSummary.session.showCacheRead}<th>Кэш-чтение</th>{/if}
-										{#if usageSummary.session.showCacheWrite}<th>Кэш-запись</th>{/if}
-									</tr>
-								</thead>
-								<tbody>
-									{#each usageSummary.session.models as row (row.model)}
-										<tr>
-											<td><code>{row.model}</code></td>
-											<td title={row.input.exact}>{row.input.compact}</td>
-											<td title={row.output.exact}>{row.output.compact}</td>
-											{#if usageSummary.session.showCacheRead}<td title={row.cacheRead.exact}>{row.cacheRead.compact}</td>{/if}
-											{#if usageSummary.session.showCacheWrite}<td title={row.cacheWrite.exact}>{row.cacheWrite.compact}</td>{/if}
-										</tr>
-									{/each}
-								</tbody>
-							</table>
+							{@render modelsTable(usageSummary.session)}
 						{/if}
 					</div>
 
@@ -186,28 +201,7 @@
 								{/each}
 							</div>
 							{#if usageSummary.delegates.models.length > 0}
-								<table class="usage-table">
-									<thead>
-										<tr>
-											<th>Модель</th>
-											<th>Вход</th>
-											<th>Выход</th>
-											{#if usageSummary.delegates.showCacheRead}<th>Кэш-чтение</th>{/if}
-											{#if usageSummary.delegates.showCacheWrite}<th>Кэш-запись</th>{/if}
-										</tr>
-									</thead>
-									<tbody>
-										{#each usageSummary.delegates.models as row (row.model)}
-											<tr>
-												<td><code>{row.model}</code></td>
-												<td title={row.input.exact}>{row.input.compact}</td>
-												<td title={row.output.exact}>{row.output.compact}</td>
-												{#if usageSummary.delegates.showCacheRead}<td title={row.cacheRead.exact}>{row.cacheRead.compact}</td>{/if}
-												{#if usageSummary.delegates.showCacheWrite}<td title={row.cacheWrite.exact}>{row.cacheWrite.compact}</td>{/if}
-											</tr>
-										{/each}
-									</tbody>
-								</table>
+								{@render modelsTable(usageSummary.delegates)}
 							{/if}
 						{/if}
 					</div>
@@ -293,25 +287,45 @@
 	}
 	.usage-table {
 		width: 100%;
-		border-collapse: collapse;
+		table-layout: fixed;
+		border-collapse: separate;
+		border-spacing: 0;
 		font-size: var(--fs-meta);
 		font-variant-numeric: tabular-nums;
 	}
+	/* Числовые колонки равной ширины: заголовок и значения стоят в одних столбцах. */
 	.usage-table th,
 	.usage-table td {
-		padding: var(--s1) 0;
+		padding: var(--s1) calc(var(--s3) / 2);
 		text-align: right;
 		white-space: nowrap;
 	}
 	.usage-table th:first-child,
 	.usage-table td:first-child {
-		text-align: left;
-		padding-right: var(--s3);
-		white-space: normal;
+		padding-inline-start: 0;
+	}
+	.usage-table th:last-child,
+	.usage-table td:last-child {
+		padding-inline-end: 0;
 	}
 	.usage-table th {
 		color: var(--muted);
 		font-weight: normal;
+	}
+	.usage-table th[scope='col'] {
+		padding-bottom: var(--s2);
+	}
+	.usage-table abbr {
+		text-decoration: none;
+	}
+	/* Имя модели — отдельная строка во всю ширину, без моноширинного переноса по слогам. */
+	.usage-table th.model {
+		padding: var(--s4) 0 var(--s1);
+		text-align: left;
+		white-space: normal;
+		overflow-wrap: anywhere;
+		color: var(--text);
+		font-weight: var(--weight-medium);
 	}
 	.rows {
 		display: flex;

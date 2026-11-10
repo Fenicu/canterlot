@@ -832,6 +832,110 @@ test('session_usage_block_shows_totals_and_delegates_with_model_breakdown', asyn
 	await expect(delegates.getByText('sonnet-5')).toBeVisible();
 });
 
+test('diagnostics_usage_tables_keep_number_columns_apart_on_a_narrow_phone', async ({ page }) => {
+	const { api, id } = await bootChat(page);
+	api.usage.set(id, {
+		session: {
+			turns: 1_024,
+			input_tokens: 1_200_000,
+			output_tokens: 88_300_000,
+			cache_read_tokens: 27_952_400_000,
+			cache_write_tokens: 942_200_000,
+			models: [
+				{
+					model: 'claude-opus-5-5',
+					input_tokens: 237_900,
+					output_tokens: 61_200_000,
+					cache_read_tokens: 21_558_400_000,
+					cache_write_tokens: 484_600_000
+				},
+				{
+					model: 'claude-sonnet-5-5',
+					input_tokens: 76_300,
+					output_tokens: 26_700_000,
+					cache_read_tokens: 6_334_200_000,
+					cache_write_tokens: 452_400_000
+				},
+				{
+					model: 'claude-fable-5-2',
+					input_tokens: 2_600,
+					output_tokens: 239_900,
+					cache_read_tokens: 59_700_000,
+					cache_write_tokens: 4_700_000
+				},
+				{
+					model: 'claude-haiku-5-5',
+					input_tokens: 838_800,
+					output_tokens: 153_300,
+					cache_read_tokens: 0,
+					cache_write_tokens: 499_300
+				}
+			]
+		},
+		delegates: {
+			turns: 408,
+			input_tokens: 56_500_000,
+			output_tokens: 21_700_000,
+			cache_read_tokens: 6_527_100_000,
+			cache_write_tokens: 28_700_000,
+			models: [
+				{
+					model: 'claude-opus-5-5',
+					input_tokens: 56_500_000,
+					output_tokens: 21_700_000,
+					cache_read_tokens: 6_527_100_000,
+					cache_write_tokens: 28_700_000
+				}
+			]
+		}
+	});
+
+	for (const width of [320, 412]) {
+		// Лист открывается заново после смены ширины: на рабочем столе смена раскладки его закрывает.
+		await resizeViewport(page, { width, height: 800 });
+		await page.getByRole('button', { name: 'Меню сессии' }).click();
+		await page.getByRole('menuitem', { name: 'Диагностика' }).click();
+		const dialog = page.getByRole('dialog', { name: 'Диагностика' });
+		await expect(dialog.getByRole('heading', { name: 'Токены за сессию' })).toBeVisible();
+
+		const session = dialog.locator('[data-role="usage-session"]');
+		await expect(session.getByText('28 млрд')).toBeVisible();
+		await expect(session.getByText('1 024')).toBeVisible();
+		await expect(session.getByText('Sonnet 5.5')).toBeVisible();
+		await expect(session.getByTitle('claude-sonnet-5-5')).toBeVisible();
+		await expect(session.getByText('838,8 тыс.')).toBeVisible();
+
+		// Раскладка и открытие листа успевают анимироваться: меряем кадром позже.
+		await page.evaluate(
+			() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+		);
+
+		const problems = await dialog.evaluate((sheet) => {
+			const found: string[] = [];
+			const right = sheet.getBoundingClientRect().right;
+			for (const table of sheet.querySelectorAll('table.usage-table')) {
+				for (const row of table.querySelectorAll('tr')) {
+					const cells = [...row.querySelectorAll('th, td')];
+					const boxes = cells.map((cell) => cell.getBoundingClientRect());
+					boxes.forEach((box, index) => {
+						const cell = cells[index]!;
+						const text = cell.textContent?.trim() ?? '';
+						if (box.right > right + 0.5) found.push(`«${text}» вышла за правый край листа`);
+						if (cell.scrollWidth > cell.clientWidth + 1) found.push(`«${text}» не влезает в свою колонку`);
+						const next = boxes[index + 1];
+						if (next && box.right > next.left) found.push(`«${text}» пересекается с соседней колонкой`);
+					});
+				}
+			}
+			return found;
+		});
+		expect(problems, `ширина ${width}`).toEqual([]);
+
+		await page.keyboard.press('Escape');
+		await expect(dialog).toBeHidden();
+	}
+});
+
 test('reconnect_mid_run_updates_header_and_cards_without_reload', async ({ page }) => {
 	const { hub, id } = await bootChat(page);
 
