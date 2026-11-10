@@ -425,10 +425,12 @@ fn unanswered_worker_times_out_and_runs_unwrapped() {
         drop(stream);
     });
     let started = Instant::now();
-    assert_unleased(output(unleased(Some(&socket))), "did not answer");
+    let mut command = unleased(Some(&socket));
+    command.env("CANTERLOT_LEASE_REPLY_TIMEOUT_MS", "500");
+    assert_unleased(output(command), "did not answer");
     let elapsed = started.elapsed();
     assert!(
-        elapsed >= Duration::from_secs(9) && elapsed < Duration::from_secs(20),
+        elapsed >= Duration::from_millis(400) && elapsed < Duration::from_secs(5),
         "{elapsed:?}"
     );
     let _ = release.send(());

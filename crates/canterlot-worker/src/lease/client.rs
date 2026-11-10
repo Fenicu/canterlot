@@ -37,6 +37,11 @@ const RECONNECT_TOTAL: Duration = Duration::from_secs(30);
 const RETRY_STEP: Duration = Duration::from_millis(250);
 /// Сокет принял соединение, но не ответил на запрос: как недоступный воркер, без аренды.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Первый ответ на `acquire`: сервер сохраняет состояние с `sync_all` под мьютексом,
+/// на заторможенном диске десяти секунд мало, и ожидающие обёртки разом ушли бы без
+/// аренды. Тест обёртки сокращает срок переменной окружения.
+const FIRST_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+const FIRST_REPLY_TIMEOUT_ENV: &str = "CANTERLOT_LEASE_REPLY_TIMEOUT_MS";
 
 #[derive(Debug, Clone)]
 pub struct RunArgs {
@@ -47,6 +52,15 @@ pub struct RunArgs {
 
 fn note(text: impl AsRef<str>) {
     let _ = writeln!(io::stderr(), "canterlot lease: {}", text.as_ref());
+}
+
+fn first_reply_timeout() -> Duration {
+    std::env::var(FIRST_REPLY_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(FIRST_REPLY_TIMEOUT)
 }
 
 /// Маска игнорируемых сигналов, унаследованная от родителя: `nohup` и фоновые задания
@@ -229,17 +243,18 @@ async fn request(
         return Wait::Lost(error.to_string(), false);
     }
     let mut answered = false;
+    let reply_timeout = first_reply_timeout();
     loop {
         // Ждём только первый ответ: очередь может стоять сколько угодно.
         let reply = if answered {
             read_message(&mut lines).await
         } else {
-            match tokio::time::timeout(REPLY_TIMEOUT, read_message(&mut lines)).await {
+            match tokio::time::timeout(reply_timeout, read_message(&mut lines)).await {
                 Ok(reply) => reply,
                 Err(_) => {
                     return Wait::Failed(format!(
                         "worker did not answer within {}s",
-                        REPLY_TIMEOUT.as_secs()
+                        reply_timeout.as_secs_f64()
                     ));
                 }
             }
