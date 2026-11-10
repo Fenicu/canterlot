@@ -6,6 +6,7 @@
   import type { TimelineEntry } from '#lib/stores/timeline.js';
   import type { FeedFolds } from '#lib/timeline/folds.js';
   import { agentTitle, handBackText, isMainAgent, toolTitle } from '#lib/timeline/present.js';
+  import { liveLineShown } from '#lib/timeline/reasoning.js';
   import { shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import { foldSteps } from '#lib/timeline/steps.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
@@ -72,6 +73,9 @@
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
   const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
   const live = $derived(working || streaming);
+  // Рассуждение само показывает «Рассуждает» с часами: отдельная строка хода их не повторяет.
+  const ownReasoning = $derived(active?.kind === 'reasoning' && shownInCard(active));
+  const showLiveLine = $derived(liveLineShown(phase, ownReasoning));
   const report = (block: BlockModel) => block.parentId === laneRoot && block.kind === 'tool_result' && isMainAgent(block.agent);
   // Карточки делегирования, плана и файлов не прячутся в свёрнутые шаги: реестр говорит, какие.
   const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: (block) => report(block) || cardStays(block), quiet: cardQuiet, label: cardLabel }));
@@ -93,7 +97,7 @@
     {:else if block.kind === 'warning' || block.kind === 'error'}
       <NoticeBlock {block} />
     {:else if block.kind === 'reasoning'}
-      <ReasoningBlock {block} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
+      <ReasoningBlock {block} {folds} {now} />
     {:else}
       {#if block.state === 'incomplete'}<p class="incomplete">Неполный ответ</p>{/if}
       <TextBlock {block} />
@@ -117,7 +121,7 @@
       {/if}
     </div>
   {/each}
-  {#if live && head}
+  {#if showLiveLine && live && head}
     <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} {interrupt} waiting={working ? leaseWait : null} />
   {/if}
   {#if head}
