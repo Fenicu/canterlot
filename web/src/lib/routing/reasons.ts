@@ -110,6 +110,11 @@ const RULES: Rule[] = [
     /^(\d+) spawns? in the last hour; the next slot opens at (\d{1,2}:\d{2}) UTC$/,
     (m, now) => `${m[1]} ${fmt.plural(Number(m[1]), ['запуск', 'запуска', 'запусков'])} за час, следующий в ${utcClock(m[2]!, now)}`
   ],
+  [
+    /^(\d+) of (\d+) delegates are working$/,
+    (m) => `уже работают ${m[1]} ${fmt.plural(Number(m[1]), ['помощник', 'помощника', 'помощников'])}`
+  ],
+  [/^the previous child started less than \d+s ago$/, () => 'пауза между запусками'],
   [/^the machine is not connected$/, () => 'машина не подключена'],
   [/^machine metrics stale$/, () => 'метрики машины устарели'],
   [/^nearest limit reset at (\d{1,2}:\d{2}) UTC$/, (m, now) => `ближайший сброс лимита в ${utcClock(m[1]!, now)}`]
@@ -191,10 +196,12 @@ const QUEUE_REASONS: Record<string, string> = {
   rate: 'частота запусков',
   concurrency: 'исполнители заняты',
   limits: 'лимиты провайдера',
-  resources: 'машина занята'
+  resources: 'машина занята',
+  children: 'Ждёт',
+  stagger: 'Ждёт'
 };
 
-/** Причина постановки в очередь: `rate`, `concurrency`, `limits`, `resources`. */
+/** Причина постановки в очередь: `rate`, `concurrency`, `limits`, `resources`, `children`, `stagger`. */
 export function queueReasonLabel(reason: string): string {
   return QUEUE_REASONS[reason] ?? reason;
 }

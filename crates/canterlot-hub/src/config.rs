@@ -609,6 +609,11 @@ pub struct SessionToolsConfig {
     pub parent_spawns: u32,
     #[serde(with = "humantime_serde")]
     pub spawn_window: Duration,
+    /// Сколько детей одного родителя могут работать одновременно. `0` выключает.
+    pub max_working_children: u32,
+    /// Пауза между запусками детей одного родителя. `0` выключает.
+    #[serde(with = "humantime_serde")]
+    pub spawn_stagger: Duration,
     /// Срок хранения принятой делегации: через него уборка удаляет её из архива.
     /// `0` выключает автоматическое удаление.
     #[serde(with = "humantime_serde")]
@@ -630,6 +635,8 @@ impl Default for SessionToolsConfig {
             sender_window: Duration::from_secs(600),
             parent_spawns: 10,
             spawn_window: Duration::from_secs(3600),
+            max_working_children: 6,
+            spawn_stagger: Duration::from_secs(20),
             accepted_retention: Duration::from_secs(3 * 86400),
             machine_unavailable_after: Duration::from_secs(3 * 60),
         }

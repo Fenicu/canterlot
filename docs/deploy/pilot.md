@@ -289,6 +289,8 @@ sender_sends = 30
 sender_window = "10m"
 parent_spawns = 10
 spawn_window = "1h"
+max_working_children = 6
+spawn_stagger = "20s"
 ```
 
 ### 2.5. Секрет прокси и перенос на сервер Caddy

@@ -33,6 +33,8 @@ use crate::{
 const HINT_QUEUED: &str = "The spawn is queued; a [canterlot] message tells you when the session starts or fails. Do not retry; carry on or end your turn.";
 pub(crate) const REASON_RATE: &str = "rate";
 pub(crate) const REASON_RESOURCES: &str = "resources";
+pub(crate) const REASON_CHILDREN: &str = "children";
+pub(crate) const REASON_STAGGER: &str = "stagger";
 const STATE_QUEUED: &str = "queued";
 const STATE_STARTED: &str = "started";
 const STATE_CANCELLED: &str = "cancelled";
@@ -1177,6 +1179,21 @@ async fn try_start(
                 at: retry_at(runtime.spawn_queue, now),
             });
         }
+        if let Some(block) = child_block(
+            &mut *conn,
+            runtime.session_tools,
+            parent.id,
+            now,
+            retry_at(runtime.spawn_queue, now),
+        )
+        .await?
+        {
+            return Ok(Attempt::Blocked {
+                reason: block.reason,
+                detail: block.detail,
+                at: block.at,
+            });
+        }
     }
     let mut attempt = conn.begin().await?; // db::begin: savepoint
     let started = spawn::start_child(
@@ -1283,6 +1300,52 @@ async fn try_start(
 
 fn retry_at(config: &SpawnQueueConfig, now: DateTime<Utc>) -> DateTime<Utc> {
     now + TimeDelta::from_std(config.retry_delay).unwrap_or_else(|_| TimeDelta::seconds(60))
+}
+
+/// Транзиентное препятствие одного родителя: сколько детей работает и когда
+/// освободится пауза между запусками.
+pub(crate) struct ChildBlock {
+    pub(crate) reason: &'static str,
+    pub(crate) detail: String,
+    pub(crate) at: DateTime<Utc>,
+}
+
+/// Предел одновременной работы детей и пауза запусков. `children_at` — когда
+/// повторить проверку занятости: у паузы срок точный, у работающих детей — тик очереди.
+pub(crate) async fn child_block(
+    conn: &mut PgConnection,
+    config: &SessionToolsConfig,
+    parent: Uuid,
+    now: DateTime<Utc>,
+    children_at: DateTime<Utc>,
+) -> Result<Option<ChildBlock>, sqlx::Error> {
+    if config.max_working_children > 0 {
+        let count = access::working_children(conn, parent).await?;
+        let limit = i64::from(config.max_working_children);
+        if count >= limit {
+            return Ok(Some(ChildBlock {
+                reason: REASON_CHILDREN,
+                detail: format!("{count} of {limit} delegates are working"),
+                at: children_at,
+            }));
+        }
+    }
+    if !config.spawn_stagger.is_zero()
+        && let Some(last) = access::last_child_start(conn, parent).await?
+    {
+        let at = last + TimeDelta::from_std(config.spawn_stagger).unwrap_or_default();
+        if at > now {
+            return Ok(Some(ChildBlock {
+                reason: REASON_STAGGER,
+                detail: format!(
+                    "the previous child started less than {}s ago",
+                    config.spawn_stagger.as_secs()
+                ),
+                at,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// Задание `spawn_dequeue`: FIFO по готовности с пропуском занятой головы.

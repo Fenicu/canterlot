@@ -444,13 +444,17 @@ fn session_tools_config_defaults_match_the_plan() {
         (tools.parent_spawns, tools.spawn_window),
         (10, D::from_secs(3600))
     );
+    assert_eq!(
+        (tools.max_working_children, tools.spawn_stagger),
+        (6, D::from_secs(20))
+    );
     assert_eq!(config.activity.idle_quiet, D::from_secs(5));
     assert_eq!(config.activity.idle_background_max, D::from_secs(15 * 60));
 
     fs::write(
         &path,
         format!(
-            "{PILOT_BASE}[session_tools]\nmax_spawn_depth = 1\npair_window = '2m'\n[activity]\nidle_quiet = '9s'\nidle_background_max = '40m'\n"
+            "{PILOT_BASE}[session_tools]\nmax_spawn_depth = 1\npair_window = '2m'\nmax_working_children = 2\nspawn_stagger = '5s'\n[activity]\nidle_quiet = '9s'\nidle_background_max = '40m'\n"
         ),
     )
     .unwrap();
@@ -458,6 +462,8 @@ fn session_tools_config_defaults_match_the_plan() {
     assert_eq!(config.session_tools.max_spawn_depth, 1);
     assert_eq!(config.session_tools.pair_window, D::from_secs(120));
     assert_eq!(config.session_tools.max_chain_depth, 8);
+    assert_eq!(config.session_tools.max_working_children, 2);
+    assert_eq!(config.session_tools.spawn_stagger, D::from_secs(5));
     assert_eq!(config.activity.idle_quiet, D::from_secs(9));
     assert_eq!(config.activity.idle_background_max, D::from_secs(40 * 60));
 

@@ -81,6 +81,10 @@ describe('reason translation', () => {
   test('queue reasons and verdicts have Russian labels', () => {
     expect(queueReasonLabel('rate')).toBe('частота запусков');
     expect(queueReasonLabel('resources')).toBe('машина занята');
+    expect(queueReasonLabel('children')).toBe('Ждёт');
+    expect(queueReasonLabel('stagger')).toBe('Ждёт');
+    expect(detailText('6 of 6 delegates are working')).toBe('уже работают 6 помощников');
+    expect(detailText('the previous child started less than 20s ago')).toBe('пауза между запусками');
     expect(queueReasonLabel('weird')).toBe('weird');
     expect(verdictLabel('chosen')).toBe('выбран');
     expect(verdictLabel('parallel_busy')).toBe('занят');

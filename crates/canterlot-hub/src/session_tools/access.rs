@@ -242,6 +242,35 @@ pub async fn rate_state(
     })
 }
 
+/// Работающие дети родителя: живые разговоры, чья проекция тратит квоту провайдера.
+/// `starting` в списке на будущее: проекция держит начало хода в `working`.
+pub async fn working_children(conn: &mut PgConnection, parent: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "select count(*) from conversations c
+           join conversation_derived d on d.conversation_id=c.id
+          where c.parent_conversation_id=$1
+            and c.trashed_at is null and c.archived_at is null
+            and d.activity_state in ('starting','working','stalled')",
+    )
+    .bind(parent)
+    .fetch_one(conn)
+    .await
+}
+
+/// Когда родитель создал последнего ребёнка: от этой точки считается пауза запусков.
+pub async fn last_child_start(
+    conn: &mut PgConnection,
+    parent: Uuid,
+) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select max(created_at) from conversations
+          where parent_conversation_id=$1 and trashed_at is null",
+    )
+    .bind(parent)
+    .fetch_one(conn)
+    .await
+}
+
 pub async fn check_spawn_rate(
     conn: &mut PgConnection,
     config: &SessionToolsConfig,

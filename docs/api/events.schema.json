@@ -4505,7 +4505,9 @@
             "model": {
               "anyOf": [ { "type": "string" }, { "type": "null" } ]
             },
-            "reason": { "enum": ["rate", "concurrency", "limits", "resources"] },
+            "reason": {
+              "enum": ["rate", "concurrency", "limits", "resources", "children", "stagger"]
+            },
             "detail": { "type": "object" },
             "state": {
               "enum": ["queued", "starting", "started", "cancelled", "failed", "expired"]

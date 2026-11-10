@@ -57,7 +57,17 @@ async fn catalog(pool: &PgPool, machine: Uuid, harness: &str, provider: &str, mo
 
 impl Fx {
     async fn new(pool: PgPool) -> Self {
-        Self::with(pool, SessionToolsConfig::default(), &CAPABILITIES).await
+        // Сценарии создают детей вплотную: пауза запусков проверяется отдельно
+        // в очереди, здесь её выключаем, чтобы не менять смысл старых тестов.
+        Self::with(
+            pool,
+            SessionToolsConfig {
+                spawn_stagger: std::time::Duration::ZERO,
+                ..Default::default()
+            },
+            &CAPABILITIES,
+        )
+        .await
     }
 
     async fn with(pool: PgPool, config: SessionToolsConfig, capabilities: &[&str]) -> Self {

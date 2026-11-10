@@ -1214,10 +1214,33 @@ pub async fn spawn(
             .blocked()
             .then_some(super::spawn_queue::REASON_RESOURCES)
     });
+    let child = if queue_reason.is_none() {
+        spawn_queue::child_block(
+            &mut tx,
+            &context.config,
+            parent.id,
+            now,
+            now + chrono::TimeDelta::from_std(context.spawn_queue.retry_delay)
+                .unwrap_or_else(|_| chrono::TimeDelta::seconds(60)),
+        )
+        .await?
+    } else {
+        None
+    };
+    let queue_reason = queue_reason.or_else(|| child.as_ref().map(|block| block.reason));
     if let Some(reason) = queue_reason {
         if !args.queue {
             return Err(match reason {
                 super::spawn_queue::REASON_RATE => ToolError::new(ToolErrorCode::RateLimited),
+                super::spawn_queue::REASON_CHILDREN | super::spawn_queue::REASON_STAGGER => {
+                    ToolError::with_message(
+                        ToolErrorCode::MachineBusy,
+                        child
+                            .as_ref()
+                            .map(|block| block.detail.clone())
+                            .unwrap_or_default(),
+                    )
+                }
                 _ => ToolError::with_message(
                     ToolErrorCode::MachineBusy,
                     guard.detail.clone().unwrap_or_default(),
@@ -1225,6 +1248,13 @@ pub async fn spawn(
             });
         }
         let (detail, not_before) = match reason {
+            super::spawn_queue::REASON_CHILDREN | super::spawn_queue::REASON_STAGGER => {
+                let block = child.as_ref().expect("reason came from a child block");
+                (
+                    serde_json::json!({"detail": block.detail.clone()}),
+                    block.at,
+                )
+            }
             super::spawn_queue::REASON_RATE => {
                 let at = rate
                     .retry_at

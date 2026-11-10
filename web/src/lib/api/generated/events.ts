@@ -1557,7 +1557,7 @@ export interface SpawnQueueChanged {
     level: ("low" | "medium" | "high" | "xhigh") | null;
     harness: string | null;
     model: string | null;
-    reason: "rate" | "concurrency" | "limits" | "resources";
+    reason: "rate" | "concurrency" | "limits" | "resources" | "children" | "stagger";
     detail: {};
     state: "queued" | "starting" | "started" | "cancelled" | "failed" | "expired";
     not_before: Time;

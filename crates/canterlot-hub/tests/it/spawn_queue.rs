@@ -55,6 +55,12 @@ async fn catalog(pool: &PgPool, machine: Uuid, harness: &str, provider: &str, mo
 
 impl Fx {
     async fn new(pool: PgPool) -> Self {
+        // Фикстуры создают детей вплотную: пауза запусков включается только там,
+        // где её проверяют, чтобы не менять смысл старых сценариев очереди.
+        Self::with_config(pool, no_stagger()).await
+    }
+
+    async fn with_config(pool: PgPool, config: SessionToolsConfig) -> Self {
         let seed = testkit::seed(&pool).await;
         let registry = Registry::new(Default::default());
         let session = testkit::fake_session(&registry, seed.machine_id, &CAPABILITIES, true);
@@ -116,7 +122,7 @@ impl Fx {
         Self {
             context: ToolContext {
                 pool: pool.clone(),
-                config: Arc::new(SessionToolsConfig::default()),
+                config: Arc::new(config),
                 limits: Default::default(),
                 settle: SettleConfig {
                     idle_quiet: std::time::Duration::from_secs(5),
@@ -2060,4 +2066,289 @@ async fn start_now_takes_the_queue_before_the_parent_row(pool: PgPool) {
     });
     let started = started.unwrap();
     assert_eq!(started.status, "started", "{started:?}");
+}
+
+fn no_stagger() -> SessionToolsConfig {
+    SessionToolsConfig {
+        spawn_stagger: std::time::Duration::ZERO,
+        ..Default::default()
+    }
+}
+
+fn staggered() -> SessionToolsConfig {
+    SessionToolsConfig {
+        spawn_stagger: std::time::Duration::from_secs(20),
+        ..Default::default()
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn working_children_limit_queues_the_seventh_and_idle_frees_it(pool: PgPool) {
+    let f = Fx::with_config(pool, no_stagger()).await;
+    let mut working = Vec::new();
+    for _ in 0..6 {
+        working.push(
+            child_of(
+                &f.pool,
+                f.parent,
+                "opencode",
+                "opencode-go/deepseek-v4.1-flash",
+                "working",
+            )
+            .await,
+        );
+    }
+    let answer = f.spawn_direct().await.unwrap();
+    assert_eq!(answer["status"], "queued", "{answer}");
+    assert_eq!(answer["reason"], "children", "{answer}");
+    assert!(
+        answer["detail"]
+            .as_str()
+            .unwrap()
+            .contains("6 of 6 delegates are working"),
+        "{answer}"
+    );
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+    let (state, reason, _detail, _child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!((state.as_str(), reason.as_str()), ("queued", "children"));
+
+    sqlx::query("update conversation_derived set activity_state='idle' where conversation_id=$1")
+        .bind(working[0])
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    make_due(&f.pool, queue_id).await;
+    let outcome = f.run_dequeue(queue_id, Utc::now()).await;
+    assert!(
+        matches!(outcome, canterlot_hub::crunch::JobOutcome::Done(_)),
+        "{outcome:?}"
+    );
+    let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "started");
+    assert!(child.is_some());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn idle_waiting_and_paused_children_do_not_count_as_working(pool: PgPool) {
+    let f = Fx::with_config(pool, no_stagger()).await;
+    for state in [
+        "idle",
+        "waiting_for_user",
+        "quota_paused",
+        "stopped",
+        "failed",
+        "idle",
+    ] {
+        child_of(
+            &f.pool,
+            f.parent,
+            "opencode",
+            "opencode-go/deepseek-v4.1-flash",
+            state,
+        )
+        .await;
+    }
+    let answer = f.spawn_direct().await.unwrap();
+    assert_eq!(answer["status"], "started", "{answer}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn routed_spawn_obeys_the_working_children_limit(pool: PgPool) {
+    let f = Fx::with_config(pool, no_stagger()).await;
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {"bugfix": {"title": "Починка", "candidates": [
+                {"harness":"opencode","model":"opencode-go/deepseek-v4.1-flash","effort":"high"}
+            ]}}
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    for _ in 0..6 {
+        child_of(
+            &f.pool,
+            f.parent,
+            "opencode",
+            "opencode-go/beam-free",
+            "working",
+        )
+        .await;
+    }
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"bugfix"},"brief":"b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "queued", "{answer}");
+    assert_eq!(answer["reason"], "children", "{answer}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stagger_queues_the_next_spawn_until_the_previous_child_is_old_enough(pool: PgPool) {
+    let f = Fx::with_config(pool, staggered()).await;
+    let first = f.spawn_direct().await.unwrap();
+    assert_eq!(first["status"], "started", "{first}");
+    let first_id: Uuid = serde_json::from_value(first["session_id"].clone()).unwrap();
+    let first_start: DateTime<Utc> =
+        sqlx::query_scalar("select created_at from conversations where id=$1")
+            .bind(first_id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+
+    let second = f.spawn_direct().await.unwrap();
+    assert_eq!(second["status"], "queued", "{second}");
+    assert_eq!(second["reason"], "stagger", "{second}");
+    let queue_id: Uuid = serde_json::from_value(second["queue_id"].clone()).unwrap();
+    let (_state, _reason, _detail, _child, not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(
+        not_before,
+        first_start + chrono::TimeDelta::seconds(20),
+        "{not_before} vs {first_start}"
+    );
+    let at: DateTime<Utc> = sqlx::query_scalar(
+        "select run_at from scheduled_jobs
+          where conversation_id=$1 and payload->>'action'='spawn_dequeue'
+            and payload->>'queue_id'=$2",
+    )
+    .bind(f.parent)
+    .bind(queue_id.to_string())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        at, not_before,
+        "the job must run at not_before, not the retry tick"
+    );
+
+    let outcome = f.run_dequeue(queue_id, not_before).await;
+    assert!(
+        matches!(outcome, canterlot_hub::crunch::JobOutcome::Done(_)),
+        "{outcome:?}"
+    );
+    let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, queue_id).await;
+    assert_eq!(state, "started");
+    assert!(child.is_some());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_burst_starts_in_fifo_order_one_stagger_apart(pool: PgPool) {
+    let f = Fx::with_config(pool, staggered()).await;
+    let first = f.spawn_direct().await.unwrap();
+    assert_eq!(first["status"], "started", "{first}");
+    let first_id: Uuid = serde_json::from_value(first["session_id"].clone()).unwrap();
+    let first_start: DateTime<Utc> =
+        sqlx::query_scalar("select created_at from conversations where id=$1")
+            .bind(first_id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    let second = f.spawn_direct().await.unwrap();
+    let third = f.spawn_direct().await.unwrap();
+    assert_eq!(second["reason"], "stagger", "{second}");
+    assert_eq!(third["reason"], "stagger", "{third}");
+    let second_id: Uuid = serde_json::from_value(second["queue_id"].clone()).unwrap();
+    let third_id: Uuid = serde_json::from_value(third["queue_id"].clone()).unwrap();
+    assert!(second["position"].as_i64() < third["position"].as_i64());
+
+    // The due tick starts the older item; the third waits for its own stagger.
+    f.run_dequeue(third_id, first_start + chrono::TimeDelta::seconds(20))
+        .await;
+    let (second_state, _reason, _detail, second_child, _not_before) =
+        queue_row(&f.pool, second_id).await;
+    assert_eq!(second_state, "started");
+    let second_start: DateTime<Utc> =
+        sqlx::query_scalar("select created_at from conversations where id=$1")
+            .bind(second_child.unwrap())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    // The next due tick sees the second child just started and pushes the third out.
+    f.run_dequeue(third_id, first_start + chrono::TimeDelta::seconds(20))
+        .await;
+    let (third_state, third_reason, _detail, _child, third_not_before) =
+        queue_row(&f.pool, third_id).await;
+    assert_eq!(third_state, "queued");
+    assert_eq!(third_reason, "stagger");
+    assert_eq!(
+        third_not_before,
+        second_start + chrono::TimeDelta::seconds(20)
+    );
+    f.run_dequeue(third_id, second_start + chrono::TimeDelta::seconds(20))
+        .await;
+    let (third_state, _reason, _detail, third_child, _not_before) =
+        queue_row(&f.pool, third_id).await;
+    assert_eq!(third_state, "started", "{third_state}");
+    assert!(third_child.is_some());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_now_overrides_the_working_children_limit(pool: PgPool) {
+    let f = Fx::with_config(pool, no_stagger()).await;
+    for _ in 0..6 {
+        child_of(
+            &f.pool,
+            f.parent,
+            "opencode",
+            "opencode-go/deepseek-v4.1-flash",
+            "working",
+        )
+        .await;
+    }
+    let answer = f.spawn_direct().await.unwrap();
+    assert_eq!(answer["reason"], "children", "{answer}");
+    let queue_id: Uuid = serde_json::from_value(answer["queue_id"].clone()).unwrap();
+    let started = f.runtime_call(queue_id, true).await.unwrap();
+    assert_eq!(started.status, "started", "{started:?}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_now_overrides_the_stagger(pool: PgPool) {
+    let f = Fx::with_config(pool, staggered()).await;
+    let first = f.spawn_direct().await.unwrap();
+    assert_eq!(first["status"], "started", "{first}");
+    let second = f.spawn_direct().await.unwrap();
+    assert_eq!(second["reason"], "stagger", "{second}");
+    let queue_id: Uuid = serde_json::from_value(second["queue_id"].clone()).unwrap();
+    let started = f.runtime_call(queue_id, true).await.unwrap();
+    assert_eq!(started.status, "started", "{started:?}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn zero_working_children_disables_the_cap(pool: PgPool) {
+    let f = Fx::with_config(
+        pool,
+        SessionToolsConfig {
+            max_working_children: 0,
+            spawn_stagger: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+    )
+    .await;
+    for _ in 0..6 {
+        child_of(
+            &f.pool,
+            f.parent,
+            "opencode",
+            "opencode-go/deepseek-v4.1-flash",
+            "working",
+        )
+        .await;
+    }
+    let first = f.spawn_direct().await.unwrap();
+    assert_eq!(first["status"], "started", "{first}");
+    let second = f.spawn_direct().await.unwrap();
+    assert_eq!(second["status"], "started", "{second}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn zero_stagger_disables_the_pause(pool: PgPool) {
+    let f = Fx::with_config(pool, no_stagger()).await;
+    let first = f.spawn_direct().await.unwrap();
+    assert_eq!(first["status"], "started", "{first}");
+    let second = f.spawn_direct().await.unwrap();
+    assert_eq!(second["status"], "started", "{second}");
 }

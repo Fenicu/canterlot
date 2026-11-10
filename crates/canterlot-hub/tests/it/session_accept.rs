@@ -61,7 +61,10 @@ fn scheduler(pool: &PgPool, registry: &Registry) -> Scheduler {
 fn context(pool: &PgPool, registry: &Registry) -> ToolContext {
     ToolContext {
         pool: pool.clone(),
-        config: Arc::new(SessionToolsConfig::default()),
+        config: Arc::new(SessionToolsConfig {
+            spawn_stagger: std::time::Duration::ZERO,
+            ..Default::default()
+        }),
         limits: Default::default(),
         settle: SettleConfig {
             idle_quiet: std::time::Duration::from_secs(5),
