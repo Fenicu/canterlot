@@ -653,8 +653,19 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
             dir,
             requested_at_ms,
         } => {
-            let Ok(start_ticks) = crate::containment::start_ticks(pid) else {
-                return Ok(());
+            let start_ticks = match crate::containment::start_ticks(pid) {
+                Ok(start_ticks) => start_ticks,
+                Err(error) => {
+                    // Без времени старта нельзя отличить переиспользованный pid:
+                    // отвечаем ошибкой, чтобы клиент сразу шёл без аренды, а не ждал обрыва.
+                    return send(
+                        &mut write,
+                        ServerMessage::Error {
+                            reason: format!("cannot read wrapper start time: {error}"),
+                        },
+                    )
+                    .await;
+                }
             };
             let meta = Meta {
                 wrapper_pid: pid,
