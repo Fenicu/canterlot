@@ -550,6 +550,84 @@ async fn a_turn_is_pushed_once_even_when_the_state_flaps(pool: PgPool) {
     );
 }
 
+async fn owner_lost(pool: &PgPool, execution: Uuid) {
+    executions::set_state(
+        pool,
+        execution,
+        ExecutionState::OwnerLost,
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+}
+
+async fn owner_reclaimed(pool: &PgPool, execution: Uuid) {
+    executions::set_state(
+        pool,
+        execution,
+        ExecutionState::Running,
+        Some(canterlot_proto::OWNER_RECLAIMED),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let first = Uuid::now_v7();
+    open_question(&pool, &s, &question_batch(&execution, first, "Первый?")).await;
+    // Запрос закрылся потерей воркера, доставка отменила строку: пуша не было.
+    owner_lost(&pool, execution.execution_id).await;
+    let cancelled = sender(&config).deliver_due(&pool, later()).await.unwrap();
+    assert_eq!((cancelled.sent, cancelled.cancelled), (0, 1));
+    assert!(fake.seen().is_empty());
+    // Воркер вернулся и снова ждёт ответа на тот же запрос.
+    owner_reclaimed(&pool, execution.execution_id).await;
+    open_question(&pool, &s, &question_batch(&execution, first, "Первый?")).await;
+    assert_eq!(
+        pushes(&pool).await,
+        [(s.conversation_id, "waiting".into(), "pending".into())]
+    );
+    assert_eq!(
+        sender(&config)
+            .deliver_due(&pool, later())
+            .await
+            .unwrap()
+            .sent,
+        1
+    );
+    assert_eq!(fake.seen().len(), 1);
+
+    // А ушедший пуш повторно открытый запрос не повторяет.
+    let second = Uuid::now_v7();
+    open_question(&pool, &s, &question_batch(&execution, second, "Второй?")).await;
+    assert_eq!(
+        sender(&config)
+            .deliver_due(&pool, later())
+            .await
+            .unwrap()
+            .sent,
+        1
+    );
+    owner_lost(&pool, execution.execution_id).await;
+    owner_reclaimed(&pool, execution.execution_id).await;
+    open_question(&pool, &s, &question_batch(&execution, second, "Второй?")).await;
+    let pending: i64 =
+        sqlx::query_scalar("select count(*) from owner_pushes where state='pending'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(pending, 0, "a delivered request stays delivered");
+    assert_eq!(fake.seen().len(), 2);
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_old_idle_session_does_not_push_after_a_restart(pool: PgPool) {
     enable(&pool).await;

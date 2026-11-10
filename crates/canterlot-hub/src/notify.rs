@@ -111,6 +111,8 @@ pub async fn configure(pool: &PgPool, settings: Option<&PushSettings>) -> Result
 
 /// Вставка строки, если пуши включены, событие выбрано и сессия подходит.
 /// `root_only`: итоги и сбои делегатов уже доходят до их оркестратора.
+/// `revive_cancelled`: отменённый или брошенный пуш возрождается — так повторно
+/// открытый запрос получает пуш, которого у него ещё не было.
 async fn enqueue_in_tx(
     conn: &mut PgConnection,
     conversation_id: Uuid,
@@ -118,8 +120,17 @@ async fn enqueue_in_tx(
     dedupe_key: &str,
     payload: &Value,
     root_only: bool,
+    revive_cancelled: bool,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let conflict = if revive_cancelled {
+        "on conflict(dedupe_key) do update
+           set state='pending', run_at=clock_timestamp(), attempts=0,
+               updated_at=clock_timestamp()
+           where owner_pushes.state in ('cancelled','dropped')"
+    } else {
+        "on conflict(dedupe_key) do nothing"
+    };
+    let sql = format!(
         "insert into owner_pushes(id,conversation_id,kind,dedupe_key,payload,run_at)
          select $1,c.id,$3,$4,$5,clock_timestamp()
          from push_settings s join conversations c on c.id=$2
@@ -128,16 +139,17 @@ async fn enqueue_in_tx(
            and case $3 when 'waiting' then s.waiting
                        when 'turn_finished' then s.turn_finished
                        else s.failures end
-         on conflict(dedupe_key) do nothing",
-    )
-    .bind(Uuid::now_v7())
-    .bind(conversation_id)
-    .bind(kind)
-    .bind(dedupe_key)
-    .bind(payload)
-    .bind(root_only)
-    .execute(conn)
-    .await?;
+         {conflict}"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(Uuid::now_v7())
+        .bind(conversation_id)
+        .bind(kind)
+        .bind(dedupe_key)
+        .bind(payload)
+        .bind(root_only)
+        .execute(conn)
+        .await?;
     Ok(())
 }
 
@@ -156,6 +168,7 @@ pub async fn on_request_opened_in_tx(
         &format!("{KIND_WAITING}:{request_id}"),
         &json!({"request_id": request_id}),
         false,
+        true,
     )
     .await
 }
@@ -204,6 +217,7 @@ pub async fn on_settled_in_tx(
         &key,
         &json!({"state": state_name(state), "evidence": evidence}),
         true,
+        false,
     )
     .await
 }
