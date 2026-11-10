@@ -374,6 +374,8 @@
       onclick={() => searchOpen = !searchOpen}
     />
 
+    <IconButton icon="bookmark" label="Избранное" onclick={() => void goto(resolve('/bookmarks'))} />
+
     <IconButton
       icon={theme.effective === 'dark' ? 'sun' : 'moon'}
       label="Сменить тему"
