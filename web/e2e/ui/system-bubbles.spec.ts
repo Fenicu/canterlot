@@ -146,6 +146,10 @@ test('a_session_message_is_an_agent_bubble_with_a_bookmark_and_no_edit', async (
   await expect(message.getByRole('button', { name: 'Изменить' })).toHaveCount(0);
   const bookmark = message.getByRole('button', { name: 'В избранное' });
   await expect(bookmark).toHaveAttribute('aria-pressed', 'false');
+  const headerBox = (await message.locator('header').boundingBox())!;
+  const toggleBox = (await bookmark.boundingBox())!;
+  expect(toggleBox.y + toggleBox.height / 2).toBeGreaterThanOrEqual(headerBox.y);
+  expect(toggleBox.y + toggleBox.height / 2).toBeLessThanOrEqual(headerBox.y + headerBox.height);
   await bookmark.click();
   await expect(message.getByRole('button', { name: 'Убрать из избранного' })).toHaveAttribute('aria-pressed', 'true');
 

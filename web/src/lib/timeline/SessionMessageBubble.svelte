@@ -33,24 +33,24 @@
       {#if input.createdAt !== null}
         <time datetime={new Date(input.createdAt).toISOString()} use:timeTip={input.createdAt}>{fmt.clock(input.createdAt)}</time>
       {/if}
+      {#if input.id && bookmarks}
+        <div class="actions" data-role="bubble-actions">
+          <IconButton
+            icon="bookmark"
+            solid={bookmarked}
+            pressed={bookmarked}
+            active={bookmarked}
+            label={bookmarked ? 'Убрать из избранного' : 'В избранное'}
+            onclick={() => bookmarks && void bookmarks.toggle('input', input.id!)}
+          />
+        </div>
+      {/if}
     </header>
     <p class="text">{view.folded && !expanded ? view.folded : view.body}</p>
     {#if view.folded}
       <button type="button" class="toggle" aria-expanded={expanded} onclick={() => { expanded = !expanded; }}>
         {expanded ? 'Свернуть' : 'Показать полностью'}
       </button>
-    {/if}
-    {#if input.id && bookmarks}
-      <div class="actions" data-role="bubble-actions">
-        <IconButton
-          icon="bookmark"
-          solid={bookmarked}
-          pressed={bookmarked}
-          active={bookmarked}
-          label={bookmarked ? 'Убрать из избранного' : 'В избранное'}
-          onclick={() => bookmarks && void bookmarks.toggle('input', input.id!)}
-        />
-      </div>
     {/if}
   </article>
 {/if}
@@ -86,5 +86,6 @@
   time { margin-left: auto; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .text { margin: 0; color: var(--text); overflow-wrap: anywhere; white-space: pre-wrap; }
   .toggle { align-self: flex-start; min-height: var(--target); padding-inline: var(--s2); color: var(--accent-link); font-size: var(--fs-sm); }
-  .actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
+  /* Закладка стоит в строке заголовка: цель касания та же, высота строки не растёт. */
+  .actions { display: flex; align-self: center; margin-left: var(--s2); margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2); }
 </style>

@@ -100,7 +100,16 @@ test('bookmark_toggle_on_an_owner_message_targets_the_input', async ({ page }) =
 	const { api, seed } = await boot(page);
 	await openChat(page, seed.main);
 	const bubble = page.locator('.bubble').filter({ hasText: OWNER_BOOKMARK_TEXT });
-	await bubble.getByRole('button', { name: 'В избранное' }).click();
+	const toggle = bubble.getByRole('button', { name: 'В избранное' });
+	const status = bubble.locator('[data-role="status-row"] .status');
+	const statusBox = (await status.boundingBox())!;
+	const toggleBox = (await toggle.boundingBox())!;
+	// Закладка делит строку со статусом и временем, а не делает пузырь выше на целую строку.
+	expect(toggleBox.y + toggleBox.height / 2).toBeGreaterThanOrEqual(statusBox.y);
+	expect(toggleBox.y + toggleBox.height / 2).toBeLessThanOrEqual(statusBox.y + statusBox.height);
+	const rowBox = (await bubble.locator('[data-role="status-row"]').boundingBox())!;
+	expect(rowBox.height).toBeLessThanOrEqual(statusBox.height + 1);
+	await toggle.click();
 	await expect(bubble.getByRole('button', { name: 'Убрать из избранного' })).toHaveAttribute('aria-pressed', 'true');
 	expect(api.bookmarkCalls.at(-1)).toMatchObject({
 		method: 'PUT',

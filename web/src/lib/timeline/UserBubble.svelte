@@ -104,6 +104,7 @@
 
   // Правка — в самом пузыре: текст уже на месте, черновик композера не трогаем.
   let editing = $state(false);
+  const canBookmark = $derived(input.id !== null && !editing && input.state === 'accepted');
   let editText = $state('');
   let editKept = $state<string[]>([]);
   let editRevision = $state(1);
@@ -206,9 +207,39 @@
   {#if input.revision > 1 && !editing}<p class="edited">Изменено</p>{/if}
   {#if editClosedNote && !editing && input.state === 'queued'}<p class="reason">{editClosedNote}</p>{/if}
   {#if settled}
-    <p class="status">{label}{#if stampAt !== null}{stampSeparator}<time datetime={new Date(stampAt).toISOString()} use:timeTip={stampAt}>{fmt.clock(stampAt)}</time>{/if}</p>
+    <div class="status-row" data-role="status-row">
+      <p class="status">{label}{#if stampAt !== null}{stampSeparator}<time datetime={new Date(stampAt).toISOString()} use:timeTip={stampAt}>{fmt.clock(stampAt)}</time>{/if}</p>
+      {#if canBookmark}
+        <div class="actions message-actions" data-role="bubble-actions">
+          <IconButton
+            icon="bookmark"
+            solid={bookmarked}
+            pressed={bookmarked}
+            active={bookmarked}
+            inert={!bookmarks}
+            label={bookmarked ? 'Убрать из избранного' : 'В избранное'}
+            onclick={() => bookmarks && void bookmarks.toggle('input', input.id!)}
+          />
+        </div>
+      {/if}
+    </div>
   {:else}
-    <StageTrack {stages} {index} state="active" form="compact" label="Доставка сообщения" status={label} />
+    <div class="status-row" data-role="status-row">
+      <StageTrack {stages} {index} state="active" form="compact" label="Доставка сообщения" status={label} />
+      {#if canBookmark}
+        <div class="actions message-actions" data-role="bubble-actions">
+          <IconButton
+            icon="bookmark"
+            solid={bookmarked}
+            pressed={bookmarked}
+            active={bookmarked}
+            inert={!bookmarks}
+            label={bookmarked ? 'Убрать из избранного' : 'В избранное'}
+            onclick={() => bookmarks && void bookmarks.toggle('input', input.id!)}
+          />
+        </div>
+      {/if}
+    </div>
   {/if}
   {#if unsure}
     <p class="reason">Отправка не подтверждена, повторяю</p>
@@ -258,19 +289,6 @@
       >Вернуть в черновик</Button>
     </div>
   {/if}
-  {#if input.id && !editing && input.state === 'accepted'}
-    <div class="actions message-actions" data-role="bubble-actions">
-      <IconButton
-        icon="bookmark"
-        solid={bookmarked}
-        pressed={bookmarked}
-        active={bookmarked}
-        inert={!bookmarks}
-        label={bookmarked ? 'Убрать из избранного' : 'В избранное'}
-        onclick={() => bookmarks && void bookmarks.toggle('input', input.id!)}
-      />
-    </div>
-  {/if}
 </article>
 {#if viewing !== null && Viewer}
   <Viewer {shots} start={viewing} title={input.text.slice(0, 80) || 'Сообщение'} heading="Вложения" onclose={() => { viewing = null; }} />
@@ -317,7 +335,11 @@
   .bubble[data-state='rejected'] { background: var(--danger-soft); }
   p { margin: 0; overflow-wrap: anywhere; }
   .text { white-space: pre-wrap; }
+  .status-row { display: flex; align-items: center; gap: var(--s3); min-width: 0; }
+  .status { min-width: 0; }
   .status, .reason { color: var(--secondary); font-size: var(--fs-sm); }
+  /* Значок держит цель касания, но не делает строку статуса выше: поле съедается отрицательным отступом. */
+  .message-actions { align-items: center; margin-left: auto; margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2); }
   [data-state='rejected'] .status { color: var(--danger); font-weight: var(--weight-medium); }
   [data-state='acceptance_unconfirmed'] .status { color: var(--warning); }
   .files { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
