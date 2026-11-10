@@ -33,7 +33,13 @@ test.describe('stack: limits and attachments', () => {
     writeSyntheticLimits(stack.workerDataDir!, 'codex', { five_hour: { used_permille: 40, resets_at_ms: Date.now() + 5 * 3_600_000 } });
 
     await expect(banner).toBeHidden({ timeout: 60_000 });
-    await expect(page.locator('article.bubble').filter({ hasText: resume })).toBeVisible({ timeout: 30_000 });
+    // Продолжение после сброса — пузырь хаба, а не сообщение владельца; текст для агента свёрнут под ним.
+    const resumed = page.locator('article.system[data-event-kind="limit_resumed"]').last();
+    await expect(resumed).toBeVisible({ timeout: 30_000 });
+    await expect(resumed).toContainText('сброшен — продолжаю');
+    await expect(page.locator('article.bubble').filter({ hasText: resume })).toHaveCount(0);
+    await resumed.getByRole('button', { name: 'Текст для агента' }).click();
+    await expect(resumed.locator('[data-role="system-body"]')).toContainText(resume);
     await expect.poll(async () => (await hub.inputLog(id)).filter((item) => item.text === resume).length, { timeout: 30_000 }).toBe(1);
     await expect.poll(async () => (await hub.textOf(id)).length, { timeout: 30_000 }).toBeGreaterThan('до лимита'.length);
     await hub.waitIdle(id, 60_000);
