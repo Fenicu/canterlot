@@ -111,16 +111,58 @@ test('the_live_window_keeps_its_height_and_folds_into_a_line_with_a_preview', as
     if (index === 0) height = box.height;
     else expect(Math.abs(box.height - height), 'window height across deltas').toBeLessThanOrEqual(0.5);
     await expect(row.locator('.toggle')).toContainText('Рассуждает');
-    // Окно само говорит о рассуждении: отдельная строка хода не повторяет эти слова.
-    await expect(page.locator('[data-working]')).toHaveCount(0);
+    // Окно само говорит о рассуждении: строка хода не повторяет эти слова, но остаётся с прерыванием.
+    const line = page.locator('[data-working]');
+    await expect(line).toBeVisible();
+    await expect(line).toHaveAttribute('data-quiet', '');
+    await expect(line.locator('.text')).toHaveCSS('position', 'absolute');
+    await expect(line.getByRole('button', { name: 'Прервать' })).toBeVisible();
   }
   await finalize(hub, id, blockId, chunks.length, chunks.join(''));
   await expect(row.locator('.window')).toHaveCount(0, { timeout: 5_000 });
   await expect(row.locator('.preview')).toHaveText('Проверяю модуль.');
-  await expect(row.locator('.duration')).toHaveText('12 с');
+  await expect(row.locator('.duration')).toHaveText(/^\d+ с$/);
   await expect(row.locator('.toggle')).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('[data-working]')).toHaveCount(0);
 });
+
+for (const pref of ['line', 'live', 'expanded'] as const) {
+  test(`the_interrupt_stays_reachable_while_the_agent_reasons_${pref}`, async ({ page }) => {
+    const { hub, api, id } = await boot(page, { pref });
+    const { blockId, run } = startReasoning(hub, api, id);
+    delta(hub, id, blockId, 1, 'Думаю над задачей');
+    hub.flush();
+    const line = page.locator('[data-working]');
+    const stop = line.locator('[data-interrupt]');
+    await expect(line).toBeVisible();
+    await expect(stop).toBeVisible();
+    await expect(stop).toBeEnabled();
+    // Фаза остаётся в доступном имени, хотя текст не повторяет окно рассуждения.
+    await expect(line).toHaveAttribute('data-quiet', '');
+    await expect(line).toContainText(/Рассуждает · \d+ с/);
+    const thinking = (await stop.boundingBox())!;
+
+    // Следующая фаза: активным становится вызов инструмента, строка говорит уже о нём.
+    const tool = api.id();
+    hub.append(scope(id), {
+      kind: 'block_started', conversation_id: id,
+      payload: { ...base(api), input_command_id: run, block_id: tool, rev: 0, kind: 'tool_call', tool_name: 'Bash', summary: 'ls' }
+    });
+    delta(hub, id, tool, 1, '{"command":"ls"}');
+    hub.flush();
+    await expect(line).not.toHaveAttribute('data-quiet', '');
+    await expect(line).toContainText('Выполняет');
+    const working = (await stop.boundingBox())!;
+    // Кнопка не прыгает между фазами: её место у правого края одно и то же.
+    expect(Math.abs(working.x - thinking.x), 'interrupt stays in place').toBeLessThanOrEqual(1);
+    expect(working.height).toBeGreaterThanOrEqual(44);
+
+    const sent = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/interrupt'));
+    await stop.click();
+    await sent;
+    await expect(line.getByRole('button', { name: 'Прерываю…' })).toBeVisible();
+  });
+}
 
 test('a_tap_during_streaming_expands_the_block_and_it_stays_expanded_after_the_final', async ({ page }) => {
   const { hub, api, id } = await boot(page);

@@ -79,9 +79,10 @@ export function reasoningDuration(block: {
 }
 
 /**
- * Отдельная строка хода молчит, пока о «Рассуждает» говорит само рассуждение:
- * два одинаковых часа на экране расходились бы на полкадра.
+ * Отдельная строка хода не повторяет «Рассуждает», пока о нём говорит само
+ * рассуждение: два одинаковых часа на экране расходились бы на полкадра.
+ * Строка остаётся на месте с прерыванием и уходит в скрытый текст для диктора.
  */
-export function liveLineShown(phase: string, ownReasoning: boolean): boolean {
-  return !(phase === "thinking" && ownReasoning);
+export function liveLineQuiet(phase: string, ownReasoning: boolean): boolean {
+  return phase === "thinking" && ownReasoning;
 }

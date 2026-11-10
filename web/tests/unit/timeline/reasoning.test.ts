@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  liveLineShown,
+  liveLineQuiet,
   reasoningDuration,
   reasoningPresentation,
   reasoningPreview,
@@ -101,11 +101,11 @@ describe("reasoning duration", () => {
 });
 
 describe("turn live line", () => {
-  it("does_not_repeat_the_word_about_thinking", () => {
-    expect(liveLineShown("thinking", true)).toBe(false);
+  it("keeps_the_phase_for_the_screen_reader_but_hides_the_duplicate_text", () => {
+    expect(liveLineQuiet("thinking", true)).toBe(true);
     // Пустое рассуждение не занимает строку: тогда о фазе говорит строка хода.
-    expect(liveLineShown("thinking", false)).toBe(true);
-    expect(liveLineShown("tool", true)).toBe(true);
-    expect(liveLineShown("working", true)).toBe(true);
+    expect(liveLineQuiet("thinking", false)).toBe(false);
+    expect(liveLineQuiet("tool", true)).toBe(false);
+    expect(liveLineQuiet("working", true)).toBe(false);
   });
 });

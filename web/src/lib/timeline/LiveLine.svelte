@@ -9,14 +9,15 @@
     startedAt,
     now,
     interrupt = null,
-    waiting = null
-  }: { phase?: string; tool?: string; startedAt: number; now: number; interrupt?: InterruptControl | null; waiting?: LeaseWait | null } = $props();
+    waiting = null,
+    quiet = false
+  }: { phase?: string; tool?: string; startedAt: number; now: number; interrupt?: InterruptControl | null; waiting?: LeaseWait | null; quiet?: boolean } = $props();
   // Процесс стоит в очереди тяжёлых задач машины: место в очереди важнее имени инструмента.
   const text = $derived(waiting ? leaseWaitText(waiting) : liveLineText(phase, Math.max(0, now - startedAt), tool));
 </script>
 
-<div class="live" data-working data-lease-wait={waiting ? '' : undefined}>
-  <span class="write" aria-hidden="true"><i></i><i></i><i></i></span><span class="text">{text}</span>
+<div class="live" data-working data-quiet={quiet ? '' : undefined} data-lease-wait={waiting ? '' : undefined}>
+  <span class="write" aria-hidden="true"><i></i><i></i><i></i></span><span class="text" class:sr-only={quiet}>{text}</span>
   <!-- Прервать ход можно здесь, вдали от «Отправить»: промах по кнопке отправки не прерывает работу. -->
   {#if interrupt}
     <button type="button" class="stop" data-interrupt aria-busy={interrupt.running} onclick={() => void interrupt.interrupt()}><Icon name="stop" /><span>{interrupt.label}</span></button>
