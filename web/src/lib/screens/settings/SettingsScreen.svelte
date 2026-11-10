@@ -37,8 +37,12 @@
   const phase = $derived(runtime?.connection.status.phase);
   const connectionText = $derived(phase === 'live' ? 'Подключено' : phase === 'auth_required' ? 'Требуется вход' : phase === 'incompatible' ? 'Требуется обновление' : phase === 'connecting' ? 'Подключаюсь' : 'Нет связи');
   $effect(() => { if (ready && !purged) saveMotion(motion as MotionPref); });
-  $effect(() => { if (ready && !purged) saveReasoningPref(reasoning); });
   $effect(() => { if (ready && !purged) setEnterPref(enter as EnterPref); });
+  // Рассуждения сохраняются на самом выборе: загрузка экрана ничего не перезаписывает.
+  function setReasoning(value: string): void {
+    reasoning = value as ReasoningPref;
+    saveReasoningPref(reasoning);
+  }
   async function load() {
     error = '';
     try { const [rt, cfg, who] = await Promise.all([browserRuntime(), loadConfig(), me()]); runtime = rt; config = cfg; login = who.data.login; }
@@ -79,7 +83,7 @@
       <section><h2>Тема</h2><PalettePicker /></section>
       <div class="settings-grid"><div>
         <section><h2>Скорость анимаций</h2><Segmented name="motion" label="Скорость анимаций" options={[{ value: 'off', label: 'Выкл' }, { value: 'slower', label: 'Медленнее' }, { value: 'normal', label: 'Обычно' }, { value: 'faster', label: 'Быстрее' }]} bind:value={motion} /><p class="note">Появление текста, дорожки этапов и раскрытие блоков. Системное уменьшение движения имеет приоритет</p></section>
-        <section><h2>Рассуждения</h2><Segmented name="reasoning" label="Рассуждения" options={[{ value: 'line', label: 'Строкой' }, { value: 'live', label: 'Вживую' }, { value: 'expanded', label: 'Раскрыты' }]} bind:value={() => reasoning, (value) => reasoning = value as ReasoningPref} /><p class="note">Вживую показывает хвост мысли, пока агент думает, и складывает его в строку после ответа. Строкой оставляет начало мысли, Раскрыты показывает рассуждение целиком</p></section>
+        <section><h2>Рассуждения</h2><Segmented name="reasoning" label="Рассуждения" options={[{ value: 'line', label: 'Строкой' }, { value: 'live', label: 'Вживую' }, { value: 'expanded', label: 'Раскрыты' }]} bind:value={() => reasoning, setReasoning} /><p class="note">Вживую показывает хвост мысли, пока агент думает, и складывает его в строку после ответа. Строкой оставляет начало мысли, Раскрыты показывает рассуждение целиком</p></section>
         <section><h2>Enter на клавиатуре</h2><Segmented name="enter" label="Enter на клавиатуре" options={[{ value: 'auto', label: 'Авто' }, { value: 'send', label: 'Отправка' }, { value: 'newline', label: 'Новая строка' }]} bind:value={enter} /><p class="note">Авто: на телефоне новая строка, на компьютере отправка. Shift+Enter добавляет строку</p></section>
         <section><h2>Данные и выход</h2><Button {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(false)} full>Очистить данные на устройстве</Button><div class="logout"><Button full {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(true)}>Выйти</Button></div>{#if busy}<p role="status">Очищаю данные на устройстве…</p>{/if}<p class="note">{config.auth.logout_url ? 'Перед выходом через Authelia данные на устройстве будут удалены' : 'Сессия Authelia завершается на собственной странице'}</p></section>
       </div><div>

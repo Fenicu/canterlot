@@ -17,7 +17,9 @@ export type ReasoningPref = 'line' | 'live' | 'expanded';
 const REASONING_KEY = 'canterlot.reasoning';
 const REASONING_DEFAULT: ReasoningPref = 'live';
 // Счётчик меняется при записи: открытая лента перечитывает выбор, не дожидаясь перезагрузки.
+// Номер записи лежит рядом с ячейкой: сохранение не читает реактивное значение, которое пишет.
 const revision = cell(0);
+let revisionSerial = 0;
 
 function readReasoning(): ReasoningPref {
   try {
@@ -34,5 +36,6 @@ export function reasoningPref(): ReasoningPref {
 
 export function saveReasoningPref(value: ReasoningPref): void {
   try { localStorage.setItem(REASONING_KEY, value); } catch { /* Выбор действует до закрытия приложения. */ }
-  revision.set(revision.get() + 1);
+  revisionSerial += 1;
+  revision.set(revisionSerial);
 }

@@ -4,6 +4,7 @@ import type { HistoryBlock } from '../../src/lib/stores/chat.svelte';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { expect, test } from './fixtures';
+import { bootSecondary } from './secondary-fixture';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const HISTORY_AT = '2026-10-28T12:00:00.000Z';
@@ -124,6 +125,54 @@ test('the_live_window_keeps_its_height_and_folds_into_a_line_with_a_preview', as
   await expect(row.locator('.duration')).toHaveText(/^\d+ с$/);
   await expect(row.locator('.toggle')).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('[data-working]')).toHaveCount(0);
+});
+
+test('the_reasoning_preference_is_chosen_in_settings_and_kept_after_reload', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await bootSecondary(page, '/settings');
+  const group = page.locator('main').getByRole('radiogroup', { name: 'Рассуждения' });
+  await expect(group).toBeVisible();
+  await expect(group.getByRole('radio', { name: 'Вживую', exact: true })).toBeChecked();
+  const stored = () => page.evaluate(() => localStorage.getItem('canterlot.reasoning'));
+  // Загрузка настроек ничего не пишет: выбор сохраняется только действием владельца.
+  await expect.poll(stored).toBeNull();
+  // Три варианта помещаются в узкий экран, цель нажатия не меньше токена.
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1), 'no horizontal scroll').toBe(true);
+  for (const label of ['Строкой', 'Вживую', 'Раскрыты']) {
+    const box = (await group.locator('label').filter({ hasText: label }).locator('span').boundingBox())!;
+    expect(box.height, `tap target ${label}`).toBeGreaterThanOrEqual(44);
+  }
+  await group.getByRole('radio', { name: 'Строкой', exact: true }).check();
+  await expect.poll(stored).toBe('line');
+  await group.getByRole('radio', { name: 'Раскрыты', exact: true }).check();
+  await expect.poll(stored).toBe('expanded');
+  await page.reload();
+  await expect(page.locator('main').getByRole('radiogroup', { name: 'Рассуждения' }).getByRole('radio', { name: 'Раскрыты', exact: true })).toBeChecked();
+});
+
+test('the_reasoning_preference_chosen_in_settings_sets_the_presentation_in_the_chat', async ({ page }) => {
+  const { api, ids } = await bootSecondary(page, '/settings');
+  const text = '## План\n- **Проверить** модуль';
+  seedBlocks(api, ids.pinned, [{ kind: 'reasoning', content: text }]);
+  const group = page.locator('main').getByRole('radiogroup', { name: 'Рассуждения' });
+  await group.getByRole('radio', { name: 'Строкой', exact: true }).check();
+  await page.goto(`/c/${ids.pinned}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  const reasoning = page.locator('.reasoning');
+  await expect(reasoning).toBeVisible();
+  await expect(reasoning.locator('.fold')).toHaveCount(0);
+  await expect(reasoning.locator('.preview')).toHaveText('План');
+  await expect(reasoning.locator('.toggle')).toHaveAttribute('aria-expanded', 'false');
+
+  await page.goto('/settings');
+  const again = page.locator('main').getByRole('radiogroup', { name: 'Рассуждения' });
+  await expect(again).toBeVisible();
+  await again.getByRole('radio', { name: 'Раскрыты', exact: true }).check();
+  await page.goto(`/c/${ids.pinned}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.reasoning .fold')).toBeVisible();
+  await expect(page.locator('.reasoning .fold')).toContainText('Проверить');
+  await expect(page.locator('.reasoning .toggle')).toHaveAttribute('aria-expanded', 'true');
 });
 
 for (const pref of ['line', 'live', 'expanded'] as const) {
