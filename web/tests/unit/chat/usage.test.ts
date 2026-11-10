@@ -70,6 +70,108 @@ describe("summarizeUsage", () => {
     expect(summary.hasDelegates).toBe(false);
   });
 
+  test("renders billions and exact turn counts for a long session", () => {
+    const summary = summarizeUsage({
+      session: totals({
+        turns: 1_024,
+        input_tokens: 1_200_000,
+        output_tokens: 88_300_000,
+        cache_read_tokens: 27_952_400_000,
+        cache_write_tokens: 942_200_000,
+        models: [
+          {
+            model: "claude-opus-5-5",
+            input_tokens: 237_900,
+            output_tokens: 61_200_000,
+            cache_read_tokens: 21_558_400_000,
+            cache_write_tokens: 484_600_000,
+          },
+          {
+            model: "claude-sonnet-5-5",
+            input_tokens: 76_300,
+            output_tokens: 26_700_000,
+            cache_read_tokens: 6_334_200_000,
+            cache_write_tokens: 452_400_000,
+          },
+          {
+            model: "claude-fable-5-2",
+            input_tokens: 2_600,
+            output_tokens: 239_900,
+            cache_read_tokens: 59_700_000,
+            cache_write_tokens: 4_700_000,
+          },
+          {
+            model: "claude-haiku-5-5",
+            input_tokens: 838_800,
+            output_tokens: 153_300,
+            cache_read_tokens: 0,
+            cache_write_tokens: 499_300,
+          },
+        ],
+      }),
+      delegates: totals({
+        turns: 408,
+        input_tokens: 56_500_000,
+        output_tokens: 21_700_000,
+        cache_read_tokens: 6_527_100_000,
+        cache_write_tokens: 28_700_000,
+      }),
+    });
+
+    expect(summary.session.rows).toEqual([
+      { label: "Вход", value: { compact: "1,2 млн", exact: "1 200 000" } },
+      { label: "Выход", value: { compact: "88,3 млн", exact: "88 300 000" } },
+      {
+        label: "Прочитано из кэша",
+        value: { compact: "28 млрд", exact: "27 952 400 000" },
+      },
+      {
+        label: "Записано в кэш",
+        value: { compact: "942,2 млн", exact: "942 200 000" },
+      },
+      { label: "Ходов", value: { compact: "1 024", exact: "1 024" } },
+    ]);
+
+    expect(summary.session.models.map((row) => row.input.compact)).toEqual([
+      "237,9 тыс.",
+      "76,3 тыс.",
+      "2,6 тыс.",
+      "838,8 тыс.",
+    ]);
+    expect(summary.session.models.map((row) => row.output.compact)).toEqual([
+      "61,2 млн",
+      "26,7 млн",
+      "239,9 тыс.",
+      "153,3 тыс.",
+    ]);
+    expect(summary.session.models.map((row) => row.cacheRead.compact)).toEqual([
+      "21,6 млрд",
+      "6,33 млрд",
+      "59,7 млн",
+      "0",
+    ]);
+    expect(summary.session.models.map((row) => row.cacheWrite.compact)).toEqual([
+      "484,6 млн",
+      "452,4 млн",
+      "4,7 млн",
+      "499,3 тыс.",
+    ]);
+
+    expect(summary.delegates.rows).toEqual([
+      { label: "Вход", value: { compact: "56,5 млн", exact: "56 500 000" } },
+      { label: "Выход", value: { compact: "21,7 млн", exact: "21 700 000" } },
+      {
+        label: "Прочитано из кэша",
+        value: { compact: "6,53 млрд", exact: "6 527 100 000" },
+      },
+      {
+        label: "Записано в кэш",
+        value: { compact: "28,7 млн", exact: "28 700 000" },
+      },
+      { label: "Ходов", value: { compact: "408", exact: "408" } },
+    ]);
+  });
+
   test("hides cache rows when the harness reports no cache", () => {
     const summary = summarizeUsage({
       session: totals({ turns: 1, input_tokens: 10, output_tokens: 2 }),

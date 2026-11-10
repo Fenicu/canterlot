@@ -147,10 +147,11 @@ export const fmt = {
 	/**
 	 * Компактные токены для узких таблиц: до миллиона как есть, дальше «516,7 млн»
 	 * и «1,32 млрд». Три значащие цифры, но не меньше одной после запятой.
+	 * `short`: под миллионом короткая запись «237,9 тыс.» вместо «237 900».
 	 */
-	tokensCompact(n: number): string {
+	tokensCompact(n: number, opts?: { short?: boolean }): string {
 		const abs = Math.abs(n);
-		if (abs < 1_000_000) return grouped(n);
+		if (abs < 1_000_000) return opts?.short ? fmt.tokensShort(n) : grouped(n);
 		const compact = (value: number, divisor: number, unit: string): string => {
 			const scaled = value / divisor;
 			const decimals = Math.abs(scaled) < 10 ? 2 : 1;
@@ -185,14 +186,24 @@ export const fmt = {
 		if (firstTokenMs != null) parts.push(`первый токен ${fmt.firstToken(firstTokenMs)}`);
 		return parts.join(' · ');
 	},
-	/** Коротко для строк ленты: «980 тыс.», «1 млн», «640». */
+	/** Коротко для строк ленты: «980 тыс.», «1 млн», «28 млрд», «640». */
 	tokensShort(n: number): string {
 		const short = (value: number, unit: string): string => {
 			const text = Number.isInteger(value) ? String(value) : value.toFixed(1).replace('.', ',');
 			return `${text} ${unit}`;
 		};
-		if (n >= 1_000_000) return short(Math.round(n / 100_000) / 10, 'млн');
-		if (n >= 1_000) return short(Math.round(n / 100) / 10, 'тыс.');
+		const scaled = (divisor: number): number => Math.round(n / (divisor / 10)) / 10;
+		if (n >= 1_000_000_000) return short(scaled(1_000_000_000), 'млрд');
+		if (n >= 1_000_000) {
+			const millions = scaled(1_000_000);
+			// 999 950 000 округляется до «1000 млн», а это уже миллиард.
+			return millions >= 1000 ? short(scaled(1_000_000_000), 'млрд') : short(millions, 'млн');
+		}
+		if (n >= 1_000) {
+			const thousands = scaled(1_000);
+			// 999 950 округляется до «1000 тыс.», а это уже миллион.
+			return thousands >= 1000 ? short(scaled(1_000_000), 'млн') : short(thousands, 'тыс.');
+		}
 		return grouped(n);
 	},
 	bytes(n: number): string {

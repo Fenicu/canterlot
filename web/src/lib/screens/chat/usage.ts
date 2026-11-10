@@ -39,7 +39,12 @@ export interface SessionUsageSummary {
 }
 
 function value(n: number): UsageValue {
-  return { compact: fmt.tokensShort(n), exact: fmt.tokens(n) };
+  return { compact: fmt.tokensCompact(n, { short: true }), exact: fmt.tokens(n) };
+}
+
+/** Ходы — счёт, а не токены: точное число с разрядами, без «тыс.». */
+function count(n: number): UsageValue {
+  return { compact: fmt.number(n), exact: fmt.tokens(n) };
 }
 
 function section(totals: UsageTotals): UsageSection {
@@ -53,7 +58,7 @@ function section(totals: UsageTotals): UsageSection {
     rows.push({ label: "Прочитано из кэша", value: value(totals.cache_read_tokens) });
   if (showCacheWrite)
     rows.push({ label: "Записано в кэш", value: value(totals.cache_write_tokens) });
-  rows.push({ label: "Ходов", value: value(totals.turns) });
+  rows.push({ label: "Ходов", value: count(totals.turns) });
 
   const models: UsageModelRow[] = totals.models.map((row) => ({
     model: row.model,
