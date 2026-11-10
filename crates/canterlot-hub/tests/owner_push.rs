@@ -44,12 +44,15 @@ struct Captured {
     query: Option<String>,
     key: Option<String>,
     body: Value,
+    attempts: Option<i32>,
+    retry_scheduled: Option<bool>,
 }
 
 #[derive(Clone, Default)]
 struct Fake {
     seen: Arc<Mutex<Vec<Captured>>>,
     script: Arc<Mutex<VecDeque<u16>>>,
+    probe: Arc<Mutex<Option<PgPool>>>,
 }
 
 impl Fake {
@@ -59,6 +62,10 @@ impl Fake {
     fn script(&self, statuses: &[u16]) {
         self.script.lock().unwrap().extend(statuses);
     }
+    /// Строка очереди на момент запроса: попытка обязана быть уже учтена.
+    fn probe(&self, pool: &PgPool) {
+        *self.probe.lock().unwrap() = Some(pool.clone());
+    }
 }
 
 async fn message(
@@ -67,6 +74,20 @@ async fn message(
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
+    let probe = fake.probe.lock().unwrap().clone();
+    let (attempts, retry_scheduled) = match probe {
+        Some(pool) => sqlx::query_as::<_, (i32, bool)>(
+            "select attempts, run_at > clock_timestamp() from owner_pushes limit 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten()
+        .map_or((None, None), |(attempts, later)| {
+            (Some(attempts), Some(later))
+        }),
+        None => (None, None),
+    };
     fake.seen.lock().unwrap().push(Captured {
         path: uri.path().to_owned(),
         query: uri.query().map(str::to_owned),
@@ -75,6 +96,8 @@ async fn message(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+        attempts,
+        retry_scheduled,
     });
     let status = fake.script.lock().unwrap().pop_front().unwrap_or(200);
     StatusCode::from_u16(status).unwrap()
@@ -772,6 +795,36 @@ async fn a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_no
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].body["priority"], 7);
     assert_eq!(seen[0].body["message"], "Сессия упала: воркер потерян");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_attempt_is_recorded_before_the_request_goes_out(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    open_question(
+        &pool,
+        &s,
+        &question_batch(&execution, Uuid::now_v7(), "Да?"),
+    )
+    .await;
+    fake.probe(&pool);
+    // Обычная пауза повтора: после ответа строка не должна быть готова к отправке.
+    let sender = Sender::new(&config).unwrap();
+    assert_eq!(sender.deliver_due(&pool, later()).await.unwrap().sent, 1);
+    let seen = fake.seen();
+    assert_eq!(
+        seen[0].attempts,
+        Some(1),
+        "attempt is recorded before the POST"
+    );
+    assert_eq!(
+        seen[0].retry_scheduled,
+        Some(true),
+        "a lost acknowledgement costs a delayed retry, not a resend"
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

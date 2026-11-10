@@ -422,27 +422,35 @@ impl Sender {
                 break;
             }
             let attempts = row.attempts.saturating_add(1);
+            // Попытка и пауза фиксируются до запроса: потерянное подтверждение
+            // стоит одного отложенного повтора, а не повторной доставки.
+            let pause = self
+                .backoff
+                .get(usize::try_from(row.attempts).unwrap_or(usize::MAX))
+                .copied()
+                .unwrap_or_default();
+            let run_at = now + TimeDelta::from_std(pause).unwrap_or(TimeDelta::MAX);
+            sqlx::query(
+                "update owner_pushes set attempts=$2,run_at=$3,updated_at=clock_timestamp()
+                 where id=$1 and state='pending'",
+            )
+            .bind(row.id)
+            .bind(attempts)
+            .bind(run_at)
+            .execute(pool)
+            .await?;
             match self.post(&message).await {
                 Ok(status) => {
                     finish(pool, row.id, "sent", Some(status)).await?;
                     report.sent += 1;
                 }
                 Err(Failure::Retry(status)) if attempts < self.max_attempts() => {
-                    let pause = self
-                        .backoff
-                        .get(usize::try_from(row.attempts).unwrap_or(usize::MAX))
-                        .copied()
-                        .unwrap_or_default();
-                    let run_at = now + TimeDelta::from_std(pause).unwrap_or(TimeDelta::MAX);
                     sqlx::query(
-                        "update owner_pushes set attempts=$2,last_status=$3,run_at=$4,
-                           updated_at=clock_timestamp()
+                        "update owner_pushes set last_status=$2,updated_at=clock_timestamp()
                          where id=$1 and state='pending'",
                     )
                     .bind(row.id)
-                    .bind(attempts)
                     .bind(status.map(i32::from))
-                    .bind(run_at)
                     .execute(pool)
                     .await?;
                     report.retried += 1;
@@ -454,12 +462,11 @@ impl Sender {
                         Failure::Fatal(status) => Some(status),
                     };
                     sqlx::query(
-                        "update owner_pushes set state='dropped',attempts=$2,last_status=$3,
+                        "update owner_pushes set state='dropped',last_status=$2,
                            updated_at=clock_timestamp()
                          where id=$1 and state='pending'",
                     )
                     .bind(row.id)
-                    .bind(attempts)
                     .bind(status.map(i32::from))
                     .execute(pool)
                     .await?;
@@ -480,7 +487,6 @@ async fn finish(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "update owner_pushes set state=$2,last_status=coalesce($3,last_status),
-           attempts=attempts+case when $3 is null then 0 else 1 end,
            updated_at=clock_timestamp()
          where id=$1 and state='pending'",
     )
