@@ -773,6 +773,7 @@ async fn purge_rows(
           where a.conversation_id=$1 and a.id=r.attachment_id",
         "delete from attachments where conversation_id=$1",
         "delete from conversation_group_pins where conversation_id=$1",
+        "delete from bookmarks where conversation_id=$1",
         "delete from queue_state where conversation_id=$1",
         "delete from idempotency_keys where conversation_id=$1",
         "delete from session_subscriptions where subscriber_id=$1 or target_id=$1",
