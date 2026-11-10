@@ -108,6 +108,12 @@ impl Media {
         &self.files.pool
     }
 
+    /// Тот же хаб с общим пределом медиа машины.
+    fn quota(mut self, bytes: u64) -> Self {
+        self.hub = self.hub.clone().with_media_quota(bytes);
+        self
+    }
+
     fn header(&self, id: Uuid, block: Uuid, bytes: &[u8]) -> MediaHeader {
         MediaHeader {
             media_id: id.to_string(),
@@ -950,6 +956,55 @@ async fn media_uploads_are_limited_per_machine_and_one_body_per_id(pool: PgPool)
         timeout(WAIT, upload).await.unwrap().unwrap().unwrap();
     }
     assert_eq!(f.rows(first_id).await, 1);
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap();
+}
+
+/// Общий предел медиа одной машины: под пределом загрузка проходит, сверх — обычный отказ
+/// `INVALID_ARGUMENT` (воркер переводит его в причину `share_*`, а не в обрыв потока),
+/// удаление сохранённого медиа освобождает место.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn media_quota_is_per_machine_and_freed_by_deletion(pool: PgPool) {
+    let mut f = Media::new(pool).await.quota(1024 * 1024);
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let first = png(1, 1, 200_000, 1);
+    let first_id = Uuid::now_v7();
+    put(
+        &mut client,
+        &f.token,
+        f.header(first_id, block, &first),
+        &first,
+    )
+    .await
+    .unwrap();
+    let over = png(1, 1, 900_000, 2);
+    let over_id = Uuid::now_v7();
+    let error = put(
+        &mut client,
+        &f.token,
+        f.header(over_id, block, &over),
+        &over,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(error.message(), "media_quota_exceeded");
+    assert_eq!(f.rows(over_id).await, 0, "a refused upload leaves no row");
+    sqlx::query("delete from block_media where id=$1")
+        .bind(first_id)
+        .execute(f.pool())
+        .await
+        .unwrap();
+    put(
+        &mut client,
+        &f.token,
+        f.header(over_id, block, &over),
+        &over,
+    )
+    .await
+    .expect("deleting stored media frees the quota");
+    assert_eq!(f.rows(over_id).await, 1);
     stop.cancel();
     timeout(WAIT, task).await.unwrap().unwrap();
 }

@@ -53,6 +53,7 @@ fn status(error: &MediaError) -> Status {
         // Сообщение статуса — стабильный код: воркер переводит его в свой `share_*`.
         MediaError::Invalid
         | MediaError::TooLarge
+        | MediaError::Quota
         | MediaError::InvalidName
         | MediaError::InvalidType
         | MediaError::InvalidText => Status::invalid_argument(kind),
@@ -132,7 +133,7 @@ pub(super) async fn put(
     let result = tokio::select! {
         biased;
         _ = hub.shutdown.cancelled() => return Err(Status::unavailable("hub_shutdown")),
-        result = media::put(&hub.pool, &*blobs, machine, &header, body) => result,
+        result = media::put(&hub.pool, &*blobs, machine, &header, hub.media_quota_bytes, body) => result,
     };
     match result {
         Ok(()) => Ok(Response::new(MediaStored {

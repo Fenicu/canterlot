@@ -51,6 +51,8 @@ pub enum MediaError {
     Invalid,
     /// Объявленный размер больше потолка (`MAX_SHARE_BYTES`, `MAX_MEDIA_BYTES`).
     TooLarge,
+    /// Суммарный объём медиа машины с этой загрузкой превысил предел.
+    Quota,
     /// Имя файла не проходит нормализацию вложений.
     InvalidName,
     /// Тип не принимается: неизвестный MIME, сигнатура не совпала с картинкой,
@@ -84,6 +86,7 @@ impl MediaError {
         match self {
             Self::Invalid => "media_invalid",
             Self::TooLarge => "media_too_large",
+            Self::Quota => "media_quota_exceeded",
             Self::InvalidName => "media_invalid_name",
             Self::InvalidType => "media_invalid_type",
             Self::InvalidText => "media_invalid_text",
@@ -348,11 +351,48 @@ async fn insert_share(
     .await
 }
 
+/// Оплаченный диском объём медиа машины: строки `block_media` и `block_files` держат blob
+/// до удаления разговора или уборки брошенной записи.
+async fn used_bytes(pool: &PgPool, machine_id: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "select coalesce(sum(size_bytes), 0)::bigint from (
+           select m.size_bytes from block_media m
+             join conversations c on c.id=m.conversation_id
+            where c.machine_id=$1
+           union all
+           select f.size_bytes from block_files f
+             join conversations c on c.id=f.conversation_id
+            where c.machine_id=$1
+         ) media",
+    )
+    .bind(machine_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// `max_bytes = 0` выключает общий предел; он не заменяет пределы одного файла.
+async fn check_quota(
+    pool: &PgPool,
+    machine_id: Uuid,
+    size: u64,
+    max_bytes: u64,
+) -> Result<(), MediaError> {
+    if max_bytes == 0 {
+        return Ok(());
+    }
+    let used = i128::from(used_bytes(pool, machine_id).await?);
+    if used + i128::from(size) > i128::from(max_bytes) {
+        return Err(MediaError::Quota);
+    }
+    Ok(())
+}
+
 pub async fn put(
     pool: &PgPool,
     store: &dyn BlobStore,
     machine_id: Uuid,
     header: &Header,
+    max_bytes: u64,
     body: BoxStream<'static, Result<Bytes, io::Error>>,
 ) -> Result<(), MediaError> {
     let conversation_id: Uuid = sqlx::query_scalar(
@@ -393,6 +433,8 @@ pub async fn put(
             return result;
         }
     }
+    // Повтор уже сохранённого выше не тратит квоту второй раз.
+    check_quota(pool, machine_id, header.size, max_bytes).await?;
     let Some(locked) = store.try_lock(header.id)? else {
         return Err(MediaError::Busy);
     };

@@ -121,6 +121,8 @@ pub struct HubGrpc {
     pub settle: crate::session_tools::settle::SettleConfig,
     pub dispatcher: Option<crate::dispatcher::Dispatcher>,
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
+    /// Общий предел медиа одной машины; `0` выключает проверку.
+    pub media_quota_bytes: u64,
     fetch_slots: attachments::FetchSlots,
     media_slots: media::UploadSlots,
     #[cfg(feature = "fault-injection")]
@@ -351,6 +353,8 @@ impl HubGrpc {
             settle: (&crate::config::ActivityConfig::default()).into(),
             dispatcher: None,
             blobs: None,
+            media_quota_bytes: crate::config::AttachmentsConfig::default()
+                .max_media_bytes_per_machine,
             fetch_slots: Default::default(),
             media_slots: Default::default(),
             #[cfg(feature = "fault-injection")]
@@ -395,6 +399,12 @@ impl HubGrpc {
 
     pub fn with_blob_store(mut self, blobs: Arc<dyn crate::attachments::BlobStore>) -> Self {
         self.blobs = Some(blobs);
+        self
+    }
+
+    /// Общий предел медиа одной машины из `[attachments]`.
+    pub fn with_media_quota(mut self, bytes: u64) -> Self {
+        self.media_quota_bytes = bytes;
         self
     }
 

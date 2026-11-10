@@ -279,6 +279,7 @@ async fn serve(
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())
+            .with_media_quota(attachments.max_media_bytes_per_machine)
             .with_session_tools(session_tools.clone())
             .with_limits(limits.clone())
             .with_orchestrator(&orchestrator)
