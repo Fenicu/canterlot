@@ -1544,3 +1544,74 @@ async fn a_stopped_session_with_a_real_execution_can_be_deleted(pool: PgPool) {
     .unwrap();
     assert_eq!(delete(&f, f.conversation, "after-stop").await.status, 204);
 }
+
+/// Текст правки отложенного сообщения лежит в ответе строки идемпотентности, поэтому
+/// окончательное удаление должно уносить её вместе с остальными данными разговора,
+/// а не ждать семидневной уборки планировщика.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleting_a_conversation_removes_scheduled_message_text_from_idempotency(pool: PgPool) {
+    use canterlot_hub::{
+        config::SchedulerConfig,
+        scheduler::{self, NewScheduled, PatchScheduled},
+    };
+    use chrono::{TimeDelta, Utc};
+
+    let f = Fixture::new(pool).await;
+    // Планировщик сервиса нужен, чтобы правка шла тем же путём, что и из HTTP.
+    let _scheduler = scheduler::Scheduler::new(
+        f.pool.clone(),
+        canterlot_hub::dispatcher::Dispatcher::channel().0,
+        SchedulerConfig::default(),
+    );
+    let now = Utc::now();
+    let text = |text: &str| vec![ContentBlock::Text { text: text.into() }];
+    let message = scheduler::schedule_message(
+        &f.pool,
+        f.owner,
+        "sched-create",
+        NewScheduled {
+            conversation_id: f.conversation,
+            run_at: now + TimeDelta::hours(1),
+            content: text("секретный черновик"),
+            attachment_ids: vec![],
+        },
+        now,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    scheduler::update_message(
+        &f.pool,
+        f.owner,
+        message.id,
+        "sched-edit",
+        PatchScheduled {
+            run_at: None,
+            content: Some(text("секретный черновик")),
+        },
+        now,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let bound: Option<Uuid> =
+        sqlx::query_scalar("select conversation_id from idempotency_keys where key='sched-edit'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        bound,
+        Some(f.conversation),
+        "the key names its conversation"
+    );
+
+    assert_eq!(delete(&f, f.conversation, "delete-sched").await.status, 204);
+    let left: i64 = sqlx::query_scalar(
+        "select count(*) from idempotency_keys where key='sched-edit'
+            or response::text like '%секретный черновик%'",
+    )
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "no scheduled text survives the conversation");
+}

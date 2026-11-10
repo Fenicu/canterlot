@@ -416,7 +416,15 @@ async fn mutate(
     };
     let hash = idempotency::request_hash(operation, &body);
     let locked_key = key.to_owned();
-    let message=idempotency::run_in_tx(pool,owner_id,key,operation,&body,None,move|conn|Box::pin(async move {
+    // Ответ содержит текст сообщения: строка идемпотентности должна уйти вместе с разговором.
+    let conversation_id: Option<Uuid> = sqlx::query_scalar(
+        "select conversation_id from scheduled_jobs where id=$1 and owner_id=$2 and kind='message'",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(pool)
+    .await?;
+    let message=idempotency::run_in_tx(pool,owner_id,key,operation,&body,conversation_id,move|conn|Box::pin(async move {
         let mut job:JobRow=sqlx::query_as("select * from scheduled_jobs where id=$1 and owner_id=$2 and kind='message' for update").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(ScheduleError::NotFound)?;
         if let Some(replay)=replay_locked(conn,owner_id,&locked_key,operation,&hash).await?{return Ok(replay);}
         if job.state!="pending" {return Err(ScheduleError::NotPending);}
