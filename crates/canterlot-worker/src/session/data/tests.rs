@@ -6,6 +6,46 @@ use crate::{
     session_store::StoreThread,
 };
 
+fn limit_observed(seq: u64, window: LimitWindow) -> JournalRecord {
+    JournalRecord {
+        seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::LimitObserved(LimitObservation {
+                provider: "claude".into(),
+                window: window as i32,
+                used_permille: 50,
+                resets_at_ms: 1_794_877_200_000,
+                ..Default::default()
+            })),
+        }),
+    }
+}
+
+fn limit_reached(seq: u64, window: LimitWindow) -> JournalRecord {
+    JournalRecord {
+        seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::LimitReached(LimitReached {
+                execution_id: Uuid::now_v7().to_string(),
+                provider: "claude".into(),
+                window: window as i32,
+                resets_at_ms: 1_794_877_200_000,
+                ..Default::default()
+            })),
+        }),
+    }
+}
+
+fn wire_records(packed: VecDeque<Batch>) -> Vec<JournalRecord> {
+    packed
+        .into_iter()
+        .flat_map(|(message, _, _)| match message.msg {
+            Some(data_up::Msg::SjRecords(batch)) => batch.records,
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 fn record(seq: u64, size: usize) -> JournalRecord {
     JournalRecord {
         seq,
@@ -42,7 +82,7 @@ fn full_sj_batch_is_split_to_include_the_data_envelope() {
         delta.append.push_str(&"x".repeat(slack));
     }
     assert_eq!(batch.encoded_len(), MAX_EVENT_BATCH_BYTES);
-    let packed = pack(id, batch.records).unwrap();
+    let packed = pack(id, batch.records, true).unwrap();
     assert_eq!(packed.len(), 2);
     let mut seqs = Vec::new();
     for (message, journal, _) in packed {
@@ -66,7 +106,7 @@ fn record_over_the_batch_limit_does_not_fail_the_shared_stream() {
         record(4, MAX_EVENT_BATCH_BYTES * 2),
     ];
     let mut bodies = Vec::new();
-    for (message, journal, last) in pack(id, records).unwrap() {
+    for (message, journal, last) in pack(id, records, true).unwrap() {
         assert_eq!(journal, id);
         assert!(message.encoded_len() <= MAX_EVENT_BATCH_BYTES);
         let Some(data_up::Msg::SjRecords(batch)) = message.msg else {
@@ -85,6 +125,220 @@ fn record_over_the_batch_limit_does_not_fail_the_shared_stream() {
         assert_eq!(stub.event_type, "record_too_large");
         assert!(Uuid::parse_str(&stub.execution_id).is_ok());
     }
+}
+
+fn fable_frame_records() -> Vec<JournalRecord> {
+    let frame: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../crates/canterlot-proto/tests/fixtures/fable_rate_limit.json"
+    ))
+    .unwrap();
+    let mut tracker = crate::adapter::claude_code::limits::LimitTracker::default();
+    tracker
+        .on_rate_limit(&frame)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, fact)| match fact {
+            crate::adapter::LimitFact::Observed {
+                window,
+                used_permille,
+                resets_at_ms,
+            } => Some(JournalRecord {
+                seq: index as u64 + 1,
+                body: Some(RecordBody {
+                    body: Some(record_body::Body::LimitObserved(LimitObservation {
+                        provider: "claude".into(),
+                        window: window.into(),
+                        used_permille: u32::from(used_permille),
+                        resets_at_ms: resets_at_ms.unwrap_or_default(),
+                        ..Default::default()
+                    })),
+                }),
+            }),
+            crate::adapter::LimitFact::Reached { .. } => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_verbatim_fable_frame_never_ships_window_four_to_an_old_hub() {
+    let records = wire_records(pack(Uuid::now_v7(), fable_frame_records(), false).unwrap());
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert!(records.iter().all(|record| {
+        !matches!(
+            record.body.as_ref().and_then(|body| body.body.as_ref()),
+            Some(record_body::Body::LimitObserved(observation))
+                if observation.window == LimitWindow::WeeklyFable as i32
+        )
+    }));
+}
+
+#[test]
+fn an_old_hub_gets_a_placeholder_for_a_fable_observation_and_weekly_for_its_reached() {
+    let id = Uuid::now_v7();
+    let records = wire_records(
+        pack(
+            id,
+            vec![
+                limit_observed(1, LimitWindow::WeeklyFable),
+                limit_reached(2, LimitWindow::WeeklyFable),
+                limit_observed(3, LimitWindow::Weekly),
+            ],
+            false,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2, 3],
+        "journal sequence stays continuous"
+    );
+    assert!(
+        records
+            .iter()
+            .all(|record| record.body.as_ref().is_some_and(|body| {
+                !matches!(
+                    body.body.as_ref(),
+                    Some(record_body::Body::LimitObserved(observation))
+                        if observation.window == LimitWindow::WeeklyFable as i32
+                )
+            })),
+        "an old hub must not see window 4"
+    );
+    let Some(record_body::Body::AdapterDiagnostic(stub)) =
+        records[0].body.as_ref().and_then(|body| body.body.as_ref())
+    else {
+        panic!("fable observation must become a harmless diagnostic");
+    };
+    assert_eq!(stub.event_type, "limit_window_unsupported");
+    assert_eq!(stub.execution_id, Uuid::nil().to_string());
+    let Some(record_body::Body::LimitReached(reached)) =
+        records[1].body.as_ref().and_then(|body| body.body.as_ref())
+    else {
+        panic!("fable reached must stay a reached fact");
+    };
+    assert_eq!(reached.window, LimitWindow::Weekly as i32);
+    assert_eq!(reached.resets_at_ms, 1_794_877_200_000);
+}
+
+#[test]
+fn a_negotiated_hub_keeps_window_four_on_the_wire() {
+    let records = wire_records(
+        pack(
+            Uuid::now_v7(),
+            vec![
+                limit_observed(1, LimitWindow::WeeklyFable),
+                limit_reached(2, LimitWindow::WeeklyFable),
+            ],
+            true,
+        )
+        .unwrap(),
+    );
+    let Some(record_body::Body::LimitObserved(observation)) =
+        records[0].body.as_ref().and_then(|body| body.body.as_ref())
+    else {
+        panic!("fable observation kept");
+    };
+    assert_eq!(observation.window, LimitWindow::WeeklyFable as i32);
+    let Some(record_body::Body::LimitReached(reached)) =
+        records[1].body.as_ref().and_then(|body| body.body.as_ref())
+    else {
+        panic!("fable reached kept");
+    };
+    assert_eq!(reached.window, LimitWindow::WeeklyFable as i32);
+}
+
+#[tokio::test]
+async fn an_old_hub_acks_the_substituted_fable_journal_to_the_end() {
+    let (mut hub, store) = ProtocolHub::start(Behavior::default()).await;
+    let (tx, mut inbound) = link(&hub).await;
+    let thread = StoreThread::new(store);
+    let (sender, mut relay) = mpsc::channel(16);
+    let runtime = tempfile::Builder::new()
+        .prefix("cl-rt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let manager = ExecutionManager::new_with_runtime_dir(
+        Default::default(),
+        thread.client(),
+        sender.clone(),
+        Some(runtime.path().to_path_buf()),
+    );
+    let journal = Uuid::now_v7();
+    sender
+        .send(SjRelay {
+            journal_id: journal,
+            records: vec![
+                limit_observed(1, LimitWindow::WeeklyFable),
+                limit_reached(2, LimitWindow::WeeklyFable),
+            ],
+        })
+        .await
+        .unwrap();
+    for seq in 3..=10 {
+        sender
+            .send(SjRelay {
+                journal_id: journal,
+                records: vec![limit_observed(seq, LimitWindow::Weekly)],
+            })
+            .await
+            .unwrap();
+    }
+    let (stop, mut active) = watch::channel(true);
+    let task = tokio::spawn(async move {
+        let result = ship(
+            &tx,
+            &mut inbound,
+            &manager,
+            &mut relay,
+            &WorkerTimers::default(),
+            &mut active,
+            (
+                HashMap::new(),
+                true,
+                false,
+                JournalDiagnostics::default(),
+                LiveLimits::default(),
+            ),
+        )
+        .await;
+        manager.shutdown().await;
+        result
+    });
+    let mut seqs = Vec::new();
+    timeout(Duration::from_secs(3), async {
+        while seqs.len() < 10 {
+            if let Observed::Data(message) = hub.event().await
+                && let Some(data_up::Msg::SjRecords(batch)) = message.msg
+            {
+                for record in batch.records {
+                    assert!(
+                        !matches!(
+                            record.body.as_ref().and_then(|body| body.body.as_ref()),
+                            Some(record_body::Body::LimitObserved(observation))
+                                if observation.window == LimitWindow::WeeklyFable as i32
+                        ),
+                        "window 4 reached an old hub"
+                    );
+                    seqs.push(record.seq);
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(seqs, (1..=10).collect::<Vec<_>>());
+    assert!(!task.is_finished(), "the execution stream keeps running");
+    drop(stop);
+    drop(sender);
+    timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    thread.close().await.unwrap();
 }
 
 async fn link(hub: &ProtocolHub) -> (mpsc::Sender<DataUp>, tonic::Streaming<DataDown>) {
@@ -164,6 +418,7 @@ async fn sj_window_stops_at_eight_and_lost_head_retries_only_once() {
             &mut active,
             (
                 HashMap::new(),
+                true,
                 true,
                 JournalDiagnostics::default(),
                 LiveLimits::default(),
@@ -252,6 +507,7 @@ async fn another_journal_progress_and_duplicate_acks_do_not_postpone_the_head() 
             (
                 HashMap::new(),
                 true,
+                true,
                 JournalDiagnostics::default(),
                 LiveLimits::default(),
             ),
@@ -338,6 +594,7 @@ async fn stale_post_reattach_batch_cannot_jump_the_committed_cursor() {
             (
                 HashMap::from([(journal, 2)]),
                 true,
+                true,
                 JournalDiagnostics::default(),
                 LiveLimits::default(),
             ),
@@ -388,6 +645,7 @@ async fn fail_shipped_batch(status: Status) -> (Vec<String>, Result<(), WorkerEr
     let session = || {
         (
             HashMap::new(),
+            true,
             true,
             diagnostics.clone(),
             LiveLimits::default(),
@@ -537,6 +795,7 @@ async fn pilot_sj_is_withheld_while_other_sj_ships_and_allowed_prefix_is_contigu
             (
                 HashMap::from([(hidden, 3)]),
                 false,
+                true,
                 diagnostics,
                 LiveLimits::default(),
             ),
@@ -644,7 +903,7 @@ impl Resend {
                 &mut relay,
                 &timers,
                 &mut active,
-                (cursors, pilot, diagnostics, LiveLimits::default()),
+                (cursors, pilot, true, diagnostics, LiveLimits::default()),
             );
             let result = tokio::select! {result=ship=>result,_=shutdown_rx.changed()=>Ok(())};
             drop(stop);

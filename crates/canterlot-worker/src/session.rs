@@ -47,9 +47,12 @@ pub const STORAGE_RESTART_EXIT_CODE: u8 = 75;
 /// Первый отчёт сторожа после подключения: размеры к этому времени ещё могут меряться.
 const WATCH_FIRST_DELAY: Duration = Duration::from_secs(90);
 
+pub const CAPABILITY_LIMITS_FABLE_V1: &str = "limits_fable_v1";
+
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
     "pilot_v1",
+    CAPABILITY_LIMITS_FABLE_V1,
     "instructions_v1",
     "workdir_suggest_v1",
     "todo_v1",
@@ -1164,6 +1167,10 @@ impl Worker {
         .await
         .map_err(|_| WorkerError::Timeout)??;
         let pilot = accepted.capabilities.iter().any(|cap| cap == "pilot_v1");
+        let limits_fable = accepted
+            .capabilities
+            .iter()
+            .any(|cap| cap == CAPABILITY_LIMITS_FABLE_V1);
         let diagnostics = JournalDiagnostics::default();
         if cj_pilot && !pilot {
             diagnostics
@@ -1354,6 +1361,7 @@ impl Worker {
                 #[cfg(feature = "fault-injection")]
                 probe: self.probe.clone(),
                 pilot,
+                limits_fable,
                 diagnostics: diagnostics.clone(),
                 live_limits: self.live_limits.clone(),
                 client: data,
@@ -1792,7 +1800,11 @@ impl Worker {
                     // Временный сбой не ждёт следующего тика: воркер сам назначает ранний повтор.
                     if let Some(delay)=limits_source.retry_in(&provider) { idle_ticker.reschedule(&provider, delay); }
                     // Хаб держит один необработанный отчёт: пустой вытеснил бы настоящий.
-                    if !fetched.observations.is_empty() || !fetched.absent.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations:fetched.observations,absent:fetched.absent}))});}
+                    let mut observations = fetched.observations;
+                    if !limits_fable {
+                        observations.retain(|o| o.window != LimitWindow::WeeklyFable as i32);
+                    }
+                    if !observations.is_empty() || !fetched.absent.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations,absent:fetched.absent}))});}
                 }
                 reply=async{suggest_operation.as_mut().unwrap().await}, if suggest_operation.is_some()=>{
                     suggest_operation=None;suggest_outbound=Some(ControlUp{msg:Some(control_up::Msg::WorkdirSuggestions(reply))});

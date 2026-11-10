@@ -284,6 +284,43 @@ async fn a_fable_limit_pauses_only_that_session_and_no_provider_reserve(pool: Pg
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stored_future_fable_timestamp_does_not_block_a_new_reading(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, s.machine_id, "claude").await;
+    let future = Utc::now() + TimeDelta::days(1);
+    sqlx::query(
+        "insert into provider_limits(provider,weekly_fable_used_permille,
+           weekly_fable_resets_at,weekly_fable_observed_at)
+         values('claude',100,$1,$2)",
+    )
+    .bind(future + TimeDelta::hours(3))
+    .bind(future)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let reset = Utc::now() + TimeDelta::days(4);
+    observe(
+        &pool,
+        &s,
+        Window::WeeklyFable,
+        50,
+        reset,
+        Utc::now() - TimeDelta::seconds(1),
+    )
+    .await;
+    let mut conn = pool.acquire().await.unwrap();
+    let fable = limits::current(&mut conn)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|provider| provider.provider == "claude")
+        .unwrap()
+        .weekly_fable
+        .unwrap();
+    assert_eq!(fable.used_permille, 50);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_unknown_window_value_is_rejected_not_stored(pool: PgPool) {
     let _seed = testkit::seed(&pool).await;
     assert!(matches!(

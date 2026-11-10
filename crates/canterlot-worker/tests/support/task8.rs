@@ -61,6 +61,7 @@ async fn worker_without_exec_capability_echo_rejects_start() {
         [
             "exec_v1",
             "pilot_v1",
+            "limits_fable_v1",
             "instructions_v1",
             "workdir_suggest_v1",
             "todo_v1",

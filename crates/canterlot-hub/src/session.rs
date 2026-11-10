@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::config::HubTimers;
 
 pub const CAPABILITY_PILOT_V1: &str = "pilot_v1";
+pub const CAPABILITY_LIMITS_FABLE_V1: &str = "limits_fable_v1";
 pub const CAPABILITY_INSTRUCTIONS_V1: &str = "instructions_v1";
 pub const CAPABILITY_TODO_V1: &str = "todo_v1";
 pub const CAPABILITY_COMPACT_V1: &str = "compact_v1";

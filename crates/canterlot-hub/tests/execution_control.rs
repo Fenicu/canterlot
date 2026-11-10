@@ -565,7 +565,11 @@ async fn hello_records_alarms_v1_and_drops_unknown_optional_capabilities(
         cj_journal_id: Uuid::now_v7().to_string(),
         boot_id: Uuid::now_v7().to_string(),
         stream_kind: StreamKind::Control as i32,
-        optional_capabilities: vec!["alarms_v1".into(), "not_a_capability_v1".into()],
+        optional_capabilities: vec![
+            "alarms_v1".into(),
+            "limits_fable_v1".into(),
+            "not_a_capability_v1".into(),
+        ],
         ..Default::default()
     };
     let token = canterlot_hub::machines::rotate_token(&pool, seed.machine_id, false, false)
@@ -587,11 +591,18 @@ async fn hello_records_alarms_v1_and_drops_unknown_optional_capabilities(
         control.message().await?.unwrap().msg,
         Some(control_down::Msg::HelloReply(HelloReply {
             result: Some(hello_reply::Result::Accepted(Accepted { capabilities, .. })),
-        })) if capabilities == ["alarms_v1"]
+        })) if capabilities == ["limits_fable_v1", "alarms_v1"]
     ));
     // Известная возможность запоминается, неизвестная не превращается в согласованную.
-    assert_eq!(hub.registry.capabilities(seed.machine_id), ["alarms_v1"]);
+    assert_eq!(
+        hub.registry.capabilities(seed.machine_id),
+        ["limits_fable_v1", "alarms_v1"]
+    );
     assert!(hub.registry.has_capability(seed.machine_id, "alarms_v1"));
+    assert!(
+        hub.registry
+            .has_capability(seed.machine_id, "limits_fable_v1")
+    );
     assert!(
         !hub.registry
             .has_capability(seed.machine_id, "not_a_capability_v1")

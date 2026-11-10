@@ -53,6 +53,7 @@ pub(super) fn session_committed(
 
 pub(super) struct Stream {
     pub pilot: bool,
+    pub limits_fable: bool,
     pub diagnostics: JournalDiagnostics,
     pub live_limits: crate::machine::limits::LiveLimits,
     #[cfg(feature = "fault-injection")]
@@ -75,6 +76,7 @@ pub(super) async fn run(
 ) -> Result<(), WorkerError> {
     let Stream {
         pilot,
+        mut limits_fable,
         diagnostics,
         live_limits,
         #[cfg(feature = "fault-injection")]
@@ -98,7 +100,13 @@ pub(super) async fn run(
             relay,
             timers,
             &mut active,
-            (cursors, pilot, diagnostics.clone(), live_limits.clone()),
+            (
+                cursors,
+                pilot,
+                limits_fable,
+                diagnostics.clone(),
+                live_limits.clone(),
+            ),
         )
         .await
         .unwrap_err();
@@ -163,6 +171,10 @@ pub(super) async fn run(
                     .map_err(|_| WorkerError::Protocol)?;
                 check_generation(generation, &accepted)?;
                 let committed = session_committed(&hello, &accepted, manager)?;
+                limits_fable = accepted
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap == crate::session::CAPABILITY_LIMITS_FABLE_V1);
                 // Старые элементы восстанавливаются сопровождением от durable cursor.
                 while relay.try_recv().is_ok() {}
                 if *active.borrow() {
@@ -219,11 +231,12 @@ async fn ship(
     session: (
         HashMap<Uuid, u64>,
         bool,
+        bool,
         JournalDiagnostics,
         crate::machine::limits::LiveLimits,
     ),
 ) -> Result<(), WorkerError> {
-    let (cursors, pilot, diagnostics, live_limits) = session;
+    let (cursors, pilot, limits_fable, diagnostics, live_limits) = session;
     let mut withheld = diagnostics.parked();
     let mut pending: VecDeque<Range> = VecDeque::new();
     let mut sent = cursors.clone();
@@ -290,7 +303,7 @@ async fn ship(
                         live_limits.note_observation(observation);
                     }
                 }
-                ready = pack(journal, records)?;
+                ready = pack(journal, records, limits_fable)?;
             }
             permit = tx.reserve(), if retry.is_some() || (!ready.is_empty() && pending.len() < 8) => {
                 let permit = permit.map_err(|_| WorkerError::Transport)?;
@@ -316,7 +329,11 @@ async fn ship(
 
 type Batch = (DataUp, Uuid, u64);
 
-fn pack(journal: Uuid, records: Vec<JournalRecord>) -> Result<VecDeque<Batch>, WorkerError> {
+fn pack(
+    journal: Uuid,
+    records: Vec<JournalRecord>,
+    limits_fable: bool,
+) -> Result<VecDeque<Batch>, WorkerError> {
     if records.len() > 256 {
         return Err(WorkerError::Protocol);
     }
@@ -326,7 +343,9 @@ fn pack(journal: Uuid, records: Vec<JournalRecord>) -> Result<VecDeque<Batch>, W
         records: Vec::new(),
     };
     for record in records {
-        batch.records.push(shippable(journal, record));
+        batch
+            .records
+            .push(shippable(journal, compatible_for_hub(record, limits_fable)));
         let bytes = batch.encoded_len();
         if prost::encoding::key_len(2) + prost::length_delimiter_len(bytes) + bytes
             > MAX_EVENT_BATCH_BYTES
@@ -343,6 +362,51 @@ fn pack(journal: Uuid, records: Vec<JournalRecord>) -> Result<VecDeque<Batch>, W
         result.push_back(envelope(journal, batch)?);
     }
     Ok(result)
+}
+
+/// Хаб без `limits_fable_v1` не должен получить неизвестное окно: отказ SJ-записи
+/// останавливает исполнение. Наблюдение Fable заменяется безвредной отметкой,
+/// упор едет недельным окном с тем же сбросом.
+fn compatible_for_hub(record: JournalRecord, limits_fable: bool) -> JournalRecord {
+    if limits_fable {
+        return record;
+    }
+    let Some(body) = record.body.as_ref().and_then(|body| body.body.as_ref()) else {
+        return record;
+    };
+    match body {
+        record_body::Body::LimitObserved(observation)
+            if observation.window
+                == canterlot_proto::worker::v1::LimitWindow::WeeklyFable as i32 =>
+        {
+            JournalRecord {
+                seq: record.seq,
+                body: Some(RecordBody {
+                    body: Some(record_body::Body::AdapterDiagnostic(
+                        canterlot_proto::worker::v1::AdapterDiagnostic {
+                            execution_id: Uuid::nil().to_string(),
+                            kind: "unknown_optional_event".into(),
+                            event_type: "limit_window_unsupported".into(),
+                            ..Default::default()
+                        },
+                    )),
+                }),
+            }
+        }
+        record_body::Body::LimitReached(reached)
+            if reached.window == canterlot_proto::worker::v1::LimitWindow::WeeklyFable as i32 =>
+        {
+            let mut reached = reached.clone();
+            reached.window = canterlot_proto::worker::v1::LimitWindow::Weekly as i32;
+            JournalRecord {
+                seq: record.seq,
+                body: Some(RecordBody {
+                    body: Some(record_body::Body::LimitReached(reached)),
+                }),
+            }
+        }
+        _ => record,
+    }
 }
 
 /// Поток данных общий для всех сессий машины, поэтому запись, не влезающая в пакет,

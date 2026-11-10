@@ -97,6 +97,7 @@ impl LimitsSource for FileLimitsSource {
             ("five_hour", LimitWindow::FiveHour),
             ("weekly", LimitWindow::Weekly),
             ("monthly", LimitWindow::Monthly),
+            ("weekly_fable", LimitWindow::WeeklyFable),
         ]
         .into_iter()
         .filter_map(|(key, window)| {

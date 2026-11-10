@@ -467,6 +467,89 @@ impl LimitsSource for ClaudeOnlySource {
     }
 }
 
+struct FableSource;
+
+#[async_trait::async_trait]
+impl LimitsSource for FableSource {
+    async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
+        if provider != "claude" {
+            return Vec::new();
+        }
+        vec![
+            LimitObservation {
+                provider: provider.to_owned(),
+                window: ProtoWindow::Weekly as i32,
+                used_permille: 260,
+                resets_at_ms: 1,
+                observed_machine_ms: 1,
+                ..Default::default()
+            },
+            LimitObservation {
+                provider: provider.to_owned(),
+                window: ProtoWindow::WeeklyFable as i32,
+                used_permille: 50,
+                resets_at_ms: 1,
+                observed_machine_ms: 1,
+                ..Default::default()
+            },
+        ]
+    }
+}
+
+async fn poll_claude(hub: &mut support::ProtocolHub) {
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::PollLimits(PollLimits {
+            provider: "claude".into(),
+            owner_refresh: false,
+        })),
+    })
+    .await;
+}
+
+async fn fable_report(capabilities: &[&str]) -> Vec<LimitObservation> {
+    let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+        capabilities: capabilities.iter().map(|cap| (*cap).to_owned()).collect(),
+        ..Default::default()
+    })
+    .await;
+    let worker = Worker::new(hub.config.clone(), store)
+        .with_runtime_dir(hub.config.data_dir.join("runtime"))
+        .with_limits_source(Arc::new(FableSource));
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    state.wait_for(|s| *s == SessionState::Live).await.unwrap();
+    poll_claude(&mut hub).await;
+    let report = next_limits_report(&mut hub).await;
+    stop.send(true).unwrap();
+    join.await.unwrap().unwrap();
+    report
+}
+
+#[tokio::test(start_paused = true)]
+async fn machine_limits_report_omits_fable_without_the_capability() {
+    frozen_clock::run(async {
+        let report = fable_report(&["pilot_v1"]).await;
+        assert_eq!(report.len(), 1, "{report:?}");
+        assert_eq!(report[0].window, ProtoWindow::Weekly as i32);
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn machine_limits_report_carries_fable_with_the_capability() {
+    frozen_clock::run(async {
+        let report = fable_report(&["pilot_v1", "limits_fable_v1"]).await;
+        assert_eq!(report.len(), 2, "{report:?}");
+        assert!(
+            report
+                .iter()
+                .any(|o| o.window == ProtoWindow::WeeklyFable as i32)
+        );
+    })
+    .await;
+}
+
 async fn next_limits_report(hub: &mut support::ProtocolHub) -> Vec<LimitObservation> {
     loop {
         if let support::Observed::Control(message) = hub.event().await
