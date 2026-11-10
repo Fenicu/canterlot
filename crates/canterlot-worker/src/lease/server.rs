@@ -522,14 +522,13 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
             let mut changes = shared.changes.subscribe();
             {
                 let mut state = shared.state.lock().expect("lease state");
-                let granted = state.scheduler.request(
-                    id.clone(),
-                    kind,
-                    requested_at_ms,
-                    super::now_ms(),
-                    meta,
-                );
-                if !granted.is_empty() {
+                let now = super::now_ms();
+                let phantom = release_phantom(&mut state.scheduler, pid, start_ticks, now);
+                let granted =
+                    state
+                        .scheduler
+                        .request(id.clone(), kind, requested_at_ms, now, meta);
+                if !phantom.is_empty() || !granted.is_empty() {
                     persist(&shared.state_file, &state.scheduler);
                 }
                 shared.publish(&state);
@@ -541,6 +540,29 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
             Ok(())
         }
     }
+}
+
+/// Снимает аренду, восстановленную после рестарта, когда та же обёртка просит заново:
+/// клиент мог не увидеть `Granted`, переподключился с новым номером, и старая аренда
+/// иначе держала бы слот до выхода обёртки. Соединение у обёртки всегда одно, поэтому
+/// совпадение pid и времени старта — это та же заявка, а не вторая.
+fn release_phantom(
+    scheduler: &mut Scheduler<Meta>,
+    pid: u32,
+    start_ticks: u64,
+    now_ms: u64,
+) -> Vec<String> {
+    let phantom: Vec<String> = scheduler
+        .holders()
+        .iter()
+        .filter(|entry| entry.meta.wrapper_pid == pid && entry.meta.start_ticks == start_ticks)
+        .map(|entry| entry.id.clone())
+        .collect();
+    for id in &phantom {
+        scheduler.release(id, now_ms);
+        tracing::info!(lease_id = %id, pid, "restored lease without a client, released");
+    }
+    phantom
 }
 
 fn truncate(text: String, limit: usize) -> String {
@@ -743,6 +765,30 @@ mod tests {
                 .unwrap();
         assert_eq!(saved.grants[0].lease_id, "next");
         assert_eq!(shared.changes.borrow().holders[0].lease_id, "next");
+    }
+
+    #[test]
+    fn acquire_releases_restored_grant_of_same_wrapper() {
+        let mut scheduler = Scheduler::new(2);
+        let me = std::process::id();
+        let mine = meta(me);
+        scheduler.restore("phantom".into(), Kind::Build, 1, 10, 1, mine.clone());
+
+        let released = release_phantom(&mut scheduler, me, mine.start_ticks, 20);
+        assert_eq!(released, ["phantom"]);
+        assert!(scheduler.holders().is_empty());
+
+        // Другой процесс и тот же pid с другим временем старта не трогаются.
+        let mut other = mine.clone();
+        other.wrapper_pid = me.wrapping_add(1);
+        scheduler.restore("other".into(), Kind::Build, 1, 10, 1, other.clone());
+        let mut reused = mine.clone();
+        reused.start_ticks += 1;
+        scheduler.restore("reused".into(), Kind::Build, 1, 10, 1, reused.clone());
+        assert!(release_phantom(&mut scheduler, me, mine.start_ticks, 20).is_empty());
+        assert!(release_phantom(&mut scheduler, other.wrapper_pid, reused.start_ticks, 20).is_empty());
+        let ids: Vec<_> = scheduler.holders().iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["other", "reused"]);
     }
 
     #[test]
