@@ -1,6 +1,7 @@
 use std::{
     future::Future,
     io,
+    net::SocketAddr,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -26,13 +27,16 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{OwnedSemaphorePermit, Semaphore, watch},
     task::JoinSet,
-    time::{Instant, sleep_until},
+    time::{Instant, sleep, sleep_until},
 };
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::config::HttpConfig;
 
 use super::SHUTDOWN_GRACE;
+
+/// Пауза перед повтором после ошибки `accept`, которую не объяснил один клиент.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 struct BodyDeadline {
@@ -175,9 +179,29 @@ impl AsyncWrite for ConnectionIo {
     }
 }
 
+/// Источник соединений: настоящий слушатель в работе, подделка в тестах.
+pub(super) trait Listen: Send + Sync {
+    fn accept(&self) -> impl Future<Output = io::Result<(TcpStream, SocketAddr)>> + Send;
+}
+
+impl Listen for TcpListener {
+    fn accept(&self) -> impl Future<Output = io::Result<(TcpStream, SocketAddr)>> + Send {
+        TcpListener::accept(self)
+    }
+}
+
 pub(super) async fn serve(
     router: Router,
     listener: TcpListener,
+    config: HttpConfig,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
+    serve_on(router, listener, config, shutdown).await
+}
+
+async fn serve_on<L: Listen>(
+    router: Router,
+    listener: L,
     config: HttpConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
@@ -194,7 +218,32 @@ pub(super) async fn serve(
             accepted = listener.accept() => {
                 let (socket, peer) = match accepted {
                     Ok(accepted) => accepted,
-                    Err(error) => break Err(error),
+                    // Ошибка уровня соединения относится к одному клиенту, а не к слушателю.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::ConnectionRefused
+                                | io::ErrorKind::ConnectionAborted
+                                | io::ErrorKind::ConnectionReset
+                        ) =>
+                    {
+                        continue;
+                    }
+                    // Нехватка дескрипторов или памяти проходит сама: пауза не даёт крутиться
+                    // вхолостую, а остановка по-прежнему срабатывает во время неё.
+                    Err(error) => {
+                        tracing::error!(
+                            kind = "http_accept_failed",
+                            error_kind = ?error.kind(),
+                            "accept failed; retrying"
+                        );
+                        tokio::select! {
+                            biased;
+                            () = &mut shutdown => break Ok(()),
+                            () = sleep(ACCEPT_RETRY_DELAY) => {},
+                        }
+                        continue;
+                    }
                 };
                 let Ok(permit) = permits.clone().try_acquire_owned() else {
                     drop(socket);
@@ -253,7 +302,74 @@ pub(super) async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::routing::get;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_stream::wrappers::ReceiverStream;
+
+    /// Слушатель, у которого первый `accept` падает, как при нехватке дескрипторов.
+    struct FlakyListener {
+        inner: TcpListener,
+        failures: AtomicUsize,
+    }
+
+    impl Listen for FlakyListener {
+        fn accept(&self) -> impl Future<Output = io::Result<(TcpStream, SocketAddr)>> + Send {
+            let fail = self
+                .failures
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            async move {
+                if fail {
+                    return Err(io::Error::other("accept failed"));
+                }
+                self.inner.accept().await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_error_does_not_stop_the_server() {
+        let inner = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = inner.local_addr().unwrap();
+        let listener = FlakyListener {
+            inner,
+            failures: AtomicUsize::new(1),
+        };
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(serve_on(
+            Router::new().route("/ping", get(|| async { "pong" })),
+            listener,
+            HttpConfig::default(),
+            stop.clone().cancelled_owned(),
+        ));
+        let mut socket = TcpStream::connect(addr).await.unwrap();
+        socket
+            .write_all(b"GET /ping HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut response))
+            .await
+            .expect("the server keeps serving after an accept error")
+            .unwrap();
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("pong"), "{response}");
+        assert!(
+            !task.is_finished(),
+            "the accept error must not stop the server"
+        );
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 
     fn poll(body: &mut ReadBody) -> Poll<Option<Result<Frame<axum::body::Bytes>, axum::Error>>> {
         let mut cx = Context::from_waker(std::task::Waker::noop());
