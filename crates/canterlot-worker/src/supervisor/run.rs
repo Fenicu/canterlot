@@ -65,8 +65,9 @@ const MAX_PENDING_MEDIA: usize = 32;
 const ORPHAN_REAP_PERIOD: Duration = Duration::from_secs(30);
 /// Период снимка участников: он находит потомков, потерявших метку группы.
 const GROUP_RECORD_PERIOD: Duration = Duration::from_secs(5);
-/// Подготовка файла и постановка в очередь: загрузки ещё нет, срок короткий.
-const SHARE_PREPARE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Подготовка файла и ожидание очереди: срок не должен истекать, пока передача
+/// ждёт за другой загрузкой, поэтому здесь отдельный щедрый запас.
+const SHARE_QUEUE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Передача файла: базовый срок и время на размер, крупный файл не обрывается.
 const SHARE_TRANSFER_BASE: Duration = Duration::from_secs(60);
 const SHARE_TRANSFER_PER_MIB: Duration = Duration::from_secs(2);
@@ -1464,7 +1465,7 @@ impl Supervisor {
         // Подготовка и постановка в очередь ограничены коротко; передача получит
         // свой срок от размера, когда файл действительно пойдёт на хаб.
         self.agent_calls
-            .insert(call_id, Instant::now() + SHARE_PREPARE_TIMEOUT);
+            .insert(call_id, Instant::now() + SHARE_QUEUE_TIMEOUT);
         if self.share_jobs.send(job).is_ok() {
             self.shares.preparing += 1;
         }
@@ -4090,6 +4091,31 @@ mod tests {
         );
     }
 
+    // Ожидание за другой загрузкой не должно съедать короткий срок подготовки:
+    // иначе вызов отвечает hub_timeout, хотя хаб ещё не спрашивали.
+    #[tokio::test(start_paused = true)]
+    async fn a_share_waiting_behind_another_upload_keeps_its_deadline() {
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        supervisor.pilot_v1 = true;
+        let call_id = Uuid::now_v7();
+        supervisor
+            .on_share(call_id, &serde_json::json!({"path": "/tmp/doc.txt"}))
+            .await
+            .unwrap();
+        let (_, _, mut pending) = queued_share();
+        pending.call_id = call_id;
+        supervisor.shares.ready.push_back(pending);
+        supervisor.shares.inflight = Some(Uuid::now_v7());
+        tokio::time::advance(Duration::from_secs(5 * 60)).await;
+        supervisor.expire_agent_calls().await;
+        assert!(
+            supervisor.agent_calls.contains_key(&call_id),
+            "a queued share keeps its call alive"
+        );
+        assert_eq!(supervisor.shares.ready.len(), 1);
+        assert_eq!(supervisor.shares.ready[0].call_id, call_id);
+    }
+
     #[tokio::test]
     async fn large_share_upload_gets_a_scaled_deadline_and_success_is_honoured() {
         let (_dir, mut supervisor, state) = test_supervisor();
@@ -4098,7 +4124,7 @@ mod tests {
         supervisor.shares.ready.push_back(pending);
         supervisor
             .agent_calls
-            .insert(call_id, Instant::now() + SHARE_PREPARE_TIMEOUT);
+            .insert(call_id, Instant::now() + SHARE_QUEUE_TIMEOUT);
         let (tx, mut rx) = mpsc::channel(64);
         supervisor.conns.insert(0, Conn { tx, attached: true });
         supervisor.attached = Some(0);
@@ -4147,7 +4173,7 @@ mod tests {
         supervisor.shares.inflight = Some(share_id);
         supervisor
             .agent_calls
-            .insert(call_id, Instant::now() + SHARE_PREPARE_TIMEOUT);
+            .insert(call_id, Instant::now() + SHARE_QUEUE_TIMEOUT);
         supervisor
             .on_share_result(canterlot_proto::worker::ipc::ShareResult {
                 share_id: share_id.to_string(),
