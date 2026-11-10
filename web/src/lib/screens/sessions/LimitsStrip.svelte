@@ -48,7 +48,7 @@
   }
 </script>
 
-{#snippet meter(tag: string, name: string, m: MeterView, window: 'five' | 'week' | 'month', first: boolean = false)}
+{#snippet meter(tag: string, name: string, m: MeterView, window: 'five' | 'week' | 'fable' | 'month', first: boolean = false)}
   <span class="meter" data-window={window} data-stale={m.stale || undefined} data-known={m.known}>
     <span class="name pname" title={first ? name : undefined}>{first ? name : ''}</span>
     <span class="tag">{tag}</span>
@@ -88,6 +88,7 @@
                 {@render meter('5ч', compact ? 'Лимиты' : row.label, row.five, 'five', true)}
                 {@render meter('нед', row.label, row.week, 'week')}
               {/if}
+              {#if row.fable}{@render meter('Fable', row.label, row.fable, 'fable')}{/if}
               {#if row.month}{@render meter('мес', row.label, row.month, 'month')}{/if}
               {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
             {/if}
@@ -161,7 +162,7 @@
     column-gap: var(--s1);
   }
   .limits:not([open]) .meter { display: contents; }
-  .limits:not([open]) .meter[data-window='month'] { display: none; }
+  .limits:not([open]) .meter[data-window='fable'], .limits:not([open]) .meter[data-window='month'] { display: none; }
   .limits:not([open]) .name:empty { display: none; }
   .limits:not([open]) .meter > .name { grid-column: 1; }
   .limits:not([open]) .meter[data-window='five'] > .tag { grid-column: 2; }

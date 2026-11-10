@@ -299,7 +299,13 @@ export class ListStore {
         next.push(provider);
       }
       const previous =
-        payload.window === "five_hour" ? provider.five_hour : payload.window === "monthly" ? provider.monthly : provider.weekly;
+        payload.window === "five_hour"
+          ? provider.five_hour
+          : payload.window === "weekly_fable"
+            ? provider.weekly_fable
+            : payload.window === "monthly"
+              ? provider.monthly
+              : provider.weekly;
       // Событие без значения сообщает, что пятичасового окна у провайдера нет.
       const window: LimitWindow | null =
         payload.used_permille === null
@@ -313,6 +319,8 @@ export class ListStore {
       if (payload.window === "five_hour") {
         provider.five_hour = window;
         provider.five_hour_absent = window === null;
+      } else if (payload.window === "weekly_fable") {
+        provider.weekly_fable = window;
       } else if (payload.window === "monthly") {
         provider.monthly = window;
       } else if (window) provider.weekly = window;

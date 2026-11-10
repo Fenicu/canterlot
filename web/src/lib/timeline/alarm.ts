@@ -33,6 +33,7 @@ function verbs(states: string[]): string {
 const LIMIT_WINDOWS: Record<string, string> = {
   five_hour: '5 ч',
   weekly: 'неделя',
+  weekly_fable: 'Fable, неделя',
   monthly: 'месяц'
 };
 

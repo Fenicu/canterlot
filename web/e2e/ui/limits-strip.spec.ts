@@ -386,6 +386,35 @@ test('monthly_windows_line_up_by_kind_across_providers', async ({ page }) => {
   await shot(page, 'strip-monthly');
 });
 
+test('fable_weekly_window_shows_after_the_weekly_window_and_fits_a_phone', async ({ page }) => {
+  await boot(page, (api) => {
+    const row = claude(api);
+    row.weekly_fable = {
+      used_permille: 50,
+      resets_at: new Date(Date.now() + 4 * 86_400_000).toISOString(),
+      observed_at: new Date(Date.now() - 60_000).toISOString()
+    };
+  });
+  await resizeViewport(page, { width: 320, height: 844 });
+  const strip = page.locator('.limits').first();
+  const row = strip.locator('.row').first();
+  const fable = row.locator('.meter[data-window="fable"]');
+  await expect(fable).toHaveCount(1);
+  await expect(fable).toBeHidden();
+  await expect(row.locator('.meter[data-window="week"]')).toContainText('4%');
+  await strip.locator('summary').click();
+  await expect(fable).toBeVisible();
+  await expect(fable).toContainText('Fable');
+  await expect(fable).toContainText('95%');
+  await expect(fable.locator('.reset')).toHaveText(/^сброс/);
+  const week = row.locator('.meter[data-window="week"]');
+  const boxes = await Promise.all([week.boundingBox(), fable.boundingBox()]);
+  expect(boxes[1]!.y).toBeGreaterThan(boxes[0]!.y);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  await shot(page, 'strip-fable');
+});
+
 test('alternating_provider_rows_are_tinted_and_the_week_values_stay_aligned', async ({ page }) => {
   await boot(page, (api) => {
     const observed = new Date(Date.now() - 60_000).toISOString();

@@ -12,6 +12,8 @@ export interface LimitRow {
   label: string;
   five: MeterView;
   week: MeterView;
+  /** Недельная квота Fable есть только у Claude и может отсутствовать в старых данных. */
+  fable: MeterView | null;
   /** Месячное окно есть не у всех провайдеров и может отсутствовать в старых данных. */
   month: MeterView | null;
   /** Хаб не знает ни одного окна: строка сводится к «нет данных». */
@@ -51,7 +53,7 @@ export function limitStrip(
     if (TONE_RANK[view.tone] > TONE_RANK[tone]) tone = view.tone;
   }
   const seen = views
-    .flatMap(({ view }) => [view.five.observedAt, view.week.observedAt])
+    .flatMap(({ view }) => [view.five.observedAt, view.week.observedAt, view.fable?.observedAt ?? Number.NaN])
     .filter((stamp) => Number.isFinite(stamp));
   const latest = seen.length ? Math.max(...seen) : 0;
   return {
@@ -60,8 +62,9 @@ export function limitStrip(
       label: label(provider.provider),
       five: view.five,
       week: view.week,
+      fable: view.fable,
       month: view.month,
-      empty: !provider.five_hour && !provider.weekly && !provider.monthly,
+      empty: !provider.five_hour && !provider.weekly && !provider.weekly_fable && !provider.monthly,
       reserve: provider.weekly_reserve_active,
       estimated: provider.data_confidence === "estimated",
     })),

@@ -219,11 +219,12 @@ describe('share, limits, web, tools', () => {
   });
 
   it('limits_parse_the_report_text', () => {
-    const text = 'Claude API budget: five-hour window 15% used, resets 2026-10-31 11:20 UTC; weekly window 39% used, resets 2026-11-03 01:00 UTC.\nCodex API budget: five-hour window 4.1% used; weekly window 83% used, resets 2026-11-10 08:00 UTC.\nOpenCode API budget: no limit data yet.\nObserved: claude just now, codex 29 min ago.';
+    const text = 'Claude API budget: five-hour window 15% used, resets 2026-10-31 11:20 UTC; weekly window 39% used, resets 2026-11-03 01:00 UTC; Fable weekly window 5% used, resets 2026-11-03 01:00 UTC.\nCodex API budget: five-hour window 4.1% used; weekly window 83% used, resets 2026-11-10 08:00 UTC.\nOpenCode API budget: no limit data yet.\nObserved: claude just now, codex 29 min ago.';
     const resolved = card<LimitsData>(made('mcp__canterlot__canterlot_limits', {}, text))!;
     expect(resolved.data.rows.map((row) => row.label)).toEqual(['Claude', 'Codex', 'OpenCode']);
     expect(resolved.data.rows[1]!.meters[1]).toMatchObject({ window: 'week', text: '17%', tone: 'warning' });
-    expect(resolved.line).toBe('Лимиты · Claude 5ч 85%, нед 61% · Codex 5ч 96%, нед 17% · OpenCode нет данных');
+    expect(resolved.data.rows[0]!.meters[2]).toMatchObject({ window: 'fable', text: '95%' });
+    expect(resolved.line).toBe('Лимиты · Claude 5ч 85%, нед 61%, Fable 95% · Codex 5ч 96%, нед 17% · OpenCode нет данных');
   });
 
   it('web_search_counts_links_and_fetch_names_the_domain', () => {

@@ -14,8 +14,8 @@ export function localDay(date: Date, zone = Intl.DateTimeFormat().resolvedOption
 export function sevenDays(now: Date): string[] {
   return Array.from({ length: 7 }, (_, index) => { const day = new Date(now); day.setDate(day.getDate() - 6 + index); return localDay(day); });
 }
-type WindowKey = 'five' | 'week' | 'month';
-const WINDOW_LABEL: Record<WindowKey, string> = { five: '5 часов', week: 'неделя', month: 'месяц' };
+type WindowKey = 'five' | 'week' | 'fable' | 'month';
+const WINDOW_LABEL: Record<WindowKey, string> = { five: '5 часов', week: 'неделя', fable: 'Fable, неделя', month: 'месяц' };
 
 export interface WindowRow {
   key: WindowKey;
@@ -46,8 +46,8 @@ export interface LeadWindow {
   tone: MeterTone;
 }
 
-const LEAD_CAPTION: Record<WindowKey, string> = { five: 'осталось на 5 часов', week: 'осталось на неделю', month: 'осталось на месяц' };
-const WINDOW_SPAN: Record<WindowKey, number> = { five: 0, week: 1, month: 2 };
+const LEAD_CAPTION: Record<WindowKey, string> = { five: 'осталось на 5 часов', week: 'осталось на неделю', fable: 'осталось на неделю Fable', month: 'осталось на месяц' };
+const WINDOW_SPAN: Record<WindowKey, number> = { five: 0, week: 1, fable: 1, month: 2 };
 /** Тон словом, а не только цветом: красное и жёлтое различимы и без цвета. */
 const TONE_WORD: Record<MeterTone, string> = { normal: '', warning: 'заканчивается', danger: 'на исходе' };
 
@@ -62,7 +62,7 @@ function leadWindow(windows: WindowRow[]): LeadWindow | null {
 /** Текущие лимиты по провайдерам: строка на каждое окно, которое у провайдера есть. */
 export function currentBlocks(providers: ProviderLimits[], now: number, cfg: LimitThresholds) {
   return limitStrip(providers, now, cfg).rows.map(row => {
-    const meters: [WindowKey, MeterView | null][] = [['five', row.five], ['week', row.week], ['month', row.month]];
+    const meters: [WindowKey, MeterView | null][] = [['five', row.five], ['week', row.week], ['fable', row.fable], ['month', row.month]];
     const windows: WindowRow[] = meters
       .filter((entry): entry is [WindowKey, MeterView] => Boolean(entry[1]?.known))
       .map(([key, meter]) => ({

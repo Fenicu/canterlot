@@ -1410,6 +1410,40 @@ describe("stores task 4", () => {
     expect(provider.weekly!.used_permille).toBe(20);
   });
 
+  it("limits_changed_weekly_fable_updates_only_the_fable_window", () => {
+    const list = listOf();
+    const observed = "2026-10-28T12:00:00.000Z";
+    list.limits = [
+      {
+        provider: "claude",
+        five_hour: { used_permille: 10, resets_at: null, observed_at: observed },
+        weekly: { used_permille: 20, resets_at: null, observed_at: observed },
+        weekly_reserve_active: false,
+      },
+    ];
+    list.applier.applyEvents([
+      {
+        event: ev(
+          "limits_changed",
+          {
+            provider: "claude",
+            window: "weekly_fable",
+            used_permille: 50,
+            resets_at: null,
+            observed_at: "2026-10-28T12:05:00.000Z",
+            weekly_reserve_active: false,
+            weekly_reserve_resets_at: null,
+          },
+          "4",
+        ),
+        overlap: false,
+      },
+    ]);
+    const provider = list.limits.find((item) => item.provider === "claude")!;
+    expect(provider.weekly_fable!.used_permille).toBe(50);
+    expect(provider.weekly!.used_permille).toBe(20);
+  });
+
   it("limits_changed_without_a_value_marks_the_five_hour_window_absent_and_a_value_brings_it_back", () => {
     const list = listOf();
     const week = {

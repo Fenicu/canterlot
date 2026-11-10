@@ -3,7 +3,7 @@ import { remainingPct, remainingText, meterTone, type MeterTone } from '#lib/sto
 import type { CardLogic } from '../types';
 
 export interface LimitMeter {
-  window: 'five' | 'week' | 'month';
+  window: 'five' | 'week' | 'fable' | 'month';
   /** Расход в промилле: так считает полоса лимитов. */
   usedPermille: number;
   remaining: number;
@@ -30,7 +30,7 @@ const LABELS: [RegExp, string, string][] = [
   [/^Antigravity/i, 'antigravity', 'Antigravity']
 ];
 
-const WINDOWS: Record<string, LimitMeter['window']> = { 'five-hour': 'five', weekly: 'week', monthly: 'month' };
+const WINDOWS: Record<string, LimitMeter['window']> = { 'five-hour': 'five', 'Fable weekly': 'fable', weekly: 'week', monthly: 'month' };
 
 function reset(text: string): number | null {
   const match = /(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) UTC/.exec(text);
@@ -50,7 +50,7 @@ export function parseLimits(text: string): LimitRow[] {
     if (!known) continue;
     const meters: LimitMeter[] = [];
     for (const part of head[2]!.split(';')) {
-      const match = /(five-hour|weekly|monthly) window ([\d.]+)% used/.exec(part);
+      const match = /(five-hour|Fable weekly|weekly|monthly) window ([\d.]+)% used/.exec(part);
       if (!match) continue;
       const usedPermille = Math.round(Number(match[2]) * 10);
       const remaining = remainingPct(usedPermille);
@@ -61,7 +61,7 @@ export function parseLimits(text: string): LimitRow[] {
   return rows;
 }
 
-const SHORT: Record<LimitMeter['window'], string> = { five: '5ч', week: 'нед', month: 'мес' };
+const SHORT: Record<LimitMeter['window'], string> = { five: '5ч', week: 'нед', fable: 'Fable', month: 'мес' };
 
 export function meterTag(window: LimitMeter['window']): string {
   return SHORT[window];

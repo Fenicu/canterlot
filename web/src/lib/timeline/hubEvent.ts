@@ -56,7 +56,8 @@ export function eventSessionId(origin: InputOrigin | null | undefined): string |
 
 const LIMIT_WINDOWS: Record<string, string> = {
   five_hour: '5 часов',
-  weekly: 'неделя'
+  weekly: 'неделя',
+  weekly_fable: 'Fable, неделя'
 };
 
 const PHASES: Record<string, string> = {

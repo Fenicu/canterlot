@@ -209,6 +209,28 @@ test('current_limits_show_only_existing_windows_with_the_text_on_one_line_over_t
   await shot(page, 'limits-cards');
 });
 
+test('claude_fable_week_is_shown_after_the_weekly_window', async ({ page }) => {
+  const phone = test.info().project.name === 'phone';
+  if (phone) await page.setViewportSize({ width: 390, height: 900 });
+  await bootSecondary(page, '/limits', null, (api) => {
+    const claude = api.limits.find((item) => item.provider === 'claude')!;
+    claude.weekly!.used_permille = 790;
+    claude.weekly_fable = {
+      used_permille: 50,
+      resets_at: new Date(Date.now() + 4 * 86_400_000).toISOString(),
+      observed_at: new Date(Date.now() - 60_000).toISOString()
+    };
+    claude.five_hour = null;
+    claude.five_hour_absent = true;
+  });
+  const card = page.getByRole('region', { name: 'Claude, текущие лимиты' });
+  await expect(card.locator('.label')).toHaveText(['неделя', 'Fable, неделя']);
+  await expect(card.locator('.value')).toHaveText(['осталось 21%', 'осталось 95%']);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  await shot(page, 'limits-fable');
+});
+
 test('current_limits_rows_stay_inside_their_card_at_narrow_widths', async ({ page }) => {
   await bootSecondary(page, '/limits');
   const cards = page.locator('main .current section');

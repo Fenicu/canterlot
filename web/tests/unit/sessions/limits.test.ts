@@ -187,6 +187,23 @@ describe("sessions/limits", () => {
     expect(opencode?.month?.reset).toBe("через 40\u00a0ч");
   });
 
+  it("fable_weekly_window_is_kept_apart_and_old_rows_stay_without_it", () => {
+    const withFable = {
+      ...provider("claude", 125, 340),
+      weekly_fable: {
+        used_permille: 50,
+        resets_at: at(31, 4, 0),
+        observed_at: new Date(NOW - 60_000).toISOString(),
+      },
+    };
+    const strip = limitStrip([withFable, provider("codex", 100, 200)], NOW, cfg);
+    const [claude, codex] = strip.rows;
+    expect(claude?.fable).toMatchObject({ text: "95%", fill: 95 });
+    expect(claude?.fable?.reset).toBe("через 40\u00a0ч");
+    expect(claude?.week).toMatchObject({ text: "66%" });
+    expect(codex?.fable).toBeNull();
+  });
+
   it("opencode_sorts_after_codex_and_keeps_its_label", () => {
     const strip = limitStrip(
       [provider("opencode", 125, 340), provider("codex", 0, 150), provider("claude", 340, 960)],
