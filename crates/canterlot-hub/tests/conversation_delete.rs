@@ -143,6 +143,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into bookmarks(id,owner_id,conversation_id,target_kind,target_id)
+         values($1,$2,$3,'block',$4)",
+        &[Uuid::now_v7(), owner, conversation, block],
+    )
+    .await;
+    exec(
+        pool,
         "insert into block_media(id,execution_id,conversation_id,block_id,mime,size_bytes,sha256)
          values($1,$2,$3,$4,'image/png',1,repeat('a',64))",
         &[media, execution, conversation, block],
