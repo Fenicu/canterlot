@@ -340,6 +340,34 @@ fn event_job(
     })
 }
 
+/// Заметка хаба получателю: идёт тем же заданием `note`, что и прочие служебные сообщения,
+/// поэтому удержание лимитом у получателя её тоже откладывает, а `dedupe_key` не даёт
+/// поставить второй ввод за один эпизод.
+#[allow(clippy::too_many_arguments)]
+pub async fn queue_note_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    subscriber_id: Uuid,
+    now: DateTime<Utc>,
+    text: String,
+    origin: Value,
+    dedupe_key: String,
+) -> Result<Uuid, sqlx::Error> {
+    insert_job(
+        conn,
+        owner_id,
+        subscriber_id,
+        now,
+        &json!({
+            "action": "note",
+            "text": text,
+            "origin": origin,
+            "dedupe_key": dedupe_key,
+        }),
+    )
+    .await
+}
+
 pub(super) async fn insert_job(
     conn: &mut PgConnection,
     owner_id: Uuid,

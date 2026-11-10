@@ -579,6 +579,7 @@ fn machine_state(state: &str, reason: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deliver(
     conn: &mut PgConnection,
     job: &ClaimedJob,

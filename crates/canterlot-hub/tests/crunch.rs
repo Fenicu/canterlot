@@ -3248,3 +3248,132 @@ async fn final_wave_failed_poll_send_does_not_consume_provider_slot(pool: PgPool
         .unwrap()
     );
 }
+
+async fn parent_note_texts(pool: &PgPool, parent: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "select content->0->>'text' from inputs where conversation_id=$1 order by input_seq",
+    )
+    .bind(parent)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn delegate_of(env: &Env, parent: Uuid) -> Uuid {
+    let child = env.conversation(true, true).await;
+    sqlx::query("update conversations set parent_conversation_id=$2,title='delegate' where id=$1")
+        .bind(child)
+        .bind(parent)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    child
+}
+
+async fn dead_turn(pool: &PgPool, child: Uuid) {
+    sqlx::query(
+        "update executions set state='stopped',outcome='normal_exit' where conversation_id=$1",
+    )
+    .bind(child)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn wake_without_a_live_execution_notes_the_parent_once(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let parent = env.conversation(true, false).await;
+    let child = delegate_of(&env, parent).await;
+    let now = start();
+    let reset = now + secs(3600);
+    env.limit_reached(child, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    dead_turn(&pool, child).await;
+    verified_reset(&env, reset).await;
+    env.tick(reset + secs(60)).await;
+
+    let notes = parent_note_texts(&pool, parent).await;
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("was paused by the claude five_hour limit"),
+        "{}",
+        notes[0]
+    );
+    assert!(notes[0].contains("no live execution"), "{}", notes[0]);
+    assert!(notes[0].contains(&child.to_string()), "{}", notes[0]);
+    assert!(resume_pending(&pool, child).await);
+    assert!(wake_texts(&pool, child).await.is_empty());
+    assert_eq!(inputs(&pool, child).await, 0);
+    let executions: i64 =
+        sqlx::query_scalar("select count(*) from executions where conversation_id=$1")
+            .bind(child)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(executions, 1, "no new execution is started by the wake");
+
+    // Второе пробуждение той же паузы не повторяет заметку.
+    sqlx::query(
+        "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
+         values($1,'wake',$2,$3,$4,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(env.owner)
+    .bind(child)
+    .bind(reset + secs(61))
+    .bind(json!({
+        "provider": "claude",
+        "window": "five_hour",
+        "hold_key": "quota:claude:five_hour",
+        "verified": true,
+    }))
+    .execute(&pool)
+    .await
+    .unwrap();
+    env.tick(reset + secs(61)).await;
+    assert_eq!(
+        parent_note_texts(&pool, parent).await.len(),
+        1,
+        "one note per pause episode"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn wake_without_a_live_execution_sends_no_note_to_an_owner_stopped_child(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let parent = env.conversation(true, false).await;
+    let child = delegate_of(&env, parent).await;
+    let now = start();
+    let reset = now + secs(3600);
+    env.limit_reached(child, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    control::request_stop(&pool, env.owner, child, "stop", Uuid::now_v7())
+        .await
+        .unwrap();
+    dead_turn(&pool, child).await;
+    verified_reset(&env, reset).await;
+    env.tick(reset + secs(60)).await;
+    assert!(parent_note_texts(&pool, parent).await.is_empty());
+    assert_eq!(inputs(&pool, child).await, 0);
+    assert!(!resume_pending(&pool, child).await);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn wake_with_a_live_execution_still_sends_the_resume_text(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let parent = env.conversation(true, false).await;
+    let child = delegate_of(&env, parent).await;
+    let now = start();
+    let reset = now + secs(3600);
+    env.limit_reached(child, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    verified_reset(&env, reset).await;
+    env.tick(reset + secs(60)).await;
+    assert_eq!(
+        wake_texts(&pool, child).await,
+        vec![LimitsConfig::default().default_resume_text]
+    );
+    assert!(parent_note_texts(&pool, parent).await.is_empty());
+    assert!(!resume_pending(&pool, child).await);
+}

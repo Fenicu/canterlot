@@ -926,8 +926,14 @@ pub async fn handle_wake_in_tx(
             None => return Ok(JobOutcome::Cancelled("conversation_not_found")),
         };
     clear_resume_in_tx(conn, id, Some(now), correlation_id).await?;
-    let (crunch, mut resume_pending, resume_text): (bool, bool, Option<String>) = sqlx::query_as(
-        "select crunch_enabled,resume_pending,crunch_resume_text from conversations where id=$1 for no key update",
+    let (crunch, mut resume_pending, resume_text, pending_until): (
+        bool,
+        bool,
+        Option<String>,
+        Option<DateTime<Utc>>,
+    ) = sqlx::query_as(
+        "select crunch_enabled,resume_pending,crunch_resume_text,resume_pending_until
+         from conversations where id=$1 for no key update",
     )
     .bind(id)
     .fetch_one(&mut *conn)
@@ -1026,6 +1032,18 @@ pub async fn handle_wake_in_tx(
         .execute(&mut *conn)
         .await?;
     }
+    // Ход срезан лимитом, живого исполнения нет: сам разговор не продолжится. Родитель
+    // должен узнать об этом заметкой, иначе делегат останется молча ждать сообщения.
+    if skipped == Some("no_live_execution")
+        && resume_pending
+        && !queue.pause_reasons.0.contains(&PauseReason::UserStop)
+    {
+        let dedupe = pending_until.map_or_else(
+            || format!("crunch-reset:{}", job.id),
+            |at| format!("crunch-reset:{id}:{}", at.timestamp_millis()),
+        );
+        queue_no_live_note_in_tx(conn, job.owner_id, id, provider, window, &dedupe, now).await?;
+    }
     let result = json!({"input_id":input_id,"skipped":skipped,"resume_pending":resume_pending,"by_clock":by_clock});
     append(
         conn,
@@ -1037,6 +1055,75 @@ pub async fn handle_wake_in_tx(
     )
     .await?;
     Ok(JobOutcome::Done(result))
+}
+
+/// Заметка родителю о срезанном лимитом ходе: разговор не продолжится сам, нужен ввод.
+/// Идёт обычным заданием `note`, поэтому удержание лимитом у родителя его тоже отложит.
+#[allow(clippy::too_many_arguments)]
+async fn queue_no_live_note_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    provider: &str,
+    window: Window,
+    dedupe_key: &str,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let child: Option<(String, Option<Uuid>)> = sqlx::query_as(
+        "select title,parent_conversation_id from conversations
+         where id=$1 and owner_id=$2 and trashed_at is null",
+    )
+    .bind(conversation_id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((title, Some(parent))) = child else {
+        return Ok(());
+    };
+    if parent == conversation_id {
+        return Ok(());
+    }
+    let parent_alive: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations
+          where id=$1 and owner_id=$2 and trashed_at is null)",
+    )
+    .bind(parent)
+    .bind(owner_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !parent_alive {
+        return Ok(());
+    }
+    let title = crate::session_tools::origin::clean_title(&title);
+    let text = format!(
+        "[canterlot] Session \"{title}\" (id {conversation_id}) was paused by the \
+         {provider} {} limit; the limit has reset, but its turn was cut and there is \
+         no live execution, so it will not continue on its own. Send it a message to \
+         continue, or stop it.",
+        window.as_str()
+    );
+    let origin = crate::session_tools::origin::with_event(
+        crate::session_tools::origin::note_origin(0),
+        crate::session_tools::origin::HubEvent {
+            kind: "quota_paused".into(),
+            session_id: Some(conversation_id),
+            provider: Some(provider.into()),
+            window: Some(window.as_str().into()),
+            reason: Some("no_live_execution".into()),
+            ..Default::default()
+        },
+    );
+    crate::session_tools::subs::queue_note_in_tx(
+        conn,
+        owner_id,
+        parent,
+        now,
+        text,
+        origin,
+        dedupe_key.to_owned(),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Проверка на уровне провайдера: замечает сброс недели, когда живых сессий нет.
