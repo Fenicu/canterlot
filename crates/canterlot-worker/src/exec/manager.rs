@@ -1595,6 +1595,28 @@ impl Actor {
                 record.released_reason = "spawn_failed".into();
             })
             .await?;
+            // Неудачный запуск не оставляет каталог и сокет до следующего старта
+            // воркера: уборка находит их только по записи без владельца.
+            if let Some(socket) = self.ipc_socket.clone()
+                && let Err(error) = tokio::fs::remove_file(&socket).await
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    path = %socket.display(),
+                    reason = %error,
+                    "failed spawn socket removal failed"
+                );
+            }
+            if let Some(dir) = self.exec_dir.clone()
+                && let Err(error) = tokio::fs::remove_dir_all(&dir).await
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    path = %dir.display(),
+                    reason = %error,
+                    "failed spawn directory removal failed"
+                );
+            }
         }
         self.released = true;
         Ok(false)
@@ -2952,6 +2974,65 @@ mod tests {
         assert!(log.contains("start_failed"), "{log}");
         assert!(log.contains("session_create_failed"), "{log}");
         assert!(log.contains(&id.to_string()), "{log}");
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_spawn_removes_its_exec_dir_and_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let id = Uuid::now_v7();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let runtime = root.path().join("runtime");
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(runtime.clone()),
+        );
+        let exec_dir = data.join("executions").join(id.to_string());
+        fs::create_dir_all(&exec_dir).unwrap();
+        let socket = runtime.join("canterlot").join(format!("{id}.sock"));
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        let command = Command {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            execution_id: id.to_string(),
+            execution_generation: 1,
+            kind: Some(Kind::StartExecution(StartExecution::default())),
+        };
+        let dir_text = exec_dir.to_string_lossy().into_owned();
+        let socket_text = socket.to_string_lossy().into_owned();
+        manager
+            .shared
+            .store
+            .call(move |slot| {
+                open(slot)?.ownership_mut()?.append(Ownership {
+                    execution_id: id.to_string(),
+                    exec_dir: dir_text,
+                    ipc_socket: socket_text,
+                    phase: OwnershipPhase::Spawning as i32,
+                    ..Default::default()
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        actor.exec_dir = Some(exec_dir.clone());
+        actor.ipc_socket = Some(socket.clone());
+        actor
+            .spawn_failed(&command, true, "supervisor_start_failed")
+            .await
+            .unwrap();
+        assert!(!exec_dir.exists(), "a failed spawn leaves no exec dir");
+        assert!(!socket.exists(), "a failed spawn leaves no socket");
         drop(actor);
         manager.shutdown().await;
         thread.close().await.unwrap();
