@@ -334,7 +334,17 @@ pub(super) async fn sweep_runtime(shared: &Shared) -> Result<(), ExecError> {
                 if open(slot)?.ownership().get(execution.id).is_some() {
                     return Ok(());
                 }
-                maintenance::remove_stale_execution(&execution, spawn_timeout, SystemTime::now())?;
+                if let Err(error) = maintenance::remove_stale_execution(
+                    &execution,
+                    spawn_timeout,
+                    SystemTime::now(),
+                ) {
+                    tracing::warn!(
+                        path = %execution.dir.display(),
+                        reason = %error,
+                        "stale execution removal failed"
+                    );
+                }
                 Ok(())
             })
             .await?;
@@ -354,7 +364,13 @@ pub(super) async fn sweep_runtime(shared: &Shared) -> Result<(), ExecError> {
                 if unreleased {
                     return Ok(());
                 }
-                maintenance::remove_stale_socket(id, &path, &executions_dir)?;
+                if let Err(error) = maintenance::remove_stale_socket(id, &path, &executions_dir) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        reason = %error,
+                        "stale socket removal failed"
+                    );
+                }
                 Ok(())
             })
             .await?;
@@ -438,15 +454,35 @@ pub(super) async fn gc_worktrees(shared: &Shared) -> Result<(), ExecError> {
                 if maintenance::target_in_use(&target, Path::new("/proc"), std::process::id()) {
                     return Ok(None);
                 }
-                let staged = maintenance::stage_build(&path, grade, &trash)?;
+                let staged = match maintenance::stage_build(&path, grade, &trash) {
+                    Ok(staged) => staged,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            reason = %error,
+                            "worktree build staging failed"
+                        );
+                        return Ok(None);
+                    }
+                };
                 drop(locks);
                 Ok(staged)
             })
             .await?;
         if let Some(batch) = staged {
-            tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&batch))
+            let path = batch.clone();
+            let removed = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&batch))
                 .await
-                .map_err(|_| ExecError::Shutdown)??;
+                .map_err(|_| ExecError::Shutdown)?;
+            if let Err(error) = removed
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    reason = %error,
+                    "gc trash batch removal failed"
+                );
+            }
         }
     }
     Ok(())
@@ -476,14 +512,28 @@ pub(super) async fn cleanup_released(shared: &Shared) -> Result<(), ExecError> {
             if let Some(spec) = spec {
                 let socket = spec.ipc_socket.unwrap_or_else(|| dir.join("ipc.sock"));
                 if socket == Path::new(&record.ipc_socket) {
-                    match fs::remove_file(socket) {
+                    match fs::remove_file(&socket) {
                         Ok(()) => {}
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.into()),
+                        Err(error) => {
+                            tracing::warn!(
+                                path = %socket.display(),
+                                reason = %error,
+                                "released exec socket removal failed"
+                            );
+                        }
                     }
                 }
             }
-            fs::remove_dir_all(dir)?;
+            if let Err(error) = fs::remove_dir_all(&dir)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    path = %dir.display(),
+                    reason = %error,
+                    "released exec dir removal failed"
+                );
+            }
         }
     }
     Ok(())
@@ -3483,6 +3533,75 @@ mod tests {
         assert!(worktree.join("target/debug/incremental/crate-1/q").exists());
         assert!(worktree.join("target/lint").exists());
         drop(held.lock().unwrap().take());
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gc_continues_when_one_candidate_cannot_be_staged() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        let first_tree = gc_tree(&data, first);
+        let second_tree = gc_tree(&data, second);
+        let thread = StoreThread::new(store);
+        let manager = gc_manager(root.path(), &thread);
+
+        // Первый же кандидат получает родителя без права записи: переименование
+        // `target` в корзину падает с EACCES, как у сборки, созданной root.
+        let failed: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>> =
+            Default::default();
+        let slot = failed.clone();
+        let worktrees = data.join("worktrees");
+        *BEFORE_RECHECK.lock().unwrap() = Some(std::sync::Arc::new(move |key| {
+            let worktree = worktrees.join(key);
+            let slot = slot.clone();
+            Box::pin(async move {
+                if slot.lock().unwrap().is_none() {
+                    fs::set_permissions(&worktree, fs::Permissions::from_mode(0o555)).unwrap();
+                    *slot.lock().unwrap() = Some(worktree);
+                }
+            })
+        }));
+        super::gc_worktrees(&manager.shared).await.unwrap();
+        *BEFORE_RECHECK.lock().unwrap() = None;
+        let failed_tree = failed.lock().unwrap().take().unwrap();
+        fs::set_permissions(&failed_tree, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            failed_tree.join("target").exists(),
+            "the candidate that could not be staged stays"
+        );
+        let other = if failed_tree == first_tree {
+            &second_tree
+        } else {
+            &first_tree
+        };
+        assert!(
+            !other.join("target").exists(),
+            "the pass still collects the next candidate"
+        );
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_verify_survives_a_gc_filesystem_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let store = WorkerStore::open(&data).unwrap();
+        let worktree = gc_tree(&data, Uuid::now_v7());
+        let thread = StoreThread::new(store);
+        let manager = gc_manager(root.path(), &thread);
+        fs::set_permissions(&worktree, fs::Permissions::from_mode(0o555)).unwrap();
+
+        manager.startup_verify().await.unwrap();
+
+        fs::set_permissions(&worktree, fs::Permissions::from_mode(0o755)).unwrap();
         manager.shutdown().await;
         thread.close().await.unwrap();
     }

@@ -526,6 +526,18 @@ pub(crate) fn runtime_dir_from_env() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
 }
 
+/// Уборка при старте: ошибка файловой системы только логируется, а не мешает
+/// запуску воркера. Ошибки хранилища и владения возвращаются как раньше.
+fn best_effort_cleanup(error: ExecError, step: &'static str) -> Result<(), ExecError> {
+    match error {
+        ExecError::Io(error) => {
+            tracing::warn!(step, reason = %error, "startup maintenance skipped");
+            Ok(())
+        }
+        error => Err(error),
+    }
+}
+
 pub struct ExecutionManager {
     shared: Arc<Shared>,
     shutdown: watch::Sender<bool>,
@@ -921,9 +933,15 @@ impl ExecutionManager {
 
     pub async fn startup_verify(&self) -> Result<Vec<Uuid>, ExecError> {
         let _route = self.shared.route_lock.lock().await;
-        manager::cleanup_released(&self.shared).await?;
-        manager::sweep_runtime(&self.shared).await?;
-        manager::gc_worktrees(&self.shared).await?;
+        manager::cleanup_released(&self.shared)
+            .await
+            .or_else(|error| best_effort_cleanup(error, "cleanup_released"))?;
+        manager::sweep_runtime(&self.shared)
+            .await
+            .or_else(|error| best_effort_cleanup(error, "sweep_runtime"))?;
+        manager::gc_worktrees(&self.shared)
+            .await
+            .or_else(|error| best_effort_cleanup(error, "gc_worktrees"))?;
         self.start_maintenance();
         let records = self
             .shared

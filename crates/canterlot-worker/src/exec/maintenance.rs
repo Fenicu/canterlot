@@ -519,7 +519,9 @@ pub(crate) fn purge_trash(trash_root: &Path) -> io::Result<()> {
         match result {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), reason = %error, "gc trash entry removal failed");
+            }
         }
     }
     Ok(())
@@ -803,6 +805,32 @@ mod tests {
         );
         assert!(target.join("debug/deps/old").exists());
         assert!(!trash.exists());
+    }
+
+    #[test]
+    fn purge_trash_continues_after_an_entry_that_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let trash = root.path().join("trash");
+        let blocked = trash.join("blocked");
+        fs::create_dir_all(blocked.join("inner")).unwrap();
+        fs::write(blocked.join("inner/file"), "x").unwrap();
+        let good = trash.join("good");
+        fs::create_dir_all(&good).unwrap();
+        fs::write(good.join("file"), "x").unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o555)).unwrap();
+
+        purge_trash(&trash).unwrap();
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            blocked.exists(),
+            "an entry that failed stays for the next pass"
+        );
+        assert!(!good.exists(), "later entries are still removed");
     }
 
     fn binary(path: &Path, age_hours: u64) {
