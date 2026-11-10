@@ -1771,6 +1771,8 @@ async fn no_live_execution_note_to_the_parent_carries_the_reset_time(pool: PgPoo
     assert_eq!(origin["event"]["provider"], "claude");
     assert_eq!(origin["event"]["window"], "five_hour");
     assert_eq!(origin["event"]["reason"], "no_live_execution");
+    assert_eq!(origin["from"], json!(id));
+    assert!(origin["title"].is_string());
     assert_eq!(
         origin["event"]["resets_at"]
             .as_str()

@@ -495,6 +495,7 @@ async fn machine_watch_message(
         session_id: Some(id),
         state: Some(machine_state(&state, &reason)),
         machine_id: Some(machine_id),
+        machine_name: Some(machine.clone()),
         details: Some(super::machine_text::view_details(
             &event.kind,
             &event.details,

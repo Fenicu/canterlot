@@ -145,10 +145,40 @@ export interface HubEvent {
   nudges?: number;
   nudge_exhausted?: boolean;
   asks_in_text?: boolean;
+  alarm_id?: Uuid;
+  alarm_key?: string;
+  fired_reason?: string;
+  alarm_path?: string;
+  alarm_size?: number;
+  armed_at?: Time;
+  condition?: {};
+  note?: string;
+  sessions?: AlarmSession[];
+  alarms?: AlarmEvent[];
+  details?: {};
+  machine_id?: Uuid;
+  machine_name?: string;
+  resets_at?: Time;
 }
 export interface HubCommit {
   sha: string;
   title: string;
+}
+export interface AlarmSession {
+  id: Uuid;
+  title: string;
+  state: string;
+}
+export interface AlarmEvent {
+  alarm_id?: Uuid;
+  alarm_key?: string;
+  fired_reason?: string;
+  alarm_path?: string;
+  alarm_size?: number;
+  armed_at?: Time;
+  condition?: {};
+  note?: string;
+  sessions?: AlarmSession[];
 }
 export interface InputStateChanged {
   v: 1;

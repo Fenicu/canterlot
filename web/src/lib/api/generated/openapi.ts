@@ -2188,6 +2188,8 @@ export interface components {
              * @description `machine_*`: машина, о которой говорит предупреждение.
              */
             machine_id?: string | null;
+            /** @description `machine_*`: имя машины для заголовка в ленте. */
+            machine_name?: string | null;
             /** @description `alarm`: заметка себе, доставленная вместе с событием. */
             note?: string | null;
             /** @description `true`: толчки кончились без маркера, итог отпущен правилом. */

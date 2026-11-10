@@ -11122,6 +11122,13 @@
             "format": "uuid",
             "description": "`machine_*`: машина, о которой говорит предупреждение."
           },
+          "machine_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`machine_*`: имя машины для заголовка в ленте."
+          },
           "note": {
             "type": [
               "string",

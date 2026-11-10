@@ -146,6 +146,9 @@ pub struct HubEvent {
     /// `machine_*`: машина, о которой говорит предупреждение.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<Uuid>,
+    /// `machine_*`: имя машины для заголовка в ленте.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_name: Option<String>,
     /// `limit_resumed` и `quota_paused`: когда лимит сбросится или сбросился.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<DateTime<Utc>>,

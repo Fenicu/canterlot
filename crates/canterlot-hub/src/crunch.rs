@@ -1175,8 +1175,14 @@ async fn queue_no_live_note_in_tx(
          continue, or stop it.",
         window.as_str()
     );
+    let mut note = crate::session_tools::origin::note_origin(0);
+    if let Some(object) = note.as_object_mut() {
+        // Заметка называет делегата и переживает его удаление: по `from` PWA даёт ссылку.
+        object.insert("from".into(), json!(conversation_id));
+        object.insert("title".into(), json!(title));
+    }
     let origin = crate::session_tools::origin::with_event(
-        crate::session_tools::origin::note_origin(0),
+        note,
         crate::session_tools::origin::HubEvent {
             kind: "quota_paused".into(),
             session_id: Some(conversation_id),

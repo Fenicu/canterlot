@@ -319,6 +319,7 @@ async fn delivered_text_names_the_machine_free_gb_and_percent(pool: PgPool) -> T
          Builds and new sessions may fail."
     );
     assert_eq!(inputs[0].1["event"]["kind"], "machine_disk_low");
+    assert_eq!(inputs[0].1["event"]["machine_name"], "synthetic");
     assert_eq!(inputs[0].1["event"]["details"]["free_gb"], 24);
     assert_eq!(inputs[0].1["event"]["details"]["free_pct"], 8);
     Ok(())

@@ -7327,7 +7327,21 @@
         },
         "asks_in_text": {
           "type": "boolean"
-        }
+        },
+        "alarm_id": { "$ref": "#/$defs/Uuid" },
+        "alarm_key": { "type": "string" },
+        "fired_reason": { "type": "string" },
+        "alarm_path": { "type": "string" },
+        "alarm_size": { "type": "integer" },
+        "armed_at": { "$ref": "#/$defs/Time" },
+        "condition": { "type": "object" },
+        "note": { "type": "string" },
+        "sessions": { "type": "array", "items": { "$ref": "#/$defs/AlarmSession" } },
+        "alarms": { "type": "array", "items": { "$ref": "#/$defs/AlarmEvent" } },
+        "details": { "type": "object" },
+        "machine_id": { "$ref": "#/$defs/Uuid" },
+        "machine_name": { "type": "string" },
+        "resets_at": { "$ref": "#/$defs/Time" }
       },
       "required": [
         "kind"
@@ -7989,6 +8003,35 @@
         "position",
         "dir"
       ],
+      "additionalProperties": false
+    },
+    "AlarmSession": {
+      "type": "object",
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "title": { "type": "string" },
+        "state": { "type": "string" }
+      },
+      "required": [
+        "id",
+        "title",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "AlarmEvent": {
+      "type": "object",
+      "properties": {
+        "alarm_id": { "$ref": "#/$defs/Uuid" },
+        "alarm_key": { "type": "string" },
+        "fired_reason": { "type": "string" },
+        "alarm_path": { "type": "string" },
+        "alarm_size": { "type": "integer" },
+        "armed_at": { "$ref": "#/$defs/Time" },
+        "condition": { "type": "object" },
+        "note": { "type": "string" },
+        "sessions": { "type": "array", "items": { "$ref": "#/$defs/AlarmSession" } }
+      },
       "additionalProperties": false
     }
   }
