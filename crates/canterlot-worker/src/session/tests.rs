@@ -669,6 +669,53 @@ async fn a_replay_backlog_is_handed_over_in_inbox_order() {
 
 // Команда, уже отданная исполнению, после переподключения не исполняется
 // дважды: повторная отдача пропущенных команд не должна дублировать итог.
+// Одна запись CJ больше пакета не должна запирать управляющий поток:
+// хаб получает на её месте безвредную отметку, как и в потоке данных.
+#[test]
+fn an_oversized_cj_record_is_replaced_instead_of_blocking_the_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut store = WorkerStore::open(root.path()).unwrap();
+    let journal = store.cj_journal_id().unwrap();
+    let first = store
+        .append_cj_fact(record_body::Body::AdapterDiagnostic(AdapterDiagnostic {
+            execution_id: Uuid::nil().to_string(),
+            kind: "test".into(),
+            event_type: "x".repeat(600 * 1024),
+            ..Default::default()
+        }))
+        .unwrap();
+    let second = store
+        .append_cj_fact(record_body::Body::CommandStored(CommandStored::default()))
+        .unwrap();
+    let (message, last) = batch_for_session(&store, first, true)
+        .unwrap()
+        .expect("a batch is sent");
+    let Some(control_up::Msg::CjRecords(batch)) = message.msg else {
+        panic!("expected CjRecords");
+    };
+    assert_eq!(batch.journal_id, journal.to_string());
+    assert_eq!(batch.records.len(), 1);
+    assert_eq!(batch.records[0].seq, first);
+    assert!(matches!(
+        batch.records[0].body.as_ref().and_then(|body| body.body.as_ref()),
+        Some(record_body::Body::AdapterDiagnostic(diagnostic))
+            if diagnostic.event_type == "record_too_large"
+    ));
+    assert_eq!(last, first);
+    // Следующая запись не заперта заменённой: она уходит следующим пакетом.
+    let (message, last) = batch_for_session(&store, first + 1, true)
+        .unwrap()
+        .expect("the next batch is sent");
+    let Some(control_up::Msg::CjRecords(batch)) = message.msg else {
+        panic!("expected CjRecords");
+    };
+    assert_eq!(batch.records.len(), 1);
+    assert_eq!(batch.records[0].seq, second);
+    assert_eq!(last, second);
+}
+
 // Подтверждение за пределами отправленного — ошибка протокола хаба,
 // а не повод отравить журнал и уйти в ожидание диска.
 #[tokio::test]

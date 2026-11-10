@@ -411,7 +411,7 @@ fn compatible_for_hub(record: JournalRecord, limits_fable: bool) -> JournalRecor
 
 /// Поток данных общий для всех сессий машины, поэтому запись, не влезающая в пакет,
 /// не должна его рвать: хаб получает с тем же seq отметку без ссылки на исполнение.
-fn shippable(journal: Uuid, record: JournalRecord) -> JournalRecord {
+pub(super) fn shippable(journal: Uuid, record: JournalRecord) -> JournalRecord {
     let alone = JournalRecords {
         journal_id: journal.to_string(),
         records: vec![record],

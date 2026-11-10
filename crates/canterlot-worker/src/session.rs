@@ -1970,11 +1970,16 @@ fn batch_for_session(
         }
         batch.records.push(record);
         if check_record_batch(&batch).is_err() {
-            batch.records.pop();
+            let record = batch.records.pop().expect("just pushed");
             if batch.records.is_empty() {
-                return Err(WorkerError::Protocol);
+                // Запись больше пакета не влезает ни в один: без замены она
+                // навсегда запирает управляющий поток на одном и том же месте.
+                let journal = Uuid::parse_str(&batch.journal_id).map_err(|_| WorkerError::Protocol)?;
+                batch.records.push(data::shippable(journal, record));
+                check_record_batch(&batch).map_err(|_| WorkerError::Protocol)?;
+            } else {
+                break;
             }
-            break;
         }
     }
     let Some(last) = batch.records.last().map(|r| r.seq) else {
