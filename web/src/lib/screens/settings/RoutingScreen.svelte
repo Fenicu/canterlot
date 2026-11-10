@@ -313,6 +313,9 @@
               <legend>{pairName(provider.provider === 'claude' ? 'claude_code' : provider.provider, 'default')}</legend>
               <label class="field small"><span>Неделя, %</span><input type="number" inputmode="numeric" min="0" max="100" value={provider.weekly ?? ''} oninput={(event) => (provider.weekly = numberOrNull(event.currentTarget.value))} /></label>
               <label class="field small"><span>5 часов, %</span><input type="number" inputmode="numeric" min="0" max="100" value={provider.fiveHour ?? ''} oninput={(event) => (provider.fiveHour = numberOrNull(event.currentTarget.value))} /></label>
+              {#if provider.provider === 'claude'}
+                <label class="field small"><span>Fable, неделя, %</span><input type="number" inputmode="numeric" min="0" max="100" value={provider.weeklyFable ?? ''} oninput={(event) => (provider.weeklyFable = numberOrNull(event.currentTarget.value))} /></label>
+              {/if}
               <label class="field small"><span>Месяц, %</span><input type="number" inputmode="numeric" min="0" max="100" value={provider.monthly ?? ''} oninput={(event) => (provider.monthly = numberOrNull(event.currentTarget.value))} /></label>
               {#each issuesAt(issues, `provider:${provider.provider}`) as message (message)}<p class="error" role="alert">{message}</p>{/each}
             </fieldset>

@@ -143,9 +143,9 @@ describe("screens/limits history charts", () => {
 
   it("one_chart_per_provider_with_weekly_points_using_the_last_point_of_each_day", () => {
     const charts = historyCharts([
-      { provider: "codex", five_hour: [], weekly: [point("2026-10-28", 10, 300), point("2026-10-30", 9, 500)] },
-      { provider: "opencode", five_hour: [point("2026-10-29", 1, 100)], weekly: [] },
-      { provider: "claude", five_hour: [point("2026-10-28", 1, 900)], weekly: [point("2026-10-28", 23, 711), point("2026-10-28", 3, 100), point("2026-10-29", 1, 800), point("2026-10-30", 1, 995)] },
+      { provider: "codex", five_hour: [], weekly: [point("2026-10-28", 10, 300), point("2026-10-30", 9, 500)], weekly_fable: [] },
+      { provider: "opencode", five_hour: [point("2026-10-29", 1, 100)], weekly: [], weekly_fable: [] },
+      { provider: "claude", five_hour: [point("2026-10-28", 1, 900)], weekly: [point("2026-10-28", 23, 711), point("2026-10-28", 3, 100), point("2026-10-29", 1, 800), point("2026-10-30", 1, 995)], weekly_fable: [] },
     ], days, zone);
     expect(charts.map((c) => c.label)).toEqual(["Claude", "Codex"]);
     expect(charts[0]!.days.map((d) => [d.mark, d.value === null ? null : Math.round(d.value * 10) / 10, d.text])).toEqual([["28", 28.9, "29%"], ["29", 20, "20%"], ["30", 0.5, "<1%"]]);
@@ -155,7 +155,7 @@ describe("screens/limits history charts", () => {
   });
 
   it("a_provider_appears_once_even_if_series_repeat", () => {
-    const series = { provider: "claude", five_hour: [], weekly: [point("2026-10-29", 1, 500)] };
+    const series = { provider: "claude", five_hour: [], weekly: [point("2026-10-29", 1, 500)], weekly_fable: [] };
     const charts = historyCharts([series, series], days, zone);
     expect(charts).toHaveLength(1);
     expect(charts[0]!.today).toBe("");

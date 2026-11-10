@@ -10,6 +10,7 @@ describe('reason translation', () => {
     expect(reasonText('codex weekly 83% > 80%', NOW)).toBe(`Codex — неделя 83${N}% при пороге 80${N}%`);
     expect(reasonText('claude five_hour 96.5% > 95%', NOW)).toBe(`Claude — 5 часов 96,5${N}% при пороге 95${N}%`);
     expect(reasonText('opencode monthly 99% > 95%', NOW)).toBe(`OpenCode — месяц 99${N}% при пороге 95${N}%`);
+    expect(reasonText('claude weekly_fable 96% > 90%', NOW)).toBe(`Claude — Fable, неделя 96${N}% при пороге 90${N}%`);
   });
 
   test('projected threshold crossing names the window, now, projection, task length and threshold', () => {
@@ -17,6 +18,7 @@ describe('reason translation', () => {
     expect(reasonText('five-hour 40% now, projected 97% in 90 min > 95%', NOW)).toBe(`5 ч 40${N}%, через 90${N}мин будет ~97${N}% при пороге 95${N}%`);
     expect(reasonText('monthly 88% now, projected 91% in 1440 min > 90%.', NOW)).toBe(`месяц 88${N}%, через 1440${N}мин будет ~91${N}% при пороге 90${N}%`);
     expect(reasonText('codex weekly 72% now, projected 84% in 60 min > 80%', NOW)).toBe(`Codex — неделя 72${N}%, через 60${N}мин будет ~84${N}% при пороге 80${N}%`);
+    expect(reasonText('claude weekly_fable 88% now, projected 94% in 60 min > 90%', NOW)).toBe(`Claude — Fable, неделя 88${N}%, через 60${N}мин будет ~94${N}% при пороге 90${N}%`);
     // Незнакомое окно не переводится наполовину.
     expect(reasonText('daily 72% now, projected 84% in 60 min > 80%', NOW)).toBe('daily 72% now, projected 84% in 60 min > 80%');
     expect(verdictLabel('projected_over_threshold')).toBe('превысит порог');

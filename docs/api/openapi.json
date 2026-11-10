@@ -13070,6 +13070,15 @@
             "format": "double",
             "default": null
           },
+          "max_weekly_fable_percent": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Недельная квота Fable у Claude; без значения действует `max_weekly_percent`.",
+            "default": null
+          },
           "max_weekly_percent": {
             "type": [
               "number",

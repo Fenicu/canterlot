@@ -7,6 +7,7 @@ const NBSP = ' ';
 
 const WINDOWS: Record<string, string> = {
   weekly: 'неделя',
+  weekly_fable: 'Fable, неделя',
   five_hour: '5 часов',
   monthly: 'месяц'
 };
@@ -56,6 +57,7 @@ type Rule = [RegExp, (match: RegExpExecArray, now: number) => string];
 /** Окно в причине прогноза хаба: `weekly`, `five-hour`, `monthly`. */
 const PROJECTED_WINDOWS: Record<string, string> = {
   weekly: 'неделя',
+  weekly_fable: 'Fable, неделя',
   'five-hour': '5 ч',
   monthly: 'месяц'
 };
@@ -64,13 +66,13 @@ const RULES: Rule[] = [
   [
     // Прогноз маршрута: за ожидаемое время задачи окно перейдёт порог.
     // Имя провайдера впереди необязательно: так же, как у причины «weekly 83% > 80%».
-    /^(?:([a-z_]+) )?(weekly|five-hour|monthly) (\d+)% now, projected (\d+)% in (\d+) min > (\d+)%$/,
+    /^(?:([a-z_]+) )?(weekly_fable|weekly|five-hour|monthly) (\d+)% now, projected (\d+)% in (\d+) min > (\d+)%$/,
     (m) =>
       (m[1] ? `${provider(m[1])} — ` : '') +
       `${PROJECTED_WINDOWS[m[2]!]} ${percent(m[3]!)}, через ${m[5]}${NBSP}мин будет ~${percent(m[4]!)} при пороге ${percent(m[6]!)}`
   ],
   [
-    /^([a-z_]+) (weekly|five_hour|monthly) ([\d.]+)% > ([\d.]+)%$/,
+    /^([a-z_]+) (weekly_fable|weekly|five_hour|monthly) ([\d.]+)% > ([\d.]+)%$/,
     (m) => `${provider(m[1]!)} — ${windowName(m[2]!)} ${percent(m[3]!)} при пороге ${percent(m[4]!)}`
   ],
   [
@@ -78,7 +80,7 @@ const RULES: Rule[] = [
     (m, now) => (m[1] ? `квота на паузе до ${utcClock(m[1], now)}` : 'квота на паузе')
   ],
   [
-    /^([a-z_]+) (weekly|five_hour|monthly) limits unknown(?: \(observed (\d+) (min|h|d) ago\))?$/,
+    /^([a-z_]+) (weekly_fable|weekly|five_hour|monthly) limits unknown(?: \(observed (\d+) (min|h|d) ago\))?$/,
     (m) =>
       `лимиты ${provider(m[1]!)} (${windowName(m[2]!)}) неизвестны` +
       (m[3] ? `: последнее наблюдение ${m[3]}${NBSP}${UNITS[m[4]!] ?? m[4]} назад` : '')

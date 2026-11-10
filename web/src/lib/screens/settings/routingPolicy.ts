@@ -52,6 +52,8 @@ export interface DraftProvider {
   weekly: number | null;
   fiveHour: number | null;
   monthly: number | null;
+  /** Недельная квота Fable у Claude; пусто — действует недельный порог. */
+  weeklyFable: number | null;
 }
 
 export interface DraftParallel {
@@ -108,13 +110,14 @@ export function candidateDraft(input: Partial<PolicyCandidate> & { harness: stri
 
 export function fromPolicy(policy: Policy): Draft {
   const providers = new Map<string, DraftProvider>();
-  for (const name of PROVIDERS) providers.set(name, { provider: name, weekly: null, fiveHour: null, monthly: null });
+  for (const name of PROVIDERS) providers.set(name, { provider: name, weekly: null, fiveHour: null, monthly: null, weeklyFable: null });
   for (const [name, limits] of Object.entries(policy.providers ?? {})) {
     providers.set(name, {
       provider: name,
       weekly: limits.max_weekly_percent ?? null,
       fiveHour: limits.max_five_hour_percent ?? null,
-      monthly: limits.max_monthly_percent ?? null
+      monthly: limits.max_monthly_percent ?? null,
+      weeklyFable: limits.max_weekly_fable_percent ?? null
     });
   }
   return {
@@ -162,11 +165,12 @@ export function toPolicy(draft: Draft): Policy {
   }
   const providers: Policy['providers'] = {};
   for (const item of draft.providers) {
-    if (item.weekly === null && item.fiveHour === null && item.monthly === null) continue;
+    if (item.weekly === null && item.fiveHour === null && item.monthly === null && item.weeklyFable === null) continue;
     providers[item.provider] = {
       max_weekly_percent: item.weekly,
       max_five_hour_percent: item.fiveHour,
-      max_monthly_percent: item.monthly
+      max_monthly_percent: item.monthly,
+      max_weekly_fable_percent: item.weeklyFable
     };
   }
   const max_parallel: Record<string, number> = {};
@@ -237,7 +241,7 @@ export function validate(draft: Draft): Issue[] {
     }
   }
   for (const item of draft.providers) {
-    if ([item.weekly, item.fiveHour, item.monthly].some(percentIssue))
+    if ([item.weekly, item.fiveHour, item.monthly, item.weeklyFable].some(percentIssue))
       issues.push({ at: `provider:${item.provider}`, message: 'Порог: от 0 до 100 %' });
   }
   const pairs = new Set<string>();

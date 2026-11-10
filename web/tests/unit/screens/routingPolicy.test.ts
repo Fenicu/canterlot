@@ -29,7 +29,7 @@ const policy: Policy = {
       ]
     }
   },
-  providers: { codex: { max_weekly_percent: 80, max_five_hour_percent: null, max_monthly_percent: null } },
+  providers: { codex: { max_weekly_percent: 80, max_five_hour_percent: null, max_monthly_percent: null, max_weekly_fable_percent: null } },
   unlimited_models: ['opencode-go/beam-free'],
   max_parallel: { 'codex/default': 1 },
   unknown_limits: 'allow'
@@ -49,7 +49,7 @@ describe('routing policy editor model', () => {
     const saved = toPolicy(d);
     expect(saved.task_types!.bugfix!.candidates[0]).toMatchObject({ nudge: { max_nudges: 2 }, watchdog_minutes: 90, effort: 'high' });
     expect(saved.task_types!.bugfix!.candidates[1]).toMatchObject({ nudge: true, exclude_workdirs: ['/srv/prod'] });
-    expect(saved.providers).toEqual({ codex: { max_weekly_percent: 80, max_five_hour_percent: null, max_monthly_percent: null } });
+    expect(saved.providers).toEqual({ codex: { max_weekly_percent: 80, max_five_hour_percent: null, max_monthly_percent: null, max_weekly_fable_percent: null } });
   });
 
   test('reorder makes the draft dirty and moving back makes it clean', () => {
@@ -71,6 +71,11 @@ describe('routing policy editor model', () => {
     const d = draft();
     d.providers[0]!.weekly = 90;
     expect(isDirty(d, policy)).toBe(true);
+    const fable = draft();
+    fable.providers[0]!.weeklyFable = 92;
+    expect(isDirty(fable, policy)).toBe(true);
+    expect(toPolicy(fable).providers.claude?.max_weekly_fable_percent).toBe(92);
+    expect(toPolicy(fable).providers.codex?.max_weekly_fable_percent).toBeNull();
     const e = draft();
     e.unknownLimits = 'skip';
     expect(isDirty(e, policy)).toBe(true);

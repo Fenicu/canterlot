@@ -239,6 +239,51 @@ async fn an_opus_observation_without_fable_keeps_the_known_value(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_fable_limit_pauses_only_that_session_and_no_provider_reserve(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let execution = f.execution().await;
+    let reset = Utc::now() + TimeDelta::days(3);
+    let mut tx = f.pool.begin().await.unwrap();
+    let effect = limits::on_limit_reached_in_tx(
+        &mut tx,
+        f.seed.owner_id,
+        &ExecutionRef {
+            execution_id: execution,
+            conversation_id: f.seed.conversation_id,
+            machine_id: f.seed.machine_id,
+        },
+        &LimitReached {
+            execution_id: execution.to_string(),
+            provider: "claude".into(),
+            window: LimitWindow::WeeklyFable as i32,
+            resets_at_ms: reset.timestamp_millis() as u64,
+            input_command_id: String::new(),
+        },
+        &LimitsConfig::default(),
+        Utc::now(),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(effect, limits::LimitReachedEffect::Paused);
+    let (pause, reserve): (Value, bool) = sqlx::query_as(
+        "select q.pause_reasons, coalesce(p.weekly_reserve_active,false)
+           from queue_state q left join provider_limits p on p.provider='claude'
+          where q.conversation_id=$1",
+    )
+    .bind(f.seed.conversation_id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(pause[0]["window"], "weekly_fable", "{pause}");
+    assert!(
+        !reserve,
+        "a fable limit does not activate the weekly reserve"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_unknown_window_value_is_rejected_not_stored(pool: PgPool) {
     let _seed = testkit::seed(&pool).await;
     assert!(matches!(

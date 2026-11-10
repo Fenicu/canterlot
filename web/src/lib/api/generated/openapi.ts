@@ -2836,6 +2836,12 @@ export interface components {
             max_monthly_percent: number | null;
             /**
              * Format: double
+             * @description Недельная квота Fable у Claude; без значения действует `max_weekly_percent`.
+             * @default null
+             */
+            max_weekly_fable_percent: number | null;
+            /**
+             * Format: double
              * @default null
              */
             max_weekly_percent: number | null;

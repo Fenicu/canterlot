@@ -36,7 +36,7 @@ describe('Task 9b', () => {
   });
   it('limits_history_shows_the_remaining_weekly_share_and_ignores_five_hours', () => {
     const days = ['2026-10-28', '2026-10-29'];
-    const series = [{ provider: 'claude', five_hour: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 340, used_pct: 34 }], weekly: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 960, used_pct: 96 }] }];
+    const series = [{ provider: 'claude', five_hour: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 340, used_pct: 34 }], weekly: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 960, used_pct: 96 }], weekly_fable: [] }];
     const model = historyCharts(series, days, 'UTC');
     expect(model[0]?.days[0]).toMatchObject({ value: null, text: '' });
     expect(model[0]?.days[1]).toMatchObject({ value: 4, text: '4%' });
@@ -78,7 +78,7 @@ it('limits_calendar_and_snapshots_use_local_days_and_the_latest_point', () => {
   const series = [{ provider: 'codex', five_hour: [], weekly: [
     { observed_at: '2026-10-28T23:30:00Z', used_permille: 500, used_pct: 50 },
     { observed_at: '2026-10-28T21:30:00Z', used_permille: 200, used_pct: 20 }
-  ] }];
+  ], weekly_fable: [] }];
   expect(historyCharts(series, ['2026-10-29'], 'Europe/Moscow')[0]?.days[0]).toMatchObject({ value: 50, text: '50%' });
 });
 

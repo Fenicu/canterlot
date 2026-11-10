@@ -55,6 +55,8 @@ pub struct ProviderThresholds {
     pub max_weekly_percent: Option<f64>,
     pub max_five_hour_percent: Option<f64>,
     pub max_monthly_percent: Option<f64>,
+    /// Недельная квота Fable у Claude; без значения действует `max_weekly_percent`.
+    pub max_weekly_fable_percent: Option<f64>,
 }
 
 /// Кандидат типа задачи.
@@ -175,6 +177,10 @@ pub fn validate(policy: &Policy) -> Result<(), String> {
         check_percent(
             thresholds.max_monthly_percent,
             &format!("providers.{provider}.max_monthly_percent"),
+        )?;
+        check_percent(
+            thresholds.max_weekly_fable_percent,
+            &format!("providers.{provider}.max_weekly_fable_percent"),
         )?;
     }
     for (pair, limit) in &policy.max_parallel {
@@ -387,6 +393,7 @@ pub fn builtin() -> Policy {
                     max_weekly_percent: Some(90.0),
                     max_five_hour_percent: Some(95.0),
                     max_monthly_percent: None,
+                    max_weekly_fable_percent: None,
                 },
             ),
             (
@@ -395,6 +402,7 @@ pub fn builtin() -> Policy {
                     max_weekly_percent: Some(80.0),
                     max_five_hour_percent: Some(80.0),
                     max_monthly_percent: None,
+                    max_weekly_fable_percent: None,
                 },
             ),
             (
@@ -403,6 +411,7 @@ pub fn builtin() -> Policy {
                     max_weekly_percent: Some(95.0),
                     max_five_hour_percent: Some(95.0),
                     max_monthly_percent: Some(95.0),
+                    max_weekly_fable_percent: None,
                 },
             ),
         ]),
@@ -560,6 +569,7 @@ pub struct ProviderView {
     pub weekly: Option<WindowReading>,
     pub five_hour: Option<WindowReading>,
     pub monthly: Option<WindowReading>,
+    pub weekly_fable: Option<WindowReading>,
     pub reserve_active: bool,
     pub reserve_resets_at: Option<DateTime<Utc>>,
 }
@@ -774,6 +784,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
         let provider = canterlot_proto::harness::provider_of(&candidate.harness)
             .unwrap_or_default()
             .to_owned();
+        let fable = provider == "claude" && is_fable_model(&resolved.id);
         let unlimited = policy.unlimited_models.iter().any(|entry| {
             entry == &resolved.id || *entry == format!("{}/{}", candidate.harness, resolved.id)
         });
@@ -787,6 +798,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
                 now,
                 task.expected_minutes,
                 &mut nearest_reset,
+                fable,
             )
         {
             considered.push(skip(candidate, verdict, reason));
@@ -984,6 +996,11 @@ fn whole_percent(value: f64) -> i64 {
 }
 
 /// Проверка лимитов: пороги, резерв и пауза. Возвращает вердикт и причину пропуска.
+fn is_fable_model(model: &str) -> bool {
+    model.to_lowercase().contains("fable")
+}
+
+#[allow(clippy::too_many_arguments)]
 fn limits_verdict(
     policy: &Policy,
     provider: &str,
@@ -992,6 +1009,7 @@ fn limits_verdict(
     now: DateTime<Utc>,
     expected_minutes: i64,
     nearest_reset: &mut Option<DateTime<Utc>>,
+    fable: bool,
 ) -> Option<(&'static str, String)> {
     let thresholds = policy.providers.get(provider);
     let view = view.cloned().unwrap_or_default();
@@ -1020,6 +1038,25 @@ fn limits_verdict(
         expected_minutes,
         nearest_reset,
     ) {
+        return Some(reason);
+    }
+    if fable
+        && let Some(reason) = check_window(
+            provider,
+            "weekly_fable",
+            thresholds.and_then(|limits| {
+                limits
+                    .max_weekly_fable_percent
+                    .or(limits.max_weekly_percent)
+            }),
+            view.weekly_fable.as_ref(),
+            unknown,
+            stale,
+            now,
+            expected_minutes,
+            nearest_reset,
+        )
+    {
         return Some(reason);
     }
     if let Some(reason) = check_window(
@@ -1177,6 +1214,7 @@ pub async fn limits_view(
                 weekly: window(provider.weekly),
                 five_hour: window(provider.five_hour),
                 monthly: window(provider.monthly),
+                weekly_fable: window(provider.weekly_fable),
                 reserve_active: provider.weekly_reserve_active,
                 reserve_resets_at: provider.weekly_reserve_resets_at,
             },
@@ -1487,7 +1525,10 @@ mod tests {
             (
                 "claude_code".to_owned(),
                 catalog(
-                    &[("opus[1m]", &["low", "medium", "high"])],
+                    &[
+                        ("opus[1m]", &["low", "medium", "high"]),
+                        ("fable[1m]", &["low", "medium", "high"]),
+                    ],
                     &["owner", "ask", "bypass", "read_only"],
                 ),
             ),
@@ -1507,6 +1548,7 @@ mod tests {
             "opencode/opencode-go/muse-spark-1.3-contributor",
             "opencode/opencode-go/beam-free",
             "claude_code/opus[1m]",
+            "claude_code/fable[1m]",
             "codex/gpt-6.1-sol",
         ]
         .iter()
@@ -2278,6 +2320,7 @@ mod tests {
                 max_weekly_percent: Some(95.0),
                 max_five_hour_percent: Some(95.0),
                 max_monthly_percent: Some(95.0),
+                ..ProviderThresholds::default()
             },
         );
         policy
@@ -2313,6 +2356,136 @@ mod tests {
             request,
             bypass_limits: false,
         })
+    }
+
+    fn claude_task_limits(
+        fable_percent: f64,
+        fable_reset: chrono::TimeDelta,
+    ) -> HashMap<String, ProviderView> {
+        HashMap::from([(
+            "claude".to_owned(),
+            ProviderView {
+                weekly: Some(window_at(10.0, chrono::TimeDelta::hours(4))),
+                weekly_fable: Some(window_at(fable_percent, fable_reset)),
+                ..ProviderView::default()
+            },
+        )])
+    }
+
+    fn fable_policy(threshold: Option<f64>) -> Policy {
+        let mut policy = Policy::default();
+        policy.task_types.insert(
+            "one".to_owned(),
+            TaskType {
+                title: "Проба".to_owned(),
+                candidates: vec![
+                    Candidate {
+                        harness: "claude_code".to_owned(),
+                        model: "fable[1m]".to_owned(),
+                        effort: Some("high".to_owned()),
+                        levels: None,
+                        preset: None,
+                        nudge: None,
+                        exclude_workdirs: vec![],
+                        watchdog_minutes: None,
+                    },
+                    Candidate {
+                        harness: "claude_code".to_owned(),
+                        model: "opus[1m]".to_owned(),
+                        effort: Some("high".to_owned()),
+                        levels: None,
+                        preset: None,
+                        nudge: None,
+                        exclude_workdirs: vec![],
+                        watchdog_minutes: None,
+                    },
+                ],
+                preset: None,
+                isolated: None,
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
+            },
+        );
+        policy.providers.insert(
+            "claude".to_owned(),
+            ProviderThresholds {
+                max_weekly_percent: Some(90.0),
+                max_weekly_fable_percent: threshold,
+                ..ProviderThresholds::default()
+            },
+        );
+        policy
+    }
+
+    fn route_claude(
+        policy: &Policy,
+        limits: &HashMap<String, ProviderView>,
+    ) -> Result<Decision, RouteError> {
+        route(RouteInputs {
+            policy,
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("one"),
+            bypass_limits: false,
+        })
+    }
+
+    #[test]
+    fn a_fable_window_blocks_only_a_fable_candidate() {
+        let limits = claude_task_limits(96.0, chrono::TimeDelta::hours(2));
+        let decision = route_claude(&fable_policy(Some(90.0)), &limits).unwrap();
+        assert_eq!(decision.model, "opus[1m]");
+        let fable = &decision.considered[0];
+        assert_eq!(fable.model, "fable[1m]");
+        assert_eq!(fable.verdict, "limits_over");
+        assert!(fable.reason.contains("weekly_fable"), "{}", fable.reason);
+    }
+
+    #[test]
+    fn the_fable_threshold_defaults_to_the_weekly_one() {
+        let limits = claude_task_limits(96.0, chrono::TimeDelta::hours(2));
+        let decision = route_claude(&fable_policy(None), &limits).unwrap();
+        assert_eq!(decision.considered[0].verdict, "limits_over");
+        assert!(decision.considered[0].reason.contains("weekly_fable"));
+    }
+
+    #[test]
+    fn a_fable_reset_is_the_queue_reason_for_a_fable_candidate() {
+        let reset = now() + chrono::TimeDelta::hours(1);
+        let limits = HashMap::from([(
+            "claude".to_owned(),
+            ProviderView {
+                weekly: Some(window_at(10.0, chrono::TimeDelta::hours(4))),
+                weekly_fable: Some(window_at(96.0, chrono::TimeDelta::hours(1))),
+                ..ProviderView::default()
+            },
+        )]);
+        let mut policy = fable_policy(Some(90.0));
+        policy
+            .task_types
+            .get_mut("one")
+            .unwrap()
+            .candidates
+            .truncate(1);
+        let error = route_claude(&policy, &limits).unwrap_err();
+        let RouteError::NoExecutor {
+            considered,
+            reset: nearest,
+        } = error
+        else {
+            panic!("expected no executor");
+        };
+        assert_eq!(nearest, Some(reset));
+        assert_eq!(
+            queue_reason(&considered, nearest, now(), Duration::from_secs(6 * 3600)),
+            Some("limits")
+        );
+        let message = no_executor_message(&considered, nearest);
+        assert!(message.contains("weekly_fable"), "{message}");
     }
 
     #[test]
