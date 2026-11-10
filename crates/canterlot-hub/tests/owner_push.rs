@@ -789,6 +789,33 @@ async fn an_old_idle_session_does_not_push_after_a_restart(pool: PgPool) {
     assert!(pushes(&pool).await.is_empty());
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_event_does_not_revive_an_old_turn_push(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    finish_turn(
+        &pool,
+        s.machine_id,
+        s.conversation_id,
+        &execution,
+        now - TimeDelta::days(3),
+    )
+    .await;
+    // Позднее событие супервизора (например, после перезапуска воркера) освежает
+    // `last_event_at`, но трёхдневный ход от этого не становится свежим.
+    sqlx::query("update executions set last_event_at=$2 where conversation_id=$1")
+        .bind(s.conversation_id)
+        .bind(now - TimeDelta::seconds(60))
+        .execute(&pool)
+        .await
+        .unwrap();
+    refresh_at(&pool, s.conversation_id, now).await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(30)).await;
+    assert!(pushes(&pool).await.is_empty(), "{:?}", pushes(&pool).await);
+}
+
 async fn lose(pool: &PgPool, conversation: Uuid, execution: Uuid) {
     executions::set_state(
         pool,

@@ -34,6 +34,10 @@ pub const PRIORITY_TURN_FINISHED: u8 = 5;
 
 /// Итог старше этого не шлётся: перезапуск хаба переоценивает давно осевшие сессии.
 const FRESH: TimeDelta = TimeDelta::minutes(10);
+/// Дольше этого позднее событие не делает старый ход свежим: иначе событие после
+/// перезапуска воркера воскрешает пуш о ходе, кончившемся дни назад. Меньше срока
+/// хранения строки дедупликации, чтобы в этом окне повтор не прошёл.
+const TURN_FINISHED_EXTENSION: TimeDelta = TimeDelta::hours(24);
 /// Пуш, не ушедший за это время (лимит, долгий сбой сервера), теряет смысл.
 const STALE: TimeDelta = TimeDelta::minutes(30);
 /// Сколько строк забирает один проход.
@@ -202,7 +206,13 @@ pub async fn on_settled_in_tx(
         // после перезапуска хаба пуша не дают. Свежесть — от последнего события:
         // сессию, которую держала фоновая задача, пуш обязан догнать после её конца.
         Settled::Idle => match facts.last_turn_at {
-            Some(turn) if facts.now - turn.max(facts.last_event_at.unwrap_or(turn)) <= FRESH => {
+            Some(turn)
+                if facts.now - turn <= FRESH
+                    || (facts.now - turn <= TURN_FINISHED_EXTENSION
+                        && facts
+                            .last_event_at
+                            .is_some_and(|at| facts.now - at <= FRESH)) =>
+            {
                 (KIND_TURN_FINISHED, Some(turn))
             }
             _ => return Ok(()),
