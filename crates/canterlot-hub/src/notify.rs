@@ -133,9 +133,12 @@ async fn enqueue_in_tx(
     revive_cancelled: bool,
 ) -> Result<(), sqlx::Error> {
     let conflict = if revive_cancelled {
+        // Возрождённый запрос получает свежий возраст: старую строку иначе бросят
+        // как протухшую до первой попытки. `created_at` читает только текст итога
+        // хода, а возрождаются лишь ожидающие запросы.
         "on conflict(dedupe_key) do update
            set state='pending', run_at=clock_timestamp(), attempts=0,
-               updated_at=clock_timestamp()
+               created_at=clock_timestamp(), updated_at=clock_timestamp()
            where owner_pushes.state in ('cancelled','dropped')"
     } else {
         "on conflict(dedupe_key) do nothing"

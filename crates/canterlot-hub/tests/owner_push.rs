@@ -734,6 +734,42 @@ async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left(pool: Pg
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_revived_waiting_push_is_fresh_even_if_the_first_row_is_old(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let request = Uuid::now_v7();
+    open_question(&pool, &s, &question_batch(&execution, request, "Первый?")).await;
+    // Запрос закрылся потерей воркера, доставка отменила строку.
+    owner_lost(&pool, execution.execution_id).await;
+    assert_eq!(
+        sender(&config).deliver_due(&pool).await.unwrap().cancelled,
+        1
+    );
+    // Строка отменена давно: при возрождении её возраст не должен её топить.
+    sqlx::query(
+        "update owner_pushes set created_at=clock_timestamp()-interval '31 minutes'
+         where dedupe_key=$1",
+    )
+    .bind(format!("waiting:{request}"))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    owner_reclaimed(&pool, execution.execution_id).await;
+    open_question(&pool, &s, &question_batch(&execution, request, "Первый?")).await;
+    assert_eq!(
+        pushes(&pool).await,
+        [(s.conversation_id, "waiting".into(), "pending".into())]
+    );
+    let report = sender(&config).deliver_due(&pool).await.unwrap();
+    assert_eq!((report.sent, report.dropped), (1, 0));
+    assert_eq!(fake.seen().len(), 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_old_idle_session_does_not_push_after_a_restart(pool: PgPool) {
     enable(&pool).await;
     let s = seed(&pool).await;
