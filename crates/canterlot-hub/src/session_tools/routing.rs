@@ -996,6 +996,12 @@ fn limits_verdict(
     let thresholds = policy.providers.get(provider);
     let view = view.cloned().unwrap_or_default();
     if view.reserve_active {
+        if let Some(reset) = view.reserve_resets_at
+            && reset > now
+            && nearest_reset.is_none_or(|known| reset < known)
+        {
+            *nearest_reset = Some(reset);
+        }
         let when = view
             .reserve_resets_at
             .map(|reset| format!(" until {}", reset.format("%H:%M UTC")))
@@ -2346,10 +2352,62 @@ mod tests {
         let reset = reset.unwrap();
         assert_eq!(reset, now() + chrono::TimeDelta::hours(1));
         assert_eq!(
-            queue_reason(&considered, Some(reset), now(), Duration::from_secs(6 * 3600)),
+            queue_reason(
+                &considered,
+                Some(reset),
+                now(),
+                Duration::from_secs(6 * 3600)
+            ),
             Some("limits")
         );
         assert!(no_executor_message(&considered, Some(reset)).contains("13:00 UTC"));
+    }
+
+    #[test]
+    fn an_active_reserve_queues_until_its_reset() {
+        let reset = now() + chrono::TimeDelta::hours(2);
+        let limits = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                reserve_active: true,
+                reserve_resets_at: Some(reset),
+                ..ProviderView::default()
+            },
+        )]);
+        let error = route_one(&limits).unwrap_err();
+        let RouteError::NoExecutor {
+            considered,
+            reset: nearest,
+        } = error
+        else {
+            panic!("expected no executor");
+        };
+        assert_eq!(nearest, Some(reset));
+        assert_eq!(
+            queue_reason(&considered, nearest, now(), Duration::from_secs(6 * 3600)),
+            Some("limits")
+        );
+    }
+
+    #[test]
+    fn an_active_reserve_without_a_reset_is_not_queued() {
+        let limits = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                reserve_active: true,
+                reserve_resets_at: None,
+                ..ProviderView::default()
+            },
+        )]);
+        let error = route_one(&limits).unwrap_err();
+        let RouteError::NoExecutor { considered, reset } = error else {
+            panic!("expected no executor");
+        };
+        assert_eq!(reset, None);
+        assert_eq!(
+            queue_reason(&considered, reset, now(), Duration::from_secs(6 * 3600)),
+            None
+        );
     }
 
     #[test]
