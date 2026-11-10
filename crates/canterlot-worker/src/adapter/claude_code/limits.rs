@@ -22,6 +22,13 @@ pub struct LimitTracker {
     limiting: Option<LimitWindow>,
     // Упор, уже сообщённый в текущем эпизоде: повтор того же кадра или 429 хода его не дублирует.
     reached: [Option<Option<u64>>; 3],
+    /// Текущий запрос идёт к модели Fable: только тогда недельное окно Fable к нему применимо.
+    fable: bool,
+}
+
+/// Модель Fable по полному id (`claude-fable-5-2`) или псевдониму (`fable[1m]`).
+pub fn is_fable(model: &str) -> bool {
+    model.to_lowercase().contains("fable")
 }
 
 fn index(window: LimitWindow) -> usize {
@@ -60,6 +67,21 @@ fn rejected(value: &Value) -> bool {
 }
 
 impl LimitTracker {
+    /// Модель текущего запроса. Окно Fable винят только для Fable, но показания
+    /// окна копятся при любой модели: их принесёт первый же кадр Fable.
+    pub fn set_model(&mut self, model: &str) {
+        let fable = is_fable(model);
+        if self.fable && !fable {
+            // Названный провайдером упор относился к окну Fable и со сменой модели
+            // протух: запасной путь следующего 429 не должен винить чужое окно.
+            if self.limiting == Some(LimitWindow::WeeklyFable) {
+                self.limiting = None;
+            }
+            self.reached[index(LimitWindow::WeeklyFable)] = None;
+        }
+        self.fable = fable;
+    }
+
     /// `rate_limit_info` из `rate_limit_event` или из кадра ошибки `assistant`.
     pub fn on_rate_limit(&mut self, info: &Value) -> Vec<LimitFact> {
         let mut facts = Vec::new();
@@ -136,7 +158,10 @@ impl LimitTracker {
         if !usage_limit || reported {
             return None;
         }
-        let window = self.limiting.unwrap_or_else(|| self.highest());
+        let window = self
+            .limiting
+            .filter(|window| *window != LimitWindow::WeeklyFable || self.fable)
+            .unwrap_or_else(|| self.highest());
         Some(LimitFact::Reached {
             window,
             resets_at_ms: self.resets[index(window)],
@@ -155,9 +180,129 @@ impl LimitTracker {
             window = LimitWindow::Weekly;
             best = used(self.snapshot.weekly);
         }
-        if used(self.snapshot.weekly_fable) > best {
+        if self.fable && used(self.snapshot.weekly_fable) > best {
             window = LimitWindow::WeeklyFable;
         }
         window
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const RESET: u64 = 1_794_877_200;
+
+    /// Кадр Fable: недельное 30 %, окно Fable 95 %, без явного `rateLimitType`.
+    fn fable_frame() -> Value {
+        json!({
+            "status": "allowed",
+            "unifiedWindows": {
+                "seven_day": {"utilization": 0.3, "resetsAt": RESET, "status": "allowed"},
+                "seven_day_overage_included": {"utilization": 0.95, "resetsAt": RESET, "status": "allowed"}
+            }
+        })
+    }
+
+    fn blamed(facts: &[LimitFact]) -> Option<LimitWindow> {
+        facts.iter().find_map(|fact| match fact {
+            LimitFact::Reached { window, .. } => Some(*window),
+            LimitFact::Observed { .. } => None,
+        })
+    }
+
+    fn tracker_on_fable() -> LimitTracker {
+        let mut tracker = LimitTracker::default();
+        tracker.set_model("fable[1m]");
+        tracker.on_rate_limit(&fable_frame());
+        tracker
+    }
+
+    #[test]
+    fn a_fable_reading_never_blames_opus_after_a_switch() {
+        let mut tracker = tracker_on_fable();
+        tracker.set_model("opus");
+        let facts = tracker.on_rate_limit(&json!({"status": "rejected", "resetsAt": RESET}));
+        assert_eq!(blamed(&facts), Some(LimitWindow::Weekly), "{facts:?}");
+    }
+
+    #[test]
+    fn a_bare_429_after_a_switch_does_not_blame_the_fable_window() {
+        let mut tracker = tracker_on_fable();
+        tracker.set_model("opus");
+        let fact = tracker.on_turn_error(Some(429), None);
+        assert_eq!(
+            fact.as_ref().map(|f| match f {
+                LimitFact::Reached { window, .. } => *window,
+                LimitFact::Observed { .. } => unreachable!(),
+            }),
+            Some(LimitWindow::Weekly)
+        );
+    }
+
+    #[test]
+    fn a_sticky_fable_limit_is_dropped_on_the_switch() {
+        let mut tracker = LimitTracker::default();
+        tracker.set_model("fable[1m]");
+        tracker.on_rate_limit(&json!({
+            "status": "allowed",
+            "rateLimitType": "seven_day_overage_included",
+            "unifiedWindows": {
+                "seven_day": {"utilization": 0.3, "resetsAt": RESET, "status": "allowed"},
+                "seven_day_overage_included": {"utilization": 0.95, "resetsAt": RESET, "status": "allowed"}
+            }
+        }));
+        tracker.set_model("opus");
+        let fact = tracker.on_turn_error(Some(429), None);
+        assert_ne!(
+            fact.as_ref().map(|f| match f {
+                LimitFact::Reached { window, .. } => *window,
+                LimitFact::Observed { .. } => unreachable!(),
+            }),
+            Some(LimitWindow::WeeklyFable)
+        );
+    }
+
+    #[test]
+    fn the_fallback_still_names_the_fable_window_while_the_model_is_fable() {
+        let mut tracker = tracker_on_fable();
+        let facts = tracker.on_rate_limit(&json!({"status": "rejected", "resetsAt": RESET}));
+        assert_eq!(blamed(&facts), Some(LimitWindow::WeeklyFable), "{facts:?}");
+    }
+
+    #[test]
+    fn an_explicit_fable_type_wins_over_the_model_flag() {
+        let mut tracker = LimitTracker::default();
+        tracker.set_model("opus");
+        let facts = tracker.on_rate_limit(&json!({
+            "status": "rejected",
+            "rateLimitType": "seven_day_overage_included",
+            "resetsAt": RESET,
+            "unifiedWindows": {
+                "seven_day": {"utilization": 0.3, "resetsAt": RESET, "status": "allowed"},
+                "seven_day_overage_included": {"utilization": 1.0, "resetsAt": RESET, "status": "rejected"}
+            }
+        }));
+        assert_eq!(blamed(&facts), Some(LimitWindow::WeeklyFable), "{facts:?}");
+    }
+
+    #[test]
+    fn switching_back_to_fable_restores_the_fallback() {
+        let mut tracker = tracker_on_fable();
+        tracker.set_model("opus");
+        tracker.on_rate_limit(&json!({"status": "rejected", "resetsAt": RESET}));
+        tracker.set_model("fable[1m]");
+        let facts = tracker.on_rate_limit(&json!({"status": "rejected", "resetsAt": RESET}));
+        assert_eq!(blamed(&facts), Some(LimitWindow::WeeklyFable), "{facts:?}");
+    }
+
+    #[test]
+    fn is_fable_matches_ids_and_aliases() {
+        assert!(is_fable("fable[1m]"));
+        assert!(is_fable("claude-fable-5-2"));
+        assert!(is_fable("FABLE"));
+        assert!(!is_fable("opus"));
+        assert!(!is_fable(""));
     }
 }

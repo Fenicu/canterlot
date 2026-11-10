@@ -288,6 +288,14 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Модель исполнения для трекера лимитов: очередь хранит псевдоним, пока
+    /// `system/init` не назвал точный id.
+    fn sync_limits_model(&mut self) {
+        if let Some(queue) = &self.queue {
+            self.limits.set_model(&queue.effective().model);
+        }
+    }
+
     fn on_parsed(&mut self, parsed: Parsed) {
         if let Some(queue) = &mut self.queue
             && let Some(proof) = queue.on_parsed(&parsed)
@@ -297,13 +305,21 @@ impl ClaudeCodeAdapter {
                 command_id: proof.command_id,
             });
         }
+        // Успешный `set_model` очередь уже применила: окно Fable винит только своя модель.
+        if matches!(&parsed, Parsed::ControlResponse { .. }) {
+            self.sync_limits_model();
+        }
         match parsed {
             Parsed::Init {
                 session_id,
+                model,
                 permission_mode,
                 version,
-                ..
             } => {
+                if !model.is_empty() {
+                    // `system/init` называет разрешённую модель, а не псевдоним запуска.
+                    self.limits.set_model(&model);
+                }
                 if !version.is_empty()
                     && version::parse_version(&version)
                         .is_ok_and(|v| v < version::MIN_SUPPORTED_VERSION)
@@ -740,6 +756,7 @@ impl ClaudeCodeAdapter {
         if let Some(queue) = self.queue.as_mut() {
             queue.apply_restarted(&model, &effort, &permission_mode);
         }
+        self.limits.set_model(&model);
         self.instructions = next;
         self.events.push_back(AdapterEvent::CliRestarted {
             cli_pid: started.0,
@@ -803,6 +820,7 @@ impl ClaudeCodeAdapter {
                 let started = (cli.pid, cli.start_ticks);
                 self.cli = Some(cli);
                 self.cli_ready = false;
+                self.limits.set_model(&model);
                 self.events.push_back(AdapterEvent::CliRestarted {
                     cli_pid: started.0,
                     cli_start_ticks: started.1,
@@ -1338,6 +1356,7 @@ impl Adapter for ClaudeCodeAdapter {
             effort: spec.effort.clone(),
             permission_mode: spec.permission_mode.clone(),
         }));
+        self.limits.set_model(&spec.model);
         let cli = CliProcess::spawn(&launch, &self.cfg, group)
             .await
             .map_err(|error| AdapterError::StartFailed(error.reason()))?;
