@@ -35,6 +35,8 @@ const REFUSED_RETRY: Duration = Duration::from_secs(10);
 /// Переподключение после обрыва: держатель и ожидающий пробуют не дольше.
 const RECONNECT_TOTAL: Duration = Duration::from_secs(30);
 const RETRY_STEP: Duration = Duration::from_millis(250);
+/// Сокет принял соединение, но не ответил на запрос: как недоступный воркер, без аренды.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct RunArgs {
@@ -177,7 +179,21 @@ async fn request(
     }
     let mut answered = false;
     loop {
-        match read_message(&mut lines).await {
+        // Ждём только первый ответ: очередь может стоять сколько угодно.
+        let reply = if answered {
+            read_message(&mut lines).await
+        } else {
+            match tokio::time::timeout(REPLY_TIMEOUT, read_message(&mut lines)).await {
+                Ok(reply) => reply,
+                Err(_) => {
+                    return Wait::Failed(format!(
+                        "worker did not answer within {}s",
+                        REPLY_TIMEOUT.as_secs()
+                    ));
+                }
+            }
+        };
+        match reply {
             Ok(ServerMessage::Queued {
                 position, holders, ..
             }) => {
@@ -503,14 +519,21 @@ pub async fn status(json: bool) -> ExitCode {
         note(error.to_string());
         return ExitCode::from(1);
     }
-    let snapshot = match read_message(&mut lines).await {
-        Ok(ServerMessage::Status(snapshot)) => snapshot,
-        Ok(other) => {
+    let snapshot = match tokio::time::timeout(REPLY_TIMEOUT, read_message(&mut lines)).await {
+        Ok(Ok(ServerMessage::Status(snapshot))) => snapshot,
+        Ok(Ok(other)) => {
             note(format!("unexpected reply {other:?}"));
             return ExitCode::from(1);
         }
-        Err(reason) => {
+        Ok(Err(reason)) => {
             note(reason);
+            return ExitCode::from(1);
+        }
+        Err(_) => {
+            note(format!(
+                "worker did not answer within {}s",
+                REPLY_TIMEOUT.as_secs()
+            ));
             return ExitCode::from(1);
         }
     };

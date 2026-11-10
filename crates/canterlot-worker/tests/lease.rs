@@ -407,6 +407,35 @@ fn refusing_socket_is_retried_then_unwrapped() {
 }
 
 #[test]
+fn unanswered_worker_times_out_and_runs_unwrapped() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("lease.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(stream.try_clone().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        assert!(line.contains("\"op\":\"acquire\""), "{line}");
+        let _ = wait.recv_timeout(Duration::from_secs(30));
+        drop(stream);
+    });
+    let started = Instant::now();
+    assert_unleased(output(unleased(Some(&socket))), "did not answer");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(9) && elapsed < Duration::from_secs(20),
+        "{elapsed:?}"
+    );
+    let _ = release.send(());
+    server.join().unwrap();
+}
+
+#[test]
 fn protocol_error_runs_unwrapped() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("lease.sock");
