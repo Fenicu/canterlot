@@ -8,6 +8,7 @@ import type {
 } from "#lib/sync/scope.js";
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import type { HubEvent } from "#lib/sync/wire.js";
+import type { BookmarkChange } from "#lib/bookmarks/model.js";
 import type { LimitWindow, ProviderLimits, WindowForecast } from "./limits";
 import { PlanModel, type PlanTask } from "./plan.svelte";
 
@@ -140,6 +141,7 @@ export class ListStore {
 
   #sub: { release(): void; readonly status: ScopeStatus } | null = null;
   #onDeleted: ((id: string) => void)[] = [];
+  #onBookmark: ((change: BookmarkChange) => void)[] = [];
 
   constructor(
     private deps: {
@@ -178,6 +180,14 @@ export class ListStore {
     this.#onDeleted.push(fn);
     return () => {
       this.#onDeleted = this.#onDeleted.filter((item) => item !== fn);
+    };
+  }
+
+  /** Закладка меняется в области списка: открытые чаты и экран избранного читают одно событие. */
+  onBookmark(fn: (change: BookmarkChange) => void): () => void {
+    this.#onBookmark.push(fn);
+    return () => {
+      this.#onBookmark = this.#onBookmark.filter((item) => item !== fn);
     };
   }
 
@@ -250,6 +260,10 @@ export class ListStore {
     if (kind === "conversation_deleted" && event.kind === "conversation_deleted") {
       this.#markDeleted(event.payload.id);
       this.counts = event.payload.counts;
+      return;
+    }
+    if (kind === "bookmark_changed" && event.kind === "bookmark_changed") {
+      for (const fn of this.#onBookmark) fn(event.payload);
       return;
     }
     if (kind === "derived_changed" && event.kind === "derived_changed") {

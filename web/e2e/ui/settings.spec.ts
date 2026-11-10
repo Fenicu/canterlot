@@ -94,7 +94,8 @@ test('header_toggle_keeps_the_palette', async ({ page }) => {
   await main.getByRole('radio', { name: 'Тёмный', exact: true }).check();
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('button', { name: 'Сменить тему' }).click();
+  await page.getByRole('button', { name: 'Ещё', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Светлая тема' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'forest');
   await page.reload();

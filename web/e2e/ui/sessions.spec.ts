@@ -23,7 +23,8 @@ test('list_matches_the_mockup_fixture_structure', async ({ page }) => {
   await expect(page.getByText('Есть непрочитанное').first()).toBeVisible();
   await expect(page.getByText('Claude Code · opus-5.5 · workstation').first()).toBeVisible();
   await expect(page.getByText('Генерирует').first()).toBeVisible();
-  await page.getByRole('button', { name: 'Сменить тему' }).click();
+  await page.getByRole('button', { name: 'Ещё', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Светлая тема' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expect(page.getByRole('link', { name: /Восстановление потока/ })).toBeVisible();
 });
@@ -51,7 +52,8 @@ test('selected_group_tab_stands_out_in_both_themes', async ({ page }) => {
   const selected = page.getByRole('tablist', { name: 'Группы сессий' }).getByRole('tab', { selected: true });
   // Признак выбора — не текст, поэтому ему нужно 3:1 с фоном под ним (WCAG 1.4.11).
   expect(await fillContrast(selected)).toBeGreaterThanOrEqual(3);
-  await page.getByRole('button', { name: 'Сменить тему' }).click();
+  await page.getByRole('button', { name: 'Ещё', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Светлая тема' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   expect(await fillContrast(selected)).toBeGreaterThanOrEqual(3);
 });
@@ -698,7 +700,7 @@ test('keyboard_reaches_every_list_action', async ({ page }) => {
   await boot(page);
   await page.getByRole('button', { name: 'Поиск', exact: true }).focus();
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('button', { name: 'Сменить тему' })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Избранное' })).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('button', { name: 'Ещё' })).toBeFocused();
   await page.keyboard.press('Enter');

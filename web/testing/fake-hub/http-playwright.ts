@@ -22,6 +22,49 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const id = parts[4] ?? '';
     const kind = parts[5] ?? '';
     const headers = { 'X-Server-Time-Ms': String(Date.now()) };
+    if (kind === 'bookmarks') {
+      const method = route.request().method();
+      const fail = async (err: unknown) => {
+        const failure = err as { status?: number; code?: string; message?: string };
+        await route.fulfill({
+          status: failure.status ?? 500,
+          headers,
+          json: {
+            error: {
+              code: failure.code ?? 'internal',
+              message: failure.message ?? 'Ошибка закладки',
+              scope: 'hub_db',
+              retry: 'never',
+              correlation_id: '00000000-0000-4000-8000-0000000000e6'
+            }
+          }
+        });
+      };
+      if (parts.length === 6 && method === 'GET') {
+        await route.fulfill({ json: api.conversationBookmarks(id), headers });
+        return;
+      }
+      const targetKind = parts[6] as 'input' | 'block';
+      const targetId = parts[7] ?? '';
+      if (method === 'PUT' && (targetKind === 'input' || targetKind === 'block') && targetId) {
+        try {
+          const { entry, created } = api.putBookmark(id, targetKind, targetId, { record: true });
+          await route.fulfill({ status: created ? 201 : 200, json: entry, headers });
+        } catch (err) {
+          await fail(err);
+        }
+        return;
+      }
+      if (method === 'DELETE' && (targetKind === 'input' || targetKind === 'block') && targetId) {
+        try {
+          api.deleteBookmark(id, targetKind, targetId, { record: true });
+          await route.fulfill({ status: 204, headers });
+        } catch (err) {
+          await fail(err);
+        }
+        return;
+      }
+    }
     if (kind === 'draft') {
       if (route.request().method() === 'GET') {
         await route.fulfill({ headers, json: api.draft(id) });
@@ -111,6 +154,19 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     }
     await route.fallback();
   });
+  await page.route('**/api/v1/bookmarks**', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const url = new URL(route.request().url());
+    const limit = url.searchParams.get('limit');
+    await route.fulfill({
+      json: api.bookmarksPage({
+        limit: limit ? Number(limit) : undefined,
+        cursor: url.searchParams.get('cursor') ?? undefined
+      }),
+      headers: { 'X-Server-Time-Ms': String(Date.now()) }
+    });
+  });
+
   await page.route('**/api/v1/media/**', async (route) => {
     await route.fulfill({ status: 200, contentType: 'image/png', body: PNG });
   });

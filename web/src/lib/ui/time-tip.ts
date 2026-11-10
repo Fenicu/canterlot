@@ -5,6 +5,8 @@ const TOUCH_HIDE = 3000;
 const HOVER_MEDIA = '(hover: hover) and (pointer: fine)';
 // Фокус от нажатия приходит сразу после pointerdown: в этот миг подсказку показывает само нажатие.
 const POINTER_GRACE = 600;
+// Браузер доводит сфокусированную отметку в видимую часть: этот сдвиг не уводит взгляд владельца.
+const FOCUS_SCROLL_GRACE = 100;
 
 type Source = 'hover' | 'focus' | 'touch';
 
@@ -29,6 +31,7 @@ export function timeTip(node: HTMLElement, at: number) {
 	let hideTimer = 0;
 	let pointerAt = Number.NEGATIVE_INFINITY;
 	let pointerKind = '';
+	let focusAt = Number.NEGATIVE_INFINITY;
 	// Внутри ссылки или кнопки отметка времени не получает свой шаг табуляции: подсказку показывает фокус строки.
 	const focusTarget: HTMLElement = node.closest<HTMLElement>('a[href], button') ?? node;
 	if (focusTarget === node) node.tabIndex = 0;
@@ -98,7 +101,7 @@ export function timeTip(node: HTMLElement, at: number) {
 		open = true;
 		focusTarget.setAttribute('aria-describedby', el.id);
 		window.addEventListener('keydown', onKey, true);
-		window.addEventListener('scroll', close, { capture: true, passive: true });
+		window.addEventListener('scroll', onScroll, { capture: true, passive: true });
 		window.addEventListener('resize', close);
 		if (next === 'touch') {
 			window.addEventListener('pointerdown', onOutside, true);
@@ -115,7 +118,7 @@ export function timeTip(node: HTMLElement, at: number) {
 		tip?.remove();
 		focusTarget.removeAttribute('aria-describedby');
 		window.removeEventListener('keydown', onKey, true);
-		window.removeEventListener('scroll', close, true);
+		window.removeEventListener('scroll', onScroll, true);
 		window.removeEventListener('resize', close);
 		window.removeEventListener('pointerdown', onOutside, true);
 		if (activeClose === close) activeClose = null;
@@ -151,7 +154,14 @@ export function timeTip(node: HTMLElement, at: number) {
 
 	function onFocus(): void {
 		if (performance.now() - pointerAt < POINTER_GRACE) return;
+		focusAt = performance.now();
 		show('focus');
+	}
+
+	function onScroll(): void {
+		// Доводка фокуса в видимую часть — не прокрутка владельца.
+		if (source === 'focus' && performance.now() - focusAt < FOCUS_SCROLL_GRACE) return;
+		close();
 	}
 
 	function onBlur(): void {

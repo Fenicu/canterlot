@@ -376,12 +376,6 @@
 
     <IconButton icon="bookmark" label="Избранное" onclick={() => void goto(resolve('/bookmarks'))} />
 
-    <IconButton
-      icon={theme.effective === 'dark' ? 'sun' : 'moon'}
-      label="Сменить тему"
-      onclick={() => theme.toggle()}
-    />
-
     <IconButton icon="more" label="Ещё" expanded={menu} onclick={() => menu = !menu} />
 
     {#if create}
@@ -396,6 +390,7 @@
       <div class="menu-slot" use:dismissable={{ onclose: () => { menu = false; }, keep: (target) => target.closest('[aria-label="Ещё"]') !== null }}>
         <Menu label="Ещё">
           <MenuItem icon="sliders" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</MenuItem>
+          <MenuItem icon={theme.effective === 'dark' ? 'sun' : 'moon'} onclick={() => { theme.toggle(); menu = false; }}>{theme.effective === 'dark' ? 'Светлая тема' : 'Тёмная тема'}</MenuItem>
           <MenuItem icon="folder" onclick={() => { groupsOpen = true; menu = false; }}>Группы</MenuItem>
           <MenuItem icon="archive" onclick={() => { tab = { kind: 'archive' }; menu = false; }}>Архив</MenuItem>
           {#if runtime && runtime.list.plan.tasks.size > 0}<MenuItem icon="list" href={resolve('/plan')} onclick={() => { menu = false; }}>Планы</MenuItem>{/if}
@@ -529,7 +524,7 @@
   .trash-error { position: fixed; z-index: 6; left: 50%; bottom: calc(var(--target) + var(--s6)); transform: translateX(-50%); margin: 0; color: var(--danger); font-size: var(--fs-sm); }
   .trash-loading { margin: var(--s4) var(--gutter); color: var(--secondary); font-size: var(--fs-sm); }
   .list { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
-  .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding-block: var(--s2); }
+  .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s0); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding-block: var(--s2); }
   .brand { flex: 1 0 auto; margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }
   .create { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: var(--target); min-height: var(--target); border-radius: var(--radius-round); color: var(--accent-link); }
   .menu-slot { position: absolute; z-index: 4; top: calc(100% + var(--s2)); right: var(--s3); }

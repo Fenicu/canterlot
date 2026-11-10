@@ -258,15 +258,16 @@
       >Вернуть в черновик</Button>
     </div>
   {/if}
-  {#if input.id && bookmarks && !editing}
+  {#if input.id && !editing && input.state === 'accepted'}
     <div class="actions message-actions" data-role="bubble-actions">
       <IconButton
         icon="bookmark"
         solid={bookmarked}
         pressed={bookmarked}
         active={bookmarked}
+        inert={!bookmarks}
         label={bookmarked ? 'Убрать из избранного' : 'В избранное'}
-        onclick={() => void bookmarks.toggle('input', input.id!)}
+        onclick={() => bookmarks && void bookmarks.toggle('input', input.id!)}
       />
     </div>
   {/if}

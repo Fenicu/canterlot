@@ -22,7 +22,7 @@
   import IconButton from '#lib/ui/IconButton.svelte';
   import { timeTip } from '#lib/ui/time-tip.js';
   import type { ConversationBookmarks } from '#lib/bookmarks/store.svelte.js';
-  import { bookmarkAnchor, cardBookmarked } from '#lib/bookmarks/model.js';
+  import { bookmarkAnchor } from '#lib/bookmarks/model.js';
 
   let {
     cardKey,
@@ -87,7 +87,9 @@
   const view = $derived(folds.view(cardKey, items, live));
   const topBlocks = $derived(all.filter((block) => block.parentId === null));
   const anchor = $derived(bookmarkAnchor(topBlocks));
-  const marked = $derived(cardBookmarked(topBlocks, (id) => bookmarks?.has('block', id) ?? false));
+  // Отмеченным карточка считается по любому верхнему блоку, а снимает все такие отметки.
+  const markedIds = $derived(topBlocks.filter((block) => bookmarks?.has('block', block.id) ?? false).map((block) => block.id));
+  const marked = $derived(markedIds.length > 0);
 </script>
 
 {#snippet entryRow(entry: TimelineEntry)}
@@ -136,14 +138,22 @@
     <footer class="byline" data-role="answer-footer">
       <p><strong>{agent}</strong><time datetime={new Date(head.createdAt).toISOString()} use:timeTip={head.createdAt}>{fmt.clock(head.createdAt)}</time></p>
       <div class="footer-actions">
-        {#if anchor && bookmarks}
+        {#if anchor}
           <IconButton
             icon="bookmark"
             solid={marked}
             pressed={marked}
             active={marked}
+            inert={!bookmarks}
             label={marked ? 'Убрать из избранного' : 'В избранное'}
-            onclick={() => void bookmarks.toggle('block', anchor.id)}
+            onclick={() => {
+              if (!bookmarks) return;
+              if (marked) {
+                for (const id of markedIds) void bookmarks.remove('block', id);
+              } else if (anchor) {
+                void bookmarks.toggle('block', anchor.id);
+              }
+            }}
           />
         {/if}
         {#if run}

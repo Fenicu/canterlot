@@ -15,6 +15,7 @@ import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWh
 import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
 import { seedPlan } from '../../testing/fixtures/plan';
 import { seedSearch } from '../../testing/fixtures/search';
+import { seedBookmarks } from '../../testing/fixtures/bookmarks';
 
 export type Theme = 'dark' | 'light';
 
@@ -153,6 +154,16 @@ async function historySearch(page: Page, scoped = false): Promise<void> {
   if (!scoped) await page.getByRole('button', { name: 'Искать во всех сессиях' }).click();
   await page.getByRole('searchbox', { name: 'Поиск по сообщениям' }).fill('индекс');
   await expect(page.locator('[data-search-hit]').first()).toBeVisible();
+}
+
+/** Общее избранное: строки журнала, архивная сессия и курсор на вторую страницу. */
+async function allBookmarks(page: Page): Promise<void> {
+  const { hub, api } = fresh();
+  seedBookmarks(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto('/bookmarks');
+  await expect(page.locator('[data-bookmarks-screen][data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-bookmark-row]').first()).toBeVisible();
 }
 
 /** Лента оркестратора со всеми карточками инструментов: низ ленты или её начало с раскрытыми строками. */
@@ -478,6 +489,8 @@ export const SCREENS: Screen[] = [
   screen('search', false, PHONE, 'dark', (page) => historySearch(page)),
   screen('search-session', false, PHONE, 'light', (page) => historySearch(page, true)),
   screen('search-desktop', false, DESKTOP, 'light', (page) => historySearch(page)),
+  screen('bookmarks', false, PHONE, 'dark', allBookmarks),
+  screen('bookmarks-desktop', false, DESKTOP, 'light', allBookmarks),
   screen('plan-tab', false, PHONE, 'dark', planTab),
   screen('plan-tab-desktop', false, DESKTOP, 'light', planTab),
   screen('plans-list', false, PHONE, 'dark', (page) => planScreen(page, 'list')),

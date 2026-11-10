@@ -51,9 +51,7 @@
     align-items: center;
     gap: var(--s2);
     min-width: 0;
-    border-bottom: var(--focus-width) solid var(--control-line);
   }
-  .row:last-child { border-bottom: 0; }
   .open {
     flex: 1;
     min-width: 0;

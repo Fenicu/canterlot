@@ -58,7 +58,8 @@ test('install_menu_prompts_once_and_hides_after_install_in_both_themes', async (
   await page.getByRole('menuitem', { name: 'Установить', exact: true }).focus();
   await page.keyboard.press('Enter');
   await expect(page.locator('html')).toHaveAttribute('data-install-prompt', 'called');
-  await page.getByRole('button', { name: 'Сменить тему', exact: true }).click();
+  await page.getByRole('button', { name: 'Ещё', exact: true }).click();
+  await page.getByRole('menuitem', { name: /Светлая тема|Тёмная тема/ }).click();
   await page.evaluate(() => window.dispatchEvent(new Event('appinstalled')));
   await page.getByRole('button', { name: 'Ещё', exact: true }).click();
   await expect(page.getByRole('menuitem', { name: 'Установить', exact: true })).toHaveCount(0);
@@ -72,7 +73,7 @@ test('share_post_without_an_active_worker_is_redirected_to_the_explanation_by_th
 
 test('csp_violations_are_zero_on_every_route', async ({ page }) => {
   const { ids } = await boot(page);
-  for (const route of ['/sessions', '/', '/new', '/machines', '/limits', `/c/${ids.pinned}`, '/share?id=missing', '/__test/primitives']) {
+  for (const route of ['/sessions', '/', '/new', '/machines', '/limits', '/bookmarks', `/c/${ids.pinned}`, '/share?id=missing', '/__test/primitives']) {
     const response = await page.goto(route); expect(response?.headers()['content-security-policy']).toContain("frame-ancestors 'none'");
     await expect(page.locator('[data-layout]')).toBeVisible();
     expect(await page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? [])).toEqual([]);

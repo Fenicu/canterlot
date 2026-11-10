@@ -258,11 +258,17 @@ export class BookmarksListStore {
 	#paged = false;
 	#generation = 0;
 	#unsubscribe: () => void;
+	#unsubscribeDrop: () => void;
 	readonly #api: BookmarksListApi;
 
-	constructor(api: BookmarksListApi, subscribe = onBookmarkChange) {
+	constructor(
+		api: BookmarksListApi,
+		subscribe = onBookmarkChange,
+		subscribeDrop = onBookmarkDrop
+	) {
 		this.#api = api;
 		this.#unsubscribe = subscribe((change) => this.apply(change));
+		this.#unsubscribeDrop = subscribeDrop((id) => this.dropConversation(id));
 	}
 
 	get hasMore(): boolean {
@@ -329,20 +335,26 @@ export class BookmarksListStore {
 
 	async remove(entry: BookmarkView): Promise<void> {
 		const key = bookmarkTarget(entry);
-		const prior = this.items;
 		this.actionError = null;
 		this.items = this.items.filter((item) => bookmarkTarget(item) !== key);
 		try {
 			await this.#api.remove(entry.conversation_id, entry.target_kind, entry.target_id);
 		} catch (err) {
-			this.items = prior;
+			if (!this.items.some((item) => bookmarkTarget(item) === key)) {
+				this.items = newestFirst([...this.items, entry]);
+			}
 			this.actionError = errorText(err, 'Не удалось убрать из избранного');
 		}
+	}
+
+	dropConversation(conversationId: string): void {
+		this.items = this.items.filter((item) => item.conversation_id !== conversationId);
 	}
 
 	dispose(): void {
 		this.#generation += 1;
 		this.#unsubscribe();
+		this.#unsubscribeDrop();
 	}
 }
 

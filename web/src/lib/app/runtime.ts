@@ -15,6 +15,7 @@ import { bindOwner, onOwnerRetired } from "#lib/storage/owner.js";
 import { staleness } from "#lib/pwa/sync-state.js";
 import { sweepShares } from "#lib/pwa/share.js";
 import { ListStore, type ListSnapshot } from "#lib/stores/list.svelte.js";
+import { applyBookmarkChange, dropConversationBookmarks } from "#lib/bookmarks/store.svelte.js";
 import {
   MachinesStore,
   type MachineRecord,
@@ -154,7 +155,9 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
     list.onDeleted((id) => {
       journal.discardConversation(id);
       void drafts.clear(id);
+      dropConversationBookmarks(id);
     });
+    list.onBookmark((change) => applyBookmarkChange(change));
     list.open();
     const machines = new MachinesStore({
       connection,

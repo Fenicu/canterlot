@@ -20,6 +20,15 @@ async function boot(page: Page, patch?: (api: FakeHubApi) => void) {
   return { hub, api };
 }
 
+
+/** Тема списка сессий живёт в меню «Ещё»: шапка держит поиск, избранное и меню в одну строку. */
+async function setListTheme(page: Page, theme: 'dark' | 'light'): Promise<void> {
+  if ((await page.locator('html').getAttribute('data-theme')) === theme) return;
+  await page.getByRole('button', { name: 'Ещё', exact: true }).click();
+  await page.getByRole('menuitem', { name: theme === 'light' ? 'Светлая тема' : 'Тёмная тема' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+}
+
 function claude(api: FakeHubApi) {
   const row = api.limits.find((item) => item.provider === 'claude');
   if (!row) throw new Error('claude limits are seeded');
@@ -63,8 +72,7 @@ test('collapsed_strip_shows_the_remaining_share_of_both_windows_per_provider', a
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'strip-collapsed');
-  await page.getByRole('button', { name: 'Сменить тему' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await setListTheme(page, 'light');
   await shot(page, 'strip-collapsed');
 });
 
@@ -124,8 +132,7 @@ test('expanded_strip_puts_resets_beside_meters_and_offers_the_refresh_button', a
   const provider = (await strip.locator('.pname').first().boundingBox())!;
   expect(Math.abs(updated.x - provider.x)).toBeLessThanOrEqual(1);
   await shot(page, 'strip-expanded');
-  await page.getByRole('button', { name: 'Сменить тему' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await setListTheme(page, 'light');
   await shot(page, 'strip-expanded');
 });
 
@@ -193,8 +200,7 @@ test('a_window_past_its_reset_is_dimmed_and_called_stale_in_words', async ({ pag
   expect(Number(opacity)).toBeLessThan(1);
   await expect(strip.locator('.row').first().locator('.meter').nth(1)).not.toHaveAttribute('data-stale', /.*/);
   await shot(page, 'strip-stale');
-  await page.getByRole('button', { name: 'Сменить тему' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await setListTheme(page, 'light');
   await shot(page, 'strip-stale');
 });
 
@@ -257,8 +263,7 @@ test('a_provider_without_a_five_hour_limit_shows_one_balanced_meter', async ({ p
   await strip.locator('summary').click();
   await expect(claudeRow.locator('.reset')).toHaveCount(1);
   await shot(page, 'strip-one-meter-open');
-  await page.getByRole('button', { name: 'Сменить тему' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await setListTheme(page, 'light');
   await shot(page, 'strip-one-meter-open');
 });
 
@@ -622,14 +627,12 @@ test('four_providers_keep_one_aligned_grid_at_the_desktop_sidebar_and_a_390_phon
     await expectFourProviderStrip(page, true);
     await shot(page, `strip-four-${width}-expanded`);
     await expectFourProviderStrip(page, false);
-    await page.getByRole('button', { name: 'Сменить тему' }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    await setListTheme(page, 'light');
     await expectFourProviderStrip(page, false);
     await shot(page, `strip-four-${width}-collapsed`);
     await expectFourProviderStrip(page, true);
     await shot(page, `strip-four-${width}-expanded`);
-    await page.getByRole('button', { name: 'Сменить тему' }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await setListTheme(page, 'dark');
     await expectFourProviderStrip(page, false);
   }
 });
@@ -661,8 +664,7 @@ test('expanded_strip_has_one_shared_grid_across_providers', async ({ page }) => 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'strip-expanded-grid');
-  await page.getByRole('button', { name: 'Сменить тему' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await setListTheme(page, 'light');
   await shot(page, 'strip-expanded-grid');
 });
 
@@ -771,10 +773,7 @@ test('stripes_span_the_strip_and_the_chevron_keeps_its_place_in_both_states', as
   for (const width of widths) {
     await resizeViewport(page, { width, height: 900 });
     for (const theme of ['dark', 'light']) {
-      if ((await page.locator('html').getAttribute('data-theme')) !== theme) {
-        await page.getByRole('button', { name: 'Сменить тему' }).click();
-        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-      }
+      await setListTheme(page, theme as 'dark' | 'light');
       if (await strip.evaluate((node) => (node as HTMLDetailsElement).open)) await strip.locator('summary').click();
       await expect(strip.locator('.reset-short').first()).toBeVisible();
       await settled();

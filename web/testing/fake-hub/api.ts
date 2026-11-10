@@ -22,6 +22,8 @@ type SearchBody = components['schemas']['SearchBody'];
 type SearchHit = components['schemas']['Hit'];
 type SearchPage = components['schemas']['SearchPage'];
 type SearchSegment = components['schemas']['SnippetSegment'];
+type BookmarkView = components['schemas']['BookmarkView'];
+type BookmarkPage = components['schemas']['BookmarkPage'];
 
 const SEARCH_CAP = 200;
 const SEARCH_WINDOW = 90;
@@ -155,6 +157,14 @@ export class FakeHubApi {
 	readonly searchCalls: SearchBody[] = [];
 	/** Следующие ответы поиска отказом: статус и код, как у хаба. */
 	searchFailure: { status: number; code: string; message: string } | null = null;
+	/** Закладки по ключу «вид:цель»: одна цель — одна запись на разговор. */
+	readonly bookmarks = new Map<string, BookmarkView>();
+	/** Запросы закладок в порядке прихода: тесты сверяют метод и цель. */
+	readonly bookmarkCalls: { method: 'PUT' | 'DELETE'; conversation: string; kind: 'input' | 'block'; target: string }[] = [];
+	/** Страницы общего избранного: курсор и размер, как их прислал клиент. */
+	readonly bookmarkPages: { limit?: number; cursor?: string }[] = [];
+	/** Следующий PUT закладки отказом. */
+	bookmarkFailure: { status: number; code: string; message: string } | null = null;
 	/** Запросы `GET /api/v1/plan`: какой оркестратор просили. */
 	readonly planReads: string[] = [];
 	/** Очередь запусков разговора: ожидающие и недавно завершённые элементы. */
@@ -859,6 +869,146 @@ export class FakeHubApi {
 				...this.planDetails.get(task.id)
 			}));
 		return { tasks };
+	}
+
+
+	bookmarkKey(kind: 'input' | 'block', target: string): string {
+		return `${kind}:${target}`;
+	}
+
+	hasBookmark(conversation: string, kind: 'input' | 'block', target: string): boolean {
+		return this.bookmarks.has(`${conversation}:${this.bookmarkKey(kind, target)}`);
+	}
+
+	/** Все закладки разговора в порядке ленты. */
+	conversationBookmarks(conversation: string): BookmarkView[] {
+		return [...this.bookmarks.values()]
+			.filter((item) => item.conversation_id === conversation)
+			.sort((a, b) => a.seq - b.seq || a.id.localeCompare(b.id));
+	}
+
+	/** Избранное владельца: новые первыми, курсор — смещение. */
+	bookmarksPage(query: { limit?: number; cursor?: string } = {}): BookmarkPage {
+		this.bookmarkPages.push(query);
+		const limit = Math.min(Math.max(query.limit ?? 50, 1), 100);
+		const visible = [...this.bookmarks.values()]
+			.filter((item) => {
+				const row = this.list.get(item.conversation_id);
+				return row && !row.trashed_at && !this.deleted.has(item.conversation_id);
+			})
+			.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id.localeCompare(a.id));
+		const offset = query.cursor ? Number(query.cursor.replace(/^b:/, '')) || 0 : 0;
+		const page = visible.slice(offset, offset + limit);
+		return { bookmarks: page, next_cursor: offset + limit < visible.length ? `b:${offset + limit}` : null };
+	}
+
+	/** Ответ PUT: существующая запись или новая с событием в область списка. */
+	putBookmark(
+		conversation: string,
+		kind: 'input' | 'block',
+		target: string,
+		options: { at?: string; emit?: boolean; record?: boolean } = {}
+	): { entry: BookmarkView; created: boolean } {
+		if (options.record) this.bookmarkCalls.push({ method: 'PUT', conversation, kind, target });
+		if (this.bookmarkFailure) throw this.bookmarkFailure;
+		const key = `${conversation}:${this.bookmarkKey(kind, target)}`;
+		const existing = this.bookmarks.get(key);
+		if (existing) return { entry: existing, created: false };
+		const entry = this.buildBookmark(conversation, kind, target, options.at);
+		this.bookmarks.set(key, entry);
+		if (options.emit !== false) this.emitBookmark(entry, true);
+		return { entry, created: true };
+	}
+
+	/** Ответ DELETE: 204 в любом случае, событие только если запись была. */
+	deleteBookmark(
+		conversation: string,
+		kind: 'input' | 'block',
+		target: string,
+		options: { emit?: boolean; record?: boolean } = {}
+	): boolean {
+		if (options.record) this.bookmarkCalls.push({ method: 'DELETE', conversation, kind, target });
+		const key = `${conversation}:${this.bookmarkKey(kind, target)}`;
+		const entry = this.bookmarks.get(key);
+		if (!entry) return false;
+		this.bookmarks.delete(key);
+		if (options.emit !== false) this.emitBookmark(entry, false);
+		return true;
+	}
+
+	private buildBookmark(
+		conversation: string,
+		kind: 'input' | 'block',
+		target: string,
+		at?: string
+	): BookmarkView {
+		const row = this.list.get(conversation);
+		if (!row || row.trashed_at || this.deleted.has(conversation)) {
+			throw { status: 404, code: 'not_found', message: 'Разговор не найден' };
+		}
+		const item = (this.histories.get(conversation) ?? []).find((entry) => entry.id === target);
+		if (!item) throw { status: 404, code: 'not_found', message: 'Цель закладки не найдена' };
+		if (kind === 'input' && item.kind !== 'input') throw { status: 404, code: 'not_found', message: 'Цель закладки не найдена' };
+		if (kind === 'block' && (item.kind !== 'block' || item.parent_block_id)) {
+			throw { status: 404, code: 'not_found', message: 'Цель закладки не найдена' };
+		}
+		if (item.kind !== 'block' && item.kind !== 'input') {
+			throw { status: 404, code: 'not_found', message: 'Цель закладки не найдена' };
+		}
+		const text =
+			item.kind === 'input'
+				? item.content.filter((part) => part.type === 'text').map((part) => part.text ?? '').join('\n')
+				: this.blocks.get(item.id)?.text ?? item.content;
+		const origin = item.kind === 'input' ? (item.origin as { kind?: string } | null | undefined) : null;
+		const originKind =
+			item.kind === 'input'
+				? origin?.kind === undefined || origin.kind === null || origin.kind === 'owner'
+					? 'owner'
+					: origin.kind === 'event'
+						? 'result'
+						: origin.kind === 'spawn'
+							? 'spawn'
+							: 'message'
+				: null;
+		const seq = Number(seqOf(item));
+		return {
+			id: this.id(),
+			conversation_id: conversation,
+			conversation_title: row.title,
+			target_kind: kind,
+			target_id: target,
+			created_at: at ?? new Date().toISOString(),
+			target_created_at: item.created_at,
+			kind: kind === 'block' ? 'answer' : 'message',
+			origin_kind: originKind,
+			block_id: kind === 'block' ? target : null,
+			input_id: kind === 'input' ? target : null,
+			seq,
+			jump_seq: seq,
+			harness: row.harness.id,
+			model: row.model,
+			archived: row.archived,
+			role: kind === 'block' ? 'agent' : 'owner',
+			agent: item.kind === 'block' ? item.agent || null : null,
+			excerpt: text.replace(/\s+/g, ' ').trim().slice(0, 300)
+		};
+	}
+
+	private emitBookmark(entry: BookmarkView, bookmarked: boolean): void {
+		this.hub.append('conversations', {
+			kind: 'bookmark_changed',
+			conversation_id: entry.conversation_id,
+			payload: {
+				conversation_id: entry.conversation_id,
+				target_kind: entry.target_kind,
+				target_id: entry.target_id,
+				bookmarked,
+				...(bookmarked
+					? { bookmark: { ...entry, seq: String(entry.seq), jump_seq: String(entry.jump_seq) } }
+					: {})
+			}
+		});
+		this.hub.flush();
 	}
 
 	/** Ответ `POST /api/v1/search`: свежие первыми, курсор — смещение, итог обрезан на 200. */
