@@ -435,10 +435,11 @@ pub fn builtin() -> Policy {
 // Каталог машины родителя
 // ---------------------------------------------------------------------------
 
-/// Модель каталога: идентификатор и усилия, которые она знает.
+/// Модель каталога: идентификатор, название и усилия, которые она знает.
 #[derive(Clone, Debug)]
 pub struct CatalogModel {
     pub id: String,
+    pub title: Option<String>,
     pub efforts: Vec<String>,
 }
 
@@ -454,37 +455,24 @@ impl HarnessCatalog {
         self.models.first().map(|model| model.id.as_str())
     }
 
-    /// Канонизация модели: точный идентификатор, `default` → первая модель,
-    /// затем совпадение по основе (`opus` ↔ `opus[1m]`), если оно однозначно.
+    /// Канонизация модели тем же разбором, что у `session_spawn`: точный
+    /// идентификатор, `default` → первая, затем название, семейство и префикс.
+    /// Неразрешимая или неоднозначная запись политики просто не находится.
     pub fn resolve_model(&self, requested: &str) -> Option<&CatalogModel> {
-        if let Some(found) = self.models.iter().find(|model| model.id == requested) {
-            return Some(found);
-        }
-        if requested == super::whitelist::DEFAULT_MODEL {
-            return self.models.first();
-        }
-        let base = strip_variant(requested);
-        let mut matches = self
+        let models: Vec<super::catalog::ModelRef<'_>> = self
             .models
             .iter()
-            .filter(|model| strip_variant(&model.id) == base);
-        let first = matches.next()?;
-        if matches.next().is_none() {
-            Some(first)
-        } else {
-            None
-        }
+            .map(|model| super::catalog::ModelRef {
+                id: &model.id,
+                title: model.title.as_deref(),
+            })
+            .collect();
+        let index = super::catalog::resolve_model(Some(requested), &models).ok()?;
+        self.models.get(index)
     }
 
     pub fn has_mode(&self, mode: &str) -> bool {
         self.modes.iter().any(|known| known == mode)
-    }
-}
-
-fn strip_variant(id: &str) -> &str {
-    match id.find('[') {
-        Some(n) if id.ends_with(']') => &id[..n],
-        _ => id,
     }
 }
 
@@ -509,6 +497,7 @@ pub async fn load_catalogs(
                     .filter_map(|item| {
                         Some(CatalogModel {
                             id: item["id"].as_str()?.to_owned(),
+                            title: item["title"].as_str().map(str::to_owned),
                             efforts: item["efforts"]
                                 .as_array()
                                 .map(|efforts| {
@@ -1496,6 +1485,7 @@ mod tests {
                 .iter()
                 .map(|(id, efforts)| CatalogModel {
                     id: id.to_string(),
+                    title: None,
                     efforts: efforts.iter().map(|effort| effort.to_string()).collect(),
                 })
                 .collect(),
@@ -1824,6 +1814,44 @@ mod tests {
         })
         .unwrap();
         assert_eq!(decision.model, "opus[1m]");
+    }
+
+    #[test]
+    fn human_model_name_resolves_in_the_owner_policy() {
+        let mut policy = Policy::default();
+        policy.task_types.insert(
+            "probe".to_owned(),
+            TaskType {
+                title: "Проба".to_owned(),
+                candidates: vec![Candidate {
+                    harness: "claude_code".to_owned(),
+                    model: "Fable 5.2".to_owned(),
+                    effort: None,
+                    levels: None,
+                    preset: None,
+                    nudge: None,
+                    exclude_workdirs: vec![],
+                    watchdog_minutes: None,
+                }],
+                preset: None,
+                isolated: None,
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
+            },
+        );
+        let decision = route(RouteInputs {
+            policy: &policy,
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &HashMap::new(),
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("probe"),
+            bypass_limits: false,
+        })
+        .unwrap();
+        assert_eq!(decision.model, "fable[1m]");
     }
 
     #[test]

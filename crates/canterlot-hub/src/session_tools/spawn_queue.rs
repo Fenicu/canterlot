@@ -379,14 +379,26 @@ fn answer_queued(row: &QueueRow, position: i64) -> Value {
     })
 }
 
-fn answer_existing(row: &QueueRow) -> Value {
-    match row.state.as_str() {
-        STATE_STARTED => json!({
-            "status": "started",
-            "session_id": row.child_id,
-            "queue_id": row.id,
-            "hint": spawn::HINT_STARTED,
-        }),
+async fn answer_existing(conn: &mut PgConnection, row: &QueueRow) -> Result<Value, sqlx::Error> {
+    Ok(match row.state.as_str() {
+        STATE_STARTED => {
+            let model: Option<String> = match row.child_id {
+                Some(child) => {
+                    sqlx::query_scalar("select model from conversations where id=$1")
+                        .bind(child)
+                        .fetch_optional(&mut *conn)
+                        .await?
+                }
+                None => None,
+            };
+            json!({
+                "status": "started",
+                "session_id": row.child_id,
+                "model": model.unwrap_or_default(),
+                "queue_id": row.id,
+                "hint": spawn::HINT_STARTED,
+            })
+        }
         STATE_CANCELLED => json!({"status": "cancelled", "queue_id": row.id}),
         STATE_FAILED | STATE_EXPIRED => json!({
             "status": row.state,
@@ -394,7 +406,7 @@ fn answer_existing(row: &QueueRow) -> Value {
             "reason": row.result,
         }),
         _ => answer_queued(row, 0),
-    }
+    })
 }
 
 /// Повтор вызова транспортом: элемент уже создан этим `call_id`.
@@ -415,7 +427,7 @@ pub async fn answer_replay(conn: &mut PgConnection, row: &QueueRow) -> Result<Va
         let position = position_of(conn, row).await?;
         return Ok(answer_queued(row, position));
     }
-    Ok(answer_existing(row))
+    answer_existing(conn, row).await
 }
 
 async fn position_of(conn: &mut PgConnection, row: &QueueRow) -> Result<i64, sqlx::Error> {

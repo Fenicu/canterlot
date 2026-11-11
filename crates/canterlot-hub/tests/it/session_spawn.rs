@@ -40,6 +40,10 @@ fn model(id: &str, efforts: &[&str]) -> Value {
     json!({"id": id, "title": id, "efforts": efforts})
 }
 
+fn titled(id: &str, title: &str, efforts: &[&str]) -> Value {
+    json!({"id": id, "title": title, "efforts": efforts})
+}
+
 async fn catalog(pool: &PgPool, machine: Uuid, harness: &str, provider: &str, models: Value) {
     sqlx::query(
         "insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,
@@ -90,6 +94,7 @@ impl Fx {
                     model(OUTSIDE, &["low", "high"]),
                     model("sonnet[1m]", &["low", "medium", "high"]),
                     model(INSIDE, &["none"]),
+                    titled("fable[1m]", "Fable 1M", &["low", "medium", "high"]),
                 ]),
             ),
             (
@@ -1091,6 +1096,61 @@ async fn owner_mode_across_harness_becomes_ask(pool: PgPool) {
         code(f.spawn(args).await),
         Code::PermissionModeTooWide,
         "owner and bypass are not comparable"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn human_model_name_starts_the_canonical_model(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update owners set spawn_whitelist=spawn_whitelist||$2::jsonb where id=$1")
+        .bind(f.owner)
+        .bind(json!([{"harness":"claude_code","model":"fable[1m]"}]))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+
+    let (child, answer) = f
+        .started(json!({"harness":"claude_code","model":"Fable 5.2","brief":"b"}))
+        .await;
+    assert_eq!(answer["model"], "fable[1m]");
+    let model: String = sqlx::query_scalar("select model from conversations where id=$1")
+        .bind(child)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(model, "fable[1m]");
+
+    let pending = f
+        .spawn(json!({"harness":"claude_code","model":"Opus 5.5","brief":"b"}))
+        .await
+        .unwrap();
+    assert_eq!(pending["status"], "pending_approval");
+    assert_eq!(pending["model"], OUTSIDE);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn ambiguous_and_unknown_model_names_list_catalog_ids(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let ambiguous = f
+        .spawn(json!({"harness":"codex","model":"gpt","brief":"b"}))
+        .await
+        .expect_err("ambiguous model");
+    assert_eq!(ambiguous.code, Code::ModelUnknown);
+    assert_eq!(
+        ambiguous.message,
+        "Model \"gpt\" matches several models of codex: gpt-first, gpt-second. \
+         Pass one of these ids."
+    );
+
+    let unknown = f
+        .spawn(json!({"harness":"claude_code","model":"gemini","brief":"b"}))
+        .await
+        .expect_err("unknown model");
+    assert_eq!(unknown.code, Code::ModelUnknown);
+    assert_eq!(
+        unknown.message,
+        "Unknown model \"gemini\" for claude_code. Available: \
+         opus[1m], sonnet[1m], haiku, fable[1m]"
     );
 }
 

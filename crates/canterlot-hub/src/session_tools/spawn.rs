@@ -13,8 +13,8 @@ use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
 use super::{
-    Caller, ToolContext, ToolError, ToolErrorCode, access, guard, nudge, origin, parse_arguments,
-    routing, send, spawn_queue, subs, whitelist,
+    Caller, ToolContext, ToolError, ToolErrorCode, access, catalog, guard, nudge, origin,
+    parse_arguments, routing, send, spawn_queue, subs, whitelist,
 };
 use crate::{
     config::LimitsConfig,
@@ -371,14 +371,33 @@ impl Catalog {
         self.models.first().and_then(|model| model["id"].as_str())
     }
 
-    fn resolve_model(&self, requested: Option<&str>) -> Result<&Value, ToolError> {
-        let id = requested
-            .filter(|model| *model != whitelist::DEFAULT_MODEL)
-            .or(self.first_model());
+    fn entries(&self) -> Vec<catalog::ModelRef<'_>> {
         self.models
             .iter()
-            .find(|model| id.is_some() && model["id"].as_str() == id)
-            .ok_or_else(|| ToolError::new(ToolErrorCode::ModelUnknown))
+            .map(|model| catalog::ModelRef {
+                id: model["id"].as_str().unwrap_or_default(),
+                title: model["title"].as_str(),
+            })
+            .collect()
+    }
+
+    fn resolve_model(&self, harness: &str, requested: Option<&str>) -> Result<&Value, ToolError> {
+        let models = self.entries();
+        match catalog::resolve_model(requested, &models) {
+            Ok(index) => Ok(&self.models[index]),
+            Err(catalog::ResolveError::Ambiguous(ids)) => Err(ToolError::with_message(
+                ToolErrorCode::ModelUnknown,
+                catalog::ambiguous_message(requested.unwrap_or_default(), harness, &ids),
+            )),
+            Err(catalog::ResolveError::Unknown) => Err(ToolError::with_message(
+                ToolErrorCode::ModelUnknown,
+                catalog::unknown_message(
+                    requested.unwrap_or(whitelist::DEFAULT_MODEL),
+                    harness,
+                    &models,
+                ),
+            )),
+        }
     }
 
     fn has_mode(&self, mode: &str) -> bool {
@@ -538,7 +557,7 @@ pub(crate) async fn validate(
 ) -> Result<(SpawnSpec, Catalog), ToolError> {
     let harness = args.harness.clone().ok_or_else(invalid)?;
     let catalog = Catalog::load(conn, caller.machine_id, &harness).await?;
-    let model = catalog.resolve_model(args.model.as_deref())?;
+    let model = catalog.resolve_model(&harness, args.model.as_deref())?;
     let effort = resolve_effort(model, args.effort.as_deref())?;
     let model = model["id"].as_str().unwrap_or_default().to_owned();
     let ChildMode {
@@ -908,10 +927,17 @@ pub(crate) async fn start_child(
     })
 }
 
-fn started_answer(id: Uuid, mode: &str, worktree: Option<&Value>, subscribed: bool) -> Value {
+fn started_answer(
+    id: Uuid,
+    model: &str,
+    mode: &str,
+    worktree: Option<&Value>,
+    subscribed: bool,
+) -> Value {
     let mut answer = json!({
         "status": "started",
         "session_id": id,
+        "model": model,
         "permission_mode": mode,
         "subscribed": subscribed,
         "hint": if subscribed { HINT_STARTED } else { HINT_NOT_SUBSCRIBED },
@@ -922,8 +948,13 @@ fn started_answer(id: Uuid, mode: &str, worktree: Option<&Value>, subscribed: bo
     answer
 }
 
-fn pending_answer(request_id: Uuid) -> Value {
-    json!({"status": "pending_approval", "request_id": request_id, "hint": HINT_PENDING})
+fn pending_answer(request_id: Uuid, model: &str) -> Value {
+    json!({
+        "status": "pending_approval",
+        "request_id": request_id,
+        "model": model,
+        "hint": HINT_PENDING,
+    })
 }
 
 fn input_key(caller: &Caller) -> String {
@@ -940,8 +971,8 @@ async fn replayed(
     caller: &Caller,
     guards: &crate::config::GuardsConfig,
 ) -> Result<Option<Value>, sqlx::Error> {
-    let child: Option<(Uuid, String, Option<Value>, bool)> = sqlx::query_as(
-        "select c.id,c.permission_mode,c.worktree,exists(
+    let child: Option<(Uuid, String, String, Option<Value>, bool)> = sqlx::query_as(
+        "select c.id,c.model,c.permission_mode,c.worktree,exists(
            select 1 from session_subscriptions s
            where s.subscriber_id=$3 and s.target_id=c.id and s.closed_at is null)
          from inputs i join conversations c on c.id=i.conversation_id
@@ -952,8 +983,8 @@ async fn replayed(
     .bind(caller.conversation_id)
     .fetch_optional(&mut *conn)
     .await?;
-    if let Some((id, mode, worktree, subscribed)) = child {
-        let mut answer = started_answer(id, &mode, worktree.as_ref(), subscribed);
+    if let Some((id, model, mode, worktree, subscribed)) = child {
+        let mut answer = started_answer(id, &model, &mode, worktree.as_ref(), subscribed);
         let verdict =
             guard::check_in_tx(conn, caller.owner_id, caller.machine_id, guards, Utc::now())
                 .await?;
@@ -962,14 +993,15 @@ async fn replayed(
         }
         return Ok(Some(answer));
     }
-    let request: Option<Uuid> = sqlx::query_scalar(
-        "select id from requests where conversation_id=$1 and native_request_id=$2",
+    let request: Option<(Uuid, Option<String>)> = sqlx::query_as(
+        "select id,request_payload->>'model' from requests
+         where conversation_id=$1 and native_request_id=$2",
     )
     .bind(caller.conversation_id)
     .bind(native_request_id(caller))
     .fetch_optional(conn)
     .await?;
-    Ok(request.map(pending_answer))
+    Ok(request.map(|(id, model)| pending_answer(id, model.as_deref().unwrap_or_default())))
 }
 
 /// Как `request_opened` из журнала, но без удержания очереди: ход родителя идёт дальше (D14).
@@ -1190,7 +1222,7 @@ pub async fn spawn(
         let request = open_card(&mut tx, caller, &spec).await?;
         tx.commit().await?;
         return Ok(with_plan_hint(
-            pending_answer(request),
+            pending_answer(request, &spec.model),
             plan_later.as_deref(),
         ));
     }
@@ -1325,6 +1357,7 @@ pub async fn spawn(
     }
     let mut answer = started_answer(
         started.session_id,
+        &spec.model,
         &spec.permission_mode,
         started.worktree.as_ref(),
         spec.subscribe,

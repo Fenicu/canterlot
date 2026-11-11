@@ -8,6 +8,7 @@
 pub mod accept;
 pub mod access;
 pub mod alarms;
+pub mod catalog;
 pub mod completion;
 pub mod control;
 pub mod disk;
