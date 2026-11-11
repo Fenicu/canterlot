@@ -325,7 +325,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                     "additionalProperties": false,
                 },
                 "brief": {"type": "string", "description": "Task for the new session, up to 64 KiB."},
-                "model": {"type": "string"},
+                "model": {"type": "string", "description": "Catalog id or a recognizable name such as fable, Opus 5.5, claude-sonnet-5-5, deepseek-v4.1-flash; unknown or ambiguous names answer with the catalog ids."},
                 "effort": {"type": "string"},
                 "title": {"type": "string"},
                 "workdir": {"type": "string", "description": "Defaults to the workdir of this session."},
