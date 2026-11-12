@@ -4,7 +4,7 @@ use super::{
     error::ApiError,
     extract::{ApiJson, ApiPath},
 };
-use crate::groups::{self, Group};
+use crate::groups::{self, Group, GroupIcon};
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
 use utoipa::ToSchema;
@@ -19,12 +19,23 @@ pub fn routes() -> OpenApiRouter<AppState> {
 #[serde(deny_unknown_fields)]
 pub struct GroupBody {
     pub name: String,
+    /// Значок из набора групп; без поля или `null` — папка по умолчанию.
+    #[serde(default)]
+    pub icon: Option<GroupIcon>,
 }
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GroupPatch {
     pub name: Option<String>,
     pub position: Option<i32>,
+    /// Без поля значок прежний; `null` возвращает папку по умолчанию.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(nullable, value_type = Option<GroupIcon>)]
+    pub icon: Option<Option<GroupIcon>>,
+}
+/// Поле, пришедшее в теле, даже со значением `null`.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<GroupIcon>>, D::Error> {
+    Option::<GroupIcon>::deserialize(d).map(Some)
 }
 #[utoipa::path(get,path="/api/v1/groups",tag="groups",responses((status=200,description="Группы",body=Vec<Group>)))]
 async fn list(State(s): State<AppState>, o: Owner) -> Result<Json<Vec<Group>>, ApiError> {
@@ -42,7 +53,7 @@ async fn create(
 ) -> Result<(StatusCode, Json<Group>), ApiError> {
     Ok((
         StatusCode::CREATED,
-        Json(groups::create_group(&s.pool, o.owner_id, &key, &b.name, c).await?),
+        Json(groups::create_group(&s.pool, o.owner_id, &key, &b.name, b.icon, c).await?),
     ))
 }
 #[utoipa::path(patch,path="/api/v1/groups/{id}",tag="groups",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=GroupPatch,responses((status=200,description="Группа изменена",body=Group)))]
@@ -55,7 +66,19 @@ async fn update(
     ApiJson(b): ApiJson<GroupPatch>,
 ) -> Result<Json<Group>, ApiError> {
     Ok(Json(
-        groups::update_group(&s.pool, o.owner_id, id, &key, b.name, b.position, c).await?,
+        groups::update_group(
+            &s.pool,
+            o.owner_id,
+            id,
+            &key,
+            groups::GroupChange {
+                name: b.name,
+                position: b.position,
+                icon: b.icon,
+            },
+            c,
+        )
+        .await?,
     ))
 }
 #[utoipa::path(delete,path="/api/v1/groups/{id}",tag="groups",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=204,description="Группа удалена")))]

@@ -15,7 +15,7 @@
 | `crates/canterlot-hub/src/http/` | HTTP хаба на axum: вход по заголовку прокси, CSRF и Origin, ошибки, `healthz`/`readyz`, `me`, `config`, OpenAPI |
 | `crates/canterlot-hub/src/{background,dberr}.rs` | Единое место запуска фоновых служб; безопасное описание ошибок базы данных |
 | `crates/canterlot-hub/src/{activity,bus,scheduler}.rs` | Проекция активности и непрочитанного, шина уведомлений и транзакционный планировщик |
-| `crates/canterlot-hub/src/{conversations,groups}.rs` | Создание сессий, атрибуты, группы, список и прочитанность |
+| `crates/canterlot-hub/src/{conversations,groups,preview}.rs` | Создание сессий, атрибуты, группы и их значки, список, превью последнего ответа и прочитанность |
 | `crates/canterlot-hub/src/{search,http/search,session_tools/search}.rs` | Поиск по истории: ответы агента и сообщения ленты через частичные индексы GIN миграции 0075, `POST /api/v1/search` и инструмент `history_search` |
 | `crates/canterlot-hub/src/{presets,http/presets,grpc/agent}.rs`, `migrations/0021_instruction_presets.sql`, `migrations/0022_conversation_presets.sql` | Пресеты инструкций: версии текста, CRUD API, события, снимок, стартовый пресет исполнителя и вызовы инструментов агента (`presets.list`, `presets.save`, `presets.apply`) |
 | `crates/canterlot-worker/src/adapter/{canterlot_mcp/,codex/home.rs}` | MCP-сервер canterlot (разрешения, вопросы, лимиты, инструменты пресетов) и собственный `CODEX_HOME` для пресетов, кроме «Как у владельца», плюс изолированные дома делегированных сессий |

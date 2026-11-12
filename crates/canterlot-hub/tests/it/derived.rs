@@ -587,3 +587,226 @@ async fn last_activity_is_truncated_to_the_minute_and_streaming_emits_no_list_ev
         1
     );
 }
+
+async fn answer_block(
+    pool: &PgPool,
+    s: &testkit::Seed,
+    execution: Uuid,
+    kind: &str,
+    agent: &str,
+    content: &str,
+    at: DateTime<Utc>,
+) {
+    sqlx::query("insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,agent,created_seq,created_at) values($1,$2,$3,$4,'final',1,$5,$6,(select coalesce(max(created_seq),0)+1 from blocks where conversation_id=$3),$7)")
+        .bind(Uuid::now_v7()).bind(execution).bind(s.conversation_id).bind(kind).bind(content).bind(agent).bind(at)
+        .execute(pool).await.unwrap();
+}
+
+async fn turn(
+    pool: &PgPool,
+    s: &testkit::Seed,
+    execution: Uuid,
+    started: DateTime<Utc>,
+    finished: Option<DateTime<Utc>>,
+) -> Uuid {
+    let command = Uuid::now_v7();
+    sqlx::query("insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state) values($1,$2,$3,$4,1,'deliver_input','{}','completed')")
+        .bind(command).bind(s.machine_id).bind(s.conversation_id).bind(execution)
+        .execute(pool).await.unwrap();
+    sqlx::query("insert into runs(input_command_id,execution_id,conversation_id,started_at,finished_at) values($1,$2,$3,$4,$5)")
+        .bind(command).bind(execution).bind(s.conversation_id).bind(started).bind(finished)
+        .execute(pool).await.unwrap();
+    command
+}
+
+async fn last_preview(pool: &PgPool, s: &testkit::Seed) -> Value {
+    let payload: Value = sqlx::query_scalar(
+        "select payload from events where kind='derived_changed' and scope=$1 order by scope_seq desc limit 1",
+    )
+    .bind(format!("owner:{}:conversations", s.owner_id))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    payload["preview"].clone()
+}
+
+async fn listed_preview(pool: &PgPool, s: &testkit::Seed) -> Option<String> {
+    let mut conn = pool.acquire().await.unwrap();
+    let page = canterlot_hub::conversations::list(
+        &mut conn,
+        &canterlot_hub::conversations::ListQuery {
+            owner_id: s.owner_id,
+            filter: canterlot_hub::conversations::ListFilter::All,
+            q: None,
+            cursor: None,
+            limit: 50,
+        },
+    )
+    .await
+    .unwrap();
+    page.items
+        .into_iter()
+        .find(|item| item.attributes.id == s.conversation_id)
+        .unwrap()
+        .preview
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn preview_is_the_plain_last_answer_of_the_finished_turn_in_event_and_list(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    refresh(&pool, s.conversation_id).await;
+    assert_eq!(last_preview(&pool, &s).await, Value::Null);
+    assert_eq!(listed_preview(&pool, &s).await, None);
+
+    let execution = Uuid::now_v7();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state) values($1,$2,1,'running')",
+    )
+    .bind(execution)
+    .bind(s.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let t0 = Utc::now() - TimeDelta::minutes(30);
+    turn(&pool, &s, execution, t0, Some(t0 + TimeDelta::minutes(6))).await;
+    answer_block(
+        &pool,
+        &s,
+        execution,
+        "text",
+        "main",
+        "Черновой ответ",
+        t0 + TimeDelta::seconds(30),
+    )
+    .await;
+    answer_block(
+        &pool,
+        &s,
+        execution,
+        "text",
+        "main",
+        "## Итог\n\n**Готово**: тесты `cargo test` [зелёные](https://ci/1)",
+        t0 + TimeDelta::minutes(1),
+    )
+    .await;
+    // Рассуждения, инструменты и тексты подагентов в превью не попадают.
+    answer_block(
+        &pool,
+        &s,
+        execution,
+        "reasoning",
+        "main",
+        "скрытые рассуждения",
+        t0 + TimeDelta::minutes(2),
+    )
+    .await;
+    answer_block(
+        &pool,
+        &s,
+        execution,
+        "tool_call",
+        "main",
+        "{\"command\":\"cat secret\"}",
+        t0 + TimeDelta::minutes(3),
+    )
+    .await;
+    answer_block(
+        &pool,
+        &s,
+        execution,
+        "tool_result",
+        "main",
+        "вывод инструмента",
+        t0 + TimeDelta::minutes(4),
+    )
+    .await;
+    answer_block(
+        &pool,
+        &s,
+        execution,
+        "text",
+        "general",
+        "ответ подагента",
+        t0 + TimeDelta::minutes(5),
+    )
+    .await;
+    assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Changed);
+    let expected = "Итог Готово: тесты cargo test зелёные";
+    assert_eq!(last_preview(&pool, &s).await, json!(expected));
+    assert_eq!(listed_preview(&pool, &s).await.as_deref(), Some(expected));
+    assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Unchanged);
+
+    // Идущий ход превью не трогает: строка показывает его состояние, а превью — прошлый ответ.
+    let t1 = t0 + TimeDelta::minutes(10);
+    let running = turn(&pool, &s, execution, t1, None).await;
+    let long = "слово ".repeat(60);
+    answer_block(
+        &pool,
+        &s,
+        execution,
+        "text",
+        "main",
+        &long,
+        t1 + TimeDelta::minutes(1),
+    )
+    .await;
+    refresh(&pool, s.conversation_id).await;
+    assert_eq!(listed_preview(&pool, &s).await.as_deref(), Some(expected));
+
+    sqlx::query("update runs set finished_at=$2 where input_command_id=$1")
+        .bind(running)
+        .bind(t1 + TimeDelta::minutes(2))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Changed);
+    let fresh = last_preview(&pool, &s).await;
+    let fresh = fresh.as_str().unwrap();
+    assert_eq!(fresh.chars().count(), 160);
+    assert!(fresh.starts_with("слово слово") && fresh.ends_with('…'));
+    assert_eq!(listed_preview(&pool, &s).await.as_deref(), Some(fresh));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn sweep_fills_the_preview_of_conversations_finished_before_the_migration(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    let execution = Uuid::now_v7();
+    sqlx::query("insert into executions(id,conversation_id,generation,state,outcome) values($1,$2,1,'stopped','user_stop')")
+        .bind(execution).bind(s.conversation_id).execute(&pool).await.unwrap();
+    let t0 = Utc::now() - TimeDelta::hours(2);
+    turn(&pool, &s, execution, t0, Some(t0 + TimeDelta::minutes(5))).await;
+    answer_block(
+        &pool,
+        &s,
+        execution,
+        "text",
+        "main",
+        "Старый *ответ*",
+        t0 + TimeDelta::minutes(1),
+    )
+    .await;
+    refresh(&pool, s.conversation_id).await;
+    // Строка до миграции: превью не посчитано, событий о сессии новее строки нет.
+    sqlx::query("update conversation_derived set preview=null,preview_turn_at=null,updated_at=clock_timestamp()+interval '1 minute' where conversation_id=$1")
+        .bind(s.conversation_id).execute(&pool).await.unwrap();
+    let (stop, task, _) = projector(
+        &pool,
+        ActivityConfig {
+            tick: Duration::from_millis(20),
+            ..Default::default()
+        },
+    )
+    .await;
+    for _ in 0..200 {
+        if row(&pool, s.conversation_id).await["preview"] == json!("Старый ответ") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        row(&pool, s.conversation_id).await["preview"],
+        json!("Старый ответ")
+    );
+    stop.send(true).unwrap();
+    task.await.unwrap();
+}

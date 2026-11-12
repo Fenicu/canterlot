@@ -47,6 +47,7 @@ pub mod notify;
 pub mod outbox;
 pub mod owner_auth;
 pub mod presets;
+pub mod preview;
 pub mod requests;
 pub mod runs;
 pub mod scheduler;

@@ -14,7 +14,52 @@ pub struct Group {
     pub id: Uuid,
     pub name: String,
     pub position: i32,
+    /// Значок группы; `None` — папка по умолчанию.
+    pub icon: Option<GroupIcon>,
     pub created_at: String,
+}
+/// Значок группы из постоянного набора; тот же список проверяет база.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupIcon {
+    Folder,
+    Briefcase,
+    Home,
+    Star,
+    Code,
+    Rocket,
+    Book,
+    Flask,
+    Wrench,
+    Server,
+    Globe,
+    Heart,
+    User,
+    Users,
+    Gamepad,
+    Music,
+}
+impl GroupIcon {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Folder => "folder",
+            Self::Briefcase => "briefcase",
+            Self::Home => "home",
+            Self::Star => "star",
+            Self::Code => "code",
+            Self::Rocket => "rocket",
+            Self::Book => "book",
+            Self::Flask => "flask",
+            Self::Wrench => "wrench",
+            Self::Server => "server",
+            Self::Globe => "globe",
+            Self::Heart => "heart",
+            Self::User => "user",
+            Self::Users => "users",
+            Self::Gamepad => "gamepad",
+            Self::Music => "music",
+        }
+    }
 }
 #[derive(thiserror::Error)]
 pub enum GroupError {
@@ -54,6 +99,11 @@ fn group(r: sqlx::postgres::PgRow) -> Result<Group, sqlx::Error> {
         id: r.try_get("id")?,
         name: r.try_get("name")?,
         position: r.try_get("position")?,
+        icon: r
+            .try_get::<Option<String>, _>("icon")?
+            .map(|icon| serde_json::from_value(Value::String(icon)))
+            .transpose()
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
         created_at: conversations::time(r.try_get("created_at")?),
     })
 }
@@ -103,9 +153,10 @@ pub async fn create_group(
     owner_id: Uuid,
     key: &str,
     name: &str,
+    icon: Option<GroupIcon>,
     correlation_id: Uuid,
 ) -> Result<Group, GroupError> {
-    let request = json!({"name":name});
+    let request = json!({"name":name,"icon":icon});
     let name = name.to_owned();
     let outcome = idempotency::run_in_tx(
         pool,
@@ -114,21 +165,35 @@ pub async fn create_group(
         "create_group",
         &request,
         None,
-        move |conn| Box::pin(create_group_in_tx(conn, owner_id, name, correlation_id)),
+        move |conn| {
+            Box::pin(create_group_in_tx(
+                conn,
+                owner_id,
+                name,
+                icon,
+                correlation_id,
+            ))
+        },
     )
     .await?;
     Ok(outcome.value)
+}
+/// Правка группы: `None` в поле оставляет его прежним; `icon: Some(None)` — папка по умолчанию.
+#[derive(Clone, Default)]
+pub struct GroupChange {
+    pub name: Option<String>,
+    pub position: Option<i32>,
+    pub icon: Option<Option<GroupIcon>>,
 }
 pub async fn update_group(
     pool: &PgPool,
     owner_id: Uuid,
     id: Uuid,
     key: &str,
-    name: Option<String>,
-    position: Option<i32>,
+    change: GroupChange,
     correlation_id: Uuid,
 ) -> Result<Group, GroupError> {
-    let request = json!({"id":id,"name":name,"position":position});
+    let request = json!({"id":id,"name":change.name,"position":change.position,"icon":change.icon});
     let outcome = idempotency::run_in_tx(
         pool,
         owner_id,
@@ -141,8 +206,7 @@ pub async fn update_group(
                 conn,
                 owner_id,
                 id,
-                name,
-                position,
+                change.clone(),
                 correlation_id,
             ))
         },
@@ -158,16 +222,11 @@ pub async fn rename_group(
     name: &str,
     correlation_id: Uuid,
 ) -> Result<Group, GroupError> {
-    update_group(
-        pool,
-        owner_id,
-        id,
-        key,
-        Some(name.to_owned()),
-        None,
-        correlation_id,
-    )
-    .await
+    let change = GroupChange {
+        name: Some(name.to_owned()),
+        ..GroupChange::default()
+    };
+    update_group(pool, owner_id, id, key, change, correlation_id).await
 }
 pub async fn reorder_groups(
     pool: &PgPool,
@@ -286,6 +345,7 @@ async fn create_group_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     name: String,
+    icon: Option<GroupIcon>,
     correlation_id: Uuid,
 ) -> Result<Group, GroupError> {
     conversations::lock_owner(conn, owner_id).await?;
@@ -293,7 +353,7 @@ async fn create_group_in_tx(
         return Err(GroupError::Invalid);
     }
     let id = Uuid::now_v7();
-    sqlx::query("insert into conversation_groups(id,owner_id,name,position) values($1,$2,$3,(select coalesce(max(position),-1)+1 from conversation_groups where owner_id=$2))").bind(id).bind(owner_id).bind(name).execute(&mut *conn).await?;
+    sqlx::query("insert into conversation_groups(id,owner_id,name,position,icon) values($1,$2,$3,(select coalesce(max(position),-1)+1 from conversation_groups where owner_id=$2),$4)").bind(id).bind(owner_id).bind(name).bind(icon.map(GroupIcon::as_str)).execute(&mut *conn).await?;
     let g = get(conn, owner_id, id).await?;
     emit(conn, owner_id, json!(g), correlation_id).await?;
     Ok(g)
@@ -303,16 +363,21 @@ async fn update_group_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     id: Uuid,
-    name: Option<String>,
-    position: Option<i32>,
+    change: GroupChange,
     correlation_id: Uuid,
 ) -> Result<Group, GroupError> {
+    let GroupChange {
+        name,
+        position,
+        icon,
+    } = change;
     conversations::lock_owner(conn, owner_id).await?;
     get(conn, owner_id, id).await?;
     if name.as_ref().is_some_and(|n| !valid(n)) || position.is_some_and(|p| p < 0) {
         return Err(GroupError::Invalid);
     }
-    sqlx::query("update conversation_groups set name=coalesce($3,name),position=coalesce($4,position) where owner_id=$1 and id=$2").bind(owner_id).bind(id).bind(name).bind(position).execute(&mut *conn).await?;
+    // `icon`: нет поля — значок прежний, `null` — папка по умолчанию.
+    sqlx::query("update conversation_groups set name=coalesce($3,name),position=coalesce($4,position),icon=case when $5 then $6 else icon end where owner_id=$1 and id=$2").bind(owner_id).bind(id).bind(name).bind(position).bind(icon.is_some()).bind(icon.flatten().map(GroupIcon::as_str)).execute(&mut *conn).await?;
     let g = get(conn, owner_id, id).await?;
     emit(conn, owner_id, json!(g), correlation_id).await?;
     Ok(g)

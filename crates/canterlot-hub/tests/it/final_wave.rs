@@ -449,7 +449,7 @@ async fn auto_title_counts_follow_prior_list_commit(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn group_delete_and_queue_resume_conform_to_public_schema(pool: PgPool) {
     let s = testkit::seed(&pool).await;
-    let g = groups::create_group(&pool, s.owner_id, "group", "g", Uuid::now_v7())
+    let g = groups::create_group(&pool, s.owner_id, "group", "g", None, Uuid::now_v7())
         .await
         .unwrap();
     groups::delete_group(&pool, s.owner_id, g.id, "delete-group", Uuid::now_v7())

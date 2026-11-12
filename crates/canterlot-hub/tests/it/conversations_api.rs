@@ -653,6 +653,79 @@ async fn group_names_are_unique_case_insensitively(pool: PgPool) {
     .await;
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn group_icon_is_set_on_create_changed_by_patch_and_checked(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let work = f
+        .request(
+            Method::POST,
+            "/api/v1/groups",
+            Some(json!({"name":"Работа","icon":"briefcase"})),
+            201,
+        )
+        .await;
+    assert_eq!(work["icon"], "briefcase");
+    let plain = f.group("Без значка").await;
+    let groups = f.request(Method::GET, "/api/v1/groups", None, 200).await;
+    assert_eq!(groups[1]["id"], plain.to_string());
+    assert_eq!(groups[1]["icon"], Value::Null);
+    let id = work["id"].as_str().unwrap();
+    let patched = f
+        .request(
+            Method::PATCH,
+            &format!("/api/v1/groups/{id}"),
+            Some(json!({"icon":"home"})),
+            200,
+        )
+        .await;
+    assert_eq!(patched["icon"], "home");
+    assert_eq!(patched["name"], "Работа");
+    // Без поля значок прежний, `null` возвращает папку по умолчанию.
+    let renamed = f
+        .request(
+            Method::PATCH,
+            &format!("/api/v1/groups/{id}"),
+            Some(json!({"name":"Дом"})),
+            200,
+        )
+        .await;
+    assert_eq!(renamed["icon"], "home");
+    let cleared = f
+        .request(
+            Method::PATCH,
+            &format!("/api/v1/groups/{id}"),
+            Some(json!({"icon":null})),
+            200,
+        )
+        .await;
+    assert_eq!(cleared["icon"], Value::Null);
+    let changed = f.events("group_changed").await;
+    assert_eq!(changed.last().unwrap()["group"]["icon"], Value::Null);
+    assert_eq!(changed[changed.len() - 2]["group"]["icon"], "home");
+    for body in [
+        json!({"name":"Череп","icon":"skull"}),
+        json!({"name":"Число","icon":7}),
+    ] {
+        f.request(Method::POST, "/api/v1/groups", Some(body), 400)
+            .await;
+    }
+    f.request(
+        Method::PATCH,
+        &format!("/api/v1/groups/{id}"),
+        Some(json!({"icon":"Folder"})),
+        400,
+    )
+    .await;
+    let check = sqlx::query("update conversation_groups set icon='skull' where id=$1")
+        .bind(plain)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(
+        check.to_string().contains("conversation_groups_icon"),
+        "{check}"
+    );
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn deleting_a_group_keeps_its_conversations(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let g = f.group("Группа").await;

@@ -2390,6 +2390,7 @@ export interface components {
         };
         Group: {
             created_at: string;
+            icon?: components["schemas"]["GroupIcon"] | null;
             /** Format: uuid */
             id: string;
             name: string;
@@ -2397,6 +2398,7 @@ export interface components {
             position: number;
         };
         GroupBody: {
+            icon?: components["schemas"]["GroupIcon"] | null;
             name: string;
         };
         GroupCount: {
@@ -2405,7 +2407,13 @@ export interface components {
             /** Format: uuid */
             id: string;
         };
+        /**
+         * @description Значок группы из постоянного набора; тот же список проверяет база.
+         * @enum {string}
+         */
+        GroupIcon: "folder" | "briefcase" | "home" | "star" | "code" | "rocket" | "book" | "flask" | "wrench" | "server" | "globe" | "heart" | "user" | "users" | "gamepad" | "music";
         GroupPatch: {
+            icon?: components["schemas"]["GroupIcon"] | null;
             name?: string | null;
             /** Format: int32 */
             position?: number | null;
@@ -2856,6 +2864,11 @@ export interface components {
              */
             model_resolved?: string | null;
             permission_mode: string;
+            /**
+             * @description Начало последнего ответа агента без разметки, до 160 символов: финальный текст
+             *     основного агента в последнем завершённом ходе; `None` — ответа ещё нет.
+             */
+            preview?: string | null;
             queue: components["schemas"]["QueueView"];
             /** @description Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута. */
             routing?: unknown;

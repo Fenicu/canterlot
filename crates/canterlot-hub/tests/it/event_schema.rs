@@ -244,9 +244,16 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
     )
     .await
     .unwrap();
-    canterlot_hub::groups::create_group(&pool, f.seed.owner_id, "group", "Группа", Uuid::now_v7())
-        .await
-        .unwrap();
+    canterlot_hub::groups::create_group(
+        &pool,
+        f.seed.owner_id,
+        "group",
+        "Группа",
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
     control::request_stop(
         &pool,
         f.seed.owner_id,

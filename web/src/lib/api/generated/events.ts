@@ -583,6 +583,7 @@ export interface ConversationCreated {
     last_activity_at: Time | null;
     working_ms?: number;
     routing?: {} | null;
+    preview?: string | null;
     counts: Counts;
     parent_id?: Uuid | null;
     spawn_depth?: number;
@@ -835,6 +836,7 @@ export interface DerivedChanged {
       enabled: boolean;
     };
     working_ms?: number;
+    preview?: string | null;
     routing?: {} | null;
   };
 }
@@ -869,6 +871,26 @@ export interface Group {
   id: Uuid;
   name: string;
   position: number;
+  icon?:
+    | (
+        | "folder"
+        | "briefcase"
+        | "home"
+        | "star"
+        | "code"
+        | "rocket"
+        | "book"
+        | "flask"
+        | "wrench"
+        | "server"
+        | "globe"
+        | "heart"
+        | "user"
+        | "users"
+        | "gamepad"
+        | "music"
+      )
+    | null;
   created_at: Time;
 }
 export interface ScheduledChanged {

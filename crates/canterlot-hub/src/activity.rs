@@ -695,6 +695,19 @@ pub async fn refresh_with_metrics(
         holds.push(HoldView::AttachmentsPending { input_id, reason });
     }
     let holds = json!(holds);
+    // Превью ответа считается один раз на ход; пустое переспрашивается, пока ответ не придёт.
+    let turn_at = inputs.last_turn_at;
+    let kept: Option<(Option<String>, Option<DateTime<Utc>>)> = old
+        .as_ref()
+        .map(|old| -> Result<_, sqlx::Error> {
+            Ok((old.try_get("preview")?, old.try_get("preview_turn_at")?))
+        })
+        .transpose()?;
+    let preview = match (kept, turn_at) {
+        (Some((Some(text), at)), _) if at == turn_at => Some(text),
+        (_, Some(at)) => crate::preview::last_answer(&mut *conn, conversation_id, at).await?,
+        (_, None) => None,
+    };
     let mut since = now;
     if let Some(old) = old {
         let old_state: String = old.try_get("activity_state")?;
@@ -722,6 +735,8 @@ pub async fn refresh_with_metrics(
             && old.try_get::<String, _>("effective_effort")? == effort
             && old.try_get::<String, _>("effective_permission_mode")? == permission
             && old.try_get::<bool, _>("crunch_enabled")? == crunch
+            && old.try_get::<Option<String>, _>("preview")? == preview
+            && old.try_get::<Option<DateTime<Utc>>, _>("preview_turn_at")? == turn_at
         {
             sqlx::query("update conversation_derived d set updated_at=clock_timestamp() where d.conversation_id=$1 and d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||d.conversation_id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed'))")
                 .bind(conversation_id).execute(&mut *conn).await?;
@@ -734,14 +749,14 @@ pub async fn refresh_with_metrics(
         .bind(last_activity)
         .execute(&mut *conn)
         .await?;
-    sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at,effective_model,effective_effort,effective_permission_mode,crunch_enabled,effective_model_resolved) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) on conflict(conversation_id) do update set effective_model_resolved=excluded.effective_model_resolved, activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,effective_model=excluded.effective_model,effective_effort=excluded.effective_effort,effective_permission_mode=excluded.effective_permission_mode,crunch_enabled=excluded.crunch_enabled,updated_at=clock_timestamp()")
-        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).bind(&resolved).execute(&mut *conn).await?;
+    sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at,effective_model,effective_effort,effective_permission_mode,crunch_enabled,effective_model_resolved,preview,preview_turn_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) on conflict(conversation_id) do update set effective_model_resolved=excluded.effective_model_resolved,preview=excluded.preview,preview_turn_at=excluded.preview_turn_at, activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,effective_model=excluded.effective_model,effective_effort=excluded.effective_effort,effective_permission_mode=excluded.effective_permission_mode,crunch_enabled=excluded.crunch_enabled,updated_at=clock_timestamp()")
+        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).bind(&resolved).bind(&preview).bind(turn_at).execute(&mut *conn).await?;
     // Конкретная модель приходит, только когда известна: без неё объект настроек прежний.
     let mut settings = json!({"model":model,"effort":effort,"permission_mode":permission});
     if !resolved.is_empty() {
         settings["model_resolved"] = json!(resolved);
     }
-    let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":settings,"crunch":{"enabled":crunch},"working_ms":working_ms});
+    let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":settings,"crunch":{"enabled":crunch},"working_ms":working_ms,"preview":preview});
     for scope in [
         Scope::Conversation {
             id: conversation_id,
@@ -840,8 +855,9 @@ async fn evaluate_subscriptions(
 /// Корневая сессия без подписчиков после хода больше не пересчитывается: окно тишины
 /// `idle` проходит без нового события. Пока включены пуши об итоге хода, недавно
 /// ставшая `idle` корневая сессия идёт в обход столько же, сколько живёт свежесть пуша.
+/// Сессия с завершёнными ходами без посчитанного превью проходит обход один раз.
 async fn sweep(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id and p.state='in_progress') or exists(select 1 from nudge_rules nr where nr.conversation_id=c.id and nr.state in ('watching','pending')) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) or (c.parent_conversation_id is null and d.activity_state='idle' and d.updated_at > now()-interval '10 minutes' and exists(select 1 from push_settings ps where ps.turn_finished)) order by c.id").fetch_all(pool).await
+    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id and p.state='in_progress') or exists(select 1 from nudge_rules nr where nr.conversation_id=c.id and nr.state in ('watching','pending')) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) or (c.parent_conversation_id is null and d.activity_state='idle' and d.updated_at > now()-interval '10 minutes' and exists(select 1 from push_settings ps where ps.turn_finished)) or (d.preview_turn_at is null and exists(select 1 from runs r where r.conversation_id=c.id and r.finished_at is not null)) order by c.id").fetch_all(pool).await
 }
 
 pub async fn run(

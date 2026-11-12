@@ -12320,6 +12320,17 @@
           "created_at": {
             "type": "string"
           },
+          "icon": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GroupIcon",
+                "description": "Значок группы; `None` — папка по умолчанию."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -12339,6 +12350,17 @@
           "name"
         ],
         "properties": {
+          "icon": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GroupIcon",
+                "description": "Значок из набора групп; без поля или `null` — папка по умолчанию."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "type": "string"
           }
@@ -12362,9 +12384,42 @@
           }
         }
       },
+      "GroupIcon": {
+        "type": "string",
+        "description": "Значок группы из постоянного набора; тот же список проверяет база.",
+        "enum": [
+          "folder",
+          "briefcase",
+          "home",
+          "star",
+          "code",
+          "rocket",
+          "book",
+          "flask",
+          "wrench",
+          "server",
+          "globe",
+          "heart",
+          "user",
+          "users",
+          "gamepad",
+          "music"
+        ]
+      },
       "GroupPatch": {
         "type": "object",
         "properties": {
+          "icon": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GroupIcon",
+                "description": "Без поля значок прежний; `null` возвращает папку по умолчанию."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "type": [
               "string",
@@ -13899,6 +13954,13 @@
               },
               "permission_mode": {
                 "type": "string"
+              },
+              "preview": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Начало последнего ответа агента без разметки, до 160 символов: финальный текст\nосновного агента в последнем завершённом ходе; `None` — ответа ещё нет."
               },
               "queue": {
                 "$ref": "#/components/schemas/QueueView"

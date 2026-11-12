@@ -245,6 +245,10 @@ pub struct ListItem {
     pub working_ms: i64,
     /// Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута.
     pub routing: Option<Value>,
+    /// Начало последнего ответа агента без разметки, до 160 символов: финальный текст
+    /// основного агента в последнем завершённом ходе; `None` — ответа ещё нет.
+    #[serde(default)]
+    pub preview: Option<String>,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct EffectiveSettings {
@@ -366,7 +370,7 @@ const SELECT:&str="select c.*,m.name machine_name,m.capabilities,m.availability,
  coalesce(d.activity_state,'idle') activity_state,coalesce(nullif(d.activity_evidence,'{}'),'{\"kind\":\"idle\",\"last_turn_at\":null,\"background_work\":null}') activity_evidence,
  coalesce(d.activity_since,c.created_at) activity_since,coalesce(d.unread_count,0) unread_count,
  coalesce(d.queue_queued,0) queue_queued,coalesce(d.pause_reasons,'[]') derived_pauses,coalesce(d.hold_reasons,'[]') derived_holds,
- d.last_activity_at derived_last_activity,
+ d.last_activity_at derived_last_activity,d.preview derived_preview,
  coalesce((select sum(w.working_ms)::bigint from run_working w where w.conversation_id=c.id),0) working_ms,
  array(select gm.group_id from conversation_group_members gm where gm.conversation_id=c.id order by gm.group_id) groups,
  coalesce((select jsonb_agg(jsonb_build_object('group_id',gp.group_id,'pinned_at',to_char(gp.pinned_at at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')) order by gp.group_id) from conversation_group_pins gp where gp.conversation_id=c.id),'[]'::jsonb) group_pins
@@ -438,6 +442,7 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
         last_activity_at: optional_time(row, "derived_last_activity")?,
         working_ms: row.try_get("working_ms")?,
         routing: row.try_get("routing").ok().flatten(),
+        preview: row.try_get("derived_preview")?,
     })
 }
 pub async fn counts(conn: &mut PgConnection, owner_id: Uuid) -> Result<Counts, sqlx::Error> {

@@ -318,6 +318,33 @@
         "position": {
           "type": "integer"
         },
+        "icon": {
+          "anyOf": [
+            {
+              "enum": [
+                "folder",
+                "briefcase",
+                "home",
+                "star",
+                "code",
+                "rocket",
+                "book",
+                "flask",
+                "wrench",
+                "server",
+                "globe",
+                "heart",
+                "user",
+                "users",
+                "gamepad",
+                "music"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "created_at": {
           "$ref": "#/$defs/Time"
         }
@@ -2506,6 +2533,17 @@
                 }
               ]
             },
+            "preview": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 160
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "counts": {
               "$ref": "#/$defs/Counts"
             },
@@ -3438,6 +3476,17 @@
             "working_ms": {
               "type": "integer",
               "minimum": 0
+            },
+            "preview": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 160
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "routing": {
               "anyOf": [
