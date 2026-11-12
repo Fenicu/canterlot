@@ -74,7 +74,7 @@ stage_target() {
 
 setup_dryrun() {
     setup_case "dryrun-$1"
-    export SITE_CODES="meeting.fenicu.com:200 auth.fenicu.com:200 git.fenicu.com:200 caddy.fenicu.com:302 gotify.fenicu.com:200 immich.fenicu.com:200 bookshelf.fenicu.com:200 hub.fenicu.com:302"
+    export SITE_CODES="meeting.fenicu.com:200 git.fenicu.com:200 caddy.fenicu.com:302 gotify.fenicu.com:200 immich.fenicu.com:200 bookshelf.fenicu.com:200 hub.fenicu.com:200"
     EXEC1="$(new_exec_id)"; EXEC2="$(new_exec_id)"; export EXEC1 EXEC2
     write_configs
     deploy_release hub "bbbbbbbbbbbb"
@@ -198,6 +198,8 @@ assert_contains "${FAKE_ROOT}/dry.log" "dry-run PASS" "dry-run passed"
 assert_contains "${FAKE_ROOT}/dry.log" "maintenance: 2 live executions, each checked for its exec dir and socket" "maintenance checked in the dry-run"
 assert_contains "${FAKE_ROOT}/dry.log" "chunk merge preview: from ${DEPLOYED}" "chunk merge previewed"
 assert_contains "${FAKE_ROOT}/dry.log" "owner checklist: authenticated checks" "owner checklist printed"
+assert_contains "${FAKE_ROOT}/dry.log" "dry-run: geoip: ${HUB_GEOIP_PATH} is 0 days old; no update needed" "geoip state read in the dry-run"
+assert_contains "${FAKE_ROOT}/dry.log" "   - geoip: canterlot-hub geoip update" "geoip update listed as a write step"
 DRY_TOKEN="$(sed -n 's/^  CONFIRM=\([0-9a-f-]*\).*/\1/p' "${FAKE_ROOT}/dry.log")"
 if bash -c 'source "$1/lib.sh"; ph="$(plan_hash "$2" "$3/$2" "$(deployed_sha hub)" "$(deployed_sha web)" "$(deployed_sha worker)")"; confirm_token_check "$4" "$2" "${ph}"' \
         _ "${DEPLOY_DIR}" "${TARGET}" "${FAKE_ROOT}/dist" "${DRY_TOKEN}" >/dev/null; then

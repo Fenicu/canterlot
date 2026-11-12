@@ -67,6 +67,7 @@ assert_contains "${FAKE_ROOT}/rehearse.log" "rehearse: loopback Caddy probe prin
 assert_contains "${FAKE_ROOT}/rehearse.log" "live: hub exe from" "retention plan ran"
 assert_not_contains "${FAKE_ROOT}/rehearse.log" "] removed " "retention removed nothing"
 assert_contains "${FAKE_ROOT}/rehearse.log" "owner checklist: authenticated checks" "owner checklist printed"
+assert_contains "${FAKE_ROOT}/rehearse.log" "dbip-city-lite.mmdb is 0 days old, no update" "geoip step read the live database age"
 assert_contains "${FAKE_ROOT}/rehearse.log" "rehearsal PASS" "rehearsal PASS"
 [ -n "$(token_from "${FAKE_ROOT}/rehearse.log")" ] && case_ok "confirm token printed" || case_fail "no token"
 grep -q 'docker fakeweb exec -i' "${FAKE_ROOT}/state/calls.log" && case_fail "loopback probe started" || case_ok "loopback probe never started"

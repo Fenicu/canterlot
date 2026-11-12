@@ -139,6 +139,10 @@ setup_case() {
     mkdir -p "${WORKER_UNIT_DIR}"
     printf '[Unit]\nDescription=fake canterlot-worker\n[Service]\nKillMode=process\nExecStart=/bin/true\n' >"${WORKER_UNIT_DIR}/canterlot-worker.service"
     export SITE_CODES="a.example:200 b.example:302"
+    # База GeoIP свежая: шаг geoip выката её не трогает (свои сценарии — test-geoip.sh).
+    export HUB_GEOIP_PATH="${FAKE_ROOT}/hub/var/geoip/dbip-city-lite.mmdb" GEOIP_MAX_AGE_DAYS=35
+    mkdir -p "${FAKE_ROOT}/hub/var/geoip"
+    : >"${HUB_GEOIP_PATH}"
     XDG_RUNTIME_DIR="/run/user/$(id -u)"
     export XDG_RUNTIME_DIR
 }

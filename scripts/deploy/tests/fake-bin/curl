@@ -31,8 +31,8 @@ hostport="${url#https://}"
 hostport="${hostport#http://}"
 site="${hostport%%/*}"
 case "${site}" in
-    meeting.fenicu.com | auth.fenicu.com | git.fenicu.com | gotify.fenicu.com | immich.fenicu.com | bookshelf.fenicu.com) code=200 ;;
-    caddy.fenicu.com | hub.fenicu.com) code=302 ;;
+    meeting.fenicu.com | git.fenicu.com | gotify.fenicu.com | immich.fenicu.com | bookshelf.fenicu.com | hub.fenicu.com) code=200 ;;
+    caddy.fenicu.com) code=302 ;;
     *) code=000 ;;
 esac
 [ "${FAKE_SITE_FAIL:-}" = "${site}" ] && code=500

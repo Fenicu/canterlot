@@ -42,7 +42,7 @@ EOF
 
 setup_verify() {
     setup_case "verify-$1"
-    export SITE_CODES="meeting.fenicu.com:200 auth.fenicu.com:200 git.fenicu.com:200 caddy.fenicu.com:302 gotify.fenicu.com:200 immich.fenicu.com:200 bookshelf.fenicu.com:200 hub.fenicu.com:302"
+    export SITE_CODES="meeting.fenicu.com:200 git.fenicu.com:200 caddy.fenicu.com:302 gotify.fenicu.com:200 immich.fenicu.com:200 bookshelf.fenicu.com:200 hub.fenicu.com:200"
     EXEC1="$(new_exec_id)"; EXEC2="$(new_exec_id)"; export EXEC1 EXEC2
     write_configs
     deploy_release hub "${SHA_PREV}"
@@ -415,6 +415,24 @@ mk_warn_stream "${FAKE_ROOT}/current.txt" 1 handshake_slow
 export FAKE_HUB_JOURNAL_BASELINE_FILE="${FAKE_ROOT}/baseline.txt" FAKE_HUB_JOURNAL_FILE="${FAKE_ROOT}/current.txt"
 if run_verify "${SHA_PREV}"; then case_fail "exit 0 despite a new WARN kind"; else case_ok "exit nonzero"; fi
 assert_contains "${FAKE_ROOT}/verify.log" "new hub WARN kind not in the baseline: handshake_slow" "new kind named"
+teardown_case
+case_end
+
+case_begin "expected WARN kinds pass: deprecation by default, sign-in kinds by VERIFY_WARN_KINDS_OK"
+setup_verify warnexpected
+mk_warn_stream "${FAKE_ROOT}/baseline.txt" 1037 machine_metrics_ignored execution_counter
+mk_warn_stream "${FAKE_ROOT}/current.txt" 30 machine_metrics_ignored execution_counter
+mk_warn_stream "${FAKE_ROOT}/current.txt" 2 config_key_deprecated
+export FAKE_HUB_JOURNAL_BASELINE_FILE="${FAKE_ROOT}/baseline.txt" FAKE_HUB_JOURNAL_FILE="${FAKE_ROOT}/current.txt"
+if run_verify "${SHA_PREV}"; then case_ok "config_key_deprecated is not a new kind by default"; else case_fail "deprecation warning failed verify"; grep HARD "${FAKE_ROOT}/verify.log" | head -3; fi
+assert_contains "${FAKE_ROOT}/verify.log" "2 WARN config_key_deprecated (expected, VERIFY_WARN_KINDS_OK)" "expected kind printed"
+mk_warn_stream "${FAKE_ROOT}/current.txt" 4 client_ip_missing
+if run_verify "${SHA_PREV}"; then case_fail "client_ip_missing passed without being listed"; else case_ok "client_ip_missing is new unless listed"; fi
+if VERIFY_WARN_KINDS_OK="config_key_deprecated client_ip_missing identity_header_forwarded" run_verify "${SHA_PREV}"; then
+    case_ok "first-release kinds pass when listed"
+else
+    case_fail "listed kinds failed verify"; grep HARD "${FAKE_ROOT}/verify.log" | head -3
+fi
 teardown_case
 case_end
 

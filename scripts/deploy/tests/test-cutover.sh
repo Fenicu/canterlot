@@ -461,6 +461,8 @@ assert_contains "${L}" "probe: loopback caddy pid 4242 stopped" "loopback probe 
 assert_contains "${L}" "port 18080 closed again" "loopback port proven closed"
 assert_contains "${L}" "harness catalog has claude_code, codex, opencode" "post-start harness catalog checked"
 assert_contains "${L}" "owner checklist: authenticated checks" "authenticated checks printed for the owner"
+assert_contains "${L}" "check-proxy.sh https://hub.fenicu.com --positive" "checklist names the self-contained sign-in check"
+assert_contains "${L}" "dbip-city-lite.mmdb is 0 days old, no update" "geoip step ran after verify and kept the fresh database"
 assert_not_contains "${L}" "SOFT-FAIL" "no soft failures"
 teardown_case
 case_end

@@ -32,6 +32,11 @@ done
 [ -z "${TO_RELEASE}" ] || require_release_id "${TO_RELEASE}"
 XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR
+# Правило отката (ADR-0005): хаб без собственного входа (1.29 и раньше) верит
+# Remote-User от прокси, поэтому блок входа в Caddy возвращается раньше отката.
+if [ -n "${TO_RELEASE}" ]; then
+    log "reminder: if ${TO_RELEASE} is a release without own sign-in (1.29 and older), restore the Caddy auth block (basic_auth or forward_auth) BEFORE starting it"
+fi
 
 # Охранник юнита на время восстановления: даже если кто-то (или сам systemd после
 # auto-restart) попробует поднять воркер, запуск не состоится. `systemctl mask`

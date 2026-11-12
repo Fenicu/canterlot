@@ -31,6 +31,9 @@ fi
 #   в сопровождениях). Печатаем точное состояние и ручные команды восстановления
 #   (таблица Task 12), включая восстановление дампа этого прогона.
 #   Ручной откат базы — только scripts/deploy/rollback-db.sh, никогда отсюда.
+# - Откат хаба на релиз без собственного входа (1.29 и раньше): сначала вернуть
+#   блок входа в Caddy (basic_auth или forward_auth), потом flip. Старый хаб верит
+#   Remote-User от прокси с секретом, и без блока входа его подделка — вход владельцем.
 # - PWA-ошибки мягкие всегда: записать, вернуть предыдущий build, продолжить.
 set -euo pipefail
 
@@ -126,14 +129,18 @@ if [ "${DRY_RUN}" = "1" ]; then
     log "dry-run mode: TARGET ${SHA}; baseline (deployed): hub=${DRY_BASE_HUB} web=${DRY_BASE_WEB} worker=${DRY_BASE_WORKER}; printing the plan, no writes"
 fi
 
-# Чек-лист владельца: аутентифицированные проверки остаются за ним (решение
-# владельца). Печатается в конце каждого режима.
+# Чек-лист владельца: проверки со входом остаются за ним (решение владельца),
+# кроме check-proxy: его положительная проверка входит сама по одноразовой ссылке.
+# Печатается в конце каждого режима.
 owner_checklist() {
     cat <<EOF
 === owner checklist: authenticated checks (the toolkit does not do these) ===
-  [ ] scripts/check-proxy.sh with the owner session
-  [ ] PWA in a browser: loads, the update banner shows release ${SHA}
-  [ ] GET ${SITE_ORIGIN}/api/v1/config with the owner session reports the new version
+  [ ] scripts/check-proxy.sh ${SITE_ORIGIN} --positive (operator, with EXPECTED_LOGIN set): hub 401 without
+      a session, forged Remote-User/X-Canterlot-* stripped, sign-in by a one-off recovery link into a temp jar,
+      a real client IP in the sessions list, logout; the owner gets one sign-in push from it
+  [ ] owner signs in to the PWA with the password or a passkey (own sign-in, no Caddy prompt);
+      the update banner shows release ${SHA}
+  [ ] GET ${SITE_ORIGIN}/api/v1/config in the signed-in PWA reports the new version
   [ ] open a live session: timeline renders, send a message, a reply arrives
   [ ] the release's own new features (CHANGES.rst for this version)
   [ ] paste the result of each line into the deploy log section ("Left for the owner")
@@ -306,6 +313,13 @@ if [ "${DRY_RUN}" = "1" ]; then
     fi
     maintenance_check "${DRY_LIVE_IDS}" "${DRY_BASE_WEB}"
     merge_preview "${SHA}"
+    GEOIP_RC=0
+    GEOIP_WHY="$(geoip_due)" || GEOIP_RC=$?
+    case "${GEOIP_RC}" in
+        0) log "dry-run: geoip: ${GEOIP_WHY}; the real run would run canterlot-hub geoip update (soft)" ;;
+        1) log "dry-run: geoip: ${GEOIP_WHY}; no update needed" ;;
+        *) log "dry-run: geoip: ${GEOIP_WHY}; the real run would record a soft failure" ;;
+    esac
     VERIFY_EXTRA=()
     [ "${ALLOW_SKIPPED}" = "0" ] || VERIFY_EXTRA=(--allow-skipped)
     if ! "${SCRIPT_DIR}/verify.sh" --dry-run --dist "${DIST_BASE:-${REPO_ROOT}/dist}" "${VERIFY_EXTRA[@]}"; then
@@ -324,6 +338,7 @@ dry-run plan for ${SHA} (write steps are NOT RUN by design):
    - PWA: canterlot.env.${SHA}, flip build, 'docker compose up -d ${WEB_CONTAINER}'
    - worker flip + start; old _app/immutable chunk merge; verify.sh twice (the read-only verify gates above did run)
    - precompressed Content-Encoding probe (would start a one-off loopback Caddy inside the container)
+   - geoip: canterlot-hub geoip update on the hub when ${HUB_GEOIP_PATH} is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)
    - retention (retain.sh --apply --keep ${SHA} ...)
   WOULD RUN (only if the gates pass and the token matches this plan):
 EOF
@@ -470,6 +485,9 @@ STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touche
   manual recovery (Task 12 rollback table — run by hand, in this order).
   Every flip below takes the same host lock as cutover and retention, and re-checks
   the target release inside it:
+    0. before flipping the hub back to a release without own sign-in (1.29 and older), restore an auth
+       block (basic_auth or forward_auth) in Caddy first: the old hub trusts Remote-User from the proxy
+       and Caddy no longer asks for a login. Keep stripping Remote-*; run check-proxy.sh afterwards.
     1. hub broken, no new migration (flip back + one restart):
          ${hub_back_cmd}
     2. hub broken after a new migration: full DB restore from this run's dump (manual only):
@@ -1039,6 +1057,9 @@ if is_rehearse; then
 else
     "${SCRIPT_DIR}/verify.sh" "${SHA}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" --web-sha "${WEB_SHA_EFF}"
 fi
+# База GeoIP для мест входа: после проверки, ошибки мягкие (место входа просто пусто).
+PHASE="geoip"
+geoip_refresh
 # Чистка — после проверки и под своими /proc-guard'ами; цель и предыдущие релизы
 # передаются как --keep и не могут быть удалены даже если выпали из трёх свежих.
 # В репетиции retain.sh печатает план без --apply (ничего не удаляет).
@@ -1069,6 +1090,7 @@ owner_checklist
 cat <<EOF
 update note: the worker has connected to the new hub, so only forward fixes remain;
 an old hub stops on VersionMissing and a DB restore now causes state_divergence.
+hub back to a release without own sign-in (1.29 and older): restore the Caddy auth block first.
 restore points: ${RUN_DUMP} in ${HUB_BACKUP_DIR}, vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS}.
 PWA alone: build to releases/${PREV_WEB_SHA}, ${WEB_ENV}.${PREV_WEB_SHA}, one recreate.
 worker alone: flip current to ${PREV_WORKER_SHA}, restart (never below a live supervisor release).

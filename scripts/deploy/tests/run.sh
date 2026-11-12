@@ -53,7 +53,7 @@ if in_lines bb "$(printf "a\nb")"; then fail "in_lines matched a substring"; fi
 '
 log "lib unit checks OK"
 
-ALL_SUITES="lint token guardrails invariants preflight stage retain verify dryrun rehearse rollback-db cutover cutover-signals"
+ALL_SUITES="lint token guardrails invariants preflight stage retain verify dryrun rehearse rollback-db cutover cutover-signals geoip"
 SUITES="${RUN_SUITES:-${ALL_SUITES}}"
 RUN_LOG_DIR="${RUN_LOG_DIR:-$(mktemp -d /tmp/canterlot-deploy-run.XXXXXX)}"
 mkdir -p "${RUN_LOG_DIR}"

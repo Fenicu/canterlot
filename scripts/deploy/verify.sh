@@ -444,8 +444,9 @@ check_machine_catalog() {
 
 # Precompressed Content-Encoding: тот же Caddyfile-фрагмент, что у живого сайта,
 # но на одноразовом loopback-процессе ВНУТРИ контейнера (решение владельца:
-# допустимо в боевом прогоне). Живой слушатель закрыт Authelia и без сессии
-# отдаёт 302, поэтому проверяется именно раздача файлов. Процесс один на все три
+# допустимо в боевом прогоне). Живой слушатель отдаёт статику без входа, но проба
+# на loopback не зависит от DNS, TLS и правил сайта (в первом выкате собственного
+# входа перед сайтом ещё стоит basic_auth) и видит ровно файлы релиза. Процесс один на все три
 # кодировки, слушает только 127.0.0.1:18080, живёт под timeout и гасится
 # ловушкой на EXIT/INT/TERM/HUP; его старт и останов попадают в журнал, а после
 # пробы отдельное чтение доказывает, что порт закрыт. Запуск — запись через
@@ -570,6 +571,19 @@ HUB_WINDOW_MIN="${HUB_WINDOW_MIN:-30}"
 HUB_BASELINE_MIN="${HUB_BASELINE_MIN:-1440}"
 WARN_RATE_FACTOR="${WARN_RATE_FACTOR:-3}"
 WARN_RATE_SLACK="${WARN_RATE_SLACK:-5}"
+# Виды WARN, которые ожидаются и без базы (через пробел): не жёсткая ошибка ни как
+# новый вид, ни как рост, только строка журнала. config_key_deprecated хаб пишет при
+# каждом старте, пока в hub.toml остаются устаревшие ключи (спека входа §11: устаревшее
+# значение не должно останавливать выкат). Первый релиз собственного входа добавляет
+# client_ip_missing и identity_header_forwarded до правки Caddy (pilot.md §11.8).
+VERIFY_WARN_KINDS_OK="${VERIFY_WARN_KINDS_OK:-config_key_deprecated}"
+warn_kind_ok() {
+    local k
+    for k in ${VERIFY_WARN_KINDS_OK}; do
+        if [ "${k}" = "$1" ]; then return 0; fi
+    done
+    return 1
+}
 # stdin — журнал хаба; stdout — "<число>\t<УРОВЕНЬ вид>" по каждому виду.
 level_kind_counts() {
     sed -nE 's/.*[0-9]Z +(WARN|ERROR) (.*)$/\1 \2/p' | awk '{
@@ -595,6 +609,10 @@ check_hub_levels() {
         [ -n "${key}" ] || continue
         n="${cur_n["${key}"]}"; b="${base_n["${key}"]:-0}"
         level="${key%% *}"; kind="${key#* }"
+        if [ "${level}" = "WARN" ] && warn_kind_ok "${kind%%/*}"; then
+            summary+="${n} ${level} ${kind} (expected, VERIFY_WARN_KINDS_OK); "
+            continue
+        fi
         if [ "${b}" = "0" ]; then
             hard "new hub ${level} kind not in the baseline: ${kind} (${n} in ${HUB_WINDOW_MIN} min)"
             summary+="${n} ${level} ${kind} (NEW); "
