@@ -2139,7 +2139,22 @@ pub async fn submit_message_in_tx(
     req: &SubmitMessage,
     correlation_id: Uuid,
 ) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
-    submit_message_in_tx_with_device(conn, req, correlation_id, None).await
+    ensure_owned_in_tx(conn, req).await?;
+    crate::delivery::submit::submit_scheduled_message_input_in_tx(
+        conn,
+        &crate::delivery::SubmitInput {
+            owner_id: req.owner_id,
+            conversation_id: req.conversation_id,
+            idempotency_key: req.key.clone(),
+            content: req.content.clone(),
+            received_at: req.received_at,
+            correlation_id,
+            origin: None,
+        },
+        &req.attachment_ids,
+        req.retry_of,
+    )
+    .await
 }
 
 async fn submit_message_in_tx_with_device(
@@ -2148,17 +2163,7 @@ async fn submit_message_in_tx_with_device(
     correlation_id: Uuid,
     draft_device: Option<&str>,
 ) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
-    let owned: bool = sqlx::query_scalar(
-        "select exists(select 1 from conversations
-                       where id=$1 and owner_id=$2 and trashed_at is null)",
-    )
-    .bind(req.conversation_id)
-    .bind(req.owner_id)
-    .fetch_one(&mut *conn)
-    .await?;
-    if !owned {
-        return Err(crate::delivery::SubmitError::ConversationNotFound);
-    }
+    ensure_owned_in_tx(conn, req).await?;
     crate::delivery::submit::submit_message_input_in_tx(
         conn,
         &crate::delivery::SubmitInput {
@@ -2175,6 +2180,24 @@ async fn submit_message_in_tx_with_device(
         draft_device,
     )
     .await
+}
+
+async fn ensure_owned_in_tx(
+    conn: &mut PgConnection,
+    req: &SubmitMessage,
+) -> Result<(), crate::delivery::SubmitError> {
+    let owned: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations
+                       where id=$1 and owner_id=$2 and trashed_at is null)",
+    )
+    .bind(req.conversation_id)
+    .bind(req.owner_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !owned {
+        return Err(crate::delivery::SubmitError::ConversationNotFound);
+    }
+    Ok(())
 }
 
 pub(crate) async fn auto_title_in_tx(

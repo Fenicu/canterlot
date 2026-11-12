@@ -2,9 +2,14 @@
 
 use axum::http::Method;
 use canterlot_hub::{
+    conversations::{SubmitMessage, submit_message_in_tx},
+    delivery::{
+        ContentBlock, SubmitInput, submit_forwarded_message_input_in_tx, submit_input_in_tx,
+    },
     http::{self, AppState},
     testkit::{self, TestClient},
 };
+use chrono::Utc;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -118,6 +123,18 @@ impl Fixture {
             .fetch_optional(&self.pool)
             .await
             .unwrap()
+    }
+}
+
+fn system_input(owner: Uuid, conversation: Uuid, key: &str, text: &str) -> SubmitInput {
+    SubmitInput {
+        owner_id: owner,
+        conversation_id: conversation,
+        idempotency_key: key.into(),
+        content: vec![ContentBlock::Text { text: text.into() }],
+        received_at: Utc::now(),
+        correlation_id: Uuid::now_v7(),
+        origin: None,
     }
 }
 
@@ -324,6 +341,115 @@ async fn sending_an_input_clears_the_draft_in_the_same_transaction(pool: PgPool)
     let last = events.last().unwrap();
     assert_eq!(last["text"], "");
     assert_eq!(last["device_id"], "phone");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_system_input_keeps_the_draft(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let saved = f
+        .put(
+            f.conversation,
+            json!({"text":"продолжаю печатать","base_revision":0,"device_id":"phone"}),
+            200,
+        )
+        .await;
+    let revision = saved["revision"].as_i64().unwrap();
+
+    let mut tx = canterlot_hub::db::begin(&f.pool).await.unwrap();
+    submit_input_in_tx(
+        &mut tx,
+        &system_input(
+            f.owner,
+            f.conversation,
+            "system-keeps-draft",
+            "служебный ввод",
+        ),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(f.stored_text().await.as_deref(), Some("продолжаю печатать"));
+    assert_eq!(f.get(f.conversation).await["revision"], revision);
+    assert_eq!(f.draft_events().await.len(), 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_forwarded_input_keeps_the_draft(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    sqlx::query("update machines set capabilities='{pilot_v1}', limits_ok=true where id=$1")
+        .bind(f.machine)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let source = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let attachment = f.attachment(source, "ready").await;
+    let saved = f
+        .put(
+            f.conversation,
+            json!({"text":"продолжаю печатать","base_revision":0,"device_id":"phone"}),
+            200,
+        )
+        .await;
+    let revision = saved["revision"].as_i64().unwrap();
+
+    let mut tx = canterlot_hub::db::begin(&f.pool).await.unwrap();
+    submit_forwarded_message_input_in_tx(
+        &mut tx,
+        &system_input(
+            f.owner,
+            f.conversation,
+            "forwarded-keeps-draft",
+            "из другой сессии",
+        ),
+        &[attachment],
+        None,
+        source,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(f.stored_text().await.as_deref(), Some("продолжаю печатать"));
+    assert_eq!(f.get(f.conversation).await["revision"], revision);
+    assert_eq!(f.draft_events().await.len(), 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_scheduled_message_firing_keeps_the_draft(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let saved = f
+        .put(
+            f.conversation,
+            json!({"text":"продолжаю печатать","base_revision":0,"device_id":"phone"}),
+            200,
+        )
+        .await;
+    let revision = saved["revision"].as_i64().unwrap();
+
+    let mut tx = canterlot_hub::db::begin(&f.pool).await.unwrap();
+    submit_message_in_tx(
+        &mut tx,
+        &SubmitMessage {
+            owner_id: f.owner,
+            conversation_id: f.conversation,
+            key: "sched:test".into(),
+            content: vec![ContentBlock::Text {
+                text: "отложенное".into(),
+            }],
+            attachment_ids: vec![],
+            retry_of: None,
+            received_at: Utc::now(),
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(f.stored_text().await.as_deref(), Some("продолжаю печатать"));
+    assert_eq!(f.get(f.conversation).await["revision"], revision);
+    assert_eq!(f.draft_events().await.len(), 1);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

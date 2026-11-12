@@ -330,6 +330,14 @@ enum Attempt {
     LostRace,
 }
 
+/// Что приём ввода делает с общим черновиком композера. Служебные вводы (события,
+/// сообщения других сессий, планировщик, толчки) черновик владельца не трогают.
+#[derive(Clone, Copy)]
+enum DraftEffect<'a> {
+    Keep,
+    Clear(Option<&'a str>),
+}
+
 fn request_hash(req: &SubmitInput, attachments: &[Uuid], retry_of: Option<Uuid>) -> Vec<u8> {
     if attachments.is_empty() && retry_of.is_none() {
         return idempotency::request_hash(
@@ -408,7 +416,18 @@ pub async fn submit_input(pool: &PgPool, req: SubmitInput) -> Result<SubmittedIn
     validate_content(&req, false)?;
     let hash = request_hash(&req, &[], None);
     let mut tx = crate::db::begin(pool).await?;
-    match submit_attempt(&mut tx, &req, &hash, None, &[], None, false, None).await {
+    match submit_attempt(
+        &mut tx,
+        &req,
+        &hash,
+        None,
+        &[],
+        None,
+        false,
+        DraftEffect::Keep,
+    )
+    .await
+    {
         Ok(Attempt::Submitted(submitted)) => {
             tx.commit().await?;
             Ok(submitted)
@@ -435,7 +454,7 @@ pub async fn submit_input_in_tx(
         return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
     }
     let hash = request_hash(req, &[], None);
-    match submit_attempt(tx, req, &hash, None, &[], None, false, None).await? {
+    match submit_attempt(tx, req, &hash, None, &[], None, false, DraftEffect::Keep).await? {
         Attempt::Submitted(submitted) => Ok(submitted),
         Attempt::LostRace => Err(SubmitError::KeyRaceLost),
     }
@@ -448,7 +467,25 @@ pub(crate) async fn submit_message_input_in_tx(
     retry_of: Option<Uuid>,
     draft_device: Option<&str>,
 ) -> Result<SubmittedInput, SubmitError> {
-    submit_message_input_scoped_in_tx(tx, req, attachments, retry_of, None, draft_device).await
+    submit_message_input_scoped_in_tx(
+        tx,
+        req,
+        attachments,
+        retry_of,
+        None,
+        DraftEffect::Clear(draft_device),
+    )
+    .await
+}
+
+/// Служебный ввод планировщика при срабатывании задания: черновик владельца не трогает.
+pub(crate) async fn submit_scheduled_message_input_in_tx(
+    tx: &mut PgConnection,
+    req: &SubmitInput,
+    attachments: &[Uuid],
+    retry_of: Option<Uuid>,
+) -> Result<SubmittedInput, SubmitError> {
+    submit_message_input_scoped_in_tx(tx, req, attachments, retry_of, None, DraftEffect::Keep).await
 }
 
 /// Вложения другого разговора вызывающего: источник проверяется вместо целевого.
@@ -465,7 +502,7 @@ pub async fn submit_forwarded_message_input_in_tx(
         attachments,
         retry_of,
         Some(source_conversation_id),
-        None,
+        DraftEffect::Keep,
     )
     .await
 }
@@ -476,7 +513,7 @@ async fn submit_message_input_scoped_in_tx(
     attachments: &[Uuid],
     retry_of: Option<Uuid>,
     source_conversation_id: Option<Uuid>,
-    draft_device: Option<&str>,
+    draft: DraftEffect<'_>,
 ) -> Result<SubmittedInput, SubmitError> {
     if !tx.is_in_transaction() {
         return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
@@ -502,7 +539,7 @@ async fn submit_message_input_scoped_in_tx(
         attachments,
         source_conversation_id,
         true,
-        draft_device,
+        draft,
     )
     .await?
     {
@@ -520,7 +557,7 @@ async fn submit_attempt(
     attachment_ids: &[Uuid],
     source_conversation_id: Option<Uuid>,
     auto_title: bool,
-    draft_device: Option<&str>,
+    draft: DraftEffect<'_>,
 ) -> Result<Attempt, SubmitError> {
     match idempotency::lookup(conn, req.owner_id, &req.idempotency_key, OPERATION, hash).await? {
         Begin::Replay(response) => return replay(response).map(Attempt::Submitted),
@@ -813,8 +850,10 @@ async fn submit_attempt(
     )
     .await?
     {
-        crate::drafts::clear_in_tx(conn, req.conversation_id, draft_device, req.correlation_id)
-            .await?;
+        if let DraftEffect::Clear(device_id) = draft {
+            crate::drafts::clear_in_tx(conn, req.conversation_id, device_id, req.correlation_id)
+                .await?;
+        }
         Ok(Attempt::Submitted(submitted))
     } else {
         Ok(Attempt::LostRace)
