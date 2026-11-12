@@ -73,7 +73,12 @@
   </span>
 {/snippet}
 
-<!-- Статус провайдера словом и цветом; ссылка ведёт на его страницу статуса в новой вкладке. -->
+<!-- В свёрнутой полосе статус — просто слово: нажатие на него раскрывает полосу, как и всё остальное. -->
+{#snippet statusWord(status: StatusBadge)}
+  <span class="pstatus" data-status-tone={status.tone}>{status.text}</span>
+{/snippet}
+
+<!-- Раскрытая полоса: статус ведёт на страницу провайдера в новой вкладке. -->
 {#snippet statusLink(status: StatusBadge, named: boolean)}
   <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- внешняя страница статуса провайдера -->
   <a class="pstatus" data-status-tone={status.tone} href={status.url} target="_blank" rel="noopener noreferrer" title={status.title} aria-label={status.title}>{named ? `${status.company}: ${status.text}` : status.text}</a>
@@ -89,7 +94,7 @@
             <span class="plaque" data-provider={row.provider}>
               <span class="plaque-text">
                 <span class="pname">{row.label}</span>
-                {#if row.status}{@render statusLink(row.status, false)}{/if}
+                {#if row.status}{@render statusWord(row.status)}{/if}
                 {#if plaque}
                   <b class="pct" data-tone={plaque.meter.tone} class:dim={plaque.meter.stale || !plaque.meter.known}><span class="sr-only">осталось </span>{plaque.meter.text}</b>
                   <span class="tag">{plaque.tag}</span>
@@ -132,7 +137,7 @@
               {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
             {/if}
             {#if row.estimated}<span class="estimated" title="Расход выведен из локальных журналов, а не получен от провайдера">оценка</span>{/if}
-            {#if row.status}<span class="status-line">{@render statusLink(row.status, true)}</span>{/if}
+            {#if row.status}<span class="status-line">{#if open}{@render statusLink(row.status, true)}{:else}{@render statusWord(row.status)}{/if}</span>{/if}
           </span>
         {/each}
       </span>
@@ -269,7 +274,7 @@
   .pstatus { display: inline; min-height: 0; font-weight: var(--weight-semibold); white-space: nowrap; text-decoration: none; }
   .pstatus[data-status-tone='warning'] { color: var(--warning); }
   .pstatus[data-status-tone='danger'] { color: var(--danger); }
-  .pstatus:hover, .pstatus:focus-visible { text-decoration: underline; }
+  a.pstatus:hover, a.pstatus:focus-visible { text-decoration: underline; }
   .status-detail { display: flex; flex-direction: column; gap: var(--s1); margin-block-start: var(--s2); color: var(--secondary); }
   .status-detail .pstatus { align-self: flex-start; }
   .status-detail .incident { display: block; min-height: 0; color: var(--secondary); overflow-wrap: anywhere; }

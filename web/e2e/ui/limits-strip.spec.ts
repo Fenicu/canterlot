@@ -861,24 +861,29 @@ test('provider_outage_is_named_in_words_and_opens_the_status_page', async ({ pag
   const label = plaques.nth(0).locator('.pstatus');
   await expect(label).toHaveText('частичный сбой');
   await expect(label).toHaveAttribute('data-status-tone', 'danger');
-  await expect(label).toHaveAttribute('href', 'https://status.claude.com');
-  await expect(label).toHaveAttribute('target', '_blank');
-  await expect(label).toHaveAttribute('aria-label', /^Anthropic: частичный сбой/);
+  // В свёрнутой полосе слово — простой текст: единственный элемент управления — раскрытие.
+  expect(await label.evaluate((node) => node.tagName)).toBe('SPAN');
+  await expect(plaques.nth(0).locator('a')).toHaveCount(0);
   expect(await label.evaluate((node) => getComputedStyle(node).color)).toBe(await tokenColor(page, '--danger'));
   await expect(plaques.nth(1).locator('.pstatus')).toHaveCount(0);
-  // Касание метки открывает страницу статуса в новой вкладке и не раскрывает полосу.
-  const popup = page.waitForEvent('popup');
+  // Касание слова раскрывает полосу и никуда не ведёт.
+  let popupOpened = false;
+  const popup = page.waitForEvent('popup', { timeout: 1_000 }).then(() => { popupOpened = true; }).catch(() => {});
   await label.click();
-  const opened = await popup;
-  expect(opened.url()).toMatch(/^https:\/\/status\.claude\.com\/?$/);
-  await opened.close();
-  expect(await page.locator('.limits').first().evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+  await expect(page.locator('.limits').first()).toHaveJSProperty('open', true);
+  await popup;
+  expect(popupOpened).toBe(false);
+  expect(page.url()).not.toContain('status.claude.com');
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'strip-status-collapsed');
-  // Раскрытая полоса: строка провайдера с компанией и подробности под кнопкой обновления.
+  // Раскрытая полоса: строка провайдера со ссылкой на страницу статуса, компанией и подробностями.
   const strip = await openStrip(page);
-  await expect(strip.locator('.row').nth(0).locator('.pstatus')).toHaveText('Anthropic: частичный сбой');
+  const rowLink = strip.locator('.row').nth(0).locator('.pstatus');
+  await expect(rowLink).toHaveText('Anthropic: частичный сбой');
+  await expect(rowLink).toHaveAttribute('href', 'https://status.claude.com');
+  await expect(rowLink).toHaveAttribute('target', '_blank');
+  await expect(rowLink).toHaveAttribute('aria-label', /^Anthropic: частичный сбой/);
   await expect(strip.locator('.row').nth(1).locator('.pstatus')).toHaveCount(0);
   const detail = strip.locator('.status-detail[data-provider="claude"]');
   await expect(detail).toContainText('Partial System Outage');
@@ -898,8 +903,8 @@ test('provider_status_label_follows_live_events_and_hides_when_ok', async ({ pag
   const label = page.locator('[data-limit-plaques] .plaque').nth(1).locator('.pstatus');
   await expect(label).toHaveText('замедление');
   await expect(label).toHaveAttribute('data-status-tone', 'warning');
+  expect(await label.evaluate((node) => node.tagName)).toBe('SPAN');
   expect(await label.evaluate((node) => getComputedStyle(node).color)).toBe(await tokenColor(page, '--warning'));
-  await expect(label).toHaveAttribute('aria-label', /^OpenAI: замедление/);
   send('major_outage');
   await expect(label).toHaveText('сбой');
   await expect(label).toHaveAttribute('data-status-tone', 'danger');
