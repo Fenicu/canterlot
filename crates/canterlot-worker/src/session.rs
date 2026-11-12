@@ -1175,10 +1175,8 @@ impl Worker {
         .await
         .map_err(|_| WorkerError::Timeout)??;
         let pilot = accepted.capabilities.iter().any(|cap| cap == "pilot_v1");
-        let limits_fable = accepted
-            .capabilities
-            .iter()
-            .any(|cap| cap == CAPABILITY_LIMITS_FABLE_V1);
+        let hub_records = data::HubRecords::from_capabilities(&accepted.capabilities);
+        let limits_fable = hub_records.limits_fable;
         let diagnostics = JournalDiagnostics::default();
         if cj_pilot && !pilot {
             diagnostics
@@ -1369,7 +1367,7 @@ impl Worker {
                 #[cfg(feature = "fault-injection")]
                 probe: self.probe.clone(),
                 pilot,
-                limits_fable,
+                hub_records,
                 diagnostics: diagnostics.clone(),
                 live_limits: self.live_limits.clone(),
                 client: data,

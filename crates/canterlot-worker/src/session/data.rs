@@ -53,7 +53,7 @@ pub(super) fn session_committed(
 
 pub(super) struct Stream {
     pub pilot: bool,
-    pub limits_fable: bool,
+    pub hub_records: HubRecords,
     pub diagnostics: JournalDiagnostics,
     pub live_limits: crate::machine::limits::LiveLimits,
     #[cfg(feature = "fault-injection")]
@@ -76,7 +76,7 @@ pub(super) async fn run(
 ) -> Result<(), WorkerError> {
     let Stream {
         pilot,
-        mut limits_fable,
+        mut hub_records,
         diagnostics,
         live_limits,
         #[cfg(feature = "fault-injection")]
@@ -103,7 +103,7 @@ pub(super) async fn run(
             (
                 cursors,
                 pilot,
-                limits_fable,
+                hub_records,
                 diagnostics.clone(),
                 live_limits.clone(),
             ),
@@ -171,10 +171,8 @@ pub(super) async fn run(
                     .map_err(|_| WorkerError::Protocol)?;
                 check_generation(generation, &accepted)?;
                 let committed = session_committed(&hello, &accepted, manager)?;
-                limits_fable = accepted
-                    .capabilities
-                    .iter()
-                    .any(|cap| cap == crate::session::CAPABILITY_LIMITS_FABLE_V1);
+                // Хаб мог смениться между подключениями, в том числе откатиться на старую версию.
+                hub_records = HubRecords::from_capabilities(&accepted.capabilities);
                 // Старые элементы восстанавливаются сопровождением от durable cursor.
                 while relay.try_recv().is_ok() {}
                 if *active.borrow() {
@@ -231,12 +229,12 @@ async fn ship(
     session: (
         HashMap<Uuid, u64>,
         bool,
-        bool,
+        HubRecords,
         JournalDiagnostics,
         crate::machine::limits::LiveLimits,
     ),
 ) -> Result<(), WorkerError> {
-    let (cursors, pilot, limits_fable, diagnostics, live_limits) = session;
+    let (cursors, pilot, hub_records, diagnostics, live_limits) = session;
     let mut withheld = diagnostics.parked();
     let mut pending: VecDeque<Range> = VecDeque::new();
     let mut sent = cursors.clone();
@@ -303,7 +301,7 @@ async fn ship(
                         live_limits.note_observation(observation);
                     }
                 }
-                ready = pack(journal, records, limits_fable)?;
+                ready = pack(journal, records, hub_records)?;
             }
             permit = tx.reserve(), if retry.is_some() || (!ready.is_empty() && pending.len() < 8) => {
                 let permit = permit.map_err(|_| WorkerError::Transport)?;
@@ -332,7 +330,7 @@ type Batch = (DataUp, Uuid, u64);
 fn pack(
     journal: Uuid,
     records: Vec<JournalRecord>,
-    limits_fable: bool,
+    hub_records: HubRecords,
 ) -> Result<VecDeque<Batch>, WorkerError> {
     if records.len() > 256 {
         return Err(WorkerError::Protocol);
@@ -345,7 +343,7 @@ fn pack(
     for record in records {
         batch
             .records
-            .push(shippable(journal, compatible_for_hub(record, limits_fable)));
+            .push(shippable(journal, compatible_for_hub(record, hub_records)));
         let bytes = batch.encoded_len();
         if prost::encoding::key_len(2) + prost::length_delimiter_len(bytes) + bytes
             > MAX_EVENT_BATCH_BYTES
@@ -364,37 +362,65 @@ fn pack(
     Ok(result)
 }
 
-/// Хаб без `limits_fable_v1` не должен получить неизвестное окно: отказ SJ-записи
-/// останавливает исполнение. Наблюдение Fable заменяется безвредной отметкой,
-/// упор едет недельным окном с тем же сбросом.
-fn compatible_for_hub(record: JournalRecord, limits_fable: bool) -> JournalRecord {
-    if limits_fable {
-        return record;
+/// Записи журнала, которые знает хаб текущего подключения. Пересчитывается при каждом
+/// подключении: сопровождение переживает и перезапуск воркера, и откат хаба.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct HubRecords {
+    pub limits_fable: bool,
+    pub prompt_suggestions: bool,
+}
+
+impl HubRecords {
+    pub(super) fn from_capabilities(capabilities: &[String]) -> Self {
+        let has = |name: &str| capabilities.iter().any(|cap| cap == name);
+        Self {
+            limits_fable: has(crate::session::CAPABILITY_LIMITS_FABLE_V1),
+            prompt_suggestions: has(crate::session::CAPABILITY_PROMPT_SUGGESTIONS_V1),
+        }
     }
+}
+
+/// Безвредная отметка с тем же seq: её принимает и пропускает любой хаб, начиная с 1.x,
+/// а непрерывность журнала, которой хаб требует от seq, сохраняется.
+fn placeholder(seq: u64, event_type: &str) -> JournalRecord {
+    JournalRecord {
+        seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::AdapterDiagnostic(
+                canterlot_proto::worker::v1::AdapterDiagnostic {
+                    execution_id: Uuid::nil().to_string(),
+                    kind: "unknown_optional_event".into(),
+                    event_type: event_type.into(),
+                    ..Default::default()
+                },
+            )),
+        }),
+    }
+}
+
+/// Хаб без возможности не должен получить незнакомую запись: отказ SJ-записи останавливает
+/// журнал. Наблюдение Fable и подсказка заменяются безвредной отметкой, упор Fable едет
+/// недельным окном с тем же сбросом. Замена делается при отправке, поэтому покрывает и
+/// записи, попавшие в журнал при прежнем хабе.
+fn compatible_for_hub(record: JournalRecord, hub: HubRecords) -> JournalRecord {
     let Some(body) = record.body.as_ref().and_then(|body| body.body.as_ref()) else {
         return record;
     };
     match body {
+        record_body::Body::PromptSuggested(_) if !hub.prompt_suggestions => {
+            placeholder(record.seq, "prompt_suggestion_unsupported")
+        }
         record_body::Body::LimitObserved(observation)
-            if observation.window
-                == canterlot_proto::worker::v1::LimitWindow::WeeklyFable as i32 =>
+            if !hub.limits_fable
+                && observation.window
+                    == canterlot_proto::worker::v1::LimitWindow::WeeklyFable as i32 =>
         {
-            JournalRecord {
-                seq: record.seq,
-                body: Some(RecordBody {
-                    body: Some(record_body::Body::AdapterDiagnostic(
-                        canterlot_proto::worker::v1::AdapterDiagnostic {
-                            execution_id: Uuid::nil().to_string(),
-                            kind: "unknown_optional_event".into(),
-                            event_type: "limit_window_unsupported".into(),
-                            ..Default::default()
-                        },
-                    )),
-                }),
-            }
+            placeholder(record.seq, "limit_window_unsupported")
         }
         record_body::Body::LimitReached(reached)
-            if reached.window == canterlot_proto::worker::v1::LimitWindow::WeeklyFable as i32 =>
+            if !hub.limits_fable
+                && reached.window
+                    == canterlot_proto::worker::v1::LimitWindow::WeeklyFable as i32 =>
         {
             let mut reached = reached.clone();
             reached.window = canterlot_proto::worker::v1::LimitWindow::Weekly as i32;
@@ -424,19 +450,7 @@ pub(super) fn shippable(journal: Uuid, record: JournalRecord) -> JournalRecord {
         return record;
     }
     tracing::warn!(kind = "record_too_large", %journal, seq = record.seq, "oversized record replaced");
-    JournalRecord {
-        seq: record.seq,
-        body: Some(RecordBody {
-            body: Some(record_body::Body::AdapterDiagnostic(
-                canterlot_proto::worker::v1::AdapterDiagnostic {
-                    execution_id: Uuid::nil().to_string(),
-                    kind: "unknown_optional_event".into(),
-                    event_type: "record_too_large".into(),
-                    ..Default::default()
-                },
-            )),
-        }),
-    }
+    placeholder(record.seq, "record_too_large")
 }
 
 fn envelope(journal: Uuid, batch: JournalRecords) -> Result<Batch, WorkerError> {

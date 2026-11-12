@@ -36,6 +36,14 @@ fn limit_reached(seq: u64, window: LimitWindow) -> JournalRecord {
     }
 }
 
+/// Хаб, знающий обе необязательные записи (`true`), или хаб 1.30 без них (`false`).
+fn hub_of(new: bool) -> HubRecords {
+    HubRecords {
+        limits_fable: new,
+        prompt_suggestions: new,
+    }
+}
+
 fn wire_records(packed: VecDeque<Batch>) -> Vec<JournalRecord> {
     packed
         .into_iter()
@@ -82,7 +90,7 @@ fn full_sj_batch_is_split_to_include_the_data_envelope() {
         delta.append.push_str(&"x".repeat(slack));
     }
     assert_eq!(batch.encoded_len(), MAX_EVENT_BATCH_BYTES);
-    let packed = pack(id, batch.records, true).unwrap();
+    let packed = pack(id, batch.records, hub_of(true)).unwrap();
     assert_eq!(packed.len(), 2);
     let mut seqs = Vec::new();
     for (message, journal, _) in packed {
@@ -106,7 +114,7 @@ fn record_over_the_batch_limit_does_not_fail_the_shared_stream() {
         record(4, MAX_EVENT_BATCH_BYTES * 2),
     ];
     let mut bodies = Vec::new();
-    for (message, journal, last) in pack(id, records, true).unwrap() {
+    for (message, journal, last) in pack(id, records, hub_of(true)).unwrap() {
         assert_eq!(journal, id);
         assert!(message.encoded_len() <= MAX_EVENT_BATCH_BYTES);
         let Some(data_up::Msg::SjRecords(batch)) = message.msg else {
@@ -161,7 +169,7 @@ fn fable_frame_records() -> Vec<JournalRecord> {
 
 #[test]
 fn the_verbatim_fable_frame_never_ships_window_four_to_an_old_hub() {
-    let records = wire_records(pack(Uuid::now_v7(), fable_frame_records(), false).unwrap());
+    let records = wire_records(pack(Uuid::now_v7(), fable_frame_records(), hub_of(false)).unwrap());
     assert_eq!(
         records.iter().map(|record| record.seq).collect::<Vec<_>>(),
         [1, 2]
@@ -186,7 +194,7 @@ fn an_old_hub_gets_a_placeholder_for_a_fable_observation_and_weekly_for_its_reac
                 limit_reached(2, LimitWindow::WeeklyFable),
                 limit_observed(3, LimitWindow::Weekly),
             ],
-            false,
+            hub_of(false),
         )
         .unwrap(),
     );
@@ -232,7 +240,7 @@ fn a_negotiated_hub_keeps_window_four_on_the_wire() {
                 limit_observed(1, LimitWindow::WeeklyFable),
                 limit_reached(2, LimitWindow::WeeklyFable),
             ],
-            true,
+            hub_of(true),
         )
         .unwrap(),
     );
@@ -298,7 +306,7 @@ async fn an_old_hub_acks_the_substituted_fable_journal_to_the_end() {
             (
                 HashMap::new(),
                 true,
-                false,
+                hub_of(false),
                 JournalDiagnostics::default(),
                 LiveLimits::default(),
             ),
@@ -339,6 +347,185 @@ async fn an_old_hub_acks_the_substituted_fable_journal_to_the_end() {
         .unwrap()
         .unwrap_err();
     thread.close().await.unwrap();
+}
+
+fn suggestion(seq: u64) -> JournalRecord {
+    JournalRecord {
+        seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::PromptSuggested(PromptSuggested {
+                execution_id: Uuid::now_v7().to_string(),
+                generation: 1,
+                text: "run the tests".into(),
+            })),
+        }),
+    }
+}
+
+#[test]
+fn capabilities_of_each_connection_decide_the_hub_records() {
+    assert_eq!(HubRecords::from_capabilities(&[]), hub_of(false));
+    assert_eq!(
+        HubRecords::from_capabilities(&[
+            "limits_fable_v1".to_owned(),
+            "prompt_suggestions_v1".to_owned(),
+        ]),
+        hub_of(true)
+    );
+}
+
+#[test]
+fn a_hub_without_suggestions_gets_a_placeholder_with_the_same_seq() {
+    let records = wire_records(
+        pack(
+            Uuid::now_v7(),
+            vec![record(1, 4), suggestion(2), record(3, 4)],
+            HubRecords {
+                limits_fable: true,
+                prompt_suggestions: false,
+            },
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let Some(record_body::Body::AdapterDiagnostic(stub)) =
+        records[1].body.as_ref().and_then(|body| body.body.as_ref())
+    else {
+        panic!("a suggestion must become a harmless diagnostic");
+    };
+    assert_eq!(stub.kind, "unknown_optional_event");
+    assert_eq!(stub.event_type, "prompt_suggestion_unsupported");
+    assert_eq!(stub.execution_id, Uuid::nil().to_string());
+    assert!(
+        !format!("{records:?}").contains("run the tests"),
+        "the owner text never reaches an old hub"
+    );
+}
+
+#[test]
+fn a_hub_with_suggestions_receives_them_verbatim() {
+    let records = wire_records(pack(Uuid::now_v7(), vec![suggestion(1)], hub_of(true)).unwrap());
+    let Some(record_body::Body::PromptSuggested(kept)) =
+        records[0].body.as_ref().and_then(|body| body.body.as_ref())
+    else {
+        panic!("suggestion kept for a negotiated hub");
+    };
+    assert_eq!(kept.text, "run the tests");
+}
+
+/// Журнал с подсказками, записанными при хабе 1.31, уходит хабу, который их не знает
+/// (откат на 1.30): весь журнал подтверждается подряд, поток не рвётся.
+async fn ship_journal_with_suggestions(hub_records: HubRecords) -> Vec<JournalRecord> {
+    let (mut hub, store) = ProtocolHub::start(Behavior::default()).await;
+    let (tx, mut inbound) = link(&hub).await;
+    let thread = StoreThread::new(store);
+    let (sender, mut relay) = mpsc::channel(16);
+    let runtime = tempfile::Builder::new()
+        .prefix("cl-rt-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let manager = ExecutionManager::new_with_runtime_dir(
+        Default::default(),
+        thread.client(),
+        sender.clone(),
+        Some(runtime.path().to_path_buf()),
+    );
+    let journal = Uuid::now_v7();
+    sender
+        .send(SjRelay {
+            journal_id: journal,
+            records: vec![record(1, 4), suggestion(2), record(3, 4), suggestion(4)],
+        })
+        .await
+        .unwrap();
+    for seq in 5..=8 {
+        let next = if seq % 2 == 0 {
+            suggestion(seq)
+        } else {
+            record(seq, 4)
+        };
+        sender
+            .send(SjRelay {
+                journal_id: journal,
+                records: vec![next],
+            })
+            .await
+            .unwrap();
+    }
+    let (stop, mut active) = watch::channel(true);
+    let task = tokio::spawn(async move {
+        let result = ship(
+            &tx,
+            &mut inbound,
+            &manager,
+            &mut relay,
+            &WorkerTimers::default(),
+            &mut active,
+            (
+                HashMap::new(),
+                true,
+                hub_records,
+                JournalDiagnostics::default(),
+                LiveLimits::default(),
+            ),
+        )
+        .await;
+        manager.shutdown().await;
+        result
+    });
+    let mut shipped = Vec::new();
+    timeout(Duration::from_secs(3), async {
+        while shipped.len() < 8 {
+            if let Observed::Data(message) = hub.event().await
+                && let Some(data_up::Msg::SjRecords(batch)) = message.msg
+            {
+                shipped.extend(batch.records);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!task.is_finished(), "the execution stream keeps running");
+    drop(stop);
+    drop(sender);
+    timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    thread.close().await.unwrap();
+    assert_eq!(
+        shipped.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        (1..=8).collect::<Vec<_>>(),
+        "journal sequence stays continuous"
+    );
+    shipped
+}
+
+fn is_suggestion(record: &JournalRecord) -> bool {
+    matches!(
+        record.body.as_ref().and_then(|body| body.body.as_ref()),
+        Some(record_body::Body::PromptSuggested(_))
+    )
+}
+
+#[tokio::test]
+async fn a_rolled_back_hub_acks_a_journal_with_suggestions_to_the_end() {
+    let shipped = ship_journal_with_suggestions(hub_of(false)).await;
+    assert!(
+        shipped.iter().all(|record| !is_suggestion(record)
+            && record.body.as_ref().is_some_and(|body| body.body.is_some())),
+        "an old hub decodes every record"
+    );
+}
+
+#[tokio::test]
+async fn a_current_hub_still_receives_journaled_suggestions() {
+    let shipped = ship_journal_with_suggestions(hub_of(true)).await;
+    assert_eq!(shipped.iter().filter(|r| is_suggestion(r)).count(), 4);
 }
 
 async fn link(hub: &ProtocolHub) -> (mpsc::Sender<DataUp>, tonic::Streaming<DataDown>) {
@@ -419,7 +606,7 @@ async fn sj_window_stops_at_eight_and_lost_head_retries_only_once() {
             (
                 HashMap::new(),
                 true,
-                true,
+                hub_of(true),
                 JournalDiagnostics::default(),
                 LiveLimits::default(),
             ),
@@ -507,7 +694,7 @@ async fn another_journal_progress_and_duplicate_acks_do_not_postpone_the_head() 
             (
                 HashMap::new(),
                 true,
-                true,
+                hub_of(true),
                 JournalDiagnostics::default(),
                 LiveLimits::default(),
             ),
@@ -594,7 +781,7 @@ async fn stale_post_reattach_batch_cannot_jump_the_committed_cursor() {
             (
                 HashMap::from([(journal, 2)]),
                 true,
-                true,
+                hub_of(true),
                 JournalDiagnostics::default(),
                 LiveLimits::default(),
             ),
@@ -646,7 +833,7 @@ async fn fail_shipped_batch(status: Status) -> (Vec<String>, Result<(), WorkerEr
         (
             HashMap::new(),
             true,
-            true,
+            hub_of(true),
             diagnostics.clone(),
             LiveLimits::default(),
         )
@@ -795,7 +982,7 @@ async fn pilot_sj_is_withheld_while_other_sj_ships_and_allowed_prefix_is_contigu
             (
                 HashMap::from([(hidden, 3)]),
                 false,
-                true,
+                hub_of(true),
                 diagnostics,
                 LiveLimits::default(),
             ),
@@ -903,7 +1090,13 @@ impl Resend {
                 &mut relay,
                 &timers,
                 &mut active,
-                (cursors, pilot, true, diagnostics, LiveLimits::default()),
+                (
+                    cursors,
+                    pilot,
+                    hub_of(true),
+                    diagnostics,
+                    LiveLimits::default(),
+                ),
             );
             let result = tokio::select! {result=ship=>result,_=shutdown_rx.changed()=>Ok(())};
             drop(stop);
