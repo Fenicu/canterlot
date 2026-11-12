@@ -855,9 +855,45 @@ async fn evaluate_subscriptions(
 /// Корневая сессия без подписчиков после хода больше не пересчитывается: окно тишины
 /// `idle` проходит без нового события. Пока включены пуши об итоге хода, недавно
 /// ставшая `idle` корневая сессия идёт в обход столько же, сколько живёт свежесть пуша.
-/// Сессия с завершёнными ходами без посчитанного превью проходит обход один раз.
+/// Превью старых сессий обход не пересчитывает: его тихо дописывает `backfill_previews`.
 async fn sweep(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id and p.state='in_progress') or exists(select 1 from nudge_rules nr where nr.conversation_id=c.id and nr.state in ('watching','pending')) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) or (c.parent_conversation_id is null and d.activity_state='idle' and d.updated_at > now()-interval '10 minutes' and exists(select 1 from push_settings ps where ps.turn_finished)) or (d.preview_turn_at is null and exists(select 1 from runs r where r.conversation_id=c.id and r.finished_at is not null)) order by c.id").fetch_all(pool).await
+    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id and p.state='in_progress') or exists(select 1 from nudge_rules nr where nr.conversation_id=c.id and nr.state in ('watching','pending')) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) or (c.parent_conversation_id is null and d.activity_state='idle' and d.updated_at > now()-interval '10 minutes' and exists(select 1 from push_settings ps where ps.turn_finished)) order by c.id").fetch_all(pool).await
+}
+
+/// Сколько сессий за один обход получают превью, посчитанное до этого релиза.
+pub const BACKFILL_BATCH: i64 = 200;
+
+/// Превью сессий, чьи ходы закончились до появления превью: не больше `limit` за вызов,
+/// без событий `derived_changed` (список получит превью со снимком). Отметка хода — та
+/// же, что берёт пересчёт, поэтому следующий настоящий ход сравнивает с ней как обычно.
+/// Возвращает число дописанных строк.
+pub async fn backfill_previews(pool: &PgPool, limit: i64) -> Result<u64, sqlx::Error> {
+    let todo: Vec<(Uuid, DateTime<Utc>)> = sqlx::query_as(
+        "select d.conversation_id,t.turn_at from conversation_derived d
+         cross join lateral (select max(r.finished_at) as turn_at from runs r
+                             where r.conversation_id=d.conversation_id) t
+         where d.preview_turn_at is null and t.turn_at is not null
+         order by d.conversation_id limit $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let mut filled = 0;
+    let mut conn = pool.acquire().await?;
+    for (conversation_id, turn_at) in todo {
+        let preview = crate::preview::last_answer(&mut conn, conversation_id, turn_at).await?;
+        filled += sqlx::query(
+            "update conversation_derived set preview=$2,preview_turn_at=$3
+             where conversation_id=$1 and preview_turn_at is null",
+        )
+        .bind(conversation_id)
+        .bind(preview)
+        .bind(turn_at)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    }
+    Ok(filled)
 }
 
 pub async fn run(
@@ -913,6 +949,9 @@ pub async fn run(
                         }
                     }
                     Err(e) => log_error(&e),
+                }
+                if let Err(e) = backfill_previews(&pool, BACKFILL_BATCH).await {
+                    log_error(&e);
                 }
             }
             let ready: Vec<_> = pending

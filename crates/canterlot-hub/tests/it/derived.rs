@@ -789,6 +789,11 @@ async fn sweep_fills_the_preview_of_conversations_finished_before_the_migration(
     // Строка до миграции: превью не посчитано, событий о сессии новее строки нет.
     sqlx::query("update conversation_derived set preview=null,preview_turn_at=null,updated_at=clock_timestamp()+interval '1 minute' where conversation_id=$1")
         .bind(s.conversation_id).execute(&pool).await.unwrap();
+    let events_before = count(
+        &pool,
+        "select count(*) from events where kind='derived_changed'",
+    )
+    .await;
     let (stop, task, _) = projector(
         &pool,
         ActivityConfig {
@@ -809,4 +814,77 @@ async fn sweep_fills_the_preview_of_conversations_finished_before_the_migration(
     );
     stop.send(true).unwrap();
     task.await.unwrap();
+    // Дозаливка тихая: событий о старой сессии не появилось.
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from events where kind='derived_changed'"
+        )
+        .await,
+        events_before
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn preview_backfill_goes_in_bounded_batches_without_events(pool: PgPool) {
+    let s = testkit::seed(&pool).await;
+    let other = testkit::Seed {
+        owner_id: s.owner_id,
+        machine_id: s.machine_id,
+        conversation_id: testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await,
+    };
+    let t0 = Utc::now() - TimeDelta::hours(2);
+    for (seed, text) in [(&s, "Первый"), (&other, "Второй")] {
+        let execution = Uuid::now_v7();
+        sqlx::query("insert into executions(id,conversation_id,generation,state,outcome) values($1,$2,1,'stopped','user_stop')")
+            .bind(execution).bind(seed.conversation_id).execute(&pool).await.unwrap();
+        turn(&pool, seed, execution, t0, Some(t0 + TimeDelta::minutes(5))).await;
+        answer_block(
+            &pool,
+            seed,
+            execution,
+            "text",
+            "main",
+            text,
+            t0 + TimeDelta::minutes(1),
+        )
+        .await;
+        refresh(&pool, seed.conversation_id).await;
+    }
+    sqlx::query("update conversation_derived set preview=null,preview_turn_at=null")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let events_before = count(&pool, "select count(*) from events").await;
+    assert_eq!(activity::BACKFILL_BATCH, 200);
+    assert_eq!(activity::backfill_previews(&pool, 1).await.unwrap(), 1);
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from conversation_derived where preview_turn_at is null"
+        )
+        .await,
+        1
+    );
+    assert_eq!(activity::backfill_previews(&pool, 1).await.unwrap(), 1);
+    assert_eq!(activity::backfill_previews(&pool, 1).await.unwrap(), 0);
+    let previews: Vec<(Option<String>, Option<DateTime<Utc>>)> =
+        sqlx::query_as("select preview,preview_turn_at from conversation_derived order by preview")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let turn_at = Some(t0 + TimeDelta::minutes(5));
+    assert_eq!(previews.len(), 2);
+    assert_eq!(previews[0].0.as_deref(), Some("Второй"));
+    assert_eq!(previews[1].0.as_deref(), Some("Первый"));
+    assert!(previews.iter().all(
+        |(_, at)| at.map(|at| at.timestamp_micros()) == turn_at.map(|at| at.timestamp_micros())
+    ));
+    assert_eq!(
+        count(&pool, "select count(*) from events").await,
+        events_before,
+        "backfill emits nothing"
+    );
+    // Посчитанное превью совпадает с тем, что посчитал бы пересчёт: он ничего не меняет.
+    assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Unchanged);
 }
