@@ -217,9 +217,8 @@
   .cat[aria-current='page'] .cat-title { color: var(--accent-link); }
   @media (hover: hover) and (pointer: fine) { .cat:not([aria-current='page']):hover { background: var(--hover); } }
   .cat:focus-visible { outline: var(--focus-width) solid var(--accent); outline-offset: calc(var(--focus-width) * -1); }
-  /* Телефон: разделы — одна поверхность со строками через линию, как список системных настроек. */
-  .settings:not(.desktop) .cats { gap: var(--s0); padding: var(--s2); border-radius: var(--radius-card); background: var(--surface); }
-  .settings:not(.desktop) .cat + .cat { border-top: var(--hairline) solid var(--line); border-radius: var(--s0); }
+  /* Телефон: разделы — одна поверхность со строками, как список системных настроек. */
+  .settings:not(.desktop) .cats { padding: var(--s2); border-radius: var(--radius-card); background: var(--surface); }
   .foot { margin: var(--s6) var(--s6) var(--s2); color: var(--muted); font-size: var(--fs-sm); }
   .pane { margin-block: var(--s0); }
   .desktop .pane { max-width: none; margin: var(--s0); }
