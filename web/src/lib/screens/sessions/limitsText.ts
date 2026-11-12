@@ -2,7 +2,9 @@ import { providerLabel as label } from "#lib/format/labels.js";
 import {
   dayClock,
   limitView,
+  statusBadge,
   type LimitThresholds,
+  type StatusBadge,
   type MeterView,
   type ProviderLimits,
 } from "#lib/stores/limits.js";
@@ -22,6 +24,8 @@ export interface LimitRow {
   reserve: boolean;
   /** Показание выведено из локальных журналов, а не получено от провайдера. */
   estimated: boolean;
+  /** Статус провайдера словом, когда он не в порядке; иначе `null`. */
+  status: StatusBadge | null;
 }
 
 export interface LimitStrip {
@@ -67,6 +71,7 @@ export function limitStrip(
       empty: !provider.five_hour && !provider.weekly && !provider.weekly_fable && !provider.monthly,
       reserve: provider.weekly_reserve_active,
       estimated: provider.data_confidence === "estimated",
+      status: statusBadge(provider.provider, provider.status),
     })),
     tone,
     updated: latest ? `обновлено ${dayClock(latest, now)}` : "",

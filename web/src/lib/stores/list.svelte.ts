@@ -9,7 +9,7 @@ import type {
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import type { HubEvent } from "#lib/sync/wire.js";
 import type { BookmarkChange } from "#lib/bookmarks/model.js";
-import type { LimitWindow, ProviderLimits, WindowForecast } from "./limits";
+import type { LimitWindow, ProviderLimits, ProviderStatus, WindowForecast } from "./limits";
 import { PlanModel, type PlanTask } from "./plan.svelte";
 
 /**
@@ -144,6 +144,8 @@ export class ListStore {
   groups = $state<ListSnapshot["groups"]>([]);
   counts = $state<Counts>({ all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] });
   limits = $state<ProviderLimits[]>([]);
+  /** Последний статус каждого провайдера по событиям, в том числе ещё не попавшего в полосу. */
+  providerStatus: Record<string, ProviderStatus> = {};
   presets = $state<PresetSummary[]>([]);
   /** Ревизия политики маршрутизации по событию: редактор и подписи маршрута перечитывают её. */
   routingRevision = $state<number | null>(null);
@@ -240,6 +242,9 @@ export class ListStore {
     this.groups = data.groups ?? [];
     this.counts = data.counts ?? this.counts;
     this.limits = data.limits ?? [];
+    this.providerStatus = Object.fromEntries(
+      this.limits.flatMap((item) => (item.status ? [[item.provider, item.status]] : [])),
+    );
     this.presets = data.presets ?? [];
     this.truncated = Boolean(data.truncated);
     this.plan.replace((data.plan_tasks ?? []).filter((task) => !this.deleted.has(task.orchestrator_id)));
@@ -322,7 +327,7 @@ export class ListStore {
       const next = this.limits.map((item) => ({ ...item }));
       let provider = next.find((item) => item.provider === payload.provider);
       if (!provider) {
-        provider = { provider: payload.provider, weekly_reserve_active: false };
+        provider = { provider: payload.provider, weekly_reserve_active: false, status: this.providerStatus[payload.provider] ?? null };
         next.push(provider);
       }
       const previous =
@@ -355,6 +360,13 @@ export class ListStore {
       provider.weekly_reserve_resets_at = payload.weekly_reserve_resets_at;
       if (payload.data_confidence) provider.data_confidence = payload.data_confidence;
       this.limits = next;
+      return;
+    }
+    if (kind === "provider_status_changed" && event.kind === "provider_status_changed") {
+      const { provider, status } = event.payload;
+      this.providerStatus = { ...this.providerStatus, [provider]: status };
+      // Статус приходит и для провайдера, которого нет в полосе: он ждёт его первого окна.
+      this.limits = this.limits.map((item) => (item.provider === provider ? { ...item, status } : item));
       return;
     }
     if (kind === "limits_providers_changed" && event.kind === "limits_providers_changed") {

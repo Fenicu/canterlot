@@ -12,7 +12,9 @@
         <!-- Крупно — самое тесное свежее окно: сколько осталось там, где кончится раньше всего. -->
         {#if block.lead}<p class="lead" data-window={block.lead.key}><b>{block.lead.pct}</b><span>{block.lead.caption}</span></p>
         {:else if block.stale}<p class="lead"><b>устарело</b><span>{block.seen}</span></p>{/if}
-        {#if block.status || block.markers.length}<p class="status">{#if block.status}<span class="word">{block.status}</span>{/if}{#each block.markers as marker (marker)}<span class="marker" class:reserve={marker === 'резерв недели'}>{marker}</span>{/each}</p>{/if}
+        {#if block.status || block.markers.length || block.providerStatus}<p class="status">{#if block.status}<span class="word">{block.status}</span>{/if}{#each block.markers as marker (marker)}<span class="marker" class:reserve={marker === 'резерв недели'}>{marker}</span>{/each}{#if block.providerStatus}
+          <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- внешняя страница статуса провайдера -->
+          <a class="pstatus" data-status-tone={block.providerStatus.tone} href={block.providerStatus.url} target="_blank" rel="noopener noreferrer" title={block.providerStatus.title} aria-label={block.providerStatus.title}>{block.providerStatus.company}: {block.providerStatus.text}</a>{/if}</p>{/if}
       </header>
       {#if block.empty}<p class="none">нет данных</p>
       {:else}<div class="rows">
@@ -45,6 +47,10 @@
   .status { grid-area: status; display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); margin: var(--s2) var(--s0) var(--s0); font-size: var(--fs-sm); color: var(--muted); }
   .word { font-weight: var(--weight-semibold); }
   .marker.reserve { color: var(--warning); }
+  .pstatus { font-weight: var(--weight-semibold); text-decoration: none; }
+  .pstatus[data-status-tone='warning'] { color: var(--warning); }
+  .pstatus[data-status-tone='danger'] { color: var(--danger); }
+  .pstatus:hover, .pstatus:focus-visible { text-decoration: underline; }
   /* Подпись, остаток и сброс — одна строка над полосой; колонки общие, значения окон стоят друг под другом. */
   .rows { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; column-gap: var(--s4); row-gap: var(--s6); }
   .row { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; align-items: center; row-gap: var(--s3); }

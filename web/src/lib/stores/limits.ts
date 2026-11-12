@@ -16,6 +16,20 @@ export interface LimitWindow {
   forecast?: WindowForecast | null;
 }
 
+export type ProviderStatusLevel = "ok" | "degraded" | "maintenance" | "partial_outage" | "major_outage" | "unknown";
+
+/** Публичный статус провайдера со страницы statuspage, которую опрашивает хаб. */
+export interface ProviderStatus {
+  level: ProviderStatusLevel;
+  description: string;
+  components: string[];
+  incidents: { name: string; url: string | null }[];
+  url: string;
+  fetched_at: string | null;
+  changed_at: string;
+  stale: boolean;
+}
+
 export interface ProviderLimits {
   provider: string;
   five_hour?: LimitWindow | null;
@@ -28,6 +42,8 @@ export interface ProviderLimits {
   five_hour_absent?: boolean;
   /** `estimated`, когда CodexBar вывел расход из локальных журналов, а не от провайдера. */
   data_confidence?: "exact" | "estimated";
+  /** Статус провайдера; `null`, если у провайдера нет страницы статуса или хаб её ещё не читал. */
+  status?: ProviderStatus | null;
 }
 
 export interface LimitThresholds {
@@ -246,4 +262,49 @@ export function limitView(
   else if (five.tone === "danger" || week.tone === "danger" || fable?.tone === "danger" || month?.tone === "danger") tone = "danger";
   else if (five.tone === "warning" || week.tone === "warning" || fable?.tone === "warning" || month?.tone === "warning") tone = "warning";
   return { five, week, fable, month, tone, stale: five.stale || week.stale || Boolean(fable?.stale) || Boolean(month?.stale) };
+}
+
+/** Метка статуса провайдера в полосе лимитов: слово, цвет и страница статуса. */
+export interface StatusBadge {
+  /** «сбой», «частичный сбой», «замедление» или «обслуживание». */
+  text: string;
+  tone: "warning" | "danger";
+  url: string;
+  /** Подсказка и подпись для чтения вслух: компания, слово и строка страницы. */
+  title: string;
+  /** Компания, чья страница статуса: «Anthropic», «OpenAI». */
+  company: string;
+  description: string;
+  incidents: { name: string; url: string | null }[];
+}
+
+const STATUS_WORDS: Partial<Record<ProviderStatusLevel, { text: string; tone: StatusBadge["tone"] }>> = {
+  degraded: { text: "замедление", tone: "warning" },
+  maintenance: { text: "обслуживание", tone: "warning" },
+  partial_outage: { text: "частичный сбой", tone: "danger" },
+  major_outage: { text: "сбой", tone: "danger" },
+};
+
+/** Компания, которая публикует статус провайдера. */
+export function statusCompany(provider: string): string {
+  if (provider === "claude") return "Anthropic";
+  if (provider === "codex") return "OpenAI";
+  return provider;
+}
+
+/** Метка только для заметного уровня: при `ok`, `unknown` и без статуса ничего не рисуется. */
+export function statusBadge(provider: string, status: ProviderStatus | null | undefined): StatusBadge | null {
+  if (!status) return null;
+  const word = STATUS_WORDS[status.level];
+  if (!word) return null;
+  const company = statusCompany(provider);
+  const parts = [status.components.join(", "), status.description].filter((part) => part.length > 0);
+  return {
+    ...word,
+    url: status.url,
+    company,
+    title: `${company}: ${word.text}${parts.length ? ` (${parts.join("; ")})` : ""}. Открыть страницу статуса`,
+    description: status.description,
+    incidents: status.incidents,
+  };
 }

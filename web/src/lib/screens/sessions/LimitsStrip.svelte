@@ -8,7 +8,7 @@
   import { limitPlaque, limitStrip } from './limitsText';
   import { fmt } from '#lib/format/ru.js';
   import { resetPhrase } from '#lib/format/countdown.js';
-  import type { LimitThresholds, MeterView, ProviderLimits } from '#lib/stores/limits.js';
+  import type { LimitThresholds, MeterView, ProviderLimits, StatusBadge } from '#lib/stores/limits.js';
 
   let {
     providers,
@@ -30,6 +30,7 @@
 
   const view = $derived(limitStrip(providers, now, thresholds, { prefer }));
   const shown = $derived(compact ? view.rows.slice(0, 1) : view.rows);
+  const troubled = $derived(view.rows.filter((row) => row.status));
 
   const refresher = new LimitsRefresh();
   // Новое показание приходит событием хаба: оно и закрывает ожидание.
@@ -72,6 +73,12 @@
   </span>
 {/snippet}
 
+<!-- Статус провайдера словом и цветом; ссылка ведёт на его страницу статуса в новой вкладке. -->
+{#snippet statusLink(status: StatusBadge, named: boolean)}
+  <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- внешняя страница статуса провайдера -->
+  <a class="pstatus" data-status-tone={status.tone} href={status.url} target="_blank" rel="noopener noreferrer" title={status.title} aria-label={status.title}>{named ? `${status.company}: ${status.text}` : status.text}</a>
+{/snippet}
+
 {#if providers.length > 0}
   <details class="limits" class:plaqued={plaques} data-tone={view.tone} bind:open>
     <summary>
@@ -82,6 +89,7 @@
             <span class="plaque" data-provider={row.provider}>
               <span class="plaque-text">
                 <span class="pname">{row.label}</span>
+                {#if row.status}{@render statusLink(row.status, false)}{/if}
                 {#if plaque}
                   <b class="pct" data-tone={plaque.meter.tone} class:dim={plaque.meter.stale || !plaque.meter.known}><span class="sr-only">осталось </span>{plaque.meter.text}</b>
                   <span class="tag">{plaque.tag}</span>
@@ -124,6 +132,7 @@
               {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
             {/if}
             {#if row.estimated}<span class="estimated" title="Расход выведен из локальных журналов, а не получен от провайдера">оценка</span>{/if}
+            {#if row.status}<span class="status-line">{@render statusLink(row.status, true)}</span>{/if}
           </span>
         {/each}
       </span>
@@ -136,6 +145,22 @@
         <a href={resolve('limits')}>История лимитов</a>
       </div>
       <p class="note" role="status">{refresher.note}</p>
+      {#each troubled as row (row.provider)}
+        {#if row.status}
+          <div class="status-detail" data-provider={row.provider}>
+            {@render statusLink(row.status, true)}
+            {#if row.status.description}<span class="status-description">{row.status.description}</span>{/if}
+            {#each row.status.incidents as incident, index (index)}
+              {#if incident.url}
+                <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- внешняя страница инцидента -->
+                <a class="incident" href={incident.url} target="_blank" rel="noopener noreferrer">{incident.name}</a>
+              {:else}
+                <span class="incident">{incident.name}</span>
+              {/if}
+            {/each}
+          </div>
+        {/if}
+      {/each}
     </div>
   </details>
 {/if}
@@ -239,6 +264,16 @@
   .none { grid-column: 2 / span 4; justify-self: start; color: var(--muted); white-space: nowrap; }
   .reserve { grid-column: 2 / -2; justify-self: start; }
   .estimated { grid-column: 2 / -2; justify-self: start; color: var(--muted); font-size: var(--fs-xs); }
+  .status-line { grid-column: 2 / -2; justify-self: start; min-width: 0; }
+  /* Слово статуса: цвет по тяжести, без значков. Ссылка не растягивает строку до цели касания. */
+  .pstatus { display: inline; min-height: 0; font-weight: var(--weight-semibold); white-space: nowrap; text-decoration: none; }
+  .pstatus[data-status-tone='warning'] { color: var(--warning); }
+  .pstatus[data-status-tone='danger'] { color: var(--danger); }
+  .pstatus:hover, .pstatus:focus-visible { text-decoration: underline; }
+  .status-detail { display: flex; flex-direction: column; gap: var(--s1); margin-block-start: var(--s2); color: var(--secondary); }
+  .status-detail .pstatus { align-self: flex-start; }
+  .status-detail .incident { display: block; min-height: 0; color: var(--secondary); overflow-wrap: anywhere; }
+  .status-detail a.incident { color: var(--accent-link); }
   /* В узкой раскрытой полосе сброс теряет слово «сброс», затем «через», но никогда не переносится. */
   @container (max-width: 30em) {
     .limits[open] .reset-full { display: none; }

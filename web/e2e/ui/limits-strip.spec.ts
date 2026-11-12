@@ -5,6 +5,7 @@ import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect, resizeViewport, test } from './fixtures';
+import type { ProviderStatus } from '../../src/lib/stores/limits';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const SHOTS = process.env.LIMITS_SHOTS_DIR;
@@ -822,4 +823,90 @@ test('a_provider_gone_from_the_machine_catalog_leaves_the_strip_and_returns_with
   hub.flush();
   await expect(strip.locator('.row').filter({ hasText: 'Antigravity' })).toHaveCount(1);
   await expect(strip.locator('.row').filter({ hasText: 'Antigravity' }).locator('.meter[data-window="week"]')).toContainText('75%');
+});
+
+function providerStatus(level: ProviderStatus['level']): ProviderStatus {
+  return {
+    level,
+    description: 'Partial System Outage',
+    components: ['Claude Code'],
+    incidents: [{ name: 'Elevated errors on Claude Code', url: 'https://status.claude.com/incidents/x' }],
+    url: 'https://status.claude.com',
+    fetched_at: new Date().toISOString(),
+    changed_at: new Date().toISOString(),
+    stale: false
+  };
+}
+
+/** Цвет токена в той же теме: временный элемент внутри полосы. */
+async function tokenColor(page: Page, token: string): Promise<string> {
+  return page.locator('.limits').first().evaluate((node, name) => {
+    const probe = document.createElement('span');
+    probe.style.color = `var(${name})`;
+    node.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }, token);
+}
+
+test('provider_outage_is_named_in_words_and_opens_the_status_page', async ({ page }) => {
+  await boot(page, (api) => {
+    claude(api).status = providerStatus('partial_outage');
+    const codex = api.limits.find((item) => item.provider === 'codex');
+    if (codex) codex.status = { ...providerStatus('ok'), url: 'https://status.openai.com' };
+  });
+  await page.context().route('https://status.claude.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<title>status</title>' }));
+  const plaques = page.locator('[data-limit-plaques] .plaque');
+  const label = plaques.nth(0).locator('.pstatus');
+  await expect(label).toHaveText('частичный сбой');
+  await expect(label).toHaveAttribute('data-status-tone', 'danger');
+  await expect(label).toHaveAttribute('href', 'https://status.claude.com');
+  await expect(label).toHaveAttribute('target', '_blank');
+  await expect(label).toHaveAttribute('aria-label', /^Anthropic: частичный сбой/);
+  expect(await label.evaluate((node) => getComputedStyle(node).color)).toBe(await tokenColor(page, '--danger'));
+  await expect(plaques.nth(1).locator('.pstatus')).toHaveCount(0);
+  // Касание метки открывает страницу статуса в новой вкладке и не раскрывает полосу.
+  const popup = page.waitForEvent('popup');
+  await label.click();
+  const opened = await popup;
+  expect(opened.url()).toMatch(/^https:\/\/status\.claude\.com\/?$/);
+  await opened.close();
+  expect(await page.locator('.limits').first().evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  await shot(page, 'strip-status-collapsed');
+  // Раскрытая полоса: строка провайдера с компанией и подробности под кнопкой обновления.
+  const strip = await openStrip(page);
+  await expect(strip.locator('.row').nth(0).locator('.pstatus')).toHaveText('Anthropic: частичный сбой');
+  await expect(strip.locator('.row').nth(1).locator('.pstatus')).toHaveCount(0);
+  const detail = strip.locator('.status-detail[data-provider="claude"]');
+  await expect(detail).toContainText('Partial System Outage');
+  await expect(detail.getByRole('link', { name: 'Elevated errors on Claude Code' })).toHaveAttribute('href', 'https://status.claude.com/incidents/x');
+  await expect(strip.locator('.status-detail')).toHaveCount(1);
+  await shot(page, 'strip-status-open');
+});
+
+test('provider_status_label_follows_live_events_and_hides_when_ok', async ({ page }) => {
+  const { hub } = await boot(page);
+  await expect(page.locator('.limits .pstatus')).toHaveCount(0);
+  const send = (level: ProviderStatus['level']) => {
+    hub.append('conversations', { kind: 'provider_status_changed', payload: { provider: 'codex', status: { ...providerStatus(level), url: 'https://status.openai.com' } } });
+    hub.flush();
+  };
+  send('degraded');
+  const label = page.locator('[data-limit-plaques] .plaque').nth(1).locator('.pstatus');
+  await expect(label).toHaveText('замедление');
+  await expect(label).toHaveAttribute('data-status-tone', 'warning');
+  expect(await label.evaluate((node) => getComputedStyle(node).color)).toBe(await tokenColor(page, '--warning'));
+  await expect(label).toHaveAttribute('aria-label', /^OpenAI: замедление/);
+  send('major_outage');
+  await expect(label).toHaveText('сбой');
+  await expect(label).toHaveAttribute('data-status-tone', 'danger');
+  send('ok');
+  await expect(page.locator('.limits .pstatus')).toHaveCount(0);
+  send('maintenance');
+  await expect(label).toHaveText('обслуживание');
+  send('unknown');
+  await expect(page.locator('.limits .pstatus')).toHaveCount(0);
 });

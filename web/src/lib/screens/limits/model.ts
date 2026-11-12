@@ -80,7 +80,9 @@ export function currentBlocks(providers: ProviderLimits[], now: number, cfg: Lim
       /** Все окна устарели: крупного числа нет, вместо него время последнего показания. */
       stale: windows.length > 0 && !lead,
       seen: Number.isFinite(seenAt) ? `показание ${dayClock(seenAt, now)}` : '',
-      status: lead ? TONE_WORD[lead.tone] : ''
+      status: lead ? TONE_WORD[lead.tone] : '',
+      /** Статус провайдера словом, когда он не в порядке. */
+      providerStatus: row.status
     };
   });
 }
