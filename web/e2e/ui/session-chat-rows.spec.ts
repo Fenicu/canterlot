@@ -126,7 +126,7 @@ test('desktop_rail_lists_every_filter_with_counts_and_bottom_sections', async ({
   // Значок группы — из её настроек.
   await expect(tabs.nth(3).locator('svg path')).toHaveAttribute('d', /M3 7h18v13H3Z/);
   const sections = rail.getByRole('navigation', { name: 'Разделы' });
-  await expect(sections.getByRole('link')).toHaveText(['Инструк­ции', 'Машины', 'Лимиты']);
+  await expect(sections.getByRole('link')).toHaveText(['Инструк­ции', 'Машины', 'Лимиты', 'Настройки']);
   await sections.getByRole('link', { name: 'Машины' }).click();
   await expect(page).toHaveURL(/\/machines$/);
   await expect(sections.getByRole('link', { name: 'Машины' })).toHaveAttribute('aria-current', 'page');

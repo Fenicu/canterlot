@@ -2,32 +2,31 @@ import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { bootSecondary } from './secondary-fixture';
 
-// Место строки «Последняя синхронизация» занято с первого кадра, поэтому ждать её появления
-// перед нажатиями не нужно: раздел делегирования уже стоит на месте.
+// Раздел делегирования живёт в «Лимитах и делегировании»: ждём его заголовка перед нажатиями.
 async function settled(page: Page) {
   await expect(page.locator('section[data-spawn-whitelist]').getByRole('heading', { name: 'Делегирование' })).toBeVisible({ timeout: 15_000 });
 }
 
 async function openSettings(page: Page) {
-  const booted = await bootSecondary(page, '/settings');
+  const booted = await bootSecondary(page, '/settings?c=limits');
   await settled(page);
   return booted;
 }
 
-test('sync_line_keeps_its_place_so_the_delegation_section_does_not_move', async ({ page }) => {
-  // Часы стоят до первого тика: строка синхронизации ещё пуста, но её место уже занято.
+test('sync_line_keeps_its_place_so_the_sign_in_section_does_not_move', async ({ page }) => {
+  // Часы стоят до первого тика: времени синхронизации ещё нет, но строка уже стоит на месте.
   await page.clock.install();
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=security');
   await expect(page.locator('main[data-secondary-ready]')).toBeVisible();
-  const section = page.locator('section[data-spawn-whitelist]');
-  await expect(section.getByRole('heading', { name: 'Делегирование' })).toBeVisible();
-  const line = page.getByText(/^Последняя синхронизация/);
+  const section = page.locator('[data-sign-in-settings]');
+  await expect(section).toBeVisible();
+  const value = page.locator('dl.facts dt', { hasText: 'Последняя синхронизация' }).locator('xpath=following-sibling::dd[1]');
   const before = (await section.boundingBox())!.y;
-  for (let tick = 0; tick < 30 && (await line.count()) === 0; tick += 1) {
+  for (let tick = 0; tick < 30 && (await value.textContent()) === 'ещё не было'; tick += 1) {
     await page.clock.fastForward(1000);
     await page.waitForTimeout(25);
   }
-  await expect(line).toBeVisible();
+  await expect(value).toHaveText(/^\d{1,2}:\d{2}$/);
   const after = (await section.boundingBox())!.y;
   expect(Math.abs(after - before)).toBeLessThanOrEqual(0.5);
 });

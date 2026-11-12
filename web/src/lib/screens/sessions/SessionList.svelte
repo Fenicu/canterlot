@@ -61,7 +61,7 @@
     create?: boolean;
     /** Стол: группы в полосе слева вместо чипов, разделы приложения внизу полосы. */
     rail?: boolean;
-    section?: 'sessions' | 'machines' | 'limits' | 'presets';
+    section?: 'sessions' | 'machines' | 'limits' | 'presets' | 'settings';
   } = $props();
 
   let runtime = $state<Runtime | null>(null);
@@ -422,7 +422,8 @@
     {#if menu}
       <div class="menu-slot" use:dismissable={{ onclose: () => { menu = false; }, keep: (target) => target.closest('[aria-label="Ещё"]') !== null }}>
         <Menu label="Ещё">
-          <MenuItem icon="sliders" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</MenuItem>
+          <!-- На столе настройки живут внизу полосы разделов; в «Ещё» они только без полосы. -->
+          {#if !rail}<MenuItem icon="sliders" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</MenuItem>{/if}
           <MenuItem icon={theme.effective === 'dark' ? 'sun' : 'moon'} onclick={() => { theme.toggle(); menu = false; }}>{theme.effective === 'dark' ? 'Светлая тема' : 'Тёмная тема'}</MenuItem>
           <MenuItem icon="folder" onclick={() => { groupsOpen = true; menu = false; }}>Группы</MenuItem>
           <MenuItem icon="archive" onclick={() => { tab = { kind: 'archive' }; menu = false; }}>Архив</MenuItem>

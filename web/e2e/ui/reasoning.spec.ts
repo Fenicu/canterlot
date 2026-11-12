@@ -129,7 +129,7 @@ test('the_live_window_keeps_its_height_and_folds_into_a_line_with_a_preview', as
 
 test('the_reasoning_preference_is_chosen_in_settings_and_kept_after_reload', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 700 });
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=input');
   const group = page.locator('main').getByRole('radiogroup', { name: 'Рассуждения' });
   await expect(group).toBeVisible();
   await expect(group.getByRole('radio', { name: 'Вживую', exact: true })).toBeChecked();
@@ -151,7 +151,7 @@ test('the_reasoning_preference_is_chosen_in_settings_and_kept_after_reload', asy
 });
 
 test('the_reasoning_preference_chosen_in_settings_sets_the_presentation_in_the_chat', async ({ page }) => {
-  const { api, ids } = await bootSecondary(page, '/settings');
+  const { api, ids } = await bootSecondary(page, '/settings?c=input');
   const text = '## План\n- **Проверить** модуль';
   seedBlocks(api, ids.pinned, [{ kind: 'reasoning', content: text }]);
   const group = page.locator('main').getByRole('radiogroup', { name: 'Рассуждения' });
@@ -164,7 +164,7 @@ test('the_reasoning_preference_chosen_in_settings_sets_the_presentation_in_the_c
   await expect(reasoning.locator('.preview')).toHaveText('План');
   await expect(reasoning.locator('.toggle')).toHaveAttribute('aria-expanded', 'false');
 
-  await page.goto('/settings');
+  await page.goto('/settings?c=input');
   const again = page.locator('main').getByRole('radiogroup', { name: 'Рассуждения' });
   await expect(again).toBeVisible();
   await again.getByRole('radio', { name: 'Раскрыты', exact: true }).check();

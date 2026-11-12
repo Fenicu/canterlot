@@ -214,7 +214,8 @@ test('sidebar_navigation_stays_on_one_row', async ({ page }) => {
   }
   // Стол: нижней навигации нет, разделы стоят столбцом внизу полосы групп.
   await expect(list(page).getByRole('navigation', { name: 'Навигация' })).toHaveCount(0);
-  await expect(page.getByRole('navigation', { name: 'Разделы' }).getByRole('link')).toHaveCount(3);
+  // Настройки — последний раздел, прямо под «Лимитами», в левом нижнем углу.
+  await expect(page.getByRole('navigation', { name: 'Разделы' }).getByRole('link')).toHaveText(['Инструкции', 'Машины', 'Лимиты', 'Настройки']);
   expect(await railSectionProblems(page)).toEqual([]);
   await page.setViewportSize({ width: size(page).width, height: 600 });
   await bootLongGroup(page);
@@ -356,9 +357,37 @@ test('no_screen_scrolls_the_document_or_overflows_sideways', async ({ page }) =>
   await check('/new');
   await bootChat(page);
   await check('/c');
-  for (const path of ['/machines', '/limits', '/presets', '/settings']) {
+  for (const path of ['/machines', '/limits', '/presets', '/settings', '/settings?c=limits', '/settings?c=routing', '/settings?c=security']) {
     await bootSecondary(page, path);
     await expect(page.locator('main[data-secondary-ready], main[data-presets-ready]')).toBeVisible();
     await check(path);
   }
+});
+
+test('settings_open_from_the_rail_corner_in_two_aligned_columns', async ({ page }) => {
+  await bootSessions(page);
+  if (await page.locator('[data-group-rail]').count() === 0) return;
+  const entry = page.getByRole('navigation', { name: 'Разделы' }).getByRole('link', { name: 'Настройки' });
+  const limits = page.getByRole('navigation', { name: 'Разделы' }).getByRole('link', { name: 'Лимиты' });
+  const [entryBox, limitsBox] = [(await entry.boundingBox())!, (await limits.boundingBox())!];
+  expect(entryBox.y).toBeGreaterThanOrEqual(limitsBox.y + limitsBox.height - 1);
+  await entry.click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(entry).toHaveAttribute('aria-current', 'page');
+  const main = page.locator('main[data-settings]');
+  await expect(main).toHaveAttribute('data-settings', 'appearance');
+  await expect(main.getByRole('navigation', { name: 'Разделы настроек' }).getByRole('link')).toHaveCount(6);
+  // Шапка делит колонки: «Настройки» над списком, название раздела над разделом, верхние края на одной линии.
+  const title = (await main.getByRole('heading', { name: 'Настройки', level: 1 }).boundingBox())!;
+  const head = (await main.getByRole('heading', { name: 'Внешний вид', level: 2 }).boundingBox())!;
+  const nav = (await main.getByRole('navigation', { name: 'Разделы настроек' }).boundingBox())!;
+  const content = (await main.locator('[data-settings-pane]').boundingBox())!;
+  expect(Math.abs((title.y + title.height / 2) - (head.y + head.height / 2))).toBeLessThanOrEqual(4);
+  expect(Math.abs(title.x - nav.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(head.x - content.x)).toBeLessThanOrEqual(1);
+  expect(content.x).toBeGreaterThan(nav.x + nav.width);
+  await main.getByRole('link', { name: /^Вход и безопасность/ }).click();
+  await expect(page).toHaveURL(/\/settings\?c=security$/);
+  await expect(main.getByRole('heading', { name: 'Вход и безопасность', level: 2 })).toBeVisible();
+  await expect(entry).toHaveAttribute('aria-current', 'page');
 });

@@ -76,6 +76,22 @@ test('rows_show_the_state_by_ring_dot_or_grey_and_the_owner_colour_by_a_stripe',
   expect(new Set(heights).size).toBe(1);
 });
 
+test('settings_open_from_the_more_menu_without_the_rail_and_from_the_rail_on_the_desktop', async ({ page }) => {
+  await boot(page);
+  const rail = page.locator('[data-group-rail]');
+  await page.getByRole('button', { name: 'Ещё', exact: true }).click();
+  const item = page.getByRole('menu', { name: 'Ещё' }).getByRole('menuitem', { name: 'Настройки' });
+  if (await rail.count() > 0) {
+    await expect(item).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await rail.getByRole('link', { name: 'Настройки' }).click();
+  } else {
+    await item.click();
+  }
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.locator('main[data-settings]')).toBeVisible();
+});
+
 test('group_tabs_are_a_tablist_with_arrow_navigation_and_stay_inside_the_pill', async ({ page, isMobile }) => {
   await boot(page);
   const tablist = page.getByRole('tablist', { name: 'Группы сессий' });

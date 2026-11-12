@@ -23,7 +23,7 @@ const transitions = (page: Page) => page.evaluate(() => (window as unknown as { 
 const supported = (page: Page) => page.evaluate(() => typeof document.startViewTransition === 'function');
 
 test('picker_shows_every_palette_with_a_live_preview', async ({ page }) => {
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=appearance');
   const group = page.locator('main').getByRole('radiogroup', { name: 'Тема' });
   await expect(group.getByRole('radio')).toHaveCount(PALETTES.length);
   for (const { key, name } of PALETTES) await expect(group.getByRole('radio', { name, exact: true })).toHaveValue(key);
@@ -46,7 +46,7 @@ test('picker_shows_every_palette_with_a_live_preview', async ({ page }) => {
 });
 
 test('arrow_keys_choose_a_palette_and_the_choice_survives_reload', async ({ page }) => {
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=appearance');
   const group = page.locator('main').getByRole('radiogroup', { name: 'Тема' });
   const first = group.getByRole('radio', { name: 'Стандартная', exact: true });
   await first.focus();
@@ -93,7 +93,7 @@ test('choosing_a_card_reveals_the_theme_through_a_view_transition_when_supported
       return original.call(this, keyframes, options);
     };
   });
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=appearance');
   const group = page.locator('main').getByRole('radiogroup', { name: 'Тема' });
   await group.locator('[data-option=forest]').click();
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'forest');
@@ -108,7 +108,7 @@ test('choosing_a_card_reveals_the_theme_through_a_view_transition_when_supported
 test('reduced_motion_and_motion_off_switch_instantly', async ({ page }) => {
   await countTransitions(page);
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=appearance');
   const main = page.locator('main');
   await main.locator('[data-option=midnight]').click();
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'midnight');

@@ -42,7 +42,7 @@ test('update_shows_new_entries_once_and_not_after_reload', async ({ page }) => {
 });
 
 test('history_page_lists_entries_and_the_installed_version', async ({ page }) => {
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=app');
   await page.locator('main').getByRole('link', { name: 'История изменений', exact: true }).click();
 
   await expect(page).toHaveURL(/\/changes$/);
@@ -55,10 +55,11 @@ test('history_page_lists_entries_and_the_installed_version', async ({ page }) =>
 });
 
 test('settings_show_both_versions_and_flag_a_mismatch_quietly', async ({ page }) => {
-  await bootSecondary(page, '/settings', undefined, '9.9.9');
+  await bootSecondary(page, '/settings?c=app', undefined, '9.9.9');
 
   const main = page.locator('main');
-  const versions = main.locator('.versions');
-  await expect(versions).toHaveText(`Приложение ${APP_VERSION} · хаб 9.9.9`);
+  const versions = main.locator('dl.facts');
+  await expect(versions).toContainText(`Приложение${APP_VERSION}`);
+  await expect(versions).toContainText('Хаб9.9.9');
   await expect(main.getByText(/Версии приложения и хаба различаются/)).toBeVisible();
 });

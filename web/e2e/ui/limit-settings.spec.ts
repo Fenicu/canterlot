@@ -6,7 +6,7 @@ const DANGER = 'Красным, когда осталось меньше, %';
 const RESERVE = 'Резерв владельца: оставить себе, % недели';
 
 async function open(page: import('@playwright/test').Page) {
-  const booted = await bootSecondary(page, '/settings');
+  const booted = await bootSecondary(page, '/settings?c=limits');
   const section = page.locator('section[data-limit-settings]');
   await expect(section.getByRole('heading', { name: 'Предупреждения о лимитах' })).toBeVisible({ timeout: 15_000 });
   return { ...booted, section };
@@ -90,7 +90,7 @@ test('limit_settings_fit_a_narrow_phone', async ({ page }) => {
 
 test('desktop_strip_recolors_without_reload_after_a_threshold_change', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'desktop keeps the session list mounted beside settings');
-  const { api } = await bootSecondary(page, '/settings', (api) => {
+  const { api } = await bootSecondary(page, '/settings?c=limits', (api) => {
     const claude = api.limits.find((item) => item.provider === 'claude')!;
     claude.weekly = {
       used_permille: 750,

@@ -1,4 +1,6 @@
 <script lang="ts">
+  /** Встроен в раздел экрана настроек: без своей шапки и без `main`. */
+  let { embedded = false }: { embedded?: boolean } = $props();
   import { onMount, type Component } from 'svelte';
   import { page } from '$app/state';
   import { clock } from '#lib/clock.js';
@@ -142,8 +144,8 @@
   }
 </script>
 
-<main id="main" tabindex="-1" data-secondary-ready={view ? '' : undefined} data-sign-in-settings>
-  <SecondaryHeader title="Сеансы и вход" back={{ path: '/settings', label: 'К настройкам' }} />
+<svelte:element this={embedded ? 'div' : 'main'} id={embedded ? undefined : 'main'} tabindex={embedded ? undefined : -1} data-secondary-ready={!embedded && view ? '' : undefined} data-embedded={embedded ? '' : undefined} data-sign-in-settings>
+  {#if !embedded}<SecondaryHeader title="Сеансы и вход" back={{ path: '/settings', label: 'К настройкам' }} />{/if}
   <div class="secondary-body"><div class="secondary-content">
     {#if recovered}
       <div class="banner" role="status" data-recovery-banner>
@@ -226,7 +228,7 @@
 
     <p class="note attribution"><a href="https://db-ip.com" rel="noopener noreferrer" target="_blank">IP-геолокация: DB-IP</a></p>
   </div></div>
-</main>
+</svelte:element>
 
 <Sheet open={selected !== null} title={selected ? sessionTitle(selected) : ''} routeKey="session-details" onclose={() => { selectedId = null; renameOpen = false; }}>
   {#if selected}

@@ -1,4 +1,6 @@
 <script lang="ts">
+  /** Встроен в раздел экрана настроек: без своей шапки и без `main`. */
+  let { embedded = false }: { embedded?: boolean } = $props();
   import { onMount } from 'svelte';
   import { flip } from 'svelte/animate';
   import { browserRuntime } from '#lib/app/browser.js';
@@ -193,8 +195,8 @@
 
 </script>
 
-<main id="main" tabindex="-1" data-secondary-ready={view ? '' : undefined} data-routing-editor>
-  <SecondaryHeader title="Маршрутизация" subtitle="Делегирование" back={{ path: '/settings', label: 'К настройкам' }} />
+<svelte:element this={embedded ? 'div' : 'main'} id={embedded ? undefined : 'main'} tabindex={embedded ? undefined : -1} data-secondary-ready={!embedded && view ? '' : undefined} data-embedded={embedded ? '' : undefined} data-routing-editor>
+  {#if !embedded}<SecondaryHeader title="Маршрутизация" subtitle="Делегирование" back={{ path: '/settings', label: 'К настройкам' }} />{/if}
   <div class="secondary-body"><div class="secondary-content">
     {#if loadError}<p class="error" role="alert">{loadError}</p><button type="button" onclick={load}>Повторить</button>{/if}
     {#if !draft && !loadError}<p>Загружаю политику…</p>{/if}
@@ -390,7 +392,7 @@
       <RoutingPreview types={Object.entries(saved?.task_types ?? {}).map(([key, task]) => ({ key, title: task.title }))} {titles} stale={dirty} />
     {/if}
   </div></div>
-</main>
+</svelte:element>
 
 {#if confirmingReset}
   <ConfirmDialog
@@ -449,6 +451,9 @@
   .actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s4); margin: var(--s0) calc(-1 * var(--s8)) var(--s10); padding: var(--s6) var(--s8); background: var(--bg); }
   /* С правками кнопка сохранения всегда под рукой: панель липнет к низу и закрывает отступ прокрутки. */
   .actions.sticky { position: sticky; bottom: calc(-1 * var(--s8)); z-index: 1; padding-bottom: calc(var(--s6) + var(--s8)); }
+  /* Встроенный в настройки редактор живёт без полей страницы: панель кнопок не выходит за край, её фон — фон панели настроек. */
+  [data-embedded] .actions { margin-inline: var(--s0); padding-inline: var(--s0); background: var(--settings-bg, var(--bg)); }
+  [data-embedded] .actions.sticky { bottom: calc(-1 * var(--s12)); padding-bottom: calc(var(--s6) + var(--s12)); }
   .actions .error, .actions .note { flex-basis: 100%; margin: var(--s0); }
   .actions :global(.reason) { margin-block: var(--s0); }
   @media (min-width: 700px) { .add { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; } .grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .levels, .exclude, .nudge { grid-column: 1 / -1; } }

@@ -141,7 +141,7 @@ test('no_suggestion_for_other_harnesses_or_while_a_turn_runs', async ({ page }) 
 test('turning_the_setting_off_hides_the_suggestion', async ({ page }) => {
   const { api, id, area } = await boot(page);
   await expect(area).toHaveAttribute('placeholder', SUGGESTION);
-  await page.goto('/settings');
+  await page.goto('/settings?c=input');
   const section = page.locator('[data-prompt-suggestions]');
   await expect(section.getByRole('heading', { name: 'Подсказки следующего сообщения' })).toBeVisible({ timeout: 15_000 });
   await section.getByText('Выключены').click();

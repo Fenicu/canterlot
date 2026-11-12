@@ -107,8 +107,9 @@
   .card { display: grid; gap: var(--s4); padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
   .field { display: grid; gap: var(--s2); }
   .field span { color: var(--secondary); font-size: var(--fs-meta); }
-  .field input { min-height: var(--target); padding: var(--s5) var(--s8); background: var(--raised); color: inherit; border: 0; border-radius: var(--radius); font-size: var(--fs-input); }
+  /* Проценты — короткие числа: поле узкое, а не во всю карточку. */
+  .field input { width: 100%; max-width: var(--gauge-width); box-sizing: border-box; min-height: var(--target); padding: var(--s5) var(--s8); background: var(--raised); color: inherit; border: 0; border-radius: var(--radius); font-size: var(--fs-input); }
   .field input[aria-invalid='true'] { outline: var(--focus-width) solid var(--danger); }
-  .actions { display: grid; gap: var(--s4); }
+  .actions { display: grid; justify-items: start; gap: var(--s4); }
   .actions :global(.reason) { margin-block: var(--s0); }
 </style>

@@ -66,6 +66,9 @@
   --phone-max: 480px;
   --reading-max: 720px;
   --index-max: 960px;
+  /* Настройки на столе: колонка разделов и наименьшая ширина кнопки выхода. */
+  --settings-nav: 264px;
+  --settings-button: 220px;
   --preview-height: 204px;
   --request-card-max: min(60dvh, calc(100dvh - 14rem));
   --sheet-context: 64px;
@@ -1708,5 +1711,6 @@
     --preview-height: calc(204px * var(--ui-scale)); --sheet-context: calc(64px * var(--ui-scale));
     --chart-height: calc(104px * var(--ui-scale)); --gauge-width: calc(112px * var(--ui-scale));
     --lane-width: calc(410px * var(--ui-scale)); --rail-width: calc(78px * var(--ui-scale));
+    --settings-nav: calc(264px * var(--ui-scale)); --settings-button: calc(220px * var(--ui-scale));
   }
 }

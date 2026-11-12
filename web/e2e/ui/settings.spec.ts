@@ -3,12 +3,23 @@ import { bootSecondary } from './secondary-fixture';
 import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/http-playwright';
 import { PALETTES } from '../../src/lib/palettes';
 
-test('settings_screen_shows_login_connection_theme_enter_install_and_signout', async ({ page, browserName }) => {
-  await bootSecondary(page, '/settings');
+test('settings_categories_hold_login_connection_theme_enter_install_and_signout', async ({ page, browserName }) => {
+  await bootSecondary(page, '/settings?c=security');
   const main = page.locator('main');
   await expect(main.getByText('owner', { exact: true })).toBeVisible();
-  await expect(main.getByText(/Последняя синхронизация/)).toBeVisible();
+  await expect(main.getByText('Последняя синхронизация')).toBeVisible();
   await expect(main.getByText('Подключено', { exact: true })).toBeVisible();
+  // Сеансы и ключи входа встроены в раздел, отдельная страница не нужна.
+  await expect(main.locator('[data-sign-in-settings][data-embedded]')).toBeVisible();
+  await expect(main.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible();
+  // Обе кнопки выхода одной ширины.
+  const clear = (await main.getByRole('button', { name: 'Очистить данные на устройстве' }).boundingBox())!;
+  const out = (await main.getByRole('button', { name: 'Выйти', exact: true }).boundingBox())!;
+  expect(Math.abs(clear.width - out.width)).toBeLessThanOrEqual(1);
+  await expect(main.getByText('Выход завершает этот сеанс на хабе и удаляет данные на устройстве')).toBeVisible();
+  await expect(main.getByText(/Authelia/)).toHaveCount(0);
+
+  await page.goto('/settings?c=appearance');
   await main.getByRole('radio', { name: 'Светлый', exact: true }).check();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expect(page.locator('html')).toHaveAttribute('data-palette', 'standard');
@@ -16,29 +27,53 @@ test('settings_screen_shows_login_connection_theme_enter_install_and_signout', a
   await expect(page.locator('html')).toHaveAttribute('data-motion', 'off');
   await page.reload();
   await expect(page.locator('main').getByRole('radio', { name: 'Выкл', exact: true })).toBeChecked();
+
+  await page.goto('/settings?c=input');
   await expect(main.getByRole('radiogroup', { name: 'Enter на клавиатуре' })).toBeVisible();
+  await expect(main.getByRole('radiogroup', { name: 'Подсказки следующего сообщения' })).toBeVisible();
+  await expect(main.getByRole('radiogroup', { name: 'Рассуждения' })).toBeVisible();
+
+  await page.goto('/settings?c=app');
+  await expect(main.getByText(/^установлена текущая версия|^доступна новая версия/)).toBeVisible();
   if (browserName === 'chromium') {
     await page.evaluate(() => { const event = new Event('beforeinstallprompt'); Object.assign(event, { prompt: async () => {}, userChoice: Promise.resolve({ outcome: 'accepted' }) }); window.dispatchEvent(event); });
     await expect(main.getByRole('button', { name: 'Установить приложение' })).toBeVisible();
     await main.getByRole('button', { name: 'Установить приложение' }).click();
     await expect(main.getByRole('button', { name: 'Установить приложение' })).toHaveCount(0);
   }
-  await expect(main.getByRole('button', { name: 'Выйти', exact: true })).toBeVisible();
-  // Обе кнопки раздела во всю ширину, а подпись после двоеточия со строчной.
-  const clear = (await main.getByRole('button', { name: 'Очистить данные на устройстве' }).boundingBox())!;
-  const out = (await main.getByRole('button', { name: 'Выйти', exact: true }).boundingBox())!;
-  expect(Math.abs(clear.width - out.width)).toBeLessThanOrEqual(1);
-  await expect(main.getByText(/^Обновление: [а-яё]/)).toBeVisible();
-  await expect(main.getByText('Выход завершает этот сеанс на хабе и удаляет данные на устройстве')).toBeVisible();
-  await expect(main.getByRole('link', { name: 'Сеансы и вход' })).toHaveAttribute('href', '/settings/sign-in');
-  await expect(main.getByText(/Authelia/)).toHaveCount(0);
+});
+
+test('settings_list_drills_into_a_category_and_back_on_the_phone', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'на столе разделы стоят колонкой рядом с содержимым: это проверяет desktop-layout');
+  await bootSecondary(page, '/settings');
+  const main = page.locator('main');
+  const nav = main.getByRole('navigation', { name: 'Разделы настроек' });
+  await expect(nav.getByRole('link')).toHaveText([/^Внешний вид/, /^Ввод и чтение/, /^Лимиты и делегирование/, /^Маршрутизация/, /^Вход и безопасность/, /^Приложение/]);
+  await expect(main.locator('[data-settings-pane]')).toHaveCount(0);
+  await nav.getByRole('link', { name: /^Ввод и чтение/ }).click();
+  await expect(page).toHaveURL(/\/settings\?c=input$/);
+  await expect(page.getByRole('heading', { name: 'Ввод и чтение', level: 1 })).toBeVisible();
+  await expect(main.getByRole('radiogroup', { name: 'Enter на клавиатуре' })).toBeVisible();
+  await page.getByRole('link', { name: 'К настройкам' }).click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(nav).toBeVisible();
+});
+
+test('old_routing_and_sign_in_addresses_still_open_their_pages', async ({ page }) => {
+  await bootSecondary(page, '/settings/routing');
+  await expect(page.locator('main[data-routing-editor]')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'К настройкам' })).toHaveAttribute('href', '/settings');
+  await page.goto('/settings?c=routing');
+  await expect(page.locator('main [data-routing-editor][data-embedded]')).toBeVisible();
+  await page.goto('/settings?c=limits');
+  await expect(page.locator('main [data-role="routing-link"]')).toHaveAttribute('href', '/settings?c=routing');
 });
 
 test('chosen_palette_and_mode_stand_out_in_every_palette_and_mode', async ({ page }) => {
   // Тридцать смен темы: проверяется контраст, а не анимация смены, поэтому без перехода вида.
   test.setTimeout(60_000);
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=appearance');
   const main = page.locator('main');
   const palettes = main.getByRole('radiogroup', { name: 'Тема' });
   const modes = main.getByRole('radiogroup', { name: 'Режим' });
@@ -67,7 +102,7 @@ test('chosen_palette_and_mode_stand_out_in_every_palette_and_mode', async ({ pag
 });
 
 test('palette_and_mode_apply_before_paint_and_survive_reload', async ({ page }) => {
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=appearance');
   const main = page.locator('main');
   await main.getByRole('radio', { name: 'Сепия', exact: true }).check();
   await main.getByRole('radio', { name: 'Светлый', exact: true }).check();
@@ -90,7 +125,7 @@ test('palette_and_mode_apply_before_paint_and_survive_reload', async ({ page }) 
 });
 
 test('header_toggle_keeps_the_palette', async ({ page }) => {
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=appearance');
   const main = page.locator('main');
   await main.getByRole('radio', { name: 'Лес', exact: true }).check();
   await main.getByRole('radio', { name: 'Тёмный', exact: true }).check();
@@ -106,13 +141,13 @@ test('header_toggle_keeps_the_palette', async ({ page }) => {
 });
 
 test('enter_preference_changes_composer_behaviour', async ({ page }) => {
-  const { ids } = await bootSecondary(page, '/settings');
+  const { ids } = await bootSecondary(page, '/settings?c=input');
   await page.locator('main').getByRole('radio', { name: 'Новая строка', exact: true }).check();
   await page.goto(`/c/${ids.pinned}`);
   const input = page.getByRole('textbox', { name: 'Сообщение', exact: true });
   await input.fill('Первая'); await input.press('Enter');
   await expect(input).toHaveValue('Первая\n');
-  await page.goto('/settings');
+  await page.goto('/settings?c=input');
   await page.locator('main').getByRole('radio', { name: 'Отправка', exact: true }).check();
   await page.goto(`/c/${ids.pinned}`);
   await input.fill('Отправить');
@@ -122,10 +157,10 @@ test('enter_preference_changes_composer_behaviour', async ({ page }) => {
 });
 
 test('sign_out_purges_local_data_and_closes_the_socket', async ({ page }) => {
-  const { hub, ids } = await bootSecondary(page, '/settings');
+  const { hub, ids } = await bootSecondary(page, '/settings?c=security');
   await page.goto(`/c/${ids.pinned}`);
   await page.getByRole('textbox', { name: 'Сообщение', exact: true }).fill('Приватный черновик');
-  await page.goto('/settings');
+  await page.goto('/settings?c=security');
   await expect.poll(() => hub.activeConnections).toBeGreaterThan(0);
   await page.locator('main').getByRole('button', { name: 'Выйти', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toBeVisible();
@@ -138,7 +173,7 @@ test('sign_out_purges_local_data_and_closes_the_socket', async ({ page }) => {
 });
 
 test('sign_out_closes_the_hub_session_first_then_purges_and_shows_sign_in', async ({ page }) => {
-  const { hub } = await bootSecondary(page, '/settings');
+  const { hub } = await bootSecondary(page, '/settings?c=security');
   const order: string[] = [];
   page.on('request', (request) => { if (request.url().endsWith('/api/v1/auth/logout')) order.push('logout'); });
   await page.exposeFunction('__purged', () => order.push('purge'));
@@ -152,7 +187,7 @@ test('sign_out_closes_the_hub_session_first_then_purges_and_shows_sign_in', asyn
 });
 
 test('failed_logout_still_purges_and_says_the_server_session_is_alive', async ({ page }) => {
-  const { hub } = await bootSecondary(page, '/settings');
+  const { hub } = await bootSecondary(page, '/settings?c=security');
   hub.auth.failures.set('POST /logout', { status: 503, code: 'db_unavailable' });
   await page.locator('main').getByRole('button', { name: 'Выйти', exact: true }).click();
   await expect(page.getByText('Данные на устройстве удалены', { exact: true })).toBeVisible();
@@ -161,7 +196,7 @@ test('failed_logout_still_purges_and_says_the_server_session_is_alive', async ({
 });
 
 test('clearing_data_in_one_window_reloads_the_other_and_keeps_only_the_shared_draft', async ({ page, context }) => {
-  const { hub, api, ids } = await bootSecondary(page, '/settings');
+  const { hub, api, ids } = await bootSecondary(page, '/settings?c=security');
   const other = await context.newPage();
   await installChatRoutes(other, hub, api, ids.pinned);
   await seedSecondaryScreens(other, api, ids);
@@ -184,7 +219,7 @@ test('clearing_data_in_one_window_reloads_the_other_and_keeps_only_the_shared_dr
 });
 
 test('clearing_local_data_does_not_claim_the_session_expired', async ({ page }) => {
-  await bootSecondary(page, '/settings');
+  await bootSecondary(page, '/settings?c=security');
   await page.locator('main').getByRole('button', { name: 'Очистить данные на устройстве', exact: true }).click();
   await expect(page.getByText('Данные на устройстве удалены', { exact: true })).toBeVisible();
   await page.waitForTimeout(1500);

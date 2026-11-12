@@ -1,7 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
   import BottomNav from '#lib/ui/BottomNav.svelte';
-  let { current, create = true }: { current: 'sessions' | 'machines' | 'limits' | 'presets'; create?: boolean } = $props();
+  let { current, create = true }: { current: 'sessions' | 'machines' | 'limits' | 'presets' | 'settings'; create?: boolean } = $props();
 </script>
 
 <div class="dock">

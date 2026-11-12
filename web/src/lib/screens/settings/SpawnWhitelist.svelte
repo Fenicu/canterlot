@@ -11,6 +11,8 @@
     removeEntry, sameEntries, type CatalogHarness, type WhitelistEntry, type WhitelistView
   } from './spawnWhitelist.js';
 
+  /** Адрес маршрутизации: на экране настроек это её раздел, отдельная страница остаётся для старых ссылок. */
+  let { routing = resolve('/settings/routing') }: { routing?: string } = $props();
   let view = $state<WhitelistView | null>(null);
   let draft = $state<WhitelistEntry[]>([]);
   let catalog = $state<CatalogHarness[]>([]);
@@ -86,7 +88,9 @@
   {:else if !error}
     <p>Загружаю список делегирования…</p>
   {/if}
-  <p class="routing"><a href={resolve('/settings/routing')} data-role="routing-link">Маршрутизация</a><span class="note">Кого брать для каждого типа задачи, пороги лимитов и проверка выбора</span></p>
+  <!-- Адрес приходит уже собранным через resolve: отдельная страница или раздел настроек. -->
+  <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+  <p class="routing"><a href={routing} data-role="routing-link">Маршрутизация</a><span class="note">Кого брать для каждого типа задачи, пороги лимитов и проверка выбора</span></p>
 </section>
 
 <style>
@@ -96,7 +100,9 @@
   .name { flex: 1 1 var(--s0); min-width: var(--s0); display: grid; }
   .model { color: var(--muted); font-size: var(--fs-meta); }
   .add { display: grid; gap: var(--s4); margin-block: var(--s4); }
-  .actions { display: grid; gap: var(--s4); }
+  /* Кнопки по своей ширине, а не во всю строку: подпись причины встаёт под своей кнопкой. */
+  .add > :global(button) { justify-self: start; }
+  .actions { display: grid; justify-items: start; gap: var(--s4); }
   .actions :global(.reason) { margin-block: var(--s0); }
   .routing { display: grid; gap: var(--s1); margin-top: var(--s8); }
   .routing a { display: inline-flex; align-items: center; min-height: var(--target); }

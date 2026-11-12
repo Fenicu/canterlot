@@ -19,7 +19,7 @@
     icons: Record<string, string | null | undefined>;
     counted?: boolean;
     /** Открытый раздел приложения: подсвечивает его внизу полосы. */
-    section: 'sessions' | 'machines' | 'limits' | 'presets';
+    section: 'sessions' | 'machines' | 'limits' | 'presets' | 'settings';
     onselect: (tab: Tab) => void;
   } = $props();
 
@@ -77,6 +77,8 @@
     <a class="item" href={resolve('/presets')} aria-current={section === 'presets' ? 'page' : undefined}><span class="icon"><Icon name="doc" /></span><span class="label">Инструк&shy;ции</span></a>
     <a class="item" href={resolve('/machines')} aria-current={section === 'machines' ? 'page' : undefined}><span class="icon"><Icon name="server" /></span><span class="label">Машины</span></a>
     <a class="item" href={resolve('/limits')} aria-current={section === 'limits' ? 'page' : undefined}><span class="icon"><Icon name="gauge" /></span><span class="label">Лимиты</span></a>
+    <!-- Настройки — последними, под «Лимитами»: постоянный вход в левом нижнем углу стола. -->
+    <a class="item" href={resolve('/settings')} aria-current={section === 'settings' ? 'page' : undefined} data-rail-settings><span class="icon"><Icon name="sliders" /></span><span class="label">Настройки</span></a>
   </nav>
 </div>
 
