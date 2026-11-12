@@ -89,6 +89,26 @@
   --bar-46: 46%; --bar-51: 51%; --bar-56: 56%; --bar-63: 63%;
   --bar-68: 68%; --bar-74: 74%; --bar-81: 81%; --bar-88: 88%;
   --bar-90: 90%; --bar-95: 95%; --bar-96: 96%;
+  /* Аватары вендоров моделей: фирменные цвета, одни для всех палитр и тем. */
+  --vendor-anthropic: #d97757;
+  --vendor-openai: #10a37f;
+  --vendor-mimo: #ff6900;
+  --vendor-minimax: #e2365f;
+  --vendor-gemini: #3186ff;
+  --vendor-dark: #26262b;
+  --vendor-light: #eef1f8;
+  --vendor-mark: #ffffff;
+  --vendor-ink: #16161a;
+  --vendor-deepseek: #4d6bfe;
+  --vendor-meta: #0866ff;
+  --vendor-qwen: #615ced;
+  --vendor-mistral: #fa500f;
+  --avatar: 46px;
+  --avatar-phone: 52px;
+  --avatar-small: 30px;
+  --avatar-dot: 13px;
+  --avatar-dot-small: 10px;
+  --rail-width: 78px;
 }
 [data-palette=aquamarine][data-theme=dark] {
   color-scheme: dark;
