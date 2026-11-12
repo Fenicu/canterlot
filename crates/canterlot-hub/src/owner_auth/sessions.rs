@@ -613,7 +613,8 @@ pub async fn remember_device(
 
 /// Уборка: полные отозванные строки старше 30 дней уходят в надгробия, надгробия живут
 /// 400 дней; журнал неудач сутки; корзины без неудач и замка сутки; просроченные ссылки
-/// восстановления; устройства, не встречавшиеся 400 дней.
+/// восстановления, состояния обрядов WebAuthn и коды QR; устройства, не встречавшиеся
+/// 400 дней.
 pub async fn purge(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
     let mut removed = 0;
@@ -633,6 +634,9 @@ pub async fn purge(pool: &PgPool) -> Result<u64, sqlx::Error> {
            and coalesce(locked_until,'-infinity') < now()",
         "delete from owner_recovery_tokens where expires_at < now()",
         "delete from owner_devices where last_used_at < now()-interval '400 days'",
+        "delete from owner_webauthn_challenges where expires_at < now()",
+        // Строки QR ещё минуту после срока считают запуски корзины.
+        "delete from owner_qr_logins where expires_at < now()-interval '10 minutes'",
     ] {
         removed += sqlx::query(sql).execute(&mut *tx).await?.rows_affected();
     }

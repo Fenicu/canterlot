@@ -62,8 +62,8 @@ pub struct MethodsView {
 async fn methods(State(state): State<AppState>) -> Result<Json<MethodsView>, ApiError> {
     Ok(Json(MethodsView {
         password: password::exists(&state.pool, state.installation.owner_id).await?,
-        // Ключи доступа добавляет часть 2.
-        passkey: false,
+        passkey: state.webauthn.is_some()
+            && owner_auth::passkeys::exists(&state.pool, state.installation.owner_id).await?,
     }))
 }
 
@@ -621,8 +621,8 @@ pub struct FreshView {
     pub fresh_until: DateTime<Utc>,
 }
 
-/// Повторный вход паролем: сеанс становится свежим на 10 минут. Ключ доступа для того
-/// же добавляет часть 2 (`/reauth/passkey/*`, тоже через `sessions::mark_fresh`).
+/// Повторный вход паролем: сеанс становится свежим на 10 минут. То же ключом доступа —
+/// `/reauth/passkey/*` (`http::signin_passkeys`).
 #[utoipa::path(post, path = "/api/v1/auth/reauth/password", tag = "auth", request_body = ReauthPassword, responses(
     (status = 200, description = "Сеанс свеж", body = FreshView),
     (status = 403, description = "wrong_password", body = ErrorEnvelope),

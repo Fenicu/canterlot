@@ -89,6 +89,9 @@ error_codes! {
     ReauthRequired => "reauth_required", 403, Auth, AfterCondition, "Подтвердите вход паролем или ключом доступа";
     WrongPassword => "wrong_password", 403, Auth, Never, "Неверный пароль";
     QrExpired => "qr_expired", 410, Auth, Never, "Код входа устарел или уже использован";
+    PasskeyRejected => "passkey_rejected", 403, Auth, Never, "Ключ доступа не подошёл";
+    NoPasskeys => "no_passkeys", 409, Auth, Never, "Ключи доступа не добавлены";
+    PasskeysUnavailable => "passkeys_unavailable", 409, Auth, Never, "Ключи доступа недоступны для адреса хаба";
     OriginRejected => "origin_rejected", 403, Auth, Never, "Запрос отклонён: недопустимый источник";
     InvalidRequest => "invalid_request", 400, Browser, Never, "Некорректный запрос";
     InvalidOffset => "invalid_offset", 400, Browser, Never, "Недопустимое смещение";

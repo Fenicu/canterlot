@@ -564,6 +564,18 @@ async fn auth_sessions_hourly_maintenance_purges_auth_rows(pool: PgPool) {
         "insert into auth_buckets(key,failures,last_failure_at) values('ip:192.0.2.1',3,now()-interval '2 days')",
         "insert into owner_recovery_tokens(owner_id,token_sha256,expires_at)
            select owner_id,sha256('x'::bytea),now()-interval '1 minute' from installation",
+        "insert into owner_webauthn_challenges(id,owner_id,kind,bucket,state,expires_at)
+           select gen_random_uuid(),owner_id,'sign_in','ip:192.0.2.1','{}',now()-interval '1 second'
+           from installation",
+        "insert into owner_webauthn_challenges(id,owner_id,kind,bucket,state,expires_at)
+           select gen_random_uuid(),owner_id,'sign_in','ip:192.0.2.1','{}',now()+interval '1 minute'
+           from installation",
+        "insert into owner_qr_logins(id,owner_id,secret_sha256,poll_sha256,bucket,expires_at)
+           select gen_random_uuid(),owner_id,sha256('a'::bytea),sha256('b'::bytea),'ip:192.0.2.1',
+                  now()-interval '11 minutes' from installation",
+        "insert into owner_qr_logins(id,owner_id,secret_sha256,poll_sha256,bucket,expires_at)
+           select gen_random_uuid(),owner_id,sha256('c'::bytea),sha256('d'::bytea),'ip:192.0.2.1',
+                  now()-interval '1 minute' from installation",
     ] {
         sqlx::query(sql).execute(&hub.pool).await.unwrap();
     }
@@ -574,6 +586,8 @@ async fn auth_sessions_hourly_maintenance_purges_auth_rows(pool: PgPool) {
         ("auth_failures", 0),
         ("auth_buckets", 0),
         ("owner_recovery_tokens", 0),
+        ("owner_webauthn_challenges", 1),
+        ("owner_qr_logins", 1),
     ] {
         let count: i64 =
             sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
