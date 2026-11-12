@@ -63,6 +63,22 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Неверный пароль",
   },
+  qr_expired: {
+    action: "none",
+    message: "Код входа устарел или уже использован",
+  },
+  passkey_rejected: {
+    action: "none",
+    message: "Ключ доступа не подошёл",
+  },
+  no_passkeys: {
+    action: "none",
+    message: "Ключи доступа не добавлены",
+  },
+  passkeys_unavailable: {
+    action: "none",
+    message: "Ключи доступа недоступны для адреса хаба",
+  },
   origin_rejected: {
     action: "none",
     message:

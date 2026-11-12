@@ -21,6 +21,10 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "session_expired",
   "reauth_required",
   "wrong_password",
+  "qr_expired",
+  "passkey_rejected",
+  "no_passkeys",
+  "passkeys_unavailable",
   "origin_rejected",
   "invalid_request",
   "invalid_offset",
@@ -121,7 +125,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(68);
+    expect(ALL_ERROR_CODES.length).toBe(72);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(
