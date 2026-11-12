@@ -110,7 +110,8 @@ pub struct QrPollView {
     /// `expired` также значит «код не найден» и «сеанс уже выдан другому опросу»:
     /// устройство начинает заново.
     pub state: QrState,
-    /// Только при `approved`: новый сеанс, cookie в `Set-Cookie`.
+    /// Только при `approved`: новый сеанс, cookie сеанса в `Set-Cookie` (cookie известного
+    /// устройства вход по QR не получает).
     pub session: Option<OwnerSessionView>,
 }
 
@@ -142,12 +143,11 @@ async fn auth_notice(
 /// шины (работает между процессами). Опрос, увидевший `approved`, создаёт сеанс; из
 /// двух одновременных его получает ровно один, второй видит `expired`.
 #[utoipa::path(post, path = "/api/v1/auth/qr/poll", tag = "auth", request_body = QrPollBody, responses(
-    (status = 200, description = "Состояние кода; при approved — Set-Cookie сеанса и устройства", body = QrPollView),
+    (status = 200, description = "Состояние кода; при approved — Set-Cookie сеанса", body = QrPollView),
     (status = 429, description = "too_many_attempts: больше 8 опросов ждут одновременно", body = ErrorEnvelope),
 ))]
 async fn qr_poll(
     State(state): State<AppState>,
-    client: Client,
     ApiJson(body): ApiJson<QrPollBody>,
 ) -> Result<Response, ApiError> {
     let Ok(_permit) = state.qr_polls.clone().try_acquire_owned() else {
@@ -164,7 +164,8 @@ async fn qr_poll(
             else {
                 return Ok(poll_view(QrState::Expired));
             };
-            let (session, cookies) = issue(&state, &client, &created, &info, Method::Qr).await?;
+            // Сеанс по QR не получает cookie известного устройства: он не доказал пароль.
+            let (session, cookies) = issue(&state, &created, &info, Method::Qr).await?;
             let view = Json(QrPollView {
                 state: QrState::Approved,
                 session: Some(session),
@@ -262,9 +263,11 @@ async fn qr_inspect(
 }
 
 /// Разрешить вход: новое устройство получит сеанс с `approved_by` = текущий сеанс.
-/// Такой сеанс несвеж и завершается вместе с подтвердившим (каскад).
+/// Такой сеанс несвеж и завершается вместе с подтвердившим (каскад). Один сеанс держит
+/// не больше 5 живых или ждущих выдачи входов, подтверждённых им.
 #[utoipa::path(post, path = "/api/v1/auth/qr/approve", tag = "auth", request_body = QrSecretBody, responses(
     (status = 200, description = "Вход разрешён", body = QrDecisionView),
+    (status = 409, description = "qr_approvals_exhausted: этот сеанс уже подтвердил 5 живых входов", body = ErrorEnvelope),
     (status = 410, description = "qr_expired", body = ErrorEnvelope),
 ))]
 async fn qr_approve(
@@ -273,8 +276,12 @@ async fn qr_approve(
     session: CurrentSession,
     ApiJson(body): ApiJson<QrSecretBody>,
 ) -> Result<Json<QrDecisionView>, ApiError> {
-    if !qr::decide(&state.pool, owner.owner_id, &body.secret, Some(session.id)).await? {
-        return Err(expired());
+    match qr::decide(&state.pool, owner.owner_id, &body.secret, Some(session.id)).await? {
+        qr::Decision::Done => {}
+        qr::Decision::Gone => return Err(expired()),
+        qr::Decision::Exhausted => {
+            return Err(ApiError::new(ErrorCode::QrApprovalsExhausted));
+        }
     }
     tracing::info!(kind = "qr_approved", session_id = %session.id, "QR sign-in approved");
     Ok(Json(QrDecisionView {
@@ -291,7 +298,7 @@ async fn qr_deny(
     owner: Owner,
     ApiJson(body): ApiJson<QrSecretBody>,
 ) -> Result<Json<QrDecisionView>, ApiError> {
-    if !qr::decide(&state.pool, owner.owner_id, &body.secret, None).await? {
+    if qr::decide(&state.pool, owner.owner_id, &body.secret, None).await? != qr::Decision::Done {
         return Err(expired());
     }
     tracing::info!(kind = "qr_denied", "QR sign-in denied");

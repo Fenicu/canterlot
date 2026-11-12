@@ -67,6 +67,10 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Код входа устарел или уже использован",
   },
+  qr_approvals_exhausted: {
+    action: "none",
+    message: "Этот сеанс уже подтвердил 5 входов по QR",
+  },
   passkey_rejected: {
     action: "none",
     message: "Ключ доступа не подошёл",

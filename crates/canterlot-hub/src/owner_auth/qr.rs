@@ -27,6 +27,9 @@ pub const STARTS_PER_MINUTE: i64 = 10;
 pub const MAX_PENDING: i64 = 20;
 /// Одновременных опросов в процессе.
 pub const MAX_POLLS: usize = 8;
+/// Живых сеансов, вход которых подтвердил один сеанс (вместе с ещё не забранными
+/// одобрениями): украденный несвежий сеанс не плодит сеансы без счёта.
+pub const MAX_APPROVED_PER_SESSION: i64 = 5;
 /// Долгий опрос ждёт не дольше.
 pub const POLL_WAIT: Duration = Duration::from_secs(25);
 /// Перепроверка строки без уведомления шины.
@@ -167,6 +170,8 @@ struct Approved {
 /// Выдача одобренного входа: ровно один опрос переводит строку в `delivered` и создаёт
 /// сеанс (`qr`, `approved_by`, несвежий) в той же транзакции. Подтвердивший сеанс должен
 /// быть жив: блокировка `owner_sessions_limit` упорядочивает выдачу с каскадным отзывом.
+/// Выдачи нет, если у подтвердившего уже 5 живых таких сеансов или у владельца 50 живых
+/// сеансов: вход по QR никого не вытесняет.
 pub async fn deliver(
     pool: &PgPool,
     owner_id: Uuid,
@@ -182,11 +187,17 @@ pub async fn deliver(
                and approved_at>now()-$3*interval '1 second'
                and exists(select 1 from owner_sessions s
                           where s.id=q.approved_by and s.revoked_at is null)
+               and (select count(*) from owner_sessions s
+                    where s.approved_by=q.approved_by and s.revoked_at is null) < $4
+               and (select count(*) from owner_sessions s
+                    where s.owner_id=$2 and s.revoked_at is null) < $5
              returning approved_by,host(ip) as ip,user_agent,client_hints,location",
     )
     .bind(id)
     .bind(owner_id)
     .bind(DELIVERY_SECS as f64)
+    .bind(MAX_APPROVED_PER_SESSION)
+    .bind(sessions::MAX_LIVE)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(Approved {
@@ -256,15 +267,40 @@ pub async fn inspect(
     Ok(found)
 }
 
-/// Одобрить (`approver`) или отклонить живой запрос. `false`: кода нет, истёк или решён.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Done,
+    /// Кода нет, он истёк или уже решён.
+    Gone,
+    /// У подтверждающего уже `MAX_APPROVED_PER_SESSION` живых или ждущих выдачи входов.
+    Exhausted,
+}
+
+/// Одобрить (`approver`) или отклонить живой запрос.
 pub async fn decide(
     pool: &PgPool,
     owner_id: Uuid,
     secret: &str,
     approver: Option<Uuid>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Decision, sqlx::Error> {
     if !token_shape_ok(secret) {
-        return Ok(false);
+        return Ok(Decision::Gone);
+    }
+    if let Some(approver) = approver {
+        let approved: i64 = sqlx::query_scalar(
+            "select (select count(*) from owner_sessions
+                     where approved_by=$1 and revoked_at is null)
+                  + (select count(*) from owner_qr_logins
+                     where approved_by=$1 and state='approved'
+                       and approved_at>now()-$2*interval '1 second')",
+        )
+        .bind(approver)
+        .bind(DELIVERY_SECS as f64)
+        .fetch_one(pool)
+        .await?;
+        if approved >= MAX_APPROVED_PER_SESSION {
+            return Ok(Decision::Exhausted);
+        }
     }
     let decided = sqlx::query(
         "update owner_qr_logins set
@@ -280,8 +316,9 @@ pub async fn decide(
     .await?
     .rows_affected()
         > 0;
-    if decided {
-        super::notify_changed(pool, BUS_KIND).await;
+    if !decided {
+        return Ok(Decision::Gone);
     }
-    Ok(decided)
+    super::notify_changed(pool, BUS_KIND).await;
+    Ok(Decision::Done)
 }

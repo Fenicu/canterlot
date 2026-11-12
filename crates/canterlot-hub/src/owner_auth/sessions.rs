@@ -14,7 +14,8 @@ use super::{
     token_shape_ok,
 };
 
-/// Не больше 50 живых сеансов: 51-й вытесняет давнее всех виденный.
+/// Не больше 50 живых сеансов: 51-й вытесняет давнее всех виденный. Вход по QR никого
+/// не вытесняет: при 50 живых его выдача отклоняется (`qr::deliver`).
 pub const MAX_LIVE: i64 = 50;
 pub const DEFAULT_IDLE_DAYS: i32 = 90;
 pub const IDLE_CHOICES: [i32; 5] = [7, 30, 90, 180, 365];
@@ -114,8 +115,30 @@ pub async fn create(
     Ok(created)
 }
 
+/// Вход паролем, ключом или ссылкой: сеанс и известное устройство одной транзакцией.
+/// Действующая cookie устройства `existing` сохраняется и переносится на новый сеанс,
+/// иначе выдаётся новая. Возвращает сеанс и токен cookie устройства.
+pub async fn sign_in(
+    pool: &PgPool,
+    owner_id: Uuid,
+    method: Method,
+    client: &ClientInfo,
+    existing: Option<&str>,
+) -> Result<(Created, String), sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    let created = create_in_tx(&mut tx, owner_id, method, None, client).await?;
+    let device = remember_device(&mut tx, owner_id, existing, created.id).await?;
+    tx.commit().await?;
+    if !created.limited.is_empty() {
+        super::notify_changed(pool, "session_revoked").await;
+    }
+    super::notify_changed(pool, "session_changed").await;
+    Ok((created, device))
+}
+
 /// То же в чужой транзакции (часть 2: вход по QR в одной транзакции с доставкой).
-/// Уведомления шины шлёт вызывающий после commit.
+/// Уведомления шины шлёт вызывающий после commit. Вход по QR не вытесняет сеансы:
+/// место для него проверяет `qr::deliver`.
 pub async fn create_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -126,17 +149,21 @@ pub async fn create_in_tx(
     sqlx::query("select pg_advisory_xact_lock(hashtext('owner_sessions_limit'))")
         .execute(&mut *conn)
         .await?;
-    let limited: Vec<Uuid> = sqlx::query_scalar(
-        "update owner_sessions set revoked_at=now(),revoke_reason='limit'
-         where id in (select id from owner_sessions
-                      where owner_id=$1 and revoked_at is null
-                      order by last_seen_at desc,id desc offset $2)
-         returning id",
-    )
-    .bind(owner_id)
-    .bind(MAX_LIVE - 1)
-    .fetch_all(&mut *conn)
-    .await?;
+    let limited: Vec<Uuid> = if method == Method::Qr {
+        Vec::new()
+    } else {
+        sqlx::query_scalar(
+            "update owner_sessions set revoked_at=now(),revoke_reason='limit'
+             where id in (select id from owner_sessions
+                          where owner_id=$1 and revoked_at is null
+                          order by last_seen_at desc,id desc offset $2)
+             returning id",
+        )
+        .bind(owner_id)
+        .bind(MAX_LIVE - 1)
+        .fetch_all(&mut *conn)
+        .await?
+    };
     let id = Uuid::now_v7();
     let token = generate_token();
     sqlx::query(
@@ -390,6 +417,7 @@ pub async fn revoke(
     .bind(spare)
     .fetch_all(&mut *tx)
     .await?;
+    forget_devices_of(&mut tx, reason, &revoked).await?;
     tx.commit().await?;
     if !revoked.is_empty() {
         super::notify_changed(pool, "session_revoked").await;
@@ -416,11 +444,37 @@ pub async fn revoke_all_except(
     .bind(reason.as_str())
     .fetch_all(&mut *tx)
     .await?;
+    forget_devices_of(&mut tx, reason, &revoked).await?;
     tx.commit().await?;
     if !revoked.is_empty() {
         super::notify_changed(pool, "session_revoked").await;
     }
     Ok(revoked)
+}
+
+/// Устройства, чей последний вход дал отозванные сеансы, забываются при отзыве владельцем,
+/// сервером, сменой пароля и каскадом; выход, бездействие и предел их не трогают.
+async fn forget_devices_of(
+    conn: &mut PgConnection,
+    reason: RevokeReason,
+    revoked: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    if reason.cascades() && !revoked.is_empty() {
+        sqlx::query("delete from owner_devices where session_id = any($1)")
+            .bind(revoked)
+            .execute(conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Забыть все известные устройства владельца: смена пароля и «завершить все сеансы».
+pub async fn forget_all_devices(pool: &PgPool, owner_id: Uuid) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("delete from owner_devices where owner_id=$1")
+        .bind(owner_id)
+        .execute(pool)
+        .await?
+        .rows_affected())
 }
 
 /// Отзыв и выдача входа по QR (`qr::deliver`, `create_in_tx`) берут одну блокировку:
@@ -591,22 +645,36 @@ pub fn device_bucket(token: &str) -> String {
     format!("device:{hex}")
 }
 
-/// Запоминает устройство после успешного входа: действующая cookie сохраняется, иначе новая.
-pub async fn remember_device(
-    pool: &PgPool,
+/// Запоминает устройство входа `session`: действующая cookie сохраняется и переносится на
+/// этот сеанс, иначе новая.
+async fn remember_device(
+    conn: &mut PgConnection,
     owner_id: Uuid,
     existing: Option<&str>,
+    session: Uuid,
 ) -> Result<String, sqlx::Error> {
-    if let Some(token) = existing
-        && device_known(pool, owner_id, token).await?
-    {
-        return Ok(token.to_owned());
+    if let Some(token) = existing.filter(|token| token_shape_ok(token)) {
+        let kept = sqlx::query(
+            "update owner_devices set last_used_at=now(),session_id=$3
+             where token_sha256=$1 and owner_id=$2",
+        )
+        .bind(digest(Secret::Device, token))
+        .bind(owner_id)
+        .bind(session)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected()
+            > 0;
+        if kept {
+            return Ok(token.to_owned());
+        }
     }
     let token = generate_token();
-    sqlx::query("insert into owner_devices(token_sha256,owner_id) values($1,$2)")
+    sqlx::query("insert into owner_devices(token_sha256,owner_id,session_id) values($1,$2,$3)")
         .bind(digest(Secret::Device, &token))
         .bind(owner_id)
-        .execute(pool)
+        .bind(session)
+        .execute(&mut *conn)
         .await?;
     Ok(token)
 }

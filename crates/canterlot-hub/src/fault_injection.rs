@@ -26,6 +26,8 @@ pub enum Point {
     DropBusNotice,
     WsBeforeDataSend,
     WsStalled,
+    /// Вход: сбой после записи нового сеанса, до ответа.
+    SignInAfterSession,
 }
 
 #[derive(Clone, Debug)]

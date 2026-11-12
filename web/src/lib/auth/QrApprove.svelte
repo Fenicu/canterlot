@@ -18,6 +18,8 @@
   });
 
   function qrErrorText(err: unknown): string {
+    if (err instanceof ApiError && err.code === 'qr_approvals_exhausted')
+      return 'С этого устройства уже подтверждено 5 входов по QR. Завершите лишние сеансы или подтвердите вход с другого устройства';
     return err instanceof ApiError && (err.code === 'qr_expired' || err.status === 410)
       ? 'Код устарел или уже использован. Попросите показать новый код'
       : signInErrorText(err, 'Не удалось проверить код');

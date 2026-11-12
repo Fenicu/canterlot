@@ -1387,7 +1387,7 @@
         "tags": [
           "auth"
         ],
-        "summary": "Разрешить вход: новое устройство получит сеанс с `approved_by` = текущий сеанс.\nТакой сеанс несвеж и завершается вместе с подтвердившим (каскад).",
+        "summary": "Разрешить вход: новое устройство получит сеанс с `approved_by` = текущий сеанс.\nТакой сеанс несвеж и завершается вместе с подтвердившим (каскад). Один сеанс держит\nне больше 5 живых или ждущих выдачи входов, подтверждённых им.",
         "operationId": "post__api_v1_auth_qr_approve",
         "requestBody": {
           "content": {
@@ -1415,6 +1415,25 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/QrDecisionView"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "qr_approvals_exhausted: этот сеанс уже подтвердил 5 живых входов",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             }
@@ -1634,7 +1653,7 @@
         },
         "responses": {
           "200": {
-            "description": "Состояние кода; при approved — Set-Cookie сеанса и устройства",
+            "description": "Состояние кода; при approved — Set-Cookie сеанса",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -11817,6 +11836,7 @@
           "reauth_required",
           "wrong_password",
           "qr_expired",
+          "qr_approvals_exhausted",
           "passkey_rejected",
           "no_passkeys",
           "passkeys_unavailable",
@@ -16281,7 +16301,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/OwnerSessionView",
-                "description": "Только при `approved`: новый сеанс, cookie в `Set-Cookie`."
+                "description": "Только при `approved`: новый сеанс, cookie сеанса в `Set-Cookie` (cookie известного\nустройства вход по QR не получает)."
               },
               {
                 "type": "null"

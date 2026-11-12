@@ -11,6 +11,7 @@ mod alarms;
 mod attachments;
 mod attachments_gc;
 mod attachments_gc_drafts;
+mod auth_devices;
 mod auth_geo;
 mod auth_logs;
 mod auth_passkeys;

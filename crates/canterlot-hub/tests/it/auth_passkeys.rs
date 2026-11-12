@@ -259,7 +259,9 @@ async fn auth_passkeys_full_global_cap_still_lets_a_known_device_start(pool: PgP
     hub.set_password(PASSWORD).await;
     let mut key = authenticator();
     assert_eq!(register(&hub.owner(), &mut key, None).await.status, 200);
-    let first = hub.sign_in_owner(&hub.anonymous(Some("198.51.100.60"))).await;
+    let first = hub
+        .sign_in_owner(&hub.anonymous(Some("198.51.100.60")))
+        .await;
     let (device, _) = set_cookie(&first, DEVICE_COOKIE).unwrap();
     // Чужие корзины держат общий предел живых обрядов входа заполненным.
     sqlx::query(

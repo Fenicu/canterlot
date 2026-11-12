@@ -193,7 +193,8 @@ pub(super) async fn record_failure(state: &AppState, bucket: &str) -> Result<(),
     Ok(())
 }
 
-/// Новый сеанс по доказанному паролю, ключу или ссылке: cookie, пуш, вид сеанса.
+/// Новый сеанс по доказанному паролю, ключу или ссылке: сеанс и известное устройство
+/// одной транзакцией, затем cookie, пуш, вид сеанса.
 pub(super) async fn signed_in(
     state: &AppState,
     client: &Client,
@@ -201,37 +202,61 @@ pub(super) async fn signed_in(
     device: Option<Value>,
 ) -> Result<Response, ApiError> {
     let info = ClientInfo::located(client.ip, client.user_agent.clone(), device, &state.geo);
-    let created = sessions::create(
+    let (created, device) = sessions::sign_in(
         &state.pool,
         state.installation.owner_id,
         method,
-        None,
         &info,
+        client.device_token.as_ref().map(|token| token.0.as_str()),
     )
     .await?;
-    let (session, cookies) = issue(state, client, &created, &info, method).await?;
+    let (session, mut cookies) = issue(state, &created, &info, method).await?;
+    cookies.push(device_cookie(&device));
     Ok(with_cookies(
         Json(SignInView { session }).into_response(),
         cookies,
     ))
 }
 
-/// Сеанс создан: запоминается устройство, уходит пуш о входе. Возвращает вид сеанса и
-/// `Set-Cookie` сеанса и устройства для ответа вызывающего.
+/// Сеанс создан и записан: уходит пуш о входе. Возвращает вид сеанса и `Set-Cookie`
+/// сеанса. Ошибка после записи сеанса отзывает его (`server`): ответ без cookie не
+/// оставляет живого сеанса, которым никто не владеет.
 pub(super) async fn issue(
     state: &AppState,
-    client: &Client,
     created: &sessions::Created,
     info: &ClientInfo,
     method: Method,
-) -> Result<(OwnerSessionView, [HeaderValue; 2]), ApiError> {
+) -> Result<(OwnerSessionView, Vec<HeaderValue>), ApiError> {
+    match describe(state, created, info, method).await {
+        Ok(session) => Ok((
+            session,
+            vec![session_cookie(&created.token, created.max_age_secs)],
+        )),
+        Err(error) => {
+            if let Err(revoke) =
+                sessions::revoke(&state.pool, created.id, RevokeReason::Server, None).await
+            {
+                tracing::warn!(kind = "sign_in_orphan", session_id = %created.id, error = %crate::dberr::describe(&revoke), "new session not revoked after a failure");
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn describe(
+    state: &AppState,
+    created: &sessions::Created,
+    info: &ClientInfo,
+    method: Method,
+) -> Result<OwnerSessionView, ApiError> {
+    #[cfg(feature = "fault-injection")]
+    if state
+        .auth_faults
+        .take_drop(crate::fault_injection::Point::SignInAfterSession, "")
+    {
+        return Err(ApiError::new(ErrorCode::DbUnavailable));
+    }
     let owner_id = state.installation.owner_id;
-    let device = sessions::remember_device(
-        &state.pool,
-        owner_id,
-        client.device_token.as_ref().map(|token| token.0.as_str()),
-    )
-    .await?;
     let row = sessions::get(&state.pool, owner_id, created.id)
         .await?
         .ok_or_else(|| ApiError::new(ErrorCode::Internal))?;
@@ -248,16 +273,10 @@ pub(super) async fn issue(
         tracing::warn!(kind = "sign_in_push_failed", error = %crate::dberr::describe(&error), "sign-in push not queued");
     }
     tracing::info!(kind = "signed_in", method = method.as_str(), session_id = %created.id, "owner signed in");
-    Ok((
-        OwnerSessionView::from_row(row, created.id),
-        [
-            session_cookie(&created.token, created.max_age_secs),
-            device_cookie(&device),
-        ],
-    ))
+    Ok(OwnerSessionView::from_row(row, created.id))
 }
 
-pub(super) fn with_cookies(mut response: Response, cookies: [HeaderValue; 2]) -> Response {
+pub(super) fn with_cookies(mut response: Response, cookies: Vec<HeaderValue>) -> Response {
     for cookie in cookies {
         response.headers_mut().append(header::SET_COOKIE, cookie);
     }
@@ -601,6 +620,7 @@ async fn set_password(
         RevokeReason::PasswordChanged,
     )
     .await?;
+    sessions::forget_all_devices(&state.pool, owner.owner_id).await?;
     sessions::mark_fresh(&state.pool, session.id).await?;
     tracing::info!(
         kind = "password_changed",

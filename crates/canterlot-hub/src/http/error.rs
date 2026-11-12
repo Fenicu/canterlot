@@ -89,6 +89,7 @@ error_codes! {
     ReauthRequired => "reauth_required", 403, Auth, AfterCondition, "Подтвердите вход паролем или ключом доступа";
     WrongPassword => "wrong_password", 403, Auth, Never, "Неверный пароль";
     QrExpired => "qr_expired", 410, Auth, Never, "Код входа устарел или уже использован";
+    QrApprovalsExhausted => "qr_approvals_exhausted", 409, Auth, Never, "Этот сеанс уже подтвердил 5 входов по QR";
     PasskeyRejected => "passkey_rejected", 403, Auth, Never, "Ключ доступа не подошёл";
     NoPasskeys => "no_passkeys", 409, Auth, Never, "Ключи доступа не добавлены";
     PasskeysUnavailable => "passkeys_unavailable", 409, Auth, Never, "Ключи доступа недоступны для адреса хаба";

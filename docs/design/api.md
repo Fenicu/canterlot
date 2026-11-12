@@ -124,6 +124,7 @@
 | `reauth_required` | 403 | `auth` | `after_condition` | Подтвердите вход паролем или ключом доступа |
 | `wrong_password` | 403 | `auth` | `never` | Неверный пароль |
 | `qr_expired` | 410 | `auth` | `never` | Код входа устарел или уже использован |
+| `qr_approvals_exhausted` | 409 | `auth` | `never` | Этот сеанс уже подтвердил 5 входов по QR |
 | `passkey_rejected` | 403 | `auth` | `never` | Ключ доступа не подошёл |
 | `no_passkeys` | 409 | `auth` | `never` | Ключи доступа не добавлены |
 | `passkeys_unavailable` | 409 | `auth` | `never` | Ключи доступа недоступны для адреса хаба |

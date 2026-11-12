@@ -133,6 +133,8 @@ pub struct AppState {
     pub ws_tasks: tokio_util::task::TaskTracker,
     #[cfg(feature = "fault-injection")]
     pub ws_faults: crate::fault_injection::Faults,
+    #[cfg(feature = "fault-injection")]
+    pub auth_faults: crate::fault_injection::Faults,
     pub shutdown: CancellationToken,
 }
 
@@ -173,6 +175,8 @@ impl AppState {
             ws_tasks: tokio_util::task::TaskTracker::new(),
             #[cfg(feature = "fault-injection")]
             ws_faults: Default::default(),
+            #[cfg(feature = "fault-injection")]
+            auth_faults: Default::default(),
             shutdown: deps.shutdown,
         }
     }

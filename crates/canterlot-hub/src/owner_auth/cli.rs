@@ -94,7 +94,7 @@ fn prompt_hidden(prompt: &str) -> Result<String, String> {
     Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
-/// Задаёт пароль; с `revoke` завершает все сеансы (причина `server`).
+/// Задаёт пароль и забывает известные устройства; с `revoke` завершает все сеансы (причина `server`).
 pub async fn set_password(
     pool: &PgPool,
     owner_id: Uuid,
@@ -110,6 +110,9 @@ pub async fn set_password(
         .await
         .map_err(|_| "db_error")?;
     drop(conn);
+    sessions::forget_all_devices(pool, owner_id)
+        .await
+        .map_err(|_| "db_error")?;
     if !revoke {
         return Ok("password_set".into());
     }
@@ -144,9 +147,12 @@ pub async fn list_sessions(pool: &PgPool, owner_id: Uuid) -> Result<String, Stri
     Ok(out)
 }
 
-/// Аварийная кнопка: завершает все сеансы (причина `server`).
+/// Аварийная кнопка: завершает все сеансы (причина `server`) и забывает все устройства.
 pub async fn revoke_all(pool: &PgPool, owner_id: Uuid) -> Result<String, String> {
     let revoked = sessions::revoke_all_except(pool, owner_id, None, RevokeReason::Server)
+        .await
+        .map_err(|_| "db_error")?;
+    sessions::forget_all_devices(pool, owner_id)
         .await
         .map_err(|_| "db_error")?;
     Ok(format!("revoked={}", revoked.len()))

@@ -390,3 +390,63 @@ async fn auth_qr_approval_by_a_revoked_session_is_not_delivered(pool: PgPool) {
     assert_eq!(state(&response), "expired");
     assert!(set_cookie(&response, SESSION_COOKIE).is_none());
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn auth_qr_one_session_approves_at_most_five_live_sessions(pool: PgPool) {
+    let hub = AuthHub::new(pool).await;
+    let (_, approver_token) = hub.session(SignInMethod::Password, None).await;
+    let approver = hub.with_session(&approver_token, Some("198.51.100.9"));
+    // Одобрено, но ещё не забрано: тоже считается.
+    let mut waiting = Vec::new();
+    for n in 0..5 {
+        let qr = started(&hub, &format!("203.0.113.{}", 100 + n)).await;
+        assert_eq!(act(&approver, "approve", &qr.secret).await.status, 200);
+        waiting.push(qr);
+    }
+    let sixth = started(&hub, "203.0.113.110").await;
+    let refused = act(&approver, "approve", &sixth.secret).await;
+    assert_eq!(refused.status, 409, "{:?}", refused.body);
+    assert_eq!(error_code(&refused), "qr_approvals_exhausted");
+    // Забранные одобрения — живые сеансы этого сеанса, предел тот же.
+    for qr in &waiting {
+        assert_eq!(
+            state(&poll(&poller(&hub), &qr.poll_token, None).await),
+            "approved"
+        );
+    }
+    assert_eq!(
+        error_code(&act(&approver, "approve", &sixth.secret).await),
+        "qr_approvals_exhausted"
+    );
+    // Другой сеанс одобряет как обычно; код всё ещё ждёт.
+    assert_eq!(
+        act(&hub.owner(), "approve", &sixth.secret).await.status,
+        200
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn auth_qr_delivery_never_evicts_other_sessions(pool: PgPool) {
+    let hub = AuthHub::new(pool).await;
+    // Заранее заведённый сеанс владельца плюс 49: предел 50 достигнут.
+    for _ in 0..49 {
+        hub.session(SignInMethod::Password, None).await;
+    }
+    let qr = started(&hub, "203.0.113.50").await;
+    assert_eq!(act(&hub.owner(), "approve", &qr.secret).await.status, 200);
+    let response = poll(&poller(&hub), &qr.poll_token, None).await;
+    assert_eq!(state(&response), "expired");
+    assert!(set_cookie(&response, SESSION_COOKIE).is_none());
+    let (live, limited): (i64, i64) = sqlx::query_as(
+        "select count(*) filter (where revoked_at is null),
+                count(*) filter (where revoke_reason='limit') from owner_sessions",
+    )
+    .fetch_one(&hub.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (live, limited),
+        (50, 0),
+        "no session evicted for a QR-born one"
+    );
+}

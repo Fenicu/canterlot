@@ -77,7 +77,9 @@ async fn auth_logs_expected_internet_outcomes_are_info(pool: PgPool) {
     // Неверный пароль.
     clear();
     let client = hub.anonymous(Some("203.0.113.70"));
-    let failed = hub.sign_in(&client, TEST_OWNER_LOGIN, "wrong password!").await;
+    let failed = hub
+        .sign_in(&client, TEST_OWNER_LOGIN, "wrong password!")
+        .await;
     assert_eq!(failed.status, 401);
     assert_eq!(levels("sign_in_failed", None), ["INFO"]);
 
@@ -137,7 +139,12 @@ async fn auth_logs_expected_internet_outcomes_are_info(pool: PgPool) {
     let lookalike = client
         .clone()
         .without_header("Origin")
-        .send(Method::POST, "/api/v1/auth/password/", None, Some(json!({})))
+        .send(
+            Method::POST,
+            "/api/v1/auth/password/",
+            None,
+            Some(json!({})),
+        )
         .await;
     assert_eq!(lookalike.status, 403);
     assert_eq!(levels("auth_rejected", Some("origin")), ["WARN", "WARN"]);
@@ -166,7 +173,11 @@ async fn auth_logs_expected_internet_outcomes_are_info(pool: PgPool) {
     .await
     .unwrap();
     let failed = hub
-        .sign_in(&hub.anonymous(Some("203.0.113.72")), TEST_OWNER_LOGIN, "nope nope nope")
+        .sign_in(
+            &hub.anonymous(Some("203.0.113.72")),
+            TEST_OWNER_LOGIN,
+            "nope nope nope",
+        )
         .await;
     assert_eq!(failed.status, 401);
     assert_eq!(levels("sign_in_global_lock", None), ["WARN"]);
