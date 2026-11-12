@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Публикует собранный заранее выпуск на Forgejo: архивы хаба, воркера и PWA, CSP, SHA256SUMS
-# и раздел CHANGES.rst как описание. Ничего не собирает: берёт готовый каталог
+# Публикует собранный заранее выпуск на Forgejo и на зеркале GitHub: архивы хаба, воркера и PWA,
+# CSP, SHA256SUMS и раздел CHANGES.rst как описание. Ничего не собирает: берёт готовый каталог
 # .superpowers/deploy/dist/<sha12>/, который кладёт scripts/build-release.sh.
 #
 #   scripts/publish-release.sh v1.11.0             собрать архивы и опубликовать
@@ -9,6 +9,9 @@
 # Каталог сборок можно указать в CANTERLOT_DIST_ROOT (по умолчанию в этой рабочей копии).
 # Токен Forgejo с правом write:repository читается из FORGEJO_TOKEN_FILE
 # (по умолчанию ~/.config/forgejo/canterlot-release.token) и никуда не печатается.
+# GitHub: репозиторий из CANTERLOT_GITHUB_REPO (по умолчанию Fenicu/canterlot, пустое значение
+# выключает шаг), вход — через `gh`. Тег приходит туда push-зеркалом Forgejo: скрипт запускает
+# синхронизацию и ждёт тег до GITHUB_TAG_WAIT секунд (по умолчанию 180).
 set -euo pipefail
 
 tag=${1:-}
@@ -103,3 +106,27 @@ for file in "$out"/*; do
     echo "загружен: $name"
 done
 echo "https://git.fenicu.com/Fenicu/canterlot/releases/tag/$tag"
+
+github_repo=${CANTERLOT_GITHUB_REPO-Fenicu/canterlot}
+[[ -n "$github_repo" ]] || exit 0
+curl -fsS "${auth[@]}" -X POST "$api/push_mirrors-sync" >/dev/null || echo "не удалось запустить синхронизацию зеркала" >&2
+deadline=$((SECONDS + ${GITHUB_TAG_WAIT:-180}))
+until [[ "$(gh api "repos/$github_repo/commits/$tag" --jq .sha 2>/dev/null)" == "$sha" ]]; do
+    ((SECONDS < deadline)) || { echo "тег $tag не дошёл до GitHub $github_repo" >&2; exit 1; }
+    sleep 5
+done
+if ! gh release view "$tag" --repo "$github_repo" >/dev/null 2>&1; then
+    gh release create "$tag" --repo "$github_repo" --verify-tag --title "canterlot $version" --notes "$body" >/dev/null
+    echo "создан выпуск $tag на GitHub"
+fi
+have=$(gh release view "$tag" --repo "$github_repo" --json assets --jq '.assets[].name')
+for file in "$out"/*; do
+    name=$(basename "$file")
+    if grep -qxF "$name" <<<"$have"; then
+        echo "уже есть на GitHub: $name"
+        continue
+    fi
+    gh release upload "$tag" "$file" --repo "$github_repo" >/dev/null
+    echo "загружен на GitHub: $name"
+done
+echo "https://github.com/$github_repo/releases/tag/$tag"
