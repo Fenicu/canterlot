@@ -39,6 +39,8 @@ pub struct HubConfig {
     pub orchestrator: OrchestratorConfig,
     #[serde(default)]
     pub notify: NotifyConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +145,13 @@ impl HubConfig {
                 error.path = path.to_owned();
                 error
             })?;
+            config
+                .auth
+                .resolve(&http.allowed_origins)
+                .map_err(|mut error| {
+                    error.path = path.to_owned();
+                    error
+                })?;
         }
         if let Some(gotify) = &mut config.notify.gotify {
             if gotify.token_file.is_relative() {
@@ -286,7 +295,9 @@ pub struct HttpConfig {
     pub listen: SocketAddr,
     pub trusted_proxies: Vec<IpNet>,
     pub owner_login: String,
-    pub user_header: String,
+    /// Устарел (ADR-0005): личность больше не берётся из заголовка. Имя только называет
+    /// заголовок, приход которого помечается `X-Canterlot-Proxy-Leak`.
+    pub user_header: Option<String>,
     pub allowed_origins: Vec<String>,
     pub max_json_body_bytes: usize,
     #[serde(with = "humantime_serde")]
@@ -296,6 +307,7 @@ pub struct HttpConfig {
     pub max_connections: usize,
     pub ws: WsConfig,
     pub proxy_secret_file: Option<PathBuf>,
+    /// Устарел (ADR-0005): читается, но ни на что не влияет.
     pub logout_url: Option<String>,
     pub multi_process: bool,
 }
@@ -306,7 +318,7 @@ impl Default for HttpConfig {
             listen: SocketAddr::from(([127, 0, 0, 1], 8080)),
             trusted_proxies: Vec::new(),
             owner_login: String::new(),
-            user_header: "Remote-User".into(),
+            user_header: None,
             allowed_origins: Vec::new(),
             max_json_body_bytes: 524288,
             header_read_timeout: Duration::from_secs(10),
@@ -342,6 +354,7 @@ impl HttpConfig {
             || self.ws.stall_timeout.is_zero()
             || self.ws.delta_window.is_zero()
             || self.ws.delta_window > Duration::from_millis(25)
+            || self.ws.session_check_interval.is_zero()
         {
             return Err(invalid());
         }
@@ -350,13 +363,6 @@ impl HttpConfig {
             let scheme = uri.scheme_str().ok_or_else(invalid)?;
             let authority = uri.authority().ok_or_else(invalid)?;
             if origin != &format!("{scheme}://{authority}") {
-                return Err(invalid());
-            }
-        }
-        validate_user_header(&self.user_header).ok_or_else(invalid)?;
-        if let Some(logout) = &self.logout_url {
-            let uri = absolute_http_uri(logout).ok_or_else(invalid)?;
-            if uri.scheme_str() != Some("https") {
                 return Err(invalid());
             }
         }
@@ -370,34 +376,87 @@ impl HttpConfig {
     }
 }
 
-/// Имя заголовка личности: обычное имя, не из служебных и не из семейств `x-forwarded-*`, `x-canterlot-*`.
-fn validate_user_header(name: &str) -> Option<()> {
-    let name = axum::http::HeaderName::from_bytes(name.as_bytes()).ok()?;
-    let name = name.as_str();
-    const RESERVED: &[&str] = &[
-        "host",
-        "origin",
-        "cookie",
-        "authorization",
-        "proxy-authorization",
-        "forwarded",
-        "x-real-ip",
-        "true-client-ip",
-        "cf-connecting-ip",
-        "x-originating-ip",
-        "content-type",
-        "content-length",
-        "transfer-encoding",
-        "connection",
-        "upgrade",
-        "idempotency-key",
-        "x-correlation-id",
-    ];
-    let forbidden = RESERVED.contains(&name)
-        || name.starts_with("x-forwarded-")
-        || name.starts_with("x-canterlot-")
-        || name.starts_with("sec-");
-    (!forbidden).then_some(())
+impl HttpConfig {
+    /// Заданные в конфиге устаревшие ключи: по предупреждению `config_key_deprecated` на каждый.
+    pub fn deprecated_keys(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.user_header.is_some() {
+            keys.push("http.user_header");
+        }
+        if self.logout_url.is_some() {
+            keys.push("http.logout_url");
+        }
+        keys
+    }
+
+    /// Имя заголовка старого прокси, приход которого считается утечкой. Неразборчивое
+    /// имя не останавливает запуск: берётся `Remote-User`.
+    pub fn leak_header(&self) -> axum::http::HeaderName {
+        self.user_header
+            .as_deref()
+            .and_then(|name| axum::http::HeaderName::from_bytes(name.as_bytes()).ok())
+            .unwrap_or_else(|| axum::http::HeaderName::from_static("remote-user"))
+    }
+}
+
+/// `[auth]`: проверяющая сторона WebAuthn. По умолчанию `origin` — первый из
+/// `[http].allowed_origins`, `rp_id` — его хост.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    pub rp_id: Option<String>,
+    pub origin: Option<String>,
+}
+
+impl AuthConfig {
+    /// Подставляет значения по умолчанию и проверяет: `origin` из `allowed_origins`,
+    /// `rp_id` — хост `origin` или его родительский домен.
+    pub fn resolve(&mut self, allowed_origins: &[String]) -> Result<(), ConfigError> {
+        let invalid = || ConfigError {
+            path: PathBuf::new(),
+            category: "config_invalid_auth",
+            location: None,
+        };
+        let origin = match &self.origin {
+            Some(origin) => origin.clone(),
+            None => allowed_origins.first().cloned().ok_or_else(invalid)?,
+        };
+        if !allowed_origins.contains(&origin) {
+            return Err(invalid());
+        }
+        let host = absolute_http_uri(&origin)
+            .and_then(|uri| uri.host().map(str::to_owned))
+            .ok_or_else(invalid)?;
+        let rp_id = match &self.rp_id {
+            Some(rp_id) => {
+                let rp_id = rp_id.trim().to_ascii_lowercase();
+                let host = host.to_ascii_lowercase();
+                let valid = !rp_id.is_empty()
+                    && !rp_id.starts_with('.')
+                    && rp_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+                    && (host == rp_id || host.ends_with(&format!(".{rp_id}")));
+                if !valid {
+                    return Err(invalid());
+                }
+                rp_id
+            }
+            None => host,
+        };
+        self.origin = Some(origin);
+        self.rp_id = Some(rp_id);
+        Ok(())
+    }
+
+    /// Адрес PWA для ссылок входа. После загрузки конфига задан всегда.
+    pub fn origin(&self) -> &str {
+        self.origin.as_deref().unwrap_or_default()
+    }
+
+    pub fn rp_id(&self) -> &str {
+        self.rp_id.as_deref().unwrap_or_default()
+    }
 }
 
 fn absolute_http_uri(value: &str) -> Option<tonic::codegen::http::Uri> {
@@ -442,6 +501,9 @@ pub struct WsConfig {
     pub poll_interval: Duration,
     #[serde(with = "humantime_serde")]
     pub stall_timeout: Duration,
+    /// Как часто открытый WebSocket перепроверяет свой сеанс в базе, даже без уведомлений.
+    #[serde(with = "humantime_serde")]
+    pub session_check_interval: Duration,
 }
 
 impl Default for WsConfig {
@@ -454,6 +516,7 @@ impl Default for WsConfig {
             delta_window: Duration::from_millis(25),
             poll_interval: Duration::from_secs(2),
             stall_timeout: Duration::from_secs(15),
+            session_check_interval: Duration::from_secs(60),
         }
     }
 }

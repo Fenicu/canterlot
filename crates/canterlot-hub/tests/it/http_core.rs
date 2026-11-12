@@ -29,8 +29,8 @@ use canterlot_hub::{
     },
     idempotency::{IdempotencyConflict, run_in_tx},
     testkit::{
-        TEST_ORIGIN, TEST_OWNER_LOGIN, TestClient, TestResponse, spawn_test_hub_http,
-        test_app_deps, test_http_config,
+        TEST_ORIGIN, TEST_OWNER_LOGIN, TEST_SESSION_COOKIE, TEST_SESSION_ID, TEST_SESSION_TOKEN,
+        TestClient, TestResponse, spawn_test_hub_http, test_app_deps, test_http_config,
     },
 };
 use canterlot_proto::limits::{
@@ -376,7 +376,7 @@ async fn upgrade_status(addr: SocketAddr, source: Option<IpAddr>, headers: &[(&s
 }
 
 fn ws_owner_headers() -> Vec<(&'static str, &'static str)> {
-    vec![("Remote-User", TEST_OWNER_LOGIN), ("Origin", TEST_ORIGIN)]
+    vec![("Cookie", TEST_SESSION_COOKIE), ("Origin", TEST_ORIGIN)]
 }
 
 async fn seed_probe_tables(pool: &PgPool) {
@@ -768,64 +768,77 @@ async fn proxy_secret_is_required_when_configured(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn trusted_proxy_with_wrong_login_is_forbidden(pool: PgPool) {
+async fn forged_identity_header_from_trusted_proxy_is_unauthenticated_and_flagged(pool: PgPool) {
     let h = harness(pool).await;
-    for login in [
-        "attacker",
-        "Owner",
-        "OWNER",
-        "owner2",
-        "owne",
-        "owner,attacker",
-        "root",
-    ] {
+    for login in [TEST_OWNER_LOGIN, "attacker", "Owner", ""] {
         let client = h
             .client()
             .await
             .with_header("Remote-User", login)
             .with_header("Origin", TEST_ORIGIN);
-        assert_error(&me(&client).await, 403, "forbidden_user", "auth", "never");
+        let response = me(&client).await;
+        assert_error(&response, 401, "unauthenticated", "auth", "after_condition");
+        assert_eq!(
+            header(&response, "x-canterlot-proxy-leak"),
+            Some("1"),
+            "{login:?}"
+        );
     }
+    // Утечка не мешает настоящему сеансу, но помечается и в его ответе.
+    let leaked_owner = h.owner().await.with_header("Remote-User", "attacker");
+    let response = me(&leaked_owner).await;
+    assert_eq!(response.status, 200);
+    assert_eq!(header(&response, "x-canterlot-proxy-leak"), Some("1"));
+    // Публичные пути входа и отказ транспорта: недоверенный адрес не узнаёт о заголовке.
+    let methods = h
+        .client()
+        .await
+        .with_header("Remote-User", TEST_OWNER_LOGIN)
+        .send(Method::GET, "/api/v1/auth/methods", None, None)
+        .await;
+    assert_eq!(methods.status, 200);
+    assert_eq!(header(&methods, "x-canterlot-proxy-leak"), Some("1"));
+    let outsider = me(&h
+        .outsider()
+        .await
+        .with_header("Remote-User", TEST_OWNER_LOGIN))
+    .await;
+    assert_eq!(header(&outsider, "x-canterlot-proxy-leak"), None);
+    let clean = me(&h.owner().await).await;
+    assert_eq!(header(&clean, "x-canterlot-proxy-leak"), None);
     assert_eq!(h.hits(), 0);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn missing_or_duplicated_user_header_from_trusted_peer_is_unauthenticated(pool: PgPool) {
+async fn missing_duplicated_or_unknown_session_cookie_is_unauthenticated(pool: PgPool) {
     let h = harness(pool).await;
+    let cookie = |value: &str| h.in_process().with_header("Cookie", value);
+    let session = |token: &str| format!("__Host-canterlot_session={token}");
+    let other = "canterlot-test-session-token-0123456789abcz";
     let cases = [
-        ("none", h.client().await),
-        ("empty", h.client().await.with_header("Remote-User", "")),
+        ("none", h.in_process()),
+        ("empty", cookie("__Host-canterlot_session=")),
+        ("unknown token", cookie(&session(other))),
+        ("not a token", cookie(&session("owner"))),
         (
-            "twice the owner",
-            h.client()
-                .await
-                .with_header("Remote-User", "owner")
-                .with_header("Remote-User", "owner"),
+            "twice in one header",
+            cookie(&format!(
+                "{}; {}",
+                session(TEST_SESSION_TOKEN),
+                session(TEST_SESSION_TOKEN)
+            )),
         ),
         (
-            "owner then attacker",
-            h.client()
-                .await
-                .with_header("Remote-User", "owner")
-                .with_header("Remote-User", "attacker"),
+            "twice in two headers",
+            cookie(&session(TEST_SESSION_TOKEN)).with_header("Cookie", &session(other)),
         ),
         (
-            "attacker then owner",
-            h.client()
-                .await
-                .with_header("Remote-User", "attacker")
-                .with_header("Remote-User", "owner"),
+            "other name",
+            cookie(&format!("canterlot_session={TEST_SESSION_TOKEN}")),
         ),
         (
-            "other header name",
-            h.client().await.with_header("X-Remote-User", "owner"),
-        ),
-        (
-            "lower-case name twice",
-            h.client()
-                .await
-                .with_header("remote-user", "owner")
-                .with_header("REMOTE-USER", "owner"),
+            "other case",
+            cookie(&format!("__host-canterlot_session={TEST_SESSION_TOKEN}")),
         ),
     ];
     for (name, client) in cases {
@@ -833,8 +846,23 @@ async fn missing_or_duplicated_user_header_from_trusted_peer_is_unauthenticated(
         assert_error(&response, 401, "unauthenticated", "auth", "after_condition");
         assert!(response.status == 401, "{name}");
     }
-    let single_lowercase = h.client().await.with_header("remote-user", "owner");
-    assert_eq!(me(&single_lowercase).await.status, 200);
+    let alongside = cookie(&format!("a=1; {}; b=2", session(TEST_SESSION_TOKEN)));
+    let response = me(&alongside).await;
+    assert_eq!(response.status, 200);
+    let body: Value = response.json();
+    assert_eq!(body["session_id"], TEST_SESSION_ID.to_string());
+    assert_eq!(body["login"], TEST_OWNER_LOGIN);
+    assert_eq!(h.hits(), 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn session_lookup_database_error_is_503_not_401(pool: PgPool) {
+    let h = harness(pool.clone()).await;
+    assert_eq!(me(&h.in_process().as_owner()).await.status, 200);
+    pool.close().await;
+    let response = me(&h.in_process().as_owner()).await;
+    assert_error(&response, 503, "db_unavailable", "hub_db", "safe_same_key");
+    assert!(response.headers.get("set-cookie").is_none());
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -904,35 +932,6 @@ async fn ipv4_mapped_ipv6_peer_matches_trusted_cidr(pool: PgPool) {
 }
 
 #[test]
-fn user_header_must_be_a_plain_header_name() {
-    for bad in [
-        "",
-        "Remote User",
-        "Remote-User\n",
-        "Host",
-        "Authorization",
-        "Cookie",
-        "Origin",
-        "Forwarded",
-        "X-Forwarded-For",
-        "X-Real-IP",
-        "X-Canterlot-Proxy",
-        "X-Canterlot-Client",
-        "Idempotency-Key",
-        "Content-Type",
-    ] {
-        let mut config = test_http_config();
-        config.user_header = bad.to_owned();
-        assert!(config.validate().is_err(), "{bad:?}");
-    }
-    for good in ["Remote-User", "X-Auth-User", "x-remote-user"] {
-        let mut config = test_http_config();
-        config.user_header = good.to_owned();
-        config.validate().unwrap();
-    }
-}
-
-#[test]
 fn proxy_secret_file_is_loaded_trimmed_and_validated() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("secret");
@@ -961,7 +960,7 @@ async fn mutation_requires_allowed_origin_and_client_header(pool: PgPool) {
     let h = harness(pool).await;
     let body = Some(json!({"n": 1}));
     let base = || h.client();
-    let identity = |c: TestClient| c.with_header("Remote-User", TEST_OWNER_LOGIN);
+    let identity = |c: TestClient| c.with_session(TEST_SESSION_TOKEN);
     let table: Vec<(&str, TestClient, u16)> = vec![
         ("no origin, no client header", identity(base().await), 403),
         (
@@ -1101,10 +1100,7 @@ async fn mutation_requires_allowed_origin_and_client_header(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn safe_methods_need_no_origin(pool: PgPool) {
     let h = harness(pool).await;
-    let bare_owner = h
-        .client()
-        .await
-        .with_header("Remote-User", TEST_OWNER_LOGIN);
+    let bare_owner = h.client().await.with_session(TEST_SESSION_TOKEN);
     let get = bare_owner.send(Method::GET, "/api/v1/me", None, None).await;
     assert_eq!(get.status, 200);
     let head = bare_owner
@@ -1113,7 +1109,7 @@ async fn safe_methods_need_no_origin(pool: PgPool) {
     assert_eq!(head.status, 200);
     assert!(head.body.is_empty());
     // WSS-апгрейд — это GET, но Origin для него обязателен.
-    let no_origin = upgrade_status(h.addr, None, &[("Remote-User", TEST_OWNER_LOGIN)]).await;
+    let no_origin = upgrade_status(h.addr, None, &[("Cookie", TEST_SESSION_COOKIE)]).await;
     assert_eq!(no_origin, 403);
     assert_eq!(upgrade_status(h.addr, None, &ws_owner_headers()).await, 101);
 }
@@ -1136,7 +1132,7 @@ async fn cross_origin_requests_get_no_cors_headers_and_options_is_405(pool: PgPo
     let foreign = h
         .client()
         .await
-        .with_header("Remote-User", TEST_OWNER_LOGIN)
+        .with_session(TEST_SESSION_TOKEN)
         .with_header("Origin", "https://evil.example");
     let get = me(&foreign).await;
     assert_eq!(get.status, 200);
@@ -1224,6 +1220,50 @@ async fn every_route_requires_identity_unless_listed_public(pool: PgPool) {
         }
     }
     assert!(checked >= 3, "documented routes were exercised");
+    // Доверенный прокси без сеанса: 401 везде, кроме точного списка публичных путей входа.
+    let anonymous = h
+        .client()
+        .await
+        .with_header("Origin", TEST_ORIGIN)
+        .with_header("X-Canterlot-Client", "1");
+    let mut public = BTreeSet::new();
+    for (path, item) in document["paths"].as_object().unwrap() {
+        if matches!(path.as_str(), "/healthz" | "/readyz") {
+            continue;
+        }
+        let concrete = path.replace("{id}", &Uuid::now_v7().to_string());
+        for method in item.as_object().unwrap().keys() {
+            let method = Method::from_bytes(method.to_uppercase().as_bytes()).unwrap();
+            let response = anonymous
+                .send(method.clone(), &concrete, Some("k"), Some(json!({})))
+                .await;
+            if response.status == 401 {
+                if method != Method::HEAD {
+                    assert_error(&response, 401, "unauthenticated", "auth", "after_condition");
+                }
+            } else {
+                public.insert((method.to_string(), path.clone()));
+            }
+        }
+    }
+    assert_eq!(
+        public,
+        BTreeSet::from([
+            ("GET".to_owned(), "/api/v1/auth/methods".to_owned()),
+            ("POST".to_owned(), "/api/v1/auth/password".to_owned()),
+            ("POST".to_owned(), "/api/v1/auth/recovery".to_owned()),
+        ])
+    );
+    let wrong_method = anonymous
+        .send(Method::GET, "/api/v1/auth/password", None, None)
+        .await;
+    assert_error(
+        &wrong_method,
+        401,
+        "unauthenticated",
+        "auth",
+        "after_condition",
+    );
     // Обработчик без экстрактора Owner защищён общим барьером.
     let bare_outsider = outsider
         .send(Method::GET, "/api/v1/_probe/bare", None, None)
@@ -1559,7 +1599,7 @@ async fn request_log_has_no_header_values_query_or_body(pool: PgPool) {
     let owner = h
         .client()
         .await
-        .with_header("Remote-User", TEST_OWNER_LOGIN)
+        .with_session(TEST_SESSION_TOKEN)
         .with_header("Origin", TEST_ORIGIN)
         .with_header("X-Canterlot-Client", "1")
         .with_header("X-Canterlot-Proxy", secret)
@@ -1584,7 +1624,7 @@ async fn request_log_has_no_header_values_query_or_body(pool: PgPool) {
     let wrong = h
         .client()
         .await
-        .with_header("Remote-User", &leak)
+        .with_session(&leak)
         .with_header("X-Canterlot-Proxy", &leak)
         .with_header("X-Correlation-Id", &correlation.to_string())
         .send_raw(
@@ -1598,7 +1638,7 @@ async fn request_log_has_no_header_values_query_or_body(pool: PgPool) {
     let _ = h
         .outsider()
         .await
-        .with_header("Remote-User", &leak)
+        .with_session(&leak)
         .with_header("Origin", TEST_ORIGIN)
         .with_header("X-Correlation-Id", &correlation.to_string())
         .send(Method::GET, &format!("/api/v1/me?q={leak}"), None, None)
@@ -1760,7 +1800,7 @@ async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
             "machines": {"disk_warn_pct": 70, "disk_warn_free_gb": 12, "disk_critical_free_gb": 4, "metrics_stale_after_secs": 45},
             "limit_thresholds": {"weekly_reserve_pct": 90, "warn_pcts": [70, 85], "warn_remaining_pct": 20, "danger_remaining_pct": 5, "reserve_remaining_pct": 10, "stale_after_secs": 1200},
             "defaults": {"crunch_resume_text": "Продолжай работу."},
-            "auth": {"logout_url": null},
+            "auth": {},
             "sessions": {"trash_retention_secs": 86_400},
         })
     );
@@ -1774,18 +1814,12 @@ async fn me_path(h: &Harness, path: &str) -> TestResponse {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn config_exposes_logout_url(pool: PgPool) {
+async fn config_auth_is_empty_even_with_a_stale_logout_url(pool: PgPool) {
     let mut http = test_http_config();
     http.logout_url = Some("https://auth.example/logout?rd=https%3A%2F%2Fchat.test".into());
-    let h = harness_with(pool.clone(), http, None).await;
+    let h = harness_with(pool, http, None).await;
     let with: Value = me_path(&h, "/api/v1/config").await.json();
-    assert_eq!(
-        with["auth"],
-        json!({"logout_url": "https://auth.example/logout?rd=https%3A%2F%2Fchat.test"})
-    );
-    let h = harness(pool).await;
-    let without: Value = me_path(&h, "/api/v1/config").await.json();
-    assert_eq!(without["auth"], json!({"logout_url": null}));
+    assert_eq!(with["auth"], json!({}));
 }
 
 #[sqlx::test(migrations = "./migrations")]

@@ -5,6 +5,47 @@ use crate::model::HoldReason;
 
 pub const TEST_OWNER_LOGIN: &str = "owner";
 pub const TEST_ORIGIN: &str = "https://chat.test";
+/// Токен сеанса, заранее заведённого для владельца в каждой тестовой базе
+/// (`test_app_deps`, `spawn_test_hub_with`). `as_owner()` несёт его в cookie.
+pub const TEST_SESSION_TOKEN: &str = "canterlot-test-session-token-0123456789abcd";
+/// Готовое значение заголовка `Cookie` для сырых запросов.
+pub const TEST_SESSION_COOKIE: &str =
+    "__Host-canterlot_session=canterlot-test-session-token-0123456789abcd";
+pub const TEST_SESSION_ID: Uuid = Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0001);
+
+/// Заводит (или оживляет) тестовый сеанс владельца: свежий, без адреса.
+/// Каждый `sqlx::test` получает свою базу, поэтому общий токен не пересекается между тестами.
+/// Тест, который сбрасывает установку или сеансы, вызывает это снова.
+pub async fn seed_test_session(pool: &PgPool, owner_id: Uuid) {
+    sqlx::query(
+        "insert into owner_sessions(id,owner_id,token_sha256,method,authenticated_at)
+         values($1,$2,$3,'password',now())
+         on conflict(id) do update set owner_id=excluded.owner_id,revoked_at=null,
+           revoke_reason=null,last_seen_at=now(),authenticated_at=now()",
+    )
+    .bind(TEST_SESSION_ID)
+    .bind(owner_id)
+    .bind(crate::owner_auth::digest(
+        crate::owner_auth::Secret::Session,
+        TEST_SESSION_TOKEN,
+    ))
+    .execute(pool)
+    .await
+    .expect("seed test session");
+}
+
+/// Дешёвые параметры argon2 для тестов: боевые 64 МиБ слишком медленны без оптимизации.
+pub fn test_passwords() -> crate::owner_auth::password::Passwords {
+    crate::owner_auth::password::Passwords::new(8, 1, 1, 2, std::time::Duration::from_secs(5))
+}
+
+/// `[auth]` по умолчанию для заданных `allowed_origins`.
+pub fn test_auth_config(http: &crate::config::HttpConfig) -> crate::config::AuthConfig {
+    let mut auth = crate::config::AuthConfig::default();
+    auth.resolve(&http.allowed_origins)
+        .expect("test auth config");
+    auth
+}
 
 pub struct TestHub {
     #[cfg(feature = "fault-injection")]
@@ -81,6 +122,7 @@ pub async fn test_app_deps(
     proxy_secret: Option<Vec<u8>>,
 ) -> (crate::http::AppDeps, tempfile::TempDir) {
     let (installation, manifest, directory) = test_installation(&pool).await;
+    seed_test_session(&pool, installation.owner_id).await;
     let (attachments, blobs) = test_blob_store(directory.path());
     let timers = crate::config::HubTimers::default();
     let (dispatcher, _rx) = crate::dispatcher::Dispatcher::channel();
@@ -92,7 +134,7 @@ pub async fn test_app_deps(
         installation,
         dispatcher,
         scheduler,
-        http,
+        http: http.clone(),
         proxy_secret,
         limits: Default::default(),
         activity: Default::default(),
@@ -106,6 +148,8 @@ pub async fn test_app_deps(
         attachments,
         blobs,
         manifest,
+        auth: test_auth_config(&http),
+        passwords: test_passwords(),
         shutdown: tokio_util::sync::CancellationToken::new(),
     };
     (deps, directory)
@@ -254,6 +298,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
             .expect("test listener");
     let pki = pki.unwrap_or_else(tls::test_pki);
     let (installation, manifest, directory) = test_installation(&pool).await;
+    seed_test_session(&pool, installation.owner_id).await;
     let (attachments, blobs) =
         attachment_store.unwrap_or_else(|| test_blob_store(directory.path()));
     let registry = Registry::new(timers.clone());
@@ -318,6 +363,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("test http listener");
+            let auth = test_auth_config(&config);
             let app = crate::http::AppState::new(crate::http::AppDeps {
                 pool: pool.clone(),
                 registry: registry.clone(),
@@ -338,6 +384,8 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
                 attachments,
                 blobs,
                 manifest,
+                auth,
+                passwords: test_passwords(),
                 shutdown: root.clone(),
             });
             (
@@ -696,11 +744,26 @@ impl TestClient {
         self
     }
 
-    /// Заголовки, с которыми прокси пропускает владельца: личность, Origin и CSRF-заголовок.
+    /// Запрос владельца: cookie заранее заведённого сеанса, Origin и CSRF-заголовок.
     pub fn as_owner(self) -> Self {
-        self.with_header("Remote-User", TEST_OWNER_LOGIN)
+        self.with_session(TEST_SESSION_TOKEN)
             .with_header("Origin", TEST_ORIGIN)
             .with_header("X-Canterlot-Client", "1")
+    }
+
+    /// Cookie сеанса с заданным токеном.
+    pub fn with_session(self, token: &str) -> Self {
+        self.with_header(
+            "Cookie",
+            &format!("{}={token}", crate::owner_auth::SESSION_COOKIE),
+        )
+    }
+
+    /// Без заголовков с этим именем (например, чтобы сменить cookie владельца).
+    pub fn without_header(mut self, name: &str) -> Self {
+        self.headers
+            .retain(|(header, _)| !header.as_str().eq_ignore_ascii_case(name));
+        self
     }
 
     /// Адрес собеседника для запросов напрямую в роутер.
@@ -857,10 +920,11 @@ pub struct TestWs {
     pub close_code: Option<u16>,
 }
 impl TestWs {
+    /// `session`: токен сеанса для cookie (`TEST_SESSION_TOKEN` у владельца).
     pub async fn connect(
         addr: std::net::SocketAddr,
         origin: &str,
-        user: Option<&str>,
+        session: Option<&str>,
     ) -> Result<Self, tokio_tungstenite::tungstenite::Error> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut request = format!("ws://{addr}/api/v1/ws").into_client_request()?;
@@ -868,8 +932,11 @@ impl TestWs {
         request
             .headers_mut()
             .insert("sec-websocket-protocol", "canterlot.v1".parse()?);
-        if let Some(user) = user {
-            request.headers_mut().insert("remote-user", user.parse()?);
+        if let Some(token) = session {
+            request.headers_mut().insert(
+                "cookie",
+                format!("{}={token}", crate::owner_auth::SESSION_COOKIE).parse()?,
+            );
         }
         let socket = tokio::net::TcpStream::connect(addr).await?;
         let (stream, response) = tokio_tungstenite::client_async(request, socket).await?;

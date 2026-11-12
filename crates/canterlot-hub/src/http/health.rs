@@ -137,18 +137,20 @@ async fn readyz(State(state): State<AppState>) -> Response {
 pub struct MeView {
     pub owner_id: Uuid,
     pub login: String,
+    /// Сеанс браузера, которым пришёл запрос.
+    pub session_id: Uuid,
 }
 
 /// Личность владельца; PWA привязывает к `owner_id` локальные данные.
 #[utoipa::path(get, path = "/api/v1/me", tag = "session", responses(
     (status = 200, description = "Владелец", body = MeView),
-    (status = 401, description = "Нет личности", body = ErrorEnvelope),
-    (status = 403, description = "Чужой пользователь", body = ErrorEnvelope),
+    (status = 401, description = "Нет сеанса", body = ErrorEnvelope),
 ))]
 async fn me(owner: Owner) -> Json<MeView> {
     Json(MeView {
         owner_id: owner.owner_id,
         login: owner.login,
+        session_id: owner.session_id,
     })
 }
 
@@ -205,10 +207,9 @@ pub struct DefaultsView {
     pub crunch_resume_text: String,
 }
 
+/// Пустой объект на один выпуск: старые вкладки PWA читают `config.auth.logout_url`.
 #[derive(Serialize, ToSchema)]
-pub struct AuthView {
-    pub logout_url: Option<String>,
-}
+pub struct AuthView {}
 
 #[derive(Serialize, ToSchema)]
 pub struct SessionsView {
@@ -233,8 +234,7 @@ pub struct ConfigView {
 /// Лимиты и пороги, которыми клиент проверяет ввод до отправки.
 #[utoipa::path(get, path = "/api/v1/config", tag = "session", responses(
     (status = 200, description = "Настройки для клиента", body = ConfigView),
-    (status = 401, description = "Нет личности", body = ErrorEnvelope),
-    (status = 403, description = "Чужой пользователь", body = ErrorEnvelope),
+    (status = 401, description = "Нет сеанса", body = ErrorEnvelope),
 ))]
 async fn config(o: Owner, State(state): State<AppState>) -> Result<Json<ConfigView>, ApiError> {
     let settings = crate::limit_settings::effective(
@@ -280,9 +280,7 @@ async fn config(o: Owner, State(state): State<AppState>) -> Result<Json<ConfigVi
         defaults: DefaultsView {
             crunch_resume_text: state.limits.default_resume_text.clone(),
         },
-        auth: AuthView {
-            logout_url: state.http.logout_url.clone(),
-        },
+        auth: AuthView {},
         sessions: SessionsView {
             trash_retention_secs: state.scheduler.trash_retention().as_secs(),
         },
@@ -292,8 +290,7 @@ async fn config(o: Owner, State(state): State<AppState>) -> Result<Json<ConfigVi
 /// Машиночитаемый контракт API (`docs/api/openapi.json`).
 #[utoipa::path(get, path = "/api/v1/openapi.json", tag = "session", responses(
     (status = 200, description = "Документ OpenAPI", content_type = "application/json"),
-    (status = 401, description = "Нет личности", body = ErrorEnvelope),
-    (status = 403, description = "Чужой пользователь", body = ErrorEnvelope),
+    (status = 401, description = "Нет сеанса", body = ErrorEnvelope),
 ))]
 async fn openapi_json(_owner: Owner) -> Result<Response, ApiError> {
     Ok((

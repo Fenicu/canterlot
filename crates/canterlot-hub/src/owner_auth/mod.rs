@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
+pub mod cli;
 pub mod password;
 pub mod recovery;
 pub mod sessions;

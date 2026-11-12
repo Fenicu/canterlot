@@ -33,6 +33,11 @@ enum Command {
         command: MachineCommand,
     },
     Serve(ConfigArgs),
+    /// Вход владельца: ссылка восстановления, пароль, сеансы.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Печатает документ OpenAPI (содержимое docs/api/openapi.json) без конфига и базы.
     Openapi,
 }
@@ -63,6 +68,40 @@ enum MachineCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// Одноразовая ссылка входа (по умолчанию на 10 минут, не больше 60).
+    RecoveryLink {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[arg(long)]
+        minutes: Option<u32>,
+        /// Отправить ссылку только в Gotify владельца и напечатать «sent».
+        #[arg(long)]
+        push: bool,
+    },
+    /// Задать пароль: дважды из TTY без эха или одной строкой из stdin.
+    SetPassword {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[arg(long)]
+        stdin: bool,
+        /// Также завершить все сеансы.
+        #[arg(long)]
+        revoke_sessions: bool,
+    },
+    /// Живые сеансы владельца.
+    Sessions {
+        #[command(flatten)]
+        config: ConfigArgs,
+    },
+    /// Завершить все сеансы.
+    RevokeAll {
+        #[command(flatten)]
+        config: ConfigArgs,
+    },
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run(Args::parse()).await {
@@ -88,6 +127,12 @@ async fn run(args: Args) -> Result<(), String> {
             MachineCommand::Add { config, .. }
             | MachineCommand::Revoke { config, .. }
             | MachineCommand::RotateToken { config, .. } => config,
+        },
+        Command::Auth { command } => match command {
+            AuthCommand::RecoveryLink { config, .. }
+            | AuthCommand::SetPassword { config, .. }
+            | AuthCommand::Sessions { config }
+            | AuthCommand::RevokeAll { config } => config,
         },
     };
     let config = HubConfig::load(&config.config).map_err(|error| error.to_string())?;
@@ -143,6 +188,33 @@ async fn run(args: Args) -> Result<(), String> {
             serve(pool.clone(), config, installation).await?;
         }
         Command::Openapi => unreachable!("handled before the config is loaded"),
+        Command::Auth { command } => {
+            use canterlot_hub::owner_auth::cli;
+            let installation = installation::check(&pool, &config.manifest)
+                .await
+                .map_err(|error| error.to_string())?;
+            let owner = installation.owner_id;
+            let output = match command {
+                AuthCommand::RecoveryLink { minutes, push, .. } => {
+                    cli::recovery_link(&pool, &config, owner, minutes, push).await?
+                }
+                AuthCommand::SetPassword {
+                    stdin,
+                    revoke_sessions,
+                    ..
+                } => {
+                    let password = cli::read_password(stdin)?;
+                    cli::set_password(&pool, owner, password, revoke_sessions).await?
+                }
+                AuthCommand::Sessions { .. } => cli::list_sessions(&pool, owner).await?,
+                AuthCommand::RevokeAll { .. } => cli::revoke_all(&pool, owner).await?,
+            };
+            let output = output.trim_end_matches('\n');
+            if !output.is_empty() {
+                writeln!(std::io::stdout().lock(), "{output}")
+                    .map_err(|_| "output_error".to_owned())?;
+            }
+        }
         Command::Machine { command } => {
             let installation = installation::check(&pool, &config.manifest)
                 .await
@@ -215,8 +287,18 @@ async fn serve(
         sessions,
         orchestrator,
         notify,
+        auth,
         ..
     } = config;
+    if let Some(http) = &http_config {
+        for key in http.deprecated_keys() {
+            tracing::warn!(
+                kind = "config_key_deprecated",
+                key,
+                "deprecated config key is ignored"
+            );
+        }
+    }
     let push_settings = notify
         .gotify
         .as_ref()
@@ -356,6 +438,8 @@ async fn serve(
             attachments,
             blobs,
             manifest,
+            auth,
+            passwords: Default::default(),
             shutdown: http_root.clone(),
         });
         let result = http::serve(app, listener, http_root.clone().cancelled_owned()).await;

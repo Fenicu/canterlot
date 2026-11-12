@@ -27,10 +27,20 @@ use crate::{
 pub const KIND_WAITING: &str = "waiting";
 pub const KIND_TURN_FINISHED: &str = "turn_finished";
 pub const KIND_FAILURE: &str = "failure";
+pub const KIND_SIGN_IN: &str = "sign_in";
+pub const KIND_SIGN_IN_FAILURES: &str = "sign_in_failures";
+pub const KIND_SIGN_IN_LOCK: &str = "sign_in_lock";
+/// Сеанс заговорил из новой страны (часть 2: геолокация).
+pub const KIND_SESSION_COUNTRY: &str = "session_country";
+/// Экран «Сеансы и вход» в PWA: сюда ведут пуши о входе.
+pub const SIGN_IN_PATH: &str = "/settings/sign-in";
+/// Сводный пуш о неудачах шлётся, когда их за час набралось столько.
+const SIGN_IN_FAILURE_THRESHOLD: i64 = 5;
 
 pub const PRIORITY_WAITING: u8 = 8;
 pub const PRIORITY_FAILURE: u8 = 7;
 pub const PRIORITY_TURN_FINISHED: u8 = 5;
+pub const PRIORITY_SIGN_IN: u8 = 8;
 
 /// Итог старше этого не шлётся: перезапуск хаба переоценивает давно осевшие сессии.
 const FRESH: TimeDelta = TimeDelta::minutes(10);
@@ -267,6 +277,126 @@ pub async fn cancel_for_conversation_in_tx(
     Ok(())
 }
 
+/// Пуш о входе: без разговора, только если пуши включены (`push_settings`).
+/// Адреса и города уходят только в собственный Gotify владельца.
+async fn enqueue_auth(
+    pool: &PgPool,
+    kind: &str,
+    dedupe_key: &str,
+    payload: &Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into owner_pushes(id,conversation_id,kind,dedupe_key,payload,run_at)
+         select $1,null,$2,$3,$4,clock_timestamp() from push_settings
+         on conflict(dedupe_key) do nothing",
+    )
+    .bind(Uuid::now_v7())
+    .bind(kind)
+    .bind(dedupe_key)
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Новый сеанс: «Новый вход в canterlot», в тексте устройство, место, адрес и способ.
+pub async fn on_sign_in(pool: &PgPool, session_id: Uuid, body: &str) -> Result<(), sqlx::Error> {
+    enqueue_auth(
+        pool,
+        KIND_SIGN_IN,
+        &format!("{KIND_SIGN_IN}:{session_id}"),
+        &json!({"title": "Новый вход в canterlot", "body": clip(body, DETAIL_CHARS)}),
+    )
+    .await
+}
+
+/// Неудачная попытка входа: не больше одного сводного пуша в час, когда неудач
+/// за час набралось не меньше порога. Числа считаются при отправке.
+pub async fn on_sign_in_failure(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into owner_pushes(id,conversation_id,kind,dedupe_key,payload,run_at)
+         select $1,null,$2,$2||':'||$1::text,'{}'::jsonb,clock_timestamp() from push_settings
+         where (select count(*) from auth_failures where at>now()-interval '1 hour') >= $3
+           and not exists(select 1 from owner_pushes
+                          where kind=$2 and created_at>clock_timestamp()-interval '1 hour')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(KIND_SIGN_IN_FAILURES)
+    .bind(SIGN_IN_FAILURE_THRESHOLD)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Общая блокировка входа по паролю включилась: один пуш на блокировку.
+pub async fn on_sign_in_lock(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let id = Uuid::now_v7();
+    enqueue_auth(
+        pool,
+        KIND_SIGN_IN_LOCK,
+        &format!("{KIND_SIGN_IN_LOCK}:{id}"),
+        &json!({}),
+    )
+    .await
+}
+
+/// «с 1 адреса», «с 2 адресов», «с 21 адреса».
+fn addresses(count: i64) -> String {
+    let word = if count % 10 == 1 && count % 100 != 11 {
+        "адреса"
+    } else {
+        "адресов"
+    };
+    format!("{count} {word}")
+}
+
+pub fn sign_in_failures_text(failures: i64, buckets: i64) -> String {
+    format!(
+        "Неудачные попытки входа: {failures} с {} за час",
+        addresses(buckets)
+    )
+}
+
+async fn compose_auth(
+    pool: &PgPool,
+    row: &PushRow,
+    app_url: &str,
+) -> Result<Option<Message>, sqlx::Error> {
+    let (title, body) = match row.kind.as_str() {
+        KIND_SIGN_IN | KIND_SESSION_COUNTRY => {
+            let (Some(title), Some(body)) =
+                (row.payload["title"].as_str(), row.payload["body"].as_str())
+            else {
+                return Ok(None);
+            };
+            (title.to_owned(), body.to_owned())
+        }
+        KIND_SIGN_IN_FAILURES => {
+            let (failures, buckets) = crate::owner_auth::throttle::last_hour(pool).await?;
+            if failures == 0 {
+                return Ok(None);
+            }
+            (
+                "Попытки входа в canterlot".to_owned(),
+                sign_in_failures_text(failures, buckets),
+            )
+        }
+        KIND_SIGN_IN_LOCK => (
+            "Вход по паролю заблокирован".to_owned(),
+            "Слишком много неудачных попыток: вход по паролю закрыт на 10 минут \
+             для устройств, где вы ещё не входили"
+                .to_owned(),
+        ),
+        _ => return Ok(None),
+    };
+    Ok(Some(Message {
+        title,
+        body,
+        priority: PRIORITY_SIGN_IN,
+        click_url: format!("{app_url}{SIGN_IN_PATH}"),
+    }))
+}
+
 /// Готовое сообщение Gotify.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
@@ -317,7 +447,7 @@ enum Failure {
 #[derive(sqlx::FromRow)]
 struct PushRow {
     id: Uuid,
-    conversation_id: Uuid,
+    conversation_id: Option<Uuid>,
     kind: String,
     payload: Value,
     attempts: i32,
@@ -412,6 +542,17 @@ impl Sender {
             408 | 429 | 500..=599 => Err(Failure::Retry(Some(status))),
             _ => Err(Failure::Fatal(status)),
         }
+    }
+
+    /// Отправка мимо очереди: ссылка восстановления не должна лежать в базе открытым текстом.
+    pub async fn send_now(&self, message: &Message) -> Result<u16, &'static str> {
+        if !self.take_slot() {
+            return Err("notify_rate_limited");
+        }
+        self.post(message).await.map_err(|failure| match failure {
+            Failure::Retry(_) => "notify_unavailable",
+            Failure::Fatal(_) => "notify_rejected",
+        })
     }
 
     /// Один проход: забирает созревшие строки и отправляет их по одной.
@@ -528,7 +669,7 @@ fn warn_dropped(row: &PushRow, status: Option<u16>, reason: &'static str) {
     tracing::warn!(
         kind = "owner_push_dropped",
         push_kind = %row.kind,
-        conversation_id = %row.conversation_id,
+        conversation_id = ?row.conversation_id,
         status = status.map(i64::from),
         reason,
         "owner push dropped"
@@ -542,9 +683,12 @@ async fn compose(
     row: &PushRow,
     app_url: &str,
 ) -> Result<Option<Message>, sqlx::Error> {
+    let Some(conversation_id) = row.conversation_id else {
+        return compose_auth(pool, row, app_url).await;
+    };
     let conversation: Option<(String, bool)> =
         sqlx::query_as("select title,trashed_at is not null from conversations where id=$1")
-            .bind(row.conversation_id)
+            .bind(conversation_id)
             .fetch_optional(pool)
             .await?;
     let Some((title, trashed)) = conversation else {
@@ -565,7 +709,7 @@ async fn compose(
                 "select kind,state,request_payload from requests where id=$1 and conversation_id=$2",
             )
             .bind(request_id)
-            .bind(row.conversation_id)
+            .bind(conversation_id)
             .fetch_optional(pool)
             .await?;
             match request {
@@ -581,7 +725,7 @@ async fn compose(
             let started: Option<DateTime<Utc>> = sqlx::query_scalar(
                 "select max(started_at) from runs where conversation_id=$1 and finished_at <= $2",
             )
-            .bind(row.conversation_id)
+            .bind(conversation_id)
             .bind(row.created_at)
             .fetch_one(pool)
             .await?;
@@ -596,7 +740,7 @@ async fn compose(
                         crate::agents::main_agent_filter("agent")
                     );
                     sqlx::query_scalar(sqlx::AssertSqlSafe(query))
-                        .bind(row.conversation_id)
+                        .bind(conversation_id)
                         .bind(started)
                         .bind(row.created_at)
                         .fetch_optional(pool)
@@ -627,7 +771,7 @@ async fn compose(
         title: clean_title(&title),
         body,
         priority,
-        click_url: format!("{app_url}/c/{}", row.conversation_id),
+        click_url: format!("{app_url}/c/{}", conversation_id),
     }))
 }
 

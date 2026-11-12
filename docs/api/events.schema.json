@@ -6715,7 +6715,10 @@
               "const": "close"
             },
             "reason": {
-              "const": "reauth"
+              "enum": [
+                "reauth",
+                "revoked"
+              ]
             }
           },
           "required": [

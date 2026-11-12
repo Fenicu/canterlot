@@ -115,7 +115,12 @@ fn pilot_sections_parse_with_defaults() {
     let config = HubConfig::load(&path).unwrap();
     let http = config.http.unwrap();
     assert_eq!(http.listen.to_string(), "127.0.0.1:8080");
-    assert_eq!(http.user_header, "Remote-User");
+    assert_eq!(http.user_header, None);
+    assert_eq!(http.leak_header().as_str(), "remote-user");
+    assert!(http.deprecated_keys().is_empty());
+    assert_eq!(http.ws.session_check_interval, D::from_secs(60));
+    assert_eq!(config.auth.origin(), "https://chat.example:8443");
+    assert_eq!(config.auth.rp_id(), "chat.example");
     assert_eq!(http.max_json_body_bytes, 524288);
     assert_eq!(http.header_read_timeout, D::from_secs(10));
     assert_eq!(http.body_read_timeout, D::from_secs(30));
@@ -297,23 +302,46 @@ fn http_section_requires_trusted_proxies_owner_and_origins() {
 }
 
 #[test]
-fn http_section_validates_logout_url_and_proxy_secret() {
+fn deprecated_http_keys_parse_without_validation_and_proxy_secret_is_checked() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hub.toml");
-    for url in [
-        "/logout",
-        "http://auth.example/logout",
-        "https://",
-        "https://user:password@auth.example/logout",
+    // Устаревшие ключи не останавливают запуск, даже с прежде недопустимым значением.
+    for (header, url) in [
+        ("Remote-User", "/logout"),
+        ("Cookie", "http://auth.example/logout"),
+        ("Remote User", "https://user:password@auth.example/logout"),
     ] {
         fs::write(
             &path,
-            format!("{PILOT_BASE}{HTTP_BASE}logout_url = '{url}'\n"),
+            format!("{PILOT_BASE}{HTTP_BASE}user_header = '{header}'\nlogout_url = '{url}'\n"),
         )
         .unwrap();
-        assert!(HubConfig::load(&path).is_err());
+        let http = HubConfig::load(&path).unwrap().http.unwrap();
+        assert_eq!(
+            http.deprecated_keys(),
+            vec!["http.user_header", "http.logout_url"]
+        );
     }
-    fs::write(&path, format!("{PILOT_BASE}{HTTP_BASE}logout_url = 'https://auth.example/logout?rd=https%3A%2F%2Fchat.example'\nproxy_secret_file = 'proxy-secret'\n")).unwrap();
+    let http = HubConfig::load(&path).unwrap().http.unwrap();
+    assert_eq!(
+        http.leak_header().as_str(),
+        "remote-user",
+        "unparsable name falls back"
+    );
+    fs::write(
+        &path,
+        format!("{PILOT_BASE}{HTTP_BASE}user_header = 'X-Auth-User'\n"),
+    )
+    .unwrap();
+    let http = HubConfig::load(&path).unwrap().http.unwrap();
+    assert_eq!(http.leak_header().as_str(), "x-auth-user");
+    assert_eq!(http.deprecated_keys(), vec!["http.user_header"]);
+
+    fs::write(
+        &path,
+        format!("{PILOT_BASE}{HTTP_BASE}proxy_secret_file = 'proxy-secret'\n"),
+    )
+    .unwrap();
     assert!(HubConfig::load(&path).is_err());
     fs::write(dir.path().join("proxy-secret"), [42; 31]).unwrap();
     assert!(HubConfig::load(&path).is_err());
@@ -323,11 +351,35 @@ fn http_section_validates_logout_url_and_proxy_secret() {
         http.proxy_secret_file.unwrap(),
         dir.path().join("proxy-secret")
     );
-    assert!(
-        http.logout_url
-            .unwrap()
-            .starts_with("https://auth.example/")
-    );
+}
+
+#[test]
+fn auth_section_defaults_to_the_first_origin_and_validates_rp_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    let http = "[http]\ntrusted_proxies = ['127.0.0.0/8']\nowner_login = 'owner'\nallowed_origins = ['https://hub.example.com', 'http://localhost:5173']\n";
+    let load = |auth: &str| {
+        fs::write(&path, format!("{PILOT_BASE}{http}{auth}")).unwrap();
+        HubConfig::load(&path)
+    };
+    let config = load("").unwrap();
+    assert_eq!(config.auth.origin(), "https://hub.example.com");
+    assert_eq!(config.auth.rp_id(), "hub.example.com");
+    let config = load("[auth]\norigin = 'http://localhost:5173'\n").unwrap();
+    assert_eq!(config.auth.origin(), "http://localhost:5173");
+    assert_eq!(config.auth.rp_id(), "localhost");
+    let config = load("[auth]\nrp_id = 'example.com'\n").unwrap();
+    assert_eq!(config.auth.rp_id(), "example.com");
+    for bad in [
+        "[auth]\norigin = 'https://other.example.com'\n",
+        "[auth]\nrp_id = 'evil.com'\n",
+        "[auth]\nrp_id = 'ub.example.com'\n",
+        "[auth]\nrp_id = '.example.com'\n",
+        "[auth]\nrp_id = ''\n",
+        "[auth]\nunknown = 1\n",
+    ] {
+        assert!(load(bad).is_err(), "{bad}");
+    }
 }
 
 #[test]

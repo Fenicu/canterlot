@@ -1735,12 +1735,12 @@ async fn download_requires_owner_and_sets_safe_headers(pool: PgPool) {
     assert_eq!(h["content-length"], png.len().to_string());
 
     let stranger = TestClient::in_process(canterlot_hub::http::router(f.state.clone()))
-        .with_header("Remote-User", "attacker");
+        .with_session("unknown-session-token-0123456789abcdefghij");
     assert_error(
         &download(&f, &stranger, id).await,
-        403,
-        "forbidden_user",
-        "never",
+        401,
+        "unauthenticated",
+        "after_condition",
     );
     let anonymous = TestClient::in_process(canterlot_hub::http::router(f.state.clone()));
     assert_error(

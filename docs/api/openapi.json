@@ -474,6 +474,827 @@
         }
       }
     },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Выход: сеанс отзывается, cookie стирается. Cookie устройства остаётся.",
+        "operationId": "post__api_v1_auth_logout",
+        "responses": {
+          "200": {
+            "description": "Сеанс завершён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/methods": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Какие способы входа сейчас доступны: кнопка ключа доступа прячется без ключей.",
+        "operationId": "get__api_v1_auth_methods",
+        "responses": {
+          "200": {
+            "description": "Способы входа",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MethodsView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/password": {
+      "put": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Задать или сменить пароль. Смена несёт `current_password`; первый пароль требует\nсвежего сеанса. Успех завершает все остальные сеансы и делает текущий свежим.",
+        "operationId": "put__api_v1_auth_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPasswordBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Пароль сохранён; отозванные сеансы",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "wrong_password или reauth_required",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "too_many_attempts",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Вход по логину и паролю. Неверный логин, неверный пароль и отсутствие пароля дают\nодин и тот же 401 и одну проверку argon2.",
+        "operationId": "post__api_v1_auth_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordSignIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Вход выполнен; Set-Cookie сеанса и устройства",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_credentials",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "too_many_attempts, details.retry_after_seconds",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/reauth/password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Повторный вход паролем: сеанс становится свежим на 10 минут. Ключ доступа для того\nже добавляет часть 2 (`/reauth/passkey/*`, тоже через `sessions::mark_fresh`).",
+        "operationId": "post__api_v1_auth_reauth_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReauthPassword"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Сеанс свеж",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreshView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "wrong_password",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "too_many_attempts",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/recovery": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Вход по ссылке восстановления: одноразовый токен из `canterlot-hub auth recovery-link`.",
+        "operationId": "post__api_v1_auth_recovery",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoverySignIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Вход выполнен; Set-Cookie сеанса и устройства",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid_credentials: токен неизвестен, использован или истёк",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "too_many_attempts",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/sessions": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "get__api_v1_auth_sessions",
+        "responses": {
+          "200": {
+            "description": "Живые сеансы",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerSessionsView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/sessions/revoke-others": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "«Завершить все остальные сеансы». Требует свежего сеанса.",
+        "operationId": "post__api_v1_auth_sessions_revoke_others",
+        "responses": {
+          "200": {
+            "description": "Остальные сеансы завершены",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "reauth_required",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/sessions/{id}": {
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Завершает сеанс. Свой сеанс — это выход; чужой требует свежего сеанса и уносит\nкаскадом сеансы, вход которых он подтвердил.",
+        "operationId": "delete__api_v1_auth_sessions__id_",
+        "responses": {
+          "200": {
+            "description": "Сеанс завершён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokedView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "reauth_required",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Живого сеанса нет",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "patch__api_v1_auth_sessions__id_",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameSession"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Имя сохранено",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnerSessionView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Живого сеанса нет",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/settings": {
+      "patch": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Срок бездействия для всех сеансов, включая текущий; cookie текущего получает новый срок.",
+        "operationId": "patch__api_v1_auth_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthSettingsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Настройки сохранены",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthSettingsView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/bookmarks": {
       "get": {
         "tags": [
@@ -590,26 +1411,7 @@
             }
           },
           "401": {
-            "description": "Нет личности",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Чужой пользователь",
+            "description": "Нет сеанса",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -6139,26 +6941,7 @@
             }
           },
           "401": {
-            "description": "Нет личности",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Чужой пользователь",
+            "description": "Нет сеанса",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -6302,26 +7085,7 @@
             }
           },
           "401": {
-            "description": "Нет личности",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Чужой пользователь",
+            "description": "Нет сеанса",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -8235,16 +8999,35 @@
         },
         "additionalProperties": false
       },
-      "AuthView": {
+      "AuthSettingsBody": {
         "type": "object",
+        "required": [
+          "idle_timeout_days"
+        ],
         "properties": {
-          "logout_url": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "idle_timeout_days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "7, 30, 90, 180 или 365."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AuthSettingsView": {
+        "type": "object",
+        "required": [
+          "idle_timeout_days"
+        ],
+        "properties": {
+          "idle_timeout_days": {
+            "type": "integer",
+            "format": "int32"
           }
         }
+      },
+      "AuthView": {
+        "type": "object",
+        "description": "Пустой объект на один выпуск: старые вкладки PWA читают `config.auth.logout_url`."
       },
       "BackgroundTaskView": {
         "type": "object",
@@ -9845,7 +10628,12 @@
         "type": "string",
         "enum": [
           "unauthenticated",
-          "forbidden_user",
+          "invalid_credentials",
+          "too_many_attempts",
+          "session_revoked",
+          "session_expired",
+          "reauth_required",
+          "wrong_password",
           "origin_rejected",
           "invalid_request",
           "invalid_offset",
@@ -9950,6 +10738,12 @@
               "$ref": "#/components/schemas/ArchiveReason"
             }
           },
+          "retry_after_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Через сколько секунд повторить попытку входа (`too_many_attempts`).",
+            "minimum": 0
+          },
           "spawn_refusal": {
             "$ref": "#/components/schemas/SpawnRefusal",
             "description": "Отказ «Запустить сейчас» (`spawn_refused`): код, сообщение и состояние элемента."
@@ -9993,7 +10787,15 @@
           "no_live_execution",
           "conversation_closed",
           "nul_character",
-          "spawn_refused"
+          "spawn_refused",
+          "logout",
+          "owner",
+          "others",
+          "password_changed",
+          "idle",
+          "server",
+          "limit",
+          "cascade"
         ]
       },
       "ErrorScope": {
@@ -10305,6 +11107,18 @@
             ],
             "format": "int64",
             "description": "Темп за последний час (пятичасовое окно) или шесть часов (неделя, месяц)."
+          }
+        }
+      },
+      "FreshView": {
+        "type": "object",
+        "required": [
+          "fresh_until"
+        ],
+        "properties": {
+          "fresh_until": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -12279,7 +13093,8 @@
         "type": "object",
         "required": [
           "owner_id",
-          "login"
+          "login",
+          "session_id"
         ],
         "properties": {
           "login": {
@@ -12288,6 +13103,11 @@
           "owner_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Сеанс браузера, которым пришёл запрос."
           }
         }
       },
@@ -12324,6 +13144,21 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "MethodsView": {
+        "type": "object",
+        "required": [
+          "password",
+          "passkey"
+        ],
+        "properties": {
+          "passkey": {
+            "type": "boolean"
+          },
+          "password": {
+            "type": "boolean"
           }
         }
       },
@@ -12963,6 +13798,130 @@
           }
         }
       },
+      "OwnerSessionView": {
+        "type": "object",
+        "required": [
+          "id",
+          "method",
+          "created_at",
+          "last_seen_at",
+          "approved",
+          "current"
+        ],
+        "properties": {
+          "approved": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Живые сеансы, вход которых подтвердил этот."
+          },
+          "approved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Сеанс, подтвердивший вход по QR."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` — адрес неизвестен («IP неизвестен»)."
+          },
+          "current": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Подпись устройства по user agent и подсказкам клиента."
+          },
+          "last_ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "location": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionLocationView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "method": {
+            "$ref": "#/components/schemas/SignInMethod"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Имя от владельца."
+          },
+          "user_agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Сырой user agent для подробностей; заявлен клиентом."
+          }
+        }
+      },
+      "OwnerSessionsView": {
+        "type": "object",
+        "required": [
+          "current_id",
+          "idle_timeout_days",
+          "sessions"
+        ],
+        "properties": {
+          "current_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "fresh_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "До какого момента текущий сеанс свеж (действия управления без повторного входа)."
+          },
+          "idle_timeout_days": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnerSessionView"
+            },
+            "description": "Живые сеансы: текущий первым, затем по последней активности."
+          }
+        }
+      },
       "OwnerUpdate": {
         "type": "object",
         "description": "Правка правила владельцем из PWA: агентских ограничений на потомков нет,\nвладелец ставит правило на любую свою сессию.",
@@ -13041,6 +14000,25 @@
             "type": "string"
           }
         }
+      },
+      "PasswordSignIn": {
+        "type": "object",
+        "required": [
+          "login",
+          "password"
+        ],
+        "properties": {
+          "device": {
+            "description": "Подсказки клиента для подписи устройства: только для показа, не больше 2 КиБ."
+          },
+          "login": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "PatchScheduled": {
         "type": "object",
@@ -14051,6 +15029,31 @@
         },
         "additionalProperties": false
       },
+      "ReauthPassword": {
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RecoverySignIn": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "device": {},
+          "token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "RefreshView": {
         "type": "object",
         "required": [
@@ -14071,6 +15074,19 @@
             "minimum": 0
           }
         }
+      },
+      "RenameSession": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "До 64 символов; пустая строка снимает имя."
+          }
+        },
+        "additionalProperties": false
       },
       "RequestItemView": {
         "type": "object",
@@ -14281,6 +15297,22 @@
           "after_condition",
           "never"
         ]
+      },
+      "RevokedView": {
+        "type": "object",
+        "required": [
+          "revoked"
+        ],
+        "properties": {
+          "revoked": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Отозванные сеансы, включая каскад."
+          }
+        }
       },
       "RoutingPolicyBody": {
         "type": "object",
@@ -14784,6 +15816,36 @@
           }
         ]
       },
+      "SessionLocationView": {
+        "type": "object",
+        "description": "Место по IP: город, регион, страна. Заполняет часть 2 (DB-IP).",
+        "properties": {
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "SessionUsageView": {
         "type": "object",
         "required": [
@@ -14835,6 +15897,26 @@
           }
         }
       },
+      "SetPasswordBody": {
+        "type": "object",
+        "required": [
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязателен, если пароль уже задан."
+          },
+          "new_password": {
+            "type": "string",
+            "description": "10..1024 байт."
+          }
+        },
+        "additionalProperties": false
+      },
       "SettingsPatch": {
         "type": "object",
         "properties": {
@@ -14880,6 +15962,27 @@
           "rev": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "SignInMethod": {
+        "type": "string",
+        "description": "Способ входа, создавший сеанс.",
+        "enum": [
+          "password",
+          "passkey",
+          "qr",
+          "recovery"
+        ]
+      },
+      "SignInView": {
+        "type": "object",
+        "required": [
+          "session"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/components/schemas/OwnerSessionView"
           }
         }
       },

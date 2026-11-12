@@ -802,12 +802,13 @@ async fn media_download_has_safe_headers_and_owner_check(pool: PgPool) {
     assert!(h.contains_key("x-server-time-ms"));
 
     let router = canterlot_hub::http::router(f.files.state.clone());
-    let stranger = TestClient::in_process(router.clone()).with_header("Remote-User", "attacker");
+    let stranger = TestClient::in_process(router.clone())
+        .with_session("unknown-session-token-0123456789abcdefghij");
     assert_error(
         &f.download(&stranger, id).await,
-        403,
-        "forbidden_user",
-        "never",
+        401,
+        "unauthenticated",
+        "after_condition",
     );
     let anonymous = TestClient::in_process(router);
     assert_error(

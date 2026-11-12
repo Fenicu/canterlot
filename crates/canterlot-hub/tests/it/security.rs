@@ -11,7 +11,7 @@ use canterlot_hub::{
     config::HttpConfig,
     http::{self, AppState, extract::ApiJson},
     idempotency::{IdempotencyConflict, run_in_tx},
-    testkit::{TEST_ORIGIN, TEST_OWNER_LOGIN, TestClient, test_app_deps, test_http_config},
+    testkit::{TEST_ORIGIN, TEST_SESSION_COOKIE, TestClient, test_app_deps, test_http_config},
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -133,7 +133,7 @@ async fn security_slow_body_expires_and_capacity_returns(pool: PgPool) {
     ] {
         let mut socket = TcpStream::connect(h.addr).await.unwrap();
         socket.write_all(format!(
-            "POST /api/v1/_security/echo HTTP/1.1\r\nHost: hub\r\nRemote-User: {TEST_OWNER_LOGIN}\r\nOrigin: {TEST_ORIGIN}\r\nX-Canterlot-Client: 1\r\nIdempotency-Key: slow\r\nContent-Type: application/json\r\n{framing}\r\n\r\n{prefix}"
+            "POST /api/v1/_security/echo HTTP/1.1\r\nHost: hub\r\nCookie: {TEST_SESSION_COOKIE}\r\nOrigin: {TEST_ORIGIN}\r\nX-Canterlot-Client: 1\r\nIdempotency-Key: slow\r\nContent-Type: application/json\r\n{framing}\r\n\r\n{prefix}"
         ).as_bytes()).await.unwrap();
         let bytes = closed(&mut socket, WAIT).await;
         assert!(!bytes.starts_with(b"HTTP/1.1 200"));
@@ -196,7 +196,7 @@ async fn security_upgraded_connection_outlives_body_deadline(pool: PgPool) {
     let h = server(pool, config).await;
     let mut socket = TcpStream::connect(h.addr).await.unwrap();
     socket.write_all(format!(
-        "GET /api/v1/_security/ws HTTP/1.1\r\nHost: hub\r\nRemote-User: {TEST_OWNER_LOGIN}\r\nOrigin: {TEST_ORIGIN}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        "GET /api/v1/_security/ws HTTP/1.1\r\nHost: hub\r\nCookie: {TEST_SESSION_COOKIE}\r\nOrigin: {TEST_ORIGIN}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
     ).as_bytes()).await.unwrap();
     let mut header = Vec::new();
     tokio::time::timeout(WAIT, async {

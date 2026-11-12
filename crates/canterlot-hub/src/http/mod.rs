@@ -18,8 +18,8 @@ use utoipa_axum::router::OpenApiRouter;
 use crate::{
     attachments::BlobStore,
     config::{
-        ActivityConfig, AttachmentsConfig, GuardsConfig, HttpConfig, LimitsConfig, MachinesConfig,
-        SessionToolsConfig,
+        ActivityConfig, AttachmentsConfig, AuthConfig, GuardsConfig, HttpConfig, LimitsConfig,
+        MachinesConfig, SessionToolsConfig,
     },
     dispatcher::Dispatcher,
     installation::Installation,
@@ -52,6 +52,7 @@ pub mod routing;
 pub mod scheduled;
 pub mod search;
 pub mod session_tools;
+pub mod signin;
 pub mod snapshot;
 pub mod spawn_queue;
 pub mod ws;
@@ -87,6 +88,10 @@ pub struct AppDeps {
     pub attachments: AttachmentsConfig,
     pub blobs: Arc<dyn BlobStore>,
     pub manifest: PathBuf,
+    /// `[auth]` после подстановки значений по умолчанию.
+    pub auth: AuthConfig,
+    /// Хеширование паролей: боевые параметры argon2, в тестах дешёвые.
+    pub passwords: crate::owner_auth::password::Passwords,
     pub shutdown: CancellationToken,
 }
 
@@ -113,7 +118,10 @@ pub struct AppState {
     /// Тела загрузок вложений одновременно в обработке: не больше `max_concurrent_uploads`.
     pub upload_slots: Arc<tokio::sync::Semaphore>,
     pub manifest: Arc<PathBuf>,
+    /// Заголовок старого прокси: его приход помечается `X-Canterlot-Proxy-Leak`.
     pub user_header: HeaderName,
+    pub auth: Arc<AuthConfig>,
+    pub passwords: crate::owner_auth::password::Passwords,
     pub ws_tasks: tokio_util::task::TaskTracker,
     #[cfg(feature = "fault-injection")]
     pub ws_faults: crate::fault_injection::Faults,
@@ -122,8 +130,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(deps: AppDeps) -> Self {
-        let user_header = HeaderName::from_bytes(deps.http.user_header.as_bytes())
-            .expect("user_header is checked by HttpConfig::validate");
+        let user_header = deps.http.leak_header();
         Self {
             pool: deps.pool,
             registry: deps.registry,
@@ -148,6 +155,8 @@ impl AppState {
             blobs: deps.blobs,
             manifest: Arc::new(deps.manifest),
             user_header,
+            auth: Arc::new(deps.auth),
+            passwords: deps.passwords,
             ws_tasks: tokio_util::task::TaskTracker::new(),
             #[cfg(feature = "fault-injection")]
             ws_faults: Default::default(),
@@ -171,6 +180,7 @@ pub fn load_proxy_secret(path: &Path) -> Result<Vec<u8>, &'static str> {
 pub fn api_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .merge(health::routes())
+        .merge(signin::routes())
         .merge(scheduled::routes())
         .merge(alarms::routes())
         .merge(plan::routes())

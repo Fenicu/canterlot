@@ -46,7 +46,7 @@ impl Fixture {
             pool,
             client: TestClient::in_process(router.clone()).as_owner(),
             no_client_header: TestClient::in_process(router)
-                .with_header("Remote-User", testkit::TEST_OWNER_LOGIN)
+                .with_session(testkit::TEST_SESSION_TOKEN)
                 .with_header("Origin", testkit::TEST_ORIGIN),
             owner,
             conversation,

@@ -63,6 +63,171 @@ export interface paths {
         patch: operations["patch__api_v1_attachments__id__content"];
         trace?: never;
     };
+    "/api/v1/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Выход: сеанс отзывается, cookie стирается. Cookie устройства остаётся. */
+        post: operations["post__api_v1_auth_logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/methods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Какие способы входа сейчас доступны: кнопка ключа доступа прячется без ключей. */
+        get: operations["get__api_v1_auth_methods"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Задать или сменить пароль. Смена несёт `current_password`; первый пароль требует
+         *     свежего сеанса. Успех завершает все остальные сеансы и делает текущий свежим.
+         */
+        put: operations["put__api_v1_auth_password"];
+        /**
+         * Вход по логину и паролю. Неверный логин, неверный пароль и отсутствие пароля дают
+         *     один и тот же 401 и одну проверку argon2.
+         */
+        post: operations["post__api_v1_auth_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/reauth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Повторный вход паролем: сеанс становится свежим на 10 минут. Ключ доступа для того
+         *     же добавляет часть 2 (`/reauth/passkey/*`, тоже через `sessions::mark_fresh`).
+         */
+        post: operations["post__api_v1_auth_reauth_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Вход по ссылке восстановления: одноразовый токен из `canterlot-hub auth recovery-link`. */
+        post: operations["post__api_v1_auth_recovery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_auth_sessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/sessions/revoke-others": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** «Завершить все остальные сеансы». Требует свежего сеанса. */
+        post: operations["post__api_v1_auth_sessions_revoke_others"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Завершает сеанс. Свой сеанс — это выход; чужой требует свежего сеанса и уносит
+         *     каскадом сеансы, вход которых он подтвердил.
+         */
+        delete: operations["delete__api_v1_auth_sessions__id_"];
+        options?: never;
+        head?: never;
+        patch: operations["patch__api_v1_auth_sessions__id_"];
+        trace?: never;
+    };
+    "/api/v1/auth/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Срок бездействия для всех сеансов, включая текущий; cookie текущего получает новый срок. */
+        patch: operations["patch__api_v1_auth_settings"];
+        trace?: never;
+    };
     "/api/v1/bookmarks": {
         parameters: {
             query?: never;
@@ -1405,9 +1570,19 @@ export interface components {
             pinned?: boolean | null;
             title?: string | null;
         };
-        AuthView: {
-            logout_url?: string | null;
+        AuthSettingsBody: {
+            /**
+             * Format: int32
+             * @description 7, 30, 90, 180 или 365.
+             */
+            idle_timeout_days: number;
         };
+        AuthSettingsView: {
+            /** Format: int32 */
+            idle_timeout_days: number;
+        };
+        /** @description Пустой объект на один выпуск: старые вкладки PWA читают `config.auth.logout_url`. */
+        AuthView: Record<string, never>;
         BackgroundTaskView: {
             /**
              * Format: uuid
@@ -1847,7 +2022,7 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed";
+        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
             /** @description Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`. */
@@ -1868,6 +2043,11 @@ export interface components {
             question_id?: string;
             reason?: components["schemas"]["ErrorReason"];
             reasons?: components["schemas"]["ArchiveReason"][];
+            /**
+             * Format: int64
+             * @description Через сколько секунд повторить попытку входа (`too_many_attempts`).
+             */
+            retry_after_seconds?: number;
             /** @description Отказ «Запустить сейчас» (`spawn_refused`): код, сообщение и состояние элемента. */
             spawn_refusal?: components["schemas"]["SpawnRefusal"];
             winner_decision?: components["schemas"]["DecisionBody"];
@@ -1876,7 +2056,7 @@ export interface components {
             error: components["schemas"]["ErrorBody"];
         };
         /** @enum {string} */
-        ErrorReason: "closed_without_decision" | "generation_advanced" | "invalid_idempotency_key" | "input_not_queued" | "no_running_turn" | "request_open" | "compacting" | "unsupported_harness" | "capability_missing" | "revision_conflict" | "steer_in_flight" | "empty_content" | "content_too_long" | "attachment_unavailable" | "attachment_not_ready" | "attachment_not_found" | "run_in_progress" | "no_live_execution" | "conversation_closed" | "nul_character" | "spawn_refused";
+        ErrorReason: "closed_without_decision" | "generation_advanced" | "invalid_idempotency_key" | "input_not_queued" | "no_running_turn" | "request_open" | "compacting" | "unsupported_harness" | "capability_missing" | "revision_conflict" | "steer_in_flight" | "empty_content" | "content_too_long" | "attachment_unavailable" | "attachment_not_ready" | "attachment_not_found" | "run_in_progress" | "no_live_execution" | "conversation_closed" | "nul_character" | "spawn_refused" | "logout" | "owner" | "others" | "password_changed" | "idle" | "server" | "limit" | "cascade";
         /** @enum {string} */
         ErrorScope: "browser" | "auth" | "hub_db" | "delivery" | "worker_disk" | "cli_start" | "adapter_protocol" | "agent_service";
         Evidence: {
@@ -1957,6 +2137,10 @@ export interface components {
              * @description Темп за последний час (пятичасовое окно) или шесть часов (неделя, месяц).
              */
             recent_rate_permille_per_hour?: number | null;
+        };
+        FreshView: {
+            /** Format: date-time */
+            fresh_until: string;
         };
         Group: {
             created_at: string;
@@ -2530,6 +2714,11 @@ export interface components {
             login: string;
             /** Format: uuid */
             owner_id: string;
+            /**
+             * Format: uuid
+             * @description Сеанс браузера, которым пришёл запрос.
+             */
+            session_id: string;
         };
         /** @description Картинка в моделях чтения блока. */
         MediaView: {
@@ -2542,6 +2731,10 @@ export interface components {
             size: number;
             /** Format: int32 */
             width?: number | null;
+        };
+        MethodsView: {
+            passkey: boolean;
+            password: boolean;
         };
         MetricsView: {
             /** Format: int32 */
@@ -2733,6 +2926,46 @@ export interface components {
             files: components["schemas"]["OwnerFileView"][];
             memory_projects: components["schemas"]["OwnerMemoryProjectView"][];
         };
+        OwnerSessionView: {
+            /** @description Живые сеансы, вход которых подтвердил этот. */
+            approved: string[];
+            /**
+             * Format: uuid
+             * @description Сеанс, подтвердивший вход по QR.
+             */
+            approved_by?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** @description `null` — адрес неизвестен («IP неизвестен»). */
+            created_ip?: string | null;
+            current: boolean;
+            /** Format: uuid */
+            id: string;
+            /** @description Подпись устройства по user agent и подсказкам клиента. */
+            label?: string | null;
+            last_ip?: string | null;
+            /** Format: date-time */
+            last_seen_at: string;
+            location?: components["schemas"]["SessionLocationView"] | null;
+            method: components["schemas"]["SignInMethod"];
+            /** @description Имя от владельца. */
+            name?: string | null;
+            /** @description Сырой user agent для подробностей; заявлен клиентом. */
+            user_agent?: string | null;
+        };
+        OwnerSessionsView: {
+            /** Format: uuid */
+            current_id: string;
+            /**
+             * Format: date-time
+             * @description До какого момента текущий сеанс свеж (действия управления без повторного входа).
+             */
+            fresh_until?: string | null;
+            /** Format: int32 */
+            idle_timeout_days: number;
+            /** @description Живые сеансы: текущий первым, затем по последней активности. */
+            sessions: components["schemas"]["OwnerSessionView"][];
+        };
         /**
          * @description Правка правила владельцем из PWA: агентских ограничений на потомков нет,
          *     владелец ставит правило на любую свою сессию.
@@ -2755,6 +2988,12 @@ export interface components {
             block_id: string;
             kind: string;
             model: string;
+        };
+        PasswordSignIn: {
+            /** @description Подсказки клиента для подписи устройства: только для показа, не больше 2 КиБ. */
+            device?: unknown;
+            login: string;
+            password: string;
         };
         PatchScheduled: {
             content?: components["schemas"]["ContentBlock"][] | null;
@@ -3050,11 +3289,22 @@ export interface components {
         ReadBody: {
             seq: string;
         };
+        ReauthPassword: {
+            password: string;
+        };
+        RecoverySignIn: {
+            device?: unknown;
+            token: string;
+        };
         RefreshView: {
             /** @description Провайдеры, чьим машинам отправлена просьба об опросе. */
             requested: string[];
             /** Format: int64 */
             retry_after_secs: number;
+        };
+        RenameSession: {
+            /** @description До 64 символов; пустая строка снимает имя. */
+            name: string;
         };
         /**
          * @description Вопрос или разрешение на том месте ленты, где агент его задал: открытый запрос
@@ -3121,6 +3371,10 @@ export interface components {
         };
         /** @enum {string} */
         Retry: "safe_same_key" | "explicit_new_operation" | "after_condition" | "never";
+        RevokedView: {
+            /** @description Отозванные сеансы, включая каскад. */
+            revoked: string[];
+        };
         RoutingPolicyBody: {
             policy: components["schemas"]["Policy"] | null;
             /** Format: int64 */
@@ -3255,6 +3509,13 @@ export interface components {
                 steer_command_id: string;
             };
         };
+        /** @description Место по IP: город, регион, страна. Заполняет часть 2 (DB-IP). */
+        SessionLocationView: {
+            city?: string | null;
+            country?: string | null;
+            country_code?: string | null;
+            region?: string | null;
+        };
         SessionUsageView: {
             /** @description Все делегаты в поддереве: живые потомки и свёрнутые после удаления. */
             delegates: components["schemas"]["UsageTotalsView"];
@@ -3274,6 +3535,12 @@ export interface components {
              */
             trash_retention_secs: number;
         };
+        SetPasswordBody: {
+            /** @description Обязателен, если пароль уже задан. */
+            current_password?: string | null;
+            /** @description 10..1024 байт. */
+            new_password: string;
+        };
         SettingsPatch: {
             effort?: string | null;
             instruction_profile?: string | null;
@@ -3285,6 +3552,14 @@ export interface components {
             pending: unknown;
             /** Format: int64 */
             rev: number;
+        };
+        /**
+         * @description Способ входа, создавший сеанс.
+         * @enum {string}
+         */
+        SignInMethod: "password" | "passkey" | "qr" | "recovery";
+        SignInView: {
+            session: components["schemas"]["OwnerSessionView"];
         };
         SnapshotQueueView: {
             hold_reasons: components["schemas"]["HoldView"][];
@@ -3880,6 +4155,525 @@ export interface operations {
             };
         };
     };
+    post__api_v1_auth_logout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сеанс завершён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokedView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_auth_methods: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Способы входа */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MethodsView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_auth_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetPasswordBody"];
+            };
+        };
+        responses: {
+            /** @description Пароль сохранён; отозванные сеансы */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokedView"];
+                };
+            };
+            /** @description wrong_password или reauth_required */
+            403: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description too_many_attempts */
+            429: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_auth_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordSignIn"];
+            };
+        };
+        responses: {
+            /** @description Вход выполнен; Set-Cookie сеанса и устройства */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignInView"];
+                };
+            };
+            /** @description invalid_credentials */
+            401: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description too_many_attempts, details.retry_after_seconds */
+            429: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_auth_reauth_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReauthPassword"];
+            };
+        };
+        responses: {
+            /** @description Сеанс свеж */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FreshView"];
+                };
+            };
+            /** @description wrong_password */
+            403: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description too_many_attempts */
+            429: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_auth_recovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoverySignIn"];
+            };
+        };
+        responses: {
+            /** @description Вход выполнен; Set-Cookie сеанса и устройства */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignInView"];
+                };
+            };
+            /** @description invalid_credentials: токен неизвестен, использован или истёк */
+            401: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description too_many_attempts */
+            429: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_auth_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Живые сеансы */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OwnerSessionsView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_auth_sessions_revoke_others: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Остальные сеансы завершены */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokedView"];
+                };
+            };
+            /** @description reauth_required */
+            403: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_auth_sessions__id_: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сеанс завершён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevokedView"];
+                };
+            };
+            /** @description reauth_required */
+            403: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Живого сеанса нет */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    patch__api_v1_auth_sessions__id_: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenameSession"];
+            };
+        };
+        responses: {
+            /** @description Имя сохранено */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OwnerSessionView"];
+                };
+            };
+            /** @description Живого сеанса нет */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    patch__api_v1_auth_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AuthSettingsBody"];
+            };
+        };
+        responses: {
+            /** @description Настройки сохранены */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthSettingsView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     get__api_v1_bookmarks: {
         parameters: {
             query?: {
@@ -3949,19 +4743,8 @@ export interface operations {
                     "application/json": components["schemas"]["ConfigView"];
                 };
             };
-            /** @description Нет личности */
+            /** @description Нет сеанса */
             401: {
-                headers: {
-                    /** @description Часы хаба: целые миллисекунды Unix */
-                    "X-Server-Time-Ms"?: number;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Чужой пользователь */
-            403: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
@@ -7020,19 +7803,8 @@ export interface operations {
                     "application/json": components["schemas"]["MeView"];
                 };
             };
-            /** @description Нет личности */
+            /** @description Нет сеанса */
             401: {
-                headers: {
-                    /** @description Часы хаба: целые миллисекунды Unix */
-                    "X-Server-Time-Ms"?: number;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Чужой пользователь */
-            403: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
@@ -7115,19 +7887,8 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
-            /** @description Нет личности */
+            /** @description Нет сеанса */
             401: {
-                headers: {
-                    /** @description Часы хаба: целые миллисекунды Unix */
-                    "X-Server-Time-Ms"?: number;
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Чужой пользователь */
-            403: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;

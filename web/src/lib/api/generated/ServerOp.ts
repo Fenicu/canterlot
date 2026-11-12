@@ -95,7 +95,7 @@ export type ServerOp =
     }
   | {
       op: "close";
-      reason: "reauth";
+      reason: "reauth" | "revoked";
     };
 export type Scope = string;
 export type Seq = string;

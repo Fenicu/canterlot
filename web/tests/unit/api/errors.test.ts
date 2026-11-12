@@ -15,7 +15,12 @@ type ErrorCode = components["schemas"]["ErrorCode"];
 
 const ALL_ERROR_CODES: ErrorCode[] = [
   "unauthenticated",
-  "forbidden_user",
+  "invalid_credentials",
+  "too_many_attempts",
+  "session_revoked",
+  "session_expired",
+  "reauth_required",
+  "wrong_password",
   "origin_rejected",
   "invalid_request",
   "invalid_offset",
@@ -116,7 +121,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(63);
+    expect(ALL_ERROR_CODES.length).toBe(68);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(

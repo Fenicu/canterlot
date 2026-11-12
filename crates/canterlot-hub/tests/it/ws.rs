@@ -5,7 +5,7 @@ use canterlot_hub::{
     events::{self, Scope, WireEvent},
     http,
     subscriptions::{Merger, Outgoing, authorize, resolve_scope},
-    testkit::{self, TEST_ORIGIN, TEST_OWNER_LOGIN, TestWs},
+    testkit::{self, TEST_ORIGIN, TEST_SESSION_TOKEN, TestWs},
 };
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -40,7 +40,7 @@ impl Hub {
         format!("conversation:{}", self.f.seed.conversation_id)
     }
     async fn socket(&self) -> TestWs {
-        TestWs::connect(self.addr, TEST_ORIGIN, Some(TEST_OWNER_LOGIN))
+        TestWs::connect(self.addr, TEST_ORIGIN, Some(TEST_SESSION_TOKEN))
             .await
             .expect("upgrade")
     }
@@ -252,7 +252,7 @@ fn merge_window_is_bounded_to_25ms_and_64kib_serialized() {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn ws_upgrade_with_foreign_origin_is_refused(pool: PgPool) {
     let h = Hub::new(pool, |_| {}).await;
-    let e = TestWs::connect(h.addr, "https://foreign.test", Some(TEST_OWNER_LOGIN))
+    let e = TestWs::connect(h.addr, "https://foreign.test", Some(TEST_SESSION_TOKEN))
         .await
         .err()
         .expect("refusal");
@@ -265,7 +265,7 @@ async fn ws_upgrade_from_untrusted_peer_is_unauthenticated(pool: PgPool) {
         c.trusted_proxies = vec!["192.0.2.1/32".parse().unwrap()]
     })
     .await;
-    let e = TestWs::connect(h.addr, TEST_ORIGIN, Some(TEST_OWNER_LOGIN))
+    let e = TestWs::connect(h.addr, TEST_ORIGIN, Some(TEST_SESSION_TOKEN))
         .await
         .err()
         .expect("refusal");
@@ -943,27 +943,27 @@ async fn ws_upgrade_requires_identity_secret_and_subprotocol(pool: PgPool) {
             Some("canterlot.v1"),
             401,
         ),
-        (Some(TEST_OWNER_LOGIN), None, Some("canterlot.v1"), 401),
+        (Some(TEST_SESSION_TOKEN), None, Some("canterlot.v1"), 401),
         (
-            Some(TEST_OWNER_LOGIN),
+            Some(TEST_SESSION_TOKEN),
             Some("wrong-secret"),
             Some("canterlot.v1"),
             401,
         ),
         (
-            Some("foreign"),
+            Some("unknown-session-token-0123456789abcdefghij"),
             Some("proxy-test-0123456789-abcdefghijklmnop"),
             Some("canterlot.v1"),
-            403,
+            401,
         ),
         (
-            Some(TEST_OWNER_LOGIN),
+            Some(TEST_SESSION_TOKEN),
             Some("proxy-test-0123456789-abcdefghijklmnop"),
             None,
             400,
         ),
         (
-            Some(TEST_OWNER_LOGIN),
+            Some(TEST_SESSION_TOKEN),
             Some("proxy-test-0123456789-abcdefghijklmnop"),
             Some("foreign.v1"),
             400,
@@ -977,7 +977,10 @@ async fn ws_upgrade_requires_identity_secret_and_subprotocol(pool: PgPool) {
         r.headers_mut()
             .insert("x-forwarded-for", "127.0.0.1".parse().unwrap());
         if let Some(v) = user {
-            r.headers_mut().insert("remote-user", v.parse().unwrap());
+            r.headers_mut().insert(
+                "cookie",
+                format!("__Host-canterlot_session={v}").parse().unwrap(),
+            );
         }
         if let Some(v) = proxy {
             r.headers_mut()
@@ -1005,7 +1008,7 @@ async fn ws_upgrade_keeps_connection_slot_and_survives_body_deadline(pool: PgPoo
     w.send(json!({"op":"ping","t":1})).await;
     assert_eq!(w.next(WAIT).await.unwrap(), json!({"op":"pong","t":1}));
     assert!(
-        TestWs::connect(h.addr, TEST_ORIGIN, Some(TEST_OWNER_LOGIN))
+        TestWs::connect(h.addr, TEST_ORIGIN, Some(TEST_SESSION_TOKEN))
             .await
             .is_err()
     );

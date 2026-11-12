@@ -37,11 +37,31 @@ const ACTION_LABEL: Record<ErrorAction, string | null> = {
 const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
   unauthenticated: {
     action: "sign_in_again",
-    message: "Требуется вход через сервис авторизации",
+    message: "Требуется вход",
   },
-  forbidden_user: {
+  invalid_credentials: {
+    action: "none",
+    message: "Неверный логин или пароль",
+  },
+  too_many_attempts: {
+    action: "none",
+    message: "Слишком много попыток входа, повторите позже",
+  },
+  session_revoked: {
     action: "sign_in_again",
-    message: "Доступ для этого пользователя запрещён",
+    message: "Сеанс завершён",
+  },
+  session_expired: {
+    action: "sign_in_again",
+    message: "Сеанс завершён из-за бездействия",
+  },
+  reauth_required: {
+    action: "none",
+    message: "Подтвердите вход паролем или ключом доступа",
+  },
+  wrong_password: {
+    action: "none",
+    message: "Неверный пароль",
   },
   origin_rejected: {
     action: "none",
@@ -322,6 +342,14 @@ export const REASON_TEXT: Record<ErrorReason, string> = {
   conversation_closed: "Разговор закрыт",
   nul_character: "В сообщении недопустимый нулевой символ",
   spawn_refused: "Запуск сейчас отклонён",
+  logout: "Выполнен выход",
+  owner: "Сеанс завершён с другого устройства",
+  others: "Сеанс завершён с другого устройства",
+  password_changed: "Пароль сменён",
+  idle: "Сеанс завершён из-за бездействия",
+  server: "Сеансы завершены на хабе",
+  limit: "Слишком много сеансов: этот самый давний",
+  cascade: "Завершён сеанс, который подтвердил этот вход",
 };
 
 /** Причина отказа, если хаб её прислал и она известна вкладке. */

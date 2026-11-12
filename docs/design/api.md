@@ -97,10 +97,14 @@
 
 ## Вход и служебные правила
 
-Подробности и обоснование: [ADR-0004](../adr/0004-browser-auth-forward-auth.md).
+Подробности и обоснование: [ADR-0005](../adr/0005-owner-sign-in.md), настройка прокси: [http.md](../http.md).
 
-- Личность задаёт прокси перед хабом. Заголовок (`[http].user_header`, по умолчанию `Remote-User`) принимается, только если TCP-адрес собеседника входит в `[http].trusted_proxies`, а при заданном `proxy_secret_file` запрос несёт `X-Canterlot-Proxy` с этим секретом. Значение заголовка должно быть равно `[http].owner_login`. `X-Forwarded-*` не читается.
-- Недоверенный адрес, чужой секрет, отсутствующий или повторённый заголовок личности дают одинаковый `401 unauthenticated`; верный прокси с чужим логином получает `403 forbidden_user`.
+- Транспорт: запрос принимается, только если TCP-адрес собеседника входит в `[http].trusted_proxies`, а при заданном `proxy_secret_file` запрос несёт ровно один `X-Canterlot-Proxy` с этим секретом. `X-Forwarded-*` не читается. Нарушение даёт `401 unauthenticated` на любом пути, кроме `/healthz` и `/readyz`.
+- Личность: только cookie `__Host-canterlot_session` (одно значение; два и больше — `401 unauthenticated`). Хаб ищет сеанс по SHA-256 токена в базе на каждом запросе, без кэша. Отозванный сеанс (и надгробие на 400 дней) даёт `401 session_revoked` с `details.reason` (`logout`, `owner`, `others`, `password_changed`, `server`, `limit`, `cascade`), истёкший по бездействию — `401 session_expired`, неизвестный — `401 unauthenticated`; все три стирают cookie (`Max-Age=0`). Ошибка базы при поиске сеанса даёт `503 db_unavailable`, а не 401.
+- Без сеанса доступны только `GET /api/v1/auth/methods`, `POST /api/v1/auth/password`, `POST /api/v1/auth/recovery` (точный метод и путь), `GET /healthz`, `GET /readyz`.
+- Адрес клиента берётся из одного `X-Canterlot-Client-Ip`, только если настроен и совпал секрет прокси; иначе адрес неизвестен.
+- Заголовок личности старого прокси (`[http].user_header`, по умолчанию `Remote-User`) больше ничего не значит; если он дошёл до хаба от доверенного прокси, ответ несёт `X-Canterlot-Proxy-Leak: 1`.
+- Пути `/api/v1/auth/*` не берут `Idempotency-Key`: выход, отзыв, имя и срок бездействия идемпотентны сами, а запросы с паролем нельзя хранить для повтора.
 - Изменяющий запрос (любой метод, кроме `GET` и `HEAD`) несёт `Origin` из `[http].allowed_origins` и `X-Canterlot-Client: 1`; запрос с `Upgrade` (WSS) несёт разрешённый `Origin`. Нарушение даёт `403 origin_rejected` до проверки личности и до обработчика. `OPTIONS` всегда `405 method_not_allowed`; заголовков `Access-Control-*` хаб не отправляет.
 - Каждый изменяющий запрос несёт `Idempotency-Key` по шаблону `^[A-Za-z0-9_-]{1,256}$`. Ключи с `:` (пространства `sched:` и `wake:`) принадлежат хабу и отклоняются с `400 invalid_request`. Исключение — `PUT /api/v1/conversations/{id}/draft`: полная замена текста и списка вложений идемпотентна, повтор того же тела даёт тот же черновик, поэтому ключ не требуется.
 - Тело JSON не больше `[http].max_json_body_bytes` (512 КиБ); превышение даёт `413 resource_limit`.
@@ -112,8 +116,13 @@
 
 | `code` | HTTP | `scope` | `retry` | `message` |
 | --- | --- | --- | --- | --- |
-| `unauthenticated` | 401 | `auth` | `after_condition` | Требуется вход через сервис авторизации |
-| `forbidden_user` | 403 | `auth` | `never` | Доступ для этого пользователя запрещён |
+| `unauthenticated` | 401 | `auth` | `after_condition` | Требуется вход |
+| `invalid_credentials` | 401 | `auth` | `never` | Неверный логин или пароль |
+| `too_many_attempts` | 429 | `auth` | `safe_same_key` | Слишком много попыток входа, повторите позже |
+| `session_revoked` | 401 | `auth` | `never` | Сеанс завершён |
+| `session_expired` | 401 | `auth` | `after_condition` | Сеанс завершён из-за бездействия |
+| `reauth_required` | 403 | `auth` | `after_condition` | Подтвердите вход паролем или ключом доступа |
+| `wrong_password` | 403 | `auth` | `never` | Неверный пароль |
 | `origin_rejected` | 403 | `auth` | `never` | Запрос отклонён: недопустимый источник |
 | `invalid_request` | 400 | `browser` | `never` | Некорректный запрос |
 | `invalid_offset` | 400 | `browser` | `never` | Недопустимое смещение |
@@ -182,6 +191,8 @@
 
 Ответы на секретные вопросы (`is_secret` у вопроса или у всего запроса) хаб отдаёт как `"[redacted]"` везде: в ответе на решение и его повторе, `details.winner_decision`, `open_requests` снимка, событии `request_decided`, истории и хранилище ключей идемпотентности. Полный ответ есть только в команде `deliver_decision` до её погашения. `decision_conflict` содержит `details.winner_decision` и `details.current_state`; `request_not_open` содержит `details.current_state` и `details.reason` (`closed_without_decision` или `generation_advanced`). `decision_invalid` содержит `details.question_id`, если ошибка относится к конкретному вопросу. `preset_revision_conflict` содержит `details.current_revision` (версию, с которой нужно повторить правку), `preset_invalid` — `details.field` (`title`, `description` или `text`). Решения и ответы в details доступны только владельцу сессии и не записываются в журналы ошибок.
 
+Отказ входа `too_many_attempts` несёт `details.retry_after_seconds` (и заголовок `Retry-After` на публичных путях входа). `session_revoked` и `session_expired` несут `details.reason` с причиной отзыва; PWA стирает локальные данные при `owner`, `others`, `server`, `password_changed`, `cascade` и сохраняет их при `logout`, `limit`, `idle`.
+
 Отказы команд очереди и управления (`send-now`, правка ввода, отмена, сжатие, остановка) несут `details.reason` из перечисления `ErrorReason`. «Запустить сейчас» при отказе отвечает `409 invalid_state` с `details.reason = spawn_refused`; сам отказ лежит в `details.spawn_refusal`: `code` из замкнутого перечисления кодов запуска (`not_in_whitelist`, `permission_mode_too_wide`, `machine_unavailable`, `harness_unknown` и т. д.), `message`, `state` элемента после отказа (`queued`, `failed`, `cancelled`, `expired`) и `retry_at` для `queued`. Свободный текст в `details.reason` не попадает. Конфликт состояния идёт `409`: `conversation_closed` своим кодом, `invalid_state` для `input_not_queued`, `revision_conflict`, `steer_in_flight`, `no_running_turn`, `request_open`, `compacting`, `unsupported_harness`, `run_in_progress`, `no_live_execution`; `capability_missing`, `attachment_not_ready` и `attachment_unavailable` (также для `attachment_not_found`) приходят своими кодами. Ошибка самого запроса идёт `400 invalid_request`: `invalid_idempotency_key`, `empty_content`, `nul_character`, `content_too_long`. Прочие `invalid_request` при создании и изменении сессии и вводе называют поле в `details.field`.
 
 Для недопустимой ссылки `retry_of` код `invalid_request` возвращается со статусом 422.
@@ -196,8 +207,8 @@
 | --- | --- |
 | `GET /healthz` | Живость процесса |
 | `GET /readyz` | База отвечает, установка совпадает с манифестом, фоновые службы готовы |
-| `GET /api/v1/me` | `{owner_id, login}` владельца |
-| `GET /api/v1/config` | Версия хаба, лимиты, действующие пороги окраски (`warn_remaining_pct`, `danger_remaining_pct`), резерв (`reserve_remaining_pct` и совместимый `weekly_reserve_pct`), путь и протокол WSS, `logout_url` |
+| `GET /api/v1/me` | `{owner_id, login, session_id}` владельца и его сеанса |
+| `GET /api/v1/config` | Версия хаба, лимиты, действующие пороги окраски (`warn_remaining_pct`, `danger_remaining_pct`), резерв (`reserve_remaining_pct` и совместимый `weekly_reserve_pct`), путь и протокол WSS; `auth` пуст (`{}`) один выпуск ради старых вкладок |
 | `GET /api/v1/openapi.json` | Документ OpenAPI |
 | `GET /api/v1/conversations/{id}/scheduled` | Отложенные сообщения разговора |
 | `POST /api/v1/conversations/{id}/scheduled` | Запланировать обычный ввод |
@@ -605,6 +616,7 @@ Pump читает журнал только при доступной ёмкос
 | 31 | Поиск по истории: ответы агента и сообщения ленты с фильтрами, фрагменты и переход к месту в ленте (pilot.md §12.1 п. 6) | `POST /api/v1/search` | – | этап 7 |
 | 27 | Белый список делегирования: какие пары харнесса и модели агент запускает без вопроса, карточка запуска вне списка и приём результата делегированной сессии (§12) | `GET /api/v1/spawn-whitelist`, `PUT /api/v1/spawn-whitelist`, `GET /api/v1/routing-policy`, `PUT /api/v1/routing-policy`, `POST /api/v1/routing-policy/preview`, `GET /api/v1/conversations/{id}/spawn-queue`, `DELETE /api/v1/conversations/{id}/spawn-queue/{queue_id}`, `POST /api/v1/conversations/{id}/spawn-queue/{queue_id}/start-now`, `POST /api/v1/conversations/{id}/accept`, решение по запросу `spawn_approval` (строка 12) | `request_opened` (с видом запроса spawn_approval), `request_closed`, `request_decided`, `conversation_updated`, `routing_policy_changed`, `spawn_queue_changed` | межсессионные инструменты |
 | 29 | Пороги лимитов владельца: жёлтый и красный остаток, недельный резерв; хранение на владельца, сразу применяется к удержаниям и окраске в PWA | `GET /api/v1/limit-settings`, `PUT /api/v1/limit-settings`, `limit_thresholds` в `GET /api/v1/config` | `limits_changed` | лимиты |
+| 33 | Собственный вход владельца (ADR-0005): пароль, ссылка восстановления, сеансы с отзывом и каскадом, срок бездействия, повторный вход для действий управления, защита от перебора | `GET /api/v1/auth/methods`, `POST /api/v1/auth/password`, `POST /api/v1/auth/recovery`, `GET /api/v1/auth/sessions`, `PATCH /api/v1/auth/sessions/{id}`, `DELETE /api/v1/auth/sessions/{id}`, `POST /api/v1/auth/sessions/revoke-others`, `POST /api/v1/auth/logout`, `PATCH /api/v1/auth/settings`, `PUT /api/v1/auth/password`, `POST /api/v1/auth/reauth/password` | `close` | вход |
 | 32 | Избранное: отметка сообщения владельца или верхнего блока ответа, возврат к месту в ленте с телефона и компьютера, общий список по всем разговорам (pilot.md §12.1) | `GET /api/v1/conversations/{id}/bookmarks`, `PUT /api/v1/conversations/{id}/bookmarks/{kind}/{target_id}`, `DELETE /api/v1/conversations/{id}/bookmarks/{kind}/{target_id}`, `GET /api/v1/bookmarks` (`limit`, `cursor`) | `bookmark_changed` | этап 8 |
 
 `resync_required`, `lagged` и `close` - служебные кадры WSS (`ServerOp`), а не виды событий. `queue_resumed` публикуется при продолжении очереди без оставшихся пауз, вместе с `queue_state_changed`; полезная нагрузка совпадает с `queue_paused` и содержит пустой `pause_reasons`.

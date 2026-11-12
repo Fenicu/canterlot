@@ -228,6 +228,7 @@ enum PumpError {
     Stalled,
     Database,
     Oversized,
+    Revoked,
 }
 impl From<sqlx::Error> for PumpError {
     fn from(error: sqlx::Error) -> Self {
@@ -523,8 +524,23 @@ impl Pump {
         }
         Ok(())
     }
+    /// Сеанс сокета всё ещё жив? Решает база; сбой базы не считается отзывом.
+    async fn session_live(&self) -> Result<(), PumpError> {
+        match crate::owner_auth::sessions::is_live(&self.state.pool, self.owner.session_id).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(PumpError::Revoked),
+            Err(error) => {
+                tracing::warn!(kind="ws_session_check_failed", error=%crate::dberr::describe(&error), "websocket session check failed");
+                Ok(())
+            }
+        }
+    }
     async fn run(&mut self, mut input: SplitStream<WebSocket>) -> Result<(), PumpError> {
         let mut notices = EventBus::local().subscribe();
+        let period = self.state.http.ws.session_check_interval;
+        let mut session_check =
+            tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        session_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let deadline = self
                 .subscriptions
@@ -541,8 +557,13 @@ impl Pump {
                     Some(Ok(Message::Binary(_))) => self.error("","bad_message").await?,
                     _ => return Err(PumpError::Disconnected),
                 },
+                _=session_check.tick() => self.session_live().await?,
                 notice=notices.recv() => {
                     let now=Instant::now();
+                    // Уведомление о сеансах, переподключение слушателя или потеря уведомлений: перепроверка.
+                    if notice.as_ref().map_or(true, |n| n.scope=="*" || n.scope==crate::owner_auth::BUS_SCOPE) {
+                        self.session_live().await?;
+                    }
                     match notice {
                         Ok(n) => for sub in self.subscriptions.values_mut().filter(|s| n.scope=="*" || s.scope.key()==n.scope) {
                             sub.next_read=now; sub.noticed_seq=sub.noticed_seq.max(n.scope_seq);
@@ -563,6 +584,7 @@ enum End {
     Disconnected,
     Failure,
     Reauth,
+    Revoked,
     Shutdown,
     Lagged(Vec<(String, Arc<Delivery>)>),
 }
@@ -610,10 +632,15 @@ async fn writer(
     input.close();
     while input.try_recv().is_ok() {}
     let code = match end {
-        End::Reauth => {
+        End::Reauth | End::Revoked => {
+            let reason = if matches!(end, End::Revoked) {
+                "revoked"
+            } else {
+                "reauth"
+            };
             if sink
                 .send(Message::Text(
-                    json!({"op":"close","reason":"reauth"}).to_string().into(),
+                    json!({"op":"close","reason":reason}).to_string().into(),
                 ))
                 .await
                 .is_err()
@@ -689,6 +716,7 @@ pub async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
         result=pump.run(input)=>match result {
             Err(PumpError::Stalled)=>End::Lagged(pump.subscriptions.iter().map(|(id,s)|(id.clone(),s.delivery.clone())).collect()),
             Err(PumpError::Database | PumpError::Oversized)=>End::Failure,
+            Err(PumpError::Revoked)=>End::Revoked,
             _=>End::Disconnected,
         },
     };

@@ -81,8 +81,13 @@ macro_rules! error_codes {
 }
 
 error_codes! {
-    Unauthenticated => "unauthenticated", 401, Auth, AfterCondition, "Требуется вход через сервис авторизации";
-    ForbiddenUser => "forbidden_user", 403, Auth, Never, "Доступ для этого пользователя запрещён";
+    Unauthenticated => "unauthenticated", 401, Auth, AfterCondition, "Требуется вход";
+    InvalidCredentials => "invalid_credentials", 401, Auth, Never, "Неверный логин или пароль";
+    TooManyAttempts => "too_many_attempts", 429, Auth, SafeSameKey, "Слишком много попыток входа, повторите позже";
+    SessionRevoked => "session_revoked", 401, Auth, Never, "Сеанс завершён";
+    SessionExpired => "session_expired", 401, Auth, AfterCondition, "Сеанс завершён из-за бездействия";
+    ReauthRequired => "reauth_required", 403, Auth, AfterCondition, "Подтвердите вход паролем или ключом доступа";
+    WrongPassword => "wrong_password", 403, Auth, Never, "Неверный пароль";
     OriginRejected => "origin_rejected", 403, Auth, Never, "Запрос отклонён: недопустимый источник";
     InvalidRequest => "invalid_request", 400, Browser, Never, "Некорректный запрос";
     InvalidOffset => "invalid_offset", 400, Browser, Never, "Недопустимое смещение";
@@ -203,6 +208,14 @@ error_reasons! {
     ConversationClosed => "conversation_closed", ConversationClosed;
     NulCharacter => "nul_character", InvalidRequest;
     SpawnRefused => "spawn_refused", InvalidState;
+    Logout => "logout", SessionRevoked;
+    Owner => "owner", SessionRevoked;
+    Others => "others", SessionRevoked;
+    PasswordChanged => "password_changed", SessionRevoked;
+    Idle => "idle", SessionExpired;
+    Server => "server", SessionRevoked;
+    Limit => "limit", SessionRevoked;
+    Cascade => "cascade", SessionRevoked;
 }
 
 /// Отказ команды управления: код по причине, сама причина в `details.reason`.
@@ -326,6 +339,10 @@ pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub spawn_refusal: Option<crate::session_tools::spawn_queue::SpawnRefusal>,
+    /// Через сколько секунд повторить попытку входа (`too_many_attempts`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub retry_after_seconds: Option<u64>,
 }
 
 impl ErrorDetails {

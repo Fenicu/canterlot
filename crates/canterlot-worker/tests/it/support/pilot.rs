@@ -16,7 +16,7 @@ use canterlot_hub::{
     events::{CLIENT_KINDS, is_client_visible},
     machines,
     testkit::{
-        self, Method, RequestBody, TEST_ORIGIN, TEST_OWNER_LOGIN, TestClient, TestHub,
+        self, Method, RequestBody, TEST_ORIGIN, TEST_SESSION_TOKEN, TestClient, TestHub,
         TestHubOptions, TestResponse, TestWs,
     },
 };
@@ -116,7 +116,7 @@ impl Recorder {
     }
 
     pub async fn open(&mut self) {
-        let mut ws = TestWs::connect(self.addr, TEST_ORIGIN, Some(TEST_OWNER_LOGIN))
+        let mut ws = TestWs::connect(self.addr, TEST_ORIGIN, Some(TEST_SESSION_TOKEN))
             .await
             .expect("WSS upgrade");
         let (ops, mut queue) = mpsc::unbounded_channel::<Value>();

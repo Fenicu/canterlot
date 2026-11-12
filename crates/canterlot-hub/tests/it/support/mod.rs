@@ -1,3 +1,4 @@
+pub mod auth;
 #[cfg(feature = "fault-injection")]
 pub mod settings_process_guard;
 pub mod task3;
