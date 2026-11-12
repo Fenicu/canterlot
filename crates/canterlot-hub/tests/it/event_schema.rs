@@ -642,3 +642,22 @@ fn an_empty_shared_file_event_fits_the_schema() {
     assert!(!schema.is_valid(&event(-1)));
     assert!(!schema.is_valid(&event(52_428_801)));
 }
+
+/// `process_alive` в простое — булево или отсутствует (старый хаб, нет телеметрии).
+#[test]
+fn idle_activity_process_alive_is_a_boolean_or_absent() {
+    let activity = |evidence: Value| json!({"state": "idle", "evidence": evidence, "since": "2026-11-12T10:00:00.000Z"});
+    let schema = validator("Activity");
+    assert!(schema.is_valid(&activity(
+        json!({"kind": "idle", "last_turn_at": null, "background_work": null, "process_alive": true})
+    )));
+    assert!(schema.is_valid(&activity(
+        json!({"kind": "idle", "last_turn_at": null, "background_work": null, "process_alive": false})
+    )));
+    assert!(schema.is_valid(&activity(
+        json!({"kind": "idle", "last_turn_at": null, "background_work": null})
+    )));
+    assert!(!schema.is_valid(&activity(
+        json!({"kind": "idle", "last_turn_at": null, "background_work": null, "process_alive": "yes"})
+    )));
+}

@@ -888,3 +888,61 @@ async fn preview_backfill_goes_in_bounded_batches_without_events(pool: PgPool) {
     // Посчитанное превью совпадает с тем, что посчитал бы пересчёт: он ничего не меняет.
     assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Unchanged);
 }
+
+/// Простой с живым процессом и после его смерти различим в строке списка и в событии:
+/// `process_alive` берётся из свежих метрик машины и попадает в `activity.evidence`.
+#[sqlx::test(migrations = "./migrations")]
+async fn idle_evidence_carries_process_alive_from_fresh_metrics(pool: PgPool) {
+    let (s, e) = running(&pool).await;
+    sqlx::query(
+        "update queue_state set run_slot='free',run_slot_input_id=null where conversation_id=$1",
+    )
+    .bind(s.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let metrics =
+        |alive: bool| json!([{"execution_id":e,"alive":alive,"cpu_permille":0,"descendants":0}]);
+    sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,clock_timestamp(),1,1,100,100,50,0,0,0,'[]',$2)").bind(s.machine_id).bind(metrics(true)).execute(&pool).await.unwrap();
+    assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Changed);
+    let derived = row(&pool, s.conversation_id).await;
+    assert_eq!(derived["activity_state"], "idle");
+    assert_eq!(derived["activity_evidence"]["process_alive"], json!(true));
+
+    sqlx::query("update machine_metrics set executions=$2,observed_at=clock_timestamp() where machine_id=$1").bind(s.machine_id).bind(metrics(false)).execute(&pool).await.unwrap();
+    assert_eq!(refresh(&pool, s.conversation_id).await, Refresh::Changed);
+    let ev: Vec<(String, Value)> = sqlx::query_as(
+        "select scope,payload from events where kind='derived_changed' order by committed_at desc,id desc limit 2",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ev.len(), 2);
+    for (_, payload) in &ev {
+        assert_eq!(payload["activity"]["state"], "idle");
+        assert_eq!(
+            payload["activity"]["evidence"]["process_alive"],
+            json!(false)
+        );
+    }
+}
+
+/// Без метрик машины (старый воркер) поле не пишется: клиент судит по-старому.
+#[sqlx::test(migrations = "./migrations")]
+async fn idle_evidence_without_metrics_omits_process_alive(pool: PgPool) {
+    let (s, _) = running(&pool).await;
+    sqlx::query(
+        "update queue_state set run_slot='free',run_slot_input_id=null where conversation_id=$1",
+    )
+    .bind(s.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    refresh(&pool, s.conversation_id).await;
+    let derived = row(&pool, s.conversation_id).await;
+    assert_eq!(derived["activity_state"], "idle");
+    assert!(
+        derived["activity_evidence"].get("process_alive").is_none(),
+        "{derived}"
+    );
+}

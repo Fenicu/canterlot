@@ -61,6 +61,7 @@ fn idle_activity(background_work: Option<u32>) -> Activity {
         evidence: E::Idle {
             last_turn_at: None,
             background_work,
+            process_alive: None,
         },
     }
 }

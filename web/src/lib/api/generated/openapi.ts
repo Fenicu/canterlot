@@ -2334,6 +2334,12 @@ export interface components {
             kind: "idle";
             /** Format: date-time */
             last_turn_at?: string | null;
+            /**
+             * @description Жив ли процесс CLI, пока сессия ждёт сообщения: `false` — исполнения нет или
+             *     процесс умер, `true` — свежая телеметрия машины видит его живым. Без телеметрии
+             *     (старый воркер, устаревшие метрики) поле не пишется: клиент судит по-старому.
+             */
+            process_alive?: boolean | null;
         } | {
             /** @enum {string} */
             kind: "working";

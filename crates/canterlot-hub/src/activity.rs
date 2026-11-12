@@ -58,6 +58,11 @@ pub enum Evidence {
         #[serde(with = "optional_time")]
         last_turn_at: Option<DateTime<Utc>>,
         background_work: Option<u32>,
+        /// Жив ли процесс CLI, пока сессия ждёт сообщения: `false` — исполнения нет или
+        /// процесс умер, `true` — свежая телеметрия машины видит его живым. Без телеметрии
+        /// (старый воркер, устаревшие метрики) поле не пишется: клиент судит по-старому.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process_alive: Option<bool>,
     },
     Working {
         phase: String,
@@ -295,6 +300,10 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
         evidence: Evidence::Idle {
             last_turn_at: i.last_turn_at,
             background_work: i.background_work,
+            process_alive: match &i.execution {
+                None => Some(false),
+                Some(_) => i.process.map(|process| process.alive),
+            },
         },
     };
     let Some(e) = &i.execution else {

@@ -104,6 +104,7 @@ fn state_table_matches_pilot_section_9() {
         E::Idle {
             last_turn_at: None,
             background_work: None,
+            process_alive: Some(true),
         },
     ));
     rows.push((
@@ -551,7 +552,8 @@ fn reserved_background_work_field_is_unknown_until_stage_2() {
         activity::compute(&i, &thresholds()).evidence,
         E::Idle {
             last_turn_at: None,
-            background_work: None
+            background_work: None,
+            process_alive: Some(true),
         }
     );
     i.background_work = Some(2);
@@ -562,4 +564,71 @@ fn reserved_background_work_field_is_unknown_until_stage_2() {
             ..
         }
     ));
+}
+
+#[test]
+fn idle_with_a_live_process_says_so() {
+    let mut i = inputs();
+    i.queue.slot = RunSlot::Free;
+    let activity = activity::compute(&i, &thresholds());
+    assert_eq!(activity.state, S::Idle);
+    assert!(matches!(
+        activity.evidence,
+        E::Idle {
+            process_alive: Some(true),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn idle_whose_process_died_is_not_alive() {
+    let mut i = inputs();
+    i.queue.slot = RunSlot::Free;
+    i.process = Some(ProcessFacts {
+        alive: false,
+        cpu_permille: 0,
+        descendants: None,
+    });
+    assert!(matches!(
+        activity::compute(&i, &thresholds()).evidence,
+        E::Idle {
+            process_alive: Some(false),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn idle_without_an_execution_has_no_process() {
+    let mut i = inputs();
+    i.queue.slot = RunSlot::Free;
+    i.execution = None;
+    i.process = None;
+    assert!(matches!(
+        activity::compute(&i, &thresholds()).evidence,
+        E::Idle {
+            process_alive: Some(false),
+            ..
+        }
+    ));
+}
+
+/// Без свежей телеметрии машины (старый воркер, пропавшие метрики) хаб не знает,
+/// жив ли процесс: поле не пишется, и клиент показывает простой как раньше.
+#[test]
+fn idle_without_process_metrics_leaves_the_flag_unknown() {
+    let mut i = inputs();
+    i.queue.slot = RunSlot::Free;
+    i.process = None;
+    let activity = activity::compute(&i, &thresholds());
+    assert!(matches!(
+        activity.evidence,
+        E::Idle {
+            process_alive: None,
+            ..
+        }
+    ));
+    let json = serde_json::to_value(&activity.evidence).unwrap();
+    assert!(json.get("process_alive").is_none(), "{json}");
 }

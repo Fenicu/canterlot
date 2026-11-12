@@ -536,7 +536,25 @@
         "evidence",
         "since"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "state": {
+            "const": "idle"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "properties": {
+              "process_alive": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
     },
     "Settings": {
       "type": "object",
