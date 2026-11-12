@@ -29,6 +29,7 @@ export type WireEvent =
   | GroupChanged
   | ScheduledChanged
   | DraftChanged
+  | PromptSuggestionChanged
   | AlarmChanged
   | NudgeChanged
   | LimitsChanged
@@ -949,6 +950,30 @@ export interface DraftChanged {
       | [Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid]
       | [Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid, Uuid];
     device_id: string | null;
+  };
+}
+export interface PromptSuggestionChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "prompt_suggestion_changed";
+  /**
+   * Последняя подсказка следующего сообщения Claude Code; null — подсказку стёрли (новый ввод, новый ход или настройка выключена).
+   */
+  payload: {
+    conversation_id: Uuid;
+    suggestion: {
+      text: string;
+      execution_id: Uuid;
+      created_at: Time;
+    } | null;
   };
 }
 export interface AlarmChanged {

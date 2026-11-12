@@ -234,11 +234,14 @@ fn to_proto_with_capability(
             crate::session::CAPABILITY_BACKGROUND_V1,
             crate::session::CAPABILITY_SESSION_TOOLS_V1,
             crate::session::CAPABILITY_SEND_NOW_V1,
+            crate::session::CAPABILITY_PROMPT_SUGGESTIONS_V1,
         ]
         .into_iter()
         .filter(|capability| has(capability))
         .map(str::to_owned)
         .collect();
+        // Старый воркер не знает записи PromptSuggested: флаг уходит только вместе с возможностью.
+        start.prompt_suggestions &= has(crate::session::CAPABILITY_PROMPT_SUGGESTIONS_V1);
     }
     if command.encoded_len() > MAX_MESSAGE_BYTES {
         return Err(OutboxError::ResourceLimit);
@@ -323,6 +326,11 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .transpose()?,
             capabilities: vec![],
             isolate_mcp: isolate_mcp(&row.payload),
+            prompt_suggestions: row
+                .payload
+                .get("prompt_suggestions")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             worktree: row
                 .payload
                 .get("worktree")

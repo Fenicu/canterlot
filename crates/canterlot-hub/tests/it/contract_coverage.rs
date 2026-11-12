@@ -701,6 +701,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Some(json!({"settings":null})),
         ),
         case(
+            Method::PUT,
+            "/api/v1/prompt-suggestion-settings",
+            "/api/v1/prompt-suggestion-settings".into(),
+            Some(json!({"enabled":false})),
+            Some(json!({"enabled":true})),
+        ),
+        case(
             Method::POST,
             "/api/v1/groups",
             "/api/v1/groups".into(),

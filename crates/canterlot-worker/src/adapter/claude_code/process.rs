@@ -252,6 +252,8 @@ pub struct LaunchSpec<'a> {
     pub instructions: &'a InstructionSpec,
     /// Делегированная сессия: только MCP-сервер canterlot из `mcp.json`.
     pub isolate_mcp: bool,
+    /// `--prompt-suggestions`: хаб включил подсказки, сессия не делегат, CLI их знает.
+    pub prompt_suggestions: bool,
 }
 
 pub fn map_permission_mode(m: &str) -> Result<Option<&'static str>, LaunchError> {
@@ -317,6 +319,10 @@ pub fn build_args(
             args.push("--resume".into());
             args.push(id.clone().into());
         }
+    }
+    if spec.prompt_suggestions && !spec.isolate_mcp {
+        args.push("--prompt-suggestions".into());
+        args.push("true".into());
     }
     if spec.instructions.mode == InstructionMode::Preset {
         args.push("--append-system-prompt-file".into());

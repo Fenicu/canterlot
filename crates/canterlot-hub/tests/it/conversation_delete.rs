@@ -207,6 +207,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into prompt_suggestions(conversation_id,execution_id,generation,text)
+         values($1,$2,1,'next')",
+        &[conversation, execution],
+    )
+    .await;
+    exec(
+        pool,
         "insert into compactions(id,conversation_id,execution_id,trigger,pre_tokens,ok,created_seq,finished_at)
          values($1,$2,$3,'auto',1,true,1,now())",
         &[compaction, conversation, execution],

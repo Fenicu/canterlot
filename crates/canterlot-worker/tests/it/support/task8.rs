@@ -76,7 +76,8 @@ async fn worker_without_exec_capability_echo_rejects_start() {
             "nudge_v1",
             "path_probe_v1",
             "resource_lease_v1",
-            "watchdog_v1"
+            "watchdog_v1",
+            "prompt_suggestions_v1"
         ]
     );
     hub.send(ControlDown {

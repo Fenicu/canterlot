@@ -50,6 +50,7 @@ fn spec(model: &str, effort: &str, mode: &str) -> StartSpec {
         permission_mode: mode.into(),
         instructions: instructions(),
         isolate_mcp: false,
+        prompt_suggestions: false,
     }
 }
 

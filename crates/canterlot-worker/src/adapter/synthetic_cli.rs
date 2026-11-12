@@ -407,6 +407,8 @@ fn run_steps<'a>(
                 let items: Vec<super::TodoItem> = serde_json::from_value(items.clone())
                     .map_err(|_| io::Error::other("invalid todo"))?;
                 emit(json!({"type":"todo_updated", "lane":lane.parent, "items":items})).await?;
+            } else if let Some(text) = step.get("suggestion").and_then(Value::as_str) {
+                emit(json!({"type":"prompt_suggested", "text":text})).await?;
             } else if let Some(spec) = step.get("large_todo") {
                 let item = super::TodoItem {
                     text: spec["repeat"]

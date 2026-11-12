@@ -1152,6 +1152,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         capabilities: vec!["pilot_v1".into()],
         worktree: None,
         isolate_mcp: false,
+        prompt_suggestions: true,
     };
     assert_eq!(
         OldStartExecution::decode(new.encode_to_vec().as_slice()).unwrap(),
@@ -1293,6 +1294,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         session_tools_v1: true,
         isolate_mcp: true,
         send_now_v1: true,
+        prompt_suggestions: true,
     });
     assert_roundtrip(ipc::CompactRequest {
         command_id: "command".into(),
@@ -1564,6 +1566,44 @@ fn instructions_and_agent_call_messages_are_stable() {
     };
     assert_eq!(down.encode_to_vec()[0], 0x62);
     assert_roundtrip(down);
+}
+
+#[test]
+fn prompt_suggested_is_record_42_and_debug_hides_the_text() {
+    use canterlot_proto::worker::v1::{PromptSuggested, RecordBody, record_body};
+    let marker = "PRIVATE_SUGGESTION_MARKER";
+    let fact = PromptSuggested {
+        execution_id: "e".into(),
+        generation: 2,
+        text: marker.into(),
+    };
+    let body = RecordBody {
+        body: Some(record_body::Body::PromptSuggested(fact.clone())),
+    };
+    let encoded = body.encode_to_vec();
+    assert_eq!(&encoded[..2], &[0xD2, 0x02], "field 42, length-delimited");
+    assert_eq!(RecordBody::decode(encoded.as_slice()).unwrap(), body);
+    for debug in [format!("{fact:?}"), format!("{body:?}")] {
+        assert!(!debug.contains(marker), "{debug}");
+    }
+    let start = StartExecution {
+        prompt_suggestions: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        start.encode_to_vec(),
+        vec![0x68, 1],
+        "StartExecution field 13"
+    );
+    let cli = canterlot_proto::worker::ipc::StartCli {
+        prompt_suggestions: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        cli.encode_to_vec(),
+        vec![0x80, 0x01, 1],
+        "StartCli field 16"
+    );
 }
 
 #[test]
@@ -2076,4 +2116,22 @@ fn machine_watch_uses_field_14_and_old_decoders_skip_it() {
     }
     let old = OldControlUp::decode(message.encode_to_vec().as_slice()).unwrap();
     assert!(old.machine_metrics.is_none());
+}
+
+#[test]
+fn prompt_suggestion_is_trimmed_and_capped_on_a_char_boundary() {
+    use canterlot_proto::limits::{MAX_PROMPT_SUGGESTION_BYTES, bound_prompt_suggestion};
+    assert_eq!(
+        bound_prompt_suggestion("  add tests \n").as_deref(),
+        Some("add tests")
+    );
+    assert_eq!(bound_prompt_suggestion(" \n\t "), None);
+    assert_eq!(bound_prompt_suggestion("a\0b").as_deref(), Some("ab"));
+    let long = "я".repeat(MAX_PROMPT_SUGGESTION_BYTES);
+    let bounded = bound_prompt_suggestion(&long).unwrap();
+    assert_eq!(bounded.len(), MAX_PROMPT_SUGGESTION_BYTES);
+    let odd = format!("x{long}");
+    let bounded = bound_prompt_suggestion(&odd).unwrap();
+    assert_eq!(bounded.len(), MAX_PROMPT_SUGGESTION_BYTES - 1);
+    assert!(bounded.starts_with('x'));
 }

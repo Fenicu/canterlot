@@ -323,6 +323,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "request_transmitting",
     "todo_updated",
     "background_work_changed",
+    "prompt_suggestion_changed",
     "compaction_started",
     "compaction_finished",
     "context_changed",

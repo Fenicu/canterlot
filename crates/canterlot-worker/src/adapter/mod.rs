@@ -49,6 +49,8 @@ pub struct StartSpec {
     pub instructions: InstructionSpec,
     /// Делегированная сессия: ни один MCP-сервер владельца не грузится, остаётся только canterlot.
     pub isolate_mcp: bool,
+    /// Подсказки следующего сообщения: только Claude Code, только если хаб их включил.
+    pub prompt_suggestions: bool,
 }
 #[derive(Debug)]
 pub struct Started {
@@ -566,6 +568,10 @@ pub enum AdapterEvent {
         lane: Option<Uuid>,
         items: Vec<TodoItem>,
     },
+    /// Предсказанное следующее сообщение владельца, уже обрезанное до `MAX_PROMPT_SUGGESTION_BYTES`.
+    PromptSuggested {
+        text: String,
+    },
     /// Все работающие фоновые задачи и закончившиеся с прошлого события; `wake_turn` — идёт
     /// ход, который агент начал сам.
     BackgroundWork {
@@ -717,6 +723,10 @@ impl fmt::Debug for AdapterEvent {
                 .debug_struct("TodoUpdated")
                 .field("lane", lane)
                 .field("items", &items.len())
+                .finish(),
+            Self::PromptSuggested { text } => f
+                .debug_struct("PromptSuggested")
+                .field("text_bytes", &text.len())
                 .finish(),
         }
     }

@@ -23,9 +23,9 @@ use canterlot_proto::{
             DecisionUnconfirmed, DeliverDecision, InputAcceptanceUnconfirmed, InputAccepted,
             InputCancelLost, InputCancelWon, InputDispatchDeferred, InputRejected,
             InputTransmissionStarted, InputWithdrawn, InterruptState, InterruptStatus,
-            JournalClosed, JournalOpened, PhaseChanged, RequestClosed, RequestOpened, RunFinished,
-            SessionStuck, TodoItem as ProtoTodoItem, TodoStatus as ProtoTodoStatus, TodoUpdated,
-            content_block, record_body::Body,
+            JournalClosed, JournalOpened, PhaseChanged, PromptSuggested, RequestClosed,
+            RequestOpened, RunFinished, SessionStuck, TodoItem as ProtoTodoItem,
+            TodoStatus as ProtoTodoStatus, TodoUpdated, content_block, record_body::Body,
         },
     },
 };
@@ -224,6 +224,8 @@ struct Supervisor {
     send_now_v1: bool,
     background_v1: bool,
     session_tools_v1: bool,
+    /// Хаб включил подсказки и знает запись `PromptSuggested`.
+    prompt_suggestions: bool,
     /// HEAD рабочего каталога на конец прошлого хода (или на старт CLI).
     git_head: Option<String>,
     background_drop_reported: bool,
@@ -429,6 +431,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         send_now_v1: false,
         background_v1: false,
         session_tools_v1: false,
+        prompt_suggestions: false,
         git_head: None,
         background_drop_reported: false,
         todo_drop_reported: false,
@@ -1194,6 +1197,22 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Без согласия хаба подсказка молча отбрасывается: старый хаб остановил бы журнал на записи.
+    fn on_prompt_suggestion(&mut self, text: String) -> Result<(), SupervisorError> {
+        if !self.prompt_suggestions {
+            return Ok(());
+        }
+        let Some(text) = canterlot_proto::limits::bound_prompt_suggestion(&text) else {
+            return Ok(());
+        };
+        self.record(Body::PromptSuggested(PromptSuggested {
+            execution_id: self.spec.execution_id.to_string(),
+            generation: self.spec.generation,
+            text,
+        }))?;
+        Ok(())
+    }
+
     fn on_todo(
         &mut self,
         lane: Option<Uuid>,
@@ -1735,6 +1754,7 @@ impl Supervisor {
         self.send_now_v1 = start.send_now_v1;
         self.background_v1 = start.background_v1;
         self.session_tools_v1 = start.session_tools_v1;
+        self.prompt_suggestions = start.prompt_suggestions && !start.isolate_mcp;
         self.workdir = Some(PathBuf::from(&start.workdir));
         if self.session_tools_v1 {
             self.git_head = git_facts::head(Path::new(&start.workdir)).await;
@@ -1767,6 +1787,7 @@ impl Supervisor {
             permission_mode: start.permission_mode,
             instructions,
             isolate_mcp: start.isolate_mcp,
+            prompt_suggestions: self.prompt_suggestions,
         };
         let outcome = timeout(
             timers.ready_deadline,
@@ -2566,6 +2587,7 @@ impl Supervisor {
             }
             AdapterEvent::Media { block_id, source } => self.on_media(block_id, source)?,
             AdapterEvent::TodoUpdated { lane, items } => self.on_todo(lane, items)?,
+            AdapterEvent::PromptSuggested { text } => self.on_prompt_suggestion(text)?,
             AdapterEvent::BackgroundWork { tasks, wake_turn } => {
                 self.on_background(tasks, wake_turn)?
             }
@@ -3613,6 +3635,7 @@ mod tests {
             send_now_v1: true,
             background_v1: false,
             session_tools_v1: false,
+            prompt_suggestions: false,
             git_head: None,
             background_drop_reported: false,
             todo_drop_reported: false,

@@ -222,6 +222,7 @@ impl PresetHarness {
             permission_mode: permission.into(),
             instructions,
             isolate_mcp: false,
+            prompt_suggestions: false,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
             .await
@@ -440,6 +441,7 @@ async fn resume_of_a_missing_rollout_fails_once_without_a_path() {
         permission_mode: "ask".into(),
         instructions: clean_spec(),
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let error = adapter.start(&spec, &group).await.expect_err("no rollout");
     assert!(

@@ -75,6 +75,9 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
             items: serde_json::from_value(value["items"].clone())
                 .map_err(|_| AdapterError::Protocol)?,
         },
+        "prompt_suggested" => AdapterEvent::PromptSuggested {
+            text: string("text")?,
+        },
         "phase" => AdapterEvent::Phase {
             phase: serde_json::from_value(value["phase"].clone())
                 .map_err(|_| AdapterError::Protocol)?,

@@ -1842,3 +1842,58 @@ fn init_model_names_the_concrete_version_behind_the_alias() {
         assert!(main.iter().all(|model| *model == version), "{main:?}");
     }
 }
+
+#[test]
+fn live_prompt_suggestion_frame_becomes_an_event_after_the_result() {
+    let lines = fixtures::replay_fixture("prompt_suggestion");
+    let mut parser = Parser::new();
+    let parsed = feed_all(&mut parser, &lines);
+    let suggestions: Vec<&str> = parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::PromptSuggested { text }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(suggestions, ["try it with an empty string"]);
+    // Кадр известен: диагностики незнакомого кадра нет.
+    assert!(!parsed.iter().any(|p| matches!(
+        p,
+        Parsed::Event(AdapterEvent::Diagnostic {
+            kind: "unknown_event",
+            ..
+        })
+    )));
+}
+
+#[test]
+fn prompt_suggestion_is_trimmed_capped_and_empty_is_ignored() {
+    let mut parser = Parser::new();
+    let long = "щ".repeat(5_000);
+    let frame = json!({"type": "prompt_suggestion", "suggestion": format!("  {long}  "), "uuid": "u", "session_id": "s"});
+    let parsed = parser.feed(&frame.to_string());
+    let [Parsed::Event(AdapterEvent::PromptSuggested { text })] = parsed.as_slice() else {
+        panic!("{parsed:?}");
+    };
+    assert!(text.len() <= canterlot_proto::limits::MAX_PROMPT_SUGGESTION_BYTES);
+    assert!(text.starts_with('щ'));
+    for frame in [
+        json!({"type": "prompt_suggestion", "suggestion": "   "}),
+        json!({"type": "prompt_suggestion"}),
+    ] {
+        assert!(matches!(
+            parser.feed(&frame.to_string()).as_slice(),
+            [Parsed::Ignored]
+        ));
+    }
+}
+
+#[test]
+fn prompt_suggestion_debug_hides_the_text() {
+    let event = AdapterEvent::PromptSuggested {
+        text: "PRIVATE_SUGGESTION".into(),
+    };
+    let debug = format!("{event:?}");
+    assert!(!debug.contains("PRIVATE_SUGGESTION"), "{debug}");
+    assert!(debug.contains("text_bytes"));
+}

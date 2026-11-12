@@ -84,6 +84,7 @@ mod owner_reclaim;
 mod plan_board;
 mod poison_records;
 mod presets;
+mod prompt_suggestions;
 mod provider_status;
 mod receipts;
 mod requests_domain;

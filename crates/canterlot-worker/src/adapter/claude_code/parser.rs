@@ -730,6 +730,15 @@ impl Parser {
                 }
             }
             Some("control_response") => self.feed_control_response(&value, &mut out),
+            Some("prompt_suggestion") => out.push(
+                value
+                    .get("suggestion")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(canterlot_proto::limits::bound_prompt_suggestion)
+                    .map_or(Parsed::Ignored, |text| {
+                        Parsed::Event(AdapterEvent::PromptSuggested { text })
+                    }),
+            ),
             Some("command_lifecycle") => {
                 self.feed_command_lifecycle(&value, &mut out);
             }

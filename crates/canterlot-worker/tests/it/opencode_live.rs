@@ -113,6 +113,7 @@ impl Live {
                 title: String::new(),
             },
             isolate_mcp: false,
+            prompt_suggestions: false,
         }
     }
 

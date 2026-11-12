@@ -389,6 +389,16 @@ impl fmt::Debug for crate::worker::v1::TodoUpdated {
     }
 }
 
+impl fmt::Debug for crate::worker::v1::PromptSuggested {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PromptSuggested")
+            .field("execution_id", &self.execution_id)
+            .field("generation", &self.generation)
+            .field("text_bytes", &self.text.len())
+            .finish()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::BackgroundTask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BackgroundTask")

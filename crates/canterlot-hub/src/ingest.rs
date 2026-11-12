@@ -1322,7 +1322,19 @@ async fn apply_body(
                 fact.machine_time_ms,
                 correlation_id,
             )
-            .await?
+            .await?;
+            // Начался новый ход: подсказка к прошлому больше не к месту.
+            let conversation: Option<Option<Uuid>> = sqlx::query_scalar(
+                "select conversation_id from commands where id = $1 and machine_id = $2",
+            )
+            .bind(parse_id(&fact.command_id)?)
+            .bind(machine_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if let Some(Some(conversation_id)) = conversation {
+                crate::prompt_suggestions::clear_in_tx(conn, conversation_id, correlation_id)
+                    .await?;
+            }
         }
         Body::InputAccepted(fact) => {
             timed_receipt(
@@ -1578,6 +1590,7 @@ async fn apply_body(
         | Body::BackgroundWorkChanged(_)
         | Body::CompactionEvent(_)
         | Body::ContextProgress(_)
+        | Body::PromptSuggested(_)
         | Body::SessionStuck(_) => return Err(IngestError::InvalidRecord),
         Body::WorktreeRemoved(fact) => {
             use crate::session_tools::accept::{Removal, apply_removal_in_tx};
@@ -2584,6 +2597,7 @@ async fn apply_journal_body(
             | Body::BackgroundWorkChanged(_)
             | Body::CompactionEvent(_)
             | Body::ContextProgress(_)
+            | Body::PromptSuggested(_)
             | Body::SessionStuck(_)
     ) {
         return Ok(None);
@@ -2651,6 +2665,15 @@ async fn apply_journal_body(
             return Err(IngestError::ForeignExecution);
         }
         return crate::todos::apply(conn, &run, fact, correlation_id)
+            .await
+            .map(Some)
+            .map_err(pilot_error);
+    }
+    if let Body::PromptSuggested(fact) = body {
+        if parse_id(&fact.execution_id)? != run.execution_id {
+            return Err(IngestError::ForeignExecution);
+        }
+        return crate::prompt_suggestions::apply(conn, &run, fact, correlation_id)
             .await
             .map(Some)
             .map_err(pilot_error);

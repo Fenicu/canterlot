@@ -669,6 +669,7 @@ async fn submit_attempt(
     if inserted == 0 {
         return Ok(Attempt::LostRace);
     }
+    crate::prompt_suggestions::clear_in_tx(conn, req.conversation_id, req.correlation_id).await?;
     // Ввод не от автопинка сбрасывает серию толчков и возвращает `exhausted` в наблюдение:
     // оркестратор или владелец вмешался, отсчёт начинается заново.
     if req

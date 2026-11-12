@@ -110,6 +110,7 @@ async fn restart_is_bounded_when_stdout_outlives_the_killed_cli() {
         permission_mode: "ask".into(),
         instructions: instructions(InstructionMode::Owner),
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     adapter.start(&spec, &group).await.expect("start ok");
     let holder: u32 = loop {

@@ -255,6 +255,8 @@ message StartExecution {
   WorktreeSpec worktree = 11;
   // Только при согласованной возможности session_tools_v1: делегированная сессия не грузит MCP-серверы владельца.
   bool isolate_mcp = 12;
+  // Только при согласованной возможности prompt_suggestions_v1: подсказки следующего сообщения Claude Code.
+  bool prompt_suggestions = 13;
 }
 
 // Изолированная рабочая копия git: путь воркер строит сам из корня рабочих копий.
@@ -326,6 +328,8 @@ message RecordBody {
     ContextProgress context_progress = 40;
     // Только при согласованной возможности session_tools_v1: файл, отданный владельцу.
     BlockFile block_file = 41;
+    // Только при согласованной возможности prompt_suggestions_v1.
+    PromptSuggested prompt_suggested = 42;
   }
 }
 
@@ -1017,6 +1021,13 @@ message ContextProgress {
 message TodoItem {
   string text = 1;
   TodoStatus status = 2;
+}
+
+// Предсказанное следующее сообщение владельца после хода. Текст — данные владельца, в логи не идёт.
+message PromptSuggested {
+  string execution_id = 1;
+  uint64 generation = 2;
+  string text = 3;
 }
 
 // Полный список задач агента, не дельта: запись заменяет прежний список своей дорожки.

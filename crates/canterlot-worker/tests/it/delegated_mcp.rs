@@ -41,6 +41,7 @@ fn claude_args(td: &TempDir, isolate_mcp: bool, mode: InstructionMode) -> Vec<St
         permission_mode: "bypass",
         instructions: &instructions,
         isolate_mcp,
+        prompt_suggestions: false,
     };
     build_args(&spec, &ClaudeCodeConfig::default())
         .unwrap()
@@ -100,6 +101,7 @@ fn claude_mcp_config_names_only_canterlot() {
         permission_mode: "bypass",
         instructions: &instructions,
         isolate_mcp: true,
+        prompt_suggestions: false,
     };
     write_exec_files(
         &spec,
@@ -279,6 +281,7 @@ fn claude_mcp_json(
         permission_mode: "bypass",
         instructions: &instructions,
         isolate_mcp: true,
+        prompt_suggestions: false,
     };
     write_exec_files_with(
         &spec,
@@ -347,6 +350,7 @@ fn claude_mcp_config_with_no_allowed_server_is_exactly_as_before() {
         permission_mode: "bypass",
         instructions: &instructions,
         isolate_mcp: true,
+        prompt_suggestions: false,
     };
     write_exec_files(
         &spec,
@@ -529,6 +533,7 @@ for line in sys.stdin:
                 permission_mode: "ask".into(),
                 instructions: instructions(mode),
                 isolate_mcp,
+                prompt_suggestions: false,
             }
         }
 

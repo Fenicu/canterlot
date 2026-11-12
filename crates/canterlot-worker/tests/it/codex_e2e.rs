@@ -271,6 +271,7 @@ impl Fake {
                 title: String::new(),
             },
             isolate_mcp: false,
+            prompt_suggestions: false,
         };
         Self {
             dir,
@@ -1986,6 +1987,7 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
                 title: String::new(),
             },
             isolate_mcp: false,
+            prompt_suggestions: false,
         };
         spec.workdir = dir.path().into();
         let group = TreeContainment::new().unwrap();
@@ -2040,6 +2042,7 @@ async fn start_fails_when_app_server_exits_at_once() {
             title: String::new(),
         },
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let group = TreeContainment::new().unwrap();
     match tokio::time::timeout(WAIT, adapter.start(&spec, &group))
@@ -2873,6 +2876,7 @@ async fn live_probe() {
             title: String::new(),
         },
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let started = tokio::time::timeout(Duration::from_secs(90), adapter.start(&spec, &group))
         .await
@@ -3097,6 +3101,7 @@ async fn live_smoke() {
             title: String::new(),
         },
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let started = tokio::time::timeout(Duration::from_secs(90), adapter.start(&spec, &group))
         .await
@@ -3323,6 +3328,7 @@ async fn live_smoke() {
             title: String::new(),
         },
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let resumed = tokio::time::timeout(Duration::from_secs(90), adapter.start(&spec, &group))
         .await
@@ -3400,6 +3406,7 @@ async fn live_smoke() {
         permission_mode: "ask".into(),
         instructions: clean_instructions(),
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     tokio::time::timeout(
         Duration::from_secs(90),

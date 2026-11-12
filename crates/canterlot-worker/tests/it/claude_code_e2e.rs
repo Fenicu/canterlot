@@ -119,6 +119,7 @@ impl Fake {
                 title: String::new(),
             },
             isolate_mcp: false,
+            prompt_suggestions: false,
         };
         Self {
             dir,
@@ -1471,6 +1472,7 @@ while True:
                 title: String::new(),
             },
             isolate_mcp: false,
+            prompt_suggestions: false,
         };
         let _permit = CLI_GATE.lock().await;
         adapter.start(&spec, &group).await.unwrap();
@@ -2215,6 +2217,7 @@ async fn live_smoke() {
             title: String::new(),
         },
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     tokio::time::timeout(WAIT, preset_adapter.start(&preset_spec, &preset_group))
         .await
@@ -3091,4 +3094,72 @@ async fn delegate_diagnostics_never_carry_the_owner_secret() {
         !debug.contains(FAKE_KEY) && !debug.contains("context7.example"),
         "{debug}"
     );
+}
+
+#[tokio::test]
+async fn prompt_suggestions_flag_reaches_only_a_cli_that_supports_it() {
+    // Двойник пишет argv и ждёт EOF: проверяется только командная строка запуска.
+    const ARGV: &str = r#"#!/usr/bin/python3
+import sys, pathlib, json
+d = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print((d / 'version').read_text()); sys.exit(0)
+(d / 'argv.json').write_text(json.dumps(sys.argv[1:]))
+sys.stdin.read()
+"#;
+    for (version, enabled, isolate, expected) in [
+        ("2.1.322", true, false, true),
+        ("2.1.311", true, false, false),
+        ("2.1.322", false, false, false),
+        ("2.1.322", true, true, false),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let exe = dir.path().join("fake-cli");
+        fake_exec::write_executable(&exe, ARGV, 0o700);
+        std::fs::write(dir.path().join("version"), version).unwrap();
+        let mut adapter: Box<dyn Adapter> = Box::new(adapter::claude_code::ClaudeCodeAdapter::new(
+            ClaudeCodeConfig {
+                executable: exe,
+                ..Default::default()
+            },
+            dir.path().join("exec"),
+            WAIT,
+        ));
+        adapter.set_stop_grace(Duration::from_millis(500));
+        let group = TreeContainment::new().unwrap();
+        let spec = StartSpec {
+            execution_id: Uuid::now_v7(),
+            generation: 1,
+            workdir: dir.path().into(),
+            native_conversation_id: None,
+            profile: "claude_code".into(),
+            model: "haiku".into(),
+            effort: "low".into(),
+            permission_mode: "ask".into(),
+            instructions: InstructionSpec {
+                mode: InstructionMode::Owner,
+                text: String::new(),
+                preset_id: None,
+                revision: 0,
+                title: String::new(),
+            },
+            isolate_mcp: isolate,
+            prompt_suggestions: enabled,
+        };
+        let _permit = CLI_GATE.lock().await;
+        adapter.start(&spec, &group).await.unwrap();
+        let argv = dir.path().join("argv.json");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !argv.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let args: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&argv).unwrap()).unwrap();
+        assert_eq!(
+            args.iter().any(|a| a == "--prompt-suggestions"),
+            expected,
+            "{version} {enabled} {isolate}: {args:?}"
+        );
+        adapter.close(CloseMode::Graceful, &group).await.unwrap();
+    }
 }

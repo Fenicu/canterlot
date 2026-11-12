@@ -278,6 +278,16 @@ pub async fn start_in_tx_with_native(
     if delegated {
         payload["isolate_mcp"] = json!(true);
     }
+    if crate::prompt_suggestions::enabled_for_start(
+        conn,
+        owner_id,
+        &row.try_get::<String, _>("harness")?,
+        delegated,
+    )
+    .await?
+    {
+        payload["prompt_suggestions"] = json!(true);
+    }
     if let Some(worktree) = worktree {
         payload["worktree"] = json!({
             "source_workdir": worktree["source_workdir"],

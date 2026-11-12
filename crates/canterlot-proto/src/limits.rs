@@ -18,6 +18,24 @@ pub const MAX_PRESET_TEXT_BYTES: usize = 65_536;
 /// Аргументы одного вызова инструмента агента по каналу данных.
 pub const MAX_AGENT_CALL_BYTES: usize = 262_144;
 
+/// Подсказка следующего сообщения: длиннее обрезается по границе символа.
+pub const MAX_PROMPT_SUGGESTION_BYTES: usize = 2048;
+
+/// Пробелы по краям убраны, текст не длиннее `MAX_PROMPT_SUGGESTION_BYTES`; пустой — `None`.
+pub fn bound_prompt_suggestion(text: &str) -> Option<String> {
+    // NUL не хранится в тексте PostgreSQL.
+    let text = text.replace('\0', "");
+    let mut text = text.trim();
+    if text.len() > MAX_PROMPT_SUGGESTION_BYTES {
+        let mut end = MAX_PROMPT_SUGGESTION_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text = text[..end].trim_end();
+    }
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 /// Рабочая папка: входит в ключ `machine_workdirs`, длиннее не принимается и подсказка.
 pub const MAX_WORKDIR_BYTES: usize = 2048;
 pub const MAX_WORKDIR_SUGGESTIONS: usize = 30;

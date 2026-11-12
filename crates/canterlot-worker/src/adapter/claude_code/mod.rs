@@ -80,6 +80,8 @@ pub struct ClaudeCodeAdapter {
     exited: bool,
     start_attempted: bool,
     isolate_mcp: bool,
+    /// Флаг подсказок для этого и всех перезапусков CLI исполнения.
+    prompt_suggestions: bool,
     /// `[execution].delegate_mcp_servers`: серверы владельца, разрешённые делегату.
     delegate_mcp: Vec<String>,
     /// Разрешённые серверы, которые попали в `mcp.json` этого исполнения.
@@ -140,6 +142,7 @@ impl ClaudeCodeAdapter {
             exited: false,
             start_attempted: false,
             isolate_mcp: false,
+            prompt_suggestions: false,
             delegate_mcp: Vec::new(),
             delegate_mcp_written: Vec::new(),
             isolation_broken: false,
@@ -798,6 +801,7 @@ impl ClaudeCodeAdapter {
             permission_mode: &permission_mode,
             instructions: &next,
             isolate_mcp: self.isolate_mcp,
+            prompt_suggestions: self.prompt_suggestions,
         };
         let spawned = self.spawn_for_restart(&launch, group).await;
         let Some(cli) = spawned else {
@@ -867,6 +871,7 @@ impl ClaudeCodeAdapter {
             permission_mode: &permission_mode,
             instructions: &previous,
             isolate_mcp: self.isolate_mcp,
+            prompt_suggestions: self.prompt_suggestions,
         };
         match self.spawn_for_restart(&launch, group).await {
             Some(cli) => {
@@ -1365,10 +1370,14 @@ impl Adapter for ClaudeCodeAdapter {
         )
         .await
         {
-            Ok(version::CliVersion::UntestedNewer(_)) => {
-                self.diagnostic("untested_cli_version", false)
+            Ok(found) => {
+                if matches!(found, version::CliVersion::UntestedNewer(_)) {
+                    self.diagnostic("untested_cli_version", false);
+                }
+                self.prompt_suggestions = spec.prompt_suggestions
+                    && !spec.isolate_mcp
+                    && version::supports_prompt_suggestions(&found);
             }
-            Ok(_) => {}
             Err(e) => {
                 return Err(AdapterError::StartFailed(match e {
                     version::VersionError::NotFound => "cli_not_found",
@@ -1399,6 +1408,7 @@ impl Adapter for ClaudeCodeAdapter {
             permission_mode: &spec.permission_mode,
             instructions: &spec.instructions,
             isolate_mcp: spec.isolate_mcp,
+            prompt_suggestions: self.prompt_suggestions,
         };
         self.isolate_mcp = spec.isolate_mcp;
         self.workdir = spec.workdir.clone();

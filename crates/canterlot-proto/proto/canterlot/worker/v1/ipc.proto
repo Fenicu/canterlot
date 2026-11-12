@@ -82,6 +82,8 @@ message StartCli {
   bool isolate_mcp = 14;
   // Возможность send_now_v1, согласованная хабом для этого исполнения.
   bool send_now_v1 = 15;
+  // Флаг --prompt-suggestions и запись PromptSuggested: хаб включил подсказки и знает запись.
+  bool prompt_suggestions = 16;
 }
 
 // Вызов инструмента агента: сопровождение → управляющий процесс → хаб и обратно.

@@ -40,6 +40,8 @@ pub struct ConversationSnapshot {
     pub history: HistoryPage,
     /// Общий черновик поля ввода; `None` — черновика нет.
     pub draft: Option<crate::drafts::DraftView>,
+    /// Подсказка следующего сообщения Claude Code для пустого поля ввода; `None` — подсказки нет.
+    pub prompt_suggestion: Option<crate::prompt_suggestions::PromptSuggestionView>,
     pub scheduled: Vec<ScheduledMessage>,
     /// Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением.
     pub open_requests: Vec<RequestView>,
@@ -219,6 +221,7 @@ pub async fn conversation_with_registry(
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
     let draft = crate::drafts::in_snapshot(&mut *conn, id).await?;
+    let prompt_suggestion = crate::prompt_suggestions::in_snapshot(&mut *conn, id).await?;
     let scheduled = scheduler::list_messages(&mut *conn, owner_id, id).await?;
     let open_requests_rows: Vec<crate::requests::RequestRow> = sqlx::query_as(
         "select r.* from requests r join executions e on e.id = r.execution_id
@@ -250,6 +253,7 @@ pub async fn conversation_with_registry(
         },
         history,
         draft,
+        prompt_suggestion,
         scheduled,
         open_requests,
         todos,

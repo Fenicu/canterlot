@@ -2,7 +2,9 @@ use canterlot_worker::adapter::claude_code::process::{
     CliProcess, LaunchError, LaunchSpec, SessionArg, Signal, StdoutLine, build_args, build_env,
     exit_cause, write_exec_files,
 };
-use canterlot_worker::adapter::claude_code::version::{check, parse_version};
+use canterlot_worker::adapter::claude_code::version::{
+    CliVersion, check, parse_version, supports_prompt_suggestions,
+};
 use canterlot_worker::adapter::{InstructionMode, InstructionSpec};
 use canterlot_worker::config::ClaudeCodeConfig;
 use canterlot_worker::containment::Containment;
@@ -75,6 +77,7 @@ fn owner_preset_args_keep_owner_configuration() {
         permission_mode: "owner",
         instructions: &owner,
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -114,6 +117,7 @@ fn one_million_variant_reaches_the_cli_unchanged_on_resume() {
         permission_mode: "owner",
         instructions: &owner,
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -153,6 +157,7 @@ fn no_preset_passes_bare_setting_sources_or_strict_mcp() {
             permission_mode: "owner",
             instructions,
             isolate_mcp: false,
+            prompt_suggestions: false,
         };
         let args = build_args(&spec, &cfg()).unwrap();
         let s: Vec<String> = args
@@ -187,6 +192,7 @@ fn custom_preset_writes_instructions_file_0600_and_appends_it() {
         permission_mode: "owner",
         instructions: &preset,
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -240,6 +246,7 @@ fn permission_modes_map_to_cli_values() {
             permission_mode: input,
             instructions: &owner,
             isolate_mcp: false,
+            prompt_suggestions: false,
         };
         let args = build_args(&spec, &cfg()).unwrap();
         let s: Vec<String> = args
@@ -270,6 +277,7 @@ fn permission_modes_map_to_cli_values() {
         permission_mode: "nope",
         instructions: &owner,
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     assert!(build_args(&spec, &cfg()).is_err());
 }
@@ -345,6 +353,7 @@ fn mcp_json_points_relay_at_exec_socket() {
         permission_mode: "owner",
         instructions: &owner,
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     fs::create_dir_all(&exec_dir).unwrap();
     write_exec_files(
@@ -402,6 +411,7 @@ printf '%s\n' '{"type":"x"}'
         permission_mode: "owner",
         instructions: &owner,
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -485,6 +495,7 @@ head -c 102400 /dev/zero | tr '\0' b 1>&2
         permission_mode: "owner",
         instructions: &owner,
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -526,6 +537,7 @@ while :; do sleep 0.1; done
         permission_mode: "owner",
         instructions: &owner,
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -582,6 +594,7 @@ sleep 1
         permission_mode: "owner",
         instructions: &owner,
         isolate_mcp: false,
+        prompt_suggestions: false,
     };
     let proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -595,4 +608,63 @@ sleep 1
         .unwrap();
     assert_eq!(member.start_ticks, proc.start_ticks);
     let _ = proc;
+}
+
+fn suggestion_args(prompt_suggestions: bool, isolate_mcp: bool) -> Vec<String> {
+    let td = TempDir::new().unwrap();
+    let workdir = td.path().join("work");
+    fs::create_dir_all(&workdir).unwrap();
+    let owner = owner_instructions();
+    let spec = LaunchSpec {
+        executable: Path::new("/usr/bin/claude"),
+        exec_dir: td.path(),
+        workdir: &workdir,
+        session: SessionArg::New(Uuid::nil()),
+        model: "claude-haiku-5-5",
+        effort: "medium",
+        permission_mode: "owner",
+        instructions: &owner,
+        isolate_mcp,
+        prompt_suggestions,
+    };
+    build_args(&spec, &cfg())
+        .unwrap()
+        .iter()
+        .map(|o| o.to_string_lossy().to_string())
+        .filter(|arg| !arg.ends_with("mcp.json"))
+        .collect()
+}
+
+#[test]
+fn prompt_suggestions_flag_only_when_enabled_and_never_for_a_delegate() {
+    let on = suggestion_args(true, false);
+    let at = on.iter().position(|x| x == "--prompt-suggestions").unwrap();
+    // Значение явное: необязательный аргумент флага не съест следующий.
+    assert_eq!(on[at + 1], "true");
+    assert!(!suggestion_args(false, false).contains(&"--prompt-suggestions".to_string()));
+    assert!(!suggestion_args(true, true).contains(&"--prompt-suggestions".to_string()));
+    // Без подсказок аргументы те же, что и до появления флага.
+    let mut without = on.clone();
+    without.drain(at..at + 2);
+    assert_eq!(without, suggestion_args(false, false));
+}
+
+#[test]
+fn prompt_suggestions_need_a_cli_that_was_checked_live() {
+    for (label, supported) in [
+        ("2.1.311", false),
+        ("2.1.316", false),
+        ("2.1.317", true),
+        ("2.1.322", true),
+        ("2.2.0", true),
+    ] {
+        assert_eq!(
+            supports_prompt_suggestions(&CliVersion::UntestedNewer(label.into())),
+            supported,
+            "{label}"
+        );
+    }
+    assert!(!supports_prompt_suggestions(&CliVersion::Verified(
+        "2.1.311".into()
+    )));
 }

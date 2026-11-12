@@ -15,6 +15,13 @@ const OUTPUT_CAP: u64 = 64 * 1024;
 pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (2, 1, 311);
 pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(2, 1, 311)];
 
+/// Первая версия, на которой `--prompt-suggestions` проверен вживую; старее флаг не передаётся.
+pub const PROMPT_SUGGESTIONS_MIN_VERSION: (u32, u32, u32) = (2, 1, 317);
+
+pub fn supports_prompt_suggestions(version: &CliVersion) -> bool {
+    parse_version(version.label()).is_ok_and(|v| v >= PROMPT_SUGGESTIONS_MIN_VERSION)
+}
+
 pub fn parse_version(output: &str) -> Result<(u32, u32, u32), VersionError> {
     let token = output
         .split_whitespace()

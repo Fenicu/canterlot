@@ -1594,6 +1594,7 @@ impl Actor {
                 session_tools_v1: start.capabilities.iter().any(|c| c == "session_tools_v1"),
                 isolate_mcp: start.isolate_mcp,
                 send_now_v1: start.capabilities.iter().any(|c| c == "send_now_v1"),
+                prompt_suggestions: prompt_suggestions_enabled(start),
             }))
             .await;
         Ok(())
@@ -2889,6 +2890,16 @@ async fn reconnect_timer(at: Option<Instant>) {
     }
 }
 
+/// Подсказки включает только хаб, знающий запись `PromptSuggested`; делегат их не получает никогда.
+pub fn prompt_suggestions_enabled(start: &StartExecution) -> bool {
+    start.prompt_suggestions
+        && !start.isolate_mcp
+        && start
+            .capabilities
+            .iter()
+            .any(|c| c == crate::session::CAPABILITY_PROMPT_SUGGESTIONS_V1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2899,6 +2910,24 @@ mod tests {
     use canterlot_proto::worker::v1::{
         AdapterDiagnostic, DeliverInput, InputCancelLost, JournalRecord, RecordBody,
     };
+
+    #[test]
+    fn prompt_suggestions_need_the_flag_the_capability_and_an_owner_session() {
+        let start = |flag: bool, capability: bool, isolate: bool| StartExecution {
+            prompt_suggestions: flag,
+            isolate_mcp: isolate,
+            capabilities: if capability {
+                vec!["pilot_v1".into(), "prompt_suggestions_v1".into()]
+            } else {
+                vec!["pilot_v1".into()]
+            },
+            ..Default::default()
+        };
+        assert!(prompt_suggestions_enabled(&start(true, true, false)));
+        assert!(!prompt_suggestions_enabled(&start(false, true, false)));
+        assert!(!prompt_suggestions_enabled(&start(true, false, false)));
+        assert!(!prompt_suggestions_enabled(&start(true, true, true)));
+    }
 
     #[test]
     fn a_start_failure_reason_reaches_the_worker_log() {

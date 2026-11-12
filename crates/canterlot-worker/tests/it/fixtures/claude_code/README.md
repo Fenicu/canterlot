@@ -95,3 +95,10 @@ adapter wrote, `"out"` is CLI stdout, `"note"` carries MCP traffic
   written to stdin. Scrubbed: paths, thinking signatures, `prompt` of
   `task_started`, `rate_limit_event`, and `system/init` down to what the parser
   reads.
+- `prompt_suggestion.jsonl` — live capture (CLI 2.1.322, haiku, `--prompt-suggestions
+  true`, no tools, empty strict MCP config). Message text, usage and ids are
+  trimmed. Covers: the `prompt_suggestion` frame after the turn's `result`
+  (`suggestion`, `uuid`, `session_id`), and the `control_response` to
+  `set_prompt_suggestions_paused` (`{"paused": true}`), which the CLI accepts.
+  The pause itself proved unreliable live (it took effect a turn late), so the
+  adapter does not send it.

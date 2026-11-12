@@ -60,6 +60,7 @@ impl Bench {
                 title: String::new(),
             },
             isolate_mcp: false,
+            prompt_suggestions: false,
         };
         Self {
             fake,

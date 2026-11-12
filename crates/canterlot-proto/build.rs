@@ -28,6 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.RequestOpened",
             ".canterlot.worker.v1.TodoItem",
             ".canterlot.worker.v1.TodoUpdated",
+            ".canterlot.worker.v1.PromptSuggested",
             ".canterlot.worker.v1.BackgroundTask",
             ".canterlot.worker.v1.DecisionApplied",
             ".canterlot.worker.v1.TextBlock",

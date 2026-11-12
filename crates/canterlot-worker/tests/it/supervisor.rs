@@ -2082,6 +2082,25 @@ impl Harness {
             .await;
     }
 
+    async fn start_cli_suggestions(&mut self, prompt_suggestions: bool, isolate_mcp: bool) {
+        let workdir = self._root.path().to_string_lossy().into_owned();
+        self.send(down::Msg::StartCli(StartCli {
+            profile: "synthetic".into(),
+            workdir,
+            pilot_v1: true,
+            prompt_suggestions,
+            isolate_mcp,
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+        self.next_message(|message| matches!(message, up::Msg::CliStarted(_)))
+            .await;
+    }
+
     async fn start_cli_background(&mut self, background_v1: bool) {
         let workdir = self._root.path().to_string_lossy().into_owned();
         self.send(down::Msg::StartCli(StartCli {
@@ -2679,6 +2698,49 @@ async fn todo_is_dropped_once_with_a_diagnostic_without_todo_v1() {
         .count();
     assert_eq!(drops, 1);
     harness.shutdown().await;
+}
+
+fn suggestions(bodies: &[Body]) -> Vec<&canterlot_proto::worker::v1::PromptSuggested> {
+    bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::PromptSuggested(fact) => Some(fact),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn prompt_suggestion_is_recorded_trimmed_when_the_hub_enabled_it() {
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_suggestions(true, false).await;
+    let id = Uuid::now_v7();
+    harness
+        .deliver(id, 1, &script(r#"{"suggestion":"  add tests  "}"#))
+        .await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    let found = suggestions(&bodies);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].text, "add tests");
+    assert!(found[0].generation > 0);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn prompt_suggestion_is_dropped_silently_without_the_hub_or_for_a_delegate() {
+    for (enabled, isolate) in [(false, false), (true, true)] {
+        let mut harness = Harness::start(&[]).await;
+        harness.attach_and_ship(0).await;
+        harness.start_cli_suggestions(enabled, isolate).await;
+        let id = Uuid::now_v7();
+        harness
+            .deliver(id, 1, &script(r#"{"suggestion":"add tests"}"#))
+            .await;
+        let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+        assert!(suggestions(&bodies).is_empty(), "{enabled} {isolate}");
+        harness.shutdown().await;
+    }
 }
 
 // Сообщение новой управляющей службы, которого эта сборка не знает: связь остаётся.

@@ -205,6 +205,7 @@ impl Fake {
                 title: String::new(),
             },
             isolate_mcp: false,
+            prompt_suggestions: false,
         };
         Self {
             dir,

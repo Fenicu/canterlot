@@ -94,6 +94,9 @@
       "$ref": "#/$defs/draft_changed"
     },
     {
+      "$ref": "#/$defs/prompt_suggestion_changed"
+    },
+    {
       "$ref": "#/$defs/alarm_changed"
     },
     {
@@ -5454,6 +5457,116 @@
       ],
       "additionalProperties": false
     },
+    "prompt_suggestion_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "prompt_suggestion_changed"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Последняя подсказка следующего сообщения Claude Code; null — подсказку стёрли (новый ввод, новый ход или настройка выключена).",
+          "properties": {
+            "conversation_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "suggestion": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048
+                    },
+                    "execution_id": {
+                      "$ref": "#/$defs/Uuid"
+                    },
+                    "created_at": {
+                      "$ref": "#/$defs/Time"
+                    }
+                  },
+                  "required": [
+                    "text",
+                    "execution_id",
+                    "created_at"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "conversation_id",
+            "suggestion"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "todo_updated": {
       "type": "object",
       "properties": {
@@ -6620,6 +6733,9 @@
                 },
                 {
                   "$ref": "#/$defs/draft_changed"
+                },
+                {
+                  "$ref": "#/$defs/prompt_suggestion_changed"
                 },
                 {
                   "$ref": "#/$defs/alarm_changed"
