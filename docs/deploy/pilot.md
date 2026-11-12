@@ -478,7 +478,7 @@ chat.example.com {
             encode zstd gzip
             reverse_proxy 10.0.0.10:8080 {
                 header_up X-Canterlot-Proxy {file./etc/caddy/secrets/canterlot-proxy}
-                header_up X-Canterlot-Client-Ip {client_ip}
+                header_up X-Canterlot-Client-Ip {remote_host}
             }
         }
 
@@ -505,7 +505,7 @@ chat.example.com {
 }
 ```
 
-`{client_ip}` без `trusted_proxies` в глобальных опциях Caddy равен адресу непосредственного собеседника, то есть `{remote_host}` из [docs/http.md](../http.md#caddy); если перед Caddy стоит ещё один прокси или CDN, `{client_ip}` берёт адрес из его заголовков только при настроенных `trusted_proxies`. Без `header_up X-Canterlot-Client-Ip` (или без секрета прокси) хаб не знает адреса клиента: все попытки пароля попадают в одну корзину перебора, а список сеансов показывает «IP неизвестен».
+`{remote_host}` — адрес непосредственного собеседника Caddy (TCP-пир), его клиент подделать не может; так же написано в [docs/http.md](../http.md#caddy) и [docs/pwa.md](../pwa.md). `{client_ip}` здесь не годится: если в глобальных опциях Caddy есть `servers { trusted_proxies … }` (в docker-установках часто `static private_ranges`), Caddy вычисляет `{client_ip}` из `X-Forwarded-For` ещё до `request_header -X-Forwarded-*`, и клиент из доверенной сети (LAN, hairpin NAT, userland-proxy docker) выбирает себе любой адрес: корзину перебора, IP в списке сеансов и пуш о новой стране. Хаб этого не видит — заголовок приходит от Caddy вместе с секретом. `{client_ip}` уместен только когда перед Caddy стоит свой доверенный CDN или прокси и глобальный `trusted_proxies` перечисляет ровно его адреса. Без `header_up X-Canterlot-Client-Ip` (или без секрета прокси) хаб не знает адреса клиента: все попытки пароля попадают в одну корзину перебора, а список сеансов показывает «IP неизвестен».
 
 `file_server { precompressed zstd br gzip }` отдаёт заранее сжатые соседние файлы `<name>.br`, `<name>.zst` и `<name>.gz`, которые создаёт `npm run build`; каталог статики переносится на сервер целиком, вместе с ними. `encode zstd gzip` внутри `@api` сжимает ответы хаба, но не трогает WebSocket-апгрейды.
 
@@ -991,10 +991,10 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
    ssh canterlot-hub 'runuser -u canterlot -- /opt/canterlot/current/bin/canterlot-hub auth recovery-link --config /etc/canterlot/hub.toml'
    ```
 3. **Ждать подтверждения владельца**, что он вошёл по ссылке (PWA пока за `basic_auth`: сначала пароль Caddy, затем страница входа) и задал пароль или ключ доступа. Без подтверждения Caddy не трогать.
-4. **Caddy — одна просмотренная правка.** На хосте web: копия Caddyfile рядом с меткой времени (`cp -p Caddyfile Caddyfile.bak-<YYYYMMDDTHHMMSSZ>`), затем один diff, который показывается целиком до применения:
+4. **Caddy — одна просмотренная правка.** На хосте web сначала посмотреть глобальные опции Caddyfile (блок `{ … }` в начале файла и импортируемые из него файлы): есть ли `servers { trusted_proxies … }`. Если есть, это не мешает правке ниже (она берёт `{remote_host}`, а не `{client_ip}`), но в доклад идёт строка с найденным значением; `{client_ip}` в этой правке не использовать ни в каком случае (§4.2). Затем копия Caddyfile рядом с меткой времени (`cp -p Caddyfile Caddyfile.bak-<YYYYMMDDTHHMMSSZ>`), затем один diff, который показывается целиком до применения:
    - убрать блок `basic_auth` сайта `hub.fenicu.com` (и копирование `Remote-User` в запрос к хабу, если оно есть);
    - оставить чистку `request_header -Remote-*` и `request_header -X-Forwarded-*`, оставить или добавить `request_header -X-Canterlot-Proxy` и `request_header -X-Canterlot-Client-Ip`;
-   - рядом с существующим `header_up X-Canterlot-Proxy {file.…}` добавить `header_up X-Canterlot-Client-Ip {client_ip}` (§4.2).
+   - рядом с существующим `header_up X-Canterlot-Proxy {file.…}` добавить `header_up X-Canterlot-Client-Ip {remote_host}` (§4.2).
 
    Затем `docker exec caddy caddy validate --config <Caddyfile в контейнере> --adapter caddyfile` и только при успехе `docker exec caddy caddy reload --config <Caddyfile в контейнере> --adapter caddyfile`. Ошибка проверки — вернуть копию, Caddy не перезагружать.
 5. **Приёмка.** Сначала без сеанса, затем с входом (владельцу придёт push о входе):
