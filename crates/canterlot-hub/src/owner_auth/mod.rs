@@ -11,6 +11,7 @@ pub mod cli;
 pub mod device;
 pub mod geo;
 pub mod password;
+pub mod qr;
 pub mod recovery;
 pub mod sessions;
 pub mod throttle;

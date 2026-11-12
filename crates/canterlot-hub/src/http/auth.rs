@@ -36,11 +36,15 @@ const WARN_EVERY_SECS: i64 = 600;
 const HEALTH_PATHS: [&str; 2] = ["/healthz", "/readyz"];
 
 /// Публичные пути входа: транспортный шлюз и CSRF действуют, сеанс не нужен.
-/// Точный метод и путь; часть 2 добавляет сюда ключи доступа и QR.
-pub const PUBLIC_AUTH: [(Method, &str); 3] = [
+/// Точный метод и путь.
+pub const PUBLIC_AUTH: [(Method, &str); 7] = [
     (Method::GET, "/api/v1/auth/methods"),
     (Method::POST, "/api/v1/auth/password"),
     (Method::POST, "/api/v1/auth/recovery"),
+    (Method::POST, "/api/v1/auth/passkey/start"),
+    (Method::POST, "/api/v1/auth/passkey/finish"),
+    (Method::POST, "/api/v1/auth/qr/start"),
+    (Method::POST, "/api/v1/auth/qr/poll"),
 ];
 
 #[derive(Clone, Debug)]

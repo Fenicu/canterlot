@@ -14,6 +14,7 @@ mod attachments_gc_drafts;
 mod auth_geo;
 mod auth_password;
 mod auth_pushes;
+mod auth_qr;
 mod auth_recovery;
 mod auth_sessions;
 mod auth_stepup;

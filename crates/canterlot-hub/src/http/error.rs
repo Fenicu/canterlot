@@ -88,6 +88,7 @@ error_codes! {
     SessionExpired => "session_expired", 401, Auth, AfterCondition, "Сеанс завершён из-за бездействия";
     ReauthRequired => "reauth_required", 403, Auth, AfterCondition, "Подтвердите вход паролем или ключом доступа";
     WrongPassword => "wrong_password", 403, Auth, Never, "Неверный пароль";
+    QrExpired => "qr_expired", 410, Auth, Never, "Код входа устарел или уже использован";
     OriginRejected => "origin_rejected", 403, Auth, Never, "Запрос отклонён: недопустимый источник";
     InvalidRequest => "invalid_request", 400, Browser, Never, "Некорректный запрос";
     InvalidOffset => "invalid_offset", 400, Browser, Never, "Недопустимое смещение";

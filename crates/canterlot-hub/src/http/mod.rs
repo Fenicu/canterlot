@@ -53,6 +53,7 @@ pub mod scheduled;
 pub mod search;
 pub mod session_tools;
 pub mod signin;
+pub mod signin_qr;
 pub mod snapshot;
 pub mod spawn_queue;
 pub mod ws;
@@ -124,6 +125,8 @@ pub struct AppState {
     pub passwords: crate::owner_auth::password::Passwords,
     /// Место по IP из `[auth.geoip].path`; файл перечитывается при смене.
     pub geo: Arc<crate::owner_auth::geo::Geo>,
+    /// Одновременные долгие опросы входа по QR в этом процессе.
+    pub qr_polls: Arc<tokio::sync::Semaphore>,
     pub ws_tasks: tokio_util::task::TaskTracker,
     #[cfg(feature = "fault-injection")]
     pub ws_faults: crate::fault_injection::Faults,
@@ -158,6 +161,9 @@ impl AppState {
             manifest: Arc::new(deps.manifest),
             user_header,
             geo: Arc::new(crate::owner_auth::geo::Geo::open(&deps.auth.geoip.path)),
+            qr_polls: Arc::new(tokio::sync::Semaphore::new(
+                crate::owner_auth::qr::MAX_POLLS,
+            )),
             auth: Arc::new(deps.auth),
             passwords: deps.passwords,
             ws_tasks: tokio_util::task::TaskTracker::new(),
@@ -184,6 +190,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .merge(health::routes())
         .merge(signin::routes())
+        .merge(signin_qr::routes())
         .merge(scheduled::routes())
         .merge(alarms::routes())
         .merge(plan::routes())

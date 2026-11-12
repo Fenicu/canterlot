@@ -103,7 +103,7 @@ pub struct OwnerSessionView {
 }
 
 impl OwnerSessionView {
-    fn from_row(row: SessionRow, current: Uuid) -> Self {
+    pub(super) fn from_row(row: SessionRow, current: Uuid) -> Self {
         // Место последнего адреса: при входе оно же место создания.
         let location = row
             .last_location
@@ -149,7 +149,7 @@ pub struct RecoverySignIn {
     pub device: Option<Value>,
 }
 
-fn too_many(retry_after: std::time::Duration) -> ApiError {
+pub(super) fn too_many(retry_after: std::time::Duration) -> ApiError {
     let seconds = retry_after.as_secs().max(1);
     ApiError::new(ErrorCode::TooManyAttempts).with_details(ErrorDetails {
         retry_after_seconds: Some(seconds),
@@ -157,7 +157,7 @@ fn too_many(retry_after: std::time::Duration) -> ApiError {
     })
 }
 
-fn refused(retry_after: std::time::Duration) -> Response {
+pub(super) fn refused(retry_after: std::time::Duration) -> Response {
     let seconds = retry_after.as_secs().max(1);
     let mut response = too_many(retry_after).into_response();
     response
@@ -167,7 +167,10 @@ fn refused(retry_after: std::time::Duration) -> Response {
 }
 
 /// Корзина попытки: у известного устройства своя, иначе по адресу клиента.
-async fn bucket_for(state: &AppState, client: &Client) -> Result<(String, bool), ApiError> {
+pub(super) async fn bucket_for(
+    state: &AppState,
+    client: &Client,
+) -> Result<(String, bool), ApiError> {
     if let Some(token) = &client.device_token
         && sessions::device_known(&state.pool, state.installation.owner_id, &token.0).await?
     {
@@ -177,7 +180,7 @@ async fn bucket_for(state: &AppState, client: &Client) -> Result<(String, bool),
 }
 
 /// Неудача: журнал, общая блокировка и пуши. Ошибка пуша не меняет ответ.
-async fn record_failure(state: &AppState, bucket: &str) -> Result<(), ApiError> {
+pub(super) async fn record_failure(state: &AppState, bucket: &str) -> Result<(), ApiError> {
     let failure = throttle::failed(&state.pool, bucket).await?;
     if failure.global_locked
         && let Err(error) = notify::on_sign_in_lock(&state.pool).await
@@ -190,16 +193,39 @@ async fn record_failure(state: &AppState, bucket: &str) -> Result<(), ApiError> 
     Ok(())
 }
 
-/// Сеанс создан: cookie сеанса и известного устройства, пуш о входе, вид сеанса.
-async fn signed_in(
+/// Новый сеанс по доказанному паролю, ключу или ссылке: cookie, пуш, вид сеанса.
+pub(super) async fn signed_in(
     state: &AppState,
     client: &Client,
     method: Method,
     device: Option<Value>,
 ) -> Result<Response, ApiError> {
-    let owner_id = state.installation.owner_id;
     let info = ClientInfo::located(client.ip, client.user_agent.clone(), device, &state.geo);
-    let created = sessions::create(&state.pool, owner_id, method, None, &info).await?;
+    let created = sessions::create(
+        &state.pool,
+        state.installation.owner_id,
+        method,
+        None,
+        &info,
+    )
+    .await?;
+    let (session, cookies) = issue(state, client, &created, &info, method).await?;
+    Ok(with_cookies(
+        Json(SignInView { session }).into_response(),
+        cookies,
+    ))
+}
+
+/// Сеанс создан: запоминается устройство, уходит пуш о входе. Возвращает вид сеанса и
+/// `Set-Cookie` сеанса и устройства для ответа вызывающего.
+pub(super) async fn issue(
+    state: &AppState,
+    client: &Client,
+    created: &sessions::Created,
+    info: &ClientInfo,
+    method: Method,
+) -> Result<(OwnerSessionView, [HeaderValue; 2]), ApiError> {
+    let owner_id = state.installation.owner_id;
     let device = sessions::remember_device(
         &state.pool,
         owner_id,
@@ -215,24 +241,27 @@ async fn signed_in(
             .as_ref()
             .map(|location| location.place())
             .as_deref(),
-        client.ip,
+        info.ip,
         method,
     );
     if let Err(error) = notify::on_sign_in(&state.pool, created.id, &text).await {
         tracing::warn!(kind = "sign_in_push_failed", error = %crate::dberr::describe(&error), "sign-in push not queued");
     }
     tracing::info!(kind = "signed_in", method = method.as_str(), session_id = %created.id, "owner signed in");
-    let mut response = Json(SignInView {
-        session: OwnerSessionView::from_row(row, created.id),
-    })
-    .into_response();
-    let headers = response.headers_mut();
-    headers.append(
-        header::SET_COOKIE,
-        session_cookie(&created.token, created.max_age_secs),
-    );
-    headers.append(header::SET_COOKIE, device_cookie(&device));
-    Ok(response)
+    Ok((
+        OwnerSessionView::from_row(row, created.id),
+        [
+            session_cookie(&created.token, created.max_age_secs),
+            device_cookie(&device),
+        ],
+    ))
+}
+
+pub(super) fn with_cookies(mut response: Response, cookies: [HeaderValue; 2]) -> Response {
+    for cookie in cookies {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    response
 }
 
 /// Вход по логину и паролю. Неверный логин, неверный пароль и отсутствие пароля дают

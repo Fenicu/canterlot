@@ -1252,6 +1252,10 @@ async fn every_route_requires_identity_unless_listed_public(pool: PgPool) {
             ("GET".to_owned(), "/api/v1/auth/methods".to_owned()),
             ("POST".to_owned(), "/api/v1/auth/password".to_owned()),
             ("POST".to_owned(), "/api/v1/auth/recovery".to_owned()),
+            ("POST".to_owned(), "/api/v1/auth/passkey/start".to_owned()),
+            ("POST".to_owned(), "/api/v1/auth/passkey/finish".to_owned()),
+            ("POST".to_owned(), "/api/v1/auth/qr/start".to_owned()),
+            ("POST".to_owned(), "/api/v1/auth/qr/poll".to_owned()),
         ])
     );
     let wrong_method = anonymous

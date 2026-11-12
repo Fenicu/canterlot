@@ -50,7 +50,7 @@ impl ClientInfo {
         }
     }
 
-    fn location(&self) -> Option<Value> {
+    pub(crate) fn location_json(&self) -> Option<Value> {
         self.location
             .as_ref()
             .and_then(|location| serde_json::to_value(location).ok())
@@ -65,11 +65,11 @@ impl ClientInfo {
             .collect()
     }
 
-    fn ip_text(&self) -> Option<String> {
+    pub(crate) fn ip_text(&self) -> Option<String> {
         self.ip.map(|ip| ip.to_canonical().to_string())
     }
 
-    fn user_agent(&self) -> Option<String> {
+    pub(crate) fn user_agent(&self) -> Option<String> {
         let agent = self.user_agent.as_deref()?.trim();
         if agent.is_empty() {
             return None;
@@ -81,7 +81,7 @@ impl ClientInfo {
         Some(agent[..end].to_owned())
     }
 
-    fn client_hints(&self) -> Option<Value> {
+    pub(crate) fn client_hints(&self) -> Option<Value> {
         let hints = self.client_hints.as_ref()?;
         (hints.is_object() && hints.to_string().len() <= CLIENT_HINTS_BYTES).then(|| hints.clone())
     }
@@ -155,7 +155,7 @@ pub async fn create_in_tx(
     .bind(client.ip_text())
     .bind(client.user_agent())
     .bind(client.client_hints())
-    .bind(client.location())
+    .bind(client.location_json())
     .bind(client.countries())
     .execute(&mut *conn)
     .await?;
@@ -370,6 +370,8 @@ pub async fn revoke(
     reason: RevokeReason,
     spare: Option<Uuid>,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    serialize_with_delivery(&mut tx).await?;
     let revoked: Vec<Uuid> = sqlx::query_scalar(
         "with recursive tree(id) as (
            select id from owner_sessions where id=$1 and revoked_at is null
@@ -386,8 +388,9 @@ pub async fn revoke(
     .bind(reason.as_str())
     .bind(reason.cascades())
     .bind(spare)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
     if !revoked.is_empty() {
         super::notify_changed(pool, "session_revoked").await;
     }
@@ -401,6 +404,8 @@ pub async fn revoke_all_except(
     keep: Option<Uuid>,
     reason: RevokeReason,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    serialize_with_delivery(&mut tx).await?;
     let revoked: Vec<Uuid> = sqlx::query_scalar(
         "update owner_sessions set revoked_at=now(),revoke_reason=$3
          where owner_id=$1 and revoked_at is null and id is distinct from $2
@@ -409,12 +414,23 @@ pub async fn revoke_all_except(
     .bind(owner_id)
     .bind(keep)
     .bind(reason.as_str())
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
     if !revoked.is_empty() {
         super::notify_changed(pool, "session_revoked").await;
     }
     Ok(revoked)
+}
+
+/// Отзыв и выдача входа по QR (`qr::deliver`, `create_in_tx`) берут одну блокировку:
+/// сеанс, выданный по одобрению отзываемого, либо уже виден каскаду, либо не выдаётся,
+/// потому что подтвердивший уже отозван.
+async fn serialize_with_delivery(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("select pg_advisory_xact_lock(hashtext('owner_sessions_limit'))")
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 /// Живые сеансы, которые уйдут каскадом вместе с `id` (без него самого).
