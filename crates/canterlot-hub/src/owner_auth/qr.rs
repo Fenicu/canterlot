@@ -155,6 +155,15 @@ pub async fn observe(
     })
 }
 
+#[derive(sqlx::FromRow)]
+struct Approved {
+    approved_by: Uuid,
+    ip: Option<String>,
+    user_agent: Option<String>,
+    client_hints: Option<Value>,
+    location: Option<Value>,
+}
+
 /// Выдача одобренного входа: ровно один опрос переводит строку в `delivered` и создаёт
 /// сеанс (`qr`, `approved_by`, несвежий) в той же транзакции. Подтвердивший сеанс должен
 /// быть жив: блокировка `owner_sessions_limit` упорядочивает выдачу с каскадным отзывом.
@@ -167,26 +176,27 @@ pub async fn deliver(
     sqlx::query("select pg_advisory_xact_lock(hashtext('owner_sessions_limit'))")
         .execute(&mut *tx)
         .await?;
-    let row: Option<(
-        Uuid,
-        Option<String>,
-        Option<String>,
-        Option<Value>,
-        Option<Value>,
-    )> = sqlx::query_as(
+    let row: Option<Approved> = sqlx::query_as(
         "update owner_qr_logins q set state='delivered'
              where id=$1 and owner_id=$2 and state='approved'
                and approved_at>now()-$3*interval '1 second'
                and exists(select 1 from owner_sessions s
                           where s.id=q.approved_by and s.revoked_at is null)
-             returning approved_by,host(ip),user_agent,client_hints,location",
+             returning approved_by,host(ip) as ip,user_agent,client_hints,location",
     )
     .bind(id)
     .bind(owner_id)
     .bind(DELIVERY_SECS as f64)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((approved_by, ip, user_agent, client_hints, location)) = row else {
+    let Some(Approved {
+        approved_by,
+        ip,
+        user_agent,
+        client_hints,
+        location,
+    }) = row
+    else {
         return Ok(None);
     };
     let client = ClientInfo {

@@ -121,9 +121,18 @@ pub struct Stored {
     pub passkey: Passkey,
 }
 
+#[derive(sqlx::FromRow)]
+struct Row {
+    id: Uuid,
+    name: String,
+    created_at: DateTime<Utc>,
+    last_used_at: Option<DateTime<Utc>>,
+    passkey: Value,
+}
+
 /// Ключи владельца по порядку добавления.
 pub async fn list(pool: &PgPool, owner_id: Uuid) -> Result<Vec<Stored>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, DateTime<Utc>, Option<DateTime<Utc>>, Value)> = sqlx::query_as(
+    let rows: Vec<Row> = sqlx::query_as(
         "select id,name,created_at,last_used_at,passkey from owner_passkeys
          where owner_id=$1 order by created_at,id",
     )
@@ -132,7 +141,14 @@ pub async fn list(pool: &PgPool, owner_id: Uuid) -> Result<Vec<Stored>, sqlx::Er
     .await?;
     Ok(rows
         .into_iter()
-        .filter_map(|(id, name, created_at, last_used_at, value)| {
+        .filter_map(|row| {
+            let Row {
+                id,
+                name,
+                created_at,
+                last_used_at,
+                passkey: value,
+            } = row;
             let backed_up = value["cred"]["backup_state"].as_bool().unwrap_or(false);
             let passkey = serde_json::from_value(value)
                 .inspect_err(|_| {
