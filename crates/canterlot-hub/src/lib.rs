@@ -44,6 +44,7 @@ pub mod model;
 pub mod model_resolution;
 pub mod notify;
 pub mod outbox;
+pub mod owner_auth;
 pub mod presets;
 pub mod requests;
 pub mod runs;
