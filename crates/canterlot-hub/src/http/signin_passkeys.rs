@@ -347,11 +347,12 @@ async fn register_start(
     }))
 }
 
-/// Завершение добавления в том же сеансе, что начал его.
+/// Завершение добавления в том же сеансе, что начал его; сеанс должен быть свеж и сейчас:
+/// обряд живёт 5 минут и мог пережить свежесть.
 #[utoipa::path(post, path = "/api/v1/auth/passkeys/register/finish", tag = "auth", request_body = PasskeyRegisterFinish, responses(
     (status = 200, description = "Ключ добавлен", body = PasskeyView),
     (status = 400, description = "invalid_request: имя", body = ErrorEnvelope),
-    (status = 403, description = "passkey_rejected", body = ErrorEnvelope),
+    (status = 403, description = "passkey_rejected или reauth_required", body = ErrorEnvelope),
 ))]
 async fn register_finish(
     State(state): State<AppState>,
@@ -360,6 +361,7 @@ async fn register_finish(
     client: Client,
     ApiJson(body): ApiJson<PasskeyRegisterFinish>,
 ) -> Result<Json<PasskeyView>, ApiError> {
+    session.require_fresh()?;
     let webauthn = relying(&state)?;
     let name = match body.name.as_deref() {
         Some(name) if !name.trim().is_empty() => Some(clean_name(name).ok_or_else(invalid_name)?),

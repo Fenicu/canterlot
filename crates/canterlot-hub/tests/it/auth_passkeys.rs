@@ -454,3 +454,31 @@ async fn auth_passkeys_challenges_are_bound_to_their_kind_and_session(pool: PgPo
         .unwrap();
     assert_eq!(rows, 0, "every finish consumes its row, right or wrong");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn auth_passkeys_register_finish_needs_the_session_still_fresh(pool: PgPool) {
+    let hub = AuthHub::new(pool).await;
+    let owner = hub.owner();
+    let mut key = authenticator();
+    let start = post(&owner, "/api/v1/auth/passkeys/register/start", json!({})).await;
+    assert_eq!(start.status, 200, "{:?}", start.body);
+    let start: Value = start.json();
+    let options: CreationChallengeResponse =
+        serde_json::from_value(start["options"].clone()).unwrap();
+    let credential = key.do_registration(origin(), options).unwrap();
+    // Свежесть кончилась между start и finish.
+    hub.make_stale(TEST_SESSION_ID).await;
+    let finish = post(
+        &owner,
+        "/api/v1/auth/passkeys/register/finish",
+        json!({"challenge_id": start["challenge_id"], "credential": credential}),
+    )
+    .await;
+    assert_eq!(finish.status, 403, "{:?}", finish.body);
+    assert_eq!(error_code(&finish), "reauth_required");
+    let stored: i64 = sqlx::query_scalar("select count(*) from owner_passkeys")
+        .fetch_one(&hub.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0);
+}

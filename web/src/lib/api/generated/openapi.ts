@@ -164,7 +164,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Завершение добавления в том же сеансе, что начал его. */
+        /**
+         * Завершение добавления в том же сеансе, что начал его; сеанс должен быть свеж и сейчас:
+         *     обряд живёт 5 минут и мог пережить свежесть.
+         */
         post: operations["post__api_v1_auth_passkeys_register_finish"];
         delete?: never;
         options?: never;
@@ -4779,7 +4782,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description passkey_rejected */
+            /** @description passkey_rejected или reauth_required */
             403: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */

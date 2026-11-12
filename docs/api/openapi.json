@@ -819,7 +819,7 @@
         "tags": [
           "auth"
         ],
-        "summary": "Завершение добавления в том же сеансе, что начал его.",
+        "summary": "Завершение добавления в том же сеансе, что начал его; сеанс должен быть свеж и сейчас:\nобряд живёт 5 минут и мог пережить свежесть.",
         "operationId": "post__api_v1_auth_passkeys_register_finish",
         "requestBody": {
           "content": {
@@ -871,7 +871,7 @@
             }
           },
           "403": {
-            "description": "passkey_rejected",
+            "description": "passkey_rejected или reauth_required",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {

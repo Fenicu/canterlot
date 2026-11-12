@@ -44,7 +44,7 @@
 | `POST /reauth/passkey/finish` | да | `{challenge_id, credential}` → сеанс свеж 10 минут; неудача — `403 passkey_rejected` |
 | `GET /passkeys` | да | `{passkeys: [{id, name, created_at, last_used_at, backed_up}]}` |
 | `POST /passkeys/register/start` | свежий | `{}` → `{challenge_id, options}` для `navigator.credentials.create()` |
-| `POST /passkeys/register/finish` | да | `{challenge_id, credential, name?}` → ключ; без имени — подпись устройства; `403 passkey_rejected` |
+| `POST /passkeys/register/finish` | свежий | `{challenge_id, credential, name?}` → ключ; без имени — подпись устройства; `403 passkey_rejected`; сеанс должен быть свеж и при завершении (`403 reauth_required`) |
 | `PATCH /passkeys/{id}` | да | `{name}`: 1..64 символа |
 | `DELETE /passkeys/{id}` | свежий | удалить ключ; ответ — оставшиеся ключи |
 
