@@ -571,6 +571,10 @@ mod tests {
 
     const CLAUDE: &str = include_str!("../tests/fixtures/provider_status/claude_summary.json");
     const OPENAI: &str = include_str!("../tests/fixtures/provider_status/openai_summary.json");
+    const CLAUDE_REAL: &str =
+        include_str!("../tests/fixtures/provider_status/claude_summary_real_2026-11-12.json");
+    const OPENAI_REAL: &str =
+        include_str!("../tests/fixtures/provider_status/openai_summary_real_2026-11-12.json");
 
     fn page(provider: &'static str) -> StatusPage {
         ProviderStatusConfig::default()
@@ -623,6 +627,70 @@ mod tests {
         );
         assert_eq!(reading.incidents.len(), 2);
         assert_eq!(reading.incidents[1].url, None);
+    }
+
+    /// Тот же ответ страницы с заведомо аварийным общим индикатором: `ok` тогда значит,
+    /// что уровень взят из компонента, а не из общего индикатора.
+    fn with_indicator(body: &str, indicator: &str) -> Vec<u8> {
+        let mut summary: Value = serde_json::from_str(body).unwrap();
+        summary["status"]["indicator"] = Value::String(indicator.to_owned());
+        serde_json::to_vec(&summary).unwrap()
+    }
+
+    /// Страницы, снятые 2026-11-12: у Claude общий индикатор `minor` из-за claude.ai,
+    /// у OpenAI всё в порядке. Настроенные компоненты обеих страниц рабочие.
+    #[test]
+    fn real_pages_parse_and_their_configured_components_are_operational() {
+        for (body, provider, names) in [
+            (
+                CLAUDE_REAL,
+                "claude",
+                &["Claude Code", "Claude API (api.anthropic.com)"][..],
+            ),
+            (OPENAI_REAL, "codex", &["Responses", "Login"][..]),
+        ] {
+            let raw: Value = serde_json::from_str(body).unwrap();
+            let components = raw["components"].as_array().unwrap();
+            let alarmed = with_indicator(body, "critical");
+            for name in names {
+                let statuses: Vec<&str> = components
+                    .iter()
+                    .filter(|component| component["name"] == *name)
+                    .map(|component| component["status"].as_str().unwrap())
+                    .collect();
+                assert!(!statuses.is_empty(), "{provider}: {name} is on the page");
+                assert!(
+                    statuses.iter().all(|status| *status == "operational"),
+                    "{provider}: {name} is operational, got {statuses:?}"
+                );
+                // Страница ищет каждый компонент по имени и не откатывается к общему индикатору.
+                let reading = read_page(&alarmed, &with_components(provider, &[name])).unwrap();
+                assert_eq!(reading.level, ProviderStatusLevel::Ok, "{provider}: {name}");
+            }
+            let reading = read_page(body.as_bytes(), &page(provider)).unwrap();
+            assert_eq!(reading.level, ProviderStatusLevel::Ok, "{provider}");
+            assert!(
+                reading.components.is_empty(),
+                "{provider}: no configured component is out"
+            );
+        }
+    }
+
+    /// На странице OpenAI два компонента `Login`; повтор не должен ни менять уровень, ни
+    /// дублировать имя в списке пострадавших.
+    #[test]
+    fn real_openai_page_tolerates_duplicate_component_names() {
+        let raw: Value = serde_json::from_str(OPENAI_REAL).unwrap();
+        let logins = raw["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|component| component["name"] == "Login")
+            .count();
+        assert_eq!(logins, 2, "the page lists Login twice");
+        let reading = read_page(OPENAI_REAL.as_bytes(), &page("codex")).unwrap();
+        assert_eq!(reading.level, ProviderStatusLevel::Ok);
+        assert!(reading.components.is_empty());
     }
 
     #[test]
