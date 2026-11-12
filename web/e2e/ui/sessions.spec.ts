@@ -30,6 +30,52 @@ test('list_matches_the_mockup_fixture_structure', async ({ page }) => {
   await expect(page.getByRole('link', { name: /Восстановление потока/ })).toBeVisible();
 });
 
+test('rows_show_the_state_by_ring_dot_or_grey_and_the_owner_colour_by_a_stripe', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  seedMockupSessions(api);
+  const machine = { id: '00000000-0000-4000-8000-000000000101', name: 'workstation' };
+  const harness = { id: 'claude', title: 'Claude Code', provider: 'claude' };
+  const idle = (title: string, alive?: boolean) => seedConversation(api, {
+    title, harness, machine, model: 'opus', preview: 'Готово, тесты зелёные', last_activity_at: '2026-10-28T19:00:00.000Z',
+    activity: { state: 'idle', evidence: { last_turn_at: '2026-10-28T19:00:00.000Z', ...(alive === undefined ? {} : { process_alive: alive }) }, since: '2026-10-28T19:00:00.000Z' }
+  });
+  idle('Живой простой', true);
+  idle('Простой без процесса', false);
+  idle('Простой со старого хаба');
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto('/sessions');
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  const row = (title: string) => page.locator('[data-session]').filter({ has: page.getByRole('link', { name: new RegExp(title) }) }).first();
+  const avatar = (title: string) => row(title).locator('.avatar');
+  await expect(row('Восстановление потока')).toHaveAttribute('data-state', 'running');
+  await expect(avatar('Восстановление потока')).toHaveAttribute('data-halo', '--accent');
+  await expect(row('Граница snapshot')).toHaveAttribute('data-state', 'waiting');
+  await expect(avatar('Граница snapshot')).toHaveAttribute('data-halo', '--warning');
+  // «Ждёт ответа» — самое важное состояние: слово жирное.
+  expect(Number(await row('Граница snapshot').locator('.activity .text').evaluate((node) => getComputedStyle(node).fontWeight))).toBeGreaterThanOrEqual(700);
+  await expect(row('Восстановление воркера')).toHaveAttribute('data-state', 'paused');
+  await expect(avatar('Восстановление воркера')).toHaveClass(/dashed/);
+  await expect(row('Сборка адаптера')).toHaveAttribute('data-state', 'stalled');
+  await expect(avatar('Сборка адаптера')).toHaveAttribute('data-halo', '--danger');
+  await expect(row('Повторная доставка ввода')).toHaveAttribute('data-state', 'stopped');
+  await expect(avatar('Повторная доставка ввода')).toHaveClass(/dim/);
+  // Простой: точная точка от хаба, серый без процесса, без поля — по-старому, как живой.
+  await expect(row('Живой простой')).toHaveAttribute('data-state', 'live');
+  await expect(avatar('Живой простой').locator('.dot')).toHaveAttribute('data-token', '--success');
+  await expect(row('Живой простой')).toContainText('Готово, тесты зелёные');
+  await expect(row('Простой без процесса')).toHaveAttribute('data-state', 'dormant');
+  await expect(avatar('Простой без процесса')).toHaveClass(/dim/);
+  await expect(row('Простой без процесса')).toContainText('Процесс не запущен');
+  await expect(row('Простой со старого хаба')).toHaveAttribute('data-state', 'live');
+  // Цвет владельца — полоска у края строки, знак состояния им не красится.
+  await expect(row('Восстановление потока').locator('[data-owner-color="accent"]')).toBeAttached();
+  await expect(row('Живой простой').locator('[data-owner-color]')).toHaveCount(0);
+  // Знаки состояния не меняют высоту строки.
+  const heights = await page.locator('[data-session]').evaluateAll((rows) => rows.filter((node) => !node.classList.contains('child')).map((node) => Math.round(node.getBoundingClientRect().height)));
+  expect(new Set(heights).size).toBe(1);
+});
+
 test('group_tabs_are_a_tablist_with_arrow_navigation_and_stay_inside_the_pill', async ({ page, isMobile }) => {
   await boot(page);
   const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
@@ -215,7 +261,7 @@ test('pin_colour_archive_roundtrip_updates_the_list_with_idempotent_calls', asyn
   expect(keys[0]).not.toBe('');
   await expect(page.getByRole('button', { name: /Закреплённые 3/ })).toBeVisible();
   await page.getByRole('radio', { name: 'Синий' }).check();
-  await expect(page.locator(`[data-session="${ids.plain}"] .mark`)).toHaveAttribute('data-token', '--blue');
+  await expect(page.locator(`[data-session="${ids.plain}"] [data-owner-color]`)).toHaveAttribute('data-owner-color', 'blue');
 });
 
 test('group_manager_create_rename_reorder_delete_keeps_sessions', async ({ page }) => {
@@ -842,7 +888,7 @@ test('more_menu_reloads_the_page', async ({ page }) => {
   expect(await page.evaluate(() => (window as unknown as { marker?: number }).marker)).toBeUndefined();
 });
 
-test('row_dot_shows_the_state_while_the_owner_colour_waits_for_a_quiet_session', async ({ page }) => {
+test('row_ring_shows_the_state_and_the_stripe_keeps_the_owner_colour', async ({ page }) => {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   const busy = seedConversation(api, { title: 'Синяя, но работает', color: 'blue', activity: { state: 'working', evidence: { phase: 'generating' }, since: new Date().toISOString() } } as never);
@@ -851,9 +897,14 @@ test('row_dot_shows_the_state_while_the_owner_colour_waits_for_a_quiet_session',
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator(`[data-session="${busy}"] .mark`)).toHaveAttribute('data-token', '--accent');
-  await expect(page.locator(`[data-session="${stalled}"] .mark`)).toHaveAttribute('data-token', '--warning');
-  await expect(page.locator(`[data-session="${quiet}"] .mark`)).toHaveAttribute('data-token', '--blue');
+  // Кольцо и точка говорят только о состоянии; цвет владельца — полоска у края строки при любом состоянии.
+  await expect(page.locator(`[data-session="${busy}"] .avatar`)).toHaveAttribute('data-halo', '--accent');
+  await expect(page.locator(`[data-session="${stalled}"] .avatar`)).toHaveAttribute('data-halo', '--danger');
+  await expect(page.locator(`[data-session="${quiet}"] .avatar`)).not.toHaveAttribute('data-halo', /./);
+  await expect(page.locator(`[data-session="${quiet}"] .avatar .dot`)).toHaveCount(0);
+  for (const [id, color] of [[busy, 'blue'], [stalled, 'neutral'], [quiet, 'blue']] as const) {
+    await expect(page.locator(`[data-session="${id}"] [data-owner-color]`)).toHaveAttribute('data-owner-color', color);
+  }
   // Длинное название, обрезанное в строке, читается целиком в подсказке.
   await expect(page.locator(`[data-session="${busy}"] .title`)).toHaveAttribute('title', 'Синяя, но работает');
 });

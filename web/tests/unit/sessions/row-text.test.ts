@@ -35,6 +35,15 @@ describe('rowLine', () => {
     expect(rowLine(row({ activity: { state: 'stopped', evidence: { outcome: 'user_stop' } } }), NOW)).toMatchObject({ text: 'Остановлена вами', preview: false });
   });
 
+  it('says there is no process instead of the preview when the CLI is gone', () => {
+    const gone = row({ activity: { state: 'idle', evidence: { last_turn_at: '2026-11-12T11:00:00.000Z', process_alive: false } } });
+    expect(rowLine(gone, NOW)).toMatchObject({ text: 'Процесс не запущен', tone: 'default', preview: false });
+    const fresh = row({ preview: null, activity: { state: 'idle', evidence: { last_turn_at: null, process_alive: false } } });
+    expect(rowLine(fresh, NOW)).toMatchObject({ text: 'Новая сессия', preview: false });
+    const live = row({ activity: { state: 'idle', evidence: { last_turn_at: '2026-11-12T11:00:00.000Z', process_alive: true } } });
+    expect(rowLine(live, NOW)).toMatchObject({ text: 'Готово: тесты зелёные', preview: true });
+  });
+
   it('names the machine only when several are online', () => {
     expect(rowLine(row(), NOW, { machines: 2 }).who).toBe('Opus · mini');
     const machines = [{ availability: 'ready' }, { availability: 'unavailable' }, { availability: 'degraded' }] as MachineRecord[];

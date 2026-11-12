@@ -18,6 +18,8 @@ export interface ActivityEvidence {
   provider?: string | null;
   until?: string | null;
   outcome?: string;
+  /** Жив ли процесс CLI в простое; хаб без телеметрии поле не присылает. */
+  process_alive?: boolean | null;
   /** Процесс ждёт очереди тяжёлых задач машины. */
   lease_wait?: { kind: string; position: number; since?: string } | null;
 }

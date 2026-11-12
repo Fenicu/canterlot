@@ -5,7 +5,7 @@
 	import type { InterruptControl } from '#lib/composer/interrupt.svelte.js';
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import StateChip from './StateChip.svelte';
-	import { chatStateLine } from './stateLine';
+	import { effectiveActivity } from './stateLine';
 	import { modelAliasNote, modelLabel, resolvedModelLabel } from '#lib/format/labels.js';
 	import { fmt } from '#lib/format/ru.js';
 	import Icon from '#lib/ui/Icon.svelte';
@@ -13,7 +13,7 @@
 	import { pane } from '#lib/shell/pane.svelte.js';
 	import Menu from '#lib/ui/Menu.svelte';
 	import MenuItem from '#lib/ui/MenuItem.svelte';
-	import { colorVar } from '#lib/screens/sessions/colors.js';
+	import { stateMark } from '#lib/screens/sessions/rowState.js';
 	import { theme } from '#lib/theme.js';
 	import { stopSession, resumeSession, continueSessionQueue, resolveOwnerLost, controlBusy } from './controls';
 	import { RESOLVE_WARNING, runLabel } from './pauseCards';
@@ -115,10 +115,8 @@
 	const settings = $derived(chat.settings as SettingsLike | null);
 
 	const title = $derived(detail?.title || 'Сессия');
-	const color = $derived(colorVar(detail?.color ?? null));
-	const stateLine = $derived(chatStateLine(chat.activity as Activity | null, chat.phase, (chat.execution as { state?: string })?.state, now));
-	const TONE_MARK = { accent: '--accent', warning: '--warning', danger: '--danger' } as const;
-	const markColor = $derived(stateLine.tone === 'default' ? color : TONE_MARK[stateLine.tone]);
+	// Знак шапки по тем же правилам, что у строки списка: кольцо, точка или серый кружок без процесса.
+	const mark = $derived(stateMark(effectiveActivity(chat.activity as Activity | null, chat.phase, (chat.execution as { state?: string })?.state)));
 	const harnessTitle = $derived(detail?.harness?.title || 'Claude Code');
 	const machineName = $derived(detail?.machine?.name || 'workstation');
 	const provider = $derived(detail?.harness?.provider || 'claude');
@@ -235,7 +233,7 @@
 		<div class="header-info">
 			<div class="title-row">
 				{#if detail}
-					<span class="mark" style:background="var({markColor})"></span>
+					<span class="mark" data-state={mark.state} data-halo={mark.halo} class:dashed={mark.dashed} class:dim={mark.dim} title={mark.word}><span class="sr-only">{mark.word}</span></span>
 					<h1 class="header-title" {title}>{title}</h1>
 				{:else}
 					<span class="skeleton" style:width="var(--bar-56)"></span>
@@ -502,11 +500,22 @@
 		color: var(--text);
 	}
 	.mark {
+		--mark-color: var(--success);
 		width: var(--mark-large);
 		height: var(--mark-large);
+		box-sizing: border-box;
 		border-radius: var(--radius-round);
 		flex-shrink: 0;
+		background: var(--mark-color);
 	}
+	/* Кольцо — идёт ход, ждёт владельца, беда или пауза; точка — процесс жив; полый серый кружок — процесса нет. */
+	.mark[data-halo] { outline: var(--s1) solid var(--mark-color); outline-offset: var(--s1); }
+	.mark[data-halo='--accent'] { --mark-color: var(--accent); }
+	.mark[data-halo='--warning'] { --mark-color: var(--warning); }
+	.mark[data-halo='--danger'] { --mark-color: var(--danger); }
+	.mark.dashed { outline-style: dashed; }
+	.mark[data-state='fresh'] { --mark-color: var(--muted); }
+	.mark.dim { background: var(--transparent); border: var(--s1) solid var(--muted); }
 	/* Длинное состояние уводит подзаголовок на свою строку, а не сжимает его до буквы. */
 	.sub-row {
 		display: flex;

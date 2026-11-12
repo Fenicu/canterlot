@@ -7,7 +7,10 @@
     model = '',
     title = '',
     tone = 'default',
-    size = 'row'
+    size = 'row',
+    halo = null,
+    dashed = false,
+    dim = false
   }: {
     vendor: Vendor | null;
     model?: string;
@@ -15,13 +18,19 @@
     /** Цвет точки состояния: работа, ожидание владельца, сбой или покой. */
     tone?: string;
     size?: 'row' | 'small';
+    /** Кольцо вокруг аватара цветом состояния: идёт ход, ждёт владельца, беда, пауза. */
+    halo?: string | null;
+    /** Пунктирное кольцо: сессию держат лимиты. */
+    dashed?: boolean;
+    /** Процесса нет: аватар серый и приглушённый. */
+    dim?: boolean;
   } = $props();
 
   const logo = $derived(vendor ? LOGOS[vendor] : undefined);
   const letter = $derived(vendorLetter(model, title));
 </script>
 
-<span class="avatar size-{size}" data-vendor={vendor ?? 'letter'} aria-hidden="true">
+<span class="avatar size-{size}" class:haloed={halo} class:dashed class:dim data-halo={halo} data-vendor={vendor ?? 'letter'} aria-hidden="true">
   {#if logo}
     <svg viewBox={logo.viewBox} fill-rule={logo.evenodd ? 'evenodd' : undefined} focusable="false">
       {#each logo.paths as d, index (index)}<path {d} />{/each}
@@ -61,4 +70,12 @@
   .dot[data-token='--warning']::after { background: var(--warning); }
   .dot[data-token='--success']::after { background: var(--success); }
   .dot[data-token='--danger']::after { background: var(--danger); }
+  /* Кольцо состояния снаружи аватара через зазор: размер аватара и высота строки не меняются. */
+  .haloed { outline: var(--s1) solid var(--halo); outline-offset: var(--s1); }
+  .size-small.haloed { outline-offset: var(--hairline); }
+  .haloed.dashed { outline-style: dashed; }
+  [data-halo='--accent'] { --halo: var(--accent); }
+  [data-halo='--warning'] { --halo: var(--warning); }
+  [data-halo='--danger'] { --halo: var(--danger); }
+  .dim { opacity: var(--opacity-dim); filter: grayscale(1); }
 </style>

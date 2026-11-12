@@ -123,12 +123,12 @@ test('child_status_dot_uses_the_same_activity_colour_as_a_top_level_row', async 
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
-  const childMark = page.locator(`[data-session="${child}"] .mark`);
-  const topMark = page.locator(`[data-session="${top}"] .mark`);
-  await expect(childMark).toHaveAttribute('data-token', '--accent');
-  await expect(topMark).toHaveAttribute('data-token', (await childMark.getAttribute('data-token'))!);
-  // Спокойная строка без выбранного цвета остаётся нейтральной.
-  await expect(page.locator(`[data-session="${parent}"] .mark`)).toHaveAttribute('data-token', '--muted');
+  const childMark = page.locator(`[data-session="${child}"] .avatar`);
+  const topMark = page.locator(`[data-session="${top}"] .avatar`);
+  await expect(childMark).toHaveAttribute('data-halo', '--accent');
+  await expect(topMark).toHaveAttribute('data-halo', (await childMark.getAttribute('data-halo'))!);
+  // Спокойная строка без процесса и хода остаётся нейтральной: серая точка новой сессии, без кольца.
+  await expect(page.locator(`[data-session="${parent}"] .avatar`)).not.toHaveAttribute('data-halo', /./);
 });
 
 test('grandchild_keeps_indentation_without_a_second_tree_mark', async ({ page }) => {

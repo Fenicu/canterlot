@@ -41,6 +41,11 @@ export function rowLine(
   const model = modelShortName(item.model, item.model_resolved, context.title);
   const who = (context.machines ?? 1) > 1 ? `${model} · ${item.machine.name}` : model;
   const calm = item.activity.state === 'idle' && line.tone === 'default';
+  // Простой без процесса гаснет как остановленная сессия и говорит об этом словами, а не превью.
+  if (calm && (item.activity as Activity).evidence?.process_alive === false) {
+    const text = (item.activity as Activity).evidence?.last_turn_at ? 'Процесс не запущен' : 'Новая сессия';
+    return { who, text, tone: 'default', live: false, preview: false };
+  }
   const preview = item.preview?.trim() ?? '';
   if (calm && preview) return { who, text: preview, tone: 'default', live: false, preview: true };
   return { who, text: line.text, tone: line.tone, live: line.live, preview: false, timed: line.timed ?? false };

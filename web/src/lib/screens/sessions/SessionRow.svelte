@@ -5,7 +5,9 @@
   import Icon from '#lib/ui/Icon.svelte';
   import { timeTip } from '#lib/ui/time-tip.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
-  import { colorVar, toneVar } from './colors';
+  import { colorVar } from './colors';
+  import { stateMark } from './rowState';
+  import type { Activity } from './activityText';
   import { getRuntime } from '#lib/app/runtime.js';
   import { planBadge } from '#lib/screens/plan/planText.js';
   import VendorAvatar from '#lib/vendors/VendorAvatar.svelte';
@@ -39,8 +41,9 @@
   // Метка плана у оркестратора: сколько задач готово из всех неотменённых.
   const plan = $derived(planBadge(runtime()?.list.plan.of(item.id) ?? []));
   const vendor = $derived(vendorOf(item.harness.provider, item.model_resolved || item.model));
-  // Как в шапке чата: точка показывает состояние, а цвет владельца — только у спокойной сессии.
-  const mark = $derived(line.tone === 'default' && item.color ? colorVar(item.color) : toneVar(line.tone));
+  // Знак на аватаре говорит только о состоянии процесса; цвет владельца — полоска у левого края строки.
+  const mark = $derived(stateMark(item.activity as Activity));
+  const owner = $derived(item.color ? colorVar(item.color) : null);
   const stampTs = $derived.by(() => {
     const parsed = item.last_activity_at ? Date.parse(item.last_activity_at) : Number.NaN;
     return Number.isFinite(parsed) ? parsed : null;
@@ -70,9 +73,11 @@
   }
 </script>
 
-<article class="row" class:current class:child={depth > 0} class:depth-1={depth === 1} class:depth-2={depth >= 2} data-session={item.id} data-vendor={vendor ?? 'letter'} oncontextmenu={(event) => { event.preventDefault(); onopen(item.id); }}>
+<article class="row" data-state={mark.state} class:dim={mark.dim} class:strong={mark.strong} class:current class:child={depth > 0} class:depth-1={depth === 1} class:depth-2={depth >= 2} data-session={item.id} data-vendor={vendor ?? 'letter'} oncontextmenu={(event) => { event.preventDefault(); onopen(item.id); }}>
+  {#if owner}<span class="owner" data-owner-color={item.color} style:--owner="var({owner})" aria-hidden="true"></span>{/if}
   <a href={resolve(`/c/${item.id}` as '/')} aria-current={current ? 'page' : undefined} onpointerdown={down} onpointerup={up} onpointercancel={up} onclick={click}>
-    <VendorAvatar {vendor} model={item.model_resolved || item.model} title={item.title} tone={mark} size={depth > 0 ? 'small' : 'row'} />
+    <VendorAvatar {vendor} model={item.model_resolved || item.model} title={item.title} tone={mark.dot ?? 'none'} halo={mark.halo} dashed={mark.dashed} dim={mark.dim} size={depth > 0 ? 'small' : 'row'} />
+    <span class="sr-only">{mark.word}</span>
     <span class="main">
       <span class="l1">
         <span class="title" title={item.title}>{item.title}</span>
@@ -129,6 +134,15 @@
   .activity[data-tone='warning'] .text { color: var(--warning); }
   .activity[data-tone='danger'] .text { color: var(--danger); }
   .live { display: inline-block; width: var(--mark); height: var(--mark); margin-right: var(--s2); border-radius: var(--radius-round); background: var(--accent); vertical-align: middle; }
+  /* Цвет владельца — тонкая полоска у левого края, чтобы не спорить с кольцом и точкой состояния. */
+  .owner { position: absolute; left: var(--s0); top: var(--s4); bottom: var(--s4); width: calc(var(--s1) * 1.5); border-radius: var(--radius-pill); background: var(--owner); }
+  /* Процесса нет: строка гаснет и читается как архивная. */
+  .row.dim .title { color: var(--secondary); font-weight: var(--weight-normal); }
+  .row.dim .activity .text { color: var(--muted); }
+  /* Ожидание владельца — самое важное состояние: слово жирное в любой палитре. */
+  .row.strong .activity .text { font-weight: var(--weight-bold); }
+  /* Подвисшая сессия — беда того же ряда, что сбой: красное кольцо и красные слова. */
+  .row[data-state='stalled'] .activity .text { color: var(--danger); }
   .plan, .queued { flex: none; max-width: 50%; padding: var(--s0) var(--s3); overflow: hidden; border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .worked { flex: none; color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .pin { flex: none; display: inline-flex; color: var(--badge); }

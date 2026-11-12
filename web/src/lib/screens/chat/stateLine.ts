@@ -21,7 +21,8 @@ export function chatStateLine(
 	return { ...line, text, quiet: effective.state === 'idle' && !line.live };
 }
 
-function effectiveActivity(
+/** Активность с поправкой на фазу и остановку исполнения: её же читает знак состояния шапки. */
+export function effectiveActivity(
 	activity: Activity | null,
 	phase: { phase?: string } | null,
 	executionState: string | null | undefined

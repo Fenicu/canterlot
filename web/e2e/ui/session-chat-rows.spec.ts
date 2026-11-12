@@ -54,15 +54,15 @@ test('session_row_status_colours_and_avatar_vendor_follow_the_model', async ({ p
     await expect(item.locator('.text')).toHaveText(text);
     await expect(item.locator('.activity')).toHaveAttribute('data-tone', tone);
   }
-  // Цвет текста состояния — цвет тона, точка аватара в том же тоне.
+  // Цвет текста состояния — цвет тона, кольцо аватара в том же тоне.
   const waiting = row(page, ids.waiting);
   const colours = await waiting.evaluate((node) => ({
     text: getComputedStyle(node.querySelector('.text')!).color,
     warning: getComputedStyle(document.documentElement).getPropertyValue('--warning').trim()
   }));
   expect(colours.text).not.toBe('');
-  await expect(waiting.locator('.dot')).toHaveAttribute('data-token', '--warning');
-  await expect(row(page, ids.kids[0]).locator('.dot')).toHaveAttribute('data-token', '--accent');
+  await expect(waiting.locator('.avatar')).toHaveAttribute('data-halo', '--warning');
+  await expect(row(page, ids.kids[0]).locator('.avatar')).toHaveAttribute('data-halo', '--accent');
   // Непрочитанное — счётчиком справа, закреплённая — значком.
   await expect(waiting.locator('.count')).toHaveText('2');
   await expect(waiting.getByText('Непрочитанных: 2')).toBeAttached();
