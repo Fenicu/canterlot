@@ -83,6 +83,18 @@ retries = 2
 filter = 'test(=exec_e2e::transport_errors_never_stop_an_execution)'
 retries = 2
 
+# QUARANTINE: в полном гейте 1.30.1 под нагрузкой наблюдение Fable не записалось («weekly_fable stored»),
+# хотя сдвиг часов машины уже известен; отдельно 5 из 5. Повтор разрешён.
+[[profile.default.overrides]]
+filter = 'test(=limits_fable::the_verbatim_fable_frame_reaches_the_hub_limits)'
+retries = 2
+
+# QUARANTINE: в полном гейте 1.30.1 под нагрузкой не дождался SIGINT за 30 с; отдельно 3 из 3 за 10 с.
+# Повтор разрешён.
+[[profile.default.overrides]]
+filter = 'test(=claude_code_e2e::sigint_fallback_fires_with_a_transmit_deadline_below_the_receipt_wait)'
+retries = 2
+
 # QUARANTINE: в полном гейте 1.23.2 (51 с) и в check.sh --fast 09.11 (37 с) под нагрузкой падал
 # «stale batches forced another handshake» (3 вместо 2); отдельно проходит за ~15 с. Повтор разрешён.
 [[profile.default.overrides]]
