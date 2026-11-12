@@ -8,6 +8,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
 pub mod cli;
+pub mod device;
 pub mod password;
 pub mod recovery;
 pub mod sessions;
@@ -187,16 +188,10 @@ pub fn bucket_key(ip: Option<IpAddr>) -> String {
     }
 }
 
-/// Подпись устройства для списка сеансов и пушей. Пока сырой user agent; разбор
-/// браузера, системы и модели из подсказок клиента добавляет часть 2.
-pub fn label(
-    user_agent: Option<&str>,
-    _client_hints: Option<&serde_json::Value>,
-) -> Option<String> {
-    user_agent
-        .map(str::trim)
-        .filter(|agent| !agent.is_empty())
-        .map(str::to_owned)
+/// Подпись устройства для списка сеансов и пушей: выводится при чтении из user agent
+/// и подсказок клиента (`device`), см. `device::label`.
+pub fn label(user_agent: Option<&str>, client_hints: Option<&serde_json::Value>) -> Option<String> {
+    device::label(user_agent, client_hints)
 }
 
 /// Текст пуша о новом входе: «Firefox 159 · Linux · Москва · 203.0.113.9 · по паролю».
