@@ -3498,11 +3498,41 @@ export interface components {
             /** Format: int64 */
             rss_bytes: number;
         };
+        /** @description Незакрытый инцидент страницы статуса. */
+        ProviderIncident: {
+            name: string;
+            /** @description Короткая ссылка на инцидент, если страница её дала. */
+            url?: string | null;
+        };
         ProviderSeries: {
             five_hour: components["schemas"]["Point"][];
             provider: string;
             weekly: components["schemas"]["Point"][];
             weekly_fable: components["schemas"]["Point"][];
+        };
+        /**
+         * @description Уровень, важный для маршрута; порядок — от лучшего к худшему.
+         * @enum {string}
+         */
+        ProviderStatusLevel: "ok" | "degraded" | "maintenance" | "partial_outage" | "major_outage" | "unknown";
+        /** @description Статус провайдера для клиентов. */
+        ProviderStatusView: {
+            /** @description Когда уровень сменился в последний раз. */
+            changed_at: string;
+            /** @description Важные для харнесса компоненты не в рабочем состоянии. */
+            components: string[];
+            /** @description Общая строка страницы, например «Partial System Outage». */
+            description: string;
+            /** @description Последнее удачное чтение страницы. */
+            fetched_at?: string | null;
+            /** @description До трёх незакрытых инцидентов. */
+            incidents: components["schemas"]["ProviderIncident"][];
+            /** @description Уровень по компонентам, важным для харнесса; `unknown` — данных нет или они устарели. */
+            level: components["schemas"]["ProviderStatusLevel"];
+            /** @description Последние известные данные старше трёх периодов опроса. */
+            stale: boolean;
+            /** @description Страница статуса для человека. */
+            url: string;
         };
         /** @description Пороги провайдера в процентах расхода. */
         ProviderThresholds: {
@@ -3536,6 +3566,7 @@ export interface components {
             five_hour_absent: boolean;
             monthly?: components["schemas"]["WindowView"] | null;
             provider: string;
+            status?: components["schemas"]["ProviderStatusView"] | null;
             weekly?: components["schemas"]["WindowView"] | null;
             weekly_fable?: components["schemas"]["WindowView"] | null;
             weekly_reserve_active: boolean;

@@ -74,6 +74,9 @@ pub struct ProviderView {
     pub five_hour_absent: bool,
     /// `estimated`, когда CodexBar вывел расход из локальных журналов, иначе `exact`.
     pub data_confidence: limits::DataConfidence,
+    /// Публичный статус провайдера со страницы statuspage; `null`, пока хаб её не опрашивал
+    /// или провайдер без такой страницы (OpenCode, Antigravity).
+    pub status: Option<crate::provider_status::ProviderStatusView>,
 }
 impl From<limits::ProviderLimits> for ProviderView {
     fn from(p: limits::ProviderLimits) -> Self {
@@ -87,6 +90,10 @@ impl From<limits::ProviderLimits> for ProviderView {
             weekly_reserve_resets_at: p.weekly_reserve_resets_at.map(time),
             five_hour_absent: p.five_hour_absent,
             data_confidence: p.data_confidence,
+            status: p
+                .status
+                .as_ref()
+                .map(crate::provider_status::ProviderStatusView::from),
         }
     }
 }

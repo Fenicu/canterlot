@@ -353,6 +353,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         multi_process: http.as_ref().is_some_and(|config| config.multi_process),
         attachments: Some((blobs.clone(), attachments.clone())),
         owner_push: None,
+        provider_status: None,
     });
     let (http_addr, app, http_listener) = match http {
         Some(config) => {

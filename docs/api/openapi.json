@@ -16084,6 +16084,25 @@
           }
         }
       },
+      "ProviderIncident": {
+        "type": "object",
+        "description": "Незакрытый инцидент страницы статуса.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Короткая ссылка на инцидент, если страница её дала."
+          }
+        }
+      },
       "ProviderSeries": {
         "type": "object",
         "required": [
@@ -16113,6 +16132,74 @@
             "items": {
               "$ref": "#/components/schemas/Point"
             }
+          }
+        }
+      },
+      "ProviderStatusLevel": {
+        "type": "string",
+        "description": "Уровень, важный для маршрута; порядок — от лучшего к худшему.",
+        "enum": [
+          "ok",
+          "degraded",
+          "maintenance",
+          "partial_outage",
+          "major_outage",
+          "unknown"
+        ]
+      },
+      "ProviderStatusView": {
+        "type": "object",
+        "description": "Статус провайдера для клиентов.",
+        "required": [
+          "level",
+          "description",
+          "components",
+          "incidents",
+          "url",
+          "changed_at",
+          "stale"
+        ],
+        "properties": {
+          "changed_at": {
+            "type": "string",
+            "description": "Когда уровень сменился в последний раз."
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Важные для харнесса компоненты не в рабочем состоянии."
+          },
+          "description": {
+            "type": "string",
+            "description": "Общая строка страницы, например «Partial System Outage»."
+          },
+          "fetched_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Последнее удачное чтение страницы."
+          },
+          "incidents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderIncident"
+            },
+            "description": "До трёх незакрытых инцидентов."
+          },
+          "level": {
+            "$ref": "#/components/schemas/ProviderStatusLevel",
+            "description": "Уровень по компонентам, важным для харнесса; `unknown` — данных нет или они устарели."
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "Последние известные данные старше трёх периодов опроса."
+          },
+          "url": {
+            "type": "string",
+            "description": "Страница статуса для человека."
           }
         }
       },
@@ -16195,6 +16282,17 @@
           },
           "provider": {
             "type": "string"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProviderStatusView",
+                "description": "Публичный статус провайдера со страницы statuspage; `null`, пока хаб её не опрашивал\nили провайдер без такой страницы (OpenCode, Antigravity)."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "weekly": {
             "oneOf": [

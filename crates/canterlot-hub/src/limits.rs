@@ -143,6 +143,9 @@ pub struct ProviderLimits {
     pub five_hour_absent_at: Option<DateTime<Utc>>,
     /// Точность последнего показания; старые записи без поля считаются точными.
     pub data_confidence: DataConfidence,
+    /// Публичный статус провайдера; `None`, пока хаб его не опрашивал.
+    #[serde(skip)]
+    pub status: Option<crate::provider_status::Status>,
 }
 #[derive(Debug, Serialize)]
 pub struct WindowState {
@@ -581,9 +584,11 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
     let rows = sqlx::query("select * from provider_limits order by provider")
         .fetch_all(&mut *conn)
         .await?;
+    let mut statuses = crate::provider_status::load_all(&mut *conn, now).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let provider: String = row.try_get("provider")?;
+        let status = statuses.remove(&provider);
         out.push(ProviderLimits {
             weekly: window_state(&mut *conn, &provider, "weekly", Window::Weekly, row, now).await?,
             five_hour: window_state(
@@ -618,6 +623,7 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
                     .as_deref()
                     .unwrap_or("exact"),
             ),
+            status,
         });
     }
     Ok(out)

@@ -25,6 +25,8 @@ pub struct BackgroundDeps {
     )>,
     /// Отправитель пушей владельцу; `None`, когда `[notify.gotify]` не задан.
     pub owner_push: Option<crate::notify::Sender>,
+    /// Опрос страниц статуса провайдеров; `None` — выключен (и у тестовых стендов).
+    pub provider_status: Option<crate::config::ProviderStatusConfig>,
 }
 
 /// Фоновая служба, завершившаяся паникой.
@@ -54,6 +56,7 @@ impl Background {
             multi_process,
             attachments,
             owner_push,
+            provider_status,
         } = deps;
         let bus = crate::bus::EventBus::spawn(pool.clone(), multi_process, stopped.clone());
         let mut tasks = vec![
@@ -132,6 +135,16 @@ impl Background {
             tasks.push((
                 "owner_push_task_error",
                 tokio::spawn(crate::notify::run(pool.clone(), sender, stopped.clone())),
+            ));
+        }
+        if let Some(config) = provider_status.filter(|config| config.enabled) {
+            tasks.push((
+                "provider_status_task_error",
+                tokio::spawn(crate::provider_status::run(
+                    pool.clone(),
+                    config,
+                    stopped.clone(),
+                )),
             ));
         }
         if let Some((store, config)) = attachments {

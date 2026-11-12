@@ -191,6 +191,24 @@ fn line(
     format!("{}: {}.", label(&row.provider), parts.join("; "))
 }
 
+/// Строка статуса провайдера, когда он не в порядке; при `ok` и `unknown` ничего.
+fn status_line(row: &crate::limits::ProviderLimits) -> Option<String> {
+    let status = row
+        .status
+        .as_ref()
+        .filter(|status| status.level.is_notable())?;
+    let name = match row.provider.as_str() {
+        "codex" => "Codex",
+        "claude" => "Claude",
+        other => other,
+    };
+    Some(format!(
+        "{name} status: {}; {}",
+        status.summary(),
+        status.url
+    ))
+}
+
 /// Возраст данных окна: `data from 61 h ago` или `data from just now`.
 fn data_from(at: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> String {
     format!("data from {}", age(at, now))
@@ -236,6 +254,7 @@ pub async fn report(
                 ],
                 "five_hour_absent": row.five_hour_absent,
                 "weekly_reserve_active": row.weekly_reserve_active,
+                "status": row.status.as_ref().map(crate::provider_status::ProviderStatusView::from),
             })
         })
         .collect();
@@ -249,9 +268,17 @@ pub async fn report(
         .first()
         .map(|row| line(row, now, stale_after))
         .unwrap_or_else(|| "no limit data yet in this session".to_owned());
+    if let Some(status) = rows.first().and_then(status_line) {
+        text.push('\n');
+        text.push_str(&status);
+    }
     for row in rows.iter().skip(1) {
         text.push('\n');
         text.push_str(&line(row, now, stale_after));
+        if let Some(status) = status_line(row) {
+            text.push('\n');
+            text.push_str(&status);
+        }
     }
     if !rows.is_empty() {
         let fresh = rows

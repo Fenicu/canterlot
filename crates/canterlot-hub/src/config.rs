@@ -41,6 +41,8 @@ pub struct HubConfig {
     pub notify: NotifyConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub provider_status: ProviderStatusConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,6 +156,10 @@ impl HubConfig {
                     error
                 })?;
         }
+        config.provider_status.validate().map_err(|mut error| {
+            error.path = path.to_owned();
+            error
+        })?;
         if let Some(gotify) = &mut config.notify.gotify {
             if gotify.token_file.is_relative() {
                 gotify.token_file = base.join(&gotify.token_file);
@@ -166,6 +172,99 @@ impl HubConfig {
             gotify.resolve(path, origins)?;
         }
         Ok(config)
+    }
+}
+
+/// `[provider_status]`: опрос публичных страниц статуса провайдеров (statuspage).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProviderStatusConfig {
+    pub enabled: bool,
+    /// Период опроса; не меньше минуты.
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+    pub claude: Option<StatusPageOverride>,
+    pub codex: Option<StatusPageOverride>,
+}
+
+/// Замена встроенного адреса страницы или списка компонентов провайдера.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StatusPageOverride {
+    pub url: Option<String>,
+    pub components: Option<Vec<String>>,
+}
+
+/// Страница статуса одного провайдера после подстановки умолчаний.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusPage {
+    pub provider: &'static str,
+    pub url: String,
+    pub components: Vec<String>,
+}
+
+impl Default for ProviderStatusConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval: Duration::from_secs(180),
+            claude: None,
+            codex: None,
+        }
+    }
+}
+
+impl ProviderStatusConfig {
+    pub const MIN_INTERVAL: Duration = Duration::from_secs(60);
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        let invalid = || ConfigError {
+            path: PathBuf::new(),
+            category: "config_invalid_provider_status",
+            location: None,
+        };
+        if self.interval < Self::MIN_INTERVAL {
+            return Err(invalid());
+        }
+        for page in self.pages() {
+            if absolute_http_uri(&page.url).is_none()
+                || page.components.iter().any(|name| name.trim().is_empty())
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+
+    /// Встроенные страницы Claude и Codex с заменами из конфига.
+    pub fn pages(&self) -> Vec<StatusPage> {
+        let page = |provider: &'static str,
+                    url: &str,
+                    components: &[&str],
+                    custom: &Option<StatusPageOverride>| {
+            let custom = custom.clone().unwrap_or_default();
+            StatusPage {
+                provider,
+                url: custom.url.unwrap_or_else(|| url.to_owned()),
+                components: custom
+                    .components
+                    .unwrap_or_else(|| components.iter().map(|name| (*name).to_owned()).collect()),
+            }
+        };
+        vec![
+            page(
+                "claude",
+                "https://status.claude.com/api/v2/summary.json",
+                &["Claude Code", "Claude API (api.anthropic.com)"],
+                &self.claude,
+            ),
+            page(
+                "codex",
+                "https://status.openai.com/api/v2/summary.json",
+                &["Responses", "Login"],
+                &self.codex,
+            ),
+        ]
     }
 }
 

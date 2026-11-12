@@ -46,6 +46,7 @@ export type ServerOp =
         | PlanTaskChanged
         | LimitsChanged
         | LimitsProvidersChanged
+        | ProviderStatusChanged
         | LimitReached
         | AttachmentStateChanged
         | RequestOpened
@@ -1187,6 +1188,66 @@ export interface LimitsProvidersChanged {
   kind: "limits_providers_changed";
   payload: {
     providers: string[];
+  };
+}
+export interface ProviderStatusChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "provider_status_changed";
+  payload: {
+    provider: string;
+    status: {
+      level: "ok" | "degraded" | "maintenance" | "partial_outage" | "major_outage" | "unknown";
+      description: string;
+      components: string[];
+      /**
+       * @maxItems 3
+       */
+      incidents:
+        | []
+        | [
+            {
+              name: string;
+              url: string | null;
+            }
+          ]
+        | [
+            {
+              name: string;
+              url: string | null;
+            },
+            {
+              name: string;
+              url: string | null;
+            }
+          ]
+        | [
+            {
+              name: string;
+              url: string | null;
+            },
+            {
+              name: string;
+              url: string | null;
+            },
+            {
+              name: string;
+              url: string | null;
+            }
+          ];
+      url: string;
+      fetched_at: Time | null;
+      changed_at: Time;
+      stale: boolean;
+    };
   };
 }
 export interface LimitReached {

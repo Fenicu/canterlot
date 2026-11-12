@@ -335,6 +335,7 @@ async fn serve(
         orchestrator,
         notify,
         auth,
+        provider_status,
         ..
     } = config;
     if let Some(http) = &http_config {
@@ -436,6 +437,7 @@ async fn serve(
             .is_some_and(|(config, _, _)| config.multi_process),
         attachments: Some((blobs.clone(), attachments.clone())),
         owner_push,
+        provider_status: Some(provider_status),
     });
     let root = tokio_util::sync::CancellationToken::new();
     let trigger = root.clone();

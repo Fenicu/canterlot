@@ -153,6 +153,24 @@ accepted_retention = "3d"
 machine_unavailable_after = "3m"
 ```
 
+Публичный статус провайдеров хаб опрашивает сам: страницы statuspage `https://status.claude.com/api/v2/summary.json` (компоненты `Claude Code` и `Claude API (api.anthropic.com)`) и `https://status.openai.com/api/v2/summary.json` (компоненты `Responses` и `Login`; общий индикатор OpenAI покрывает и картинки, и голос, поэтому для Codex не берётся). Таблица `[provider_status]` необязательна: без неё опрос включён с этими умолчаниями. Запрос несёт только `User-Agent: canterlot-hub`, срок ответа 10 с. Уровень — худший из перечисленных компонентов; компонент, которого нет на странице, пропускается, а если нет ни одного, берётся общий индикатор страницы. Неудачный опрос оставляет прежние данные; старше трёх периодов они дают уровень `unknown`, который ни на что не влияет. У OpenCode и Antigravity страницы статуса нет. Сбой (`partial_outage`, `major_outage`) уводит маршрут к другому кандидату, но запуск не запрещает; PWA показывает слово рядом с провайдером в полосе лимитов. Пример (раскомментируйте):
+
+```toml
+# [provider_status]
+# enabled = true      # false выключает опрос; полоса и маршрут тогда статуса не видят.
+# interval = "3m"     # Период опроса, не меньше 1m.
+#
+# [provider_status.claude]
+# url = "https://status.claude.com/api/v2/summary.json"
+# components = ["Claude Code", "Claude API (api.anthropic.com)"]
+#
+# [provider_status.codex]
+# url = "https://status.openai.com/api/v2/summary.json"
+# components = ["Responses", "Login"]
+```
+
+Ключи провайдеров — только `claude` и `codex`; неизвестный ключ, `interval` меньше минуты или адрес не http(s) останавливают запуск (`config_invalid_provider_status`). Хаб старше этой таблицы её не знает (`deny_unknown_fields`): перед его запуском таблицу нужно убрать.
+
 Пуши владельцу через [Gotify](https://gotify.net) включает необязательная таблица `[notify.gotify]`; без неё пушей нет. Пример (раскомментируйте):
 
 ```toml

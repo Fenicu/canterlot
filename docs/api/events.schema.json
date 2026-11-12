@@ -106,6 +106,9 @@
       "$ref": "#/$defs/limits_providers_changed"
     },
     {
+      "$ref": "#/$defs/provider_status_changed"
+    },
+    {
       "$ref": "#/$defs/limit_reached"
     },
     {
@@ -4474,6 +4477,72 @@
       ],
       "additionalProperties": false
     },
+    "provider_status_changed": {
+      "type": "object",
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/Uuid" },
+        "scope": { "$ref": "#/$defs/Scope" },
+        "scope_seq": { "$ref": "#/$defs/Seq" },
+        "scope_seq_from": { "$ref": "#/$defs/Seq" },
+        "committed_at": { "$ref": "#/$defs/Time" },
+        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "conversation_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "execution_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "correlation_id": { "$ref": "#/$defs/Uuid" },
+        "kind": { "const": "provider_status_changed" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "provider": { "type": "string" },
+            "status": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "level": {
+                  "enum": [ "ok", "degraded", "maintenance", "partial_outage", "major_outage", "unknown" ]
+                },
+                "description": { "type": "string" },
+                "components": { "type": "array", "items": { "type": "string" } },
+                "incidents": {
+                  "type": "array",
+                  "maxItems": 3,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": { "type": "string" },
+                      "url": { "anyOf": [ { "type": "string" }, { "type": "null" } ] }
+                    },
+                    "required": [ "name", "url" ]
+                  }
+                },
+                "url": { "type": "string" },
+                "fetched_at": { "anyOf": [ { "$ref": "#/$defs/Time" }, { "type": "null" } ] },
+                "changed_at": { "$ref": "#/$defs/Time" },
+                "stale": { "type": "boolean" }
+              },
+              "required": [
+                "level", "description", "components", "incidents", "url", "fetched_at",
+                "changed_at", "stale"
+              ]
+            }
+          },
+          "required": [ "provider", "status" ]
+        }
+      },
+      "required": [
+        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
+        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
+        "kind", "payload"
+      ],
+      "additionalProperties": false
+    },
     "routing_policy_changed": {
       "type": "object",
       "properties": {
@@ -6572,6 +6641,9 @@
                 },
                 {
                   "$ref": "#/$defs/limits_providers_changed"
+                },
+                {
+                  "$ref": "#/$defs/provider_status_changed"
                 },
                 {
                   "$ref": "#/$defs/limit_reached"

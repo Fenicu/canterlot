@@ -1,0 +1,36 @@
+{
+  "page": {
+    "id": "01JMYB4AWVJ0XXY8E5H4Q0VBV9",
+    "name": "OpenAI",
+    "url": "https://status.openai.com",
+    "time_zone": "Etc/UTC",
+    "updated_at": "2026-11-12T16:05:00.000Z"
+  },
+  "status": {
+    "indicator": "minor",
+    "description": "Minor Service Outage"
+  },
+  "components": [
+    {"id": "01JMXBRMFE6N2NNT7DG6XZQ6PW", "name": "Image Generation", "status": "major_outage", "group_id": "g1"},
+    {"id": "01JMXBRMFDK8SH5PGEWRDF8HAA", "name": "Login", "status": "operational", "group_id": "g1"},
+    {"id": "01JMXBRMFEX7H5AXJ2Y4GTK1BS", "name": "Login", "status": "degraded_performance", "group_id": "g2"},
+    {"id": "01JMXBRMFEB6N1TPR3PB3SNVSG", "name": "Responses", "status": "operational", "group_id": "g2"},
+    {"id": "01JMXBRMFEDSB3YXKHXEPZJ2SN", "name": "Codex in ChatGPT Desktop", "status": "major_outage", "group_id": "g3"}
+  ],
+  "incidents": [
+    {
+      "id": "01JX1",
+      "name": "Degraded login for some users",
+      "status": "investigating",
+      "impact": "minor",
+      "shortlink": "https://status.openai.com/incidents/01JX1"
+    },
+    {
+      "id": "01JX2",
+      "name": "Image generation unavailable",
+      "status": "identified",
+      "impact": "major",
+      "shortlink": null
+    }
+  ]
+}
