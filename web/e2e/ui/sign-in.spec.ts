@@ -279,6 +279,30 @@ test('revoked_session_wipes_local_data_and_shows_sign_in', async ({ page }) => {
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith('canterlot.')))).toEqual([]);
 });
 
+test('revoked_close_keeps_local_data_until_me_answers_401', async ({ page }) => {
+  const { hub } = await boot(page, '/sessions');
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  await page.evaluate(() => localStorage.setItem('canterlot.theme', 'light'));
+  await expect.poll(() => hub.activeConnections).toBeGreaterThan(0);
+  // Закрытие revoked, а /me не отвечает о сеансе: 503, затем обрыв сети.
+  hub.auth.meFailure = 503;
+  hub.chaos.closeRevoked();
+  await page.waitForTimeout(1_500);
+  await expect(page.getByText('Данные на этом устройстве удалены')).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('canterlot.theme'))).toBe('light');
+  hub.auth.meFailure = 'network';
+  await page.waitForTimeout(2_500);
+  await expect(page.getByText('Данные на этом устройстве удалены')).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem('canterlot.theme'))).toBe('light');
+  // Хаб вернулся и подтвердил отзыв владельцем: только теперь данные стираются.
+  hub.auth.meFailure = null;
+  hub.auth.signedIn = false;
+  hub.auth.signOut = { code: 'session_revoked', reason: 'owner' };
+  await expect(signIn(page)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('Данные на этом устройстве удалены')).toBeVisible();
+  expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith('canterlot.')))).toEqual([]);
+});
+
 test('limit_and_idle_endings_show_sign_in_but_keep_local_data', async ({ page }) => {
   const { hub } = await boot(page, '/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });

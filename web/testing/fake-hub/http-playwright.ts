@@ -13,6 +13,10 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
   await hub.wire.playwright(page);
   await installAuthRoutes(page, hub.auth);
   hub.routes.set('GET /api/v1/me', async (route) => {
+    if (hub.auth.meFailure === 'network') return route.abort('failed');
+    if (hub.auth.meFailure === 503) {
+      return route.fulfill({ status: 503, json: { error: { code: 'db_unavailable', message: 'db_unavailable', scope: 'hub_db', retry: 'safe_same_key', correlation_id: '00000000-0000-4000-8000-0000000000a2' } } });
+    }
     if (!hub.auth.signedIn) return hub.auth.refuse(route);
     await route.fulfill({
       json: { login: 'owner', owner_id: ownerId, session_id: hub.auth.current.id },

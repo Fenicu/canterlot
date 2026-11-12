@@ -18,6 +18,8 @@ export class FakeAuth {
   signedIn = true;
   /** Ответ 401 на запросы с сеансом, пока владелец не вошёл. */
   signOut: { code: string; reason?: string } = { code: 'unauthenticated' };
+  /** Сбой `GET /me` без ответа хаба о сеансе: 503 базы или обрыв сети. */
+  meFailure: 503 | 'network' | null = null;
   fresh = false;
   idle = 90;
   lockSeconds = 0;

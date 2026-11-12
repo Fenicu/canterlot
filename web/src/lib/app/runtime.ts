@@ -90,6 +90,22 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
     const drafts = new DraftStore(ownerId, db);
     journal.onOrphanRefused((op) => void returnRefused(op, drafts));
     await journal.recover();
+    let disposed = false;
+    let cancelRevokedCheck: (() => void) | undefined;
+    // Закрытие с причиной revoked не говорит, отозван сеанс или истёк: точную причину даёт
+    // 401 на /me, и стирает данные только он. Сеть или 503 ничего не решают: данные
+    // остаются, проверка повторяется с растущей паузой.
+    const confirmRevoked = (attempt: number): void => {
+      cancelRevokedCheck = undefined;
+      void me().then(
+        () => connection.probe("manual"),
+        (error) => {
+          if (disposed || error instanceof AuthRequired) return;
+          const delay = Math.min(30_000, 1_000 * 2 ** attempt);
+          cancelRevokedCheck = deps.schedule(() => confirmRevoked(attempt + 1), delay);
+        },
+      );
+    };
     const connection = new ConnectionManager({
       transport: new BrowserSocket(() => {
         const origin =
@@ -118,14 +134,9 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
           return authProbeResult(error);
         }
       },
-      // Закрытие с причиной revoked не говорит, отозван сеанс или истёк: точную причину даёт 401 на /me.
       revoked: () => {
-        void me().then(
-          () => connection.probe("manual"),
-          (error) => {
-            if (!(error instanceof AuthRequired)) session.expire("session_revoked", "server");
-          },
-        );
+        cancelRevokedCheck?.();
+        confirmRevoked(0);
       },
       now: deps.clock.now,
       schedule: deps.schedule,
@@ -197,7 +208,6 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
       },
     });
     machines.open();
-    let disposed = false;
     const runtime: Runtime = {
       ownerId,
       deviceId,
@@ -210,6 +220,7 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
       dispose() {
         if (disposed) return;
         disposed = true;
+        cancelRevokedCheck?.();
         connection.dispose();
         journal.retire();
         drafts.retire();
