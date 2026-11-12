@@ -389,6 +389,21 @@ async fn serve(
             None
         }
     };
+    if !provider_status.enabled {
+        // До приёма запросов: читатели не должны увидеть сбой, который никто больше не опрашивает.
+        match canterlot_hub::provider_status::retire(&pool, chrono::Utc::now()).await {
+            Ok(changed) => tracing::info!(
+                kind = "provider_status_disabled",
+                changed,
+                "provider status polling disabled; stored status cleared"
+            ),
+            Err(error) => tracing::warn!(
+                kind = "provider_status_database",
+                error = %canterlot_hub::dberr::describe(&error),
+                "stored provider status not cleared"
+            ),
+        }
+    }
     let registry = Registry::new(timers.clone());
     let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
     let scheduler = canterlot_hub::scheduler::Scheduler::new(

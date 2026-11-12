@@ -398,3 +398,79 @@ async fn canterlot_limits_names_an_outage_and_stays_quiet_when_ok(pool: PgPool) 
     assert!(!text.contains("status:"), "{text}");
     assert_eq!(answer["providers"][0]["status"]["level"], "ok");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn disabled_polling_clears_a_stored_outage_for_every_reader(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, seed.machine_id, "claude").await;
+    let now = Utc::now();
+    sqlx::query(
+        "insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,weekly_observed_at)
+         values('claude',100,$1,$2)",
+    )
+    .bind(now + TimeDelta::days(3))
+    .bind(now)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let page = claude_page("http://x/");
+    let reading = provider_status::read_page(CLAUDE.as_bytes(), &page).unwrap();
+    provider_status::record(&pool, &page, Ok(reading), INTERVAL, now)
+        .await
+        .unwrap();
+    assert_eq!(changes(&pool).await.len(), 1);
+
+    // Хаб перезапущен с `[provider_status].enabled = false`: данные ещё не истекли.
+    let later = now + TimeDelta::seconds(5);
+    assert_eq!(provider_status::retire(&pool, later).await.unwrap(), 1);
+
+    let mut conn = pool.acquire().await.unwrap();
+    let stored = provider_status::load(&mut conn, "claude", later)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.level, ProviderStatusLevel::Unknown);
+    assert!(!stored.stale && stored.components.is_empty() && stored.incidents.is_empty());
+    let routed = session_tools::routing::limits_view(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        routed["claude"].status.as_ref().unwrap().level,
+        ProviderStatusLevel::Unknown,
+        "routing no longer avoids the provider"
+    );
+    let api = canterlot_hub::limits::current(&mut conn).await.unwrap();
+    let claude = api.iter().find(|p| p.provider == "claude").unwrap();
+    assert_eq!(
+        claude.status.as_ref().unwrap().level,
+        ProviderStatusLevel::Unknown
+    );
+    drop(conn);
+    let caller = Caller {
+        owner_id: seed.owner_id,
+        conversation_id: seed.conversation_id,
+        execution_id: Uuid::now_v7(),
+        machine_id: seed.machine_id,
+        call_id: Uuid::now_v7(),
+    };
+    let answer = session_tools::call(&context(&pool), &caller, "limits.report", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        !answer["text"].as_str().unwrap().contains("status:"),
+        "{answer}"
+    );
+
+    // Открытые клиенты получают переход и убирают метку.
+    let events = changes(&pool).await;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1]["provider"], "claude");
+    assert_eq!(events[1]["status"]["level"], "unknown");
+    let validator = validator();
+    for row in event_rows(&pool).await {
+        assert!(validator.is_valid(&row), "{row}");
+    }
+    // Повторный старт без опроса ничего не объявляет.
+    assert_eq!(provider_status::retire(&pool, later).await.unwrap(), 0);
+    assert_eq!(changes(&pool).await.len(), 2);
+}

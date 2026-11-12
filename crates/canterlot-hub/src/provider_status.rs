@@ -450,6 +450,42 @@ pub async fn record(
     Ok(status.level)
 }
 
+/// `[provider_status].enabled = false`: опроса нет, и хранимое чтение больше не действует.
+/// Строки забывают прочитанное, поэтому маршрут, API лимитов и `canterlot_limits` видят
+/// `unknown` сразу, а не после истечения данных; провайдер с объявленным уровнем получает
+/// событие перехода, и открытые клиенты убирают метку. Возвращает число таких переходов.
+pub async fn retire(pool: &PgPool, now: DateTime<Utc>) -> Result<usize, sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    let announced: Vec<String> = sqlx::query_scalar(
+        "select provider from provider_status where announced_level <> 'unknown'
+         order by provider for update",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query(
+        "update provider_status set level='unknown',description='',components='[]',
+           incidents='[]',fetched_at=null,expires_at=null,failed=false
+         where fetched_at is not null or level <> 'unknown' or announced_level <> 'unknown'",
+    )
+    .execute(&mut *tx)
+    .await?;
+    for provider in &announced {
+        sqlx::query(
+            "update provider_status set announced_level='unknown',changed_at=$2 where provider=$1",
+        )
+        .bind(provider)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        let status = load(&mut tx, provider, now)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        emit_changed(&mut tx, &status).await?;
+    }
+    tx.commit().await?;
+    Ok(announced.len())
+}
+
 async fn emit_changed(conn: &mut PgConnection, status: &Status) -> Result<(), sqlx::Error> {
     let owners: Vec<Uuid> = sqlx::query_scalar("select id from owners order by id")
         .fetch_all(&mut *conn)
