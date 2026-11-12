@@ -33,9 +33,11 @@ done
 XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR
 # Правило отката (ADR-0005): хаб без собственного входа (1.29 и раньше) верит
-# Remote-User от прокси, поэтому блок входа в Caddy возвращается раньше отката.
+# Remote-User от прокси, поэтому блок входа в Caddy возвращается раньше отката; его
+# конфиг deny_unknown_fields, поэтому новые ключи hub.toml убираются до старта.
+# Отменять пуши входа в восстановленной базе не нужно: дамп снят до релиза.
 if [ -n "${TO_RELEASE}" ]; then
-    log "reminder: if ${TO_RELEASE} is a release without own sign-in (1.29 and older), restore the Caddy auth block (basic_auth or forward_auth) BEFORE starting it"
+    log "reminder: if ${TO_RELEASE} is a release without own sign-in (1.29 and older), BEFORE starting it: restore the Caddy auth block (basic_auth or forward_auth), and remove [auth] and [http.ws].session_check_interval from ${HUB_CONFIG}"
 fi
 
 # Охранник юнита на время восстановления: даже если кто-то (или сам systemd после

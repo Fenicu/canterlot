@@ -34,6 +34,10 @@ fi
 # - Откат хаба на релиз без собственного входа (1.29 и раньше): сначала вернуть
 #   блок входа в Caddy (basic_auth или forward_auth), потом flip. Старый хаб верит
 #   Remote-User от прокси с секретом, и без блока входа его подделка — вход владельцем.
+#   Перед стартом старого хаба из hub.toml убираются [auth] и
+#   [http.ws].session_check_interval (deny_unknown_fields: иначе он не стартует), а
+#   ждущие пуши входа отменяются: старый хаб не читает строку пуша без разговора.
+#   Воркер ниже этого релиза не стартует с [execution].delegate_mcp_servers.
 # - PWA-ошибки мягкие всегда: записать, вернуть предыдущий build, продолжить.
 set -euo pipefail
 
@@ -486,9 +490,15 @@ STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touche
   manual recovery (Task 12 rollback table — run by hand, in this order).
   Every flip below takes the same host lock as cutover and retention, and re-checks
   the target release inside it:
-    0. before flipping the hub back to a release without own sign-in (1.29 and older), restore an auth
-       block (basic_auth or forward_auth) in Caddy first: the old hub trusts Remote-User from the proxy
-       and Caddy no longer asks for a login. Keep stripping Remote-*; run check-proxy.sh afterwards.
+    0. before flipping the hub back to a release without own sign-in (1.29 and older), in this order:
+       a. restore an auth block (basic_auth or forward_auth) in Caddy first: the old hub trusts Remote-User
+          from the proxy and Caddy no longer asks for a login. Keep stripping Remote-*; run check-proxy.sh afterwards.
+       b. remove [auth] (with [auth.geoip]) and session_check_interval under [http.ws] from ${HUB_CONFIG}:
+          the old hub refuses unknown keys (deny_unknown_fields) and would not start.
+       c. if the old hub will run on this database (no restore from the dump), cancel the pending sign-in
+          pushes first: the old hub cannot read a push row without a conversation and its whole delivery
+          pass fails until they go stale:
+            runuser -u canterlot -- psql -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' -c "update owner_pushes set state='cancelled',updated_at=clock_timestamp() where state='pending' and kind in ('sign_in','sign_in_failures','sign_in_lock','session_country')"
     1. hub broken, no new migration (flip back + one restart):
          ${hub_back_cmd}
     2. hub broken after a new migration: full DB restore from this run's dump (manual only):
@@ -498,7 +508,9 @@ STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touche
          # restore it starts nothing. Never start the worker on a restored DB by hand without review.
     3. PWA broken: flip build back, restore env, one recreate:
          ${web_back_cmd}
-    4. worker broken or stopped: flip ${WORKER_CURRENT} back, then start (never below a live supervisor release):
+    4. worker broken or stopped: flip ${WORKER_CURRENT} back, then start (never below a live supervisor release);
+       a worker release before the delegate MCP allowlist refuses [execution].delegate_mcp_servers in
+       ${WORKER_CONFIG} (deny_unknown_fields): remove that key before starting it:
          ${worker_back_cmd}
          systemctl --user start ${WORKER_UNIT}
     5. when everything is resolved, release this run's reservations (retention keeps these releases until then):
@@ -1091,7 +1103,9 @@ owner_checklist
 cat <<EOF
 update note: the worker has connected to the new hub, so only forward fixes remain;
 an old hub stops on VersionMissing and a DB restore now causes state_divergence.
-hub back to a release without own sign-in (1.29 and older): restore the Caddy auth block first.
+hub back to a release without own sign-in (1.29 and older): restore the Caddy auth block first, remove [auth]
+and [http.ws].session_check_interval from hub.toml, cancel pending sign-in pushes (row 0 of the rollback table).
+worker back below this release: remove [execution].delegate_mcp_servers from worker.toml first.
 restore points: ${RUN_DUMP} in ${HUB_BACKUP_DIR}, vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS}.
 PWA alone: build to releases/${PREV_WEB_SHA}, ${WEB_ENV}.${PREV_WEB_SHA}, one recreate.
 worker alone: flip current to ${PREV_WORKER_SHA}, restart (never below a live supervisor release).
