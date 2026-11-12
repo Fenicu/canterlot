@@ -96,20 +96,20 @@ if run_cutover; then case_fail "exit 0 despite failed CT status query"; else cas
 unset FAKE_PVES_FAIL_STATUS
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"
-assert_contains "${FAKE_ROOT}/cutover.log" "cannot query CT 130 lock state" "status query failure reported"
+assert_contains "${FAKE_ROOT}/cutover.log" "cannot query CT 101 lock state" "status query failure reported"
 teardown_case
 case_end
 
 # --- A2c. PROXMOX_NODE расходится с настоящей нодой CT — отказ до любых изменений ---
 case_begin "PROXMOX_NODE disagrees with the real node"
 setup_cutover pvewrongnode
-export PROXMOX_NODE=proxmox-main
+export PROXMOX_NODE=pve-node2
 if run_cutover; then case_fail "exit 0 despite a wrong PROXMOX_NODE"; else case_ok "exit nonzero"; fi
-export PROXMOX_NODE=bigboy
+export PROXMOX_NODE=pve-node1
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_ok "worker still active (never stopped)" || case_fail "worker not active"
-assert_contains "${FAKE_ROOT}/cutover.log" "PROXMOX_NODE=proxmox-main but CT 130 runs on node bigboy" "both names reported"
+assert_contains "${FAKE_ROOT}/cutover.log" "PROXMOX_NODE=pve-node2 but CT 101 runs on node pve-node1" "both names reported"
 teardown_case
 case_end
 
@@ -461,7 +461,7 @@ assert_contains "${L}" "probe: loopback caddy pid 4242 stopped" "loopback probe 
 assert_contains "${L}" "port 18080 closed again" "loopback port proven closed"
 assert_contains "${L}" "harness catalog has claude_code, codex, opencode" "post-start harness catalog checked"
 assert_contains "${L}" "owner checklist: authenticated checks" "authenticated checks printed for the owner"
-assert_contains "${L}" "check-proxy.sh https://hub.fenicu.com --positive" "checklist names the self-contained sign-in check"
+assert_contains "${L}" "check-proxy.sh https://hub.example.com --positive" "checklist names the self-contained sign-in check"
 assert_contains "${L}" "dbip-city-lite.mmdb is 0 days old, no update" "geoip step ran after verify and kept the fresh database"
 assert_not_contains "${L}" "SOFT-FAIL" "no soft failures"
 teardown_case
@@ -483,11 +483,11 @@ case_end
 # --- L3b. проверка после доказанно живого воркера: воркер не гасим ---
 case_begin "a verifying-phase failure leaves hub, PWA and worker running"
 setup_cutover verify-keeps-running
-export FAKE_SITE_FAIL=meeting.fenicu.com
+export FAKE_SITE_FAIL=meeting.example.com
 if run_cutover; then case_fail "exit 0 despite a broken site"; else case_ok "exit nonzero"; fi
 unset FAKE_SITE_FAIL
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT (phase verifying)" "stop-and-report in the verifying phase"
-assert_contains "${FAKE_ROOT}/cutover.log" "site meeting.fenicu.com: 500, expected 200" "failure named"
+assert_contains "${FAKE_ROOT}/cutover.log" "site meeting.example.com: 500, expected 200" "failure named"
 assert_contains "${FAKE_ROOT}/cutover.log" "leaving hub, PWA and worker running" "kept the deployment running"
 hub_is "${SHA_NEW}" && case_ok "hub stays new" || case_fail "hub moved"
 web_is "${SHA_NEW}" && case_ok "PWA stays new" || case_fail "web moved"

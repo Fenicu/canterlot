@@ -8,7 +8,7 @@ const AT = '2026-10-28T12:00:00.000Z';
 const SHOTS = process.env.CODEBLOCK_SHOTS;
 
 const budget = 'OpenCode API budget: five-hour window 0% used, resets in 1h 36m; weekly window 77% used, resets in 8h 53m; at the average pace (0.5%/h) lasts until the reset; monthly window 48% used, resets in 20d 4h; at the average pace (2.1%/h) runs out in 6d 2h before the reset.';
-const url = `https://git.fenicu.com/Fenicu/canterlot/releases/download/v1.22.2/${'canterlot-web-bundle-'.repeat(8)}linux-amd64.tar.gz`;
+const url = `https://github.com/Fenicu/canterlot/releases/download/v1.22.2/${'canterlot-web-bundle-'.repeat(8)}linux-amd64.tar.gz`;
 const inline = `\`${'web/src/lib/timeline/AnswerCard.svelte::render::'.repeat(5)}\``;
 
 const answer = [

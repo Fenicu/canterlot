@@ -599,10 +599,10 @@ assert_contains "${FAKE_ROOT}/verify.log" "session process gone" "killed relay d
 teardown_case
 case_end
 
-# 14. нода CT: настоящий CT 130 живёт на bigboy. Умолчание deploy.conf обязано
-# совпадать с ней (раньше было proxmox-main: pvesh падал на hostname lookup), а
-# заданная вручную чужая нода — громкая ошибка с названием настоящей.
-case_begin "PROXMOX_NODE default matches the real node and a disagreeing one fails loudly"
+# 14. нода CT: умолчание deploy.conf — нейтральный pve-node1, он и должен совпасть
+# с нодой из кластерного списка, а заданная вручную чужая нода — громкая ошибка
+# с названием настоящей.
+case_begin "PROXMOX_NODE default matches the cluster node and a disagreeing one fails loudly"
 setup_live pvenode
 unset PROXMOX_NODE
 if bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" >"${FAKE_ROOT}/out.log" 2>&1; then
@@ -610,19 +610,19 @@ if bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" >"${F
 else
     case_fail "deploy.conf default node: exit nonzero"; grep -E 'HARD|FATAL|hostname' "${FAKE_ROOT}/out.log" | head -3
 fi
-assert_contains "${FAKE_ROOT}/out.log" "CT 130 runs on node bigboy" "node discovered from the cluster resources"
+assert_contains "${FAKE_ROOT}/out.log" "CT 101 runs on node pve-node1" "node discovered from the cluster resources"
 assert_contains "${FAKE_ROOT}/out.log" "no CT lock" "lock queried on the discovered node"
-export PROXMOX_NODE=proxmox-main
+export PROXMOX_NODE=pve-node2
 if bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" >"${FAKE_ROOT}/out.log" 2>&1; then
     case_fail "exit 0 although PROXMOX_NODE disagrees with the real node"
 else
     case_ok "disagreeing PROXMOX_NODE: exit nonzero"
 fi
-assert_contains "${FAKE_ROOT}/out.log" "PROXMOX_NODE=proxmox-main but CT 130 runs on node bigboy" "both names reported"
-export PROXMOX_NODE=bigboy
+assert_contains "${FAKE_ROOT}/out.log" "PROXMOX_NODE=pve-node2 but CT 101 runs on node pve-node1" "both names reported"
+export PROXMOX_NODE=pve-node1
 FAKE_PVES_FAIL=1 bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" >"${FAKE_ROOT}/out.log" 2>&1 \
     && case_fail "exit 0 although the node discovery failed" || case_ok "failed discovery: exit nonzero"
-assert_contains "${FAKE_ROOT}/out.log" "cannot discover the node of CT 130" "discovery failure reported"
+assert_contains "${FAKE_ROOT}/out.log" "cannot discover the node of CT 101" "discovery failure reported"
 teardown_case
 case_end
 

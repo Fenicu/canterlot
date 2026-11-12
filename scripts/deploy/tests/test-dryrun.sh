@@ -62,7 +62,7 @@ make_target_dist() {
     echo x >"${d}/web/icons/icon.png"
     printf '{"version":"%s"}' "${TARGET}" >"${d}/web/_app/version.json"
     printf 'sha=%s\ndate=x\nmigrations_last=0042_target.sql\nsource=%s%028d\n' "${TARGET}" "${TARGET}" 0 >"${d}/RELEASE"
-    printf "default-src 'self'; script-src '%s'; connect-src wss://hub.fenicu.com\n" "${TARGET_SCRIPT_HASH}" >"${d}/csp.txt"
+    printf "default-src 'self'; script-src '%s'; connect-src wss://hub.example.com\n" "${TARGET_SCRIPT_HASH}" >"${d}/csp.txt"
     (cd "${d}" && find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
 }
 TARGET_SCRIPT_HASH="sha256-hUmDl3yY/7GaaX+Zuy8aEy8IzxgpBs7xccqYHs2/7kQ="
@@ -74,7 +74,7 @@ stage_target() {
 
 setup_dryrun() {
     setup_case "dryrun-$1"
-    export SITE_CODES="meeting.fenicu.com:200 git.fenicu.com:200 caddy.fenicu.com:302 gotify.fenicu.com:200 immich.fenicu.com:200 bookshelf.fenicu.com:200 hub.fenicu.com:200"
+    export SITE_CODES="meeting.example.com:200 git.example.com:200 caddy.example.com:302 gotify.example.com:200 immich.example.com:200 bookshelf.example.com:200 hub.example.com:200"
     EXEC1="$(new_exec_id)"; EXEC2="$(new_exec_id)"; export EXEC1 EXEC2
     write_configs
     deploy_release hub "bbbbbbbbbbbb"
@@ -305,7 +305,7 @@ case_end
 # D8: verify-ворота (код сайта) тоже выполняются в dry-run.
 case_begin "cutover dry-run runs verify gates"
 setup_dryrun verifygate
-export FAKE_SITE_FAIL=meeting.fenicu.com
+export FAKE_SITE_FAIL=meeting.example.com
 watch_start
 if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
     case_fail "exit 0 despite failing verify site gate"
@@ -314,7 +314,7 @@ else
 fi
 watch_stop
 unset FAKE_SITE_FAIL
-assert_contains "${FAKE_ROOT}/dry.log" "site meeting.fenicu.com: 500, expected 200" "verify site gate ran in dry-run"
+assert_contains "${FAKE_ROOT}/dry.log" "site meeting.example.com: 500, expected 200" "verify site gate ran in dry-run"
 assert_contains "${FAKE_ROOT}/dry.log" "verification read 1" "verify itself ran in dry-run"
 fs_unchanged "failed dry-run wrote nothing"
 teardown_case
@@ -384,7 +384,7 @@ case_end
 # D10b: csp.txt цели не выведен из финального билда (старый хэш скрипта) — провал до любого flip.
 case_begin "dry-run refuses a target csp.txt that does not match the final build"
 setup_dryrun cspstale
-printf "default-src 'self'; script-src 'sha256-STALEHASH'; connect-src wss://hub.fenicu.com\n" >"${FAKE_ROOT}/dist/${TARGET}/csp.txt"
+printf "default-src 'self'; script-src 'sha256-STALEHASH'; connect-src wss://hub.example.com\n" >"${FAKE_ROOT}/dist/${TARGET}/csp.txt"
 (cd "${FAKE_ROOT}/dist/${TARGET}" && find . -type f ! -name 'SHA256SUMS*' -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
 if bash "${DEPLOY_DIR}/cutover.sh" "${TARGET}" --dry-run --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/dry.log" 2>&1; then
     case_fail "exit 0 with a stale CSP hash"

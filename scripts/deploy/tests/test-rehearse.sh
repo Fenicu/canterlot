@@ -123,7 +123,7 @@ case_end
 
 case_begin "a failing rehearsal prints no token and writes nothing"
 setup_cutover rehearse-fail
-export FAKE_SITE_FAIL=meeting.fenicu.com
+export FAKE_SITE_FAIL=meeting.example.com
 : >"${FAKE_ROOT}/state/calls.log"
 if run_rehearse; then case_fail "rehearsal passed with a broken site"; else case_ok "rehearsal failed"; fi
 unset FAKE_SITE_FAIL

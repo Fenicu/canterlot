@@ -3,7 +3,7 @@
 # в контейнере Debian 13 на сборочной машине: те же шаги, что /tmp/gate/run.sh на
 # этой VM, но изолированно от хоста и на быстром железе.
 #
-#   scripts/gate-remote.sh [REV]            REV на CANTERLOT_BUILD_HOST (mainpc-build)
+#   scripts/gate-remote.sh [REV]            REV на CANTERLOT_BUILD_HOST (по умолчанию canterlot-build)
 #   scripts/gate-remote.sh [REV] --local    то же на местном docker (для проверки)
 #
 # REV — любой коммит (по умолчанию HEAD этой рабочей копии). Скрипт:
@@ -27,6 +27,14 @@ usage() {
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo"
+
+# Значения своего стенда — в необязательном .superpowers/site.env; файл задаёт
+# только переменные, которых нет в окружении, и перекрывает умолчания ниже.
+site_env=${CANTERLOT_SITE_ENV:-$repo/.superpowers/site.env}
+if [[ -f "$site_env" ]]; then
+    # shellcheck disable=SC1090 # файл стенда, путь задаётся снаружи
+    source "$site_env"
+fi
 dockerfile="$repo/docker/gate/Dockerfile"
 in_container="$repo/scripts/gate/in-container.sh"
 rev=HEAD
@@ -65,7 +73,7 @@ if [[ "$mode" == local ]]; then
     uid=$(id -u)
     gid=$(id -g)
 else
-    host=${CANTERLOT_BUILD_HOST:-mainpc-build}
+    host=${CANTERLOT_BUILD_HOST:-canterlot-build}
     command -v ssh >/dev/null || die "нет ssh"
 fi
 rust_version=$(git show "$commit:rust-toolchain.toml" | sed -n 's/^channel = "\(.*\)"/\1/p')

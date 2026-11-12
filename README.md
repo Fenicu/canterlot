@@ -122,7 +122,7 @@ CSP, `_app/version.json`, `synthetic-cli` только в синтетическ
 scripts/publish-release.sh v1.24.0
 ```
 
-Выкат production — только через `scripts/deploy` (см. §11 `docs/deploy/pilot.md`, ранбук — §11.7): он проверяет готовый dist из `build-release.sh`, `cutover.sh <id> --dry-run` или `--rehearse` (весь путь записи, записи только печатаются) выдаёт токен, а боевой прогон `cutover.sh --execute <id> --confirm <токен>` принимает его 2 часа и только для того же плана.
+Выкат production — только через `scripts/deploy` (см. §11 `docs/deploy/pilot.md`, ранбук — §11.7): он проверяет готовый dist из `build-release.sh`, `cutover.sh <id> --dry-run` или `--rehearse` (весь путь записи, записи только печатаются) выдаёт токен, а боевой прогон `cutover.sh --execute <id> --confirm <токен>` принимает его 2 часа и только для того же плана. Значения своего стенда — в `.superpowers/site.env`, образец в [docs/deploy/site.env.example](docs/deploy/site.env.example).
 
 ### Полный гейт на сборочной машине
 

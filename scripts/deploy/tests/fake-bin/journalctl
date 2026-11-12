@@ -12,7 +12,7 @@ fi
 ts="2026-11-03T12:00:00.123456Z"
 if [[ "$*" == *canterlot-hub* ]]; then
     echo "Nov 03 12:00:00 canterlot-hub canterlot-hub[101]: ${ts}  INFO schema ready kind=\"migrations_applied\" version=40"
-    echo "Nov 03 12:00:01 canterlot-hub canterlot-hub[101]: ${ts}  INFO listening on 10.0.40.64:8080"
+    echo "Nov 03 12:00:01 canterlot-hub canterlot-hub[101]: ${ts}  INFO listening on 192.0.2.10:8080"
     if [ "${FAKE_JOURNAL_MIGRATION_ERROR:-0}" = "1" ]; then
         echo "hub migration_error version_missing table=blocks"
     fi

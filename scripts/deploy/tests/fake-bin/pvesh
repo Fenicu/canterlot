@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Подмена pvesh с настоящими фактами прода: CT 130 живёт на ноде bigboy (FAKE_PVE_NODE),
+# Подмена pvesh: CT HUB_CTID живёт на ноде FAKE_PVE_NODE (по умолчанию pve-node1),
 # запрос по чужому имени ноды падает так же, как на настоящем PvE
 # ("hostname lookup '<имя>' failed"). Есть кластерный список ресурсов (--type vm).
 set -euo pipefail
 [ -n "${FAKE_ROOT:-}" ] || { echo "fake-pvesh: FAKE_ROOT unset" >&2; exit 99; }
 echo "pvesh $*" >>"${FAKE_ROOT}/state/calls.log"
 if [ "${FAKE_PVES_FAIL:-0}" = "1" ]; then echo "fake-pvesh: injected failure" >&2; exit 1; fi
-real_node="${FAKE_PVE_NODE:-bigboy}"
+real_node="${FAKE_PVE_NODE:-pve-node1}"
 [ "${1:-}" = "get" ] || { echo "fake-pvesh: only get is supported: $*" >&2; exit 99; }
 path="${2:-}"
 case "${path}" in
     /cluster/resources)
         # Несколько гостей на разных нодах; нужный CT — на real_node.
-        printf '[{"type":"qemu","vmid":124,"node":"proxmox-mini","status":"stopped"},{"type":"lxc","vmid":%s,"node":"%s","status":"running"},{"type":"lxc","vmid":109,"node":"%s","status":"running"}]\n' \
-            "${HUB_CTID:-130}" "${real_node}" "${real_node}" ;;
+        printf '[{"type":"qemu","vmid":124,"node":"pve-node2","status":"stopped"},{"type":"lxc","vmid":%s,"node":"%s","status":"running"},{"type":"lxc","vmid":109,"node":"%s","status":"running"}]\n' \
+            "${HUB_CTID:-101}" "${real_node}" "${real_node}" ;;
     /nodes/*/lxc/*/status/current)
         node="${path#/nodes/}"; node="${node%%/*}"
         if [ "${node}" != "${real_node}" ]; then

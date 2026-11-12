@@ -102,7 +102,7 @@ if [ "$(header Origin || true)" = "https://hub.example" ] && [ "$(header X-Cante
 case "${method} ${path}" in
     "GET /api/v1/me")
         [ "${authed}" = "1" ] || hub_401 unauthenticated
-        respond 200 application/json "{\"owner_id\":\"01a18c86-e8a2-74da-86da-26eaa3fe6eaa\",\"login\":\"fenicu\",\"session_id\":\"${SID}\"}" ;;
+        respond 200 application/json "{\"owner_id\":\"01a18c86-e8a2-74da-86da-26eaa3fe6eaa\",\"login\":\"owner\",\"session_id\":\"${SID}\"}" ;;
     "POST /api/v1/auth/recovery")
         [ "${origin_ok}" = "1" ] || respond 403 application/json '{"error":{"code":"forbidden"}}'
         [ "${posted}" = "{\"token\":\"$(cat "${state}/issued-token")\"}" ] || hub_401 invalid_credentials
@@ -138,10 +138,10 @@ no_secret_printed() {
 
 case_begin "negatives: the hub's JSON 401 is accepted, forged headers carry the owner login"
 setup_cp negatives
-EXPECTED_LOGIN=fenicu run_cp
+EXPECTED_LOGIN=owner run_cp
 assert_eq "${CP_RC}" "0" "exit 0"
 assert_contains "${FAKE_ROOT}/cp.log" "check-proxy: OK without a session" "OK printed"
-assert_contains "${FAKE_ROOT}/state/requests" "GET /api/v1/me ua= headers=Remote-User: fenicu|Remote-Groups: admins" "Remote-User alone forged with the owner login"
+assert_contains "${FAKE_ROOT}/state/requests" "GET /api/v1/me ua= headers=Remote-User: owner|Remote-Groups: admins" "Remote-User alone forged with the owner login"
 assert_contains "${FAKE_ROOT}/state/requests" "X-Canterlot-Client-Ip: 203.0.113.7|X-Forwarded-For: 127.0.0.1" "client IP and X-Forwarded-For forged"
 assert_contains "${FAKE_ROOT}/state/requests" "X-Canterlot-Proxy: forged" "proxy secret forged"
 assert_contains "${FAKE_ROOT}/state/requests" "GET / ua=" "the PWA shell probed"
@@ -185,9 +185,9 @@ case_end
 
 case_begin "positive: sign-in by a recovery link, client IP, logout, jar removed, link never printed"
 setup_cp positive
-EXPECTED_LOGIN=fenicu run_cp --positive
+EXPECTED_LOGIN=owner run_cp --positive
 assert_eq "${CP_RC}" "0" "exit 0"
-assert_contains "${FAKE_ROOT}/cp.log" "OK sign-in (login fenicu, session 01a1cf1a-0000-7000-8000-00000000000a, client IP 198.51.100.23), logged out" "positive OK printed"
+assert_contains "${FAKE_ROOT}/cp.log" "OK sign-in (login owner, session 01a1cf1a-0000-7000-8000-00000000000a, client IP 198.51.100.23), logged out" "positive OK printed"
 assert_eq "$(cat "${FAKE_ROOT}/state/hub-cli.log")" "auth recovery-link --config ${HUB_CONFIG} --minutes 5" "link issued by the hub CLI of the current release"
 assert_eq "$(cat "${FAKE_ROOT}/state/posted")" "{\"token\":\"${TOKEN}\"}" "token posted in the body (stdin), not argv"
 assert_contains "${FAKE_ROOT}/state/requests" "POST /api/v1/auth/recovery ua=canterlot-check-proxy headers=Origin: https://hub.example|X-Canterlot-Client: 1" "recovery POST carries Origin and X-Canterlot-Client"

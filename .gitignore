@@ -3,6 +3,7 @@ target/
 node_modules/
 .env
 *.local.toml
+/.superpowers/
 
 # PWA
 web/node_modules/

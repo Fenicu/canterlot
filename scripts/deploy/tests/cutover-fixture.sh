@@ -33,7 +33,7 @@ EOF
 
 setup_cutover() {
     setup_case "cutover-$1"
-    export SITE_CODES="meeting.fenicu.com:200 git.fenicu.com:200 caddy.fenicu.com:302 gotify.fenicu.com:200 immich.fenicu.com:200 bookshelf.fenicu.com:200 hub.fenicu.com:200"
+    export SITE_CODES="meeting.example.com:200 git.example.com:200 caddy.example.com:302 gotify.example.com:200 immich.example.com:200 bookshelf.example.com:200 hub.example.com:200"
     EXEC1="$(new_exec_id)"; EXEC2="$(new_exec_id)"; export EXEC1 EXEC2
     write_configs
     deploy_release hub "${SHA_PREV}"

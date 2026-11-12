@@ -42,7 +42,7 @@ EOF
 
 setup_verify() {
     setup_case "verify-$1"
-    export SITE_CODES="meeting.fenicu.com:200 git.fenicu.com:200 caddy.fenicu.com:302 gotify.fenicu.com:200 immich.fenicu.com:200 bookshelf.fenicu.com:200 hub.fenicu.com:200"
+    export SITE_CODES="meeting.example.com:200 git.example.com:200 caddy.example.com:302 gotify.example.com:200 immich.example.com:200 bookshelf.example.com:200 hub.example.com:200"
     EXEC1="$(new_exec_id)"; EXEC2="$(new_exec_id)"; export EXEC1 EXEC2
     write_configs
     deploy_release hub "${SHA_PREV}"
@@ -179,10 +179,10 @@ case_end
 # V10: код чужого сайта изменился — жёстко.
 case_begin "verify site code"
 setup_verify sitecode
-export FAKE_SITE_FAIL=meeting.fenicu.com
+export FAKE_SITE_FAIL=meeting.example.com
 if run_verify "${SHA_PREV}"; then case_fail "exit 0 despite site code change"; else case_ok "exit nonzero"; fi
 unset FAKE_SITE_FAIL
-assert_contains "${FAKE_ROOT}/verify.log" "site meeting.fenicu.com: 500, expected 200" "site code counted"
+assert_contains "${FAKE_ROOT}/verify.log" "site meeting.example.com: 500, expected 200" "site code counted"
 teardown_case
 case_end
 

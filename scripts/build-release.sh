@@ -3,7 +3,7 @@
 # сборочной машине и кладёт готовый dist/<sha12> в эту рабочую копию — оттуда его
 # берут выкат и scripts/publish-release.sh.
 #
-#   scripts/build-release.sh vX.Y.Z            сборка на CANTERLOT_BUILD_HOST (mainpc-build)
+#   scripts/build-release.sh vX.Y.Z            сборка на CANTERLOT_BUILD_HOST (по умолчанию canterlot-build)
 #   scripts/build-release.sh vX.Y.Z --local    та же сборка на локальном docker (для проверки)
 #
 # Почему контейнер: сборочная машина — Arch с glibc 2.44, а прод — Debian 13 с
@@ -21,6 +21,14 @@ usage() {
 }
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo"
+
+# Значения своего стенда — в необязательном .superpowers/site.env; файл задаёт
+# только переменные, которых нет в окружении, и перекрывает умолчания ниже.
+site_env=${CANTERLOT_SITE_ENV:-$repo/.superpowers/site.env}
+if [[ -f "$site_env" ]]; then
+    # shellcheck disable=SC1090 # файл стенда, путь задаётся снаружи
+    source "$site_env"
+fi
 dockerfile="$repo/docker/release-build/Dockerfile"
 in_container="$repo/scripts/release-build/in-container.sh"
 tag=""
@@ -59,7 +67,7 @@ docker_cmd=${CANTERLOT_DOCKER:-docker}
 if [[ "$mode" == local ]]; then
     command -v "$docker_cmd" >/dev/null || die "нет docker ($docker_cmd): --local собирает на этой машине"
 else
-    host=${CANTERLOT_BUILD_HOST:-mainpc-build}
+    host=${CANTERLOT_BUILD_HOST:-canterlot-build}
     command -v ssh >/dev/null || die "нет ssh"
 fi
 log "выпуск $tag ($sha12), режим $mode"
@@ -197,8 +205,8 @@ if [[ "$mode" == remote ]]; then
     # shellcheck disable=SC2016 # $(id -u) раскрывает удалённый shell
     cmd=$(printf 'docker run --rm --user "$(id -u):$(id -g)" --cpus 24 --memory 40g --pids-limit 4096 -v %q:/src -v %q:/cache/cargo -v %q:/cache/target -v %q:/cache/npm -v %q:/out -v %q:/build/in-container.sh:ro -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target -e npm_config_cache=/cache/npm -e %q -e %q -w /src %q bash /build/in-container.sh --src /src --out /out --sha %q --commit %q' \
         "$src" "$cache_root/cargo" "$cache_root/target" "$cache_root/npm" "$src/.release-out" "$script_path" \
-        "SITE_ORIGIN=${CANTERLOT_SITE_ORIGIN:-https://hub.fenicu.com}" \
-        "WSS_ORIGIN=${CANTERLOT_WSS_ORIGIN:-wss://hub.fenicu.com}" "$image" "$sha12" "$commit")
+        "SITE_ORIGIN=${CANTERLOT_SITE_ORIGIN:-https://hub.example.com}" \
+        "WSS_ORIGIN=${CANTERLOT_WSS_ORIGIN:-wss://hub.example.com}" "$image" "$sha12" "$commit")
     remote "$cmd" || die "сборка в контейнере на $host не удалась"
 else
     "$docker_cmd" run --rm --user "$(id -u):$(id -g)" --cpus 24 --memory 40g --pids-limit 4096 \
@@ -211,8 +219,8 @@ else
         -e CARGO_HOME=/cache/cargo \
         -e CARGO_TARGET_DIR=/cache/target \
         -e npm_config_cache=/cache/npm \
-        -e "SITE_ORIGIN=${CANTERLOT_SITE_ORIGIN:-https://hub.fenicu.com}" \
-        -e "WSS_ORIGIN=${CANTERLOT_WSS_ORIGIN:-wss://hub.fenicu.com}" \
+        -e "SITE_ORIGIN=${CANTERLOT_SITE_ORIGIN:-https://hub.example.com}" \
+        -e "WSS_ORIGIN=${CANTERLOT_WSS_ORIGIN:-wss://hub.example.com}" \
         -w /src \
         "$image" \
         bash /build/in-container.sh --src /src --out /out --sha "$sha12" --commit "$commit" \

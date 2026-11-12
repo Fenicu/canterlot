@@ -106,9 +106,11 @@ setup_case() {
     # Ожидание переходных строк исполнений (starting и т. п.) у супервизоров: секунды, не минута.
     export SUPERVISOR_SETTLE_WAIT="${SUPERVISOR_SETTLE_WAIT:-2}" SUPERVISOR_SETTLE_POLL="${SUPERVISOR_SETTLE_POLL:-0.2}"
 
-    # Конфиг скриптов — на фейковые хосты и пути.
-    export HUB_SSH=fakehub WEB_SSH=fakeweb PROXMOX_SSH=fakeproxmox PROXMOX_NODE=bigboy
-    export HUB_CTID=130 HUB_IP=10.0.40.64
+    # Конфиг скриптов — на фейковые хосты и пути. Файл стенда отключён: у
+    # разработчика может быть свой .superpowers/site.env, тесты от него не зависят.
+    export CANTERLOT_SITE_ENV="${FAKE_ROOT}/no-site.env"
+    export HUB_SSH=fakehub WEB_SSH=fakeweb PROXMOX_SSH=fakeproxmox PROXMOX_NODE=pve-node1
+    export HUB_CTID=101 HUB_IP=192.0.2.10
     export HUB_BASE="${FAKE_ROOT}/hub/opt/canterlot"
     export HUB_RELEASES="${FAKE_ROOT}/hub/opt/canterlot/releases"
     export HUB_CURRENT="${FAKE_ROOT}/hub/opt/canterlot/current"
@@ -117,7 +119,7 @@ setup_case() {
     export HUB_BACKUP_DIR="${FAKE_ROOT}/hub/backups"
     export HUB_PG_SOCKET=/var/run/postgresql HUB_PG_DB=canterlot HUB_PG_USER=canterlot
     export PBS_STORAGE=backup_storage
-    export SITE_ORIGIN=https://hub.fenicu.com WSS_ORIGIN=wss://hub.fenicu.com
+    export SITE_ORIGIN=https://hub.example.com WSS_ORIGIN=wss://hub.example.com
     export WEB_SITES_BASE="${FAKE_ROOT}/web/sites/canterlot"
     export WEB_RELEASES="${FAKE_ROOT}/web/sites/canterlot/releases"
     export WEB_BUILD_LINK="${FAKE_ROOT}/web/sites/canterlot/build"
@@ -152,21 +154,21 @@ setup_case() {
 write_configs() {
     cat >"${HUB_CONFIG}" <<'EOF'
 database_url_file = "database-url"
-grpc_listen = "10.0.40.64:7443"
+grpc_listen = "192.0.2.10:7443"
 tls_cert = "tls/hub.pem"
 tls_key = "tls/hub.key"
 manifest = "/var/lib/canterlot-manifest/installation.toml"
 
 [http]
-listen = "10.0.40.64:8080"
-trusted_proxies = ["10.10.40.3/32"]
-owner_login = "fenicu"
-allowed_origins = ["https://hub.fenicu.com"]
+listen = "192.0.2.10:8080"
+trusted_proxies = ["192.0.2.3/32"]
+owner_login = "owner"
+allowed_origins = ["https://hub.example.com"]
 proxy_secret_file = "proxy-secret"
-logout_url = "https://auth.fenicu.com/logout"
+logout_url = "https://auth.example.com/logout"
 EOF
     cat >"${WORKER_CONFIG}" <<'EOF'
-hub_url = "https://10.0.40.64:7443"
+hub_url = "https://192.0.2.10:7443"
 ca_cert = "/tmp/fake-ca.pem"
 token_file = "/tmp/fake-token"
 machine_id = "01a18e6d-87d5-7217-9425-60460504f09d"

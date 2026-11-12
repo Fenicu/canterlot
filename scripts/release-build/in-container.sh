@@ -8,8 +8,8 @@
 #   CARGO_TARGET_DIR   каталог target на смонтированном кэше (обязателен);
 #   CARGO_HOME         каталог cargo на смонтированном кэше (ставит build-release.sh);
 #   npm_config_cache   кэш npm на смонтированном кэше;
-#   SITE_ORIGIN        адрес PWA для csp.txt (по умолчанию https://hub.fenicu.com);
-#   WSS_ORIGIN         адрес WebSocket для проверки csp.txt (по умолчанию wss://hub.fenicu.com).
+#   SITE_ORIGIN        адрес PWA для csp.txt (по умолчанию https://hub.example.com);
+#   WSS_ORIGIN         адрес WebSocket для проверки csp.txt (по умолчанию wss://hub.example.com).
 #
 # Тестов здесь нет: полный прогон scripts/check.sh и check-web.sh уже прошёл на
 # коммите. Скрипт собирает и проверяет ровно то, что проверяет выкат (Task 1
@@ -43,8 +43,8 @@ done
 export CARGO_TARGET_DIR
 export CARGO_HOME=${CARGO_HOME:-/usr/local/cargo}
 export npm_config_cache=${npm_config_cache:-$HOME/.npm}
-site_origin=${SITE_ORIGIN:-https://hub.fenicu.com}
-wss_origin=${WSS_ORIGIN:-wss://hub.fenicu.com}
+site_origin=${SITE_ORIGIN:-https://hub.example.com}
+wss_origin=${WSS_ORIGIN:-wss://hub.example.com}
 
 started=$SECONDS
 phase() { printf '\n==> %s\n' "$1"; phase_started=$SECONDS; }
