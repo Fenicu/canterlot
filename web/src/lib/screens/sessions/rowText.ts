@@ -11,6 +11,8 @@ export interface RowLine {
   live: boolean;
   /** Строка показывает превью ответа, а не состояние. */
   preview: boolean;
+  /** В тексте уже есть длительность: строка делегата не повторяет её справа. */
+  timed?: boolean;
 }
 
 /** Название модели из каталога машины, на которой идёт сессия. */
@@ -41,5 +43,5 @@ export function rowLine(
   const calm = item.activity.state === 'idle' && line.tone === 'default';
   const preview = item.preview?.trim() ?? '';
   if (calm && preview) return { who, text: preview, tone: 'default', live: false, preview: true };
-  return { who, text: line.text, tone: line.tone, live: line.live, preview: false };
+  return { who, text: line.text, tone: line.tone, live: line.live, preview: false, timed: line.timed ?? false };
 }

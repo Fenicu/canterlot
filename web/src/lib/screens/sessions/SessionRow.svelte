@@ -86,7 +86,7 @@
           <span class="sr-only">{vendor ? VENDOR_TITLES[vendor] : ''}</span>
           {#if line.live}<span class="live" aria-hidden="true"></span>{/if}<span class="text">{line.text}</span>
         </span>
-        {#if depth > 0 && item.working_ms}
+        {#if depth > 0 && item.working_ms && !line.timed}
           <span class="worked" data-worked title={`работала ${fmt.durationCoarse(item.working_ms)}`}><span class="sr-only">{workedPrefix}</span>{fmt.durationCoarse(item.working_ms)}</span>
         {/if}
         {#if plan}

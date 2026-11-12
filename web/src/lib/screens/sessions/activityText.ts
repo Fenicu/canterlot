@@ -38,7 +38,7 @@ export interface Activity {
 export function activityLine(
   activity: Activity,
   ctx: { now: number },
-): { text: string; tone: Tone; live: boolean } {
+): { text: string; tone: Tone; live: boolean; timed?: boolean } {
   const evidence = activity.evidence ?? {};
   switch (activity.state) {
     case "idle": {
@@ -74,6 +74,7 @@ export function activityLine(
         text: `Подвисла? Нет событий ${duration}`,
         tone: "warning",
         live: false,
+        timed: true,
       };
     }
     case "quota_paused":
@@ -134,7 +135,7 @@ function working(
   evidence: ActivityEvidence,
   since: string | undefined,
   now: number,
-): { text: string; tone: Tone; live: boolean } {
+): { text: string; tone: Tone; live: boolean; timed?: boolean } {
   const phase = evidence.phase ?? "";
   const wait = evidence.lease_wait;
   if (wait && typeof wait.kind === "string" && typeof wait.position === "number")
@@ -164,6 +165,7 @@ function working(
       text: `Выполняет ${name} · ${duration}`,
       tone: "accent",
       live: false,
+      timed: true,
     };
   }
   return { text: "Работает", tone: "accent", live: true };
