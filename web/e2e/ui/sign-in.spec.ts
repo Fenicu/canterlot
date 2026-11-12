@@ -168,6 +168,7 @@ test('terminate_others_names_the_sessions_this_device_approved_and_idle_timeout_
   await expect(page.getByRole('button', { name: 'Завершить все остальные сеансы' })).toHaveCount(0);
   const idle = page.getByRole('radiogroup', { name: 'Срок бездействия' });
   await expect(idle.getByRole('radio', { name: '3 месяца' })).toBeChecked();
+  await expect(page.locator('[data-idle-note]')).toContainText('только получает события, сеанс не продлевает');
   await idle.getByText('1 год').click();
   await expect.poll(() => auth.idle).toBe(365);
 });

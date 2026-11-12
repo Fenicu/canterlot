@@ -184,6 +184,7 @@
       <section>
         <h2>Автоматически завершать сеанс, если он неактивен</h2>
         <Segmented name="idle" label="Срок бездействия" options={IDLE_OPTIONS} bind:value={() => idle, setIdle} />
+        <p class="note" data-idle-note>Активностью считаются запросы к хабу: открытие приложения и чатов, отправка сообщений. Открытая вкладка, которая только получает события, сеанс не продлевает</p>
       </section>
 
       <section aria-labelledby="passkeys-title">
