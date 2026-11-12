@@ -67,6 +67,14 @@ impl Fake {
         Self::with_timers(turns, WAIT, WAIT)
     }
     fn with_timers(turns: Vec<Vec<Value>>, transmit: Duration, ready: Duration) -> Self {
+        Self::with_context(turns, transmit, ready, |_, _| {})
+    }
+    fn with_context(
+        turns: Vec<Vec<Value>>,
+        transmit: Duration,
+        ready: Duration,
+        change: impl FnOnce(&std::path::Path, &mut AdapterContext),
+    ) -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-cli");
         fake_exec::write_executable(&exe, FAKE, 0o700);
@@ -88,7 +96,10 @@ impl Fake {
             codex: None,
             opencode: None,
             antigravity: None,
+            delegate_mcp_servers: Vec::new(),
         };
+        let mut context = context;
+        change(dir.path(), &mut context);
         let adapter =
             adapter::registry_with("claude_code", &context).expect("Claude Code registered");
         let spec = StartSpec {
@@ -2882,11 +2893,36 @@ fn init_with(servers: Value) -> Value {
 
 /// События до остановки CLI или до конца хода.
 async fn isolated_turn(isolate_mcp: bool, servers: Value) -> Vec<AdapterEvent> {
+    delegated_turn(isolate_mcp, servers, &[], None).await
+}
+
+const FAKE_KEY: &str = "ctx7-FAKE-not-a-real-key";
+
+/// Ход делегата с разрешёнными серверами и поддельным `~/.claude.json` владельца.
+async fn delegated_turn(
+    isolate_mcp: bool,
+    servers: Value,
+    allowed: &[&str],
+    owner_servers: Option<Value>,
+) -> Vec<AdapterEvent> {
     let id = Uuid::now_v7();
-    let mut f = Fake::new(vec![vec![
-        init_with(servers),
-        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id],"modelUsage":{}}),
-    ]]);
+    let allowed: Vec<String> = allowed.iter().map(|name| (*name).to_owned()).collect();
+    let mut f = Fake::with_context(
+        vec![vec![
+            init_with(servers),
+            json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id],"modelUsage":{}}),
+        ]],
+        WAIT,
+        WAIT,
+        |dir, context| {
+            context.delegate_mcp_servers = allowed;
+            if let Some(owner_servers) = owner_servers {
+                let path = dir.join("owner.claude.json");
+                std::fs::write(&path, json!({"mcpServers": owner_servers}).to_string()).unwrap();
+                context.claude_code.as_mut().unwrap().owner_user_config = Some(path);
+            }
+        },
+    );
     f.spec.isolate_mcp = isolate_mcp;
     f.start().await;
     // Убитый CLI не успевает подтвердить ввод: исход передачи здесь не важен.
@@ -2960,4 +2996,99 @@ async fn isolated_start_with_only_canterlot_and_owner_start_with_more_servers_ru
     )
     .await;
     assert!(!isolation_failed(&owner), "{owner:?}");
+}
+
+fn context7_owner() -> Value {
+    json!({
+        "context7": {"type":"http","url":"https://mcp.context7.example/mcp",
+            "headers":{"Authorization": format!("Bearer {FAKE_KEY}")}},
+        "nanokvm": {"type":"stdio","command":"/bin/true"},
+    })
+}
+
+fn missing_names(events: &[AdapterEvent]) -> Vec<Vec<String>> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Diagnostic {
+                kind: "delegate_mcp_missing",
+                required: false,
+                field_names,
+                ..
+            } => Some(field_names.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn delegate_with_an_allowed_owner_server_runs_and_an_extra_one_still_stops_it() {
+    let allowed = json!([
+        {"name":"canterlot","status":"connected"},
+        {"name":"context7","status":"connected"},
+    ]);
+    let ok = delegated_turn(true, allowed.clone(), &["context7"], Some(context7_owner())).await;
+    assert!(!isolation_failed(&ok), "{ok:?}");
+    assert!(missing_names(&ok).is_empty(), "{ok:?}");
+    assert!(
+        ok.iter()
+            .any(|e| matches!(e, AdapterEvent::RunFinished { .. })),
+        "{ok:?}"
+    );
+
+    let extra = delegated_turn(
+        true,
+        json!([
+            {"name":"canterlot","status":"connected"},
+            {"name":"context7","status":"connected"},
+            {"name":"nanokvm","status":"connected"},
+        ]),
+        &["context7"],
+        Some(context7_owner()),
+    )
+    .await;
+    assert!(isolation_failed(&extra), "{extra:?}");
+
+    // Не записанный в mcp.json разрешённый сервер тоже чужой.
+    let unlisted = delegated_turn(true, allowed, &[], Some(context7_owner())).await;
+    assert!(isolation_failed(&unlisted), "{unlisted:?}");
+}
+
+#[tokio::test]
+async fn delegate_with_a_missing_allowed_server_starts_with_one_named_diagnostic() {
+    let events = delegated_turn(
+        true,
+        json!([{"name":"canterlot","status":"connected"}]),
+        &["context7"],
+        Some(json!({"nanokvm": {"type":"stdio","command":"/bin/true"}})),
+    )
+    .await;
+    assert!(!isolation_failed(&events), "{events:?}");
+    assert_eq!(missing_names(&events), [vec!["context7".to_owned()]]);
+    let debug = format!("{events:?}");
+    assert!(
+        !debug.contains("nanokvm") && !debug.contains("/bin/true"),
+        "{debug}"
+    );
+}
+
+#[tokio::test]
+async fn delegate_diagnostics_never_carry_the_owner_secret() {
+    // CLI с лишним сервером убит: текст отказа и диагностика без значений из файла владельца.
+    let events = delegated_turn(
+        true,
+        json!([
+            {"name":"canterlot","status":"connected"},
+            {"name":"context7","status":"connected"},
+            {"name":"nanokvm","status":"connected"},
+        ]),
+        &["context7"],
+        Some(context7_owner()),
+    )
+    .await;
+    let debug = format!("{events:?}");
+    assert!(
+        !debug.contains(FAKE_KEY) && !debug.contains("context7.example"),
+        "{debug}"
+    );
 }

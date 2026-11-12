@@ -1408,6 +1408,7 @@ impl Actor {
             .lock()
             .expect("adapter config lock")
             .clone();
+        let delegate_mcp_servers = self.shared.config.delegate_mcp_servers.clone();
         let prepared = tokio::task::spawn_blocking(move || {
             let prepared = spawn::prepare(
                 &data_dir,
@@ -1439,6 +1440,13 @@ impl Actor {
                 let cfg =
                     toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("antigravity"))?;
                 table.insert("antigravity".into(), cfg);
+            }
+            if !delegate_mcp_servers.is_empty() {
+                table.insert(
+                    "delegate_mcp_servers".into(),
+                    toml::Value::try_from(delegate_mcp_servers)
+                        .map_err(|_| ExecError::Verify("spec"))?,
+                );
             }
             fs::write(
                 &spec_path,

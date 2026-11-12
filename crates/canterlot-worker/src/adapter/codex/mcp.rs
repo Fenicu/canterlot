@@ -48,14 +48,17 @@ pub fn secret_override(secret: &str) -> [OsString; 2] {
     ]
 }
 
-/// Действующий конфиг делегированной сессии (`config/read`): серверов нет, кроме canterlot, а
-/// приложения аккаунта и плагины выключены. Сверка до `thread/start`, ничего не запуская.
-pub fn isolated_config(response: &Value) -> bool {
+/// Действующий конфиг делегированной сессии (`config/read`): включённых серверов нет, кроме
+/// canterlot и `allowed` (оставленных в копии конфига), а приложения аккаунта и плагины
+/// выключены. Сверка до `thread/start`, ничего не запуская.
+pub fn isolated_config(response: &Value, allowed: &[String]) -> bool {
     let config = &response["config"];
     let servers_ok = match config.get("mcp_servers") {
         None | Some(Value::Null) => true,
         Some(Value::Object(servers)) => servers.iter().all(|(name, server)| {
-            name == SERVER_NAME || server.get("enabled").and_then(Value::as_bool) == Some(false)
+            name == SERVER_NAME
+                || allowed.iter().any(|allowed| allowed == name)
+                || server.get("enabled").and_then(Value::as_bool) == Some(false)
         }),
         Some(_) => false,
     };
@@ -95,44 +98,45 @@ mod isolation_tests {
         json!({"config": {"mcp_servers": servers, "features": {"apps": apps, "plugins": plugins}}})
     }
 
+    fn isolated(servers: Value, apps: Value, plugins: Value) -> bool {
+        isolated_config(&config(servers, apps, plugins), &[])
+    }
+
     #[test]
     fn only_canterlot_with_apps_and_plugins_off_passes() {
         let canterlot = json!({"canterlot": {"command": "x", "enabled": true}});
-        assert!(isolated_config(&config(
-            canterlot.clone(),
-            json!(false),
-            json!(false)
-        )));
-        assert!(isolated_config(&config(
-            json!({}),
-            json!(false),
-            json!(false)
-        )));
-        assert!(!isolated_config(&config(
-            canterlot.clone(),
-            json!(true),
-            json!(false)
-        )));
-        assert!(!isolated_config(&config(
-            canterlot.clone(),
-            json!(false),
-            json!(true)
-        )));
+        assert!(isolated(canterlot.clone(), json!(false), json!(false)));
+        assert!(isolated(json!({}), json!(false), json!(false)));
+        assert!(!isolated(canterlot.clone(), json!(true), json!(false)));
+        assert!(!isolated(canterlot.clone(), json!(false), json!(true)));
         // Нет сведений - не доказано: закрыто.
-        assert!(!isolated_config(&config(
-            canterlot,
-            Value::Null,
-            json!(false)
-        )));
-        assert!(!isolated_config(&json!({"config": {"mcp_servers": {}}})));
-        assert!(!isolated_config(&json!({})));
+        assert!(!isolated(canterlot, Value::Null, json!(false)));
+        assert!(!isolated_config(
+            &json!({"config": {"mcp_servers": {}}}),
+            &[]
+        ));
+        assert!(!isolated_config(&json!({}), &[]));
     }
 
     #[test]
     fn any_other_enabled_server_fails_the_start() {
         let other = json!({"canterlot": {"enabled": true}, "nanokvm": {"command": "x"}});
-        assert!(!isolated_config(&config(other, json!(false), json!(false))));
+        assert!(!isolated(other, json!(false), json!(false)));
         let off = json!({"canterlot": {"enabled": true}, "nanokvm": {"enabled": false}});
-        assert!(isolated_config(&config(off, json!(false), json!(false))));
+        assert!(isolated(off, json!(false), json!(false)));
+    }
+
+    #[test]
+    fn a_kept_delegate_server_passes_and_any_extra_still_fails() {
+        let kept = ["context7".to_owned()];
+        let with = |servers| config(servers, json!(false), json!(false));
+        let ours = json!({"canterlot": {"enabled": true}, "context7": {"url": "u"}});
+        assert!(isolated_config(&with(ours.clone()), &kept));
+        assert!(!isolated_config(&with(ours), &[]), "not kept, not allowed");
+        let extra = json!({"canterlot": {}, "context7": {}, "nanokvm": {"command": "x"}});
+        assert!(!isolated_config(&with(extra), &kept));
+        // Разрешённый сервер не открывает приложения и плагины.
+        let apps = config(json!({"context7": {}}), json!(true), json!(false));
+        assert!(!isolated_config(&apps, &kept));
     }
 }

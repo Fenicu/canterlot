@@ -555,6 +555,12 @@ pub struct OpenCodeAdapter {
     start_attempted: bool,
     /// Делегированная сессия: ни серверов владельца, ни репозиторной конфигурации.
     isolate_mcp: bool,
+    /// `[execution].delegate_mcp_servers`: серверы владельца, разрешённые делегату.
+    delegate_mcp: Vec<String>,
+    /// Разрешённые серверы, оставленные в копиях конфигурации последнего запуска.
+    delegate_mcp_kept: Vec<String>,
+    /// Пропущенные разрешённые серверы, о которых уже сообщено.
+    delegate_mcp_reported: Vec<String>,
     proc: Option<ServerProcess>,
     http: Option<Http>,
     stream: Option<EventStream>,
@@ -666,6 +672,9 @@ impl OpenCodeAdapter {
             instructions: owner_instructions(),
             applied: owner_instructions(),
             isolate_mcp: false,
+            delegate_mcp: Vec::new(),
+            delegate_mcp_kept: Vec::new(),
+            delegate_mcp_reported: Vec::new(),
             spec: None,
             overflowed: false,
             stuck: failure::StuckWatch::default(),
@@ -675,6 +684,11 @@ impl OpenCodeAdapter {
             kill_at: None,
             exited: false,
         }
+    }
+
+    pub fn with_delegate_mcp_servers(mut self, names: &[String]) -> Self {
+        self.delegate_mcp = crate::adapter::delegate_mcp_names(names);
+        self
     }
 
     pub fn with_relay_executable(mut self, executable: PathBuf) -> Self {
@@ -850,7 +864,10 @@ impl OpenCodeAdapter {
         let limit = Instant::now() + self.ready_wait;
         let (state, proven) = loop {
             let (state, proven) = match self.http()?.get("/api/mcp", REQUEST_WAIT).await {
-                Ok(list) if self.isolate_mcp && mcp::has_foreign_server(&list) => {
+                Ok(list)
+                    if self.isolate_mcp
+                        && mcp::has_foreign_server(&list, &self.delegate_mcp_kept) =>
+                {
                     return Err(AdapterError::StartFailed("mcp_isolation_failed"));
                 }
                 Ok(list) => (mcp::state_of(&list), mcp::lists_own_server(&list)),
@@ -910,7 +927,7 @@ impl OpenCodeAdapter {
 
     // Окружение зависит от инструкций: своё у каждого запуска, пароль тоже.
     async fn launch_env(
-        &self,
+        &mut self,
         instructions: &InstructionSpec,
     ) -> Result<(Vec<(OsString, OsString)>, String), AdapterError> {
         let layout = DataLayout::for_execution(&self.cfg, &self.exec_dir);
@@ -923,11 +940,35 @@ impl OpenCodeAdapter {
                 })
             })?;
         let owner = instructions::owner_dir(self.cfg.owner_config.as_deref(), &env);
-        env.extend(
-            instructions::prepare(&self.exec_dir, owner, instructions, self.isolate_mcp)
-                .await
-                .map_err(|_| AdapterError::StartFailed("instructions_failed"))?,
-        );
+        let prepared = instructions::prepare_with(
+            &self.exec_dir,
+            owner,
+            instructions,
+            self.isolate_mcp,
+            &self.delegate_mcp,
+        )
+        .await
+        .map_err(|_| AdapterError::StartFailed("instructions_failed"))?;
+        env.extend(prepared.env);
+        self.delegate_mcp_kept = prepared.mcp_kept;
+        for name in prepared.mcp_missing {
+            // Одно сообщение на имя за исполнение: перезапуск снова готовит каталог.
+            if self.delegate_mcp_reported.contains(&name) {
+                continue;
+            }
+            tracing::info!(
+                kind = "delegate_mcp_missing",
+                server = %name,
+                "allowed MCP server is absent from the owner's OpenCode config"
+            );
+            self.delegate_mcp_reported.push(name.clone());
+            self.events.push_back(AdapterEvent::Diagnostic {
+                kind: "delegate_mcp_missing",
+                event_type: "delegate_mcp_missing".into(),
+                required: false,
+                field_names: vec![name],
+            });
+        }
         let relay = match &self.relay_executable {
             Some(relay) => relay.clone(),
             None => std::env::current_exe()?,

@@ -249,6 +249,7 @@ impl Fake {
                     codex: Some(codex),
                     opencode: None,
                     antigravity: None,
+                    delegate_mcp_servers: Vec::new(),
                 };
                 adapter::registry_with("codex", &context).expect("Codex registered")
             }
@@ -471,6 +472,7 @@ fn registry_builds_codex_adapter_from_context() {
         codex: Some(CodexConfig::default()),
         opencode: None,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let adapter = adapter::registry_with("codex", &context).expect("Codex registered");
     let capabilities = adapter.capabilities();
@@ -509,6 +511,7 @@ fn registry_builds_codex_adapter_from_context() {
                 codex: None,
                 opencode: None,
                 antigravity: None,
+                delegate_mcp_servers: Vec::new(),
             }
         )
         .is_none()
@@ -1962,6 +1965,7 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
             }),
             opencode: None,
             antigravity: None,
+            delegate_mcp_servers: Vec::new(),
         };
         let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
         adapter.set_cli_version_probe(Duration::from_millis(100));
@@ -2016,6 +2020,7 @@ async fn start_fails_when_app_server_exits_at_once() {
         }),
         opencode: None,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
     let spec = StartSpec {
@@ -2847,6 +2852,7 @@ async fn live_probe() {
         codex: Some(config),
         opencode: None,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
     let group = TreeContainment::new().unwrap();
@@ -3070,6 +3076,7 @@ async fn live_smoke() {
         codex: Some(config),
         opencode: None,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
     let group = TreeContainment::new().unwrap();
@@ -3296,6 +3303,7 @@ async fn live_smoke() {
         codex: Some(smoke_config()),
         opencode: None,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let mut adapter = adapter::registry_with("codex", &context).expect("Codex registered");
     let spec = StartSpec {
@@ -3376,6 +3384,7 @@ async fn live_smoke() {
             codex: Some(home_config()),
             opencode: None,
             antigravity: None,
+            delegate_mcp_servers: Vec::new(),
         },
     )
     .expect("Codex registered");
@@ -3419,6 +3428,7 @@ async fn live_smoke() {
             codex: Some(home_config()),
             opencode: None,
             antigravity: None,
+            delegate_mcp_servers: Vec::new(),
         },
     )
     .expect("Codex registered");

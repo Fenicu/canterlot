@@ -5,12 +5,12 @@
 //! `sessions`, рулоны тредов обязаны быть видны из обоих домов, иначе смена
 //! режима инструкций не возобновит тред.
 //! Дом делегированной сессии (D24) читает `config.toml` владельца и кладёт его копию без
-//! `mcp_servers`.
+//! `mcp_servers`, кроме серверов из `[execution].delegate_mcp_servers`.
 
 use crate::config::CodexConfig;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Имена записей дома владельца, которые никогда не ссылаются.
@@ -83,6 +83,10 @@ pub struct LinkReport {
     pub relinked: usize,
     pub removed: usize,
     pub conflicts: Vec<String>,
+    /// Разрешённые делегату серверы, оставленные в копии `config.toml`.
+    pub mcp_kept: Vec<String>,
+    /// Разрешённые серверы, которых нет в конфиге владельца.
+    pub mcp_missing: Vec<String>,
 }
 
 /// Ошибка дома: непригодный путь или сбой ввода-вывода.
@@ -287,6 +291,17 @@ impl CodexHome {
     /// только если отличается. Никогда не заменяет настоящий файл и не открывает
     /// файлы владельца.
     pub fn prepare(&self, agents_md: &str, policy: TempDirPolicy) -> Result<LinkReport, HomeError> {
+        self.prepare_with(agents_md, policy, &[])
+    }
+
+    /// `prepare`, у изолированного дома копия конфига сохраняет `mcp_servers.<имя>`
+    /// разрешённых делегату серверов.
+    pub fn prepare_with(
+        &self,
+        agents_md: &str,
+        policy: TempDirPolicy,
+        delegate_mcp: &[String],
+    ) -> Result<LinkReport, HomeError> {
         if policy == TempDirPolicy::Refuse && is_temp_path(&self.path) {
             return Err(HomeError::Unusable);
         }
@@ -395,22 +410,47 @@ impl CodexHome {
             self.write_atomic(AGENTS_MD, agents_md)?;
         }
         if self.kind.is_isolated() {
-            self.write_atomic(CONFIG_TOML, &self.config_without_mcp()?)?;
+            let (text, kept, missing) = self.config_without_mcp(delegate_mcp)?;
+            self.write_atomic(CONFIG_TOML, &text)?;
+            report.mcp_kept = kept;
+            report.mcp_missing = missing;
         }
         Ok(report)
     }
 
-    /// Конфиг владельца без серверов MCP (D24). Читается только он; не разобрался или не
-    /// читается - дом непригоден, молча копировать целиком нельзя.
-    fn config_without_mcp(&self) -> Result<String, HomeError> {
+    /// Конфиг владельца без серверов MCP (D24), кроме разрешённых делегату: их таблицы
+    /// остаются целиком. Читается только он; не разобрался или не читается - дом
+    /// непригоден, молча копировать целиком нельзя.
+    fn config_without_mcp(
+        &self,
+        delegate_mcp: &[String],
+    ) -> Result<(String, Vec<String>, Vec<String>), HomeError> {
         let text = match std::fs::read_to_string(self.owner_home.join(CONFIG_TOML)) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(HomeError::Io(error)),
         };
         let mut config: toml::Table = text.parse().map_err(|_| HomeError::Unusable)?;
-        config.remove("mcp_servers");
-        toml::to_string(&config).map_err(|_| HomeError::Unusable)
+        let mut owned = match config.remove("mcp_servers") {
+            Some(toml::Value::Table(servers)) => servers,
+            _ => toml::Table::new(),
+        };
+        let mut kept = toml::Table::new();
+        let mut missing = Vec::new();
+        for name in crate::adapter::delegate_mcp_names(delegate_mcp) {
+            match owned.remove(&name) {
+                Some(server @ toml::Value::Table(_)) => {
+                    kept.insert(name, server);
+                }
+                _ => missing.push(name),
+            }
+        }
+        let names = kept.keys().cloned().collect();
+        if !kept.is_empty() {
+            config.insert("mcp_servers".into(), toml::Value::Table(kept));
+        }
+        let text = toml::to_string(&config).map_err(|_| HomeError::Unusable)?;
+        Ok((text, names, missing))
     }
 
     /// Файл дома canterlot: атомарно и только при отличии.
@@ -421,9 +461,18 @@ impl CodexHome {
             .unwrap_or(false);
         if !same {
             let tmp = self.path.join(format!("{name}.tmp-{}", std::process::id()));
-            std::fs::write(&tmp, text.as_bytes()).map_err(HomeError::Io)?;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            // Копия конфига может нести секреты владельца: 0600 с момента создания.
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
                 .map_err(HomeError::Io)?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(HomeError::Io)?;
+            std::io::Write::write_all(&mut file, text.as_bytes()).map_err(HomeError::Io)?;
+            drop(file);
             std::fs::rename(&tmp, &path).map_err(HomeError::Io)?;
         }
         Ok(())

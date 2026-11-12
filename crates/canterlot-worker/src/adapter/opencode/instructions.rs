@@ -117,19 +117,65 @@ fn strip_jsonc(text: &str) -> String {
 }
 
 /// Конфигурация владельца без `mcp` (D24). Не разобралась - ошибка: целиком копировать нельзя.
+#[cfg(test)]
 fn without_mcp(text: &str) -> io::Result<String> {
+    without_mcp_except(text, &[]).map(|(text, _)| text)
+}
+
+/// Как `without_mcp`, но серверы `allowed` остаются: `mcp.servers.<имя>` (вид 2.x) и
+/// `mcp.<имя>` (вид 1.x). Прочие ключи `mcp` уходят. Возвращает и оставленные имена.
+fn without_mcp_except(text: &str, allowed: &[String]) -> io::Result<(String, Vec<String>)> {
+    use serde_json::Value;
     let invalid = |_| io::Error::new(io::ErrorKind::InvalidData, "owner config");
-    let mut config: serde_json::Value =
-        serde_json::from_str(&strip_jsonc(text)).map_err(invalid)?;
+    let mut config: Value = serde_json::from_str(&strip_jsonc(text)).map_err(invalid)?;
     let object = config
         .as_object_mut()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "owner config"))?;
-    object.remove("mcp");
-    serde_json::to_string(&config).map_err(invalid)
+    let mut owned = match object.remove("mcp") {
+        Some(Value::Object(mcp)) => mcp,
+        _ => serde_json::Map::new(),
+    };
+    let mut servers = match owned.remove("servers") {
+        Some(Value::Object(servers)) => servers,
+        _ => serde_json::Map::new(),
+    };
+    let mut kept_mcp = serde_json::Map::new();
+    let mut kept_servers = serde_json::Map::new();
+    let mut kept = Vec::new();
+    for name in crate::adapter::delegate_mcp_names(allowed) {
+        let mut found = false;
+        if let Some(server @ Value::Object(_)) = servers.remove(&name) {
+            kept_servers.insert(name.clone(), server);
+            found = true;
+        }
+        if name != "servers"
+            && let Some(server @ Value::Object(_)) = owned.remove(&name)
+        {
+            kept_mcp.insert(name.clone(), server);
+            found = true;
+        }
+        if found {
+            kept.push(name);
+        }
+    }
+    if !kept_servers.is_empty() {
+        kept_mcp.insert("servers".into(), Value::Object(kept_servers));
+    }
+    if !kept_mcp.is_empty() {
+        object.insert("mcp".into(), Value::Object(kept_mcp));
+    }
+    let text = serde_json::to_string(&config).map_err(invalid)?;
+    Ok((text, kept))
 }
 
 // Копии лежат настоящими файлами рядом со ссылками; исчезнувший у владельца файл исчезает и тут.
-fn copy_config_without_mcp(dir: &Path, owner: Option<&Path>) -> io::Result<()> {
+// Возвращает разрешённые серверы, оставленные хотя бы в одной копии.
+fn copy_config_without_mcp(
+    dir: &Path,
+    owner: Option<&Path>,
+    allowed: &[String],
+) -> io::Result<Vec<String>> {
+    let mut kept_names: Vec<String> = Vec::new();
     for name in CONFIG_FILES {
         let target = dir.join(name);
         let text = match owner.map(|owner| fs::read_to_string(owner.join(name))) {
@@ -148,15 +194,22 @@ fn copy_config_without_mcp(dir: &Path, owner: Option<&Path>) -> io::Result<()> {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
+        let (copy, kept) = without_mcp_except(&text, allowed)?;
+        // Копия может нести секреты разрешённых серверов: 0600 с момента создания.
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&temporary)?;
-        file.write_all(without_mcp(&text)?.as_bytes())?;
+        file.write_all(copy.as_bytes())?;
         fs::rename(temporary, target)?;
+        for server in kept {
+            if !kept_names.contains(&server) {
+                kept_names.push(server);
+            }
+        }
     }
-    Ok(())
+    Ok(kept_names)
 }
 
 // Подмена целиком: сервер следит за файлом и прочитал бы половину текста.
@@ -190,6 +243,16 @@ async fn blocking<T: Send + 'static>(
         .map_err(io::Error::other)?
 }
 
+/// Итог подготовки каталога: переменные запуска и судьба разрешённых серверов MCP.
+#[derive(Debug, Default)]
+pub struct Prepared {
+    pub env: Vec<(OsString, OsString)>,
+    /// Разрешённые делегату серверы, оставленные в копиях конфигурации.
+    pub mcp_kept: Vec<String>,
+    /// Разрешённые серверы, которых нет в конфигурации владельца.
+    pub mcp_missing: Vec<String>,
+}
+
 /// Готовит каталог и возвращает переменные запуска. Делегированная сессия (`isolate_mcp`)
 /// всегда получает каталог с копией конфигурации без `mcp`, пустой глобальный каталог и
 /// запрет репозиторной конфигурации: серверов владельца и проекта в ней нет.
@@ -199,17 +262,36 @@ pub async fn prepare(
     spec: &InstructionSpec,
     isolate_mcp: bool,
 ) -> io::Result<Vec<(OsString, OsString)>> {
+    prepare_with(exec_dir, owner, spec, isolate_mcp, &[])
+        .await
+        .map(|prepared| prepared.env)
+}
+
+/// `prepare`, у делегированной сессии копии сохраняют серверы `delegate_mcp`.
+pub async fn prepare_with(
+    exec_dir: &Path,
+    owner: Option<PathBuf>,
+    spec: &InstructionSpec,
+    isolate_mcp: bool,
+    delegate_mcp: &[String],
+) -> io::Result<Prepared> {
     if spec.mode == InstructionMode::Owner && !isolate_mcp {
         rewrite(exec_dir, spec).await?;
-        return Ok(Vec::new());
+        return Ok(Prepared::default());
     }
+    let allowed: Vec<String> = if isolate_mcp {
+        crate::adapter::delegate_mcp_names(delegate_mcp)
+    } else {
+        Vec::new()
+    };
+    let wanted = allowed.clone();
     let dir = config_dir(exec_dir);
     let target = dir.clone();
     let xdg = xdg_dir(exec_dir);
     let spec = spec.clone();
     // «Как у владельца» оставляет его `AGENTS.md` ссылкой, остальные режимы подменяют его.
     let owner_text = spec.mode == InstructionMode::Owner;
-    blocking(move || {
+    let mcp_kept = blocking(move || {
         DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -218,21 +300,25 @@ pub async fn prepare(
         if !owner_text {
             skip.push(AGENTS);
         }
+        let mut kept = Vec::new();
         if isolate_mcp {
             skip.extend(CONFIG_FILES);
             DirBuilder::new().recursive(true).mode(0o700).create(&xdg)?;
-            copy_config_without_mcp(&target, owner.as_deref())?;
+            kept = copy_config_without_mcp(&target, owner.as_deref(), &allowed)?;
         }
         if let Some(owner) = &owner {
             link_owner(&target, owner, &skip)?;
         }
-        if owner_text {
-            Ok(())
-        } else {
-            write_text(&target, &spec)
+        if !owner_text {
+            write_text(&target, &spec)?;
         }
+        Ok(kept)
     })
     .await?;
+    let mcp_missing = wanted
+        .into_iter()
+        .filter(|name| !mcp_kept.contains(name))
+        .collect();
     let mut env: Vec<(OsString, OsString)> =
         vec![("OPENCODE_CONFIG_DIR".into(), dir.into_os_string())];
     if !owner_text {
@@ -242,7 +328,11 @@ pub async fn prepare(
         env.push(("XDG_CONFIG_HOME".into(), xdg_dir(exec_dir).into_os_string()));
         env.push(("OPENCODE_DISABLE_PROJECT_CONFIG".into(), "1".into()));
     }
-    Ok(env)
+    Ok(Prepared {
+        env,
+        mcp_kept,
+        mcp_missing,
+    })
 }
 
 /// Смена текста без перезапуска: сервер следит за файлом.
@@ -410,5 +500,128 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    const FAKE_KEY: &str = "ctx7-FAKE-not-a-real-key";
+
+    fn owner_with_context7(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("opencode.json"),
+            serde_json::json!({
+                "theme": "t",
+                "mcp": {
+                    "servers": {
+                        "context7": {"type": "remote", "url": "https://mcp.context7.example/mcp",
+                            "headers": {"Authorization": format!("Bearer {FAKE_KEY}")}},
+                        "nanokvm": {"type": "local", "command": ["/bin/true"]}
+                    },
+                    "other_setting": true
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Вид 1.x: сервер прямо под `mcp`.
+        fs::write(
+            dir.join("opencode.jsonc"),
+            "// owner\n{\"mcp\": {\"legacy7\": {\"type\": \"remote\", \"url\": \"https://x\"}, \"nanokvm\": {\"type\": \"local\"}},}\n",
+        )
+        .unwrap();
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[tokio::test]
+    async fn isolated_prepare_keeps_only_allowed_servers_in_both_shapes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let owner = root.path().join("owner");
+        owner_with_context7(&owner);
+        let exec = root.path().join("exec");
+        let prepared = prepare_with(
+            &exec,
+            Some(owner.clone()),
+            &clean(),
+            true,
+            &names(&["context7", "legacy7", "absent", "canterlot"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.mcp_kept, ["context7", "legacy7"]);
+        assert_eq!(prepared.mcp_missing, ["absent"]);
+        assert!(!format!("{prepared:?}").contains(FAKE_KEY));
+        let dir = config_dir(&exec);
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("opencode.json")).unwrap()).unwrap();
+        assert_eq!(
+            json["mcp"],
+            serde_json::json!({"servers": {"context7": {"type": "remote",
+                "url": "https://mcp.context7.example/mcp",
+                "headers": {"Authorization": format!("Bearer {FAKE_KEY}")}}}})
+        );
+        assert_eq!(json["theme"], "t");
+        let jsonc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
+        assert_eq!(
+            jsonc["mcp"],
+            serde_json::json!({"legacy7": {"type": "remote", "url": "https://x"}})
+        );
+        for name in CONFIG_FILES {
+            let meta = fs::metadata(dir.join(name)).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600, "{name}");
+            assert!(
+                !fs::read_to_string(dir.join(name))
+                    .unwrap()
+                    .contains("nanokvm")
+            );
+        }
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_prepare_with_no_allowed_server_is_exactly_as_before() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = root.path().join("owner");
+        owner_with_context7(&owner);
+        let exec = root.path().join("exec");
+        prepare(&exec, Some(owner.clone()), &clean(), true)
+            .await
+            .unwrap();
+        let dir = config_dir(&exec);
+        let before: Vec<String> = CONFIG_FILES
+            .iter()
+            .map(|name| fs::read_to_string(dir.join(name)).unwrap())
+            .collect();
+        for text in &before {
+            assert!(!text.contains("mcp") && !text.contains(FAKE_KEY), "{text}");
+        }
+        let prepared = prepare_with(&exec, Some(owner), &clean(), true, &[])
+            .await
+            .unwrap();
+        assert!(prepared.mcp_kept.is_empty() && prepared.mcp_missing.is_empty());
+        let after: Vec<String> = CONFIG_FILES
+            .iter()
+            .map(|name| fs::read_to_string(dir.join(name)).unwrap())
+            .collect();
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn owner_started_prepare_ignores_the_allow_list() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = root.path().join("owner");
+        owner_with_context7(&owner);
+        let exec = root.path().join("exec");
+        let prepared = prepare_with(&exec, Some(owner), &clean(), false, &names(&["context7"]))
+            .await
+            .unwrap();
+        assert!(prepared.mcp_kept.is_empty() && prepared.mcp_missing.is_empty());
+        assert!(config_dir(&exec).join("opencode.json").is_symlink());
     }
 }

@@ -603,6 +603,7 @@ mod manager_tests {
                     stop_retry: Duration::from_millis(200),
                     ..Default::default()
                 },
+                delegate_mcp_servers: Vec::new(),
             };
             let thread = StoreThread::new(WorkerStore::open(&root.path().join("store")).unwrap());
             let (sender, relay) = mpsc::channel(64);

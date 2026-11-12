@@ -988,6 +988,7 @@ pub fn registry_with_deadline(
             codex: None,
             opencode: None,
             antigravity: None,
+            delegate_mcp_servers: Vec::new(),
         },
     )
 }
@@ -1001,6 +1002,20 @@ pub struct AdapterContext {
     pub codex: Option<crate::config::CodexConfig>,
     pub opencode: Option<crate::config::OpenCodeConfig>,
     pub antigravity: Option<crate::config::AntigravityConfig>,
+    /// Серверы MCP владельца, разрешённые делегированной сессии рядом с canterlot (D24).
+    /// Antigravity их не получает.
+    pub delegate_mcp_servers: Vec<String>,
+}
+
+/// Разрешённые имена без повторов и без негодных: canterlot владелец не подменит.
+pub(crate) fn delegate_mcp_names(names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        if crate::config::valid_delegate_mcp_name(name) && !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    out
 }
 
 pub fn known_harness(profile: &str) -> bool {
@@ -1026,26 +1041,25 @@ pub fn registry_with(profile: &str, ctx: &AdapterContext) -> Option<Box<dyn Adap
                     ctx.exec_dir.clone(),
                     ctx.transmit_deadline,
                 )
-                .with_ready_deadline(ctx.ready_deadline),
+                .with_ready_deadline(ctx.ready_deadline)
+                .with_delegate_mcp_servers(&ctx.delegate_mcp_servers),
             ) as Box<dyn Adapter>
         });
     }
     if profile == "codex" {
         return ctx.codex.clone().map(|cfg| {
-            Box::new(codex::CodexAdapter::new(
-                cfg,
-                ctx.exec_dir.clone(),
-                ctx.transmit_deadline,
-            )) as Box<dyn Adapter>
+            Box::new(
+                codex::CodexAdapter::new(cfg, ctx.exec_dir.clone(), ctx.transmit_deadline)
+                    .with_delegate_mcp_servers(&ctx.delegate_mcp_servers),
+            ) as Box<dyn Adapter>
         });
     }
     if profile == "opencode" {
         return ctx.opencode.clone().map(|cfg| {
-            Box::new(opencode::OpenCodeAdapter::new(
-                cfg,
-                ctx.exec_dir.clone(),
-                ctx.transmit_deadline,
-            )) as Box<dyn Adapter>
+            Box::new(
+                opencode::OpenCodeAdapter::new(cfg, ctx.exec_dir.clone(), ctx.transmit_deadline)
+                    .with_delegate_mcp_servers(&ctx.delegate_mcp_servers),
+            ) as Box<dyn Adapter>
         });
     }
     if profile == "antigravity" {

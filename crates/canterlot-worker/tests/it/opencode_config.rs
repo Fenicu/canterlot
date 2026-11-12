@@ -42,6 +42,7 @@ fn context(opencode: Option<OpenCodeConfig>) -> AdapterContext {
         codex: None,
         opencode,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     }
 }
 

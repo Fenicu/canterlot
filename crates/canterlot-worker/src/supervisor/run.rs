@@ -1712,6 +1712,7 @@ impl Supervisor {
             codex: self.spec.codex.clone(),
             opencode: self.spec.opencode.clone(),
             antigravity: self.spec.antigravity.clone(),
+            delegate_mcp_servers: self.spec.delegate_mcp_servers.clone(),
         };
         let Some(mut adapter) = registry_with(&start.profile, &context) else {
             self.fail_start("unknown_profile")?;
@@ -3581,6 +3582,7 @@ mod tests {
                 codex: None,
                 opencode: None,
                 antigravity: None,
+                delegate_mcp_servers: Vec::new(),
             },
             exec_dir: dir.path().to_owned(),
             secret: Vec::new(),

@@ -1223,6 +1223,91 @@ async fn isolated_start_goes_on_when_the_list_proves_there_is_only_canterlot() {
     bench.close(CloseMode::Graceful).await;
 }
 
+const FAKE_KEY: &str = "ctx7-FAKE-not-a-real-key";
+
+/// Делегат с `delegate_mcp_servers = ["context7"]`; `owner_has` кладёт сервер владельцу.
+fn delegated(replies: Vec<Reply>, owner_has: bool) -> Bench {
+    let bench = isolated(replies);
+    let owner = bench.fake.dir.path().join("owner-config");
+    std::fs::create_dir_all(&owner).unwrap();
+    let mut servers = json!({"nanokvm": {"type": "local", "command": ["/bin/true"]}});
+    if owner_has {
+        servers["context7"] = json!({"type": "remote", "url": "https://mcp.context7.example/mcp",
+            "headers": {"Authorization": format!("Bearer {FAKE_KEY}")}});
+    }
+    std::fs::write(
+        owner.join("opencode.json"),
+        json!({"mcp": {"servers": servers}}).to_string(),
+    )
+    .unwrap();
+    let ready_wait = Duration::from_millis(300);
+    Bench {
+        adapter: {
+            let mut adapter = bench
+                .adapter
+                .with_delegate_mcp_servers(&["context7".to_owned()]);
+            adapter.set_ready_wait(ready_wait);
+            adapter
+        },
+        ..bench
+    }
+}
+
+fn delegate_list(names: &[&str]) -> Reply {
+    mcp_reply(
+        json!({"data": names.iter().map(|name| json!({"name": name, "status": {"status": "connected"}})).collect::<Vec<_>>()}),
+    )
+}
+
+#[tokio::test]
+async fn delegated_start_accepts_the_allowed_server_and_still_refuses_an_extra_one() {
+    let mut bench = delegated(vec![delegate_list(&["canterlot", "context7"])], true);
+    bench.start_ok().await;
+    let copy =
+        std::fs::read_to_string(bench.exec_dir.join("opencode-config/opencode.json")).unwrap();
+    let copy: Value = serde_json::from_str(&copy).unwrap();
+    let kept: Vec<_> = copy["mcp"]["servers"].as_object().unwrap().keys().collect();
+    assert_eq!(kept, ["context7"]);
+    bench.close(CloseMode::Graceful).await;
+
+    let mut bench = delegated(
+        vec![delegate_list(&["canterlot", "context7", "nanokvm"])],
+        true,
+    );
+    assert_eq!(bench.fail_reason().await, "mcp_isolation_failed");
+
+    // Сервер не попал в копию — значит, он чужой и для проверки.
+    let mut bench = delegated(vec![delegate_list(&["canterlot", "context7"])], false);
+    assert_eq!(bench.fail_reason().await, "mcp_isolation_failed");
+}
+
+#[tokio::test]
+async fn delegated_start_skips_a_missing_allowed_server_with_one_named_diagnostic() {
+    let mut bench = delegated(vec![delegate_list(&["canterlot"])], false);
+    bench.start_ok().await;
+    let mut events = Vec::new();
+    while let Ok(event) =
+        tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event()).await
+    {
+        events.push(event);
+    }
+    let missing: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::Diagnostic {
+                kind: "delegate_mcp_missing",
+                required: false,
+                field_names,
+                ..
+            } => Some(field_names.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(missing, [vec!["context7".to_owned()]], "{events:?}");
+    assert!(!format!("{events:?}").contains("nanokvm"));
+    bench.close(CloseMode::Graceful).await;
+}
+
 #[tokio::test]
 async fn owner_session_still_starts_when_the_server_list_is_refused() {
     let mut script = session_only();
@@ -1580,6 +1665,7 @@ fn registry_builds_the_adapter_from_context_with_supervisor_paths() {
         codex: None,
         opencode: Some(OpenCodeConfig::default()),
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let adapter = registry_with("opencode", &context).unwrap();
     assert!(adapter.capabilities().interrupt_keeps_process);

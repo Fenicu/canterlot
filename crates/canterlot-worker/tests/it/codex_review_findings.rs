@@ -185,6 +185,7 @@ impl Fake {
             }),
             opencode: None,
             antigravity: None,
+            delegate_mcp_servers: Vec::new(),
         };
         let adapter = adapter::registry_with("codex", &context).unwrap();
         let spec = StartSpec {

@@ -80,6 +80,10 @@ pub struct ClaudeCodeAdapter {
     exited: bool,
     start_attempted: bool,
     isolate_mcp: bool,
+    /// `[execution].delegate_mcp_servers`: серверы владельца, разрешённые делегату.
+    delegate_mcp: Vec<String>,
+    /// Разрешённые серверы, которые попали в `mcp.json` этого исполнения.
+    delegate_mcp_written: Vec<String>,
     /// `system/init` делегата назвал чужой сервер MCP: CLI убит, кадры больше не разбираются.
     isolation_broken: bool,
     relay_executable: Option<PathBuf>,
@@ -136,6 +140,8 @@ impl ClaudeCodeAdapter {
             exited: false,
             start_attempted: false,
             isolate_mcp: false,
+            delegate_mcp: Vec::new(),
+            delegate_mcp_written: Vec::new(),
             isolation_broken: false,
             relay_executable: None,
             deferred: None,
@@ -154,6 +160,11 @@ impl ClaudeCodeAdapter {
 
     pub fn with_ready_deadline(mut self, ready_deadline: Duration) -> Self {
         self.ready_deadline = ready_deadline;
+        self
+    }
+
+    pub fn with_delegate_mcp_servers(mut self, names: &[String]) -> Self {
+        self.delegate_mcp = crate::adapter::delegate_mcp_names(names);
         self
     }
 
@@ -183,11 +194,39 @@ impl ClaudeCodeAdapter {
         if let Some(cli) = &self.cli {
             signal_group(cli.pid, process::Signal::Kill);
         }
+        let allowed = std::iter::once("canterlot".to_owned())
+            .chain(self.delegate_mcp_written.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(", ");
         self.error_block(format!(
-            "Запуск остановлен: делегированной сессии доступны чужие серверы MCP ({}), а должен быть только canterlot.",
+            "Запуск остановлен: делегированной сессии доступны чужие серверы MCP ({}), а разрешены только {allowed}.",
             foreign.join(", ")
         ));
         self.diagnostic("mcp_isolation_failed", true);
+    }
+
+    /// Разрешённые серверы владельца для `mcp.json` делегата; сессии владельца и пустой
+    /// список файл владельца не читают. Пропущенное имя — необязательная диагностика.
+    fn delegate_mcp_servers(&mut self, isolate_mcp: bool) -> serde_json::Map<String, Value> {
+        if !isolate_mcp || self.delegate_mcp.is_empty() {
+            return serde_json::Map::new();
+        }
+        let path = process::owner_user_config(&self.cfg);
+        let found = process::read_owner_mcp_servers(path.as_deref(), &self.delegate_mcp);
+        for name in found.missing {
+            tracing::info!(
+                kind = "delegate_mcp_missing",
+                server = %name,
+                "allowed MCP server is absent from the owner's Claude Code config"
+            );
+            self.events.push_back(AdapterEvent::Diagnostic {
+                kind: "delegate_mcp_missing",
+                event_type: "delegate_mcp_missing".into(),
+                required: false,
+                field_names: vec![name],
+            });
+        }
+        found.servers
     }
 
     fn error_block(&mut self, text: String) {
@@ -234,7 +273,8 @@ impl ClaudeCodeAdapter {
                     if value["type"] == "system"
                         && value["subtype"] == "init"
                         && self.isolate_mcp
-                        && let Some(foreign) = foreign_mcp_servers(&value["mcp_servers"])
+                        && let Some(foreign) =
+                            foreign_mcp_servers(&value["mcp_servers"], &self.delegate_mcp_written)
                     {
                         self.refuse_foreign_mcp(&foreign);
                         return;
@@ -1142,13 +1182,18 @@ async fn exited_early(cli: &mut CliProcess) -> bool {
     false
 }
 
-/// Имена серверов MCP из `system/init`, кроме canterlot; `None`, если чужих нет.
-/// Запись без имени тоже чужая: проверить её нельзя.
-fn foreign_mcp_servers(servers: &Value) -> Option<Vec<String>> {
+/// Имена серверов MCP из `system/init`, кроме canterlot и записанных в `mcp.json`
+/// разрешённых; `None`, если чужих нет. Запись без имени тоже чужая: проверить её нельзя.
+fn foreign_mcp_servers(servers: &Value, allowed: &[String]) -> Option<Vec<String>> {
     let foreign: Vec<String> = servers
         .as_array()?
         .iter()
-        .filter(|server| server["name"] != "canterlot")
+        .filter(|server| {
+            server["name"] != "canterlot"
+                && !server["name"]
+                    .as_str()
+                    .is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
+        })
         .map(|server| {
             server["name"]
                 .as_str()
@@ -1338,6 +1383,7 @@ impl Adapter for ClaudeCodeAdapter {
             .native_conversation_id
             .clone()
             .unwrap_or_else(|| Uuid::now_v7().to_string());
+        let delegates = self.delegate_mcp_servers(spec.isolate_mcp);
         // Пресеты инструкций принимает все режимы: текст пишет хаб через StartSpec.
         let launch = LaunchSpec {
             executable: &self.cfg.executable,
@@ -1359,7 +1405,7 @@ impl Adapter for ClaudeCodeAdapter {
         self.instructions = spec.instructions.clone();
         // The exec manager stages a named Task-1 profile before starting the supervisor.
         let broker = Broker::bind(&self.exec_dir).await?;
-        process::write_exec_files(
+        process::write_exec_files_with(
             &launch,
             &self.cfg,
             &self
@@ -1367,8 +1413,11 @@ impl Adapter for ClaudeCodeAdapter {
                 .clone()
                 .unwrap_or(std::env::current_exe()?),
             Some(broker.relay_secret()),
+            &delegates,
         )
         .map_err(|error| AdapterError::StartFailed(error.reason()))?;
+        self.delegate_mcp_written = delegates.keys().cloned().collect();
+        drop(delegates);
         broker.arm();
         self.broker = Some(broker);
         self.queue = Some(InputQueue::new(LaunchSettings {

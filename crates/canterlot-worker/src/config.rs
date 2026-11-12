@@ -47,6 +47,9 @@ pub struct ExecutionConfig {
     /// Предел параллельной сборки для запускаемых сессий; не перекрывает уже заданный `CARGO_BUILD_JOBS`.
     pub build_jobs: u32,
     pub supervisor: SupervisorTimers,
+    /// Серверы MCP владельца, которые делегированная сессия получает рядом с canterlot (D24).
+    /// Только серверы на чтение; пустой список — делегат видит один canterlot.
+    pub delegate_mcp_servers: Vec<String>,
 }
 
 impl Default for ExecutionConfig {
@@ -57,6 +60,7 @@ impl Default for ExecutionConfig {
             spawn_timeout: Duration::from_secs(10),
             build_jobs: 6,
             supervisor: SupervisorTimers::default(),
+            delegate_mcp_servers: Vec::new(),
         }
     }
 }
@@ -149,6 +153,10 @@ pub enum ConfigErrorCategory {
         provider: String,
         pattern: Option<String>,
     },
+    /// Негодное имя в `[execution].delegate_mcp_servers`.
+    DelegateMcpServer {
+        name: String,
+    },
 }
 
 impl ConfigError {
@@ -211,6 +219,11 @@ impl fmt::Display for ConfigError {
                     ),
                 }
             }
+            ConfigErrorCategory::DelegateMcpServer { name } => write!(
+                f,
+                "{}: execution.delegate_mcp_servers has an invalid server name {name:?}",
+                self.path.display()
+            ),
         }
     }
 }
@@ -275,6 +288,17 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
             ConfigErrorCategory::PaidModelPollUnsupported,
         ));
     }
+    if let Some(name) = config
+        .execution
+        .delegate_mcp_servers
+        .iter()
+        .find(|name| !valid_delegate_mcp_name(name))
+    {
+        return Err(ConfigError::new(
+            path,
+            ConfigErrorCategory::DelegateMcpServer { name: name.clone() },
+        ));
+    }
     if let Some(opencode) = &config.opencode {
         for (provider, patterns) in &opencode.provider_models {
             if provider != crate::adapter::opencode::catalog::GO_PROVIDER
@@ -302,6 +326,15 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
         }
     }
     Ok(config)
+}
+
+/// Имя сервера MCP владельца для делегата: непустое, `[A-Za-z0-9_-]`, не `canterlot`.
+pub fn valid_delegate_mcp_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != crate::adapter::canterlot_mcp::SERVER_NAME
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 pub fn read_token(path: &Path) -> Result<String, ConfigError> {
@@ -401,6 +434,9 @@ pub struct ClaudeCodeConfig {
     // claude_md_excludes удалён планом 2c (задача 6): список исключений
     // вычисляется при каждом запуске (owner_instruction_excludes).
     pub allow_paid_model_poll: bool,
+    /// Явный `~/.claude.json` владельца (тесты); иначе путь из окружения.
+    #[serde(skip, default)]
+    pub owner_user_config: Option<PathBuf>,
 }
 
 impl Default for ClaudeCodeConfig {
@@ -408,6 +444,7 @@ impl Default for ClaudeCodeConfig {
         Self {
             executable: PathBuf::from("claude"),
             allow_paid_model_poll: false,
+            owner_user_config: None,
         }
     }
 }
@@ -419,6 +456,19 @@ pub fn claude_config_dir(home: &std::path::Path, config_dir: Option<&std::ffi::O
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
         .unwrap_or_else(|| home.join(".claude"))
+}
+
+/// Пользовательский файл Claude Code с серверами MCP (`~/.claude.json`): в
+/// `CLAUDE_CONFIG_DIR`, если он задан абсолютным путём, иначе в домашнем каталоге.
+pub fn claude_user_config_file(
+    home: &std::path::Path,
+    config_dir: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    config_dir
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home.to_path_buf())
+        .join(".claude.json")
 }
 
 fn default_claude_executable() -> PathBuf {

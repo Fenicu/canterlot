@@ -131,6 +131,241 @@ fn claude_account_connectors_are_switched_off_over_any_inherited_value() {
     assert_eq!(values[0].1, "false");
 }
 
+// --- `[execution].delegate_mcp_servers`: разрешённые делегату серверы владельца. Ключи и
+// значения поддельные; настоящие файлы владельца не открываются. ---
+
+const FAKE_KEY: &str = "ctx7-FAKE-not-a-real-key";
+
+fn worker_toml(extra: &str) -> String {
+    let id = Uuid::now_v7();
+    format!(
+        "hub_url = \"https://hub.example\"\nca_cert = \"/ca\"\ntoken_file = \"/token\"\n\
+         machine_id = \"{id}\"\ninstallation_id = \"{id}\"\nrestore_generation = \"{id}\"\n\
+         data_dir = \"/data\"\n{extra}"
+    )
+}
+
+fn load_worker(extra: &str) -> Result<canterlot_worker::config::WorkerConfig, String> {
+    let td = TempDir::new().unwrap();
+    let path = td.path().join("worker.toml");
+    fs::write(&path, worker_toml(extra)).unwrap();
+    canterlot_worker::config::load(&path).map_err(|error| error.to_string())
+}
+
+#[test]
+fn delegate_mcp_servers_defaults_to_empty_and_takes_valid_names() {
+    let config = load_worker("").unwrap();
+    assert!(config.execution.delegate_mcp_servers.is_empty());
+    let config =
+        load_worker("[execution]\ndelegate_mcp_servers = [\"context7\", \"docs_2-x\"]\n").unwrap();
+    assert_eq!(
+        config.execution.delegate_mcp_servers,
+        ["context7", "docs_2-x"]
+    );
+}
+
+#[test]
+fn delegate_mcp_servers_refuses_bad_names_and_canterlot() {
+    for bad in ["", "canterlot", "a.b", "a b", "ctx/7", "ü"] {
+        let error = load_worker(&format!(
+            "[execution]\ndelegate_mcp_servers = [\"context7\", {bad:?}]\n"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("execution.delegate_mcp_servers"),
+            "{bad:?}: {error}"
+        );
+    }
+    // Таблица остаётся строгой.
+    let error = load_worker("[execution]\ndelegate_mcp = [\"context7\"]\n").unwrap_err();
+    assert!(error.contains("invalid worker configuration"), "{error}");
+}
+
+#[test]
+fn claude_user_config_file_follows_claude_config_dir() {
+    use canterlot_worker::config::claude_user_config_file;
+    let home = Path::new("/home/owner");
+    assert_eq!(
+        claude_user_config_file(home, None),
+        Path::new("/home/owner/.claude.json")
+    );
+    assert_eq!(
+        claude_user_config_file(home, Some(std::ffi::OsStr::new("/cfg/claude"))),
+        Path::new("/cfg/claude/.claude.json")
+    );
+    assert_eq!(
+        claude_user_config_file(home, Some(std::ffi::OsStr::new("relative"))),
+        Path::new("/home/owner/.claude.json")
+    );
+}
+
+/// Поддельный `~/.claude.json`: context7 и nanokvm у пользователя, ещё один сервер только
+/// в проекте, прочие ключи с секретами, которые читать нельзя.
+fn fake_claude_json(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join(".claude.json");
+    fs::write(
+        &path,
+        serde_json::json!({
+            "oauthAccount": {"emailAddress": "owner@example.invalid"},
+            "mcpServers": {
+                "context7": {
+                    "type": "http",
+                    "url": "https://mcp.context7.example/mcp",
+                    "headers": {"Authorization": format!("Bearer {FAKE_KEY}")}
+                },
+                "nanokvm": {"type": "stdio", "command": "/bin/true"}
+            },
+            "projects": {"/w": {"mcpServers": {"projonly": {"type": "stdio", "command": "/bin/true"}}}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path
+}
+
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|name| (*name).to_owned()).collect()
+}
+
+#[test]
+fn claude_reads_only_allowed_user_scope_servers() {
+    use canterlot_worker::adapter::claude_code::process::read_owner_mcp_servers;
+    let td = TempDir::new().unwrap();
+    let path = fake_claude_json(td.path());
+    let found = read_owner_mcp_servers(
+        Some(&path),
+        &names(&["context7", "projonly", "absent", "canterlot"]),
+    );
+    assert_eq!(found.servers.keys().collect::<Vec<_>>(), ["context7"]);
+    assert_eq!(
+        found.servers["context7"]["headers"]["Authorization"],
+        format!("Bearer {FAKE_KEY}")
+    );
+    // Проектный сервер не пользовательский; canterlot владелец не подменяет.
+    assert_eq!(found.missing, ["projonly", "absent"]);
+    let debug = format!("{found:?}");
+    assert!(
+        !debug.contains(FAKE_KEY) && !debug.contains("context7.example"),
+        "{debug}"
+    );
+    // Нет файла или он битый: всё разрешённое пропущено, без ошибки.
+    let none = read_owner_mcp_servers(Some(&td.path().join("nope.json")), &names(&["context7"]));
+    assert!(none.servers.is_empty());
+    assert_eq!(none.missing, ["context7"]);
+    fs::write(td.path().join("broken.json"), "{ broken").unwrap();
+    let broken =
+        read_owner_mcp_servers(Some(&td.path().join("broken.json")), &names(&["context7"]));
+    assert_eq!(broken.missing, ["context7"]);
+    let unset = read_owner_mcp_servers(None, &names(&["context7"]));
+    assert_eq!(unset.missing, ["context7"]);
+}
+
+fn claude_mcp_json(
+    td: &TempDir,
+    delegates: &serde_json::Map<String, serde_json::Value>,
+) -> (std::path::PathBuf, String) {
+    use canterlot_worker::adapter::claude_code::process::write_exec_files_with;
+    let exec_dir = td.path().join("exec");
+    let workdir = td.path().join("work");
+    fs::create_dir_all(&workdir).unwrap();
+    let instructions = instructions(InstructionMode::Clean);
+    let spec = LaunchSpec {
+        executable: Path::new("/usr/bin/claude"),
+        exec_dir: &exec_dir,
+        workdir: &workdir,
+        session: SessionArg::New(Uuid::nil()),
+        model: "haiku",
+        effort: "low",
+        permission_mode: "bypass",
+        instructions: &instructions,
+        isolate_mcp: true,
+    };
+    write_exec_files_with(
+        &spec,
+        &ClaudeCodeConfig::default(),
+        Path::new("/usr/bin/relay"),
+        Some("relay-secret"),
+        delegates,
+    )
+    .unwrap();
+    let path = exec_dir.join("mcp.json");
+    let text = fs::read_to_string(&path).unwrap();
+    (path, text)
+}
+
+#[test]
+fn claude_mcp_config_adds_the_allowed_server_next_to_canterlot_privately() {
+    use canterlot_worker::adapter::claude_code::process::read_owner_mcp_servers;
+    use std::os::unix::fs::PermissionsExt;
+    let td = TempDir::new().unwrap();
+    let owner = fake_claude_json(td.path());
+    let found = read_owner_mcp_servers(Some(&owner), &names(&["context7"]));
+    let (path, text) = claude_mcp_json(&td, &found.servers);
+    let config: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let servers: Vec<_> = config["mcpServers"].as_object().unwrap().keys().collect();
+    assert_eq!(servers, ["canterlot", "context7"]);
+    assert_eq!(config["mcpServers"]["context7"]["type"], "http");
+    assert_eq!(config["mcpServers"]["canterlot"]["type"], "stdio");
+    assert!(!text.contains("nanokvm") && !text.contains("projonly"));
+    assert!(!text.contains("emailAddress"), "nothing else from the file");
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // Прежний файл с широкими правами тоже становится 0600.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    claude_mcp_json(&td, &found.servers);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // Владелец не подменяет canterlot записью со своим именем.
+    let mut spoof = serde_json::Map::new();
+    spoof.insert(
+        "canterlot".into(),
+        serde_json::json!({"type": "http", "url": "x"}),
+    );
+    let (_, text) = claude_mcp_json(&td, &spoof);
+    let config: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(config["mcpServers"]["canterlot"]["type"], "stdio");
+}
+
+#[test]
+fn claude_mcp_config_with_no_allowed_server_is_exactly_as_before() {
+    let td = TempDir::new().unwrap();
+    let (_, with_empty) = claude_mcp_json(&td, &serde_json::Map::new());
+    let exec_dir = td.path().join("exec");
+    let instructions = instructions(InstructionMode::Clean);
+    let workdir = td.path().join("work");
+    let spec = LaunchSpec {
+        executable: Path::new("/usr/bin/claude"),
+        exec_dir: &exec_dir,
+        workdir: &workdir,
+        session: SessionArg::New(Uuid::nil()),
+        model: "haiku",
+        effort: "low",
+        permission_mode: "bypass",
+        instructions: &instructions,
+        isolate_mcp: true,
+    };
+    write_exec_files(
+        &spec,
+        &ClaudeCodeConfig::default(),
+        Path::new("/usr/bin/relay"),
+        Some("relay-secret"),
+    )
+    .unwrap();
+    let plain = fs::read_to_string(exec_dir.join("mcp.json")).unwrap();
+    assert_eq!(with_empty, plain);
+    let expected = serde_json::json!({"mcpServers": {"canterlot": {
+        "type": "stdio",
+        "command": "/usr/bin/relay",
+        "args": ["mcp-relay", "--socket", exec_dir.join("mcp.sock").display().to_string()],
+        "env": {"CANTERLOT_MCP_SECRET": "relay-secret"}
+    }}});
+    assert_eq!(plain, expected.to_string());
+}
+
 // --- Codex: двойник app-server читает CODEX_HOME/config.toml и флаги так, как настоящий, и
 // записывает, какие MCP-серверы он поднял бы при запуске треда. ---
 
@@ -232,6 +467,15 @@ for line in sys.stdin:
 
     impl Fixture {
         fn new(setup: impl FnOnce(&Path)) -> Self {
+            Self::with_delegates(setup, None, &[])
+        }
+
+        /// `owner_config` заменяет конфиг владельца, `allowed` — `delegate_mcp_servers`.
+        fn with_delegates(
+            setup: impl FnOnce(&Path),
+            owner_config: Option<&str>,
+            allowed: &[&str],
+        ) -> Self {
             let dir = TempDir::new().unwrap();
             setup(dir.path());
             let exe = dir.path().join("fake-codex");
@@ -244,6 +488,9 @@ for line in sys.stdin:
                 "model = \"x\"\n\n[mcp_servers.nanokvm]\ncommand = \"/bin/true\"\n\n[mcp_servers.other]\ncommand = \"/bin/true\"\nenabled = true\n",
             )
             .unwrap();
+            if let Some(text) = owner_config {
+                std::fs::write(owner.join("config.toml"), text).unwrap();
+            }
             std::fs::write(owner.join("AGENTS.md"), "owner instructions").unwrap();
             let context = AdapterContext {
                 transmit_deadline: WAIT,
@@ -259,6 +506,7 @@ for line in sys.stdin:
                 }),
                 opencode: None,
                 antigravity: None,
+                delegate_mcp_servers: allowed.iter().map(|name| (*name).to_owned()).collect(),
             };
             let adapter = canterlot_worker::adapter::registry_with("codex", &context).unwrap();
             Self {
@@ -300,6 +548,17 @@ for line in sys.stdin:
                 .lines()
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect()
+        }
+
+        /// Уже готовые события адаптера, не дожидаясь новых.
+        async fn queued(&mut self) -> Vec<AdapterEvent> {
+            let mut events = Vec::new();
+            while let Ok(event) =
+                tokio::time::timeout(Duration::from_millis(200), self.adapter.next_event()).await
+            {
+                events.push(event);
+            }
+            events
         }
 
         fn servers(launch: &serde_json::Value) -> Vec<String> {
@@ -421,5 +680,71 @@ for line in sys.stdin:
         for launch in &launches {
             assert_eq!(Fixture::servers(launch), ["canterlot"], "{launch}");
         }
+    }
+
+    const FAKE_KEY: &str = "ctx7-FAKE-not-a-real-key";
+
+    fn context7_config() -> String {
+        format!(
+            "model = \"x\"\n\n[mcp_servers.nanokvm]\ncommand = \"/bin/true\"\n\n\
+             [mcp_servers.context7]\nurl = \"https://mcp.context7.example/mcp\"\n\n\
+             [mcp_servers.context7.http_headers]\nAuthorization = \"Bearer {FAKE_KEY}\"\n"
+        )
+    }
+
+    fn missing(events: &[AdapterEvent]) -> Vec<Vec<String>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AdapterEvent::Diagnostic {
+                    kind: "delegate_mcp_missing",
+                    required: false,
+                    field_names,
+                    ..
+                } => Some(field_names.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn delegated_session_also_starts_the_allowed_owner_server_and_nothing_else() {
+        for mode in [InstructionMode::Clean, InstructionMode::Owner] {
+            let config = context7_config();
+            let mut f = Fixture::with_delegates(|_| {}, Some(&config), &["context7"]);
+            f.start(mode, true).await.unwrap();
+            let launches = f.launches();
+            assert_eq!(launches.len(), 1, "{mode:?}");
+            assert_eq!(
+                Fixture::servers(&launches[0]),
+                ["canterlot", "context7"],
+                "{mode:?}"
+            );
+            let events = f.queued().await;
+            assert!(missing(&events).is_empty(), "{events:?}");
+            assert!(!format!("{events:?}").contains(FAKE_KEY));
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_started_session_ignores_the_allow_list() {
+        let config = context7_config();
+        let mut f = Fixture::with_delegates(|_| {}, Some(&config), &["context7"]);
+        f.start(InstructionMode::Clean, false).await.unwrap();
+        assert_eq!(
+            Fixture::servers(&f.launches()[0]),
+            ["canterlot", "context7", "nanokvm"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_allowed_server_is_skipped_with_one_named_diagnostic() {
+        let mut f = Fixture::with_delegates(|_| {}, None, &["context7"]);
+        f.start(InstructionMode::Clean, true).await.unwrap();
+        assert_eq!(Fixture::servers(&f.launches()[0]), ["canterlot"]);
+        let events = f.queued().await;
+        assert_eq!(missing(&events), [vec!["context7".to_owned()]]);
+        let debug = format!("{events:?}");
+        assert!(!debug.contains("nanokvm"), "{debug}");
     }
 }

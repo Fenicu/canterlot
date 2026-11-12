@@ -60,6 +60,9 @@ pub struct SupervisorSpec {
     pub opencode: Option<crate::config::OpenCodeConfig>,
     #[serde(default)]
     pub antigravity: Option<crate::config::AntigravityConfig>,
+    /// `[execution].delegate_mcp_servers` воркера: серверы владельца для делегата.
+    #[serde(default)]
+    pub delegate_mcp_servers: Vec<String>,
 }
 
 /// Спека на диске глазами управляющей службы: она может быть записана другим релизом,

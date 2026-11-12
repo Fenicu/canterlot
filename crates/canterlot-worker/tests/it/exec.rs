@@ -203,6 +203,10 @@ impl Env {
     }
 
     async fn with_supervisor_exe(supervisor_exe: PathBuf) -> Env {
+        Self::with_delegates(supervisor_exe, Vec::new()).await
+    }
+
+    async fn with_delegates(supervisor_exe: PathBuf, delegate_mcp_servers: Vec<String>) -> Env {
         let root = TempDir::new().unwrap();
         let work = root.path().join("work");
         fs::create_dir(&work).unwrap();
@@ -216,6 +220,7 @@ impl Env {
                 stop_retry: Duration::from_millis(200),
                 ..Default::default()
             },
+            delegate_mcp_servers,
         };
         let thread = open_store(root.path());
         let (sender, relay) = mpsc::channel(64);
@@ -574,6 +579,32 @@ async fn start_with_configured_adapters_reaches_running() {
     .unwrap();
     assert!(spec.contains("[claude_code]"), "{spec}");
     assert!(spec.contains("[codex]"), "{spec}");
+    assert!(!spec.contains("delegate_mcp_servers"), "{spec}");
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn delegate_mcp_servers_reach_the_supervisor_spec() {
+    let mut env = Env::with_delegates(
+        PathBuf::from(env!("CARGO_BIN_EXE_canterlot-worker")),
+        vec!["context7".to_owned()],
+    )
+    .await;
+    env.hub_session();
+    let start = start_command(env.execution, 1, env.conversation, "synthetic", &env.work);
+    env.send(start).await;
+    // Сопровождение читает спеку строго: дошло до работы — ключ ему знаком.
+    env.wait_running().await;
+    let spec = fs::read_to_string(
+        env.root
+            .path()
+            .join("store/executions")
+            .join(env.execution.to_string())
+            .join("spec.toml"),
+    )
+    .unwrap();
+    let spec: canterlot_worker::supervisor::SupervisorSpec = toml::from_str(&spec).unwrap();
+    assert_eq!(spec.delegate_mcp_servers, ["context7"]);
     env.stop().await;
 }
 

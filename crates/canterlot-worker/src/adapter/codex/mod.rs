@@ -165,6 +165,12 @@ pub struct CodexAdapter {
     codex_home: Option<CodexHome>,
     /// Делегированная сессия: дом без конфига MCP владельца, без приложений и плагинов.
     isolate_mcp: bool,
+    /// `[execution].delegate_mcp_servers`: серверы владельца, разрешённые делегату.
+    delegate_mcp: Vec<String>,
+    /// Разрешённые серверы, оставленные в копии `config.toml` последнего запуска.
+    delegate_mcp_kept: Vec<String>,
+    /// Пропущенные разрешённые серверы, о которых уже сообщено.
+    delegate_mcp_reported: Vec<String>,
     last_noted: Option<u16>,
     turn_items: HashSet<String>,
     started_items: HashMap<String, Value>,
@@ -267,6 +273,9 @@ impl CodexAdapter {
             },
             codex_home: None,
             isolate_mcp: false,
+            delegate_mcp: Vec::new(),
+            delegate_mcp_kept: Vec::new(),
+            delegate_mcp_reported: Vec::new(),
             last_noted: None,
             turn_items: HashSet::new(),
             started_items: HashMap::new(),
@@ -304,6 +313,11 @@ impl CodexAdapter {
 
     pub fn with_relay_executable(mut self, executable: PathBuf) -> Self {
         self.relay_executable = Some(executable);
+        self
+    }
+
+    pub fn with_delegate_mcp_servers(mut self, names: &[String]) -> Self {
+        self.delegate_mcp = crate::adapter::delegate_mcp_names(names);
         self
     }
 
@@ -1054,7 +1068,7 @@ impl CodexAdapter {
             .await
             .ok_or(AdapterError::StartFailed("app_server_failed"))?
             .map_err(|_| AdapterError::StartFailed("app_server_failed"))?;
-        if self.isolate_mcp && !mcp::isolated_config(&config) {
+        if self.isolate_mcp && !mcp::isolated_config(&config, &self.delegate_mcp_kept) {
             return Err(AdapterError::StartFailed("mcp_isolation_failed"));
         }
         self.owner.reread(&config);
@@ -1434,8 +1448,35 @@ impl CodexAdapter {
             home = home.isolated(mode == InstructionMode::Owner);
         }
         let report = home
-            .prepare(mcp::SERVER_INSTRUCTIONS, self.cfg.home_policy)
+            .prepare_with(
+                mcp::SERVER_INSTRUCTIONS,
+                self.cfg.home_policy,
+                if self.isolate_mcp {
+                    &self.delegate_mcp
+                } else {
+                    &[]
+                },
+            )
             .map_err(home_error)?;
+        self.delegate_mcp_kept = report.mcp_kept;
+        for name in report.mcp_missing {
+            // Одно сообщение на имя за исполнение: перезапуск снова готовит дом.
+            if self.delegate_mcp_reported.contains(&name) {
+                continue;
+            }
+            tracing::info!(
+                kind = "delegate_mcp_missing",
+                server = %name,
+                "allowed MCP server is absent from the owner's Codex config"
+            );
+            self.delegate_mcp_reported.push(name.clone());
+            self.events.push_back(AdapterEvent::Diagnostic {
+                kind: "delegate_mcp_missing",
+                event_type: "delegate_mcp_missing".into(),
+                required: false,
+                field_names: vec![name],
+            });
+        }
         // Настоящий файл вместо ссылки перестал следовать за настройками владельца.
         if !report.conflicts.is_empty() {
             self.events.push_back(AdapterEvent::Diagnostic {

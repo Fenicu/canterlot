@@ -703,3 +703,111 @@ fn isolated_owner_home_links_the_owner_instructions_and_has_no_mcp_config() {
     // SQLite и блокировки по-прежнему не ссылаются.
     assert!(!home.path.join("state_5.sqlite").exists());
 }
+
+const FAKE_KEY: &str = "ctx7-FAKE-not-a-real-key";
+
+fn fake_owner_with_context7(owner: &Path) {
+    place_owner(owner);
+    std::fs::write(
+        owner.join("config.toml"),
+        format!(
+            "model = \"x\"\n\n[mcp_servers.nanokvm]\ncommand = \"/bin/true\"\n\n\
+             [mcp_servers.context7]\nurl = \"https://mcp.context7.example/mcp\"\n\
+             startup_timeout_sec = 20\n\n[mcp_servers.context7.http_headers]\n\
+             Authorization = \"Bearer {FAKE_KEY}\"\n\n[projects.\"/w\"]\ntrust_level = \"trusted\"\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn delegates(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+#[test]
+fn isolated_home_keeps_only_the_allowed_server_with_its_sub_tables() {
+    let (_td, owner) = owner_home();
+    fake_owner_with_context7(&owner);
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    for owner_instructions in [false, true] {
+        let home = resolve(&canterlot, &owner).isolated(owner_instructions);
+        let report = home
+            .prepare_with(BLOCK, TempDirPolicy::Allow, &delegates(&["context7"]))
+            .unwrap();
+        assert_eq!(report.mcp_kept, ["context7"]);
+        assert!(report.mcp_missing.is_empty());
+        let config = home.path.join("config.toml");
+        let parsed: toml::Table = std::fs::read_to_string(&config).unwrap().parse().unwrap();
+        let servers = parsed["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.keys().collect::<Vec<_>>(), ["context7"]);
+        assert_eq!(
+            servers["context7"]["http_headers"]["Authorization"].as_str(),
+            Some(format!("Bearer {FAKE_KEY}").as_str())
+        );
+        assert_eq!(
+            servers["context7"]["startup_timeout_sec"].as_integer(),
+            Some(20)
+        );
+        assert_eq!(parsed["model"].as_str(), Some("x"));
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&home.path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // Отчёт для диагностики без значений из файла.
+        let debug = format!("{report:?}");
+        assert!(!debug.contains(FAKE_KEY), "{debug}");
+    }
+}
+
+#[test]
+fn isolated_home_reports_a_missing_allowed_server_by_name() {
+    let (_td, owner) = owner_home();
+    fake_owner_with_nanokvm(&owner);
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    let home = resolve(&canterlot, &owner).isolated(false);
+    let report = home
+        .prepare_with(
+            BLOCK,
+            TempDirPolicy::Allow,
+            &delegates(&["context7", "canterlot"]),
+        )
+        .unwrap();
+    assert!(report.mcp_kept.is_empty());
+    assert_eq!(report.mcp_missing, ["context7"], "canterlot is never taken");
+    let text = std::fs::read_to_string(home.path.join("config.toml")).unwrap();
+    assert!(!text.contains("mcp_servers"), "{text}");
+}
+
+#[test]
+fn isolated_home_with_no_allowed_server_is_exactly_as_before() {
+    let (_td, owner) = owner_home();
+    fake_owner_with_context7(&owner);
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    let home = resolve(&canterlot, &owner).isolated(false);
+    home.prepare(BLOCK, TempDirPolicy::Allow).unwrap();
+    let plain = std::fs::read_to_string(home.path.join("config.toml")).unwrap();
+    assert!(!plain.contains("mcp_servers") && !plain.contains(FAKE_KEY));
+    let report = home.prepare_with(BLOCK, TempDirPolicy::Allow, &[]).unwrap();
+    assert!(report.mcp_kept.is_empty() && report.mcp_missing.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(home.path.join("config.toml")).unwrap(),
+        plain
+    );
+}
+
+#[test]
+fn shared_home_ignores_the_allow_list() {
+    let (_td, owner) = owner_home();
+    fake_owner_with_context7(&owner);
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    let home = resolve(&canterlot, &owner);
+    let report = home
+        .prepare_with(BLOCK, TempDirPolicy::Allow, &delegates(&["context7"]))
+        .unwrap();
+    assert!(canterlot.join("config.toml").is_symlink());
+    assert!(report.mcp_kept.is_empty() && report.mcp_missing.is_empty());
+}

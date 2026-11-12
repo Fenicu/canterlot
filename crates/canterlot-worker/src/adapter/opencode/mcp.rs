@@ -59,13 +59,16 @@ pub fn state_of(list: &Value) -> McpState {
     }
 }
 
-/// Другие включённые серверы в ответе `GET /api/mcp`: делегированная сессия их иметь не должна.
-pub fn has_foreign_server(list: &Value) -> bool {
+/// Другие включённые серверы в ответе `GET /api/mcp`, кроме canterlot и `allowed` (оставленных
+/// в копиях конфигурации): делегированная сессия их иметь не должна.
+pub fn has_foreign_server(list: &Value, allowed: &[String]) -> bool {
     list.get("data")
         .and_then(Value::as_array)
         .is_some_and(|servers| {
             servers.iter().any(|server| {
-                server.get("name").and_then(Value::as_str) != Some(SERVER_NAME)
+                let name = server.get("name").and_then(Value::as_str);
+                name != Some(SERVER_NAME)
+                    && !name.is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
                     && server.pointer("/status/status").and_then(Value::as_str) != Some("disabled")
             })
         })
@@ -111,17 +114,44 @@ mod tests {
         assert!(!lists_own_server(&json!([])));
     }
 
+    fn has_foreign_server_none(list: &Value) -> bool {
+        has_foreign_server(list, &[])
+    }
+
+    #[test]
+    fn a_kept_delegate_server_is_not_foreign_but_anything_else_is() {
+        let list = |entries: &[&str]| json!({"data": entries.iter().map(|name| json!({"name": name, "status": {"status": "connected"}})).collect::<Vec<_>>()});
+        let kept = ["context7".to_owned()];
+        assert!(!has_foreign_server(
+            &list(&["canterlot", "context7"]),
+            &kept
+        ));
+        assert!(has_foreign_server(&list(&["canterlot", "context7"]), &[]));
+        assert!(has_foreign_server(
+            &list(&["canterlot", "context7", "nanokvm"]),
+            &kept
+        ));
+        // Запись без имени проверить нельзя: чужая.
+        assert!(has_foreign_server(
+            &json!({"data": [{"status": {"status": "connected"}}]}),
+            &kept
+        ));
+    }
+
     #[test]
     fn foreign_enabled_servers_are_found_by_name() {
         let list = |entries: &[(&str, &str)]| json!({"data": entries.iter().map(|(name, status)| json!({"name": name, "status": {"status": status}})).collect::<Vec<_>>()});
-        assert!(!has_foreign_server(&list(&[("canterlot", "connected")])));
-        assert!(!has_foreign_server(&json!({"data": []})));
-        assert!(has_foreign_server(&list(&[
+        assert!(!has_foreign_server_none(&list(&[(
+            "canterlot",
+            "connected"
+        )])));
+        assert!(!has_foreign_server_none(&json!({"data": []})));
+        assert!(has_foreign_server_none(&list(&[
             ("canterlot", "connected"),
             ("nanokvm", "pending")
         ])));
-        assert!(has_foreign_server(&list(&[("nanokvm", "failed")])));
-        assert!(!has_foreign_server(&list(&[
+        assert!(has_foreign_server_none(&list(&[("nanokvm", "failed")])));
+        assert!(!has_foreign_server_none(&list(&[
             ("canterlot", "connected"),
             ("nanokvm", "disabled")
         ])));

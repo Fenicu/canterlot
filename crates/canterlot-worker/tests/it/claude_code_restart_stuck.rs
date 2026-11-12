@@ -95,6 +95,7 @@ async fn restart_is_bounded_when_stdout_outlives_the_killed_cli() {
         codex: None,
         opencode: None,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
     let group = TreeContainment::new().unwrap();

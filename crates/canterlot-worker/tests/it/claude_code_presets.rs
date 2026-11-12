@@ -487,6 +487,7 @@ impl RestartHarness {
             codex: None,
             opencode: None,
             antigravity: None,
+            delegate_mcp_servers: Vec::new(),
         };
         let mut adapter =
             canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
@@ -1226,6 +1227,7 @@ for line in sys.stdin:
         codex: None,
         opencode: None,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
     let group = TreeContainment::new().unwrap();
@@ -1312,6 +1314,7 @@ sys.stdout.flush()
         codex: None,
         opencode: None,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
     adapter.set_stop_grace(Duration::from_millis(200));
@@ -1382,6 +1385,7 @@ for line in sys.stdin:
         codex: None,
         opencode: None,
         antigravity: None,
+        delegate_mcp_servers: Vec::new(),
     };
     let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
     let group = TreeContainment::new().unwrap();

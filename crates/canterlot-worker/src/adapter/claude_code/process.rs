@@ -353,35 +353,116 @@ pub fn apply_mcp_isolation(envs: &mut Vec<(OsString, OsString)>) {
     envs.push(("ENABLE_CLAUDEAI_MCP_SERVERS".into(), "false".into()));
 }
 
+/// Серверы MCP владельца, разрешённые делегату, из его пользовательского файла.
+#[derive(Default)]
+pub struct OwnerMcpServers {
+    /// Записи `mcpServers.<имя>` как есть; содержат секреты и никуда, кроме `mcp.json`, не идут.
+    pub servers: serde_json::Map<String, serde_json::Value>,
+    /// Разрешённые имена, которых у владельца нет.
+    pub missing: Vec<String>,
+}
+
+impl std::fmt::Debug for OwnerMcpServers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerMcpServers")
+            .field("servers", &self.servers.keys().collect::<Vec<_>>())
+            .field("missing", &self.missing)
+            .finish()
+    }
+}
+
+/// Пользовательский `~/.claude.json` владельца: явный путь или окружение воркера.
+pub fn owner_user_config(cfg: &ClaudeCodeConfig) -> Option<PathBuf> {
+    if let Some(path) = &cfg.owner_user_config {
+        return Some(path.clone());
+    }
+    let home = std::env::home_dir()?;
+    Some(crate::config::claude_user_config_file(
+        &home,
+        std::env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
+    ))
+}
+
+/// Из файла берутся только записи верхнего `mcpServers` с разрешёнными именами: серверы
+/// проектов и плагинов в него не попадают. Нет файла, не разобрался или нет записи —
+/// имя пропущено.
+pub fn read_owner_mcp_servers(path: Option<&Path>, allowed: &[String]) -> OwnerMcpServers {
+    let mut config = path
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let mut owned = config
+        .as_mut()
+        .and_then(|config| config.get_mut("mcpServers"))
+        .and_then(serde_json::Value::as_object_mut);
+    let mut out = OwnerMcpServers::default();
+    for name in crate::adapter::delegate_mcp_names(allowed) {
+        match owned
+            .as_mut()
+            .and_then(|servers| servers.remove(&name))
+            .filter(serde_json::Value::is_object)
+        {
+            Some(server) => {
+                out.servers.insert(name, server);
+            }
+            None => out.missing.push(name),
+        }
+    }
+    out
+}
+
 /// `relay_secret` — секрет сокета MCP этой сессии: relay получает его в окружении.
 pub fn write_exec_files(
+    spec: &LaunchSpec,
+    cfg: &ClaudeCodeConfig,
+    relay_exe: &Path,
+    relay_secret: Option<&str>,
+) -> Result<(), LaunchError> {
+    write_exec_files_with(spec, cfg, relay_exe, relay_secret, &serde_json::Map::new())
+}
+
+/// Как `write_exec_files`, плюс разрешённые серверы владельца рядом с canterlot.
+pub fn write_exec_files_with(
     spec: &LaunchSpec,
     _cfg: &ClaudeCodeConfig,
     relay_exe: &Path,
     relay_secret: Option<&str>,
+    delegate_servers: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), LaunchError> {
     std::fs::create_dir_all(spec.exec_dir).map_err(LaunchError::Io)?;
     let env: serde_json::Map<String, serde_json::Value> = relay_secret
         .map(|secret| (RELAY_SECRET_ENV.to_owned(), secret.into()))
         .into_iter()
         .collect();
-    let mcp = serde_json::json!({
-        "mcpServers": {
-            "canterlot": {
-                "type": "stdio",
-                "command": relay_exe.display().to_string(),
-                "args": ["mcp-relay", "--socket", spec.exec_dir.join("mcp.sock").display().to_string()],
-                "env": env
-            }
-        }
-    });
-    let mcp_path = spec.exec_dir.join("mcp.json");
-    std::fs::write(&mcp_path, mcp.to_string()).map_err(LaunchError::Io)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&mcp_path, std::fs::Permissions::from_mode(0o600))
+    let mut servers = delegate_servers.clone();
+    servers.remove(SERVER_NAME);
+    servers.insert(
+        SERVER_NAME.to_owned(),
+        serde_json::json!({
+            "type": "stdio",
+            "command": relay_exe.display().to_string(),
+            "args": ["mcp-relay", "--socket", spec.exec_dir.join("mcp.sock").display().to_string()],
+            "env": env
+        }),
+    );
+    let mcp = serde_json::json!({ "mcpServers": servers });
+    write_private(&spec.exec_dir.join("mcp.json"), mcp.to_string().as_bytes())
         .map_err(LaunchError::Io)?;
     write_instructions_file(spec.exec_dir, spec.instructions)?;
     Ok(())
+}
+
+/// Файл с секретами: 0600 с момента создания, права прежнего файла поправляются до записи.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)
 }
 
 pub struct CliProcess {

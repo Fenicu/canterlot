@@ -333,6 +333,7 @@ impl Fixture {
                     stop_retry: Duration::from_millis(300),
                     ..Default::default()
                 },
+                delegate_mcp_servers: Vec::new(),
             },
             opencode,
             antigravity: None,
