@@ -561,6 +561,8 @@ pub struct ProviderView {
     pub weekly_fable: Option<WindowReading>,
     pub reserve_active: bool,
     pub reserve_resets_at: Option<DateTime<Utc>>,
+    /// Публичный статус провайдера: сбой уводит к другому кандидату, но не запрещает.
+    pub status: Option<crate::provider_status::Status>,
 }
 
 /// Кандидат в ответе: пара, вердикт и короткая английская причина.
@@ -687,6 +689,8 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
     })?;
     let mut considered = Vec::with_capacity(task.candidates.len());
     let mut nearest_reset: Option<DateTime<Utc>> = None;
+    // Первый кандидат, прошедший всё, кроме статуса провайдера: выбор, если других нет.
+    let mut outage_fallback: Option<(usize, Decision)> = None;
     for candidate in &task.candidates {
         // 1. Уровень.
         if let Some(level) = request.level.as_deref()
@@ -809,13 +813,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
                 continue;
             }
         }
-        considered.push(Considered {
-            harness: candidate.harness.clone(),
-            model: resolved.id.clone(),
-            verdict: "chosen".to_owned(),
-            reason: String::new(),
-        });
-        return Ok(Decision {
+        let decision = Decision {
             policy_revision: revision,
             task_type: request.task_type.clone(),
             level: request.level.clone(),
@@ -826,7 +824,49 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
             nudge: candidate.nudge.clone().unwrap_or(Value::Bool(false)),
             watchdog_minutes: candidate.watchdog_minutes,
             expected_minutes: task.expected_minutes,
+            considered: Vec::new(),
+        };
+        // 8. Публичный статус провайдера: сбой — к следующему кандидату, остальное — заметка.
+        let status = limits
+            .get(&provider)
+            .and_then(|view| view.status.as_ref())
+            .filter(|status| status.level.is_notable());
+        if let Some(status) = status.filter(|status| status.level.is_outage()) {
+            considered.push(Considered {
+                harness: candidate.harness.clone(),
+                model: resolved.id.clone(),
+                verdict: "provider_outage".to_owned(),
+                reason: format!("provider {}", status.summary()),
+            });
+            if outage_fallback.is_none() {
+                outage_fallback = Some((considered.len() - 1, decision));
+            }
+            continue;
+        }
+        considered.push(Considered {
+            harness: candidate.harness.clone(),
+            model: resolved.id.clone(),
+            verdict: "chosen".to_owned(),
+            reason: status
+                .map(|status| format!("provider {}", status.summary()))
+                .unwrap_or_default(),
+        });
+        return Ok(Decision {
             considered,
+            ..decision
+        });
+    }
+    // Статус только советует: если прошёл лишь кандидат со сбоем провайдера, он и выбран.
+    if let Some((index, decision)) = outage_fallback {
+        let entry = &mut considered[index];
+        entry.verdict = "chosen".to_owned();
+        entry.reason = format!(
+            "{}; chosen anyway: no other candidate available",
+            entry.reason
+        );
+        return Ok(Decision {
+            considered,
+            ..decision
         });
     }
     Err(RouteError::NoExecutor {
@@ -1182,12 +1222,31 @@ pub async fn save_policy(
     Ok(revision)
 }
 
-/// Снимок лимитов провайдеров для маршрута.
+/// Только статус провайдеров: маршрут «Запустить сейчас» лимиты не смотрит, а статус — да.
+pub async fn status_view(
+    conn: &mut PgConnection,
+) -> Result<HashMap<String, ProviderView>, sqlx::Error> {
+    Ok(crate::provider_status::load_all(conn, Utc::now())
+        .await?
+        .into_iter()
+        .map(|(provider, status)| {
+            (
+                provider,
+                ProviderView {
+                    status: Some(status),
+                    ..ProviderView::default()
+                },
+            )
+        })
+        .collect())
+}
+
+/// Снимок лимитов и статуса провайдеров для маршрута.
 pub async fn limits_view(
     conn: &mut PgConnection,
 ) -> Result<HashMap<String, ProviderView>, sqlx::Error> {
-    let current = crate::limits::current(conn).await?;
-    let mut out = HashMap::new();
+    let current = crate::limits::current(&mut *conn).await?;
+    let mut out = status_view(conn).await?;
     for provider in current {
         let window = |state: Option<crate::limits::WindowState>| {
             state.map(|reading| WindowReading {
@@ -1206,6 +1265,7 @@ pub async fn limits_view(
                 weekly_fable: window(provider.weekly_fable),
                 reserve_active: provider.weekly_reserve_active,
                 reserve_resets_at: provider.weekly_reserve_resets_at,
+                status: provider.status,
             },
         );
     }
@@ -1664,6 +1724,139 @@ mod tests {
         assert_eq!(decision.expected_minutes, DEFAULT_EXPECTED_MINUTES);
         assert_eq!(decision.considered.len(), 1);
         assert_eq!(decision.considered[0].verdict, "chosen");
+    }
+
+    fn provider_status(
+        provider: &str,
+        level: crate::provider_status::ProviderStatusLevel,
+    ) -> (String, ProviderView) {
+        (
+            provider.to_owned(),
+            ProviderView {
+                status: Some(crate::provider_status::Status {
+                    provider: provider.to_owned(),
+                    level,
+                    description: "Partial System Outage".to_owned(),
+                    components: vec!["Responses".to_owned()],
+                    incidents: vec![crate::provider_status::ProviderIncident {
+                        name: "Elevated errors".to_owned(),
+                        url: None,
+                    }],
+                    url: "https://status.example".to_owned(),
+                    fetched_at: Some(now()),
+                    changed_at: now(),
+                    stale: false,
+                }),
+                ..ProviderView::default()
+            },
+        )
+    }
+
+    fn route_review(limits: &HashMap<String, ProviderView>, bypass: bool) -> Decision {
+        route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("review"),
+            bypass_limits: bypass,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_provider_outage_skips_to_the_next_candidate() {
+        use crate::provider_status::ProviderStatusLevel::*;
+        for level in [PartialOutage, MajorOutage] {
+            let limits = HashMap::from([provider_status("codex", level)]);
+            for bypass in [false, true] {
+                let decision = route_review(&limits, bypass);
+                assert_eq!(decision.harness, "claude_code", "{level:?}");
+                assert_eq!(decision.considered[0].verdict, "provider_outage");
+                assert!(
+                    decision.considered[0].reason.starts_with(&format!(
+                        "provider {} (Responses) — Elevated errors, since",
+                        level.words()
+                    )),
+                    "{:?}",
+                    decision.considered[0]
+                );
+                assert_eq!(decision.considered[1].verdict, "chosen");
+                assert_eq!(decision.considered[1].reason, "");
+                assert!(!blocked_by_limits(&decision.considered));
+            }
+        }
+    }
+
+    #[test]
+    fn an_outage_everywhere_still_chooses_the_first_candidate() {
+        use crate::provider_status::ProviderStatusLevel::*;
+        let limits = HashMap::from([
+            provider_status("codex", MajorOutage),
+            provider_status("claude", PartialOutage),
+        ]);
+        let decision = route_review(&limits, false);
+        assert_eq!(decision.harness, "codex");
+        assert_eq!(decision.model, "gpt-6.1-sol");
+        assert_eq!(decision.effort, "high");
+        assert_eq!(decision.considered.len(), 2);
+        assert_eq!(decision.considered[0].verdict, "chosen");
+        assert!(
+            decision.considered[0]
+                .reason
+                .ends_with("; chosen anyway: no other candidate available"),
+            "{:?}",
+            decision.considered[0]
+        );
+        assert_eq!(decision.considered[1].verdict, "provider_outage");
+    }
+
+    #[test]
+    fn an_outage_candidate_wins_over_candidates_blocked_by_limits() {
+        use crate::provider_status::ProviderStatusLevel::*;
+        let mut limits = HashMap::from([provider_status("codex", PartialOutage)]);
+        limits.insert(
+            "claude".to_owned(),
+            ProviderView {
+                weekly: Some(reading(99.0, 5)),
+                ..ProviderView::default()
+            },
+        );
+        let decision = route_review(&limits, false);
+        assert_eq!(
+            decision.harness, "codex",
+            "status is advisory, limits are not"
+        );
+        assert_eq!(decision.considered[1].verdict, "limits_over");
+    }
+
+    #[test]
+    fn degraded_and_maintenance_only_add_a_note() {
+        use crate::provider_status::ProviderStatusLevel::*;
+        for level in [Degraded, Maintenance] {
+            let limits = HashMap::from([provider_status("codex", level)]);
+            let decision = route_review(&limits, false);
+            assert_eq!(decision.harness, "codex");
+            assert_eq!(decision.considered.len(), 1);
+            assert_eq!(decision.considered[0].verdict, "chosen");
+            assert!(
+                decision.considered[0]
+                    .reason
+                    .starts_with(&format!("provider {}", level.words())),
+                "{:?}",
+                decision.considered[0]
+            );
+        }
+        for level in [Ok, Unknown] {
+            let limits = HashMap::from([provider_status("codex", level)]);
+            let decision = route_review(&limits, false);
+            assert_eq!(decision.harness, "codex");
+            assert_eq!(decision.considered[0].reason, "", "{level:?}");
+        }
     }
 
     #[test]

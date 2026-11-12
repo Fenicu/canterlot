@@ -682,7 +682,12 @@ pub(crate) async fn validate_routed(
         explicit_mode: args.permission_mode.clone(),
         workdir,
     };
-    let no_limits = std::collections::HashMap::new();
+    // «Запустить сейчас» не смотрит лимиты, но сбой провайдера по-прежнему уводит к другому.
+    let no_limits = if bypass_queue {
+        super::routing::status_view(conn).await?
+    } else {
+        std::collections::HashMap::new()
+    };
     let no_live = std::collections::HashMap::new();
     let mut decision = match super::routing::route(super::routing::RouteInputs {
         policy: &policy,
@@ -1351,6 +1356,7 @@ pub async fn spawn(
         true,
     )
     .await?;
+    let provider_status = provider_warning(&mut tx, &spec.harness, now).await?;
     tx.commit().await?;
     if let Some(dispatcher) = &context.dispatcher {
         dispatcher.trigger(started.session_id);
@@ -1364,6 +1370,9 @@ pub async fn spawn(
     );
     if guard.stale {
         answer["machine_metrics"] = serde_json::json!("stale");
+    }
+    if let Some(warning) = provider_status {
+        answer["provider_status"] = warning;
     }
     if let Some(routing) = spec.routing.as_ref()
         && let Ok(decision) = serde_json::from_value::<super::routing::Decision>(routing.clone())
@@ -1389,6 +1398,13 @@ pub async fn spawn(
                 skipped.harness, skipped.reason
             ));
         }
+        if let Some(chosen) = decision
+            .considered
+            .iter()
+            .find(|entry| entry.verdict == "chosen" && !entry.reason.is_empty())
+        {
+            hint.push_str(&format!(" note {}: {}.", chosen.harness, chosen.reason));
+        }
         answer["hint"] = serde_json::json!(hint);
     }
     if let Some(plan) = &started.plan {
@@ -1397,6 +1413,31 @@ pub async fn spawn(
         answer = with_plan_hint(answer, Some(&note));
     }
     Ok(answer)
+}
+
+/// Предупреждение ответа о статусе провайдера харнесса: запуск не отклоняется,
+/// но модель знает, почему делегат может споткнуться.
+async fn provider_warning(
+    conn: &mut PgConnection,
+    harness: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<Value>, sqlx::Error> {
+    let Some(provider) = canterlot_proto::harness::provider_of(harness) else {
+        return Ok(None);
+    };
+    Ok(crate::provider_status::load(conn, provider, now)
+        .await?
+        .filter(|status| status.level.is_notable())
+        .map(|status| {
+            json!({
+                "provider": provider,
+                "level": status.level,
+                "summary": status.summary(),
+                "description": status.description,
+                "incidents": status.incidents,
+                "url": status.url,
+            })
+        }))
 }
 
 /// Строка о задаче плана в конце подсказки ответа.

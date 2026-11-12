@@ -636,3 +636,139 @@ async fn routing_preview_no_executor_has_structured_details(pool: PgPool) {
         "details.reason stays an ErrorReason enum or absent: {body}"
     );
 }
+
+async fn provider_status(pool: &PgPool, provider: &str, level: &str) {
+    sqlx::query(
+        "insert into provider_status(provider,level,description,components,incidents,url,
+                                     fetched_at,expires_at,checked_at,announced_level,changed_at)
+         values($1,$2,'Partial System Outage','[\"Responses\"]',
+                '[{\"name\":\"Elevated errors\",\"url\":null}]','https://status.openai.com',
+                now(),now()+interval '9 minutes',now(),$2,now())",
+    )
+    .bind(provider)
+    .bind(level)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn route_skips_a_provider_in_outage_and_explains_it(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    provider_status(&f.pool, "codex", "partial_outage").await;
+    let preview = f
+        .call("routing.preview", json!({"task_type": "review"}))
+        .await
+        .unwrap();
+    let considered = preview["decision"]["considered"].as_array().unwrap();
+    assert_eq!(considered[0]["harness"], "codex");
+    assert_eq!(considered[0]["verdict"], "provider_outage", "{preview}");
+    assert!(
+        considered[0]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("provider partial outage (Responses) — Elevated errors, since "),
+        "{preview}"
+    );
+    assert_eq!(preview["decision"]["harness"], "claude_code");
+
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"review"},"brief":"Посмотри дифф"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "started", "{answer}");
+    assert_eq!(answer["routing"]["harness"], "claude_code");
+    let hint = answer["hint"].as_str().unwrap();
+    assert!(
+        hint.contains("skipped codex: provider partial outage (Responses)"),
+        "{hint}"
+    );
+    assert!(answer.get("provider_status").is_none(), "{answer}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn route_chooses_an_outage_provider_when_it_is_the_only_one(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    provider_status(&f.pool, "codex", "major_outage").await;
+    provider_status(&f.pool, "claude", "partial_outage").await;
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"review"},"brief":"Посмотри дифф"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "started", "{answer}");
+    assert_eq!(answer["routing"]["harness"], "codex");
+    let hint = answer["hint"].as_str().unwrap();
+    assert!(
+        hint.contains("chosen anyway: no other candidate available"),
+        "{hint}"
+    );
+    assert_eq!(answer["provider_status"]["provider"], "codex");
+    assert_eq!(answer["provider_status"]["level"], "major_outage");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn explicit_spawn_is_never_refused_for_status_and_carries_a_warning(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    provider_status(&f.pool, "codex", "major_outage").await;
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"harness":"codex","model":"gpt-6.1-sol","brief":"Сделай"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "started", "{answer}");
+    let warning = &answer["provider_status"];
+    assert_eq!(warning["provider"], "codex");
+    assert_eq!(warning["level"], "major_outage");
+    assert_eq!(warning["url"], "https://status.openai.com");
+    assert_eq!(warning["incidents"][0]["name"], "Elevated errors");
+    assert!(
+        warning["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("major outage (Responses) — Elevated errors, since "),
+        "{warning}"
+    );
+
+    // Обычный статус и неизвестный не добавляют предупреждения.
+    sqlx::query("update provider_status set level='ok' where provider='codex'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"harness":"codex","model":"gpt-6.1-sol","brief":"Ещё"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "started", "{answer}");
+    assert!(answer.get("provider_status").is_none(), "{answer}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn degraded_provider_is_chosen_with_a_note(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    provider_status(&f.pool, "codex", "degraded").await;
+    let answer = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"review"},"brief":"Посмотри дифф"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer["routing"]["harness"], "codex", "{answer}");
+    let hint = answer["hint"].as_str().unwrap();
+    assert!(
+        hint.contains("note codex: provider degraded performance (Responses)"),
+        "{hint}"
+    );
+    assert_eq!(answer["provider_status"]["level"], "degraded");
+}
