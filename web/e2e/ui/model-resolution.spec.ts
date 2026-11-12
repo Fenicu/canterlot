@@ -55,9 +55,10 @@ test('session_row_and_header_name_the_concrete_version_behind_the_alias', async 
 	const { hub, id } = await boot(page);
 	await page.goto('/sessions');
 	await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
-	const meta = page.locator(`[data-session="${id}"] .meta`);
-	await expect(meta).toHaveText('Claude Code · Fable 5.2 1M · workstation');
-	await expect(meta).toHaveAttribute('title', 'fable[1m] → claude-fable-5-2');
+	// Строка называет семейство, подсказка — харнесс, версию, машину и псевдоним.
+	const who = page.locator(`[data-session="${id}"] .who`);
+	await expect(who).toHaveText('Fable:');
+	await expect(who).toHaveAttribute('title', 'Claude Code · Fable 5.2 1M · workstation · fable[1m] → claude-fable-5-2');
 
 	await page.goto(`/c/${id}`);
 	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });

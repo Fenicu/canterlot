@@ -53,26 +53,26 @@ async function bootList(page: Page, patch?: (api: FakeHubApi) => void) {
 test('collapsed_strip_counts_down_to_each_shown_reset_and_tints_a_window_that_runs_out_first', async ({ page }) => {
   await bootList(page);
   const strip = page.locator('.limits').first();
-  const claude = strip.locator('.row').nth(0);
-  const five = claude.locator('.meter[data-window="five"] .reset');
-  const week = claude.locator('.meter[data-window="week"] .reset');
-  await expect(five.locator('.reset-short')).toHaveText(/^(59м|1ч)$/);
+  // Свёрнутая полоса — плашка на провайдера: окно, где осталось меньше всего, и отсчёт до его сброса.
+  const plaques = strip.locator('[data-limit-plaques] .plaque');
+  const week = plaques.nth(0).locator('.plaque-reset');
+  const codex = plaques.nth(1).locator('.plaque-reset');
   await expect(week.locator('.reset-short')).toBeVisible();
   // Неделя Claude по прогнозу кончится раньше сброса: отсчёт окрашен, слова — в подсказке и раскрытой полосе.
   await expect(week).toHaveAttribute('data-forecast', 'before');
   await expect(week).toHaveAttribute('title', /кончится через 3 часа, раньше сброса$/);
-  await expect(five).not.toHaveAttribute('data-forecast', /.*/);
-  const tones = await claude.evaluate((row) => ({
-    week: getComputedStyle(row.querySelector('.meter[data-window="week"] .reset')!).color,
-    five: getComputedStyle(row.querySelector('.meter[data-window="five"] .reset')!).color
-  }));
-  expect(tones.week).not.toBe(tones.five);
+  await expect(codex).not.toHaveAttribute('data-forecast', /.*/);
+  const tones = await strip.evaluate((root) => {
+    const [claude, other] = root.querySelectorAll('.plaque-reset');
+    return { week: getComputedStyle(claude!).color, codex: getComputedStyle(other!).color };
+  });
+  expect(tones.week).not.toBe(tones.codex);
   // Чтение вслух: полный отсчёт с верными формами числа и прогноз.
-  await expect(week.locator('.sr-only')).toHaveText(/^сброс через 23 часа 5\d минут(ы|у)?, кончится через 3 часа$/);
+  await expect(week.locator('.sr-only')).toHaveText(/^, сброс через 23 часа 5\d минут(ы|у)?, кончится через 3 часа$/);
   await expect(strip.locator('.forecast:visible')).toHaveCount(0);
-  // Свёрнутая полоса — одна строка на провайдера, без прокрутки вбок.
-  const rows = await strip.locator('.row').evaluateAll((items) => items.map((row) => ({ height: row.getBoundingClientRect().height, line: Number.parseFloat(getComputedStyle(row).lineHeight) })));
-  for (const row of rows) expect(row.height).toBeLessThanOrEqual(row.line * 1.6);
+  // Плашки стоят в один ряд.
+  const tops = await plaques.evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().top)));
+  expect(new Set(tops).size).toBe(1);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, '01-sessions-strip-collapsed', 'список сессий, свёрнутая полоса лимитов: отсчёт до сброса у каждого окна, неделя Claude окрашена прогнозом');
@@ -128,16 +128,19 @@ test('countdown_ticks_with_the_shared_clock_every_minute', async ({ page }) => {
   const claude = api.limits.find((row) => row.provider === 'claude')!;
   // Сброс через 3 минуты 30 секунд, показание свежее на всё время теста.
   claude.five_hour = { ...claude.five_hour!, resets_at: new Date(start + 3 * 60_000 + 30_000).toISOString(), observed_at: new Date(start).toISOString(), forecast: null };
+  // Неделя почти полна: плашка Claude показывает пятичасовое окно.
+  claude.weekly = { ...claude.weekly!, used_permille: 100, observed_at: new Date(start).toISOString(), forecast: null };
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   const strip = page.locator('.limits').first();
+  const plaque = strip.locator('[data-limit-plaques] .plaque').nth(0).locator('.plaque-reset');
   const reset = strip.locator('.row').nth(0).locator('.meter[data-window="five"] .reset');
-  await expect(reset.locator('.reset-short')).toHaveText('3м');
+  await expect(plaque.locator('.reset-short')).toHaveText('3м');
   await page.clock.runFor(60_000);
-  await expect(reset.locator('.reset-short')).toHaveText('2м');
+  await expect(plaque.locator('.reset-short')).toHaveText('2м');
   await page.clock.runFor(2 * 60_000);
-  await expect(reset.locator('.reset-short')).toHaveText('<1м');
+  await expect(plaque.locator('.reset-short')).toHaveText('<1м');
   await strip.locator('summary').click();
   await expect(reset.locator('.sr-only')).toHaveText('сброс меньше чем через минуту');
   // Сброс прошёл: отсчёт исчезает, окно называется устаревшим, а не «сбрасывается» без конца.

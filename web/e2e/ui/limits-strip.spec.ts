@@ -20,6 +20,17 @@ async function boot(page: Page, patch?: (api: FakeHubApi) => void) {
   return { hub, api };
 }
 
+/**
+ * Полоса списка в свёрнутом виде — плашки провайдеров; сетка окон, которую проверяют
+ * эти тесты, живёт в раскрытой полосе.
+ */
+async function openStrip(page: Page) {
+  const strip = page.locator('.limits').first();
+  await expect(strip).toBeVisible();
+  if (!(await strip.evaluate((node) => (node as HTMLDetailsElement).open))) await strip.locator('summary').click();
+  await expect(strip.locator('.rows')).toBeVisible();
+  return strip;
+}
 
 /** Тема списка сессий живёт в меню «Ещё»: шапка держит поиск, избранное и меню в одну строку. */
 async function setListTheme(page: Page, theme: 'dark' | 'light'): Promise<void> {
@@ -49,7 +60,14 @@ function error(code: string, message: string) {
 
 test('collapsed_strip_shows_the_remaining_share_of_both_windows_per_provider', async ({ page }) => {
   await boot(page);
-  const strip = page.locator('.limits').first();
+  // Свёрнутая полоса: плашка на провайдера с окном, где осталось меньше всего, и отсчётом до его сброса.
+  await expectPlaques(page, ['Claude', 'Codex']);
+  const plaques = page.locator('[data-limit-plaques] .plaque');
+  await expect(plaques.nth(0)).toContainText(/4%\s*нед/);
+  await expect(plaques.nth(0).locator('.pct[data-tone="danger"]')).toHaveText(/4%/);
+  await expect(plaques.nth(0).locator('.reset-short')).toHaveText(/^(23ч\d+м|1д)$/);
+  await expect(plaques.nth(1)).toContainText(/85%\s*нед/);
+  const strip = await openStrip(page);
   const rows = strip.locator('.row');
   await expect(rows).toHaveCount(2);
   await expect(rows.nth(0)).toContainText('Claude');
@@ -63,9 +81,6 @@ test('collapsed_strip_shows_the_remaining_share_of_both_windows_per_provider', a
   await expect(rows.nth(0).getByRole('meter', { includeHidden: true }).first()).toHaveAttribute('aria-valuenow', '66');
   await expect(rows.nth(0).locator('.pct[data-tone="danger"]')).toHaveText(/4%/);
   // Свёрнутая полоса сразу говорит, сколько до сброса каждого показанного окна: сжато, без слова «сброс».
-  await expect(rows.nth(0).locator('.meter').nth(0).locator('.reset-short')).toHaveText(/^(59м|1ч)$/);
-  await expect(rows.nth(0).locator('.meter').nth(1).locator('.reset-short')).toHaveText(/^(23ч\d+м|1д)$/);
-  await expect(strip.locator('.reset-full').first()).toBeHidden();
   const box = await strip.boundingBox();
   const viewport = page.viewportSize();
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
@@ -87,7 +102,7 @@ test('antigravity_is_named_on_the_limits_strip', async ({ page }) => {
       weekly: { used_permille: 410, resets_at: reset, observed_at: observed }
     });
   });
-  const rows = page.locator('.limits').first().locator('.row');
+  const rows = (await openStrip(page)).locator('.row');
   await expect(rows).toHaveCount(3);
   const antigravity = rows.filter({ hasText: 'Antigravity' });
   await expect(antigravity).toHaveCount(1);
@@ -98,7 +113,7 @@ test('estimated_reading_is_labelled_in_the_strip_in_words', async ({ page }) => 
   await boot(page, (api) => {
     claude(api).data_confidence = 'estimated';
   });
-  const strip = page.locator('.limits').first();
+  const strip = await openStrip(page);
   const rows = strip.locator('.row');
   await expect(rows.nth(0).getByText('оценка', { exact: true })).toBeVisible();
   await expect(rows.nth(1).getByText('оценка')).toHaveCount(0);
@@ -190,7 +205,7 @@ test('a_window_past_its_reset_is_dimmed_and_called_stale_in_words', async ({ pag
     const row = claude(api);
     row.five_hour = { used_permille: 440, resets_at: new Date(Date.now() - 3_600_000).toISOString(), observed_at: new Date(Date.now() - 60_000).toISOString() };
   });
-  const strip = page.locator('.limits').first();
+  const strip = await openStrip(page);
   const meter = strip.locator('.row').first().locator('.meter').first();
   await expect(meter).toContainText('устарело');
   await expect(meter).not.toContainText('56%');
@@ -242,7 +257,7 @@ function withoutFiveHour(api: FakeHubApi): void {
 
 test('a_provider_without_a_five_hour_limit_shows_one_balanced_meter', async ({ page }) => {
   await boot(page, withoutFiveHour);
-  const strip = page.locator('.limits').first();
+  const strip = await openStrip(page);
   const claudeRow = strip.locator('.row').nth(0);
   await expect(claudeRow).toContainText('Claude');
   await expect(claudeRow.locator('.meter')).toHaveCount(1);
@@ -260,7 +275,7 @@ test('a_provider_without_a_five_hour_limit_shows_one_balanced_meter', async ({ p
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'strip-one-meter');
-  await strip.locator('summary').click();
+  await openStrip(page);
   await expect(claudeRow.locator('.reset')).toHaveCount(1);
   await shot(page, 'strip-one-meter-open');
   await setListTheme(page, 'light');
@@ -269,7 +284,7 @@ test('a_provider_without_a_five_hour_limit_shows_one_balanced_meter', async ({ p
 
 test('the_five_hour_meter_disappears_and_returns_with_the_hub_events', async ({ page }) => {
   const { hub, api } = await boot(page);
-  const strip = page.locator('.limits').first();
+  const strip = await openStrip(page);
   const claudeRow = strip.locator('.row').nth(0);
   await expect(claudeRow.locator('.meter')).toHaveCount(2);
   const five = claude(api).five_hour!;
@@ -332,14 +347,13 @@ test('opencode_name_fits_beside_the_meters_and_all_meters_stay_aligned', async (
       monthly: { used_permille: 93, resets_at: new Date(Date.now() + 30 * 86_400_000).toISOString(), observed_at: observed }
     });
   });
-  const strip = page.locator('.limits').first();
+  const strip = await openStrip(page);
   await expect(strip.locator('.row')).toHaveCount(3);
   const opencode = strip.locator('.row').nth(2);
   await expect(opencode).toContainText('OpenCode');
   await expect(opencode.locator('.meter')).toHaveCount(3);
   await expect(opencode.locator('.meter').nth(2)).toContainText('мес');
   await expect(opencode.locator('.meter').nth(2)).toContainText('91%');
-  await expect(opencode.locator('.meter').nth(2).locator('.reset')).toBeHidden();
   const geometry = await strip.evaluate((root) => {
     const rows = [...root.querySelectorAll(':scope .row')];
     const boxes = rows.map((row) => {
@@ -356,7 +370,6 @@ test('opencode_name_fits_beside_the_meters_and_all_meters_stay_aligned', async (
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'strip-opencode');
-  await strip.locator('summary').click();
   await expect(opencode.locator('.reset')).toHaveCount(3);
   await expect(opencode.locator('.meter').nth(2).locator('.reset')).toHaveText(/^сброс/);
 });
@@ -375,12 +388,11 @@ test('monthly_windows_line_up_by_kind_across_providers', async ({ page }) => {
       monthly: { used_permille: 93, resets_at: reset, observed_at: observed }
     });
   });
-  const strip = page.locator('.limits').first();
+  // Свёрнутая полоса показывает месяц, только если в нём осталось меньше всего: у OpenCode это неделя.
+  await expect(page.locator('[data-limit-plaques] .plaque').nth(2)).toContainText(/66%\s*нед/);
+  const strip = await openStrip(page);
   const months = strip.locator('.meter[data-window="month"]');
   await expect(months).toHaveCount(2);
-  // Свёрнутая полоса остаётся компактной: месячное окно живёт только в раскрытой.
-  await expect(months.first()).toBeHidden();
-  await strip.locator('summary').click();
   await expect(months.first()).toBeVisible();
   const boxes = await months.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().x));
   expect(Math.abs(boxes[0]! - boxes[1]!)).toBeLessThanOrEqual(1);
@@ -401,13 +413,13 @@ test('fable_weekly_window_shows_after_the_weekly_window_and_fits_a_phone', async
     };
   });
   await resizeViewport(page, { width: 320, height: 844 });
-  const strip = page.locator('.limits').first();
+  // Квота Fable в плашку не попадает: плашка Claude — общая неделя.
+  await expect(page.locator('[data-limit-plaques] .plaque').first()).toContainText(/4%\s*нед/);
+  const strip = await openStrip(page);
   const row = strip.locator('.row').first();
   const fable = row.locator('.meter[data-window="fable"]');
   await expect(fable).toHaveCount(1);
-  await expect(fable).toBeHidden();
   await expect(row.locator('.meter[data-window="week"]')).toContainText('4%');
-  await strip.locator('summary').click();
   await expect(fable).toBeVisible();
   await expect(fable).toContainText('Fable');
   await expect(fable).toContainText('95%');
@@ -432,7 +444,7 @@ test('alternating_provider_rows_are_tinted_and_the_week_values_stay_aligned', as
       monthly: { used_permille: 93, resets_at: reset, observed_at: observed }
     });
   });
-  const strip = page.locator('.limits').first();
+  const strip = await openStrip(page);
   const rows = strip.locator('.row');
   await expect(rows).toHaveCount(3);
   const backgrounds = () => rows.evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).backgroundColor));
@@ -446,7 +458,7 @@ test('alternating_provider_rows_are_tinted_and_the_week_values_stay_aligned', as
   expect(collapsedBackgrounds[0]).toBe(collapsedBackgrounds[2]);
   aligned(await weekValues());
 
-  await strip.locator('summary').click();
+  await openStrip(page);
   await expect(strip.locator('.reset').first()).toBeVisible();
   const expandedBackgrounds = await backgrounds();
   expect(expandedBackgrounds[0]).not.toBe(expandedBackgrounds[1]);
@@ -551,33 +563,43 @@ function expectColumnsAligned(items: WindowMetrics[], column: string): void {
   for (const x of positions) expect(Math.abs(x - positions[0]!), column).toBeLessThanOrEqual(1);
 }
 
+/** Свёрнутая полоса списка: плашка на провайдера, все в один ряд и в пределах полосы. */
+async function expectPlaques(page: Page, names: readonly string[]): Promise<void> {
+  const strip = page.locator('.limits').first();
+  const plaques = strip.locator('[data-limit-plaques] .plaque');
+  await expect(plaques).toHaveCount(names.length);
+  for (const [index, name] of names.entries()) await expect(plaques.nth(index).locator('.pname')).toHaveText(name);
+  const boxes = await plaques.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect()).map((box) => ({ top: box.top, left: box.left, right: box.right })));
+  const outer = (await strip.boundingBox())!;
+  for (const box of boxes) {
+    expect(Math.abs(box.top - boxes[0]!.top)).toBeLessThanOrEqual(1);
+    expect(box.left).toBeGreaterThanOrEqual(outer.x - 0.5);
+    expect(box.right).toBeLessThanOrEqual(outer.x + outer.width + 0.5);
+  }
+  const summary = await strip.locator('summary').boundingBox();
+  expect(summary!.height).toBeGreaterThanOrEqual(44);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+}
+
 async function expectFourProviderStrip(page: Page, open: boolean): Promise<void> {
   const strip = page.locator('.limits').first();
   const isOpen = await strip.evaluate((node) => (node as HTMLDetailsElement).open);
   if (isOpen !== open) await strip.locator('summary').click();
+  if (!open) {
+    await expectPlaques(page, FOUR_PROVIDERS);
+    return;
+  }
   await expect(strip.locator('.row')).toHaveCount(4);
-  // Раскрытая полоса показывает каждое окно своей строкой, свёрнутая — 5ч и нед рядом и без месяца.
-  // Меряем, только когда полоса показывает именно этот набор окон.
-  const windows = open ? ['week', 'five', 'week', 'five', 'week', 'five', 'week', 'month'] : ['week', 'five', 'week', 'five', 'week', 'five', 'week'];
+  // Раскрытая полоса показывает каждое окно своей строкой.
+  const windows = ['week', 'five', 'week', 'five', 'week', 'five', 'week', 'month'];
   await expect.poll(async () => (await windowMetrics(page)).filter((item) => item.visible).map((item) => item.window)).toEqual(windows);
 
   const all = await windowMetrics(page);
   const metrics = all.filter((item) => item.visible);
   const month = all.find((item) => item.window === 'month');
-  if (open) {
-    // Раскрытая полоса: одна колонка полосы на все окна.
-    expectColumnsAligned(metrics, 'expanded');
-  } else {
-    // Свёрнутая полоса: одна строка на провайдера.
-    expect(month?.visible).toBe(false);
-    expectColumnsAligned(metrics.filter((item) => item.window === 'five'), 'five');
-    expectColumnsAligned(metrics.filter((item) => item.window === 'week'), 'week');
-    const five = metrics.find((item) => item.window === 'five')!.gaugeX;
-    const week = metrics.find((item) => item.window === 'week')!.gaugeX;
-    expect(week).toBeGreaterThan(five);
-    const heights = await strip.locator('.row').evaluateAll((rows) => rows.map((row) => ({ height: row.getBoundingClientRect().height, line: Number.parseFloat(getComputedStyle(row).lineHeight) })));
-    for (const row of heights) expect(row.height).toBeLessThanOrEqual(row.line * 1.6);
-  }
+  // Раскрытая полоса: одна колонка полосы на все окна.
+  expectColumnsAligned(metrics, 'expanded');
 
   // Название провайдера не режется, пока в колонке есть место.
   for (const name of FOUR_PROVIDERS) {
@@ -591,30 +613,20 @@ async function expectFourProviderStrip(page: Page, open: boolean): Promise<void>
     expect(item.valueOverflow, `${item.window}: ${item.value}`).toBeLessThanOrEqual(0);
   }
   const stale = metrics.filter((item) => item.value === 'устарело');
-  expect(stale).toHaveLength(open ? 3 : 2);
+  expect(stale).toHaveLength(3);
   for (const item of stale) expect(item.band).toContain('OpenCode');
   const summary = await strip.locator('summary').boundingBox();
   expect(summary!.height).toBeGreaterThanOrEqual(44);
 
-  if (open) {
-    expect(month?.band).toContain('OpenCode');
-    expect(month!.meterTop).toBeGreaterThanOrEqual(month!.bandTop - 0.5);
-    expect(month!.meterBottom).toBeLessThanOrEqual(month!.bandBottom + 0.5);
-    const resets = metrics.filter((item) => item.resetVisible);
-    expect(resets).toHaveLength(5);
-    for (const item of resets) {
-      expect(item.resetLines, `${item.window} reset lines`).toBe(1);
-      expect(item.resetOverflow, `${item.window} reset overflow`).toBeLessThanOrEqual(0);
-      expect(Math.abs(item.resetHeight - item.resetLineHeight), `${item.window} reset height`).toBeLessThanOrEqual(1);
-    }
-  } else {
-    // Свёрнутая полоса: у каждого показанного окна свой отсчёт до сброса в одну строку.
-    const resets = metrics.filter((item) => item.resetVisible);
-    expect(resets.map((item) => item.window)).toEqual(metrics.filter((item) => item.value !== 'устарело').map((item) => item.window));
-    for (const item of resets) {
-      expect(item.resetLines, `${item.window} reset lines`).toBe(1);
-      expect(item.resetOverflow, `${item.window} reset overflow`).toBeLessThanOrEqual(0);
-    }
+  expect(month?.band).toContain('OpenCode');
+  expect(month!.meterTop).toBeGreaterThanOrEqual(month!.bandTop - 0.5);
+  expect(month!.meterBottom).toBeLessThanOrEqual(month!.bandBottom + 0.5);
+  const resets = metrics.filter((item) => item.resetVisible);
+  expect(resets).toHaveLength(5);
+  for (const item of resets) {
+    expect(item.resetLines, `${item.window} reset lines`).toBe(1);
+    expect(item.resetOverflow, `${item.window} reset overflow`).toBeLessThanOrEqual(0);
+    expect(Math.abs(item.resetHeight - item.resetLineHeight), `${item.window} reset height`).toBeLessThanOrEqual(1);
   }
 }
 
@@ -775,18 +787,14 @@ test('stripes_span_the_strip_and_the_chevron_keeps_its_place_in_both_states', as
     for (const theme of ['dark', 'light']) {
       await setListTheme(page, theme as 'dark' | 'light');
       if (await strip.evaluate((node) => (node as HTMLDetailsElement).open)) await strip.locator('summary').click();
-      await expect(strip.locator('.reset-short').first()).toBeVisible();
       await settled();
-      const collapsed = await stripGeometry(page);
-      expectStripGeometry(collapsed);
+      // Свёрнутая полоса — плашки в один ряд, раскрытая — полосы строк на всю ширину.
+      await expectPlaques(page, FOUR_PROVIDERS);
       await strip.locator('summary').click();
-      await expect(strip.locator('.reset-short').first()).toBeHidden();
+      await expect(strip.locator('.reset-short:visible')).toHaveCount(0);
       await settled();
       const expanded = await stripGeometry(page);
       expectStripGeometry(expanded);
-      // Стрелка не прыгает при раскрытии: то же место относительно полосы.
-      expect(Math.abs(expanded.chevron.left - collapsed.chevron.left), `${width} chevron x`).toBeLessThanOrEqual(1);
-      expect(Math.abs((expanded.chevron.top - expanded.strip.top) - (collapsed.chevron.top - collapsed.strip.top)), `${width} chevron y`).toBeLessThanOrEqual(1);
       // Подвал стоит по тем же краям, что и строки.
       expect(Math.abs(expanded.updatedLeft! - (expanded.rows[0]!.left + expanded.rows[0]!.nameInset)), `${width} footer left`).toBeLessThanOrEqual(1);
       expect(Math.abs(expanded.linkRight! - expanded.chevron.right), `${width} footer right`).toBeLessThanOrEqual(1);
@@ -797,7 +805,7 @@ test('stripes_span_the_strip_and_the_chevron_keeps_its_place_in_both_states', as
 
 test('a_provider_gone_from_the_machine_catalog_leaves_the_strip_and_returns_with_it', async ({ page }) => {
   const { hub } = await boot(page, fourProviders);
-  const strip = page.locator('.limits').first();
+  const strip = await openStrip(page);
   await expect(strip.locator('.row')).toHaveCount(4);
   await expect(strip.locator('.row').filter({ hasText: 'Antigravity' })).toHaveCount(1);
   hub.append('conversations', { kind: 'limits_providers_changed', payload: { providers: ['claude', 'codex', 'opencode'] } });

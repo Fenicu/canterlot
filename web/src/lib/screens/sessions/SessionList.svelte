@@ -36,6 +36,7 @@
   import { collapsedSet, readCollapsed, readKidsChoice, writeCollapsed, writeKidsChoice } from './collapsed';
   import EmptyState from './EmptyState.svelte';
   import GroupManager from './GroupManager.svelte';
+  import GroupRail from './GroupRail.svelte';
   import GroupTabs from './GroupTabs.svelte';
   import { buildSections, tabCounts, type Tab, type TreeNode } from './grouping';
   import { readTab, resolveTab, writeTab } from './listTab';
@@ -50,7 +51,18 @@
   import { installation } from '#lib/pwa/register.js';
   import { openSearch } from '#lib/search/open.svelte.js';
 
-  let { main = false, create = false }: { main?: boolean; create?: boolean } = $props();
+  let {
+    main = false,
+    create = false,
+    rail = false,
+    section = 'sessions'
+  }: {
+    main?: boolean;
+    create?: boolean;
+    /** Стол: группы в полосе слева вместо чипов, разделы приложения внизу полосы. */
+    rail?: boolean;
+    section?: 'sessions' | 'machines' | 'limits' | 'presets';
+  } = $props();
 
   let runtime = $state<Runtime | null>(null);
   let collapsed = $state<string[]>([]);
@@ -149,6 +161,7 @@
   const rows = $derived(runtime ? [...runtime.list.items.values()] : []);
   const groups = $derived(runtime?.list.groups ?? []);
   const tabs = $derived(runtime ? tabCounts(runtime.list.counts, groups) : []);
+  const groupIcons = $derived(Object.fromEntries(groups.map((group) => [group.id, group.icon])));
   // Ответ поиска живёт дольше строки списка: удалённая сессия не должна в нём оставаться.
   // Поиск показывает и делегированные сессии плоским списком.
   const found = $derived.by((): TreeNode[] | null => {
@@ -364,15 +377,35 @@
   });
 </script>
 
-<svelte:element this={main ? 'main' : 'div'} bind:this={listNode} id={main ? 'main' : undefined} class="list" data-list-ready={ready ? '' : undefined} >
-  <div class="bar" data-top-chrome>
-    <p class="brand">Canterlot</p>
-
-    <IconButton
-      icon="search"
-      label="Поиск"
-      onclick={() => searchOpen = !searchOpen}
+<svelte:element this={main ? 'main' : 'div'} bind:this={listNode} id={main ? 'main' : undefined} class="list" class:railed={rail} data-list-ready={ready ? '' : undefined} >
+  {#if rail}
+    <GroupRail
+      tabs={tabs}
+      current={tab}
+      icons={groupIcons}
+      counted={counted}
+      {section}
+      onselect={(next) => tab = next}
     />
+  {/if}
+  <div class="column">
+  <div class="bar" data-top-chrome>
+    {#if rail && searchOpen}
+      <SearchBar bind:value={query} onreset={resetSearch} inline onclose={() => { resetSearch(); searchOpen = false; }} />
+    {:else if rail}
+      <!-- Стол: поле-кнопка открывает тот же поиск, что значок на телефоне. -->
+      <button type="button" class="search-field" data-search-field onclick={() => searchOpen = true}>
+        <Icon name="search" /><span>Поиск</span>
+      </button>
+    {:else}
+      <p class="brand">Canterlot</p>
+
+      <IconButton
+        icon="search"
+        label="Поиск"
+        onclick={() => searchOpen = !searchOpen}
+      />
+    {/if}
 
     <IconButton icon="bookmark" label="Избранное" onclick={() => void goto(resolve('/bookmarks'))} />
 
@@ -400,7 +433,7 @@
       </div>
     {/if}
   </div>
-  {#if searchOpen}
+  {#if searchOpen && !rail}
     <SearchBar bind:value={query} onreset={resetSearch} />
   {/if}
   {#if runtime}
@@ -409,6 +442,7 @@
       now={now}
       thresholds={limitThresholds}
       prefer={openRow?.harness.provider ?? ''}
+      plaques
     />
     {#if !synced && runtime.list.limits.length === 0}
       <!-- Место полосы лимитов держится до снимка, чтобы строки не съезжали вниз, когда она придёт. -->
@@ -416,16 +450,18 @@
     {/if}
     {#if diskNotice}<p class="disk-notice" data-tone={diskNotice.tone} role="status">{diskNotice.text}</p>{/if}
 
-    <GroupTabs
-      tabs={tabs}
-      current={tab}
-      counted={counted}
-      onselect={(next) => tab = next}
-    />
+    {#if !rail}
+      <GroupTabs
+        tabs={tabs}
+        current={tab}
+        counted={counted}
+        onselect={(next) => tab = next}
+      />
+    {/if}
   {:else}
     <div class="strip-slot" aria-hidden="true"></div>
   {/if}
-  <div class="scroll" data-list-scroll bind:this={scroller} onscroll={remember}>
+  <div class="scroll" data-list-scroll data-fine-targets bind:this={scroller} onscroll={remember}>
     {#if runtime && runtime.machines.items.size === 0 && ready}
       <EmptyState kind="machines" />
     {/if}
@@ -487,6 +523,7 @@
       </button>
     {/if}
   </div>
+  </div>
   {#if sheetItem}
     {#key sheetItem.id}<SessionSheet
       item={sheetItem}
@@ -523,7 +560,15 @@
   .disk-notice[data-tone='danger'] { color: var(--danger); }
   .trash-error { position: fixed; z-index: 6; left: 50%; bottom: calc(var(--target) + var(--s6)); transform: translateX(-50%); margin: 0; color: var(--danger); font-size: var(--fs-sm); }
   .trash-loading { margin: var(--s4) var(--gutter); color: var(--secondary); font-size: var(--fs-sm); }
-  .list { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
+  .list { --list-bg: var(--bg); position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
+  :global([data-pane='list']) .list { --list-bg: var(--chat-bg); }
+  .list.railed { flex-direction: row; }
+  .column { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+  .railed .bar { flex-wrap: nowrap; gap: var(--s2); margin: var(--s6) var(--s6) var(--s3); padding-block: var(--s0); }
+  /* Поле-кнопка поиска на столе: та же капсула, что у открытого поиска. */
+  .search-field { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--s4); min-height: var(--target); padding: var(--s0) var(--s7); border: var(--s0); border-radius: var(--radius-pill); background: var(--surface); color: var(--muted); font-size: var(--fs-body); text-align: start; }
+  .search-field :global(svg) { width: var(--icon-small); height: var(--icon-small); }
+  @media (hover: hover) and (pointer: fine) { .search-field:hover { background: var(--hover); } }
   .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s0); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding-block: var(--s2); }
   .brand { flex: 1 0 auto; margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }
   .create { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: var(--target); min-height: var(--target); border-radius: var(--radius-round); color: var(--accent-link); }

@@ -103,7 +103,7 @@ test.describe('строки инструментов и сессий', () => {
     expect(box.chevron).toBe(1);
   });
 
-  test('session_row_shows_unread_or_time_and_never_lays_them_over_the_meta_line', async ({ page }) => {
+  test('session_row_keeps_time_on_the_title_line_and_unread_on_the_model_line', async ({ page }) => {
     const hub = new FakeHub();
     const api = new FakeHubApi(hub);
     const ids = seedMockupSessions(api);
@@ -111,18 +111,23 @@ test.describe('строки инструментов и сессий', () => {
     await installChatRoutes(page, hub, api, ids.pinned);
     await page.goto('/sessions');
     await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    // Как в чатах: время справа от названия, счётчик непрочитанного справа во второй строке.
     const rows = await page.locator('[data-session]').evaluateAll((nodes) => nodes.map((node) => {
-      const time = node.querySelector('.side time')?.getBoundingClientRect();
-      const meta = node.querySelector('.meta')!.getBoundingClientRect();
+      const time = node.querySelector('.l1 time')!.getBoundingClientRect();
+      const line = node.querySelector('.l2')!.getBoundingClientRect();
       const title = node.querySelector('.title')!.getBoundingClientRect();
-      return { time: time ? { top: time.top, bottom: time.bottom, left: time.left } : null, metaTop: meta.top, titleRight: title.right, unread: node.querySelector('.unread, .count') !== null };
+      const count = node.querySelector('.count')?.getBoundingClientRect();
+      const text = node.querySelector('.activity')!.getBoundingClientRect();
+      return { time: { bottom: time.bottom, left: time.left }, lineTop: line.top, titleRight: title.right, count: count ? { top: count.top, left: count.left } : null, textRight: text.right };
     }));
     expect(rows.length).toBeGreaterThan(3);
+    expect(rows.some((row) => row.count)).toBe(true);
     for (const row of rows) {
-      if (row.unread) expect(row.time).toBeNull();
-      if (row.time) {
-        expect(row.time.bottom).toBeLessThanOrEqual(row.metaTop + 1);
-        expect(row.time.left).toBeGreaterThanOrEqual(row.titleRight - 1);
+      expect(row.time.bottom).toBeLessThanOrEqual(row.lineTop + 1);
+      expect(row.time.left).toBeGreaterThanOrEqual(row.titleRight - 1);
+      if (row.count) {
+        expect(row.count.top).toBeGreaterThanOrEqual(row.lineTop - 1);
+        expect(row.count.left).toBeGreaterThanOrEqual(row.textRight - 1);
       }
     }
   });
@@ -455,20 +460,23 @@ test.describe('лимиты и баннеры', () => {
   test('limits_strip_colours_only_the_low_value_and_keeps_providers_apart', async ({ page }) => {
     await list(page);
     const strip = page.locator('.limits').first();
-    await expect(strip.locator('.row')).toHaveCount(2);
+    // Свёрнутая: плашка на провайдера, красное только у малого остатка.
+    await expect(strip.locator('.plaque')).toHaveCount(2);
     await expect(strip.locator('.pct[data-tone="danger"]')).toHaveText([/4%/]);
     await expect(strip.locator('.pct[data-tone="warning"]')).toHaveCount(0);
-    await expect(strip.locator('.meter')).toHaveCount(4);
     await strip.locator('summary').click();
     await expect(strip).toHaveAttribute('open', '');
+    await expect(strip.locator('.row')).toHaveCount(2);
+    await expect(strip.locator('.meter')).toHaveCount(4);
     const radius = await strip.evaluate((node) => parseFloat(getComputedStyle(node).borderTopLeftRadius));
     expect(radius).toBeLessThan(40);
   });
 
   test('archive_tab_explains_that_it_is_empty', async ({ page }) => {
     await list(page);
-    // Пустой архив не занимает чип, открывается из меню и остаётся выбранным.
-    await expect(page.getByRole('tab', { name: /Архив/ })).toHaveCount(0);
+    // Пустой архив не занимает чип на телефоне, открывается из меню и остаётся выбранным; полоса стола показывает все фильтры.
+    const railed = (await page.locator('[data-group-rail]').count()) > 0;
+    await expect(page.getByRole('tab', { name: /Архив/ })).toHaveCount(railed ? 1 : 0);
     await page.getByRole('button', { name: 'Ещё', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Архив' }).click();
     await expect(page.getByText('В архиве пока пусто')).toBeVisible();

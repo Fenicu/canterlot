@@ -81,3 +81,22 @@ export function providerRank(provider: string, prefer?: string): number {
   if (provider === "codex") return 2;
   return 3;
 }
+
+/** Плашка свёрнутой полосы: одно окно провайдера, у которого остаток меньше всего. */
+export interface LimitPlaque {
+  tag: "5ч" | "нед" | "мес";
+  meter: MeterView;
+}
+
+export function limitPlaque(row: LimitRow): LimitPlaque | null {
+  if (row.empty) return null;
+  const windows: LimitPlaque[] = [
+    ...(row.five.absent ? [] : [{ tag: "5ч" as const, meter: row.five }]),
+    { tag: "нед" as const, meter: row.week },
+    ...(row.month ? [{ tag: "мес" as const, meter: row.month }] : []),
+  ];
+  const live = windows.filter((window) => window.meter.known && !window.meter.stale);
+  if (live.length === 0) return windows.find((window) => window.meter.known) ?? windows[0] ?? null;
+  // При равном остатке важнее длинное окно: его не переждать.
+  return live.reduce((best, window) => (window.meter.fill <= best.meter.fill ? window : best));
+}

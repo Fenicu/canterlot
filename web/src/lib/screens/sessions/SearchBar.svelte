@@ -1,5 +1,17 @@
 <script lang="ts">
-  let { value = $bindable(''), onreset }: { value?: string; onreset: () => void } = $props();
+  let {
+    value = $bindable(''),
+    onreset,
+    inline = false,
+    onclose
+  }: {
+    value?: string;
+    onreset: () => void;
+    /** Поле стоит в верхней строке списка вместо поля-кнопки. */
+    inline?: boolean;
+    /** Escape в пустом поле закрывает поиск. */
+    onclose?: () => void;
+  } = $props();
   let field: HTMLInputElement | undefined = $state();
 
   $effect(() => {
@@ -14,21 +26,26 @@
   function keydown(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
+    if (!value && onclose) {
+      onclose();
+      return;
+    }
     value = '';
     onreset();
   }
 </script>
 
-<div class="search" role="search" data-top-chrome>
+<div class="search" class:inline role="search" data-top-chrome>
   <label>
     <span class="sr-only">Поиск сессий</span>
     <input bind:this={field} bind:value aria-label="Поиск сессий" placeholder="Поиск сессий" onkeydown={keydown} />
   </label>
-  {#if value}<button type="button" onclick={reset}>Сбросить</button>{/if}
+  {#if value}<button type="button" onclick={reset}>Сбросить</button>{:else if onclose}<button type="button" onclick={onclose}>Закрыть</button>{/if}
 </div>
 
 <style>
   .search { display: flex; align-items: center; gap: var(--s2); margin: var(--s3) var(--s6) var(--s4); border-radius: var(--radius-pill); background: var(--raised); }
+  .search.inline { flex: 1; min-width: 0; margin: var(--s0); }
   /* Кольцо фокуса обводит всю капсулу вместе с «Сбросить», а не поле внутри неё. */
   .search:has(input:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
   input:focus-visible { outline: none; }

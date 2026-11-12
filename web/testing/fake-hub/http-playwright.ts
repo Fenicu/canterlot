@@ -1079,8 +1079,8 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
 
   await page.route('**/api/v1/groups', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
-    const body = route.request().postDataJSON() as { name?: string };
-    const group = { id: api.id(), name: body.name ?? 'Группа', position: api.groups.length, created_at: new Date().toISOString() };
+    const body = route.request().postDataJSON() as { name?: string; icon?: string | null };
+    const group = { id: api.id(), name: body.name ?? 'Группа', position: api.groups.length, icon: body.icon ?? null, created_at: new Date().toISOString() };
     api.groups = [...api.groups, group];
     hub.append('conversations', { kind: 'group_changed', payload: { group, groups: api.groups, counts: api.counts } });
     hub.flush();
@@ -1090,8 +1090,9 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
   await page.route('**/api/v1/groups/*', async (route) => {
     const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
     if (route.request().method() === 'PATCH') {
-      const body = route.request().postDataJSON() as { name?: string | null; position?: number | null };
-      api.groups = api.groups.map((group) => group.id === id ? { ...group, name: body.name ?? group.name, position: body.position ?? group.position } : group);
+      const body = route.request().postDataJSON() as { name?: string | null; position?: number | null; icon?: string | null };
+      // Как у хаба: без поля значок прежний, `null` — папка.
+      api.groups = api.groups.map((group) => group.id === id ? { ...group, name: body.name ?? group.name, position: body.position ?? group.position, icon: 'icon' in body ? body.icon ?? null : group.icon } : group);
     } else if (route.request().method() === 'DELETE') {
       api.groups = api.groups.filter((group) => group.id !== id);
       for (const row of api.list.values()) {

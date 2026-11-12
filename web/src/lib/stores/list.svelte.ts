@@ -75,6 +75,8 @@ export interface ListRow {
   working_ms?: number;
   /** Решение маршрута, выбравшее исполнителя; `null` — запуск без маршрута. */
   routing?: unknown;
+  /** Начало последнего ответа агента без разметки; `null` — ответа ещё нет. */
+  preview?: string | null;
 }
 
 export interface GroupCount {
@@ -94,9 +96,18 @@ export type ListFilter = "all" | "pinned" | "archived" | { group: string };
 
 export type PresetSummary = components["schemas"]["PresetSummary"];
 
+export interface ListGroup {
+  id: string;
+  name: string;
+  position: number;
+  /** Значок из набора групп; `null` — папка. */
+  icon?: string | null;
+  created_at: string;
+}
+
 export interface ListSnapshot {
   counts: Counts;
-  groups: { id: string; name: string; position: number; created_at: string }[];
+  groups: ListGroup[];
   items: ListRow[];
   limits: ProviderLimits[];
   truncated: boolean;
@@ -279,6 +290,8 @@ export class ListStore {
       row.effort = event.payload.settings.effort;
       row.permission_mode = event.payload.settings.permission_mode;
       row.crunch = { enabled: event.payload.crunch.enabled };
+      // Старый хаб превью не присылает: тогда остаётся прежнее.
+      if ("preview" in event.payload) row.preview = event.payload.preview ?? null;
       this.items.set(row.id, { ...row });
       return;
     }

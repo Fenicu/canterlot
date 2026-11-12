@@ -101,7 +101,8 @@ test('desktop_strip_recolors_without_reload_after_a_threshold_change', async ({ 
   });
   const strip = page.locator('aside[data-pane="list"] .limits').first();
   await expect(strip).toBeVisible({ timeout: 15_000 });
-  const week = strip.locator('.row').first().locator('.meter[data-window="week"] .pct');
+  // Свёрнутая полоса — плашки: у Claude показана неделя, остаток в ней меньше.
+  const week = strip.locator('[data-limit-plaques] .plaque').first().locator('.pct');
   await expect(week).toHaveAttribute('data-tone', 'normal');
   await expect(week).toHaveText(/25%/);
 

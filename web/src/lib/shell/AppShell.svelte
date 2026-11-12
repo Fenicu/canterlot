@@ -256,7 +256,11 @@
     {/if}
   {:else if laidOut}
     <div class="panes">
-      <aside data-pane="list"><SessionList create /><Nav current={nav} create={false} /></aside>
+      <!-- Стол: группы и разделы в полосе слева, нижней навигации в панели списка нет. -->
+      <aside data-pane="list" data-railed={mode === 'desktop' ? '' : undefined}>
+        <SessionList create rail={mode === 'desktop'} section={nav} />
+        {#if mode !== 'desktop'}<Nav current={nav} create={false} />{/if}
+      </aside>
       <div data-pane="chat">
         {@render banner()}
         {@render children()}
@@ -333,6 +337,11 @@
   [data-pane="list"] {
     width: var(--sidebar-width);
     flex: 0 0 var(--sidebar-width);
+  }
+
+  [data-pane="list"][data-railed] {
+    width: calc(var(--sidebar-width) + var(--rail-width));
+    flex-basis: calc(var(--sidebar-width) + var(--rail-width));
   }
 
   /* Баннер связи лежит в панели чата поверх содержимого, не в потоке. */

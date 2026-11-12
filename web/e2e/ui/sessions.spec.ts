@@ -21,7 +21,8 @@ test('list_matches_the_mockup_fixture_structure', async ({ page }) => {
   await expect(page.getByRole('link', { name: /Восстановление потока/ })).toBeVisible();
   await expect(page.getByRole('link', { name: /Очередь сообщений/ })).toBeVisible();
   await expect(page.getByText('Есть непрочитанное').first()).toBeVisible();
-  await expect(page.getByText('Claude Code · opus-5.5 · workstation').first()).toBeVisible();
+  // Харнесс и машина ушли из строки: их называет подсказка модели во второй строке.
+  await expect(page.locator('.who[title^="Claude Code · opus-5.5 · workstation"]').first()).toBeAttached();
   await expect(page.getByText('Генерирует').first()).toBeVisible();
   await page.getByRole('button', { name: 'Ещё', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Светлая тема' }).click();
@@ -47,7 +48,8 @@ test('group_tabs_are_a_tablist_with_arrow_navigation_and_stay_inside_the_pill', 
   expect(metrics.page).toBeLessThanOrEqual((page.viewportSize()?.width ?? metrics.page) + 1);
 });
 
-test('selected_group_tab_stands_out_in_both_themes', async ({ page }) => {
+test('selected_group_tab_stands_out_in_both_themes', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'на столе группы в полосе: выбор полосы проверяет session-chat-rows');
   await boot(page);
   const selected = page.getByRole('tablist', { name: 'Группы сессий' }).getByRole('tab', { selected: true });
   // Признак выбора — не текст, поэтому ему нужно 3:1 с фоном под ним (WCAG 1.4.11).
@@ -102,11 +104,17 @@ async function bootOwnerFilters(page: Page, egorchik = 2) {
   return { recount, tablist: page.getByRole('tablist', { name: 'Группы сессий' }) };
 }
 
+/** Нажатие мимо меню: на столе — по пустому месту ленты, в стороне от списка. */
+async function outsideList(page: Page, button: 'left' | 'right' = 'left'): Promise<void> {
+  await page.locator('[data-pane="chat"]').click({ button, position: { x: 40, y: 320 } });
+}
+
 const tabNames = (tablist: Locator) => tablist.getByRole('tab').evaluateAll((tabs) => tabs.map((tab) => tab.textContent!.replace(/\s+/g, ' ').trim()));
 
 test('desktop_group_chips_are_compact_and_fit_two_rows', async ({ page, isMobile }) => {
   test.skip(isMobile, 'на телефоне чипы остаются под палец');
-  await page.setViewportSize({ width: 1920, height: 1080 });
+  // Стол шире 74rem держит группы в полосе слева; чипы в панели списка остаются у планшета.
+  await page.setViewportSize({ width: 1100, height: 900 });
   const { tablist } = await bootOwnerFilters(page);
   const boxes = await tablist.getByRole('tab').evaluateAll((tabs) => tabs.map((tab) => tab.getBoundingClientRect()).map((box) => ({ height: box.height, top: Math.round(box.top) })));
   expect(Math.max(...boxes.map((box) => box.height))).toBeLessThan(34);
@@ -114,7 +122,8 @@ test('desktop_group_chips_are_compact_and_fit_two_rows', async ({ page, isMobile
   expect((await tablist.boundingBox())!.height).toBeLessThan(80);
 });
 
-test('empty_filters_hide_but_all_and_the_selected_one_stay', async ({ page }) => {
+test('empty_filters_hide_but_all_and_the_selected_one_stay', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'полоса стола показывает все фильтры: её проверяет session-chat-rows');
   const { tablist, recount } = await bootOwnerFilters(page);
   expect(await tabNames(tablist)).toEqual(['Все 5', 'Canterlot 1', 'Работа 1', 'Егорчик 2', 'Архив 5', 'Корзина 3']);
   // Стрелки ходят только по видимым чипам.
@@ -215,8 +224,9 @@ test('group_manager_create_rename_reorder_delete_keeps_sessions', async ({ page 
   await page.getByRole('menuitem', { name: 'Группы' }).click();
   await page.getByRole('textbox', { name: 'Название группы' }).fill('черновики');
   await page.getByRole('button', { name: 'Создать' }).click();
-  // Пустая группа не занимает чип в полосе, но видна в управлении группами.
-  await expect(page.getByRole('tab', { name: /черновики/ })).toHaveCount(0);
+  // Пустая группа не занимает чип на телефоне, но видна в управлении группами; полоса стола показывает и её.
+  const railed = (await page.locator('[data-group-rail]').count()) > 0;
+  await expect(page.getByRole('tab', { name: /черновики/ })).toHaveCount(railed ? 1 : 0);
   const renamed = page.getByRole('textbox', { name: 'Название черновики' });
   await renamed.fill('заметки');
   await renamed.press('Enter');
@@ -493,11 +503,11 @@ test('session_menu_closes_on_an_outside_click_however_it_was_opened', async ({ p
   const menu = page.getByRole('dialog', { name: 'Сессия' });
   await row.getByRole('link').click({ button: 'right' });
   await expect(menu).toBeVisible();
-  await page.locator('.brand').click();
+  await outsideList(page);
   await expect(menu).toHaveCount(0);
   await row.getByRole('button').click();
   await expect(menu).toBeVisible();
-  await page.locator('.brand').click({ button: 'right' });
+  await outsideList(page, 'right');
   await expect(menu).toHaveCount(0);
   await row.getByRole('button').click();
   await expect(menu).toBeVisible();
@@ -565,7 +575,7 @@ for (const way of ['outside', 'escape'] as const) {
     await field.fill('Новое имя');
     if (way === 'escape') await field.press('Escape');
     else if (isMobile) await page.touchscreen.tap(195, 12);
-    else await page.locator('.brand').click();
+    else await outsideList(page);
     await expect(field).toHaveCount(0);
     await expect(page.getByRole('link', { name: /Новое имя/ })).toBeVisible();
     expect(titles).toEqual(['Новое имя']);
@@ -587,7 +597,7 @@ test('more_menu_of_the_list_closes_outside_and_keeps_its_toggle', async ({ page,
   await boot(page);
   const toggle = page.getByRole('button', { name: 'Ещё', exact: true });
   const menu = page.getByRole('menu', { name: 'Ещё' });
-  const outside = (): Promise<void> => (isMobile ? page.locator('.brand').tap() : page.locator('.brand').click());
+  const outside = (): Promise<void> => (isMobile ? page.locator('.brand').tap() : outsideList(page));
   await toggle.click();
   await expect(menu).toBeVisible();
   await outside();
@@ -665,7 +675,8 @@ test('unread_dot_and_counts_update_from_events', async ({ page }) => {
   });
   hub.flush();
   await expect(page.locator(`[data-session="${ids.plain}"]`)).toContainText('Непрочитанных: 3');
-  await expect(page.locator(`[data-session="${ids.plain}"] .activity`)).toHaveText(/ · \d{2}:\d{2}$/);
+  // Время остаётся справа от названия и при непрочитанном.
+  await expect(page.locator(`[data-session="${ids.plain}"] .l1 time`)).toHaveText(/^\d{2}:\d{2}$/);
   api.counts = { ...api.counts, all: 11 };
   hub.append('conversations', {
     kind: 'conversation_updated',
@@ -741,7 +752,6 @@ test('limits_strip_warns_below_20_remaining_and_shows_the_reserve_variant', asyn
   await page.goto(`/c/${ids.pinned}`);
   const strip = page.locator('[data-pane="list"] .limits summary');
   await expect(strip).toContainText('Claude');
-  await expect(strip.locator('.meter').first()).toContainText('5ч');
   await expect(strip).toContainText('нед');
   await expect(strip).toContainText('4%');
   await expect(strip).toContainText('Codex');

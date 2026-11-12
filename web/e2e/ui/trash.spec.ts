@@ -45,8 +45,9 @@ test('move_to_trash_shows_the_undo_toast_and_returns_the_session', async ({ page
   await page.getByRole('button', { name: 'Вернуть' }).click();
   await expect(page.getByText('Сессия в корзине')).toHaveCount(0);
   await expect(page.locator(`[data-session="${id}"]`)).toBeVisible();
-  // Опустевшая корзина прячет свой чип, пока она не выбрана.
-  await expect(page.getByRole('tab', { name: /Корзина/ })).toHaveCount(0);
+  // Опустевшая корзина прячет свой чип, пока она не выбрана; полоса стола показывает её всегда, без счётчика.
+  const railed = (await page.locator('[data-group-rail]').count()) > 0;
+  await expect(page.getByRole('tab', { name: railed ? /^Корзина 0$/ : /Корзина/ })).toHaveCount(railed ? 1 : 0);
   expect(api.list.get(id)?.trashed_at).toBeNull();
 });
 

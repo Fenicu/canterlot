@@ -942,7 +942,8 @@ test('request_card_does_not_replay_its_entrance_after_returning_to_the_chat', as
   const card = page.locator('.request-cards-slot .card-root');
   await expect(card).toHaveAttribute('data-arrive', '');
   // Уход в список и возврат пересобирают экран чата: карточка уже показана и входит без движения.
-  await page.evaluate(() => (document.querySelector('a[href$="/sessions"], a[href="/"]') as HTMLAnchorElement | null)?.click());
+  // На столе ссылки «Сессии» нет: уходим в другой раздел полосы, это тоже снимает экран чата.
+  await page.evaluate(() => (document.querySelector('a[href$="/sessions"], a[href="/"], [data-group-rail] a[href$="/machines"]') as HTMLAnchorElement | null)?.click());
   await expect(page.locator('.request-cards-slot')).toHaveCount(0);
   await page.locator(`[data-session="${id}"] a`).first().click();
   await expect(page.locator('.request-cards-slot .card-root')).toBeVisible();

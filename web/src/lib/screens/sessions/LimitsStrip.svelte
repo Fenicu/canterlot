@@ -5,7 +5,7 @@
   import Gauge from '#lib/ui/Gauge.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import { LimitsRefresh } from '#lib/stores/limitsRefresh.svelte.js';
-  import { limitStrip } from './limitsText';
+  import { limitPlaque, limitStrip } from './limitsText';
   import { fmt } from '#lib/format/ru.js';
   import { resetPhrase } from '#lib/format/countdown.js';
   import type { LimitThresholds, MeterView, ProviderLimits } from '#lib/stores/limits.js';
@@ -15,14 +15,18 @@
     now,
     thresholds,
     prefer = '',
-    compact = false
+    compact = false,
+    plaques = false
   }: {
     providers: ProviderLimits[];
     now: number;
     thresholds: LimitThresholds;
     prefer?: string;
     compact?: boolean;
+    /** Свёрнутая полоса — плашки провайдеров в один ряд: окно с меньшим остатком и его полоска. */
+    plaques?: boolean;
   } = $props();
+  let open = $state(false);
 
   const view = $derived(limitStrip(providers, now, thresholds, { prefer }));
   const shown = $derived(compact ? view.rows.slice(0, 1) : view.rows);
@@ -69,8 +73,35 @@
 {/snippet}
 
 {#if providers.length > 0}
-  <details class="limits" data-tone={view.tone}>
+  <details class="limits" class:plaqued={plaques} data-tone={view.tone} bind:open>
     <summary>
+      {#if plaques && !open}
+        <span class="plaques" data-limit-plaques>
+          {#each view.rows as row (row.provider)}
+            {@const plaque = limitPlaque(row)}
+            <span class="plaque" data-provider={row.provider}>
+              <span class="plaque-text">
+                <span class="pname">{row.label}</span>
+                {#if plaque}
+                  <b class="pct" data-tone={plaque.meter.tone} class:dim={plaque.meter.stale || !plaque.meter.known}><span class="sr-only">осталось </span>{plaque.meter.text}</b>
+                  <span class="tag">{plaque.tag}</span>
+                  {#if plaque.meter.reset}
+                    <span class="plaque-reset" data-forecast={plaque.meter.forecast?.before ? 'before' : undefined} title={resetTitle(plaque.meter)}>
+                      <span class="sr-only">, {resetPhrase(plaque.meter.resetLong)}{plaque.meter.forecast?.before ? `, ${plaque.meter.forecast.long}` : ''}</span>
+                      <span class="reset-short" aria-hidden="true">{plaque.meter.resetShort}</span>
+                    </span>
+                  {/if}
+                {:else}
+                  <span class="none">нет данных</span>
+                {/if}
+                {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
+              </span>
+              {#if plaque}<span class="bar" aria-hidden="true"><Gauge value={plaque.meter.fill} tone={plaque.meter.tone} dim={plaque.meter.stale || !plaque.meter.known} label="{row.label} {plaque.tag}" /></span>{/if}
+            </span>
+          {/each}
+          <span class="sr-only">Подробнее о лимитах</span>
+        </span>
+      {:else}
       <span class="rows">
         {#each shown as row, index (row.provider)}
           <span class="row">
@@ -96,6 +127,7 @@
           </span>
         {/each}
       </span>
+      {/if}
     </summary>
     <div class="open">
       <div class="status">
@@ -228,6 +260,17 @@
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .limits[open] .chevron { transform: rotate(180deg); }
   .open { padding: var(--s2) var(--s6) var(--s4); }
+  /* Плашки провайдеров в один ряд: имя, остаток, окно и полоска на всю ширину плашки. */
+  .plaques { display: flex; gap: var(--s3); min-width: 0; }
+  .plaque { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: var(--s2); padding: var(--s2) var(--s3) var(--s3); border-radius: var(--radius-sm); background: var(--surface); }
+  .plaque-text { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: var(--s2); min-width: 0; overflow: hidden; color: var(--muted); line-height: var(--lh-tight); }
+  .plaque .pname { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+  .plaque .reset-short { font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .plaque-reset[data-forecast='before'] { color: var(--warning); }
+  .plaque .pct { color: var(--text); }
+  .plaque .pct.dim { color: var(--muted); font-weight: var(--weight-normal); }
+  .plaque .bar { display: flex; --gauge-width: 100%; }
+  .plaques { min-height: var(--target); }
   .status { display: flex; align-items: center; gap: var(--s4); color: var(--secondary); }
   .status a { margin-inline-start: auto; }
   .refresh.pending :global(svg) { animation: spin var(--duration-stage-spin) var(--ease-stage-spin) infinite; }

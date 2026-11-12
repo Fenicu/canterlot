@@ -116,7 +116,9 @@ test('secondary_navigation_matches_phone_and_desktop_mockups', async ({ page }) 
   await expect(page.locator('main').getByRole('heading', { name: 'Настройки' })).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Навигация' })).toHaveCount(0);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await expect(page.locator('[data-pane="list"]').getByRole('navigation', { name: 'Навигация' })).toBeVisible();
+  // Стол: разделы внизу полосы групп, нижней навигации в панели списка нет.
+  await expect(page.locator('[data-pane="list"]').getByRole('navigation', { name: 'Навигация' })).toHaveCount(0);
+  await expect(page.locator('[data-pane="list"]').getByRole('navigation', { name: 'Разделы' })).toBeVisible();
   await page.locator('[data-pane="list"]').getByRole('link', { name: 'Машины', exact: true }).click();
   await expect(page.locator('main').getByRole('heading', { name: 'Машины', exact: true })).toBeVisible();
 });
