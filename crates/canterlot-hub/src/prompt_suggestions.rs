@@ -19,13 +19,24 @@ use crate::{
 
 pub const HARNESS: &str = "claude_code";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema, sqlx::FromRow)]
+#[derive(Clone, PartialEq, Eq, Serialize, ToSchema, sqlx::FromRow)]
 pub struct PromptSuggestionView {
     /// Предсказанное следующее сообщение владельца, не длиннее 2 КиБ.
     pub text: String,
     pub execution_id: Uuid,
     #[serde(with = "crate::model::utc_time")]
     pub created_at: DateTime<Utc>,
+}
+
+/// Текст подсказки — данные владельца: в `Debug` только длина.
+impl std::fmt::Debug for PromptSuggestionView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PromptSuggestionView")
+            .field("text_bytes", &self.text.len())
+            .field("execution_id", &self.execution_id)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

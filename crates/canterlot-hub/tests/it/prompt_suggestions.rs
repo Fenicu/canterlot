@@ -464,3 +464,21 @@ fn events_schema_describes_prompt_suggestion_changed() {
     extra["payload"]["extra"] = json!(1);
     assert!(!validator.is_valid(&extra));
 }
+
+#[test]
+fn suggestion_view_debug_shows_only_the_length() {
+    let marker = "PRIVATE_SUGGESTION_VIEW_MARKER";
+    let view = prompt_suggestions::PromptSuggestionView {
+        text: marker.into(),
+        execution_id: Uuid::now_v7(),
+        created_at: Utc::now(),
+    };
+    let debug = format!("{view:?}");
+    assert!(!debug.contains(marker), "{debug}");
+    assert!(
+        debug.contains(&format!("text_bytes: {}", marker.len())),
+        "{debug}"
+    );
+    let snapshot_field = format!("{:?}", Some(view));
+    assert!(!snapshot_field.contains(marker), "{snapshot_field}");
+}
