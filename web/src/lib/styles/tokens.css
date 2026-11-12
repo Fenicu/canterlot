@@ -1707,6 +1707,6 @@
     --phone-max: calc(480px * var(--ui-scale)); --reading-max: calc(720px * var(--ui-scale)); --index-max: calc(960px * var(--ui-scale));
     --preview-height: calc(204px * var(--ui-scale)); --sheet-context: calc(64px * var(--ui-scale));
     --chart-height: calc(104px * var(--ui-scale)); --gauge-width: calc(112px * var(--ui-scale));
-    --lane-width: calc(410px * var(--ui-scale));
+    --lane-width: calc(410px * var(--ui-scale)); --rail-width: calc(78px * var(--ui-scale));
   }
 }
