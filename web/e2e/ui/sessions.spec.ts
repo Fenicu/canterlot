@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions, type MockupSessions } from '../../testing/fixtures/mockup-sessions';
@@ -64,7 +64,8 @@ test('phone_tabs_fade_only_the_edge_with_more_tabs_and_keep_the_selected_tab_cle
   const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
   await expect(tablist).toHaveAttribute('data-fade-end', '');
   await expect(tablist).not.toHaveAttribute('data-fade-start', '');
-  await tablist.getByRole('tab', { name: /Архив/ }).click();
+  // Пустые «Архив» и «Корзина» скрыты, последний видимый чип — bookshelf.
+  await tablist.getByRole('tab').last().click();
   await expect(tablist).toHaveAttribute('data-fade-start', '');
   await expect(tablist).not.toHaveAttribute('data-fade-end', '');
   // Выбранная вкладка целиком вне гаснущей полосы.
@@ -82,6 +83,65 @@ test('tabs_of_the_desktop_list_stay_compact_and_left_aligned', async ({ page, is
   expect(Math.max(...boxes.map((box) => box.width))).toBeLessThan(220);
   const list = await page.locator('[data-pane="list"]').boundingBox();
   expect(boxes[0]!.width).toBeLessThan((list?.width ?? 0) / 2);
+});
+
+// Фильтры владельца: пустые «Закреплённые» и «Личные проекты» не показываются.
+async function bootOwnerFilters(page: Page, egorchik = 2) {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  seedMockupSessions(api);
+  const ids = [api.id(), api.id(), api.id(), api.id()];
+  api.groups = ['Canterlot', 'Работа', 'Егорчик', 'Личные проекты'].map((name, position) => ({ id: ids[position]!, name, position, created_at: '2026-10-28T12:00:00.000Z' }));
+  const recount = (count: number) => {
+    api.counts = { all: 5, pinned: 0, archived: 5, trashed: 3, groups: [{ id: ids[0]!, count: 1 }, { id: ids[1]!, count: 1 }, { id: ids[2]!, count }] };
+  };
+  recount(egorchik);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto('/sessions');
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  return { recount, tablist: page.getByRole('tablist', { name: 'Группы сессий' }) };
+}
+
+const tabNames = (tablist: Locator) => tablist.getByRole('tab').evaluateAll((tabs) => tabs.map((tab) => tab.textContent!.replace(/\s+/g, ' ').trim()));
+
+test('desktop_group_chips_are_compact_and_fit_two_rows', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'на телефоне чипы остаются под палец');
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  const { tablist } = await bootOwnerFilters(page);
+  const boxes = await tablist.getByRole('tab').evaluateAll((tabs) => tabs.map((tab) => tab.getBoundingClientRect()).map((box) => ({ height: box.height, top: Math.round(box.top) })));
+  expect(Math.max(...boxes.map((box) => box.height))).toBeLessThan(34);
+  expect(new Set(boxes.map((box) => box.top)).size).toBeLessThanOrEqual(2);
+  expect((await tablist.boundingBox())!.height).toBeLessThan(80);
+});
+
+test('empty_filters_hide_but_all_and_the_selected_one_stay', async ({ page }) => {
+  const { tablist, recount } = await bootOwnerFilters(page);
+  expect(await tabNames(tablist)).toEqual(['Все 5', 'Canterlot 1', 'Работа 1', 'Егорчик 2', 'Архив 5', 'Корзина 3']);
+  // Стрелки ходят только по видимым чипам.
+  const all = tablist.getByRole('tab', { name: /Все/ });
+  await all.focus();
+  await all.press('ArrowRight');
+  await expect(tablist.getByRole('tab', { name: /Canterlot/ })).toHaveAttribute('aria-selected', 'true');
+  await tablist.getByRole('tab', { name: /Canterlot/ }).press('ArrowLeft');
+  await tablist.getByRole('tab', { name: /Все/ }).press('ArrowLeft');
+  await expect(tablist.getByRole('tab', { name: /Корзина/ })).toHaveAttribute('aria-selected', 'true');
+
+  await tablist.getByRole('tab', { name: /Егорчик/ }).click();
+  recount(0);
+  await page.reload();
+  await expect(page.locator('[data-list-ready]')).toBeVisible();
+  await expect(tablist.getByRole('tab', { name: /Егорчик 0/ })).toHaveAttribute('aria-selected', 'true');
+  await tablist.getByRole('tab', { name: /Все/ }).click();
+  await expect(tablist.getByRole('tab', { name: /Егорчик/ })).toHaveCount(0);
+});
+
+test('phone_group_chips_keep_the_touch_target_in_one_scrolling_row', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'проверка пальцевой полосы');
+  const { tablist } = await bootOwnerFilters(page);
+  const boxes = await tablist.getByRole('tab').evaluateAll((tabs) => tabs.map((tab) => tab.getBoundingClientRect()).map((box) => ({ height: box.height, top: Math.round(box.top) })));
+  expect(Math.min(...boxes.map((box) => box.height))).toBeGreaterThanOrEqual(44);
+  expect(new Set(boxes.map((box) => box.top)).size).toBe(1);
+  expect(await tablist.evaluate((node) => getComputedStyle(node).overflowX)).toBe('auto');
 });
 
 test('sections_collapse_and_remember_state', async ({ page }) => {
@@ -155,11 +215,12 @@ test('group_manager_create_rename_reorder_delete_keeps_sessions', async ({ page 
   await page.getByRole('menuitem', { name: 'Группы' }).click();
   await page.getByRole('textbox', { name: 'Название группы' }).fill('черновики');
   await page.getByRole('button', { name: 'Создать' }).click();
-  await expect(page.getByRole('tab', { name: /черновики/ })).toBeVisible();
+  // Пустая группа не занимает чип в полосе, но видна в управлении группами.
+  await expect(page.getByRole('tab', { name: /черновики/ })).toHaveCount(0);
   const renamed = page.getByRole('textbox', { name: 'Название черновики' });
   await renamed.fill('заметки');
   await renamed.press('Enter');
-  await expect(page.getByRole('tab', { name: /заметки/ })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Название заметки' })).toBeVisible();
   await page.getByRole('button', { name: 'Выше' }).last().click();
   await page.getByRole('button', { name: 'Удалить' }).last().click();
   await expect(page.getByText('Сессии останутся в списке')).toBeVisible();

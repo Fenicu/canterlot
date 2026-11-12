@@ -71,7 +71,7 @@ test('group_create_shows_proxy_outage_and_a_double_tap_sends_once', async ({ pag
   await expect(page.getByRole('alert').filter({ hasText: 'Хаб недоступен, повторяю' })).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Сессия истекла' })).toBeHidden();
   await doubleTap(page, 'Создать');
-  await expect(page.getByRole('tab', { name: /черновики/ })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Название черновики' })).toBeVisible();
   expect(keys).toHaveLength(2);
   // Повтор после обрыва идёт тем же ключом: хаб не заведёт вторую группу.
   expect(keys[1]).toBe(keys[0]);

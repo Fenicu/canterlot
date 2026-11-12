@@ -45,7 +45,8 @@ test('move_to_trash_shows_the_undo_toast_and_returns_the_session', async ({ page
   await page.getByRole('button', { name: 'Вернуть' }).click();
   await expect(page.getByText('Сессия в корзине')).toHaveCount(0);
   await expect(page.locator(`[data-session="${id}"]`)).toBeVisible();
-  await expect(page.getByRole('tab', { name: /Корзина 0/ })).toBeVisible();
+  // Опустевшая корзина прячет свой чип, пока она не выбрана.
+  await expect(page.getByRole('tab', { name: /Корзина/ })).toHaveCount(0);
   expect(api.list.get(id)?.trashed_at).toBeNull();
 });
 

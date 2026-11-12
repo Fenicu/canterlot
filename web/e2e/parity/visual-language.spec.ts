@@ -232,7 +232,10 @@ for (const screen of SCREENS) {
           if (interactive && !el.closest('.sr-only, [hidden], [inert]') && !(el instanceof HTMLAnchorElement && el.closest('p, li, span, label, td') && el.parentElement?.tagName !== 'NAV')) {
             const holder = el instanceof HTMLInputElement && ['checkbox', 'radio'].includes(el.type) ? (el.closest('label') ?? el) : el;
             const rect = holder.getBoundingClientRect();
-            if (rect.width < target - 0.5 || rect.height < target - 0.5) note(`interactive target >= --target (${target}px)`, el, `${Math.round(rect.width)}x${Math.round(rect.height)} «${(el.textContent ?? '').trim().slice(0, 30)}»`);
+            // Под точным указателем помеченным плотным спискам хватает минимума WCAG 2.5.8 (24px).
+            const fine = el.closest('[data-fine-targets]') && matchMedia('(pointer: fine)').matches;
+            const need = fine ? 24 : target;
+            if (rect.width < need - 0.5 || rect.height < need - 0.5) note(`interactive target >= ${fine ? '24px (pointer: fine)' : `--target (${target}px)`}`, el, `${Math.round(rect.width)}x${Math.round(rect.height)} «${(el.textContent ?? '').trim().slice(0, 30)}»`);
           }
           if ([...el.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && (node.textContent ?? '').trim() !== '')) {
             if (!colorSet(el).has(style.color)) note('text colour must be a token', el, style.color);

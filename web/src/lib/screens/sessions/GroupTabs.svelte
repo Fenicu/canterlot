@@ -19,6 +19,9 @@
     return a.kind !== 'group' || b.kind !== 'group' || a.id === b.id;
   }
 
+  // Пустой фильтр не занимает места; «Все» и выбранный видны всегда, до снимка счёт неизвестен.
+  const shown = $derived(tabs.filter((item) => !counted || item.tab.kind === 'all' || item.count > 0 || same(item.tab, current)));
+
   let strip = $state<HTMLElement | null>(null);
   let fadeStart = $state(false);
   let fadeEnd = $state(false);
@@ -33,7 +36,7 @@
   // Выбранная вкладка не прячется под гаснущим краем.
   $effect(() => {
     void current;
-    void tabs.map((item) => item.label + item.count).join();
+    void shown.map((item) => item.label + item.count).join();
     const node = strip;
     if (!node) return;
     const tab = node.querySelector<HTMLElement>('[aria-selected="true"]');
@@ -56,14 +59,14 @@
     const back = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
     if (!forward && !back) return;
     event.preventDefault();
-    const index = tabs.findIndex((item) => same(item.tab, current));
-    const next = tabs[(index + (forward ? 1 : -1) + tabs.length) % tabs.length];
+    const index = shown.findIndex((item) => same(item.tab, current));
+    const next = shown[(index + (forward ? 1 : -1) + shown.length) % shown.length];
     if (next) onselect(next.tab);
   }
 </script>
 
-<div bind:this={strip} class="tabs" data-top-chrome data-fade-start={fadeStart ? '' : undefined} data-fade-end={fadeEnd ? '' : undefined} role="tablist" aria-label="Группы сессий" tabindex="-1" onkeydown={move} onscroll={measure}>
-  {#each tabs as item, index (item.label + index)}
+<div bind:this={strip} class="tabs" data-top-chrome data-fine-targets data-fade-start={fadeStart ? '' : undefined} data-fade-end={fadeEnd ? '' : undefined} role="tablist" aria-label="Группы сессий" tabindex="-1" onkeydown={move} onscroll={measure}>
+  {#each shown as item, index (item.label + index)}
     <button
       type="button"
       role="tab"
@@ -108,4 +111,10 @@
   button[aria-selected='true'] .count { background: var(--accent-ink); color: var(--accent); }
   :global([data-pane='list']) .tabs { flex-wrap: wrap; overflow-x: visible; }
   :global([data-pane='list']) button { flex: 0 1 auto; min-width: 0; max-width: 100%; padding-inline: var(--s4); overflow-wrap: anywhere; white-space: normal; }
+  /* Точный указатель не нуждается в пальцевой мишени: чипы мелкие и плотные. */
+  @media (pointer: fine) {
+    .tabs { gap: var(--s3); margin-block: var(--s2); padding-block: var(--s1); }
+    button { flex: 0 0 auto; min-height: var(--s11); padding: var(--s1) var(--s5); }
+    :global([data-pane='list']) button { padding-inline: var(--s5); }
+  }
 </style>

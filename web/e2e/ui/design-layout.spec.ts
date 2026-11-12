@@ -467,8 +467,12 @@ test.describe('лимиты и баннеры', () => {
 
   test('archive_tab_explains_that_it_is_empty', async ({ page }) => {
     await list(page);
-    await page.getByRole('tab', { name: /Архив/ }).click();
+    // Пустой архив не занимает чип, открывается из меню и остаётся выбранным.
+    await expect(page.getByRole('tab', { name: /Архив/ })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Ещё', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Архив' }).click();
     await expect(page.getByText('В архиве пока пусто')).toBeVisible();
+    await expect(page.getByRole('tab', { name: /Архив 0/ })).toHaveAttribute('aria-selected', 'true');
   });
 
 });
