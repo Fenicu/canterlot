@@ -383,6 +383,37 @@ fn auth_section_defaults_to_the_first_origin_and_validates_rp_id() {
 }
 
 #[test]
+fn geoip_path_defaults_under_the_config_dir_and_is_the_only_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    let load = |extra: &str| {
+        fs::write(&path, format!("{PILOT_BASE}{extra}")).unwrap();
+        HubConfig::load(&path)
+    };
+    assert_eq!(
+        load("").unwrap().auth.geoip.path,
+        dir.path().join("data/geoip/dbip-city-lite.mmdb")
+    );
+    assert_eq!(
+        load("[auth.geoip]\npath = 'geo/city.mmdb'\n")
+            .unwrap()
+            .auth
+            .geoip
+            .path,
+        dir.path().join("geo/city.mmdb")
+    );
+    assert_eq!(
+        load("[auth.geoip]\npath = '/srv/geo.mmdb'\n")
+            .unwrap()
+            .auth
+            .geoip
+            .path,
+        std::path::PathBuf::from("/srv/geo.mmdb")
+    );
+    assert!(load("[auth.geoip]\nurl = 'https://example.com'\n").is_err());
+}
+
+#[test]
 fn relative_blob_dir_resolves_against_the_config_dir() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hub.toml");

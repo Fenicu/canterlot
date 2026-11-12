@@ -122,6 +122,8 @@ pub struct AppState {
     pub user_header: HeaderName,
     pub auth: Arc<AuthConfig>,
     pub passwords: crate::owner_auth::password::Passwords,
+    /// Место по IP из `[auth.geoip].path`; файл перечитывается при смене.
+    pub geo: Arc<crate::owner_auth::geo::Geo>,
     pub ws_tasks: tokio_util::task::TaskTracker,
     #[cfg(feature = "fault-injection")]
     pub ws_faults: crate::fault_injection::Faults,
@@ -155,6 +157,7 @@ impl AppState {
             blobs: deps.blobs,
             manifest: Arc::new(deps.manifest),
             user_header,
+            geo: Arc::new(crate::owner_auth::geo::Geo::open(&deps.auth.geoip.path)),
             auth: Arc::new(deps.auth),
             passwords: deps.passwords,
             ws_tasks: tokio_util::task::TaskTracker::new(),

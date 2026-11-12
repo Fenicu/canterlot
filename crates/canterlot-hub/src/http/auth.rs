@@ -432,7 +432,7 @@ async fn gate_session(
             error.into_response()
         };
     };
-    let live = match sessions::authenticate(&state.pool, &token, client.ip).await {
+    let live = match sessions::authenticate(&state.pool, &token, client.ip, &state.geo).await {
         // Владелец один: личность берётся из записи установки, сеанс лишь доказывает её.
         Ok(Lookup::Live(live)) => live,
         Ok(Lookup::Unknown) => {

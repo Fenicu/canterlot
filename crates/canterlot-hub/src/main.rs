@@ -38,6 +38,11 @@ enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// База мест по IP (DB-IP City Lite).
+    Geoip {
+        #[command(subcommand)]
+        command: GeoipCommand,
+    },
     /// Печатает документ OpenAPI (содержимое docs/api/openapi.json) без конфига и базы.
     Openapi,
 }
@@ -65,6 +70,15 @@ enum MachineCommand {
         config: ConfigArgs,
         #[arg(long)]
         machine_id: Uuid,
+    },
+}
+
+#[derive(Subcommand)]
+enum GeoipCommand {
+    /// Скачать свежую базу в `[auth.geoip].path`; при ошибке прежний файл остаётся.
+    Update {
+        #[command(flatten)]
+        config: ConfigArgs,
     },
 }
 
@@ -134,8 +148,24 @@ async fn run(args: Args) -> Result<(), String> {
             | AuthCommand::Sessions { config }
             | AuthCommand::RevokeAll { config } => config,
         },
+        Command::Geoip {
+            command: GeoipCommand::Update { config },
+        } => config,
     };
     let config = HubConfig::load(&config.config).map_err(|error| error.to_string())?;
+    if let Command::Geoip {
+        command: GeoipCommand::Update { .. },
+    } = &args.command
+    {
+        let name = canterlot_hub::owner_auth::geo::update(
+            &config.auth.geoip.path,
+            canterlot_hub::owner_auth::geo::DBIP_BASE_URL,
+            chrono::Utc::now().date_naive(),
+        )
+        .await?;
+        return writeln!(std::io::stdout().lock(), "updated {name}")
+            .map_err(|_| "output_error".to_owned());
+    }
     let database_url = fs::read_to_string(&config.database_url_file)
         .map_err(|_| "database_url_file_error".to_owned())?;
     let database_url = database_url.trim();
@@ -188,6 +218,7 @@ async fn run(args: Args) -> Result<(), String> {
             serve(pool.clone(), config, installation).await?;
         }
         Command::Openapi => unreachable!("handled before the config is loaded"),
+        Command::Geoip { .. } => unreachable!("handled before the database is opened"),
         Command::Auth { command } => {
             use canterlot_hub::owner_auth::cli;
             let installation = installation::check(&pool, &config.manifest)

@@ -509,7 +509,7 @@ async fn auth_sessions_list_rename_and_order(pool: PgPool) {
     assert!(list["fresh_until"].is_string());
     let current = &list["sessions"][0];
     assert_eq!(current["current"], true);
-    assert_eq!(current["label"], "Mozilla/5.0 Chrome/142.0");
+    assert_eq!(current["label"], "Chrome 142");
     assert_eq!(current["user_agent"], "Mozilla/5.0 Chrome/142.0");
     assert_eq!(current["last_ip"], "203.0.113.80");
 

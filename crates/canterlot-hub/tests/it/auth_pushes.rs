@@ -10,7 +10,7 @@ use sqlx::PgPool;
 
 use crate::support::auth::{AuthHub, PASSWORD, fake_gotify};
 
-async fn enable(pool: &PgPool) {
+pub(crate) async fn enable(pool: &PgPool) {
     notify::configure(
         pool,
         Some(&PushSettings {
@@ -75,10 +75,7 @@ async fn auth_pushes_new_sign_in_is_pushed_without_a_conversation(pool: PgPool) 
     assert_eq!(report.sent, 1);
     let message = seen.lock().unwrap()[0].clone();
     assert_eq!(message["title"], "Новый вход в canterlot");
-    assert_eq!(
-        message["message"],
-        "Firefox/159.0 · 203.0.113.9 · по паролю"
-    );
+    assert_eq!(message["message"], "Firefox 159 · 203.0.113.9 · по паролю");
     assert_eq!(message["priority"], 8);
     assert_eq!(
         message["extras"]["client::notification"]["click"]["url"],

@@ -8,7 +8,11 @@ use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use super::{Method, RevokeReason, Secret, digest, generate_token, token_shape_ok};
+use super::{
+    Method, RevokeReason, Secret, digest, generate_token,
+    geo::{Geo, Location},
+    token_shape_ok,
+};
 
 /// Не больше 50 живых сеансов: 51-й вытесняет давнее всех виденный.
 pub const MAX_LIVE: i64 = 50;
@@ -26,9 +30,41 @@ pub struct ClientInfo {
     pub ip: Option<IpAddr>,
     pub user_agent: Option<String>,
     pub client_hints: Option<Value>,
+    /// Место по адресу: ищется при первой записи адреса и хранится на строке.
+    pub location: Option<Location>,
 }
 
 impl ClientInfo {
+    /// Данные клиента с местом, найденным по его адресу.
+    pub fn located(
+        ip: Option<IpAddr>,
+        user_agent: Option<String>,
+        client_hints: Option<Value>,
+        geo: &Geo,
+    ) -> Self {
+        Self {
+            ip,
+            user_agent,
+            client_hints,
+            location: ip.and_then(|ip| geo.lookup(ip)),
+        }
+    }
+
+    fn location(&self) -> Option<Value> {
+        self.location
+            .as_ref()
+            .and_then(|location| serde_json::to_value(location).ok())
+    }
+
+    /// Страна входа сразу считается известной: пуш о ней не нужен.
+    fn countries(&self) -> Vec<String> {
+        self.location
+            .as_ref()
+            .and_then(|location| location.country_code.clone())
+            .into_iter()
+            .collect()
+    }
+
     fn ip_text(&self) -> Option<String> {
         self.ip.map(|ip| ip.to_canonical().to_string())
     }
@@ -105,8 +141,10 @@ pub async fn create_in_tx(
     let token = generate_token();
     sqlx::query(
         "insert into owner_sessions(id,owner_id,token_sha256,method,approved_by,authenticated_at,
-                                    created_ip,last_ip,user_agent,client_hints)
-         values($1,$2,$3,$4,$5,case when $6 then now() end,$7::inet,$7::inet,$8,$9)",
+                                    created_ip,last_ip,user_agent,client_hints,
+                                    created_location,last_location,notified_countries)
+         values($1,$2,$3,$4,$5,case when $6 then now() end,$7::inet,$7::inet,$8,$9,
+                $10,$10,$11)",
     )
     .bind(id)
     .bind(owner_id)
@@ -117,6 +155,8 @@ pub async fn create_in_tx(
     .bind(client.ip_text())
     .bind(client.user_agent())
     .bind(client.client_hints())
+    .bind(client.location())
+    .bind(client.countries())
     .execute(&mut *conn)
     .await?;
     let days = idle_days_in(&mut *conn, owner_id).await?;
@@ -157,6 +197,7 @@ struct Found {
     revoke_reason: Option<String>,
     idle: bool,
     stale: bool,
+    moved: bool,
     idle_days: i32,
 }
 
@@ -166,13 +207,14 @@ struct Found {
 pub async fn authenticate(
     pool: &PgPool,
     token: &str,
-    ip: Option<IpAddr>,
+    client_ip: Option<IpAddr>,
+    geo: &Geo,
 ) -> Result<Lookup, sqlx::Error> {
     if !token_shape_ok(token) {
         return Ok(Lookup::Unknown);
     }
     let hash = digest(Secret::Session, token);
-    let ip = ip.map(|ip| ip.to_canonical().to_string());
+    let ip = client_ip.map(|ip| ip.to_canonical().to_string());
     let found: Option<Found> = sqlx::query_as(
         "select s.id,s.owner_id,s.revoke_reason,
                 coalesce(s.authenticated_at > now()-$3*interval '1 minute',false) as fresh,
@@ -180,6 +222,7 @@ pub async fn authenticate(
                 s.last_seen_at < now()-coalesce(st.idle_timeout_days,$4)*interval '1 day' as idle,
                 (s.last_seen_at < now()-interval '60 seconds'
                  or ($2::inet is not null and s.last_ip is distinct from $2::inet)) as stale,
+                ($2::inet is not null and s.last_ip is distinct from $2::inet) as moved,
                 coalesce(st.idle_timeout_days,$4) as idle_days
          from owner_sessions s left join owner_auth_settings st on st.owner_id=s.owner_id
          where s.token_sha256=$1",
@@ -216,16 +259,32 @@ pub async fn authenticate(
     }
     let mut touched = false;
     if found.stale {
-        touched = sqlx::query(
-            "update owner_sessions set last_seen_at=now(),last_ip=coalesce($2::inet,last_ip)
-             where id=$1 and revoked_at is null",
+        // Новый адрес: место ищется один раз и кэшируется на строке.
+        let location = client_ip.filter(|_| found.moved).map(|ip| geo.lookup(ip));
+        let row: Option<(Option<String>, Option<String>, Option<Value>)> = sqlx::query_as(
+            "update owner_sessions set last_seen_at=now(),last_ip=coalesce($2::inet,last_ip),
+               last_location=case when $3 then $4 else last_location end
+             where id=$1 and revoked_at is null
+             returning name,user_agent,client_hints",
         )
         .bind(found.id)
         .bind(&ip)
-        .execute(pool)
-        .await?
-        .rows_affected()
-            > 0;
+        .bind(location.is_some())
+        .bind(
+            location
+                .as_ref()
+                .and_then(|location| serde_json::to_value(location).ok()),
+        )
+        .fetch_optional(pool)
+        .await?;
+        touched = row.is_some();
+        if let (Some((name, agent, hints)), Some(Some(now)), Some(ip)) = (row, location, client_ip)
+        {
+            let title = name
+                .or_else(|| super::label(agent.as_deref(), hints.as_ref()))
+                .unwrap_or_else(|| "неизвестное устройство".into());
+            new_country(pool, found.id, &now, ip, &title).await?;
+        }
     }
     Ok(Lookup::Live(Live {
         id: found.id,
@@ -235,6 +294,38 @@ pub async fn authenticate(
         touched,
         max_age_secs: i64::from(found.idle_days) * 86400,
     }))
+}
+
+/// Пуш «используется из новой страны»: о каждой стране не больше одного раза на сеанс.
+/// Первая известная страна сеанса (обычно страна входа) — точка отсчёта без пуша.
+/// Ошибка пуша не мешает запросу.
+async fn new_country(
+    pool: &PgPool,
+    id: Uuid,
+    now: &Location,
+    ip: IpAddr,
+    title: &str,
+) -> Result<(), sqlx::Error> {
+    let Some(code) = now.country_code.as_deref() else {
+        return Ok(());
+    };
+    let changed: Option<bool> = sqlx::query_scalar(
+        "update owner_sessions set notified_countries=array_append(notified_countries,$2)
+         where id=$1 and not ($2 = any(notified_countries))
+         returning cardinality(notified_countries) > 1",
+    )
+    .bind(id)
+    .bind(code)
+    .fetch_optional(pool)
+    .await?;
+    if changed != Some(true) {
+        return Ok(());
+    }
+    let text = super::country_text(title, now, ip);
+    if let Err(error) = crate::notify::on_session_country(pool, id, code, &text).await {
+        tracing::warn!(kind = "sign_in_push_failed", error = %crate::dberr::describe(&error), "country push not queued");
+    }
+    Ok(())
 }
 
 /// Перепроверка сеанса открытого WebSocket: жив ли он сейчас (бездействие тоже отзывает).

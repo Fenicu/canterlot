@@ -130,6 +130,7 @@ impl HubConfig {
             &mut config.tls_key,
             &mut config.manifest,
             &mut config.attachments.blob_dir,
+            &mut config.auth.geoip.path,
         ] {
             if path.is_relative() {
                 *path = base.join(&*path);
@@ -406,6 +407,23 @@ impl HttpConfig {
 pub struct AuthConfig {
     pub rp_id: Option<String>,
     pub origin: Option<String>,
+    pub geoip: GeoipConfig,
+}
+
+/// `[auth.geoip]`: файл DB-IP «IP to City Lite» (MMDB). Путь разрешается от каталога
+/// конфигурации; без файла место сеанса неизвестно.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeoipConfig {
+    pub path: PathBuf,
+}
+
+impl Default for GeoipConfig {
+    fn default() -> Self {
+        Self {
+            path: "data/geoip/dbip-city-lite.mmdb".into(),
+        }
+    }
 }
 
 impl AuthConfig {

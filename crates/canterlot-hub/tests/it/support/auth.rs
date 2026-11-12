@@ -36,11 +36,26 @@ impl AuthHub {
         Self::build(pool, edit, secret, None).await
     }
 
+    /// Хаб с базой гео по указанному пути.
+    pub async fn with_geo(pool: PgPool, path: std::path::PathBuf) -> Self {
+        Self::assemble(pool, |_| {}, true, None, Some(path)).await
+    }
+
     pub async fn build(
         pool: PgPool,
         edit: impl FnOnce(&mut HttpConfig),
         secret: bool,
         passwords: Option<password::Passwords>,
+    ) -> Self {
+        Self::assemble(pool, edit, secret, passwords, None).await
+    }
+
+    async fn assemble(
+        pool: PgPool,
+        edit: impl FnOnce(&mut HttpConfig),
+        secret: bool,
+        passwords: Option<password::Passwords>,
+        geo: Option<std::path::PathBuf>,
     ) -> Self {
         let mut config = test_http_config();
         edit(&mut config);
@@ -52,6 +67,9 @@ impl AuthHub {
         .await;
         if let Some(passwords) = passwords {
             deps.passwords = passwords;
+        }
+        if let Some(path) = geo {
+            deps.auth.geoip.path = path;
         }
         let state = AppState::new(deps);
         let router = http::router(state.clone());

@@ -310,6 +310,22 @@ pub async fn on_sign_in(pool: &PgPool, session_id: Uuid, body: &str) -> Result<(
     .await
 }
 
+/// Живой сеанс пришёл из новой страны: один пуш на сеанс и страну.
+pub async fn on_session_country(
+    pool: &PgPool,
+    session_id: Uuid,
+    country_code: &str,
+    body: &str,
+) -> Result<(), sqlx::Error> {
+    enqueue_auth(
+        pool,
+        KIND_SESSION_COUNTRY,
+        &format!("{KIND_SESSION_COUNTRY}:{session_id}:{country_code}"),
+        &json!({"title": "Сеанс из новой страны", "body": clip(body, DETAIL_CHARS)}),
+    )
+    .await
+}
+
 /// Неудачная попытка входа: не больше одного сводного пуша в час, когда неудач
 /// за час набралось не меньше порога. Числа считаются при отправке.
 pub async fn on_sign_in_failure(pool: &PgPool) -> Result<(), sqlx::Error> {

@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 pub mod cli;
 pub mod device;
+pub mod geo;
 pub mod password;
 pub mod recovery;
 pub mod sessions;
@@ -212,6 +213,21 @@ pub fn sign_in_text(
     .flatten()
     .collect::<Vec<_>>()
     .join(" · ")
+}
+
+/// Текст пуша о новой стране: «Сеанс «Ноутбук» используется из новой страны: Germany (Berlin, 198.18.0.7)».
+pub fn country_text(title: &str, location: &geo::Location, ip: IpAddr) -> String {
+    let country = location
+        .country
+        .as_deref()
+        .or(location.country_code.as_deref())
+        .unwrap_or("?");
+    let ip = ip.to_canonical().to_string();
+    let detail = match location.city.as_deref() {
+        Some(city) => format!("{city}, {ip}"),
+        None => ip,
+    };
+    format!("Сеанс «{title}» используется из новой страны: {country} ({detail})")
 }
 
 /// Будит читателей шины после commit: в этом процессе сразу, в других через `pg_notify`.

@@ -67,7 +67,7 @@ async fn auth_password_sign_in_sets_host_cookies_and_returns_the_session(pool: P
     assert_eq!(session["last_ip"], "203.0.113.9");
     assert_eq!(session["current"], true);
     assert_eq!(session["location"], Value::Null);
-    assert!(session["label"].as_str().unwrap().contains("Firefox/159.0"));
+    assert_eq!(session["label"], "Firefox 159 · Linux");
     let stored: Option<String> = sqlx::query_scalar(
         "select phc from owner_passwords where owner_id=$1 and phc like '$argon2id$%'",
     )

@@ -1,4 +1,5 @@
-#![forbid(unsafe_code)]
+// Единственное исключение: отображение базы гео в память (`owner_auth::geo::open_reader`).
+#![deny(unsafe_code)]
 
 #[cfg(all(feature = "fault-injection", not(debug_assertions)))]
 compile_error!("fault-injection must not be built in release");

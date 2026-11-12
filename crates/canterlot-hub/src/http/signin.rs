@@ -67,13 +67,16 @@ async fn methods(State(state): State<AppState>) -> Result<Json<MethodsView>, Api
     }))
 }
 
-/// Место по IP: город, регион, страна. Заполняет часть 2 (DB-IP).
+/// Место по IP из локальной базы DB-IP: русские названия, где они есть, иначе английские.
+/// `local`: частная, петлевая, link-local или CGNAT сеть («локальная сеть»), остальные поля пусты.
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug, Default)]
 pub struct SessionLocationView {
     pub city: Option<String>,
     pub region: Option<String>,
     pub country: Option<String>,
     pub country_code: Option<String>,
+    #[serde(default)]
+    pub local: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -101,9 +104,9 @@ pub struct OwnerSessionView {
 
 impl OwnerSessionView {
     fn from_row(row: SessionRow, current: Uuid) -> Self {
+        // Место последнего адреса: при входе оно же место создания.
         let location = row
             .last_location
-            .or(row.created_location)
             .and_then(|value| serde_json::from_value(value).ok());
         Self {
             label: owner_auth::label(row.user_agent.as_deref(), row.client_hints.as_ref()),
@@ -195,11 +198,7 @@ async fn signed_in(
     device: Option<Value>,
 ) -> Result<Response, ApiError> {
     let owner_id = state.installation.owner_id;
-    let info = ClientInfo {
-        ip: client.ip,
-        user_agent: client.user_agent.clone(),
-        client_hints: device,
-    };
+    let info = ClientInfo::located(client.ip, client.user_agent.clone(), device, &state.geo);
     let created = sessions::create(&state.pool, owner_id, method, None, &info).await?;
     let device = sessions::remember_device(
         &state.pool,
@@ -212,7 +211,10 @@ async fn signed_in(
         .ok_or_else(|| ApiError::new(ErrorCode::Internal))?;
     let text = owner_auth::sign_in_text(
         owner_auth::label(row.user_agent.as_deref(), row.client_hints.as_ref()).as_deref(),
-        None,
+        info.location
+            .as_ref()
+            .map(|location| location.place())
+            .as_deref(),
         client.ip,
         method,
     );
