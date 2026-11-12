@@ -545,3 +545,41 @@ async fn auth_sessions_list_rename_and_order(pool: PgPool) {
         .await;
     assert_eq!(missing.status, 404);
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn auth_sessions_hourly_maintenance_purges_auth_rows(pool: PgPool) {
+    let hub = AuthHub::new(pool).await;
+    let (old, token) = hub.session(SignInMethod::Password, None).await;
+    sessions::revoke(
+        &hub.pool,
+        old,
+        canterlot_hub::owner_auth::RevokeReason::Owner,
+        None,
+    )
+    .await
+    .unwrap();
+    for sql in [
+        "update owner_sessions set revoked_at=now()-interval '31 days' where revoke_reason is not null",
+        "insert into auth_failures(bucket,at) values('ip:192.0.2.1',now()-interval '2 days')",
+        "insert into auth_buckets(key,failures,last_failure_at) values('ip:192.0.2.1',3,now()-interval '2 days')",
+        "insert into owner_recovery_tokens(owner_id,token_sha256,expires_at)
+           select owner_id,sha256('x'::bytea),now()-interval '1 minute' from installation",
+    ] {
+        sqlx::query(sql).execute(&hub.pool).await.unwrap();
+    }
+    hub.state.scheduler.maintenance().await.unwrap();
+    for (table, left) in [
+        ("owner_sessions where revoked_at is not null", 0),
+        ("owner_session_tombstones", 1),
+        ("auth_failures", 0),
+        ("auth_buckets", 0),
+        ("owner_recovery_tokens", 0),
+    ] {
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
+            .fetch_one(&hub.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, left, "{table}");
+    }
+    assert_eq!(reason(&me(&hub, &token).await), "owner");
+}

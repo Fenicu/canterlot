@@ -1503,6 +1503,8 @@ impl Scheduler {
             sqlx::query("delete from machine_outages where ended_at is not null and ended_at < clock_timestamp() - interval '90 days'").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from nudge_events where at < clock_timestamp() - interval '30 days'").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from idempotency_keys where created_at < clock_timestamp() - interval '7 days'").execute(&self.pool).await.map(|_| ()),
+            // Вход владельца: отозванные сеансы в надгробия, неудачи, корзины, ссылки, устройства.
+            crate::owner_auth::sessions::purge(&self.pool).await.map(|_| ()),
         ];
         let mut first = None;
         for result in results {
