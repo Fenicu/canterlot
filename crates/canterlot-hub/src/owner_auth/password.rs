@@ -37,6 +37,9 @@ struct Inner {
     permits: Arc<Semaphore>,
     permit_wait: Duration,
     dummy: OnceLock<String>,
+    /// Поток, на котором посчитан фиктивный хеш (только тесты).
+    #[cfg(test)]
+    dummy_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
 }
 
 impl Default for Passwords {
@@ -66,6 +69,8 @@ impl Passwords {
                 permits: Arc::new(Semaphore::new(permits.max(1))),
                 permit_wait,
                 dummy: OnceLock::new(),
+                #[cfg(test)]
+                dummy_thread: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -103,36 +108,40 @@ impl Passwords {
     }
 
     /// Проверка против сохранённого хеша, а без него против фиктивного: одна проверка argon2
-    /// на любой исход. Вызывающий держит разрешение.
+    /// на любой исход. Фиктивный хеш при первой нужде строится в той же блокирующей задаче,
+    /// не на потоке runtime. Вызывающий держит разрешение.
     pub async fn verify(&self, password: String, stored: Option<String>) -> bool {
         let real = stored.is_some();
-        let phc = match stored {
-            Some(phc) => phc,
-            None => self.dummy().to_owned(),
-        };
+        let inner = self.inner.clone();
         let hasher = self.hasher();
         let matched = tokio::task::spawn_blocking(move || {
-            hasher
-                .verify_password(password.as_bytes(), phc.as_str())
-                .is_ok()
+            let phc = match &stored {
+                Some(phc) => phc.as_str(),
+                None => dummy(&inner, &hasher),
+            };
+            hasher.verify_password(password.as_bytes(), phc).is_ok()
         })
         .await
         .unwrap_or(false);
         real && matched
     }
+}
 
-    fn dummy(&self) -> &str {
-        self.inner.dummy.get_or_init(|| {
-            let mut salt = [0u8; 16];
-            getrandom::fill(&mut salt).expect("OS random source");
-            let mut secret = [0u8; 32];
-            getrandom::fill(&mut secret).expect("OS random source");
-            self.hasher()
-                .hash_password_with_salt(&secret, &salt)
-                .expect("dummy argon2 hash")
-                .to_string()
-        })
-    }
+fn dummy<'a>(inner: &'a Inner, hasher: &Argon2<'static>) -> &'a str {
+    inner.dummy.get_or_init(|| {
+        #[cfg(test)]
+        {
+            *inner.dummy_thread.lock().unwrap() = Some(std::thread::current().id());
+        }
+        let mut salt = [0u8; 16];
+        getrandom::fill(&mut salt).expect("OS random source");
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret).expect("OS random source");
+        hasher
+            .hash_password_with_salt(&secret, &salt)
+            .expect("dummy argon2 hash")
+            .to_string()
+    })
 }
 
 pub async fn load(pool: &PgPool, owner_id: Uuid) -> Result<Option<String>, sqlx::Error> {
@@ -181,6 +190,19 @@ mod tests {
         );
         assert!(!passwords.verify("wrong horse!".into(), Some(phc)).await);
         assert!(!passwords.verify("correct horse".into(), None).await);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_dummy_hash_is_built_off_the_async_thread() {
+        let passwords = cheap();
+        assert!(!passwords.verify("no password yet".into(), None).await);
+        let built = *passwords.inner.dummy_thread.lock().unwrap();
+        assert!(built.is_some(), "the dummy hash was built");
+        assert_ne!(
+            built,
+            Some(std::thread::current().id()),
+            "64 MiB of argon2 must not block a runtime thread"
+        );
     }
 
     #[test]
