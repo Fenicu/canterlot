@@ -30,12 +30,40 @@ fn opened(execution: &executions::StartedExecution) -> Body {
     })
 }
 
-fn suggested(execution: &executions::StartedExecution, text: &str) -> Body {
+fn suggested(execution: &executions::StartedExecution, origin: Uuid, text: &str) -> Body {
     Body::PromptSuggested(PromptSuggested {
         execution_id: execution.execution_id.to_string(),
         generation: execution.generation as u64,
         text: text.into(),
+        input_command_id: origin.to_string(),
     })
+}
+
+/// Принятый ход разговора; возвращает команду его ввода, к которой привязывается подсказка.
+async fn turn(pool: &PgPool, seed: &Seed) -> Uuid {
+    testkit::seed_recorded_turn(pool, seed.conversation_id).await;
+    // Следующий ввод владельца получает номер после записанного хода.
+    sqlx::query(
+        "update queue_state set next_input_seq =
+           (select max(input_seq) + 1 from inputs where conversation_id = $1)
+         where conversation_id = $1",
+    )
+    .bind(seed.conversation_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    latest_turn(pool, seed).await
+}
+
+async fn latest_turn(pool: &PgPool, seed: &Seed) -> Uuid {
+    sqlx::query_scalar(
+        "select command_id from inputs where conversation_id = $1
+         order by input_seq desc limit 1",
+    )
+    .bind(seed.conversation_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 fn records(journal_id: Uuid, from: u64, bodies: Vec<Body>) -> JournalRecords {
@@ -91,13 +119,14 @@ async fn running(pool: &PgPool, seed: &Seed) -> executions::StartedExecution {
     execution
 }
 
-/// Журнал открыт, подсказка записана: возвращает журнал для следующих записей.
+/// Ход принят, журнал открыт, подсказка записана: возвращает журнал для следующих записей.
 async fn suggest(
     pool: &PgPool,
     seed: &Seed,
     execution: &executions::StartedExecution,
     text: &str,
 ) -> Uuid {
+    let origin = turn(pool, seed).await;
     let journal = Uuid::now_v7();
     assert_eq!(
         apply(
@@ -106,7 +135,7 @@ async fn suggest(
             &records(
                 journal,
                 1,
-                vec![opened(execution), suggested(execution, text)]
+                vec![opened(execution), suggested(execution, origin, text)]
             )
         )
         .await,
@@ -199,7 +228,15 @@ async fn only_the_latest_suggestion_is_kept(pool: PgPool) {
     apply(
         &pool,
         &seed,
-        &records(journal, 3, vec![suggested(&execution, "second")]),
+        &records(
+            journal,
+            3,
+            vec![suggested(
+                &execution,
+                latest_turn(&pool, &seed).await,
+                "second",
+            )],
+        ),
     )
     .await;
     assert_eq!(stored(&pool, &seed).await.as_deref(), Some("second"));
@@ -303,7 +340,15 @@ async fn setting_off_drops_new_suggestions_and_clears_shown_ones(pool: PgPool) {
     apply(
         &pool,
         &seed,
-        &records(journal, 3, vec![suggested(&execution, "again")]),
+        &records(
+            journal,
+            3,
+            vec![suggested(
+                &execution,
+                latest_turn(&pool, &seed).await,
+                "again",
+            )],
+        ),
     )
     .await;
     assert_eq!(stored(&pool, &seed).await, None);
@@ -463,6 +508,54 @@ fn events_schema_describes_prompt_suggestion_changed() {
     let mut extra = valid;
     extra["payload"]["extra"] = json!(1);
     assert!(!validator.is_valid(&extra));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn late_suggestion_after_the_next_input_was_accepted_is_dropped(pool: PgPool) {
+    let seed = claude_seed(&pool).await;
+    let execution = running(&pool, &seed).await;
+    let journal = Uuid::now_v7();
+    let first = turn(&pool, &seed).await;
+    apply(&pool, &seed, &records(journal, 1, vec![opened(&execution)])).await;
+    // Следующий ввод отправлен (подсказки стёрты, строки нет) и уже принят CLI.
+    let next = submit(&pool, &seed).await;
+    sqlx::query("update inputs set state = 'accepted' where id = $1")
+        .bind(next.input_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        apply(
+            &pool,
+            &seed,
+            &records(journal, 2, vec![suggested(&execution, first, "stale")]),
+        )
+        .await,
+        IngestOutcome::Committed { up_to_seq: 2 }
+    );
+    assert_eq!(stored(&pool, &seed).await, None);
+    // Подсказка без хода или с чужим ходом тоже не сохраняется.
+    for origin in [Uuid::nil(), Uuid::now_v7()] {
+        let mut body = suggested(&execution, origin, "foreign");
+        if origin.is_nil()
+            && let Body::PromptSuggested(fact) = &mut body
+        {
+            fact.input_command_id.clear();
+        }
+        let seq = if origin.is_nil() { 3 } else { 4 };
+        apply(&pool, &seed, &records(journal, seq, vec![body])).await;
+        assert_eq!(stored(&pool, &seed).await, None);
+    }
+    assert!(events(&pool, seed.conversation_id).await.is_empty());
+    // Подсказка к самому новому ходу по-прежнему сохраняется.
+    let latest = turn(&pool, &seed).await;
+    apply(
+        &pool,
+        &seed,
+        &records(journal, 5, vec![suggested(&execution, latest, "fresh")]),
+    )
+    .await;
+    assert_eq!(stored(&pool, &seed).await.as_deref(), Some("fresh"));
 }
 
 #[test]

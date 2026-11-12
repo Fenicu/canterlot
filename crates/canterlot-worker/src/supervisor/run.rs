@@ -226,6 +226,9 @@ struct Supervisor {
     session_tools_v1: bool,
     /// Хаб включил подсказки и знает запись `PromptSuggested`.
     prompt_suggestions: bool,
+    /// Ввод хода, после которого CLI может прислать подсказку; передача следующего ввода
+    /// его снимает, и запоздавшая подсказка прошлого хода уже не пишется.
+    suggestion_turn: Option<Uuid>,
     /// HEAD рабочего каталога на конец прошлого хода (или на старт CLI).
     git_head: Option<String>,
     background_drop_reported: bool,
@@ -432,6 +435,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         background_v1: false,
         session_tools_v1: false,
         prompt_suggestions: false,
+        suggestion_turn: None,
         git_head: None,
         background_drop_reported: false,
         todo_drop_reported: false,
@@ -1198,10 +1202,15 @@ impl Supervisor {
     }
 
     /// Без согласия хаба подсказка молча отбрасывается: старый хаб остановил бы журнал на записи.
+    /// Подсказка относится к последнему законченному ходу; пришедшая во время хода или после
+    /// передачи следующего ввода устарела и не пишется.
     fn on_prompt_suggestion(&mut self, text: String) -> Result<(), SupervisorError> {
-        if !self.prompt_suggestions {
+        if !self.prompt_suggestions || self.active_turn.is_some() {
             return Ok(());
         }
+        let Some(turn) = self.suggestion_turn else {
+            return Ok(());
+        };
         let Some(text) = canterlot_proto::limits::bound_prompt_suggestion(&text) else {
             return Ok(());
         };
@@ -1209,6 +1218,7 @@ impl Supervisor {
             execution_id: self.spec.execution_id.to_string(),
             generation: self.spec.generation,
             text,
+            input_command_id: turn.to_string(),
         }))?;
         Ok(())
     }
@@ -2283,6 +2293,7 @@ impl Supervisor {
             }
             input.state = InputState::Transmitting;
             self.transmitted.insert(key.0);
+            self.suggestion_turn = None;
             self.turn_started = Some(Instant::now());
             self.sj
                 .intent(Body::TransmissionStarted(InputTransmissionStarted {
@@ -2526,6 +2537,9 @@ impl Supervisor {
                 }))?;
                 if ours {
                     self.active_turn = None;
+                    if !input_command_id.is_nil() {
+                        self.suggestion_turn = Some(input_command_id);
+                    }
                     // Прерванный ход закончился, процесс жив: сессия снова idle,
                     // следующий ввод уйдёт в тот же CLI. Без сброса решения
                     // следующего хода отклонялись бы как «во время прерывания».
@@ -3636,6 +3650,7 @@ mod tests {
             background_v1: false,
             session_tools_v1: false,
             prompt_suggestions: false,
+            suggestion_turn: None,
             git_head: None,
             background_drop_reported: false,
             todo_drop_reported: false,

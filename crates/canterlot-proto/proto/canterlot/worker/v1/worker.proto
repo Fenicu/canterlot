@@ -1028,6 +1028,9 @@ message PromptSuggested {
   string execution_id = 1;
   uint64 generation = 2;
   string text = 3;
+  // Ввод (command_id) хода, после которого пришла подсказка: хаб отбрасывает её, если у
+  // разговора уже есть ввод новее.
+  string input_command_id = 4;
 }
 
 // Полный список задач агента, не дельта: запись заменяет прежний список своей дорожки.

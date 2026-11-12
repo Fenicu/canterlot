@@ -117,16 +117,24 @@ pub async fn apply(
     };
     let generation = i64::try_from(fact.generation)
         .map_err(|_| sqlx::Error::InvalidArgument("invalid prompt_suggested: generation".into()))?;
+    // Подсказка без хода, к которому она относится, не сохраняется.
+    let Ok(origin) = Uuid::parse_str(&fact.input_command_id) else {
+        return Ok(true);
+    };
     // Ввод в очереди или в передаче означает новый ход: подсказка к прошлому ему не нужна.
+    // Ввод новее хода подсказки, в каком бы он ни был состоянии, тоже: номер ввода разговора
+    // переживает стирание подсказки, поэтому запоздавшая подсказка не вернётся после него.
     let stored: Option<PromptSuggestionView> = sqlx::query_as(
         "insert into prompt_suggestions as s (conversation_id, execution_id, generation, text)
          select c.id, $2, $3, $4 from conversations c
+         join inputs o on o.conversation_id = c.id and o.command_id = $6
          where c.id = $1 and c.harness = $5
            and c.parent_conversation_id is null and c.spawn_depth = 0
            and coalesce((select p.enabled from prompt_suggestion_settings p
                          where p.owner_id = c.owner_id), true)
            and not exists (select 1 from inputs i where i.conversation_id = c.id
-                           and i.state in ('queued', 'dispatched', 'on_machine', 'transmitting'))
+                           and (i.input_seq > o.input_seq
+                                or i.state in ('queued', 'dispatched', 'on_machine', 'transmitting')))
          on conflict (conversation_id) do update
          set execution_id = excluded.execution_id, generation = excluded.generation,
              text = excluded.text, created_at = clock_timestamp()
@@ -138,6 +146,7 @@ pub async fn apply(
     .bind(generation)
     .bind(&text)
     .bind(HARNESS)
+    .bind(origin)
     .fetch_optional(&mut *conn)
     .await?;
     let Some(view) = stored else {

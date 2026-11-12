@@ -1576,6 +1576,7 @@ fn prompt_suggested_is_record_42_and_debug_hides_the_text() {
         execution_id: "e".into(),
         generation: 2,
         text: marker.into(),
+        input_command_id: "c".into(),
     };
     let body = RecordBody {
         body: Some(record_body::Body::PromptSuggested(fact.clone())),
@@ -1585,6 +1586,11 @@ fn prompt_suggested_is_record_42_and_debug_hides_the_text() {
     assert_eq!(RecordBody::decode(encoded.as_slice()).unwrap(), body);
     for debug in [format!("{fact:?}"), format!("{body:?}")] {
         assert!(!debug.contains(marker), "{debug}");
+        assert!(
+            debug.contains(&format!("text_bytes: {}", marker.len())),
+            "{debug}"
+        );
+        assert!(debug.contains("input_command_id"), "{debug}");
     }
     let start = StartExecution {
         prompt_suggestions: true,

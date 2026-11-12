@@ -357,6 +357,7 @@ fn suggestion(seq: u64) -> JournalRecord {
                 execution_id: Uuid::now_v7().to_string(),
                 generation: 1,
                 text: "run the tests".into(),
+                input_command_id: Uuid::now_v7().to_string(),
             })),
         }),
     }

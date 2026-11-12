@@ -394,6 +394,7 @@ impl fmt::Debug for crate::worker::v1::PromptSuggested {
         f.debug_struct("PromptSuggested")
             .field("execution_id", &self.execution_id)
             .field("generation", &self.generation)
+            .field("input_command_id", &self.input_command_id)
             .field("text_bytes", &self.text.len())
             .finish()
     }

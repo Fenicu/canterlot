@@ -2716,14 +2716,76 @@ async fn prompt_suggestion_is_recorded_trimmed_when_the_hub_enabled_it() {
     harness.attach_and_ship(0).await;
     harness.start_cli_suggestions(true, false).await;
     let id = Uuid::now_v7();
+    // Как у Claude Code: кадр подсказки идёт после конца хода.
     harness
-        .deliver(id, 1, &script(r#"{"suggestion":"  add tests  "}"#))
+        .deliver(
+            id,
+            1,
+            &script(r#"{"after_turn":[{"suggestion":"  add tests  "}]}"#),
+        )
         .await;
-    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    let bodies = harness
+        .wait_records("suggestion", |b| !suggestions(b).is_empty())
+        .await;
+    assert!(run_finished(&bodies, id));
     let found = suggestions(&bodies);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].text, "add tests");
     assert!(found[0].generation > 0);
+    assert_eq!(
+        found[0].input_command_id,
+        id.to_string(),
+        "tied to its turn"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn late_suggestion_of_the_previous_turn_is_not_recorded_after_the_next_input() {
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_suggestions(true, false).await;
+    let release_late = harness._root.path().join("late");
+    let release_next = harness._root.path().join("next");
+    let first = Uuid::now_v7();
+    harness
+        .deliver(
+            first,
+            1,
+            &script(&format!(
+                r#"{{"after_turn":[{{"wait_file":"{}"}},{{"suggestion":"stale"}},{{"unknown":{{"event_type":"late_marker"}}}}]}}"#,
+                release_late.display()
+            )),
+        )
+        .await;
+    harness
+        .wait_records("first turn", |b| run_finished(b, first))
+        .await;
+    let second = Uuid::now_v7();
+    harness
+        .deliver(
+            second,
+            1,
+            &script(&format!(r#"{{"wait_file":"{}"}}"#, release_next.display())),
+        )
+        .await;
+    harness
+        .wait_records("second transmitted", |b| transmissions(b, second) > 0)
+        .await;
+    // Подсказка первого хода приходит, когда второй ввод уже передан CLI.
+    std::fs::write(&release_late, "").unwrap();
+    let bodies = harness
+        .wait_records("late marker", |b| {
+            b.iter().any(
+                |body| matches!(body, Body::AdapterDiagnostic(d) if d.event_type == "late_marker"),
+            )
+        })
+        .await;
+    assert!(suggestions(&bodies).is_empty(), "stale suggestion recorded");
+    std::fs::write(&release_next, "").unwrap();
+    harness
+        .wait_records("second turn", |b| run_finished(b, second))
+        .await;
     harness.shutdown().await;
 }
 
@@ -2735,9 +2797,21 @@ async fn prompt_suggestion_is_dropped_silently_without_the_hub_or_for_a_delegate
         harness.start_cli_suggestions(enabled, isolate).await;
         let id = Uuid::now_v7();
         harness
-            .deliver(id, 1, &script(r#"{"suggestion":"add tests"}"#))
+            .deliver(
+                id,
+                1,
+                &script(
+                    r#"{"after_turn":[{"suggestion":"add tests"},{"unknown":{"event_type":"after_marker"}}]}"#,
+                ),
+            )
             .await;
-        let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+        let bodies = harness
+            .wait_records("after turn", |b| {
+                b.iter().any(|body| {
+                    matches!(body, Body::AdapterDiagnostic(d) if d.event_type == "after_marker")
+                })
+            })
+            .await;
         assert!(suggestions(&bodies).is_empty(), "{enabled} {isolate}");
         harness.shutdown().await;
     }
