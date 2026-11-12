@@ -201,6 +201,7 @@ export interface SnapshotData {
   history?: HistoryPage;
   scheduled?: ScheduledMessage[];
   draft?: DraftRecord | null;
+  prompt_suggestion?: { text: string } | null;
   alarms?: AlarmView[];
   spawn_queue?: SpawnQueueItemView[];
   nudge?: NudgeRule | null;
@@ -352,6 +353,8 @@ export class ChatStore {
   draft = $state<DraftRecord | null>(null);
   /** Номер изменения черновика: экран применяет каждое новое значение один раз. */
   draftSerial = $state(0);
+  /** Подсказка следующего сообщения Claude Code; в черновик не попадает. */
+  promptSuggestion = $state<string | null>(null);
   alarms = $state<AlarmView[]>([]);
   nudge = $state<NudgeRule | null>(null);
   nudgeEvents = $state<NudgeEvent[]>([]);
@@ -553,6 +556,7 @@ export class ChatStore {
     this.nudge = null;
     this.nudgeEvents = [];
     this.spawnQueue = [];
+    this.promptSuggestion = null;
     this.settings = { effective: null, pending: null, rev: 0 };
     this.crunch = { enabled: false, resume_pending: false };
   }
@@ -1126,6 +1130,10 @@ export class ChatStore {
               : payload;
         }
         return;
+      case "prompt_suggestion_changed":
+        if (event.kind === "prompt_suggestion_changed")
+          this.promptSuggestion = event.payload.suggestion?.text ?? null;
+        return;
       case "draft_changed":
         if (event.kind === "draft_changed") {
           this.draft = {
@@ -1530,6 +1538,7 @@ export class ChatStore {
     if (data.scheduled) this.scheduled = data.scheduled;
     this.draft = data.draft ?? null;
     this.draftSerial += 1;
+    this.promptSuggestion = data.prompt_suggestion?.text ?? null;
     if (data.alarms && !sameAlarms(this.alarms, data.alarms))
       this.alarms = data.alarms;
     if (data.nudge !== undefined) this.nudge = data.nudge ?? null;

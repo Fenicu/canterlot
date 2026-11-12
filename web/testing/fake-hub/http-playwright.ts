@@ -227,6 +227,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     if (key && !prior) inputs.set(key, id);
     const conversation = new URL(route.request().url()).pathname.split('/')[4] ?? '';
     const body = route.request().postDataJSON() as { device_id?: string | null };
+    api.setPromptSuggestion(conversation, null);
     api.putDraft(conversation, {
       text: '',
       attachment_ids: [],
@@ -1226,6 +1227,22 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       const failure = error as { status: number; code: string; message: string; details?: Record<string, unknown> };
       await route.fulfill({ status: failure.status, headers: headers(), json: errorBody(failure.code, failure.message, failure.details) });
     }
+  });
+
+  await page.route('**/api/v1/prompt-suggestion-settings', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: { enabled: api.promptSuggestionsEnabled } });
+      return;
+    }
+    if (method !== 'PUT') return route.fallback();
+    if (!route.request().headers()['idempotency-key']) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const body = route.request().postDataJSON() as { enabled: boolean };
+    api.setPromptSuggestionsEnabled(body.enabled);
+    await route.fulfill({ headers: headers(), json: { enabled: api.promptSuggestionsEnabled } });
   });
 
   await page.route('**/api/v1/limit-settings', async (route) => {

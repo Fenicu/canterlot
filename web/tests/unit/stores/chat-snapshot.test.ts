@@ -367,3 +367,27 @@ describe("правило автопинка", () => {
     expect(chat.nudgeEvents).toHaveLength(1);
   });
 });
+
+describe("prompt suggestion", () => {
+  it("comes from the snapshot, follows the event and is cleared by null", () => {
+    const chat = chatOf();
+    snapshot(chat, { prompt_suggestion: { text: "добавь тесты" } });
+    expect(chat.promptSuggestion).toBe("добавь тесты");
+    apply(chat, ev("prompt_suggestion_changed", {
+      conversation_id: CONV,
+      suggestion: { text: "запусти сборку", execution_id: "00000000-0000-4000-8000-0000000000e1", created_at: "2026-10-28T12:00:00.000Z" },
+    }, "2"));
+    expect(chat.promptSuggestion).toBe("запусти сборку");
+    apply(chat, ev("prompt_suggestion_changed", { conversation_id: CONV, suggestion: null }, "3"));
+    expect(chat.promptSuggestion).toBeNull();
+    snapshot(chat, { prompt_suggestion: { text: "снова" } });
+    snapshot(chat, {});
+    expect(chat.promptSuggestion).toBeNull();
+  });
+
+  it("never reaches the shared draft", () => {
+    const chat = chatOf();
+    snapshot(chat, { prompt_suggestion: { text: "добавь тесты" } });
+    expect(chat.draft).toBeNull();
+  });
+});

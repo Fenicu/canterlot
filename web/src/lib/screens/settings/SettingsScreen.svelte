@@ -23,6 +23,7 @@
   import PalettePicker from './PalettePicker.svelte';
   import SpawnWhitelist from './SpawnWhitelist.svelte';
   import LimitSettings from './LimitSettings.svelte';
+  import PromptSuggestionSetting from './PromptSuggestionSetting.svelte';
   import { motionPref, reasoningPref, saveMotion, saveReasoningPref, type MotionPref, type ReasoningPref } from './preferences.js';
   import '../secondary.css';
 
@@ -92,6 +93,7 @@
         <section><h2>Скорость анимаций</h2><Segmented name="motion" label="Скорость анимаций" options={[{ value: 'off', label: 'Выкл' }, { value: 'slower', label: 'Медленнее' }, { value: 'normal', label: 'Обычно' }, { value: 'faster', label: 'Быстрее' }]} bind:value={motion} /><p class="note">Появление текста, дорожки этапов и раскрытие блоков. Системное уменьшение движения имеет приоритет</p></section>
         <section><h2>Рассуждения</h2><Segmented name="reasoning" label="Рассуждения" options={[{ value: 'line', label: 'Строкой' }, { value: 'live', label: 'Вживую' }, { value: 'expanded', label: 'Раскрыты' }]} bind:value={() => reasoning, setReasoning} /><p class="note">Вживую показывает хвост мысли, пока агент думает, и складывает его в строку после ответа. Строкой оставляет начало мысли, Раскрыты показывает рассуждение целиком</p></section>
         <section><h2>Enter на клавиатуре</h2><Segmented name="enter" label="Enter на клавиатуре" options={[{ value: 'auto', label: 'Авто' }, { value: 'send', label: 'Отправка' }, { value: 'newline', label: 'Новая строка' }]} bind:value={enter} /><p class="note">Авто: на телефоне новая строка, на компьютере отправка. Shift+Enter добавляет строку</p></section>
+        <PromptSuggestionSetting />
         <section><h2>Данные и выход</h2><Button {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(false)} full>Очистить данные на устройстве</Button><div class="logout"><Button full {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(true)}>Выйти</Button></div>{#if busy}<p role="status">Очищаю данные на устройстве…</p>{/if}<p class="note">Выход завершает этот сеанс на хабе и удаляет данные на устройстве</p></section>
       </div><div>
         <section><h2>Подключение</h2><p>Логин: <strong>{login}</strong></p><p>{connectionText}</p><p class="note sync">{#if sync}Последняя синхронизация: {fmt.clock(sync)}{/if}</p><a href={resolve('/settings/sign-in')}>Сеансы и вход</a></section>

@@ -14,6 +14,7 @@
   import { bindComposerRestore } from '#lib/composer/restore.js';
   import { bindReturned } from '#lib/composer/returned.js';
   import { decideEnter, isTouchPrimary } from '#lib/composer/sendRules.js';
+  import { acceptsWithTab, visibleSuggestion } from '#lib/composer/suggestion.js';
   import { getRuntime } from '#lib/app/runtime.js';
   import { sessionUploads } from '#lib/screens/chat/open.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -89,12 +90,28 @@
   const touch = isTouchPrimary();
   const reasonId = $props.id();
   const laterId = `${reasonId}-later`;
+  const suggestionId = `${reasonId}-suggestion`;
 
   const uploadsPending = $derived.by(() => {
     void ticker.now;
     return uploads
       .list(chat.id)
       .some((item) => item.phase !== 'cancelled' && item.phase !== 'failed' && item.phase !== 'ready');
+  });
+  // Подсказка живёт только в placeholder: в черновик и в отправку она не попадает.
+  const suggestion = $derived.by(() => {
+    void ticker.now;
+    const tray = uploads.list(chat.id).filter((item) => item.phase !== 'cancelled' && item.phase !== 'failed');
+    const slot = chat.queue.run_slot;
+    return visibleSuggestion({
+      suggestion: chat.promptSuggestion,
+      text: model.text,
+      attachments: tray.length,
+      uploadsPending,
+      harness: (chat.detail?.harness as { id?: string } | undefined)?.id,
+      activity: chat.activity?.state,
+      runSlotFree: !slot || slot === 'free'
+    });
   });
   const notice = $derived.by(() => {
     void ticker.now;
@@ -185,7 +202,31 @@
     model.attachmentsChanged();
   });
 
+  function acceptSuggestion() {
+    const text = suggestion;
+    if (!text) return;
+    model.text = text;
+    if (node) {
+      node.value = text;
+      node.focus();
+      node.setSelectionRange(text.length, text.length);
+    }
+    model.typed();
+  }
+
   function onKey(event: KeyboardEvent) {
+    if (suggestion && !touch && acceptsWithTab({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      altKey: event.altKey,
+      isComposing: event.isComposing || composing
+    })) {
+      event.preventDefault();
+      acceptSuggestion();
+      return;
+    }
     const decision = decideEnter({
       key: event.key,
       shiftKey: event.shiftKey,
@@ -345,9 +386,9 @@
       onblur={() => void model.flushDraft()}
       rows="1"
       enterkeyhint="enter"
-      placeholder="Сообщение агенту…"
+      placeholder={suggestion ?? 'Сообщение агенту…'}
       aria-label="Сообщение"
-      aria-describedby={reasonId}
+      aria-describedby={suggestion ? `${reasonId} ${suggestionId}` : reasonId}
       oncompositionstart={() => (composing = true)}
       oncompositionend={() => (composing = false)}
       onkeydown={onKey}
@@ -355,6 +396,12 @@
     ></textarea>
     <span class="attach"><IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} /></span>
     <ContextIndicator {chat} />
+    {#if suggestion}
+      <p class="sr-only" id={suggestionId}>Подсказка: {suggestion}. {touch ? 'Кнопка «Подставить» вставит её в поле' : 'Tab вставит её в поле'}</p>
+    {/if}
+    {#if touch && suggestion}
+      <button type="button" class="accept" data-suggestion-accept onmousedown={(event) => event.preventDefault()} onclick={acceptSuggestion}>Подставить</button>
+    {/if}
     {#if !touch}
       <button
         type="button"
@@ -388,7 +435,7 @@
       <Icon name="send" />
     </button>
   </div>
-  {#if !touch}<p class="hint">Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже</p>{/if}
+  {#if !touch}<p class="hint">{suggestion ? 'Tab: подставить подсказку · ' : ''}Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже</p>{/if}
   {#if SendLater}
     <SendLater
       open={later}
@@ -460,6 +507,7 @@
   }
   .clock { grid-area: clock; background: var(--transparent); color: var(--text); }
   .send { grid-area: send; }
+  .accept { grid-area: clock; min-height: var(--target); padding-inline: var(--s5); border: var(--s0); border-radius: var(--radius-round); background: var(--raised); color: var(--text); font-size: var(--fs-meta); }
   .off { background: var(--raised); color: var(--muted); }
   .reason, .hint { margin: 0; padding-inline: var(--s5); color: var(--muted); font-size: var(--fs-sm); }
   .reason { color: var(--danger); }

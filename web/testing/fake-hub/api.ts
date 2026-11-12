@@ -216,6 +216,8 @@ export class FakeHubApi {
 	readonly spawnWhitelistKeys: string[] = [];
 	/** `null`: пороги лимитов по умолчанию, как у хаба. */
 	limitSettings: components['schemas']['LimitSettings'] | null = null;
+	promptSuggestionsEnabled = true;
+	readonly promptSuggestions = new Map<string, components['schemas']['PromptSuggestionView']>();
 	readonly limitSettingsKeys: string[] = [];
 	readonly defaultLimitSettings: components['schemas']['LimitSettings'] = {
 		warn_remaining_pct: 20,
@@ -555,6 +557,32 @@ export class FakeHubApi {
 		return record;
 	}
 
+	/** Подсказка следующего сообщения, как её пишет хаб: `null` стирает и тоже шлёт событие. */
+	setPromptSuggestion(id: string, text: string | null): void {
+		const had = this.promptSuggestions.has(id);
+		if (text === null) {
+			if (!had) return;
+			this.promptSuggestions.delete(id);
+		} else {
+			if (!this.promptSuggestionsEnabled) return;
+			this.promptSuggestions.set(id, { text, execution_id: crypto.randomUUID(), created_at: new Date().toISOString() });
+		}
+		const suggestion = this.promptSuggestions.get(id) ?? null;
+		this.hub.append(`conversation:${id}`, {
+			kind: 'prompt_suggestion_changed',
+			conversation_id: id,
+			...(suggestion ? { execution_id: suggestion.execution_id } : {}),
+			payload: { conversation_id: id, suggestion }
+		});
+		this.hub.flush();
+	}
+
+	setPromptSuggestionsEnabled(enabled: boolean): void {
+		this.promptSuggestionsEnabled = enabled;
+		if (enabled) return;
+		for (const id of [...this.promptSuggestions.keys()]) this.setPromptSuggestion(id, null);
+	}
+
 	conversationData(id: string): SnapshotData {
 		const open_requests = [...this.requestRows(id).values()].filter((r) =>
 			r.state === 'open' || r.state === 'decision_saved' || r.state === 'decision_transmitting'
@@ -599,6 +627,7 @@ export class FakeHubApi {
 			history: this.page(id, {}),
 			scheduled: [],
 			draft: this.drafts.get(id) ?? null,
+			prompt_suggestion: this.promptSuggestions.get(id) ?? null,
 			alarms: [...alarms.values()],
 			spawn_queue: this.spawnQueue.get(id) ?? [],
 			nudge: this.nudgeRules.get(id) ?? null,

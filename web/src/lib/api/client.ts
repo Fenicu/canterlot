@@ -189,6 +189,20 @@ export function putLimitSettings(
   return http("PUT", "/api/v1/limit-settings", body, keyed(key, opts));
 }
 
+export function getPromptSuggestionSettings(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_prompt_suggestion_settings"]>>> {
+  return http("GET", "/api/v1/prompt-suggestion-settings", undefined, opts);
+}
+
+export function putPromptSuggestionSettings(
+  body: Body<operations["put__api_v1_prompt_suggestion_settings"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_prompt_suggestion_settings"]>>> {
+  return http("PUT", "/api/v1/prompt-suggestion-settings", body, keyed(key, opts));
+}
+
 export function listGroups(
   query?: Query,
   opts?: RequestOptions,
