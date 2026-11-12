@@ -168,6 +168,12 @@ async fn the_verbatim_fable_frame_reaches_the_hub_limits(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    // Под нагрузкой сдвиг часов машины ещё не известен: без него наблюдение не пишется.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while hub.registry.to_hub_time(run.seed.machine_id, 1).is_none() {
+        assert!(std::time::Instant::now() < deadline, "clock offset known");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     run.ingest = Ingest::new(pool.clone()).with_registry(hub.registry.clone());
     run.send(vec![Body::LimitObserved(LimitObservation {
         provider: "claude".into(),
