@@ -144,7 +144,7 @@ async fn auth_notice(
 /// двух одновременных его получает ровно один, второй видит `expired`.
 #[utoipa::path(post, path = "/api/v1/auth/qr/poll", tag = "auth", request_body = QrPollBody, responses(
     (status = 200, description = "Состояние кода; при approved — Set-Cookie сеанса", body = QrPollView),
-    (status = 429, description = "too_many_attempts: больше 8 опросов ждут одновременно", body = ErrorEnvelope),
+    (status = 429, description = "too_many_attempts: в этом процессе хаба уже ждут 8 опросов", body = ErrorEnvelope),
 ))]
 async fn qr_poll(
     State(state): State<AppState>,

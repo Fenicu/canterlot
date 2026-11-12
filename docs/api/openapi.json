@@ -1672,7 +1672,7 @@
             }
           },
           "429": {
-            "description": "too_many_attempts: больше 8 опросов ждут одновременно",
+            "description": "too_many_attempts: в этом процессе хаба уже ждут 8 опросов",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {

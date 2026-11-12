@@ -5276,7 +5276,7 @@ export interface operations {
                     "application/json": components["schemas"]["QrPollView"];
                 };
             };
-            /** @description too_many_attempts: больше 8 опросов ждут одновременно */
+            /** @description too_many_attempts: в этом процессе хаба уже ждут 8 опросов */
             429: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
