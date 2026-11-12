@@ -2553,3 +2553,104 @@ async fn claude_histories_are_empty_without_a_capable_live_worker(pool: PgPool) 
         "old worker gets no request"
     );
 }
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn group_retry_across_the_icon_release_replays_the_old_answer(pool: PgPool) {
+    use canterlot_hub::{groups, idempotency, testkit};
+    let s = testkit::seed(&pool).await;
+    // Ответы хаба до значков групп: тот же ключ, запрос без поля icon.
+    let remember = |key: &'static str, operation: &'static str, request: Value, id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("insert into idempotency_keys(owner_id,key,operation,request_hash,response) values($1,$2,$3,$4,$5)")
+                .bind(s.owner_id)
+                .bind(key)
+                .bind(operation)
+                .bind(idempotency::request_hash(operation, &request))
+                .bind(json!({"id":id,"name":"Работа","position":0,"created_at":"2026-11-01T00:00:00.000Z"}))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    let created = Uuid::now_v7();
+    remember(
+        "retry-create",
+        "create_group",
+        json!({"name":"Работа"}),
+        created,
+    )
+    .await;
+    let Ok(replayed) = groups::create_group(
+        &pool,
+        s.owner_id,
+        "retry-create",
+        "Работа",
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    else {
+        panic!("a retry without an icon must replay, not conflict");
+    };
+    assert_eq!(replayed.id, created);
+    assert_eq!(replayed.icon, None);
+
+    let updated = Uuid::now_v7();
+    remember(
+        "retry-update",
+        "update_group",
+        json!({"id":updated,"name":"Работа","position":null}),
+        updated,
+    )
+    .await;
+    let change = groups::GroupChange {
+        name: Some("Работа".into()),
+        ..Default::default()
+    };
+    let Ok(replayed) = groups::update_group(
+        &pool,
+        s.owner_id,
+        updated,
+        "retry-update",
+        change,
+        Uuid::now_v7(),
+    )
+    .await
+    else {
+        panic!("a retry without an icon must replay, not conflict");
+    };
+    assert_eq!(replayed.id, updated);
+
+    // Запрос со значком — другой запрос: тот же ключ даёт конфликт.
+    let with_icon = groups::create_group(
+        &pool,
+        s.owner_id,
+        "retry-create",
+        "Работа",
+        Some(groups::GroupIcon::Star),
+        Uuid::now_v7(),
+    )
+    .await;
+    assert!(matches!(
+        with_icon,
+        Err(groups::GroupError::IdempotencyConflict)
+    ));
+    let reset = groups::GroupChange {
+        name: Some("Работа".into()),
+        icon: Some(None),
+        ..Default::default()
+    };
+    let with_reset = groups::update_group(
+        &pool,
+        s.owner_id,
+        updated,
+        "retry-update",
+        reset,
+        Uuid::now_v7(),
+    )
+    .await;
+    assert!(matches!(
+        with_reset,
+        Err(groups::GroupError::IdempotencyConflict)
+    ));
+}

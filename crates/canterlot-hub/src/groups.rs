@@ -156,7 +156,11 @@ pub async fn create_group(
     icon: Option<GroupIcon>,
     correlation_id: Uuid,
 ) -> Result<Group, GroupError> {
-    let request = json!({"name":name,"icon":icon});
+    // Без значка запрос тот же, что до значков: повтор через выкат не даёт конфликта.
+    let mut request = json!({"name":name});
+    if let Some(icon) = icon {
+        request["icon"] = json!(icon);
+    }
     let name = name.to_owned();
     let outcome = idempotency::run_in_tx(
         pool,
@@ -193,7 +197,11 @@ pub async fn update_group(
     change: GroupChange,
     correlation_id: Uuid,
 ) -> Result<Group, GroupError> {
-    let request = json!({"id":id,"name":change.name,"position":change.position,"icon":change.icon});
+    // Поле icon только когда значок меняется (`null` — папка по умолчанию).
+    let mut request = json!({"id":id,"name":change.name,"position":change.position});
+    if let Some(icon) = change.icon {
+        request["icon"] = json!(icon);
+    }
     let outcome = idempotency::run_in_tx(
         pool,
         owner_id,
