@@ -268,6 +268,48 @@ test('archive_with_active_crunch_asks_for_confirmation_and_retries_with_force', 
   expect(bodies[0]?.key).not.toBe(bodies[1]?.key);
 });
 
+test('archived_session_menu_offers_unarchive_and_moves_it_back_to_all', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  const archived = seedConversation(api, {
+    title: 'Архивная сессия',
+    archived: true,
+    machine: { id: ids.machine, name: 'workstation' },
+    harness: { id: 'codex', title: 'Codex', provider: 'codex' }
+  });
+  await page.reload();
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+
+  // Архивный список: меню предлагает вернуть сессию, а не отправить в архив повторно.
+  await page.getByRole('tab', { name: /Архив/ }).click();
+  const bodies: { archived?: boolean }[] = [];
+  const keys: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() !== 'PATCH' || !request.url().includes(archived)) return;
+    keys.push(request.headers()['idempotency-key'] ?? '');
+    bodies.push(request.postDataJSON() as { archived?: boolean });
+  });
+  await page.getByRole('button', { name: 'Действия: Архивная сессия' }).click();
+  const unarchive = page.getByRole('button', { name: /Вернуть из архива/ });
+  await expect(unarchive).toBeVisible();
+  await expect(unarchive).toContainText('Сессия вернётся в список');
+  await expect(page.getByRole('button', { name: /В архив/ })).toHaveCount(0);
+  await unarchive.click();
+
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(bodies[0]).toEqual({ archived: false });
+  expect(keys[0]).not.toBe('');
+
+  // Строка уходит из архива и появляется во «Все».
+  await expect(page.locator(`[data-session="${archived}"]`)).toHaveCount(0);
+  await page.getByRole('tab', { name: /Все/ }).click();
+  await expect(page.locator(`[data-session="${archived}"]`)).toBeVisible();
+
+  // Активная сессия по-прежнему предлагает отправить в архив.
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(page.getByRole('button', { name: /В архив/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Вернуть из архива/ })).toHaveCount(0);
+});
+
 test('session_menu_closes_on_tab_change', async ({ page, isMobile }) => {
   test.skip(isMobile, 'телефонное меню модально: вкладки под ним недоступны');
   await boot(page);

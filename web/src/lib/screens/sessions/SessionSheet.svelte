@@ -378,6 +378,16 @@
       saveError = errorText(err, 'Не удалось архивировать');
     }
   }
+
+  async function unarchive() {
+    saveError = '';
+    try {
+      await patch({ archived: false });
+      reasons = [];
+    } catch (err) {
+      saveError = errorText(err, 'Не удалось вернуть из архива');
+    }
+  }
 </script>
 
 {#snippet fields()}
@@ -434,12 +444,18 @@
         </div>
       </Disclosure>
     </div>
-    <button type="button" class="archive" onclick={() => void archive(false)}>
-      <Icon name="archive" /><span>В архив</span><small>История сохранится</small>
-    </button>
-    {#if reasons.length > 0}
-      <p class="note">Сначала подтвердите: {reasons.join(', ')}</p>
-      <Button onclick={() => void archive(true)}>Всё равно архивировать</Button>
+    {#if item.archived}
+      <button type="button" class="archive" onclick={() => void unarchive()}>
+        <Icon name="archive" /><span>Вернуть из архива</span><small>Сессия вернётся в список</small>
+      </button>
+    {:else}
+      <button type="button" class="archive" onclick={() => void archive(false)}>
+        <Icon name="archive" /><span>В архив</span><small>История сохранится</small>
+      </button>
+      {#if reasons.length > 0}
+        <p class="note">Сначала подтвердите: {reasons.join(', ')}</p>
+        <Button onclick={() => void archive(true)}>Всё равно архивировать</Button>
+      {/if}
     {/if}
     <button type="button" class="archive remove" onclick={() => void askDelete()}>
       <Icon name="trash" /><span>Переместить в корзину</span><small>Можно вернуть в течение 24 часов</small>
