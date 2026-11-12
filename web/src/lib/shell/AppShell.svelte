@@ -13,13 +13,14 @@
   import { layoutMode, type LayoutMode } from './layout';
   import { pane } from './pane.svelte';
   import Nav from './Nav.svelte';
-  import SessionExpired from './SessionExpired.svelte';
   import { applyMotion } from '#lib/screens/settings/preferences.js';
   import { trackViewport } from './viewport';
   import { installation, register } from '#lib/pwa/register.js';
   import type { UpdateController } from '#lib/pwa/update.js';
   import { announce } from '#lib/a11y/announce.js';
-  import { followSignout, watchSignout } from '#lib/pwa/signout.js';
+  import { clearOwnerPreferences, followSignout, purgeLocal, watchSignout } from '#lib/pwa/signout.js';
+  import { purgeAllStores } from '#lib/storage/idb.js';
+  import { session, type SignOut } from '#lib/api/http.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import type { MachineRecord } from '#lib/stores/machines.svelte.js';
   import { goto } from '$app/navigation';
@@ -36,8 +37,42 @@
   const mode: LayoutMode = $derived(layoutMode(width || 412));
   const path = $derived(page.url.pathname);
   const onSessions = $derived(path === '/' || path === '/sessions');
-  const standalonePage = $derived(path === '/settings' || path === '/changes' || path === '/share' || path === '/search' || path === '/bookmarks' || path === '/plan' || path.startsWith('/plan/'));
+  const standalonePage = $derived(path === '/settings' || path === '/settings/sign-in' || path === '/changes' || path === '/share' || path === '/search' || path === '/bookmarks' || path === '/plan' || path.startsWith('/plan/'));
   const onChat = $derived(path.startsWith('/c/'));
+  // Код входа и ссылка восстановления работают и без сеанса: страница входа их не закрывает.
+  const authRoute = $derived(path === '/qr' || path === '/recover');
+  let signOut = $state<SignOut | null>(session.cause);
+  let wiped = $state(false);
+  let wiping: Promise<void> | null = null;
+  let SignInComponent = $state<Component<{ cause?: SignOut | null; wiped?: boolean }> | null>(null);
+  const signingIn = $derived(signOut !== null && !authRoute);
+
+  $effect(() => {
+    if (signingIn && !SignInComponent) void import('#lib/auth/SignInPage.svelte').then((m) => { SignInComponent = m.default; });
+  });
+
+  /** Отзыв сеанса стирает данные устройства тем же путём, что «Очистить данные на устройстве». */
+  function wipeDevice(): Promise<void> {
+    wiping ??= (async () => {
+      try {
+        const current = runtime ?? (await browserRuntime().catch(() => null));
+        if (current) await purgeLocal({ idb: current.db, caches, ls: localStorage, connection: current.connection, runtime: current });
+        else { await purgeAllStores(); clearOwnerPreferences(localStorage); }
+      } catch {
+        // Хранилище недоступно: страница входа всё равно закрывает данные.
+      }
+      runtime = null;
+      wiped = true;
+    })();
+    return wiping;
+  }
+
+  function onSession(cause: SignOut | null): void {
+    // Вход вернулся (например, в другой вкладке): стёртое приложение начинает заново.
+    if (!cause) { if (wiping) window.location.reload(); signOut = null; return; }
+    signOut = cause;
+    if (cause.wipe) void wipeDevice();
+  }
   const chatId = $derived(onChat ? path.split('/')[2] : null);
   let currentChat = $state<ChatStore | null>(null);
   let DelegationPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
@@ -113,6 +148,8 @@
   });
 
   onMount(() => {
+    const stopSession = session.subscribe(onSession);
+    if (session.cause) onSession(session.cause);
     installation();
     applyMotion();
     let alive = true;
@@ -173,6 +210,7 @@
     loadRuntime();
     return () => {
       alive = false;
+      stopSession();
       stopSignout();
       update?.removeEventListener('change', changed);
       update?.destroy();
@@ -236,14 +274,15 @@
       failure={updateError}
       onupdate={applyUpdate}
       onrefresh={() => { void runtime?.drafts.flush().then(() => window.location.reload()); }}
-      onrelogin={() => window.location.assign('/')}
     />
   {/snippet}
-  {#if harness || !laidOut || mode === 'phone'}{@render banner()}{/if}
-  {#if runtime}<SessionExpired phase={runtime.connection.status.phase} now={now} />{/if}
-  {#if harness}
+  {#if signingIn}
+    {#if SignInComponent}<SignInComponent cause={signOut} {wiped} />{/if}
+  {:else if harness || authRoute}
+    {@render banner()}
     <div class="page">{@render children()}</div>
   {:else if laidOut && mode === 'phone'}
+    {@render banner()}
     {#if onSessions || onNew}
       <SessionList main={onSessions} />
     {/if}
@@ -281,6 +320,8 @@
         </aside>
       {/if}
     </div>
+  {:else}
+    {@render banner()}
   {/if}
 </div>
 

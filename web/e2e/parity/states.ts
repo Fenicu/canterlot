@@ -300,7 +300,7 @@ export const SCREENS: Screen[] = [
     await expect(page.locator('[data-secondary-ready]')).toBeVisible();
   }),
   screen('09-machine-lease-queue', false, PHONE, 'dark', async (page) => {
-    await bootSecondary(page, '/machines', null, (api) => {
+    await bootSecondary(page, '/machines', (api) => {
       const rows = [...api.list.values()];
       const machine = [...api.machines.values()].find((item) => item.name === 'workstation')!;
       const since = new Date(Date.now() - 12 * 60_000).toISOString();

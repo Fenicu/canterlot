@@ -69,7 +69,7 @@ test('group_create_shows_proxy_outage_and_a_double_tap_sends_once', async ({ pag
   await page.getByRole('textbox', { name: 'Название группы' }).fill('черновики');
   await page.getByRole('button', { name: 'Создать', exact: true }).click();
   await expect(page.getByRole('alert').filter({ hasText: 'Хаб недоступен, повторяю' })).toBeVisible();
-  await expect(page.getByRole('dialog', { name: 'Сессия истекла' })).toBeHidden();
+  await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toHaveCount(0);
   await doubleTap(page, 'Создать');
   await expect(page.getByRole('textbox', { name: 'Название черновики' })).toBeVisible();
   expect(keys).toHaveLength(2);

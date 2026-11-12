@@ -48,17 +48,18 @@ describe("api/gate", () => {
     expect(await canSendNow()).toBe("offline");
     expect(session.state).toBe("expired");
 
-    // 5. Probe returns 403 forbidden_user: same authentication failure
+    // 5. Probe returns 401 session_revoked: same authentication failure, with the reason
     session.reset?.();
     httpHealth.reset?.();
     fetchMock.mockReset();
     fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: { code: "forbidden_user" } }), {
-        status: 403,
+      new Response(JSON.stringify({ error: { code: "session_revoked", details: { reason: "owner" } } }), {
+        status: 401,
       }),
     );
     expect(await canSendNow()).toBe("offline");
     expect(session.state).toBe("expired");
+    expect(session.cause?.wipe).toBe(true);
 
     // 6. Probe throws network error -> returns false
     httpHealth.reset?.();

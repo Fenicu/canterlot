@@ -71,90 +71,70 @@ export class NetworkError extends Error {
   }
 }
 
-export class AuthRequired extends Error {
-  readonly reason: "redirect" | "unauthenticated" | "forbidden_user";
+/** Код ответа 401, после которого нужен вход. */
+export type SignOutCode = "unauthenticated" | "session_expired" | "session_revoked";
 
-  constructor(reason: "redirect" | "unauthenticated" | "forbidden_user") {
+export class AuthRequired extends Error {
+  readonly reason: SignOutCode;
+  /** Причина отзыва из `details.reason` при `session_revoked`. */
+  readonly revokeReason?: string;
+
+  constructor(reason: SignOutCode, revokeReason?: string) {
     super(
-      reason === "forbidden_user"
-        ? "Доступ для этого пользователя запрещён"
+      reason === "session_revoked"
+        ? "Сеанс завершён, войдите снова"
         : "Сессия истекла, войдите снова",
     );
     this.name = "AuthRequired";
     this.reason = reason;
+    this.revokeReason = revokeReason;
   }
 }
 
 /** Прокси ответил своей страницей ошибки или хаб не поднялся: повтор, а не вход. */
 export const HUB_UNAVAILABLE = "hub_unavailable";
 
-const AUTH_PAGE = /authelia|sign[\s-]?in|log[\s-]?in|вход|password|пароль/i;
+const SIGN_OUT_CODES = new Set<string>(["unauthenticated", "session_expired", "session_revoked"]);
 
 /**
- * HTML на адрес API: страница входа или ошибка прокси. 5xx никогда не вход,
- * 2xx и 3xx всегда вход, прочие 4xx решают заголовки и разметка страницы.
+ * Ответ 401 хаба: код конверта и причина отзыва. `invalid_credentials` на публичных
+ * путях входа остаётся обычной ошибкой формы, а не выходом из приложения.
  */
-export function htmlVerdict(
-  status: number,
-  headers: Headers | null | undefined,
-  body = "",
-): "auth" | "unavailable" {
-  if (status >= 500) return "unavailable";
-  if (status < 400 || status === 401 || status === 403 || status === 407)
-    return "auth";
-  if (headers?.has("www-authenticate")) return "auth";
-  for (const [name] of headers?.entries() ?? [])
-    if (name.toLowerCase().startsWith("x-authelia")) return "auth";
-  return AUTH_PAGE.test(body) ? "auth" : "unavailable";
+export function signOutOf(body: unknown): { code: SignOutCode; reason?: string } | null {
+  const error = (body as { error?: { code?: unknown; details?: { reason?: unknown } } } | null)?.error;
+  const code = typeof error?.code === "string" ? error.code : "unauthenticated";
+  if (!SIGN_OUT_CODES.has(code)) return null;
+  const reason = typeof error?.details?.reason === "string" ? error.details.reason : undefined;
+  return { code: code as SignOutCode, reason };
 }
 
 /**
- * Ответ не от хаба: переадресация на вход, страница входа, ошибка прокси или отказ личности.
- * Бросает AuthRequired (и помечает сессию истёкшей) либо NetworkError(hub_unavailable).
+ * Ответ не от хаба или отказ сеанса. 401 с кодом выхода бросает AuthRequired и помечает
+ * сессию истёкшей; HTML или переадресация на адрес API значат, что хаба за прокси нет.
  */
 export async function screenForeign(
   response: Response,
   path: string,
 ): Promise<void> {
   const status = response.status;
+  if (status === 401) {
+    const body: unknown = await response
+      .clone()
+      .json()
+      .catch(() => null);
+    const out = signOutOf(body);
+    if (!out) return;
+    session.expire(out.code, out.reason);
+    throw new AuthRequired(out.code, out.reason);
+  }
   if (
     (response as Response & { type?: string }).type === "opaqueredirect" ||
     (status >= 300 && status < 400 && status !== 304)
-  ) {
-    session.state = "expired";
-    throw new AuthRequired("redirect");
-  }
+  )
+    throw new NetworkError(HUB_UNAVAILABLE);
   const contentType = response.headers?.get("Content-Type") ?? "";
-  if (path.includes("/api/") && contentType.includes("text/html")) {
-    const needsBody = status >= 400 && status < 500 && status !== 401 && status !== 403;
-    const body = needsBody
-      ? await response
-          .clone()
-          .text()
-          .catch(() => "")
-      : "";
-    if (htmlVerdict(status, response.headers, body) === "unavailable")
-      throw new NetworkError(HUB_UNAVAILABLE);
-    session.state = "expired";
-    throw new AuthRequired(status === 401 ? "unauthenticated" : "redirect");
-  }
-  if (status === 401) {
-    session.state = "expired";
-    throw new AuthRequired("unauthenticated");
-  }
-  if (status === 403) {
-    let errorCode: string | undefined;
-    try {
-      errorCode = (await response.clone().json())?.error?.code;
-    } catch {
-      errorCode = undefined;
-    }
-    // origin_rejected повторный вход не исправит: он уходит обычной ошибкой с конвертом.
-    if (errorCode === "forbidden_user") {
-      session.state = "expired";
-      throw new AuthRequired("forbidden_user");
-    }
-  }
+  if (path.includes("/api/") && contentType.includes("text/html"))
+    throw new NetworkError(HUB_UNAVAILABLE);
 }
 
 /** Ошибка без конверта хаба: 5xx значит прокси без хаба за ним. */
@@ -166,17 +146,58 @@ export function envelopeMissing(status: number): NetworkError {
 
 /**
  * Итог проверки входа: истёкшей сессия считается только по явному отказу,
- * сетевая ошибка или ответ без личности не должны останавливать переподключение.
+ * сетевая ошибка не должна останавливать переподключение.
  */
 export function authProbeResult(error: unknown): "expired" | "down" {
   return error instanceof AuthRequired ? "expired" : "down";
 }
 
+/** Отзыв владельцем, другим устройством, сервером или сменой пароля стирает данные устройства. */
+const WIPE_REASONS = new Set(["owner", "others", "server", "password_changed", "cascade"]);
+
+export interface SignOut {
+  code: SignOutCode;
+  reason?: string;
+  wipe: boolean;
+}
+
+export function signOutCause(code: SignOutCode, reason?: string): SignOut {
+  return { code, reason, wipe: code === "session_revoked" && reason !== undefined && WIPE_REASONS.has(reason) };
+}
+
 class SessionManager {
   state: "ok" | "expired" = "ok";
+  /** Почему нужен вход; пусто, пока сеанс жив. */
+  cause: SignOut | null = null;
+  #listeners = new Set<(cause: SignOut | null) => void>();
+
+  /** Хаб отказал сеансу: оболочка показывает страницу входа, а при отзыве стирает данные. */
+  expire(code: SignOutCode, reason?: string): void {
+    this.state = "expired";
+    const next = signOutCause(code, reason);
+    // Стирание не отменяется более мягким отказом следующего запроса.
+    if (this.cause?.wipe && !next.wipe) return;
+    if (this.cause && this.cause.code === next.code && this.cause.reason === next.reason) return;
+    this.cause = next;
+    for (const listener of this.#listeners) listener(next);
+  }
+
+  /** Запрос с сеансом прошёл: вход снова есть (например, вошли в другой вкладке). */
+  restore(): void {
+    this.state = "ok";
+    if (!this.cause) return;
+    this.cause = null;
+    for (const listener of this.#listeners) listener(null);
+  }
+
+  subscribe(listener: (cause: SignOut | null) => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
 
   reset(): void {
     this.state = "ok";
+    this.cause = null;
   }
 
   serverNow(): number {
@@ -245,6 +266,8 @@ export function requestPathname(path: string): string {
 
 function isMutationExempt(method: HttpMethod, path: string): boolean {
   const pathname = requestPathname(path);
+  // Вход и сеансы идемпотентны сами, а запросы с паролем хаб не хранит для повтора.
+  if (pathname.startsWith("/api/v1/auth/")) return true;
   if (method === "PATCH" && CONTENT_PATCH.test(pathname)) return true;
   if (method === "POST" && MARK_READ.test(pathname)) return true;
   if (method === "POST" && LIMITS_REFRESH.test(pathname)) return true;
@@ -460,7 +483,8 @@ export async function http<T = unknown>(
     }
 
     httpHealth.recordSuccess(receivedAt);
-    session.state = "ok";
+    // Публичные пути входа отвечают и без сеанса: их успех вход не возвращает.
+    if (!requestPathname(path).startsWith("/api/v1/auth/")) session.restore();
 
     if (
       response.status === 204 ||

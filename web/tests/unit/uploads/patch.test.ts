@@ -164,8 +164,8 @@ describe("uploads/patch", () => {
         new Uint8Array([1, 2, 3, 4]),
         0,
       ),
-    ).rejects.toBeInstanceOf(AuthRequired);
-    expect(session.state).toBe("expired");
+    ).rejects.toBeInstanceOf(NetworkError);
+    expect(session.state).toBe("ok");
 
     session.reset?.();
     install({ status: 401, responseText: "<html>login</html>" });

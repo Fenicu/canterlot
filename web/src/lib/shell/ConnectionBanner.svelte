@@ -16,8 +16,7 @@
     updateMessage = '',
     failure = '',
     onupdate,
-    onrefresh,
-    onrelogin
+    onrefresh
   }: {
     phase: ConnectionPhase;
     since: number;
@@ -28,7 +27,6 @@
     failure?: string;
     onupdate?: () => void;
     onrefresh: () => void;
-    onrelogin?: () => void;
   } = $props();
 
   type Tone = 'warning' | 'danger' | 'neutral' | 'success';
@@ -57,7 +55,6 @@
         : { kind: 'update', text: 'Доступна новая версия', tone: 'neutral', action: { label: 'Обновить', run: () => onupdate?.() } };
     }
     if (phase === 'incompatible') return { kind: 'incompatible', text: 'Доступна новая версия приложения', tone: 'neutral' };
-    if (phase === 'auth_required') return { kind: 'auth', text: 'Сессия истекла. Войдите снова', tone: 'danger', action: { label: 'Войти', run: () => onrelogin?.() } };
     if (scope === 'degraded') return { kind: 'degraded', text: 'Не удаётся синхронизироваться. Повторяю попытки', tone: 'danger', action: { label: 'Обновить', run: onrefresh } };
     if (phase === 'offline') return { kind: 'link', text: 'Нет связи с сервером. Переподключаюсь…', tone: 'warning' };
     if (phase === 'reconnecting' && now - since >= 3000) return { kind: 'link', text: 'Нет связи. Переподключаюсь…', tone: 'warning' };

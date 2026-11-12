@@ -90,7 +90,7 @@ test('limit_settings_fit_a_narrow_phone', async ({ page }) => {
 
 test('desktop_strip_recolors_without_reload_after_a_threshold_change', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'desktop keeps the session list mounted beside settings');
-  const { api } = await bootSecondary(page, '/settings', null, (api) => {
+  const { api } = await bootSecondary(page, '/settings', (api) => {
     const claude = api.limits.find((item) => item.provider === 'claude')!;
     claude.weekly = {
       used_permille: 750,

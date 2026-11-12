@@ -89,7 +89,7 @@ test('connection_banner_follows_transport_state_and_announces_politely', async (
   await expect(page.getByRole('button', { name: 'Обновить' })).toBeVisible();
 });
 
-test('session_expired_dialog_blocks_and_navigates', async ({ page }) => {
+test('an_unauthenticated_answer_replaces_the_app_with_the_sign_in_page', async ({ page }) => {
   await boot(page);
   await page.route('**/api/v1/conversations?*', async (route) => {
     await route.fulfill({
@@ -100,7 +100,6 @@ test('session_expired_dialog_blocks_and_navigates', async ({ page }) => {
   });
   await page.getByRole('button', { name: 'Поиск', exact: true }).click();
   await page.getByRole('textbox', { name: 'Поиск сессий' }).fill('поток');
-  await expect(page.getByRole('dialog', { name: 'Сессия истекла' })).toBeVisible({ timeout: 5_000 });
-  await page.getByRole('button', { name: 'Войти снова' }).click();
-  await expect(page).toHaveURL(/\//);
+  await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByRole('textbox', { name: 'Логин' })).toHaveAttribute('autocomplete', 'username');
 });

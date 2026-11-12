@@ -118,6 +118,15 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
           return authProbeResult(error);
         }
       },
+      // Закрытие с причиной revoked не говорит, отозван сеанс или истёк: точную причину даёт 401 на /me.
+      revoked: () => {
+        void me().then(
+          () => connection.probe("manual"),
+          (error) => {
+            if (!(error instanceof AuthRequired)) session.expire("session_revoked", "server");
+          },
+        );
+      },
       now: deps.clock.now,
       schedule: deps.schedule,
       rng: deps.rng ?? Math.random,

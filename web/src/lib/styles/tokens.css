@@ -103,6 +103,10 @@
   --vendor-meta: #0866ff;
   --vendor-qwen: #615ced;
   --vendor-mistral: #fa500f;
+  /* Код входа: тёмные модули на белом в любой теме, иначе камера его не прочтёт. */
+  --qr-light: #ffffff;
+  --qr-dark: #000000;
+  --qr-size: 232px;
   --avatar: 46px;
   --avatar-phone: 52px;
   --avatar-small: 30px;

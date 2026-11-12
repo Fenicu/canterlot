@@ -124,7 +124,7 @@ test('settings_for_every_variant', async ({ page }) => {
   const hub = new FakeHub(); const api = new FakeHubApi(hub);
   const ids = seedMockupSessions(api);
   await installChatRoutes(page, hub, api, ids.pinned);
-  await seedSecondaryScreens(page, api, ids, null);
+  await seedSecondaryScreens(page, api, ids);
   await page.goto('/settings');
   await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
   for (const variant of VARIANTS) {

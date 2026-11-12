@@ -128,7 +128,7 @@ test('huge_token_counts_stay_inside_their_cells_at_every_width', async ({ page }
 });
 
 test('antigravity_is_one_named_provider_on_the_limits_page', async ({ page }) => {
-  await bootSecondary(page, '/limits', null, (api) => {
+  await bootSecondary(page, '/limits', (api) => {
     const observed = new Date(Date.now() - 60_000).toISOString();
     const reset = new Date(Date.now() + 3_600_000).toISOString();
     api.limits.push({
@@ -147,7 +147,7 @@ test('antigravity_is_one_named_provider_on_the_limits_page', async ({ page }) =>
 });
 
 test('estimated_reading_is_called_out_on_the_limits_page', async ({ page }) => {
-  await bootSecondary(page, '/limits', null, (api) => {
+  await bootSecondary(page, '/limits', (api) => {
     const claude = api.limits.find((item) => item.provider === 'claude');
     if (claude) claude.data_confidence = 'estimated';
   });
@@ -158,7 +158,7 @@ test('estimated_reading_is_called_out_on_the_limits_page', async ({ page }) => {
 test('current_limits_show_only_existing_windows_with_the_text_on_one_line_over_the_gauge', async ({ page }) => {
   const phone = test.info().project.name === 'phone';
   if (phone) await page.setViewportSize({ width: 390, height: 900 });
-  await bootSecondary(page, '/limits', null, (api) => {
+  await bootSecondary(page, '/limits', (api) => {
     const claude = api.limits.find((item) => item.provider === 'claude')!;
     claude.weekly!.used_permille = 790;
     claude.five_hour = null;
@@ -212,7 +212,7 @@ test('current_limits_show_only_existing_windows_with_the_text_on_one_line_over_t
 test('claude_fable_week_is_shown_after_the_weekly_window', async ({ page }) => {
   const phone = test.info().project.name === 'phone';
   if (phone) await page.setViewportSize({ width: 390, height: 900 });
-  await bootSecondary(page, '/limits', null, (api) => {
+  await bootSecondary(page, '/limits', (api) => {
     const claude = api.limits.find((item) => item.provider === 'claude')!;
     claude.weekly!.used_permille = 790;
     claude.weekly_fable = {

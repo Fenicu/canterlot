@@ -15,6 +15,8 @@
   import { currentUpdate, installation } from '#lib/pwa/register.js';
   import { staleness } from '#lib/pwa/sync-state.js';
   import { purgeLocal } from '#lib/pwa/signout.js';
+  import { session } from '#lib/api/http.js';
+  import { authApi } from '#lib/auth/api.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import Button from '#lib/ui/Button.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
@@ -26,7 +28,7 @@
 
   let ready = $state(false);
   let runtime = $state<Runtime | null>(null); let config = $state<components['schemas']['ConfigView'] | null>(null);
-  let login = $state(''); let error = $state(''); let busy = $state(false); let purged = $state(false);
+  let login = $state(''); let error = $state(''); let busy = $state(false); let purged = $state(false); let logoutFailed = $state(false);
   let enter = $state('auto'); let motion = $state('normal'); let reasoning = $state<ReasoningPref>('live');
   let canInstall = $state(false);
   const update = $derived.by(() => { void ticker.second; return currentUpdate(); });
@@ -55,14 +57,19 @@
     const releaseTicker = ticker.retain();
     return () => { releaseTicker(); install.removeEventListener('change', changed); };
   });
+  /** Выход: сначала сеанс на хабе (HttpOnly-cookie снимает только ответ хаба), затем данные устройства в любом случае. */
   async function clear(exit: boolean) {
-    if (busy || !runtime || !config) return;
-    busy = true; error = '';
-    const logout = config.auth.logout_url;
+    if (busy || !runtime) return;
+    busy = true; error = ''; logoutFailed = false;
+    let closed = !exit;
+    if (exit) {
+      try { await authApi.logout(); closed = true; }
+      catch { logoutFailed = true; }
+    }
     try {
       await purgeLocal({ idb: runtime.db, caches, ls: localStorage, connection: runtime.connection, runtime });
       purged = true;
-      if (exit && logout) window.location.assign(logout);
+      if (exit && closed) session.expire('session_revoked', 'logout');
     } catch { error = 'Не удалось очистить данные на устройстве. Повторите очистку'; }
     finally { busy = false; }
   }
@@ -75,7 +82,7 @@
   <SecondaryHeader title="Настройки" />
   <div class="secondary-body"><div class="secondary-content">
     {#if error}<p class="error" role="alert">{error}</p>{#if !runtime}<button type="button" onclick={load}>Повторить</button>{/if}{/if}
-    {#if purged}<p role="status">Данные на устройстве удалены</p><p>Сессия Authelia завершается на собственной странице. Откройте страницу Authelia, чтобы завершить вход</p>
+    {#if purged}<p role="status">Данные на устройстве удалены</p>{#if logoutFailed}<p class="error" role="alert">Данные удалены, но сеанс на сервере не завершён: завершите его с другого устройства</p>{/if}
     {:else if !config}<p>Загружаю настройки…</p>
     {:else}
       <!-- Режим и тема идут во всю ширину: карточкам тем на рабочем столе нужны три-четыре колонки. -->
@@ -85,9 +92,9 @@
         <section><h2>Скорость анимаций</h2><Segmented name="motion" label="Скорость анимаций" options={[{ value: 'off', label: 'Выкл' }, { value: 'slower', label: 'Медленнее' }, { value: 'normal', label: 'Обычно' }, { value: 'faster', label: 'Быстрее' }]} bind:value={motion} /><p class="note">Появление текста, дорожки этапов и раскрытие блоков. Системное уменьшение движения имеет приоритет</p></section>
         <section><h2>Рассуждения</h2><Segmented name="reasoning" label="Рассуждения" options={[{ value: 'line', label: 'Строкой' }, { value: 'live', label: 'Вживую' }, { value: 'expanded', label: 'Раскрыты' }]} bind:value={() => reasoning, setReasoning} /><p class="note">Вживую показывает хвост мысли, пока агент думает, и складывает его в строку после ответа. Строкой оставляет начало мысли, Раскрыты показывает рассуждение целиком</p></section>
         <section><h2>Enter на клавиатуре</h2><Segmented name="enter" label="Enter на клавиатуре" options={[{ value: 'auto', label: 'Авто' }, { value: 'send', label: 'Отправка' }, { value: 'newline', label: 'Новая строка' }]} bind:value={enter} /><p class="note">Авто: на телефоне новая строка, на компьютере отправка. Shift+Enter добавляет строку</p></section>
-        <section><h2>Данные и выход</h2><Button {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(false)} full>Очистить данные на устройстве</Button><div class="logout"><Button full {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(true)}>Выйти</Button></div>{#if busy}<p role="status">Очищаю данные на устройстве…</p>{/if}<p class="note">{config.auth.logout_url ? 'Перед выходом через Authelia данные на устройстве будут удалены' : 'Сессия Authelia завершается на собственной странице'}</p></section>
+        <section><h2>Данные и выход</h2><Button {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(false)} full>Очистить данные на устройстве</Button><div class="logout"><Button full {...(busy ? { disabled: true as const, reason: 'Очистка уже выполняется' } : { disabled: false as const })} onclick={() => clear(true)}>Выйти</Button></div>{#if busy}<p role="status">Очищаю данные на устройстве…</p>{/if}<p class="note">Выход завершает этот сеанс на хабе и удаляет данные на устройстве</p></section>
       </div><div>
-        <section><h2>Подключение</h2><p>Логин: <strong>{login}</strong></p><p>{connectionText}</p><p class="note sync">{#if sync}Последняя синхронизация: {fmt.clock(sync)}{/if}</p></section>
+        <section><h2>Подключение</h2><p>Логин: <strong>{login}</strong></p><p>{connectionText}</p><p class="note sync">{#if sync}Последняя синхронизация: {fmt.clock(sync)}{/if}</p><a href={resolve('/settings/sign-in')}>Сеансы и вход</a></section>
         <LimitSettings />
         <section><a href={resolve('/limits')}>История лимитов</a></section>
         <section><a href={resolve('/machines')}>Машины</a></section>

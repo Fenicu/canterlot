@@ -403,7 +403,7 @@ export function describeError(err: ApiError | unknown): DescribedError {
     return {
       action: "sign_in_again",
       actionLabel: ACTION_LABEL.sign_in_again,
-      message: "Требуется вход через сервис авторизации",
+      message: "Требуется вход",
     };
   }
 

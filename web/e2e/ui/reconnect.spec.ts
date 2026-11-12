@@ -74,18 +74,19 @@ test('a_silently_dropped_socket_is_detected_by_the_heartbeat_and_recovers_withou
   await expect(page.locator(`[data-session="${ids.pinned}"]`)).toHaveCount(0);
 });
 
-test('an_expired_session_is_named_in_the_indicator_and_recovers_after_auth_without_a_reload', async ({ page }) => {
+test('an_expired_session_shows_sign_in_and_recovers_after_auth_without_a_reload', async ({ page }) => {
   test.setTimeout(45_000);
   const { hub } = await boot(page);
   await page.route('**/api/v1/me', expired);
   hub.acceptConnections = false;
   hub.chaos.cut();
-  await expect(page.locator('[data-banner]')).toContainText('Сессия истекла. Войдите снова', { timeout: 20_000 });
-  await expect(page.getByRole('dialog', { name: 'Сессия истекла' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toBeVisible({ timeout: 20_000 });
+  await page.evaluate(() => { window.reconnectSentinel = 2; });
+  // Вошли в другой вкладке: проверка входа при возврате снимает страницу входа без перезагрузки.
   await page.unroute('**/api/v1/me', expired);
   hub.acceptConnections = true;
   await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect(page.getByRole('dialog', { name: 'Сессия истекла' })).toBeHidden({ timeout: 10_000 });
+  await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toBeHidden({ timeout: 10_000 });
   await expect(page.locator('[data-list-ready]')).toBeVisible();
-  await expect(page.locator('[data-banner]')).not.toContainText('Сессия истекла');
+  expect(await page.evaluate(() => window.reconnectSentinel)).toBe(2);
 });

@@ -326,7 +326,7 @@ test('chat_header_and_limits_tab_hide_the_missing_five_hour_window', async ({ pa
   await shot(page, 'chat-header-one-meter');
 
   await installChatRoutes(page, hub, api, ids.pinned);
-  await seedSecondaryScreens(page, api, ids, null);
+  await seedSecondaryScreens(page, api, ids);
   await page.goto('/limits');
   await expect(page.locator('[data-layout]')).toBeVisible();
   const card = page.getByRole('region', { name: 'Claude, текущие лимиты' });

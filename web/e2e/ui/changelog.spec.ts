@@ -55,7 +55,7 @@ test('history_page_lists_entries_and_the_installed_version', async ({ page }) =>
 });
 
 test('settings_show_both_versions_and_flag_a_mismatch_quietly', async ({ page }) => {
-  await bootSecondary(page, '/settings', null, undefined, '9.9.9');
+  await bootSecondary(page, '/settings', undefined, '9.9.9');
 
   const main = page.locator('main');
   const versions = main.locator('.versions');

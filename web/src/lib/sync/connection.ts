@@ -14,6 +14,8 @@ export interface ConnectionDependencies {
   transport: Transport;
   lifecycle: Lifecycle;
   probeAuth(): Promise<'ok' | 'expired' | 'down'>;
+  /** Хаб закрыл сокет с причиной `revoked`: сеанс отозван или истёк, решает проверка входа. */
+  revoked?(): void;
   now(): number;
   schedule: Schedule;
   rng(): number;
@@ -23,7 +25,7 @@ export interface ConnectionDependencies {
 }
 const labels: Record<ConnectionPhase, string> = {
   connecting: 'Подключение', live: 'Соединение установлено', reconnecting: 'Восстановление соединения',
-  offline: 'Нет связи с сервером', auth_required: 'Сессия истекла. Войдите снова', incompatible: 'Обновите приложение для продолжения'
+  offline: 'Нет связи с сервером', auth_required: 'Требуется вход', incompatible: 'Обновите приложение для продолжения'
 };
 type Slot = { sync: ScopeSync; applier: ScopeApplier; refs: number; cancelRelease?: () => void };
 const OPEN_TIMEOUT = 10_000;
@@ -139,9 +141,19 @@ export class ConnectionManager {
     this.status.lastFrameAt = this.deps.now();
     const op = parseServerFrame(text);
     if (op.op === 'unknown') return;
-    if (op.op === 'close') { this.restart(); return; }
+    if (op.op === 'close') {
+      if (op.reason === 'revoked') { this.revoke(); return; }
+      this.restart(); return;
+    }
     if (op.op === 'pong' && op.t === this.ping?.t) { this.cancelPing?.(); this.cancelPing = undefined; this.ping = undefined; }
     for (const slot of this.scopes.values()) slot.sync.onFrame(op);
+  }
+  /** Отозванный сеанс не переподключается: дальше страница входа. */
+  private revoke(): void {
+    this.cancelReconnect?.(); this.cancelReconnect = undefined;
+    this.phase('auth_required');
+    this.selfClosing = true; this.deps.transport.close();
+    this.deps.revoked?.();
   }
   private incompatible(): void {
     this.phase('incompatible'); this.cancelReconnect?.(); this.cancelPing?.();

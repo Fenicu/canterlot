@@ -4,9 +4,9 @@ import {
   envelopeMissing,
   envelopeOf,
   HUB_UNAVAILABLE,
-  htmlVerdict,
   NetworkError,
   session,
+  signOutOf,
 } from "#lib/api/http.js";
 
 export interface PatchChunkOptions {
@@ -104,6 +104,20 @@ export function patchChunk(
       }
 
       const contentType = xhr.getResponseHeader("Content-Type") ?? "";
+      if (xhr.status === 401) {
+        let body: unknown = null;
+        try {
+          body = JSON.parse(xhr.responseText);
+        } catch {
+          body = null;
+        }
+        const out = signOutOf(body) ?? { code: "unauthenticated" as const };
+        session.expire(out.code, out.reason);
+        reject(new AuthRequired(out.code, out.reason));
+        return;
+      }
+
+      // Переадресация, обрыв без статуса или HTML на адрес API: хаба за прокси нет.
       const landed = xhr.responseURL;
       if (landed) {
         const base =
@@ -116,52 +130,14 @@ export function patchChunk(
           actual.origin !== requested.origin ||
           actual.pathname !== requested.pathname
         ) {
-          session.state = "expired";
-          reject(new AuthRequired("redirect"));
-          return;
-        }
-      }
-
-      if (xhr.status === 0) {
-        session.state = "expired";
-        reject(new AuthRequired("redirect"));
-        return;
-      }
-
-      if (contentType.includes("text/html")) {
-        let page = "";
-        try {
-          page = xhr.responseText ?? "";
-        } catch {
-          page = "";
-        }
-        if (htmlVerdict(xhr.status, headers, page) === "unavailable") {
           reject(new NetworkError(HUB_UNAVAILABLE));
           return;
         }
-        session.state = "expired";
-        reject(new AuthRequired("redirect"));
-        return;
       }
 
-      if (xhr.status === 401) {
-        session.state = "expired";
-        reject(new AuthRequired("unauthenticated"));
+      if (xhr.status === 0 || contentType.includes("text/html")) {
+        reject(new NetworkError(HUB_UNAVAILABLE));
         return;
-      }
-
-      if (xhr.status === 403) {
-        let code: string | undefined;
-        try {
-          code = JSON.parse(xhr.responseText)?.error?.code;
-        } catch {
-          code = undefined;
-        }
-        if (code === "forbidden_user") {
-          session.state = "expired";
-          reject(new AuthRequired("forbidden_user"));
-          return;
-        }
       }
 
       if (xhr.status === 200 || xhr.status === 204) {

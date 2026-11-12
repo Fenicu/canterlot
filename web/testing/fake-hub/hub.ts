@@ -2,6 +2,7 @@ import type { Page, Route } from '@playwright/test';
 import { seq, type ClientOp, type HubEvent, type ServerOp } from '../../src/lib/sync/wire';
 import type { RangeResult } from '../../src/lib/sync/scope';
 import { Chaos } from './chaos';
+import { FakeAuth } from './auth';
 import { mergeEvents } from './merger';
 import { checkClient, checkEvent, checkServer, clientKinds } from './schema-check';
 import type { FakeClock, HubClock, HubPeer, HubSession, ScopeJournal } from './state';
@@ -20,6 +21,7 @@ export class FakeHub {
   get activeConnections(): number { return this.sessions.size; }
   acceptConnections = true;
   readonly chaos: Chaos;
+  readonly auth = new FakeAuth();
   readonly routes = new Map<string, (route: Route) => Promise<void>>();
   readonly wire: { memory(clock: FakeClock): MemoryWire; playwright(page: Page): Promise<void> };
   constructor(private opts: { mergeWindowMs?: number; maxSubscriptions?: number; journalRetention?: number; maxFrameBytes?: number } = {}) {

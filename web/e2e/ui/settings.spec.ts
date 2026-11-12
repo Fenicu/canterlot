@@ -29,7 +29,9 @@ test('settings_screen_shows_login_connection_theme_enter_install_and_signout', a
   const out = (await main.getByRole('button', { name: 'Выйти', exact: true }).boundingBox())!;
   expect(Math.abs(clear.width - out.width)).toBeLessThanOrEqual(1);
   await expect(main.getByText(/^Обновление: [а-яё]/)).toBeVisible();
-  await expect(main.getByText(/Authelia.*собственной странице/)).toBeVisible();
+  await expect(main.getByText('Выход завершает этот сеанс на хабе и удаляет данные на устройстве')).toBeVisible();
+  await expect(main.getByRole('link', { name: 'Сеансы и вход' })).toHaveAttribute('href', '/settings/sign-in');
+  await expect(main.getByText(/Authelia/)).toHaveCount(0);
 });
 
 test('chosen_palette_and_mode_stand_out_in_every_palette_and_mode', async ({ page }) => {
@@ -126,7 +128,7 @@ test('sign_out_purges_local_data_and_closes_the_socket', async ({ page }) => {
   await page.goto('/settings');
   await expect.poll(() => hub.activeConnections).toBeGreaterThan(0);
   await page.locator('main').getByRole('button', { name: 'Выйти', exact: true }).click();
-  await expect(page.getByText('Данные на устройстве удалены', { exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toBeVisible();
   await expect.poll(() => hub.activeConnections === 0).toBe(true);
   expect(await page.evaluate(async () => {
     const db = await new Promise<IDBDatabase>(resolve => { const r = indexedDB.open('canterlot', 1); r.onsuccess = () => resolve(r.result); });
@@ -135,18 +137,34 @@ test('sign_out_purges_local_data_and_closes_the_socket', async ({ page }) => {
   })).toEqual({ counts: [0, 0, 0, 0], preferences: [] });
 });
 
-test('sign_out_navigates_to_the_logout_url_from_config', async ({ page }) => {
-  await page.route('**/logout-fixture', r => r.fulfill({ contentType: 'text/html', body: '<html lang="ru"><title>Выход</title><p>Выход завершён</p></html>' }));
-  await bootSecondary(page, '/settings', '/logout-fixture');
+test('sign_out_closes_the_hub_session_first_then_purges_and_shows_sign_in', async ({ page }) => {
+  const { hub } = await bootSecondary(page, '/settings');
+  const order: string[] = [];
+  page.on('request', (request) => { if (request.url().endsWith('/api/v1/auth/logout')) order.push('logout'); });
+  await page.exposeFunction('__purged', () => order.push('purge'));
+  await page.evaluate(() => { const original = IDBObjectStore.prototype.clear; IDBObjectStore.prototype.clear = function () { void (window as unknown as { __purged: () => void }).__purged(); return original.call(this); }; });
   await page.locator('main').getByRole('button', { name: 'Выйти', exact: true }).click();
-  await expect(page).toHaveURL(/\/logout-fixture$/);
+  await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toBeVisible();
+  await expect(page.getByText('Вы вышли из canterlot')).toBeVisible();
+  expect(hub.auth.calls.filter((call) => call.path === '/logout')).toHaveLength(1);
+  expect(order[0]).toBe('logout');
+  expect(order).toContain('purge');
+});
+
+test('failed_logout_still_purges_and_says_the_server_session_is_alive', async ({ page }) => {
+  const { hub } = await bootSecondary(page, '/settings');
+  hub.auth.failures.set('POST /logout', { status: 503, code: 'db_unavailable' });
+  await page.locator('main').getByRole('button', { name: 'Выйти', exact: true }).click();
+  await expect(page.getByText('Данные на устройстве удалены', { exact: true })).toBeVisible();
+  await expect(page.getByText('Данные удалены, но сеанс на сервере не завершён: завершите его с другого устройства')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toHaveCount(0);
 });
 
 test('clearing_data_in_one_window_reloads_the_other_and_keeps_only_the_shared_draft', async ({ page, context }) => {
   const { hub, api, ids } = await bootSecondary(page, '/settings');
   const other = await context.newPage();
   await installChatRoutes(other, hub, api, ids.pinned);
-  await seedSecondaryScreens(other, api, ids, null);
+  await seedSecondaryScreens(other, api, ids);
   await other.goto(`/c/${ids.pinned}`);
   const input = other.getByRole('textbox', { name: 'Сообщение', exact: true });
   await input.fill('Черновик второго окна');
@@ -170,5 +188,5 @@ test('clearing_local_data_does_not_claim_the_session_expired', async ({ page }) 
   await page.locator('main').getByRole('button', { name: 'Очистить данные на устройстве', exact: true }).click();
   await expect(page.getByText('Данные на устройстве удалены', { exact: true })).toBeVisible();
   await page.waitForTimeout(1500);
-  await expect(page.getByRole('dialog', { name: 'Сессия истекла' })).toBeHidden();
+  await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toHaveCount(0);
 });

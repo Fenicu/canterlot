@@ -134,26 +134,25 @@ describe("sendOp", () => {
     expect(init?.redirect).toBe("manual");
   });
 
-  it("sso_redirect_is_auth_required_and_never_committed", async () => {
+  it("redirect_is_hub_unavailable_and_never_committed", async () => {
     session.reset();
     const opaque = new Response(null, { status: 200 });
     Object.defineProperty(opaque, "type", { value: "opaqueredirect" });
     Object.defineProperty(opaque, "status", { value: 0 });
     const failure = await sendOp((async () => opaque) as unknown as typeof fetch, op).catch((e: unknown) => e);
-    expect(failure).toBeInstanceOf(AuthRequired);
-    expect(session.state).toBe("expired");
+    expect(failure).toBeInstanceOf(NetworkError);
     expect(httpHealth.lastOkAt).toBeNull();
   });
 
-  it("login_page_with_200_is_auth_required_not_success", async () => {
+  it("html_page_with_200_is_not_success", async () => {
     session.reset();
     const page = (async () =>
-      new Response("<html><title>Authelia</title></html>", {
+      new Response("<html><title>Вход</title></html>", {
         status: 200,
         headers: { "content-type": "text/html; charset=utf-8" },
       })) as unknown as typeof fetch;
-    await expect(sendOp(page, op)).rejects.toBeInstanceOf(AuthRequired);
-    expect(session.state).toBe("expired");
+    await expect(sendOp(page, op)).rejects.toBeInstanceOf(NetworkError);
+    expect(httpHealth.lastOkAt).toBeNull();
   });
 
   it("hub_401_waits_for_sign_in_instead_of_a_refusal", async () => {

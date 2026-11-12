@@ -188,7 +188,7 @@ test('limits_screen_shows_the_countdown_the_warning_the_calm_forecast_and_nothin
 
 test('limits_screen_calm_case_when_every_window_lasts_until_the_reset', async ({ page }) => {
   await prepare(page);
-  await bootSecondary(page, '/limits', null, (api) => {
+  await bootSecondary(page, '/limits', (api) => {
     const claude = api.limits.find((row) => row.provider === 'claude')!;
     claude.weekly = { ...claude.weekly!, used_permille: 610, forecast: { rate_permille_per_hour: 9, recent_rate_permille_per_hour: 14, exhausts_at: new Date(Date.now() + 43 * 3_600_000).toISOString(), before_reset: false } };
   });

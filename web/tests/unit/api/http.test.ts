@@ -6,7 +6,7 @@ import {
   AuthRequired,
   authProbeResult,
   HUB_UNAVAILABLE,
-  htmlVerdict,
+  signOutCause,
   session,
 } from "#lib/api/http.js";
 import { clock } from "#lib/clock.js";
@@ -133,122 +133,106 @@ describe("api/http", () => {
     }
   });
 
-  it("redirect_or_html_on_api_is_auth_required_not_a_json_error", async () => {
-    // 1. opaqueredirect
+  const envelope401 = (code: string, reason?: string) =>
+    new Response(
+      JSON.stringify({
+        error: {
+          code,
+          message: "Требуется вход",
+          scope: "auth",
+          retry: "after_condition",
+          correlation_id: "corr-auth-1",
+          ...(reason ? { details: { reason } } : {}),
+        },
+      }),
+      { status: 401, headers: { "Content-Type": "application/json" } },
+    );
+
+  it("unauthorized_is_auth_required_with_the_hub_code_and_revoke_reason", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => envelope401("unauthenticated")));
+    const plain = await http("GET", "/api/v1/me").catch((e: unknown) => e);
+    expect(plain).toBeInstanceOf(AuthRequired);
+    expect((plain as AuthRequired).reason).toBe("unauthenticated");
+    expect(session.state).toBe("expired");
+    expect(session.cause).toEqual({ code: "unauthenticated", reason: undefined, wipe: false });
+
+    session.reset();
+    vi.stubGlobal("fetch", vi.fn(async () => envelope401("session_revoked", "owner")));
+    const revoked = await http("GET", "/api/v1/me").catch((e: unknown) => e);
+    expect((revoked as AuthRequired).revokeReason).toBe("owner");
+    expect(session.cause?.wipe).toBe(true);
+
+    // Мягкий отказ следующего запроса не отменяет начатое стирание.
+    vi.stubGlobal("fetch", vi.fn(async () => envelope401("unauthenticated")));
+    await http("GET", "/api/v1/me").catch(() => undefined);
+    expect(session.cause?.wipe).toBe(true);
+  });
+
+  it("revoke_reasons_decide_whether_the_device_is_wiped", () => {
+    for (const reason of ["owner", "others", "server", "password_changed", "cascade"])
+      expect(signOutCause("session_revoked", reason).wipe, reason).toBe(true);
+    for (const reason of ["limit", "idle", "logout"])
+      expect(signOutCause("session_revoked", reason).wipe, reason).toBe(false);
+    expect(signOutCause("session_expired").wipe).toBe(false);
+    expect(signOutCause("unauthenticated").wipe).toBe(false);
+  });
+
+  it("wrong_credentials_on_sign_in_stay_a_form_error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => envelope401("invalid_credentials")));
+    const failure = await http("POST", "/api/v1/auth/password", { login: "owner", password: "x" }).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).code).toBe("invalid_credentials");
+    expect(session.state).toBe("ok");
+    expect(session.cause).toBeNull();
+  });
+
+  it("wrong_password_while_signed_in_is_not_a_sign_out", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
-        return Response.error(); // or mock opaqueredirect response
-      }),
+      vi.fn(async () => new Response(JSON.stringify({ error: { code: "wrong_password", message: "Неверный пароль", scope: "auth", retry: "never", correlation_id: "c" } }), { status: 403, headers: { "Content-Type": "application/json" } })),
     );
-    // We can simulate opaqueredirect response with type = 'opaqueredirect'
+    const failure = await http("POST", "/api/v1/auth/reauth/password", { password: "x" }).catch((e: unknown) => e);
+    expect((failure as ApiError).code).toBe("wrong_password");
+    expect(session.cause).toBeNull();
+  });
+
+  it("success_after_sign_out_restores_but_public_sign_in_paths_do_not", async () => {
+    const seen: unknown[] = [];
+    const stop = session.subscribe((cause) => seen.push(cause));
+    session.expire("unauthenticated");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ password: true, passkey: false }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    await http("GET", "/api/v1/auth/methods");
+    expect(session.cause).not.toBeNull();
+    await http("GET", "/api/v1/me");
+    expect(session.cause).toBeNull();
+    expect(seen).toEqual([{ code: "unauthenticated", reason: undefined, wipe: false }, null]);
+    stop();
+  });
+
+  it("redirect_or_html_on_api_is_hub_unavailable_not_a_sign_in", async () => {
     const opaqueResp = new Response(null, { status: 200 });
     Object.defineProperty(opaqueResp, "type", { value: "opaqueredirect" });
     Object.defineProperty(opaqueResp, "status", { value: 0 });
+    vi.stubGlobal("fetch", vi.fn(async () => opaqueResp));
+    const redirected = await http("GET", "/api/v1/me").catch((e: unknown) => e);
+    expect((redirected as NetworkError).message).toBe(HUB_UNAVAILABLE);
+
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => opaqueResp),
+      vi.fn(async () => new Response("<!DOCTYPE html><html><body>Login page</body></html>", { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } })),
     );
-
-    await expect(http("GET", "/api/v1/me")).rejects.toThrow(AuthRequired);
-    expect(session.state).toBe("expired");
-
-    // 2. 401 unauthenticated
-    session.reset?.();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        return new Response(
-          JSON.stringify({
-            error: {
-              code: "unauthenticated",
-              message: "Требуется вход",
-              scope: "auth",
-              retry: "after_condition",
-              correlation_id: "corr-auth-1",
-            },
-          }),
-          {
-            status: 401,
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-      }),
-    );
-    await expect(http("GET", "/api/v1/me")).rejects.toThrow(AuthRequired);
-    expect(session.state).toBe("expired");
-
-    // 3. 403 forbidden_user
-    session.reset?.();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        return new Response(
-          JSON.stringify({
-            error: {
-              code: "forbidden_user",
-              message: "Доступ запрещён",
-              scope: "auth",
-              retry: "never",
-              correlation_id: "corr-auth-2",
-            },
-          }),
-          {
-            status: 403,
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-      }),
-    );
-    await expect(http("GET", "/api/v1/me")).rejects.toThrow(AuthRequired);
-    expect(session.state).toBe("expired");
-
-    // 4. 403 origin_rejected
-    session.reset?.();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        return new Response(
-          JSON.stringify({
-            error: {
-              code: "origin_rejected",
-              message: "Недопустимый источник",
-              scope: "auth",
-              retry: "never",
-              correlation_id: "corr-auth-3",
-            },
-          }),
-          {
-            status: 403,
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-      }),
-    );
-    // Повторный вход не исправит адрес вне allowed_origins: это ошибка настройки, а не истёкшая сессия.
-    const rejected = await http("GET", "/api/v1/me").catch((e: unknown) => e);
-    expect(rejected).toBeInstanceOf(ApiError);
-    expect((rejected as ApiError).code).toBe("origin_rejected");
+    const html = await http("GET", "/api/v1/conversations").catch((e: unknown) => e);
+    expect((html as NetworkError).message).toBe(HUB_UNAVAILABLE);
     expect(session.state).toBe("ok");
 
-    // 5. HTML body on /api/
-    session.reset?.();
+    // Адрес вне allowed_origins повторный вход не исправит: это ошибка настройки.
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
-        return new Response(
-          "<!DOCTYPE html><html><body>Login page</body></html>",
-          {
-            status: 200,
-            headers: { "Content-Type": "text/html; charset=utf-8" },
-          },
-        );
-      }),
+      vi.fn(async () => new Response(JSON.stringify({ error: { code: "origin_rejected", message: "Недопустимый источник", scope: "auth", retry: "never", correlation_id: "corr-auth-3" } }), { status: 403, headers: { "Content-Type": "application/json" } })),
     );
-    await expect(http("GET", "/api/v1/conversations")).rejects.toThrow(
-      AuthRequired,
-    );
-    expect(session.state).toBe("expired");
+    const rejected = await http("GET", "/api/v1/me").catch((e: unknown) => e);
+    expect((rejected as ApiError).code).toBe("origin_rejected");
+    expect(session.state).toBe("ok");
   });
 
   it("proxy_error_page_is_hub_unavailable_not_an_expired_login", async () => {
@@ -280,22 +264,14 @@ describe("api/http", () => {
     expect((failure as NetworkError).message).toBe(HUB_UNAVAILABLE);
   });
 
-  it("html_4xx_is_auth_only_with_login_markers", () => {
-    expect(htmlVerdict(404, new Headers(), "<h1>Not Found</h1>")).toBe("unavailable");
-    expect(htmlVerdict(404, new Headers(), "<title>Authelia</title>")).toBe("auth");
-    expect(htmlVerdict(400, new Headers({ "www-authenticate": "Basic" }))).toBe("auth");
-    expect(htmlVerdict(200, new Headers())).toBe("auth");
-    expect(htmlVerdict(302, new Headers())).toBe("auth");
-    expect(htmlVerdict(500, new Headers(), "<title>Authelia</title>")).toBe("unavailable");
-  });
-
-  it("manual_redirect_status_is_auth_required", async () => {
+  it("manual_redirect_status_is_hub_unavailable", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response(null, { status: 302, headers: { Location: "https://auth.example/" } })),
     );
-    await expect(http("GET", "/api/v1/me")).rejects.toThrow(AuthRequired);
-    expect(session.state).toBe("expired");
+    const failure = await http("GET", "/api/v1/me").catch((e: unknown) => e);
+    expect((failure as NetworkError).message).toBe(HUB_UNAVAILABLE);
+    expect(session.state).toBe("ok");
   });
 
   it("unknown_error_code_from_a_newer_hub_is_an_api_error", async () => {
@@ -505,7 +481,7 @@ describe("api/http", () => {
   });
 
   it("auth_probe_only_treats_auth_requirements_as_an_expired_session", () => {
-    expect(authProbeResult(new AuthRequired("redirect"))).toBe("expired");
+    expect(authProbeResult(new AuthRequired("unauthenticated"))).toBe("expired");
     expect(authProbeResult(new NetworkError("timeout"))).toBe("down");
     expect(authProbeResult(new Error("boom"))).toBe("down");
   });

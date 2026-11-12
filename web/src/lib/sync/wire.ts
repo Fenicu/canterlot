@@ -20,7 +20,7 @@ export function parseServerFrame(text: string): ServerOp | { op: 'unknown' } {
     let valid = false;
     switch (f.op) {
       case 'pong': valid = Number.isFinite(f.t); break;
-      case 'close': valid = f.reason === 'reauth'; break;
+      case 'close': valid = f.reason === 'reauth' || f.reason === 'revoked'; break;
       case 'subscribed': valid = id && typeof f.scope === 'string' && isSeq(f.head); break;
       case 'unsubscribed': valid = id; break;
       case 'lagged': valid = id && isSeq(f.cursor); break;

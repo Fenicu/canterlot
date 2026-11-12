@@ -8,7 +8,7 @@ import { bootSecondary } from './secondary-fixture';
  */
 export async function bootRealisticLimits(page: Page, opts: { history?: 'full' | 'empty' } = {}) {
   let sessions: string[] = [];
-  const boot = await bootSecondary(page, '/limits', null, (api) => {
+  const boot = await bootSecondary(page, '/limits', (api) => {
     const now = Date.now();
     const at = (ms: number) => new Date(now + ms).toISOString();
     const fresh = at(-90_000);

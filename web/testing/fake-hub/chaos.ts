@@ -17,6 +17,10 @@ export class Chaos {
   close4401(): void {
     for (const session of [...this.sessions]) { session.peer.message({ op: 'close', reason: 'reauth' }); this.disconnect(session, 4401); }
   }
+  /** Хаб отозвал сеанс: кадр close с причиной revoked и код 4401. */
+  closeRevoked(): void {
+    for (const session of [...this.sessions]) { session.peer.message({ op: 'close', reason: 'revoked' }); this.disconnect(session, 4401); }
+  }
   forceResync(reason: 'cursor_too_old' | 'cursor_ahead'): void {
     this.resyncReason = reason;
     for (const session of this.sessions) for (const [id] of [...session.subscriptions]) {

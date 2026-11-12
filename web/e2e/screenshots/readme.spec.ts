@@ -638,7 +638,7 @@ test.describe('скриншоты README для телефона', () => {
     );
     await prepare(page, 'standard', 'light');
     await installChatRoutes(page, hub, api, OWNER);
-    await seedSecondaryScreens(page, api, { machine: ids.machine, pinned: ids.themes }, null);
+    await seedSecondaryScreens(page, api, { machine: ids.machine, pinned: ids.themes });
     await page.route('**/api/v1/limits/history?*', async (route) => {
       const url = new URL(route.request().url());
       const query = url.searchParams;
@@ -814,7 +814,7 @@ test.describe('скриншоты README для телефона', () => {
     const seed = seedOrchestrator(api);
     await prepare(page, 'nord', 'dark');
     await installChatRoutes(page, hub, api, OWNER);
-    await seedSecondaryScreens(page, api, { machine: seed.machine, pinned: seed.orchestrator }, null);
+    await seedSecondaryScreens(page, api, { machine: seed.machine, pinned: seed.orchestrator });
     seedMachineReport(api, seed);
     await page.goto('/machines');
     await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });

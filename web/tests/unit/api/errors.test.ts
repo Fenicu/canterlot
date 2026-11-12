@@ -203,7 +203,7 @@ describe("api/errors", () => {
   it("proxy_outage_reads_as_hub_unavailable_and_auth_without_latin_reason", () => {
     expect(errorText(new NetworkError(HUB_UNAVAILABLE), "Не вышло")).toBe("Хаб недоступен, повторяю");
     expect(describeError(new NetworkError(HUB_UNAVAILABLE)).message).toBe("Хаб недоступен, повторяю");
-    expect(errorText(new AuthRequired("redirect"), "Не вышло")).toBe("Сессия истекла, войдите снова");
+    expect(errorText(new AuthRequired("unauthenticated"), "Не вышло")).toBe("Сессия истекла, войдите снова");
   });
 
   it("every_published_reason_has_a_russian_message_and_wins_over_the_code", () => {

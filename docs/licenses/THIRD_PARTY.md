@@ -13,7 +13,7 @@
 | `(MIT OR GPL-3.0-or-later)` | 0 | 1 | 0 | 1 |
 | `(MPL-2.0 OR Apache-2.0)` | 0 | 1 | 0 | 1 |
 | `0BSD OR MIT OR Apache-2.0` | 1 | 0 | 0 | 1 |
-| `Apache-2.0` | 8 | 4 | 20 | 32 |
+| `Apache-2.0` | 8 | 5 | 20 | 33 |
 | `Apache-2.0 / MIT` | 1 | 0 | 0 | 1 |
 | `Apache-2.0 AND ISC` | 1 | 0 | 0 | 1 |
 | `Apache-2.0 OR BSL-1.0` | 1 | 0 | 0 | 1 |
@@ -28,7 +28,7 @@
 | `BlueOak-1.0.0` | 0 | 0 | 2 | 2 |
 | `CC0-1.0` | 0 | 0 | 1 | 1 |
 | `ISC` | 3 | 3 | 10 | 16 |
-| `MIT` | 71 | 86 | 156 | 313 |
+| `MIT` | 71 | 87 | 156 | 314 |
 | `MIT AND BSD-3-Clause` | 1 | 0 | 0 | 1 |
 | `MIT OR Apache-2.0` | 248 | 0 | 0 | 248 |
 | `MIT OR Apache-2.0 OR BSD-1-Clause` | 1 | 0 | 0 | 1 |
@@ -44,7 +44,7 @@
 | `Unlicense OR MIT` | 8 | 0 | 0 | 8 |
 | `Zlib` | 3 | 0 | 0 | 3 |
 | `Zlib OR Apache-2.0 OR MIT` | 1 | 0 | 0 | 1 |
-| **ИТОГО** | **466** | **118** | **208** | **792** |
+| **ИТОГО** | **466** | **120** | **208** | **794** |
 
 ## Требуют внимания
 
@@ -547,7 +547,7 @@
 
 ## Runtime-пакеты npm
 
-Пакеты веб-интерфейса `web/`, поставляемые в составе клиентского приложения. Всего: 118.
+Пакеты веб-интерфейса `web/`, поставляемые в составе клиентского приложения. Всего: 120.
 
 | Пакет | Версия | Лицензия | Выбрано | Репозиторий |
 | --- | --- | --- | --- | --- |
@@ -612,6 +612,7 @@
 | `inherits` | 2.0.4 | `ISC` | `ISC` | [https://github.com/isaacs/inherits](https://github.com/isaacs/inherits) |
 | `is-reference` | 3.0.3 | `MIT` | `MIT` | [https://github.com/Rich-Harris/is-reference](https://github.com/Rich-Harris/is-reference) |
 | `isarray` | 1.0.0 | `MIT` | `MIT` | [https://github.com/juliangruber/isarray](https://github.com/juliangruber/isarray) |
+| `jsqr` | 1.4.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/cozmo/jsQR](https://github.com/cozmo/jsQR) |
 | `jszip` | 3.10.2 | `(MIT OR GPL-3.0-or-later)` | `MIT` | [https://github.com/Stuk/jszip](https://github.com/Stuk/jszip) |
 | `lie` | 3.3.0 | `MIT` | `MIT` | [https://github.com/calvinmetcalf/lie](https://github.com/calvinmetcalf/lie) |
 | `lightningcss` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | [https://github.com/parcel-bundler/lightningcss](https://github.com/parcel-bundler/lightningcss) |
@@ -663,6 +664,7 @@
 | `underscore` | 1.13.8 | `MIT` | `MIT` | [https://github.com/jashkenas/underscore](https://github.com/jashkenas/underscore) |
 | `undici-types` | 7.24.6 | `MIT` | `MIT` | [https://github.com/nodejs/undici](https://github.com/nodejs/undici) |
 | `unzipper-esm` | 0.13.3 | `MIT` | `MIT` | [https://github.com/catamphetamine/node-unzipper](https://github.com/catamphetamine/node-unzipper) |
+| `uqr` | 0.1.3 | `MIT` | `MIT` | [https://github.com/unjs/uqr](https://github.com/unjs/uqr) |
 | `util-deprecate` | 1.0.2 | `MIT` | `MIT` | [https://github.com/TooTallNate/util-deprecate](https://github.com/TooTallNate/util-deprecate) |
 | `vite` | 8.3.5 | `MIT` | `MIT` | [https://github.com/vitejs/vite](https://github.com/vitejs/vite) |
 | `vitefu` | 1.1.3 | `MIT` | `MIT` | [https://github.com/svitejs/vitefu](https://github.com/svitejs/vitefu) |

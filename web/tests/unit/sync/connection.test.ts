@@ -252,3 +252,18 @@ test('released_scope_taken_by_a_new_applier_starts_a_fresh_sync_for_it', async (
   expect(fresh.applyEvents).toHaveBeenCalled(); expect(h.accepted).toHaveLength(0);
   again.release(); h.manager.dispose();
 });
+test('close_revoked_stops_reconnecting_and_asks_the_runtime_why', async () => {
+  const clock = new FakeClock(), lifecycle = new TestLifecycle(); let handlers: TransportHandlers | undefined;
+  const transport = {
+    on: (h: TransportHandlers) => { handlers = h; return () => { handlers = undefined; }; },
+    send: () => true, open: vi.fn(() => { clock.schedule(() => handlers?.open(), 0); }),
+    close: vi.fn(() => { handlers?.close({ code: 4401, reason: '', opened: true }); })
+  };
+  const revoked = vi.fn();
+  const manager = new ConnectionManager({ transport, lifecycle, now: clock.now, schedule: clock.schedule, rng: clock.rng, probeAuth: async () => 'expired', revoked, announce: vi.fn() });
+  await clock.advanceAsync(0); expect(manager.status.phase).toBe('live');
+  handlers?.message(JSON.stringify({ op: 'close', reason: 'revoked' }));
+  expect(manager.status.phase).toBe('auth_required'); expect(revoked).toHaveBeenCalledTimes(1);
+  await clock.advanceAsync(120_000); expect(transport.open).toHaveBeenCalledTimes(1);
+  manager.dispose();
+});

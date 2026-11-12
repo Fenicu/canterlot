@@ -28,7 +28,7 @@ async function frame(page: Page, testInfo: TestInfo) {
 
 test('machine_screen_lists_queue_holders_and_waiters_and_hides_an_empty_or_stale_queue', async ({ page }, testInfo) => {
   await frame(page, testInfo);
-  const { hub, ids } = await bootSecondary(page, '/machines', null, (api) => {
+  const { hub, ids } = await bootSecondary(page, '/machines', (api) => {
     const plain = [...api.list.values()].find((row) => row.title === 'Очередь сообщений')!.id;
     seedLease(api, [...api.machines.values()].find((machine) => machine.name === 'workstation')!.id, [
       leaseEntry({ lease_id: 'h1', kind: 'build', conversation_id: [...api.list.values()].find((row) => row.title === 'Восстановление потока')!.id, since: ago(12 * MIN) }),
