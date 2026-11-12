@@ -51,7 +51,7 @@
 | `crates/canterlot-worker/tests/it/pilot_e2e.rs` | Сквозные сценарии пилота через HTTP и WSS: настоящий хаб, воркер, сопровождение и синтетический CLI |
 | `crates/canterlot-hub/tests/it/contract_coverage.rs` | Заморозка контракта: таблицы `api.md` против OpenAPI и схемы событий, ключ идемпотентности у каждого изменяющего маршрута |
 | `docs/api/openapi.json` | Машиночитаемый контракт API, генерируется `scripts/gen-openapi.sh` |
-| `scripts/{gen-openapi,check-proxy}.sh` | Перегенерация OpenAPI; приёмка заголовков Caddy и Authelia |
+| `scripts/{gen-openapi,check-proxy}.sh` | Перегенерация OpenAPI; приёмка Caddy и собственного входа хаба |
 | `docs/adr/0004-browser-auth-forward-auth.md` | Вход браузера через прокси с forward-auth (заменено ADR-0005) |
 | `docs/adr/0005-owner-sign-in.md` | Собственный вход владельца: сеансы, пароль, восстановление, защита от перебора |
 | `spikes/` | Прототипы этапа 0, не продуктовый код |
