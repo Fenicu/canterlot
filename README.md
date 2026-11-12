@@ -232,7 +232,13 @@ sudo -u canterlot canterlot-hub auth recovery-link --config /etc/canterlot/hub.t
 sudo -u canterlot canterlot-hub auth recovery-link --config /etc/canterlot/hub.toml --push   # шлёт её только в Gotify
 ```
 
-Ссылка живёт 10 минут (`--minutes`, до 60) и открывается один раз. После входа задайте пароль в «Настройки → Сеансы и вход». Там же список сеансов с адресами, завершение любого из них и срок бездействия (по умолчанию 90 дней). Те же действия на хосте: `auth set-password` (из TTY без эха или `--stdin`, `--revoke-sessions` завершает все сеансы), `auth sessions`, `auth revoke-all`. Подробности — в [docs/http.md](docs/http.md) и [ADR-0005](docs/adr/0005-owner-sign-in.md).
+Ссылка живёт 10 минут (`--minutes`, до 60) и открывается один раз. После входа задайте пароль или добавьте ключ доступа в «Настройки → Сеансы и вход». Там же список сеансов с устройством, адресом и местом, завершение любого из них, срок бездействия (по умолчанию 90 дней) и «Сканировать код» для входа по QR на новом устройстве. Те же действия на хосте: `auth set-password` (из TTY без эха или `--stdin`, `--revoke-sessions` завершает все сеансы), `auth sessions`, `auth revoke-all`. Подробности — в [docs/http.md](docs/http.md) и [ADR-0005](docs/adr/0005-owner-sign-in.md).
+
+Место сеанса хаб определяет сам по локальной базе DB-IP City Lite (CC BY 4.0); скачайте её и обновляйте раз в месяц:
+
+```bash
+sudo -u canterlot canterlot-hub geoip update --config /etc/canterlot/hub.toml   # в [auth.geoip].path, прежний файл остаётся при ошибке
+```
 
 **3. PWA и Caddy.** Разверните статику и подставьте свой адрес PWA в CSP:
 
