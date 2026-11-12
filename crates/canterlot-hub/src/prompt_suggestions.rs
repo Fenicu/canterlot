@@ -3,6 +3,11 @@
 //! Подсказки получают только сессии владельца на Claude Code: не делегаты и не другие CLI.
 //! Настройка владельца выключает их сразу: запись больше не сохраняется, сохранённые стираются,
 //! а флаг CLI уходит при следующем запуске.
+//!
+//! Настройка и запись подсказки сериализуются общей advisory-блокировкой `SUGGESTIONS_LOCK`:
+//! пакет SJ с подсказкой берёт её разделяемой до блокировки очереди разговора, PUT настройки —
+//! исключительной до своих записей. Иначе подсказка, вставленная по прочитанному `enabled =
+//! true`, фиксировалась бы после выключения, которое её не увидело.
 
 use canterlot_proto::worker::v1::PromptSuggested;
 use chrono::{DateTime, Utc};
@@ -18,6 +23,27 @@ use crate::{
 };
 
 pub const HARNESS: &str = "claude_code";
+
+/// Ключ advisory lock настроек подсказок (общий на хаб: PUT настройки редок).
+const SUGGESTIONS_LOCK: &str = "canterlot:prompt_suggestions";
+
+/// Разделяемая блокировка до первой записи транзакции SJ с подсказкой: порядок
+/// «подсказки → очередь → события» тот же, что у PUT, взаимной блокировки нет.
+pub async fn lock_for_ingest(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("select pg_advisory_xact_lock_shared(hashtextextended($1, 0))")
+        .bind(SUGGESTIONS_LOCK)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+async fn lock_for_settings(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(SUGGESTIONS_LOCK)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, ToSchema, sqlx::FromRow)]
 pub struct PromptSuggestionView {
@@ -67,6 +93,8 @@ pub async fn replace_settings_in_tx(
     next: PromptSuggestionSettings,
     correlation_id: Uuid,
 ) -> Result<PromptSuggestionSettings, sqlx::Error> {
+    // Ждёт пакеты SJ, уже вставившие подсказку по прежней настройке; новые увидят эту.
+    lock_for_settings(&mut *conn).await?;
     sqlx::query(
         "insert into prompt_suggestion_settings (owner_id, enabled) values ($1, $2)
          on conflict (owner_id) do update
@@ -77,6 +105,25 @@ pub async fn replace_settings_in_tx(
     .execute(&mut *conn)
     .await?;
     if !next.enabled {
+        // Счётчики событий разговоров берутся до строк подсказок, как у ввода и пакета SJ,
+        // которые стирают подсказку после своих событий.
+        let shown: Vec<Uuid> = sqlx::query_scalar(
+            "select s.conversation_id from prompt_suggestions s
+             join conversations c on c.id = s.conversation_id
+             where c.owner_id = $1 order by s.conversation_id",
+        )
+        .bind(owner_id)
+        .fetch_all(&mut *conn)
+        .await?;
+        for conversation_id in &shown {
+            events::lock_scope(
+                &mut *conn,
+                &Scope::Conversation {
+                    id: *conversation_id,
+                },
+            )
+            .await?;
+        }
         let cleared: Vec<Uuid> = sqlx::query_scalar(
             "delete from prompt_suggestions s using conversations c
              where c.id = s.conversation_id and c.owner_id = $1
@@ -106,6 +153,7 @@ pub async fn enabled_for_start(
 }
 
 /// `true`, если подсказка не сохранена: устарела, разговор её не получает или ввод уже ждёт.
+/// Вызывающий держит [`lock_for_ingest`].
 pub async fn apply(
     conn: &mut PgConnection,
     run: &ExecutionRef,
@@ -178,8 +226,13 @@ pub async fn in_snapshot(
     conn: &mut PgConnection,
     conversation_id: Uuid,
 ) -> Result<Option<PromptSuggestionView>, sqlx::Error> {
+    // Выключенная настройка прячет подсказку и у читателя, а не только у записи.
     sqlx::query_as(
-        "select text, execution_id, created_at from prompt_suggestions where conversation_id = $1",
+        "select s.text, s.execution_id, s.created_at from prompt_suggestions s
+         join conversations c on c.id = s.conversation_id
+         where s.conversation_id = $1
+           and coalesce((select p.enabled from prompt_suggestion_settings p
+                         where p.owner_id = c.owner_id), true)",
     )
     .bind(conversation_id)
     .fetch_optional(conn)

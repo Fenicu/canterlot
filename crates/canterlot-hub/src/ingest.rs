@@ -673,7 +673,7 @@ impl Ingest {
         let mut changed_limits = BTreeSet::new();
         let mut touched = BTreeSet::new();
         let mut diagnostics: Vec<(&'static str, serde_json::Value)> = Vec::new();
-        // Порядок SJ: credentials → cursor → providers → queue → события.
+        // Порядок SJ: credentials → cursor → providers → подсказки → queue → события.
         // Отзыв/ротация: machines NO KEY UPDATE → credentials; FK KEY SHARE курсора с этим совместим.
         require_active(&mut *conn, machine_id, &credential).await?;
         let owner_id: Uuid = sqlx::query_scalar("select owner_id from machines where id=$1")
@@ -701,6 +701,14 @@ impl Ingest {
                     .collect();
                 for provider in providers {
                     crate::limits::lock_provider(&mut *conn, provider).await?;
+                }
+                if pending.iter().any(|(record, _)| {
+                    matches!(
+                        record.body.as_ref().and_then(|b| b.body.as_ref()),
+                        Some(Body::PromptSuggested(_))
+                    )
+                }) {
+                    crate::prompt_suggestions::lock_for_ingest(&mut *conn).await?;
                 }
                 let opened = pending.iter().find_map(|(record, _)| {
                     match record.body.as_ref().and_then(|body| body.body.as_ref()) {

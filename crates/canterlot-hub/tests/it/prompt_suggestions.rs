@@ -1,4 +1,5 @@
 use canterlot_hub::{
+    blocks::ExecutionRef,
     delivery::{
         dispatch::{DispatchOutcome, GateInputs, dispatch_next},
         submit::{ContentBlock, SubmitInput, SubmittedInput, submit_input},
@@ -556,6 +557,119 @@ async fn late_suggestion_after_the_next_input_was_accepted_is_dropped(pool: PgPo
     )
     .await;
     assert_eq!(stored(&pool, &seed).await.as_deref(), Some("fresh"));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn disabling_waits_for_an_ingest_that_already_stored_a_suggestion(pool: PgPool) {
+    let seed = claude_seed(&pool).await;
+    let execution = running(&pool, &seed).await;
+    let origin = turn(&pool, &seed).await;
+    // Пакет SJ прочитал enabled = true и вставил подсказку, но ещё не зафиксировал её.
+    let mut ingest = pool.begin().await.unwrap();
+    prompt_suggestions::lock_for_ingest(&mut ingest)
+        .await
+        .unwrap();
+    let Body::PromptSuggested(fact) = suggested(&execution, origin, "in flight") else {
+        unreachable!()
+    };
+    assert!(
+        !prompt_suggestions::apply(
+            &mut ingest,
+            &ExecutionRef {
+                execution_id: execution.execution_id,
+                conversation_id: seed.conversation_id,
+                machine_id: seed.machine_id,
+            },
+            &fact,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap()
+    );
+    let disable = tokio::spawn({
+        let pool = pool.clone();
+        let owner = seed.owner_id;
+        async move { set_enabled(&pool, owner, false).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!disable.is_finished(), "disabling must wait for the ingest");
+    ingest.commit().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), disable)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored(&pool, &seed).await, None);
+    let left: i64 = sqlx::query_scalar("select count(*) from prompt_suggestions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the disable deleted the committed suggestion");
+    let published = events(&pool, seed.conversation_id).await;
+    assert_eq!(published.last().unwrap().payload["suggestion"], Value::Null);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn ingest_waits_for_a_disable_even_without_a_settings_row(pool: PgPool) {
+    let seed = claude_seed(&pool).await;
+    let execution = running(&pool, &seed).await;
+    let origin = turn(&pool, &seed).await;
+    let journal = Uuid::now_v7();
+    apply(&pool, &seed, &records(journal, 1, vec![opened(&execution)])).await;
+    let settings_rows: i64 = sqlx::query_scalar("select count(*) from prompt_suggestion_settings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(settings_rows, 0);
+    let mut disable = pool.begin().await.unwrap();
+    prompt_suggestions::replace_settings_in_tx(
+        &mut disable,
+        seed.owner_id,
+        PromptSuggestionSettings { enabled: false },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let ingest = tokio::spawn({
+        let ingest = Ingest::new(pool.clone());
+        let (machine, credential) = (seed.machine_id, seed.credential_digest());
+        let batch = records(journal, 2, vec![suggested(&execution, origin, "racing")]);
+        async move {
+            ingest
+                .apply_batch(machine, &credential, JournalKind::Sj, &batch)
+                .await
+                .unwrap()
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!ingest.is_finished(), "ingest must wait for the disable");
+    disable.commit().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), ingest)
+            .await
+            .unwrap()
+            .unwrap(),
+        IngestOutcome::Committed { up_to_seq: 2 }
+    );
+    assert_eq!(stored(&pool, &seed).await, None);
+    let left: i64 = sqlx::query_scalar("select count(*) from prompt_suggestions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn snapshot_hides_a_suggestion_while_the_setting_is_off(pool: PgPool) {
+    let seed = claude_seed(&pool).await;
+    let execution = running(&pool, &seed).await;
+    suggest(&pool, &seed, &execution, "add tests").await;
+    // Строка осталась, а настройка выключена в обход PUT: читатель всё равно её не отдаёт.
+    sqlx::query("insert into prompt_suggestion_settings (owner_id, enabled) values ($1, false)")
+        .bind(seed.owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored(&pool, &seed).await, None);
 }
 
 #[test]
