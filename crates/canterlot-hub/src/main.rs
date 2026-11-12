@@ -80,6 +80,11 @@ enum GeoipCommand {
         #[command(flatten)]
         config: ConfigArgs,
     },
+    /// Напечатать действующий `[auth.geoip].path` (выкат проверяет возраст этого файла).
+    Path {
+        #[command(flatten)]
+        config: ConfigArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -149,10 +154,21 @@ async fn run(args: Args) -> Result<(), String> {
             | AuthCommand::RevokeAll { config } => config,
         },
         Command::Geoip {
-            command: GeoipCommand::Update { config },
+            command: GeoipCommand::Update { config } | GeoipCommand::Path { config },
         } => config,
     };
     let config = HubConfig::load(&config.config).map_err(|error| error.to_string())?;
+    if let Command::Geoip {
+        command: GeoipCommand::Path { .. },
+    } = &args.command
+    {
+        return writeln!(
+            std::io::stdout().lock(),
+            "{}",
+            config.auth.geoip.path.display()
+        )
+        .map_err(|_| "output_error".to_owned());
+    }
     if let Command::Geoip {
         command: GeoipCommand::Update { .. },
     } = &args.command

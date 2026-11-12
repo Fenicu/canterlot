@@ -388,3 +388,35 @@ fn auth_geo_update_cli_needs_no_database() {
         "geoip_dir_error"
     );
 }
+
+#[test]
+fn auth_geo_path_cli_prints_the_effective_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = "database_url_file = 'absent'\ngrpc_listen = '127.0.0.1:7443'\ntls_cert = 'c'\n\
+                tls_key = 'k'\nmanifest = 'm'\n";
+    let print = |text: String| {
+        let config = dir.path().join("hub.toml");
+        std::fs::write(&config, text).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-hub"))
+            .args(["geoip", "path", "--config"])
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    // По умолчанию путь от каталога конфига, как его откроет хаб.
+    assert_eq!(
+        print(base.to_owned()),
+        format!(
+            "{}\n",
+            dir.path().join("data/geoip/dbip-city-lite.mmdb").display()
+        )
+    );
+    assert_eq!(
+        print(format!(
+            "{base}[auth.geoip]\npath = '/var/lib/canterlot/geoip/dbip-city-lite.mmdb'\n"
+        )),
+        "/var/lib/canterlot/geoip/dbip-city-lite.mmdb\n"
+    );
+}

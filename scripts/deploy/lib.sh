@@ -258,7 +258,7 @@ plan_text() {
         "  6 worker flip ${b_worker} -> ${sha}, start; guarded MainPID/exe wait; state=live wait; NRestarts" \
         "  7 merge old _app/immutable chunks of the previous web releases into ${sha} (no clobber), verify dist files intact" \
         "  8 maintenance check (sockets, exec dirs, leftovers, env record); verify.sh twice incl. loopback Caddy probe and harness catalog" \
-        "  9 geoip: canterlot-hub geoip update on the hub when ${HUB_GEOIP_PATH} is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)" \
+        "  9 geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)" \
         " 10 retention: keep ${RETAIN_COUNT} per component + every live release; literal paths re-checked right before deletion"
 }
 plan_hash() { plan_text "$@" | sha256sum | cut -c1-12; }
@@ -681,32 +681,47 @@ check_summary() {
 # GeoIP на хосте хаба: возраст файла базы в секундах или missing. Только чтение.
 # shellcheck disable=SC2016 # удалённый скрипт раскрывает свои позиционные аргументы
 GEOIP_AGE_SCRIPT='if [ -f "$1" ]; then echo $(( $(date +%s) - $(stat -c %Y "$1") )); else echo missing; fi'
-geoip_age() { ssh_hub "$(script_cmd_text "${GEOIP_AGE_SCRIPT}" "${HUB_GEOIP_PATH}")"; }
+geoip_age() { ssh_hub "$(script_cmd_text "${GEOIP_AGE_SCRIPT}" "$1")"; }
+# Путь базы спрашивается у хаба ($1 — его бинарь): тот же [auth.geoip].path, что откроет
+# хаб, поэтому выкат и хаб не смотрят в разные файлы. HUB_GEOIP_PATH подменяет ответ (тесты).
+geoip_path() {
+    local path
+    if [ -n "${HUB_GEOIP_PATH:-}" ]; then printf '%s' "${HUB_GEOIP_PATH}"; return 0; fi
+    path="$(ssh_hub "runuser -u canterlot -- $(shq "$1") geoip path --config $(shq "${HUB_CONFIG}")")" || return 1
+    case "${path}" in
+        *$'\n'* | '') return 1 ;;
+        /*) printf '%s' "${path}" ;;
+        *) return 1 ;;
+    esac
+}
 # Решение без записи: печатает причину; 0 — обновить, 1 — свежая, 2 — не прочитать.
+# $1 — бинарь хаба (по умолчанию текущий релиз).
 geoip_due() {
-    local age limit=$((GEOIP_MAX_AGE_DAYS * 86400))
-    age="$(geoip_age 2>/dev/null)" || { printf 'cannot read %s on the hub' "${HUB_GEOIP_PATH}"; return 2; }
+    local bin="${1:-${HUB_CURRENT}/bin/canterlot-hub}" path age limit=$((GEOIP_MAX_AGE_DAYS * 86400))
+    path="$(geoip_path "${bin}" 2>/dev/null)" || { printf 'cannot ask %s for [auth.geoip].path' "${bin}"; return 2; }
+    age="$(geoip_age "${path}" 2>/dev/null)" || { printf 'cannot read %s on the hub' "${path}"; return 2; }
     case "${age}" in
-        missing) printf '%s is missing' "${HUB_GEOIP_PATH}"; return 0 ;;
-        '' | *[!0-9-]*) printf 'unexpected age of %s: %s' "${HUB_GEOIP_PATH}" "${age}"; return 2 ;;
+        missing) printf '%s is missing' "${path}"; return 0 ;;
+        '' | *[!0-9-]*) printf 'unexpected age of %s: %s' "${path}" "${age}"; return 2 ;;
     esac
     if [ "${age}" -gt "${limit}" ]; then
-        printf '%s is %s days old (more than %s)' "${HUB_GEOIP_PATH}" "$((age / 86400))" "${GEOIP_MAX_AGE_DAYS}"
+        printf '%s is %s days old (more than %s)' "${path}" "$((age / 86400))" "${GEOIP_MAX_AGE_DAYS}"
         return 0
     fi
-    printf '%s is %s days old' "${HUB_GEOIP_PATH}" "$((age / 86400))"
+    printf '%s is %s days old' "${path}" "$((age / 86400))"
     return 1
 }
 # Обновление базы после выката хаба. Любая неудача мягкая: места входа просто пусты.
+# $1 — бинарь хаба (по умолчанию текущий релиз).
 geoip_refresh() {
-    local why rc=0
-    why="$(geoip_due)" || rc=$?
+    local bin="${1:-${HUB_CURRENT}/bin/canterlot-hub}" why rc=0
+    why="$(geoip_due "${bin}")" || rc=$?
     case "${rc}" in
         1) log "geoip: ${why}, no update"; return 0 ;;
         2) soft "geoip: ${why}; sign-in locations stay empty"; return 0 ;;
     esac
     log "geoip: ${why}: running canterlot-hub geoip update"
-    if run_write "geoip update" ssh_hub "runuser -u canterlot -- $(shq "${HUB_CURRENT}/bin/canterlot-hub") geoip update --config $(shq "${HUB_CONFIG}")"; then
+    if run_write "geoip update" ssh_hub "runuser -u canterlot -- $(shq "${bin}") geoip update --config $(shq "${HUB_CONFIG}")"; then
         log "geoip: update done"
     else
         soft "geoip update failed; sign-in locations stay empty until a later run"

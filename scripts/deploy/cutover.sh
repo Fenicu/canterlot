@@ -314,7 +314,8 @@ if [ "${DRY_RUN}" = "1" ]; then
     maintenance_check "${DRY_LIVE_IDS}" "${DRY_BASE_WEB}"
     merge_preview "${SHA}"
     GEOIP_RC=0
-    GEOIP_WHY="$(geoip_due)" || GEOIP_RC=$?
+    # Путь спрашивается у выкатываемого релиза: у развёрнутого команды geoip path может не быть.
+    GEOIP_WHY="$(geoip_due "${HUB_RELEASES}/${SHA}/bin/canterlot-hub")" || GEOIP_RC=$?
     case "${GEOIP_RC}" in
         0) log "dry-run: geoip: ${GEOIP_WHY}; the real run would run canterlot-hub geoip update (soft)" ;;
         1) log "dry-run: geoip: ${GEOIP_WHY}; no update needed" ;;
@@ -338,7 +339,7 @@ dry-run plan for ${SHA} (write steps are NOT RUN by design):
    - PWA: canterlot.env.${SHA}, flip build, 'docker compose up -d ${WEB_CONTAINER}'
    - worker flip + start; old _app/immutable chunk merge; verify.sh twice (the read-only verify gates above did run)
    - precompressed Content-Encoding probe (would start a one-off loopback Caddy inside the container)
-   - geoip: canterlot-hub geoip update on the hub when ${HUB_GEOIP_PATH} is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)
+   - geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)
    - retention (retain.sh --apply --keep ${SHA} ...)
   WOULD RUN (only if the gates pass and the token matches this plan):
 EOF
@@ -1059,7 +1060,7 @@ else
 fi
 # База GeoIP для мест входа: после проверки, ошибки мягкие (место входа просто пусто).
 PHASE="geoip"
-geoip_refresh
+geoip_refresh "${HUB_RELEASES}/${SHA}/bin/canterlot-hub"
 # Чистка — после проверки и под своими /proc-guard'ами; цель и предыдущие релизы
 # передаются как --keep и не могут быть удалены даже если выпали из трёх свежих.
 # В репетиции retain.sh печатает план без --apply (ничего не удаляет).
