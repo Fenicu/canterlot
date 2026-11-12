@@ -199,6 +199,7 @@ async fn auth_devices_are_forgotten_by_revoke_all_and_set_password(pool: PgPool)
     );
 }
 
+#[cfg(feature = "fault-injection")]
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn auth_devices_a_failure_after_the_session_commit_revokes_it(pool: PgPool) {
     use canterlot_hub::fault_injection::Point;
