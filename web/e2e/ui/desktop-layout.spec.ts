@@ -12,11 +12,13 @@ const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const THEMES: Theme[] = ['dark', 'light'];
 // DejaVu Sans шире Noto Sans из живого Firefox владельца: если вмещается он, вмещается и стек --font-sans.
 const WIDE_FONT = '"DejaVu Sans", sans-serif';
-const EXPECTED: Record<string, { body: number; sidebar: [number, number] }> = {
-  'layout-1024': { body: 15, sidebar: [0.25, 0.34] },
-  'layout-1440': { body: 15, sidebar: [0.2, 0.24] },
-  'layout-2560': { body: 18, sidebar: [0.16, 0.2] },
-  'layout-3840': { body: 24, sidebar: [0.16, 0.2] }
+// column — колонка списка без полосы групп, pane — вся панель списка вместе с полосой.
+// Полоса на столе — 78px в масштабе интерфейса: на 1440 колонка упирается в 20rem и панель занимает 0,276 окна, выше 18vw колонки и около 0,21.
+const EXPECTED: Record<string, { body: number; column: [number, number]; pane: [number, number] }> = {
+  'layout-1024': { body: 15, column: [0.25, 0.34], pane: [0.25, 0.34] },
+  'layout-1440': { body: 15, column: [0.2, 0.24], pane: [0.24, 0.29] },
+  'layout-2560': { body: 18, column: [0.16, 0.2], pane: [0.19, 0.23] },
+  'layout-3840': { body: 24, column: [0.16, 0.2], pane: [0.19, 0.23] }
 };
 
 const named = (name: string) => SCREENS.find((item) => item.name === name)!;
@@ -47,13 +49,15 @@ const bootSessions = (page: Page, theme?: Theme) => bootScreen(page, named('01-s
 const bootNew = (page: Page, theme?: Theme) => bootScreen(page, named('07-new-session'), theme, size(page));
 const bootChat = (page: Page, theme?: Theme) => bootScreen(page, named('02-chat'), theme, size(page));
 
-function titleClashes(page: Page): Promise<string[]> {
-  return list(page).getByText('Canterlot', { exact: true }).first().evaluate((title) => {
+// На столе заголовка нет: начало шапки — поле-кнопка поиска, остальные кнопки не должны на него наезжать.
+function headClashes(page: Page): Promise<string[]> {
+  return list(page).locator('[data-search-field], .brand').first().evaluate((head) => {
     const range = document.createRange();
-    range.selectNodeContents(title);
-    const text = range.getBoundingClientRect();
-    const clashes = title.scrollWidth > title.clientWidth ? [`clipped ${title.scrollWidth} > ${title.clientWidth}`] : [];
-    for (const control of title.parentElement!.querySelectorAll('a, button')) {
+    range.selectNodeContents(head);
+    const text = head.matches('button') ? head.getBoundingClientRect() : range.getBoundingClientRect();
+    const clashes = head.scrollWidth > head.clientWidth ? [`clipped ${head.scrollWidth} > ${head.clientWidth}`] : [];
+    for (const control of head.parentElement!.querySelectorAll('a, button')) {
+      if (control === head) continue;
       const box = control.getBoundingClientRect();
       if (box.right > text.left && box.left < text.right && box.bottom > text.top && box.top < text.bottom) clashes.push(control.getAttribute('aria-label') ?? '');
     }
@@ -68,6 +72,48 @@ function tabsProblems(page: Page): Promise<string[]> {
     for (const tab of tabs.children) {
       const rect = tab.getBoundingClientRect();
       if (rect.left < box.left - 0.5 || rect.right > box.right + 0.5 || rect.top < box.top - 0.5 || rect.bottom > box.bottom + 0.5) problems.push(`clipped ${tab.textContent?.trim()}`);
+    }
+    const rail = tabs.closest('[data-group-rail]');
+    if (!rail) return problems;
+    // Полоса: подпись и счётчик внутри пункта, слово не рвётся по буквам, счётчик не лежит на подписи.
+    const edge = rail.getBoundingClientRect();
+    const canvas = document.createElement('canvas').getContext('2d')!;
+    for (const item of rail.querySelectorAll<HTMLElement>('.item')) {
+      const own = item.getBoundingClientRect();
+      const label = item.querySelector<HTMLElement>('.label')!;
+      const name = label.textContent!.trim();
+      const style = getComputedStyle(label);
+      canvas.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      const room = item.clientWidth - parseFloat(getComputedStyle(item).paddingLeft) - parseFloat(getComputedStyle(item).paddingRight);
+      for (const word of name.split(/[\s\u00ad]+/)) if (canvas.measureText(word).width > room + 0.5) problems.push(`word ${word} ${canvas.measureText(word).width.toFixed(1)} > ${room}`);
+      if (own.left < edge.left - 0.5 || own.right > edge.right + 0.5) problems.push(`outside ${name}`);
+      const count = item.querySelector('.count')?.getBoundingClientRect();
+      if (!count) continue;
+      if (count.left < own.left - 0.5 || count.right > own.right + 0.5 || count.top < own.top - 0.5) problems.push(`count outside ${name}`);
+      const icon = item.querySelector('.icon')!.getBoundingClientRect();
+      const text = label.getBoundingClientRect();
+      if (count.bottom > text.top + 0.5 && count.left < text.right && count.right > text.left) problems.push(`count over label ${name}`);
+      if (count.right <= icon.left || count.left >= icon.right) problems.push(`count off icon ${name}`);
+    }
+    return problems;
+  });
+}
+
+// Разделы внизу полосы целиком на экране, по одному в ряд и без переливов подписи; scrollHeight округляется до целого пикселя.
+function railSectionProblems(page: Page): Promise<string[]> {
+  return page.getByRole('navigation', { name: 'Разделы' }).evaluate((nav) => {
+    const rail = nav.closest('[data-group-rail]')!.getBoundingClientRect();
+    const problems: string[] = [];
+    let previous = -Infinity;
+    for (const link of nav.querySelectorAll<HTMLElement>('a')) {
+      const box = link.getBoundingClientRect();
+      const name = link.textContent!.trim();
+      if (box.top < 0 || box.bottom > window.innerHeight + 0.5 || box.bottom > rail.bottom + 0.5) problems.push(`offscreen ${name} ${box.bottom} > ${Math.min(window.innerHeight, rail.bottom)}`);
+      if (box.left < rail.left - 0.5 || box.right > rail.right + 0.5) problems.push(`outside ${name}`);
+      if (box.top < previous - 0.5) problems.push(`overlap ${name}`);
+      const label = link.querySelector<HTMLElement>('.label')!;
+      if (label.scrollWidth > label.clientWidth || label.scrollHeight > label.clientHeight + 1) problems.push(`clipped ${name} ${label.scrollWidth}x${label.scrollHeight} > ${label.clientWidth}x${label.clientHeight}`);
+      previous = box.bottom;
     }
     return problems;
   });
@@ -141,9 +187,9 @@ function plainButtons(page: Page): Promise<string[]> {
 
 test('sidebar_header_keeps_the_title_clear_of_its_buttons', async ({ page }) => {
   await bootEmpty(page);
-  expect(await titleClashes(page)).toEqual([]);
+  expect(await headClashes(page)).toEqual([]);
   await widenFont(page);
-  expect(await titleClashes(page)).toEqual([]);
+  expect(await headClashes(page)).toEqual([]);
 });
 
 test('group_tabs_stay_inside_the_sidebar_without_a_scrollbar', async ({ page }) => {
@@ -160,8 +206,20 @@ test('group_tabs_stay_inside_the_sidebar_without_a_scrollbar', async ({ page }) 
 test('sidebar_navigation_stays_on_one_row', async ({ page }) => {
   await bootEmpty(page);
   await widenFont(page);
-  const tops = await list(page).getByRole('navigation', { name: 'Навигация' }).getByRole('link').evaluateAll((links) => links.map((link) => link.getBoundingClientRect().top));
-  expect(new Set(tops).size).toBe(1);
+  if (await page.locator('[data-group-rail]').count() === 0) {
+    const tops = await list(page).getByRole('navigation', { name: 'Навигация' }).getByRole('link').evaluateAll((links) => links.map((link) => link.getBoundingClientRect().top));
+    expect(tops.length).toBeGreaterThan(0);
+    expect(new Set(tops).size).toBe(1);
+    return;
+  }
+  // Стол: нижней навигации нет, разделы стоят столбцом внизу полосы групп.
+  await expect(list(page).getByRole('navigation', { name: 'Навигация' })).toHaveCount(0);
+  await expect(page.getByRole('navigation', { name: 'Разделы' }).getByRole('link')).toHaveCount(3);
+  expect(await railSectionProblems(page)).toEqual([]);
+  await page.setViewportSize({ width: size(page).width, height: 600 });
+  await bootLongGroup(page);
+  await widenFont(page);
+  expect(await railSectionProblems(page)).toEqual([]);
 });
 
 test('search_field_explains_itself_and_keeps_reset_inside_the_pill', async ({ page }) => {
@@ -242,19 +300,30 @@ test('every_button_looks_like_a_button_in_both_themes', async ({ page }) => {
 test('type_and_panes_scale_with_the_viewport', async ({ page }, testInfo) => {
   const expected = EXPECTED[testInfo.project.name]!;
   await bootEmpty(page);
-  const measure = () => page.evaluate(() => ({
-    body: parseFloat(getComputedStyle(document.body).fontSize),
-    root: parseFloat(getComputedStyle(document.documentElement).fontSize),
-    sidebar: document.querySelector('[data-pane="list"]')!.getBoundingClientRect().width,
-    stageBox: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--icon-small'))
-  }));
+  const measure = () => page.evaluate(() => {
+    const pane = document.querySelector('[data-pane="list"]')!.getBoundingClientRect().width;
+    const rail = document.querySelector('[data-group-rail]')?.getBoundingClientRect().width ?? 0;
+    return {
+      body: parseFloat(getComputedStyle(document.body).fontSize),
+      root: parseFloat(getComputedStyle(document.documentElement).fontSize),
+      pane,
+      rail,
+      column: pane - rail,
+      stageBox: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--icon-small'))
+    };
+  });
   const wide = await measure();
+  const viewport = size(page).width;
   expect(wide.body).toBeCloseTo(expected.body, 1);
   expect(wide.stageBox, 'StageTrack читает токен числом').toBeCloseTo(16 * (expected.body / 15), 0);
-  expect(wide.sidebar / size(page).width).toBeGreaterThanOrEqual(expected.sidebar[0]);
-  expect(wide.sidebar / size(page).width).toBeLessThanOrEqual(expected.sidebar[1]);
-  expect(wide.sidebar).toBeGreaterThanOrEqual(20 * wide.root - 0.5);
-  expect(wide.sidebar).toBeLessThanOrEqual(28 * wide.root + 0.5);
+  expect(wide.column / viewport, 'колонка списка').toBeGreaterThanOrEqual(expected.column[0]);
+  expect(wide.column / viewport, 'колонка списка').toBeLessThanOrEqual(expected.column[1]);
+  expect(wide.pane / viewport, 'полоса и список вместе').toBeGreaterThanOrEqual(expected.pane[0]);
+  expect(wide.pane / viewport, 'полоса и список вместе').toBeLessThanOrEqual(expected.pane[1]);
+  expect(wide.column).toBeGreaterThanOrEqual(20 * wide.root - 0.5);
+  expect(wide.column).toBeLessThanOrEqual(28 * wide.root + 0.5);
+  // Полоса растёт вместе с шрифтом: 78px при корне 16px.
+  if (wide.rail > 0) expect(Math.abs(wide.rail - (78 / 16) * wide.root), 'полоса в масштабе интерфейса').toBeLessThanOrEqual(1);
   // Снимок владельца: 3839 физических точек при масштабе 1,5 дают окно чуть уже 2560 CSS-пикселей.
   await resizeViewport(page, { width: size(page).width - 1, height: Math.round(size(page).height * 0.89) });
   await expect.poll(async () => (await measure()).body).toBeCloseTo(expected.body, 1);
