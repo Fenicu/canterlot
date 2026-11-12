@@ -426,13 +426,28 @@ mk_warn_stream "${FAKE_ROOT}/current.txt" 2 config_key_deprecated
 export FAKE_HUB_JOURNAL_BASELINE_FILE="${FAKE_ROOT}/baseline.txt" FAKE_HUB_JOURNAL_FILE="${FAKE_ROOT}/current.txt"
 if run_verify "${SHA_PREV}"; then case_ok "config_key_deprecated is not a new kind by default"; else case_fail "deprecation warning failed verify"; grep HARD "${FAKE_ROOT}/verify.log" | head -3; fi
 assert_contains "${FAKE_ROOT}/verify.log" "2 WARN config_key_deprecated (expected, VERIFY_WARN_KINDS_OK)" "expected kind printed"
-mk_warn_stream "${FAKE_ROOT}/current.txt" 4 client_ip_missing
-if run_verify "${SHA_PREV}"; then case_fail "client_ip_missing passed without being listed"; else case_ok "client_ip_missing is new unless listed"; fi
+mk_warn_stream "${FAKE_ROOT}/current.txt" 4 identity_header_forwarded
+if run_verify "${SHA_PREV}"; then case_fail "identity_header_forwarded passed without being listed"; else case_ok "identity_header_forwarded is new unless listed"; fi
 if VERIFY_WARN_KINDS_OK="config_key_deprecated client_ip_missing identity_header_forwarded" run_verify "${SHA_PREV}"; then
     case_ok "first-release kinds pass when listed"
 else
     case_fail "listed kinds failed verify"; grep HARD "${FAKE_ROOT}/verify.log" | head -3
 fi
+teardown_case
+case_end
+
+case_begin "sign-in WARN kinds from the internet pass by default"
+setup_verify warnsignin
+mk_warn_stream "${FAKE_ROOT}/baseline.txt" 1037 machine_metrics_ignored execution_counter
+mk_warn_stream "${FAKE_ROOT}/current.txt" 30 machine_metrics_ignored execution_counter
+mk_warn_stream "${FAKE_ROOT}/current.txt" 1 sign_in_global_lock
+mk_warn_stream "${FAKE_ROOT}/current.txt" 3 client_ip_missing
+export FAKE_HUB_JOURNAL_BASELINE_FILE="${FAKE_ROOT}/baseline.txt" FAKE_HUB_JOURNAL_FILE="${FAKE_ROOT}/current.txt"
+if run_verify "${SHA_PREV}"; then case_ok "sign_in_global_lock and client_ip_missing are expected by default"; else case_fail "sign-in WARN kinds failed verify"; grep HARD "${FAKE_ROOT}/verify.log" | head -3; fi
+assert_contains "${FAKE_ROOT}/verify.log" "1 WARN sign_in_global_lock (expected, VERIFY_WARN_KINDS_OK)" "global lock printed as expected"
+assert_contains "${FAKE_ROOT}/verify.log" "3 WARN client_ip_missing (expected, VERIFY_WARN_KINDS_OK)" "client_ip_missing printed as expected"
+mk_warn_stream "${FAKE_ROOT}/current.txt" 1 sign_in_failed
+if run_verify "${SHA_PREV}"; then case_fail "an unexpected WARN kind passed"; else case_ok "other new kinds still fail"; fi
 teardown_case
 case_end
 

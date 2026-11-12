@@ -574,9 +574,11 @@ WARN_RATE_SLACK="${WARN_RATE_SLACK:-5}"
 # Виды WARN, которые ожидаются и без базы (через пробел): не жёсткая ошибка ни как
 # новый вид, ни как рост, только строка журнала. config_key_deprecated хаб пишет при
 # каждом старте, пока в hub.toml остаются устаревшие ключи (спека входа §11: устаревшее
-# значение не должно останавливать выкат). Первый релиз собственного входа добавляет
-# client_ip_missing и identity_header_forwarded до правки Caddy (pilot.md §11.8).
-VERIFY_WARN_KINDS_OK="${VERIFY_WARN_KINDS_OK:-config_key_deprecated}"
+# значение не должно останавливать выкат). sign_in_global_lock (перебор пароля из
+# интернета) и client_ip_missing (Caddy не прислал адрес клиента) хаб пишет WARN, но
+# вызывает их не выкат: они в умолчании. Первый релиз собственного входа добавляет
+# identity_header_forwarded до правки Caddy (pilot.md §11.8).
+VERIFY_WARN_KINDS_OK="${VERIFY_WARN_KINDS_OK:-config_key_deprecated sign_in_global_lock client_ip_missing}"
 warn_kind_ok() {
     local k
     for k in ${VERIFY_WARN_KINDS_OK}; do

@@ -122,13 +122,22 @@ fn secret_matches(headers: &HeaderMap, secret: &[u8]) -> bool {
     given.as_slice().ct_eq(expected.as_slice()).into()
 }
 
-fn refuse(code: ErrorCode, reason: &'static str, peer: Option<IpAddr>, quiet: bool) -> ApiError {
+/// Уровень строки отказа: обычный шум — DEBUG, ожидаемое от интернета на публичных
+/// путях входа — INFO, остальное — WARN.
+#[derive(Clone, Copy)]
+enum Loud {
+    Quiet,
+    Expected,
+    Warn,
+}
+
+fn refuse(code: ErrorCode, reason: &'static str, peer: Option<IpAddr>, loud: Loud) -> ApiError {
     let peer = peer.map(|ip| ip.to_string());
     let peer = peer.as_deref().unwrap_or("-");
-    if quiet {
-        tracing::debug!(kind = "auth_rejected", reason, peer, "request refused");
-    } else {
-        tracing::warn!(kind = "auth_rejected", reason, peer, "request refused");
+    match loud {
+        Loud::Quiet => tracing::debug!(kind = "auth_rejected", reason, peer, "request refused"),
+        Loud::Expected => tracing::info!(kind = "auth_rejected", reason, peer, "request refused"),
+        Loud::Warn => tracing::warn!(kind = "auth_rejected", reason, peer, "request refused"),
     }
     ApiError::new(code)
 }
@@ -158,7 +167,7 @@ pub(crate) fn transport(
             ErrorCode::Unauthenticated,
             "no_peer_address",
             None,
-            false,
+            Loud::Warn,
         ));
     };
     let peer = peer.ip();
@@ -167,7 +176,7 @@ pub(crate) fn transport(
             ErrorCode::Unauthenticated,
             "untrusted_peer",
             Some(peer),
-            true,
+            Loud::Quiet,
         ));
     }
     if let Some(secret) = &state.proxy_secret
@@ -177,7 +186,7 @@ pub(crate) fn transport(
             ErrorCode::Unauthenticated,
             "proxy_secret",
             Some(peer),
-            false,
+            Loud::Warn,
         ));
     }
     Ok(())
@@ -428,7 +437,7 @@ async fn gate_session(
                 "no_session"
             },
             client.ip,
-            count <= 1,
+            if count > 1 { Loud::Warn } else { Loud::Quiet },
         );
         return if count > 1 {
             session_refusal(error)
@@ -444,7 +453,7 @@ async fn gate_session(
                 ErrorCode::Unauthenticated,
                 "unknown_session",
                 client.ip,
-                true,
+                Loud::Quiet,
             ));
         }
         Ok(Lookup::Revoked(reason)) => return session_refusal(revoked_error(reason)),
@@ -510,11 +519,17 @@ pub(crate) async fn csrf_gate(
     if safe && !upgrade {
         return next.run(request).await;
     }
+    // Публичную форму входа дёргают боты без Origin: это ожидаемо, не повод для WARN.
+    let loud = if is_public_auth(request.method(), request.uri().path()) {
+        Loud::Expected
+    } else {
+        Loud::Warn
+    };
     if !origin_allowed(request.headers(), &state.http.allowed_origins) {
-        return refuse(ErrorCode::OriginRejected, "origin", None, false).into_response();
+        return refuse(ErrorCode::OriginRejected, "origin", None, loud).into_response();
     }
     if !safe && !client_header_present(request.headers()) {
-        return refuse(ErrorCode::OriginRejected, "client_header", None, false).into_response();
+        return refuse(ErrorCode::OriginRejected, "client_header", None, loud).into_response();
     }
     next.run(request).await
 }

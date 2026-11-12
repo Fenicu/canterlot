@@ -190,6 +190,7 @@ async fn passkey_start(
     let webauthn = relying(&state)?;
     let (bucket, _) = bucket_for(&state, &client).await?;
     if let Some(retry_after) = passkeys::sign_in_limited(&state.pool, &bucket).await? {
+        tracing::info!(kind = "passkey_start_limited", bucket = %bucket, "passkey start refused");
         return Ok(refused(retry_after));
     }
     let owner_id = state.installation.owner_id;
@@ -279,7 +280,7 @@ async fn passkey_finish(
     .await?
     {
         record_failure(&state, &bucket).await?;
-        tracing::warn!(kind = "sign_in_failed", method = "passkey", bucket = %bucket, "passkey sign-in failed");
+        tracing::info!(kind = "sign_in_failed", method = "passkey", bucket = %bucket, "passkey sign-in failed");
         return Err(ApiError::new(ErrorCode::InvalidCredentials));
     }
     throttle::succeeded(&state.pool, &bucket).await?;
@@ -512,7 +513,7 @@ async fn reauth_finish(
     .await?
     {
         record_failure(&state, &bucket).await?;
-        tracing::warn!(kind = "reauth_failed", method = "passkey", bucket = %bucket, "passkey check failed");
+        tracing::info!(kind = "reauth_failed", method = "passkey", bucket = %bucket, "passkey check failed");
         return Err(rejected());
     }
     throttle::succeeded(&state.pool, &bucket).await?;

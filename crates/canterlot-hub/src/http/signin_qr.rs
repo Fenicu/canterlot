@@ -89,7 +89,7 @@ async fn qr_start(
         })
         .into_response()),
         qr::Start::Limited { retry_after } => {
-            tracing::warn!(kind = "qr_start_limited", bucket = %bucket, "QR start refused");
+            tracing::info!(kind = "qr_start_limited", bucket = %bucket, "QR start refused");
             Ok(refused(retry_after))
         }
     }

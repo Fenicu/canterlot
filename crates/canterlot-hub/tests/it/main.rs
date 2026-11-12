@@ -12,6 +12,7 @@ mod attachments;
 mod attachments_gc;
 mod attachments_gc_drafts;
 mod auth_geo;
+mod auth_logs;
 mod auth_passkeys;
 mod auth_password;
 mod auth_pushes;

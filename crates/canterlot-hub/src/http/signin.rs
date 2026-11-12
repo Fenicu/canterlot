@@ -295,7 +295,7 @@ async fn sign_in_password(
     drop(_permit);
     if !(verified && login_matches) {
         record_failure(&state, &bucket).await?;
-        tracing::warn!(kind = "sign_in_failed", method = "password", bucket = %bucket, "password sign-in failed");
+        tracing::info!(kind = "sign_in_failed", method = "password", bucket = %bucket, "password sign-in failed");
         return Err(ApiError::new(ErrorCode::InvalidCredentials));
     }
     throttle::succeeded(&state.pool, &bucket).await?;
@@ -322,7 +322,7 @@ async fn sign_in_recovery(
     let owner = recovery::redeem(&state.pool, &body.token).await?;
     if owner != Some(state.installation.owner_id) {
         record_failure(&state, &bucket).await?;
-        tracing::warn!(kind = "sign_in_failed", method = "recovery", bucket = %bucket, "recovery sign-in failed");
+        tracing::info!(kind = "sign_in_failed", method = "recovery", bucket = %bucket, "recovery sign-in failed");
         return Err(ApiError::new(ErrorCode::InvalidCredentials));
     }
     throttle::succeeded(&state.pool, &bucket).await?;
@@ -548,7 +548,7 @@ async fn check_password(
     }
     if !state.passwords.verify(given, stored).await {
         record_failure(state, &bucket).await?;
-        tracing::warn!(kind = "reauth_failed", bucket = %bucket, "password check failed");
+        tracing::info!(kind = "reauth_failed", bucket = %bucket, "password check failed");
         return Err(ApiError::new(ErrorCode::WrongPassword));
     }
     throttle::succeeded(&state.pool, &bucket).await?;
