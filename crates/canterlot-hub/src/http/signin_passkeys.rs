@@ -176,7 +176,8 @@ fn invalid_name() -> ApiError {
 }
 
 /// Начало входа по ключу: все ключи владельца в `allowCredentials`, проверка пользователя
-/// обязательна. Не больше 10 начал в минуту с корзины и 50 живых обрядов всего.
+/// обязательна. Не больше 10 начал в минуту с корзины и 500 живых обрядов всего; известное
+/// устройство общим пределом не ограничено, атакующий не запирает им вход владельца.
 #[utoipa::path(post, path = "/api/v1/auth/passkey/start", tag = "auth", request_body = PasskeyStartBody, responses(
     (status = 200, description = "Опции для navigator.credentials.get()", body = PasskeyChallengeView),
     (status = 409, description = "no_passkeys или passkeys_unavailable", body = ErrorEnvelope),
@@ -188,8 +189,8 @@ async fn passkey_start(
     ApiJson(_): ApiJson<PasskeyStartBody>,
 ) -> Result<Response, ApiError> {
     let webauthn = relying(&state)?;
-    let (bucket, _) = bucket_for(&state, &client).await?;
-    if let Some(retry_after) = passkeys::sign_in_limited(&state.pool, &bucket).await? {
+    let (bucket, device) = bucket_for(&state, &client).await?;
+    if let Some(retry_after) = passkeys::sign_in_limited(&state.pool, &bucket, device).await? {
         tracing::info!(kind = "passkey_start_limited", bucket = %bucket, "passkey start refused");
         return Ok(refused(retry_after));
     }

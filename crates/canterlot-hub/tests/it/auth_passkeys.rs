@@ -4,7 +4,7 @@
 //! неудачный finish считается неудачей перебора, счётчик ключа обновляется.
 
 use canterlot_hub::{
-    owner_auth::{Method as SignInMethod, SESSION_COOKIE},
+    owner_auth::{DEVICE_COOKIE, Method as SignInMethod, SESSION_COOKIE, passkeys},
     testkit::{Method, TEST_ORIGIN, TEST_SESSION_ID, TestClient, TestResponse},
 };
 use serde_json::{Value, json};
@@ -12,7 +12,7 @@ use sqlx::PgPool;
 use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
 use webauthn_rs::prelude::{CreationChallengeResponse, RequestChallengeResponse, Url};
 
-use crate::support::auth::{AuthHub, error_code, session_token, set_cookie};
+use crate::support::auth::{AuthHub, PASSWORD, error_code, session_token, set_cookie};
 
 const CHROME_ANDROID: &str = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 \
     (KHTML, like Gecko) Chrome/142.0.0.0 Mobile Safari/537.36";
@@ -59,10 +59,13 @@ async fn assertion(client: &TestClient, path: &str, key: &mut SoftPasskey) -> (V
 }
 
 async fn sign_in(hub: &AuthHub, key: &mut SoftPasskey, ip: &str) -> TestResponse {
-    let client = hub.anonymous(Some(ip));
-    let (challenge, credential) = assertion(&client, "/api/v1/auth/passkey/start", key).await;
+    sign_in_with(&hub.anonymous(Some(ip)), key).await
+}
+
+async fn sign_in_with(client: &TestClient, key: &mut SoftPasskey) -> TestResponse {
+    let (challenge, credential) = assertion(client, "/api/v1/auth/passkey/start", key).await;
     post(
-        &client,
+        client,
         "/api/v1/auth/passkey/finish",
         json!({"challenge_id": challenge, "credential": credential}),
     )
@@ -248,6 +251,46 @@ async fn auth_passkeys_start_is_limited_and_needs_a_key(pool: PgPool) {
     let limited = post(&client, "/api/v1/auth/passkey/start", json!({})).await;
     assert_eq!(limited.status, 429);
     assert_eq!(error_code(&limited), "too_many_attempts");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn auth_passkeys_full_global_cap_still_lets_a_known_device_start(pool: PgPool) {
+    let hub = AuthHub::new(pool).await;
+    hub.set_password(PASSWORD).await;
+    let mut key = authenticator();
+    assert_eq!(register(&hub.owner(), &mut key, None).await.status, 200);
+    let first = hub.sign_in_owner(&hub.anonymous(Some("198.51.100.60"))).await;
+    let (device, _) = set_cookie(&first, DEVICE_COOKIE).unwrap();
+    // Чужие корзины держат общий предел живых обрядов входа заполненным.
+    sqlx::query(
+        "insert into owner_webauthn_challenges(id,owner_id,kind,bucket,state,expires_at)
+         select gen_random_uuid(),$1,'sign_in','ip:2001:db8:'||g||'::/64','{}'::jsonb,
+                now()+interval '5 minutes'
+         from generate_series(1,$2::int) g",
+    )
+    .bind(hub.owner_id())
+    .bind(passkeys::MAX_SIGN_IN_CHALLENGES as i32)
+    .execute(&hub.pool)
+    .await
+    .unwrap();
+    assert_eq!(passkeys::MAX_SIGN_IN_CHALLENGES, 500);
+    let stranger = hub.anonymous(Some("203.0.113.61"));
+    let refused = post(&stranger, "/api/v1/auth/passkey/start", json!({})).await;
+    assert_eq!(refused.status, 429);
+    assert_eq!(error_code(&refused), "too_many_attempts");
+    // Известное устройство: свой предел корзины, общий его не касается.
+    let known = hub
+        .anonymous(Some("203.0.113.61"))
+        .with_header("Cookie", &format!("{DEVICE_COOKIE}={device}"));
+    let response = sign_in_with(&known, &mut key).await;
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    // Поддельная cookie устройства исключения не даёт.
+    let forged = hub.anonymous(Some("203.0.113.62")).with_header(
+        "Cookie",
+        &format!("{DEVICE_COOKIE}=canterlot-test-session-token-0123456789abcd"),
+    );
+    let refused = post(&forged, "/api/v1/auth/passkey/start", json!({})).await;
+    assert_eq!(refused.status, 429);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

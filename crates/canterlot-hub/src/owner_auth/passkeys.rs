@@ -15,8 +15,9 @@ use webauthn_rs::prelude::{AuthenticationResult, Passkey};
 pub const CHALLENGE_TTL_SECS: i64 = 300;
 /// Начал входа по ключу с одной корзины адресов за минуту.
 pub const STARTS_PER_MINUTE: i64 = 10;
-/// Неистёкших состояний входа всего: публичный start не раздувает таблицу.
-pub const MAX_SIGN_IN_CHALLENGES: i64 = 50;
+/// Неистёкших состояний входа всего: публичный start не раздувает таблицу. Известное
+/// устройство под этот предел не попадает, ему хватает предела своей корзины.
+pub const MAX_SIGN_IN_CHALLENGES: i64 = 500;
 pub const NAME_CHARS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +42,12 @@ fn seconds(value: Option<f64>) -> Duration {
 }
 
 /// Можно ли начать вход по ключу из корзины `bucket`: `Some(срок)` — нельзя.
-pub async fn sign_in_limited(pool: &PgPool, bucket: &str) -> Result<Option<Duration>, sqlx::Error> {
+/// `known_device`: корзина известного устройства, общий предел к ней не применяется.
+pub async fn sign_in_limited(
+    pool: &PgPool,
+    bucket: &str,
+    known_device: bool,
+) -> Result<Option<Duration>, sqlx::Error> {
     let (recent, oldest, live, soonest): (i64, Option<f64>, i64, Option<f64>) = sqlx::query_as(
         "select count(*) filter (where bucket=$1 and created_at>now()-interval '1 minute'),
                 extract(epoch from min(created_at) filter (where bucket=$1
@@ -55,7 +61,7 @@ pub async fn sign_in_limited(pool: &PgPool, bucket: &str) -> Result<Option<Durat
     .await?;
     Ok(if recent >= STARTS_PER_MINUTE {
         Some(seconds(oldest))
-    } else if live >= MAX_SIGN_IN_CHALLENGES {
+    } else if !known_device && live >= MAX_SIGN_IN_CHALLENGES {
         Some(seconds(soonest))
     } else {
         None
