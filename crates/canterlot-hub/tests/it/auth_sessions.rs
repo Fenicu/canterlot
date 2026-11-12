@@ -575,10 +575,11 @@ async fn auth_sessions_hourly_maintenance_purges_auth_rows(pool: PgPool) {
         ("auth_buckets", 0),
         ("owner_recovery_tokens", 0),
     ] {
-        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
-            .fetch_one(&hub.pool)
-            .await
-            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("select count(*) from {table}")))
+                .fetch_one(&hub.pool)
+                .await
+                .unwrap();
         assert_eq!(count, left, "{table}");
     }
     assert_eq!(reason(&me(&hub, &token).await), "owner");
