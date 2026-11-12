@@ -8745,6 +8745,120 @@
         }
       }
     },
+    "/api/v1/prompt-suggestion-settings": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "get__api_v1_prompt_suggestion_settings",
+        "responses": {
+          "200": {
+            "description": "Подсказки следующего сообщения владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptSuggestionSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "put__api_v1_prompt_suggestion_settings",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptSuggestionSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Настройка сохранена; выключение стирает показанные подсказки",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptSuggestionSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/routing-policy": {
       "get": {
         "tags": [
@@ -11208,6 +11322,17 @@
               "$ref": "#/components/schemas/RequestView"
             },
             "description": "Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением."
+          },
+          "prompt_suggestion": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PromptSuggestionView",
+                "description": "Подсказка следующего сообщения Claude Code для пустого поля ввода; `None` — подсказки нет."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "queue": {
             "$ref": "#/components/schemas/SnapshotQueueView"
@@ -16084,6 +16209,41 @@
           }
         }
       },
+      "PromptSuggestionSettings": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Подсказки следующего сообщения в пустом поле ввода сессий Claude Code."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PromptSuggestionView": {
+        "type": "object",
+        "required": [
+          "text",
+          "execution_id",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "execution_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "text": {
+            "type": "string",
+            "description": "Предсказанное следующее сообщение владельца, не длиннее 2 КиБ."
+          }
+        }
+      },
       "ProviderIncident": {
         "type": "object",
         "description": "Незакрытый инцидент страницы статуса.",
@@ -17792,6 +17952,17 @@
                   "$ref": "#/components/schemas/RequestView"
                 },
                 "description": "Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением."
+              },
+              "prompt_suggestion": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/PromptSuggestionView",
+                    "description": "Подсказка следующего сообщения Claude Code для пустого поля ввода; `None` — подсказки нет."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "queue": {
                 "$ref": "#/components/schemas/SnapshotQueueView"

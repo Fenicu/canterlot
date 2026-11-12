@@ -1491,6 +1491,22 @@ export interface paths {
         patch: operations["patch__api_v1_presets__id_"];
         trace?: never;
     };
+    "/api/v1/prompt-suggestion-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_prompt_suggestion_settings"];
+        put: operations["put__api_v1_prompt_suggestion_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/routing-policy": {
         parameters: {
             query?: never;
@@ -2108,6 +2124,7 @@ export interface components {
             nudge_events: components["schemas"]["NudgeEventView"][];
             /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */
             open_requests: components["schemas"]["RequestView"][];
+            prompt_suggestion?: components["schemas"]["PromptSuggestionView"] | null;
             queue: components["schemas"]["SnapshotQueueView"];
             scheduled: components["schemas"]["ScheduledMessage"][];
             /** @description Очередь запусков этого разговора: ожидающие и недавно завершённые. */
@@ -3498,6 +3515,18 @@ export interface components {
             /** Format: int64 */
             rss_bytes: number;
         };
+        PromptSuggestionSettings: {
+            /** @description Подсказки следующего сообщения в пустом поле ввода сессий Claude Code. */
+            enabled: boolean;
+        };
+        PromptSuggestionView: {
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            execution_id: string;
+            /** @description Предсказанное следующее сообщение владельца, не длиннее 2 КиБ. */
+            text: string;
+        };
         /** @description Незакрытый инцидент страницы статуса. */
         ProviderIncident: {
             name: string;
@@ -3987,6 +4016,7 @@ export interface components {
                 nudge_events: components["schemas"]["NudgeEventView"][];
                 /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */
                 open_requests: components["schemas"]["RequestView"][];
+                prompt_suggestion?: components["schemas"]["PromptSuggestionView"] | null;
                 queue: components["schemas"]["SnapshotQueueView"];
                 scheduled: components["schemas"]["ScheduledMessage"][];
                 /** @description Очередь запусков этого разговора: ожидающие и недавно завершённые. */
@@ -9281,6 +9311,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Preset"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_prompt_suggestion_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Подсказки следующего сообщения владельца */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptSuggestionSettings"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_prompt_suggestion_settings: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PromptSuggestionSettings"];
+            };
+        };
+        responses: {
+            /** @description Настройка сохранена; выключение стирает показанные подсказки */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptSuggestionSettings"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
