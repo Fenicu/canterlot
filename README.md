@@ -16,7 +16,7 @@
 
 Canterlot — self-hosted хаб для агентов программирования. Claude Code, Codex, OpenCode и Antigravity работают на машинах владельца, а сессии открываются с телефона через PWA: лента, разрешения и вопросы, очередь сообщений, доска плана, поиск по истории, лимиты и настройки. Antigravity работает на Google-аккаунте владельца и использует его каталог `~/.gemini`: настройки, MCP-серверы и история разговоров общие с Antigravity владельца.
 
-Хаб написан на Rust и хранит состояние в PostgreSQL. На каждой рабочей машине запущен Rust-воркер, хаб и воркеры общаются по gRPC поверх TLS. Клиент — статическая сборка SvelteKit; её раздаёт обратный прокси, он же закрывает вход (Caddy и Authelia). Отдельного сервера приложений у клиента нет.
+Хаб написан на Rust и хранит состояние в PostgreSQL. На каждой рабочей машине запущен Rust-воркер, хаб и воркеры общаются по gRPC поверх TLS. Клиент — статическая сборка SvelteKit; её раздаёт обратный прокси (Caddy), а владельца проверяет сам хаб: страница входа в PWA, пароль, ссылка восстановления и сеансы браузера в cookie. Отдельного сервера приложений у клиента нет.
 
 Что можно делать из интерфейса:
 
@@ -176,7 +176,7 @@ Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестов�
 Понадобятся:
 
 - PostgreSQL 18 с базой в UTF-8;
-- Caddy и SSO с forward-auth, который передаёт логин в заголовке `Remote-User` (например, Authelia);
+- Caddy (TLS, статика PWA и обратный прокси к хабу); SSO не нужен, вход проверяет сам хаб;
 - на рабочих машинах — systemd и CLI агентов, которыми будете пользоваться: `claude`, `codex`, `opencode`, `agy`.
 
 Поддерживаемые версии CLI (более новая запускается, но воркер пишет диагностику `untested_cli_version`):
@@ -211,7 +211,7 @@ sudo useradd --system --home-dir /var/lib/canterlot --shell /usr/sbin/nologin ca
 Дальше по [docs/deploy/pilot.md](docs/deploy/pilot.md):
 
 - роль и база PostgreSQL, строка подключения в `/etc/canterlot/db.url` (§2.2);
-- `/etc/canterlot/hub.toml` с таблицей `[http]`: `trusted_proxies` — адрес Caddy, `owner_login` — ваш логин в SSO, `allowed_origins` — адрес PWA (§2.4);
+- `/etc/canterlot/hub.toml` с таблицей `[http]`: `trusted_proxies` — адрес Caddy, `owner_login` — логин для страницы входа, `allowed_origins` — адрес PWA (§2.4);
 - секрет прокси, общий для хаба и Caddy (§2.5);
 - сертификат gRPC от своего УЦ, имя хоста хаба в SAN (§3);
 - по желанию — пуши на телефон через Gotify: таблица `[notify.gotify]` с `url` сервера и `token_file` с ключом приложения; события включаются ключами `waiting`, `turn_finished` и `failures` ([docs/configuration.md](docs/configuration.md)).
@@ -225,6 +225,15 @@ sudo systemctl enable --now canterlot-hub
 
 `init` применяет миграции и создаёт владельца. При обновлении хаб сам применяет новые миграции на старте.
 
+**Вход.** Пароля сразу после установки нет: первый вход — одноразовая ссылка восстановления, выпущенная на хосте хаба.
+
+```bash
+sudo -u canterlot canterlot-hub auth recovery-link --config /etc/canterlot/hub.toml          # печатает ссылку
+sudo -u canterlot canterlot-hub auth recovery-link --config /etc/canterlot/hub.toml --push   # шлёт её только в Gotify
+```
+
+Ссылка живёт 10 минут (`--minutes`, до 60) и открывается один раз. После входа задайте пароль в «Настройки → Сеансы и вход». Там же список сеансов с адресами, завершение любого из них и срок бездействия (по умолчанию 90 дней). Те же действия на хосте: `auth set-password` (из TTY без эха или `--stdin`, `--revoke-sessions` завершает все сеансы), `auth sessions`, `auth revoke-all`. Подробности — в [docs/http.md](docs/http.md) и [ADR-0005](docs/adr/0005-owner-sign-in.md).
+
 **3. PWA и Caddy.** Разверните статику и подставьте свой адрес PWA в CSP:
 
 ```bash
@@ -233,7 +242,7 @@ sudo tar -xzf canterlot-web-$VER.tar.gz -C /var/www/canterlot/build
 sed 's/chat\.example\.com/chat.your.domain/' canterlot-csp-$VER.txt
 ```
 
-Строку передайте Caddy в переменной окружения `CANTERLOT_CSP`. Блок сайта возьмите из §4.2: порядок директив внутри `route` важен, он не даёт подделать заголовки входа. Хэши скриптов в CSP привязаны к версии, поэтому при обновлении PWA строку CSP тоже обновляйте.
+Строку передайте Caddy в переменной окружения `CANTERLOT_CSP`. Блок сайта возьмите из §4.2 и [docs/http.md](docs/http.md#caddy): порядок директив внутри `route` важен, чистка `Remote-*`, `X-Forwarded-*`, `X-Canterlot-Proxy` и `X-Canterlot-Client-Ip` идёт до проксирования. Хэши скриптов в CSP привязаны к версии, поэтому при обновлении PWA строку CSP тоже обновляйте.
 
 **4. Машина с воркером.** На хабе выпустите параметры машины:
 
@@ -260,7 +269,7 @@ systemctl --user enable --now canterlot-worker
 
 - [Разработка](docs/development.md) — тулчейн, структура репозитория, проверки, тесты и обновление контракта.
 - [Конфигурация](docs/configuration.md) — `hub.toml` и `worker.toml`, ключи, пуши Gotify, пороги машин и лимитов, версии CLI, запуск, отзыв и ротация машин.
-- [HTTP и вход](docs/http.md) — заголовки прокси, CSRF, Caddy и WSS.
+- [HTTP и вход](docs/http.md) — вход владельца, сеансы, CSRF, Caddy и WSS.
 - [PWA](docs/pwa.md) — модули клиента, статическая публикация (CSP и `wss://<origin-host>`), установка и обновление.
 - [Развёртывание](docs/deploy/pilot.md) — пилотный контур: Proxmox LXC, PostgreSQL, Caddy, Authelia.
 - [Контракт API](docs/design/api.md) — маршруты, ошибки и события; машинные схемы в `docs/api/`.

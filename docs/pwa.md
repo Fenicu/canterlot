@@ -111,7 +111,7 @@ Cargo-команды, которые обращаются к базе, нужн�
 
 ## Статическая публикация
 
-После `npm run build` Caddy обслуживает `web/build`, глубокие ссылки получают `200.html`. Последний шаг сборки — `web/scripts/precompress.mjs`: рядом с каждым сжимаемым файлом (`.js`, `.mjs`, `.css`, `.html`, `.json`, `.svg`, `.webmanifest`, `.txt`, `.xml`, `.map`; от 1 КиБ) лежат готовые `<name>.br` (Brotli 11, режим текста), `<name>.zst` (zstd 22) и `<name>.gz` (gzip 9, mtime 0), если сосед меньше оригинала. Эти файлы детерминированы и входят в архив выпуска; `file_server` отдаёт их вместо сжатия на лету. Весь origin защищён одним `forward_auth`, включая HTML, JS, manifest, API и WSS. Перед аутентификацией удаляются присланные клиентом `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`; секрет к хабу добавляет только `header_up`. Заголовок CSP формируется из `web/csp.mjs` с точными hashes bootstrap-скрипта текущей сборки и единственным `wss://<origin-host>`:
+После `npm run build` Caddy обслуживает `web/build`, глубокие ссылки получают `200.html`. Последний шаг сборки — `web/scripts/precompress.mjs`: рядом с каждым сжимаемым файлом (`.js`, `.mjs`, `.css`, `.html`, `.json`, `.svg`, `.webmanifest`, `.txt`, `.xml`, `.map`; от 1 КиБ) лежат готовые `<name>.br` (Brotli 11, режим текста), `<name>.zst` (zstd 22) и `<name>.gz` (gzip 9, mtime 0), если сосед меньше оригинала. Эти файлы детерминированы и входят в архив выпуска; `file_server` отдаёт их вместо сжатия на лету. Статика публична: оболочка должна загрузиться, чтобы показать страницу входа, данных в сборке нет. API и WSS требуют сеанса хаба (ADR-0005). До проксирования удаляются присланные клиентом `Remote-*`, `X-Forwarded-*`, `X-Canterlot-Proxy` и `X-Canterlot-Client-Ip`; секрет и адрес клиента к хабу добавляет только `header_up`. Заголовок CSP формируется из `web/csp.mjs` с точными hashes bootstrap-скрипта текущей сборки и единственным `wss://<origin-host>`:
 
 ```bash
 node web/scripts/print-csp.mjs https://chat.example
@@ -125,10 +125,7 @@ chat.example {
         request_header -Remote-*
         request_header -X-Forwarded-*
         request_header -X-Canterlot-Proxy
-        forward_auth authelia:9091 {
-            uri /api/authz/forward-auth
-            copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
-        }
+        request_header -X-Canterlot-Client-Ip
         header Content-Security-Policy "{$CANTERLOT_CSP}"
         header X-Content-Type-Options "nosniff"
         @api path /api/* /healthz
@@ -136,6 +133,7 @@ chat.example {
             encode zstd gzip
             reverse_proxy hub:8080 {
                 header_up X-Canterlot-Proxy {file./run/secrets/canterlot-proxy}
+                header_up X-Canterlot-Client-Ip {remote_host}
             }
         }
         @share {
