@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { getStack } from '../stack/global-setup';
+import { getStack, SESSION_COOKIE } from '../stack/global-setup';
 import { synthetic, type SyntheticStep } from '../stack/synthetic';
 import { createHubClient, createSessionUI, enableProbe, fetchFrames, openSession, sendChaos, type HubClient } from '../stack/hub';
 import { distribution, standardConditions } from './measure';
@@ -334,7 +334,7 @@ test.describe('perf: длинный чат на 10 000 вызовов инстр
     const tools = events.filter((event) => event.kind === 'block_started' && (event.payload as { kind?: string; tool_name?: string }).kind === 'tool_call' && (event.payload as { tool_name?: string }).tool_name === 'Read').length;
     expect(tools, 'в чате 10 000 вызовов инструментов').toBe(10_000);
 
-    const headers = { 'Remote-User': 'owner', 'X-Canterlot-Proxy': stack.proxySecret, Origin: stack.baseUrl };
+    const headers = { Cookie: `${SESSION_COOKIE}=${stack.sessionToken}`, 'X-Canterlot-Proxy': stack.proxySecret, Origin: stack.baseUrl };
     const directStart = Date.now();
     const directSamples: number[] = [];
     for (let i = 0; i < N; i++) directSamples.push(await timed(`${stack.hubUrl}${path}`, { headers }));

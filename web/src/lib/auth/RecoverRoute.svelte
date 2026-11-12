@@ -13,7 +13,7 @@
 
   onMount(() => {
     // Токен одноразовый: из адреса он уходит до запроса и нигде не сохраняется.
-    const token = takeFragment(() => void goto(resolve('/recover'), { replaceState: true, keepFocus: true, noScroll: true }));
+    const token = takeFragment(() => void goto(resolve('/recover'), { replace: true, reset: false }));
     if (!token) { status = 'failed'; error = 'В ссылке нет токена восстановления'; return; }
     void (async () => {
       try {

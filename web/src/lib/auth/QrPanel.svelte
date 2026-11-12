@@ -19,7 +19,7 @@
   let controller: AbortController | null = null;
   let generation = 0;
 
-  const left = $derived(Math.max(0, Math.ceil((expiresAt - now) / 1000)));
+  const left = $derived(Math.min(60, Math.max(0, Math.ceil((expiresAt - now) / 1000))));
 
   async function start(): Promise<void> {
     controller?.abort();

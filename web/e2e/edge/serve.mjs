@@ -10,7 +10,8 @@ const root = resolve(process.env.WEB_BUILD ?? 'build');
 const port = Number(process.env.PORT ?? 4173);
 const hubUrlStr = process.env.HUB_URL ?? 'http://127.0.0.1:8080';
 const hubUrl = new URL(hubUrlStr);
-const proxyOwner = process.env.PROXY_OWNER_USER ?? 'owner';
+// Имя хоста в адресе страницы: стенд работает на localhost, потому что WebAuthn не принимает IP-адрес.
+const edgeHost = process.env.EDGE_HOST ?? '127.0.0.1';
 let proxySecret = process.env.PROXY_SECRET ?? '';
 if (!proxySecret && process.env.PROXY_SECRET_FILE && existsSync(process.env.PROXY_SECRET_FILE)) {
   proxySecret = readFileSync(process.env.PROXY_SECRET_FILE, 'utf8').trim();
@@ -23,8 +24,8 @@ const fixturePath = resolve('e2e/edge/fixtures/ws-smoke.html');
 const fixture = await readFile(fixturePath, 'utf8');
 const hashes = html => [...html.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => `sha256-${createHash('sha256').update(m[1]).digest('base64')}`);
 const scriptHashes = hashes(shell);
-const csp = productionCsp({ websocketOrigin: `ws://127.0.0.1:${port}`, scriptHashes });
-const fixtureCsp = productionCsp({ websocketOrigin: `ws://127.0.0.1:${port}`, scriptHashes: hashes(fixture) });
+const csp = productionCsp({ websocketOrigin: `ws://${edgeHost}:${port}`, scriptHashes });
+const fixtureCsp = productionCsp({ websocketOrigin: `ws://${edgeHost}:${port}`, scriptHashes: hashes(fixture) });
 const mime = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -35,17 +36,18 @@ const mime = {
   '.svg': 'image/svg+xml'
 };
 
-function filterClientHeaders(incoming) {
+/** Как Caddy в проде: заголовки личности и адреса от клиента выбрасываются, адрес ставит кромка по настоящему пиру. */
+function filterClientHeaders(incoming, peer) {
   const clean = {};
   for (const [key, val] of Object.entries(incoming)) {
     const lower = key.toLowerCase();
-    if (lower.startsWith('remote-') || lower.startsWith('x-forwarded-') || lower === 'x-canterlot-proxy') {
+    if (lower.startsWith('remote-') || lower.startsWith('x-forwarded-') || lower === 'x-canterlot-proxy' || lower === 'x-canterlot-client-ip') {
       continue;
     }
     clean[key] = val;
   }
-  clean['remote-user'] = proxyOwner;
   if (proxySecret) clean['x-canterlot-proxy'] = proxySecret;
+  if (peer) clean['x-canterlot-client-ip'] = peer.replace(/^::ffff:/, '');
   clean['host'] = hubUrl.host;
   return clean;
 }
@@ -70,7 +72,7 @@ const server = createServer(async (request, response) => {
         chaos.dropResponsePattern = null;
       }
 
-      const headers = filterClientHeaders(request.headers);
+      const headers = filterClientHeaders(request.headers, request.socket.remoteAddress);
       const options = {
         hostname: hubUrl.hostname,
         port: hubUrl.port,
@@ -138,7 +140,7 @@ const server = createServer(async (request, response) => {
     const selectedRoot = /(?:^|;\s*)pwa-build=next(?:;|$)/.test(request.headers.cookie ?? '') ? nextRoot : root;
     if (selectedRoot === nextRoot) {
       const nextShell = await readFile(resolve(nextRoot, '200.html'), 'utf8');
-      response.setHeader('Content-Security-Policy', productionCsp({ websocketOrigin: `ws://127.0.0.1:${port}`, scriptHashes: hashes(nextShell) }));
+      response.setHeader('Content-Security-Policy', productionCsp({ websocketOrigin: `ws://${edgeHost}:${port}`, scriptHashes: hashes(nextShell) }));
     }
     if (request.method === 'POST' && url.pathname === '/_share') {
       response.writeHead(303, { Location: '/share?error=sw_inactive' });
@@ -198,7 +200,7 @@ server.on('upgrade', (req, clientSocket, head) => {
     return;
   }
 
-  const cleanHeaders = filterClientHeaders(req.headers);
+  const cleanHeaders = filterClientHeaders(req.headers, req.socket.remoteAddress);
   delete cleanHeaders['sec-websocket-extensions'];
   const options = {
     hostname: hubUrl.hostname,

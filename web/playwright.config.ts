@@ -4,7 +4,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const STACK_INFO_FILE = join(tmpdir(), 'canterlot-stack-info.json');
-const isStackOrPerf = process.argv.some(a => a.includes('e2e/stack') || a.includes('e2e/perf'));
+// Cookie владельца, которую global-setup стенда получает по ссылке восстановления.
+const STACK_STATE_FILE = join(tmpdir(), 'canterlot-stack-state.json');
+// Процессы-исполнители перечитывают конфиг без аргументов командной строки: признак стенда идёт им через окружение.
+const isStackOrPerf = process.env.CANTERLOT_STACK_RUN === '1' || process.argv.some(a => a.includes('e2e/stack') || a.includes('e2e/perf'));
+if (isStackOrPerf) process.env.CANTERLOT_STACK_RUN = '1';
 // Скриншоты тем и README снимаются отдельно: в обычный прогон они не входят.
 const screenshots = process.env.PW_SCREENSHOTS === '1';
 
@@ -39,7 +43,7 @@ export default defineConfig({
   workers: isStackOrPerf ? 1 : workers,
   globalSetup: isStackOrPerf ? './e2e/stack/global-setup.ts' : undefined,
   globalTeardown: isStackOrPerf ? './e2e/stack/global-teardown.ts' : undefined,
-  use: { baseURL: origin, trace: 'retain-on-failure' },
+  use: { baseURL: origin, trace: 'retain-on-failure', storageState: isStackOrPerf ? STACK_STATE_FILE : undefined },
   webServer: isStackOrPerf
     ? undefined
     : { command: 'node e2e/edge/serve.mjs', url: origin, reuseExistingServer: false },

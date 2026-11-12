@@ -84,7 +84,7 @@
   }
 
   function subtitle(session: OwnerSession): string {
-    const parts = [session.name ? session.label : null, ipText(session), placeText(session.location), session.current ? 'этот сеанс' : seenText(session.last_seen_at, now)];
+    const parts = [session.name ? session.label : null, ipText(session), placeText(session.location), session.current ? null : seenText(session.last_seen_at, now)];
     return parts.filter(Boolean).join(' · ');
   }
 

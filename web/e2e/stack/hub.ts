@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
-import { getStack, type Stack } from './global-setup';
+import { getStack, SESSION_COOKIE, type Stack } from './global-setup';
 
 export interface InputItem {
   kind: 'input';
@@ -61,12 +61,12 @@ export interface WireEvent {
   payload: Record<string, unknown>;
 }
 
-/** Клиент идёт на хаб напрямую: те же заголовки, что и у кромки, но без её цепочки и без хаоса. */
-export function createHubClient(stack: Stack = getStack(), owner = 'owner'): HubClient {
+/** Клиент идёт на хаб напрямую: секрет кромки и cookie сеанса владельца, но без её цепочки и без хаоса. */
+export function createHubClient(stack: Stack = getStack(), session = stack.sessionToken): HubClient {
   const hubUrl = stack.hubUrl;
   const call = (path: string, init: RequestInit = {}) => {
     const headers = new Headers(init.headers ?? {});
-    headers.set('Remote-User', owner);
+    headers.set('Cookie', `${SESSION_COOKIE}=${session}`);
     headers.set('X-Canterlot-Proxy', stack.proxySecret);
     headers.set('Origin', stack.baseUrl);
     if (init.method && init.method !== 'GET') {

@@ -14,7 +14,7 @@
 
   onMount(() => {
     // Секрет живёт только в памяти этой страницы: из адреса и истории он уходит сразу.
-    secret = takeFragment(() => void goto(resolve('/qr'), { replaceState: true, keepFocus: true, noScroll: true }));
+    secret = takeFragment(() => void goto(resolve('/qr'), { replace: true, reset: false }));
     if (!secret) { status = 'empty'; return; }
     me().then(() => { status = 'signed_in'; }, (err) => {
       if (err instanceof AuthRequired) status = 'signed_out';

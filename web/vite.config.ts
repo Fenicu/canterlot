@@ -34,8 +34,8 @@ export default defineConfig({
       "/api": {
         target: process.env.HUB_URL ?? "http://127.0.0.1:8080",
         ws: true,
+        // Вход по cookie сеанса: прокси только подставляет разрешённый хабом Origin.
         headers: {
-          "Remote-User": process.env.HUB_OWNER ?? "owner",
           Origin: process.env.HUB_ALLOWED_ORIGIN ?? "http://localhost:5173",
         },
       },

@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { PNG } from 'pngjs';
-import { getStack } from './global-setup';
+import { getStack, STACK_STATE_FILE } from './global-setup';
 import { synthetic } from './synthetic';
 import { answerText, createHubClient, createSessionUI, fetchFrames, sendChaos, sendScript } from './hub';
 
@@ -255,7 +255,7 @@ test.describe('stack: features and security', () => {
     const idB = await hub.createConversation({ title: beta, start: false });
     const group = await hub.json<{ id: string }>('/api/v1/groups', { method: 'POST', body: JSON.stringify({ name: `Группа-${suffix}` }) });
 
-    const context = await browser.newContext();
+    const context = await browser.newContext({ storageState: STACK_STATE_FILE });
     const one = await context.newPage();
     const two = await context.newPage();
     for (const page of [one, two]) {
@@ -299,7 +299,7 @@ test.describe('stack: features and security', () => {
     const id = await hub.createConversation({ title, start: true });
     await expect.poll(async () => (await hub.json<{ execution: { state: string } | null }>(`/api/v1/conversations/${id}`)).execution?.state, { timeout: 30_000 }).toBe('running');
 
-    const context = await browser.newContext();
+    const context = await browser.newContext({ storageState: STACK_STATE_FILE });
     const list = await context.newPage();
     const chat = await context.newPage();
     await list.goto(`${stack.baseUrl}/sessions`);
@@ -376,24 +376,37 @@ test.describe('stack: features and security', () => {
     await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toHaveCount(0);
   });
 
-  test('edge_proxy_strips_client_remote_headers', tag, async ({ page }) => {
+  test('edge_proxy_strips_client_remote_headers', tag, async ({ browser }) => {
     const stack = getStack();
     const hub = createHubClient(stack);
-    // Запрос, дошедший до хаба без секрета кромки, отклоняется.
+    // Без cookie сеанса хаб не пускает: ни напрямую, ни с поддельными заголовками личности.
     const direct = await fetch(`${stack.hubUrl}/api/v1/me`, { headers: { 'Remote-User': 'owner' } });
     expect(direct.status).toBe(401);
     const forgedDirect = await fetch(`${stack.hubUrl}/api/v1/me`, { headers: { 'Remote-User': 'other', 'X-Canterlot-Proxy': 'forged' } });
     expect(forgedDirect.status).toBe(401);
     expect((await hub.fetch('/api/v1/me')).status).toBe(200);
 
-    // Подделанные заголовки со страницы перезаписываются кромкой: хаб видит владельца.
+    // Страница без входа подделывает заголовки через кромку: 401 unauthenticated и без признака утечки.
+    const context = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+    const page = await context.newPage();
     await page.goto(stack.baseUrl);
     const viaEdge = await page.evaluate(async () => {
-      const res = await fetch('/api/v1/me', { headers: { 'Remote-User': 'other', 'X-Canterlot-Proxy': 'forged', 'X-Forwarded-For': '203.0.113.9', 'Remote-Groups': 'admins' } });
-      return { status: res.status, body: await res.json() };
+      const res = await fetch('/api/v1/me', { headers: { 'Remote-User': 'owner', 'X-Canterlot-Proxy': 'forged', 'X-Canterlot-Client-Ip': '203.0.113.9', 'X-Forwarded-For': '203.0.113.9', 'Remote-Groups': 'admins' } });
+      return { status: res.status, leak: res.headers.get('X-Canterlot-Proxy-Leak'), body: await res.json() };
     });
-    expect(viaEdge.status).toBe(200);
-    expect(JSON.stringify(viaEdge.body)).toContain('owner');
-    expect(JSON.stringify(viaEdge.body)).not.toContain('other');
+    expect(viaEdge.status).toBe(401);
+    expect(viaEdge.leak).toBeNull();
+    expect((viaEdge.body as { error: { code: string } }).error.code).toBe('unauthenticated');
+    await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toBeVisible({ timeout: 15_000 });
+    await context.close();
+
+    // Адрес клиента ставит кромка по настоящему пиру, а не по присланному заголовку.
+    const headers = { Origin: stack.baseUrl, 'X-Canterlot-Client': '1', 'Content-Type': 'application/json', 'X-Canterlot-Client-Ip': '203.0.113.9', 'X-Forwarded-For': '203.0.113.9' };
+    const signedIn = await fetch(`${stack.baseUrl}/api/v1/auth/recovery`, { method: 'POST', headers, body: JSON.stringify({ token: stack.recoveryToken() }) });
+    expect(signedIn.status).toBe(200);
+    const view = (await signedIn.json()) as { session: { created_ip: string | null; id: string } };
+    expect(view.session.created_ip).toBe('127.0.0.1');
+    const cookie = signedIn.headers.getSetCookie().map((line) => line.split(';')[0]).join('; ');
+    expect((await fetch(`${stack.baseUrl}/api/v1/auth/logout`, { method: 'POST', headers: { Origin: stack.baseUrl, 'X-Canterlot-Client': '1', Cookie: cookie } })).status).toBe(200);
   });
 });

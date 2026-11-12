@@ -15,10 +15,57 @@ export interface Stack {
   machineName: 'e2e';
   workerDataDir?: string;
   proxySecret: string;
+  /** Сеанс владельца из ссылки восстановления: его cookie лежит в storage state стенда. */
+  sessionToken: string;
   psql(sql: string): Promise<string>;
+  /** Новый отдельный сеанс владельца (своя ссылка восстановления): для проверок, которые его завершают. */
+  newSession(): Promise<SignedIn>;
+  /** Одноразовый токен восстановления из CLI хаба. */
+  recoveryToken(): string;
 }
 
+export interface SignedIn { session: string; device: string; id: string }
+
 const STACK_INFO_FILE = join(tmpdir(), 'canterlot-stack-info.json');
+/** Cookie владельца для браузерных контекстов стенда; контексты, созданные вручную, передают его явно. */
+export const STACK_STATE_FILE = join(tmpdir(), 'canterlot-stack-state.json');
+export const SESSION_COOKIE = '__Host-canterlot_session';
+export const DEVICE_COOKIE = '__Host-canterlot_device';
+
+function issueRecoveryToken(hubBin: string, hubToml: string): string {
+  const out = execSync(`${hubBin} auth recovery-link --config ${hubToml}`, { encoding: 'utf8' });
+  const match = /\/recover#([A-Za-z0-9_-]+)/.exec(out);
+  if (!match) throw new Error('recovery-link не напечатал ссылку');
+  return match[1]!;
+}
+
+/** Вход по токену восстановления через кромку, как это делает страница /recover. */
+async function signInWithRecovery(baseUrl: string, token: string): Promise<SignedIn> {
+  const res = await fetch(`${baseUrl}/api/v1/auth/recovery`, {
+    method: 'POST',
+    headers: { Origin: baseUrl, 'X-Canterlot-Client': '1', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token })
+  });
+  if (!res.ok) throw new Error(`POST /auth/recovery -> ${res.status} ${await res.text()}`);
+  const cookies = new Map(res.headers.getSetCookie().map((line) => {
+    const [pair] = line.split(';');
+    const at = pair!.indexOf('=');
+    return [pair!.slice(0, at), pair!.slice(at + 1)] as const;
+  }));
+  const session = cookies.get(SESSION_COOKIE);
+  const device = cookies.get(DEVICE_COOKIE);
+  if (!session || !device) throw new Error('вход по восстановлению не выдал cookie');
+  const view = (await res.json()) as { session: { id: string } };
+  return { session, device, id: view.session.id };
+}
+
+/** Storage state Playwright: cookie без Domain (host-only), как их ставит браузер для `__Host-`. */
+export function storageStateFor(baseUrl: string, signedIn: SignedIn) {
+  const domain = new URL(baseUrl).hostname;
+  const expires = Math.floor(Date.now() / 1000) + 90 * 86400;
+  const cookie = (name: string, value: string) => ({ name, value, domain, path: '/', expires, httpOnly: true, secure: true, sameSite: 'Strict' as const });
+  return { cookies: [cookie(SESSION_COOKIE, signedIn.session), cookie(DEVICE_COOKIE, signedIn.device)], origins: [] };
+}
 
 async function getFreePort(): Promise<number> {
   return new Promise((res, rej) => {
@@ -45,6 +92,9 @@ export function getStack(): Stack {
     machineName: 'e2e',
     workerDataDir: info.workerDataDir,
     proxySecret: info.proxySecret ?? '',
+    sessionToken: info.sessionToken ?? '',
+    recoveryToken: () => issueRecoveryToken(info.hubBin, info.hubToml),
+    newSession: () => signInWithRecovery(info.baseUrl, issueRecoveryToken(info.hubBin, info.hubToml)),
     psql(sql: string): Promise<string> {
       return new Promise((resolvePsql, rejectPsql) => {
         const proc = spawn('psql', ['-h', '127.0.0.1', '-p', String(info.pgPort), '-U', 'canterlot', '-d', info.dbName, '-t', '-A', '-c', sql], {
@@ -133,6 +183,8 @@ export default async function globalSetup() {
   const hubHttpPort = await getFreePort();
   const edgePort = await getFreePort();
   const chaosPort = await getFreePort();
+  // WebAuthn не принимает IP-адрес как источник: стенд открывается на localhost, ключи доступа работают.
+  const baseUrl = `http://localhost:${edgePort}`;
 
   // 6. Write hub.toml
   const hubToml = join(stackDir, 'hub.toml');
@@ -148,8 +200,7 @@ listen = "127.0.0.1:${hubHttpPort}"
 trusted_proxies = ["127.0.0.1/32"]
 owner_login = "owner"
 proxy_secret_file = "${proxySecretFile}"
-logout_url = "https://127.0.0.1/logout"
-allowed_origins = ["http://127.0.0.1:${edgePort}"]
+allowed_origins = ["${baseUrl}"]
 
 [http.ws]
 max_connection_age = "20s"
@@ -248,6 +299,7 @@ allowed_workdir_roots = ["${workRoot}"]
     env: {
       ...process.env,
       PORT: String(edgePort),
+      EDGE_HOST: 'localhost',
       HUB_URL: `http://127.0.0.1:${hubHttpPort}`,
       PROXY_SECRET: proxySecret,
       PROXY_SECRET_FILE: proxySecretFile,
@@ -260,17 +312,18 @@ allowed_workdir_roots = ["${workRoot}"]
   edgeProcess.stdout?.on('data', d => { edgeLogs += d; fsAppend(edgeLogFile, d); });
   edgeProcess.stderr?.on('data', d => { edgeLogs += d; fsAppend(edgeLogFile, d); });
 
-  // 14. Wait for Hub /readyz or /healthz and machine available through edge
+  // 14. Wait for Hub /readyz, sign in through a recovery link and wait for the machine through the edge
   const deadline = Date.now() + 30000;
   let ready = false;
   let lastErr = '';
+  let signedIn: SignedIn | null = null;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`http://127.0.0.1:${edgePort}/readyz`);
+      const res = await fetch(`${baseUrl}/readyz`);
       if (res.ok) {
-        // Also check if machine is available
-        const machinesRes = await fetch(`http://127.0.0.1:${edgePort}/api/v1/machines`, {
-          headers: { 'Remote-User': 'owner' }
+        signedIn ??= await signInWithRecovery(baseUrl, issueRecoveryToken(hubBin, hubToml));
+        const machinesRes = await fetch(`${baseUrl}/api/v1/machines`, {
+          headers: { Cookie: `${SESSION_COOKIE}=${signedIn.session}` }
         });
         if (machinesRes.ok) {
           const list = (await machinesRes.json()) as Array<{ name?: string; availability?: string; state?: string }>;
@@ -305,8 +358,9 @@ allowed_workdir_roots = ["${workRoot}"]
   }
 
   // 15. Save Stack state
+  writeFileSync(STACK_STATE_FILE, JSON.stringify(storageStateFor(baseUrl, signedIn!)), { mode: 0o600 });
   const stackInfo = {
-    baseUrl: `http://127.0.0.1:${edgePort}`,
+    baseUrl,
     hubUrl: `http://127.0.0.1:${hubHttpPort}`,
     control: String(chaosPort),
     dataDir,
@@ -316,6 +370,9 @@ allowed_workdir_roots = ["${workRoot}"]
     pgPort,
     dbName,
     proxySecret,
+    sessionToken: signedIn!.session,
+    hubBin,
+    hubToml,
     pids: {
       hub: hubProcess.pid,
       worker: workerProcess.pid,

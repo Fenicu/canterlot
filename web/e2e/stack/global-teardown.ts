@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const STACK_INFO_FILE = join(tmpdir(), 'canterlot-stack-info.json');
+const STACK_STATE_FILE = join(tmpdir(), 'canterlot-stack-state.json');
 
 /** PID принадлежит стенду, только если в его командной строке есть каталог стенда. */
 function cmdline(pid: number): string {
@@ -73,6 +74,7 @@ export async function stopStack(): Promise<void> {
   } catch { /* повреждённый файл состояния ничего не останавливает */ }
 
   try { unlinkSync(STACK_INFO_FILE); } catch { /* файла уже нет */ }
+  try { unlinkSync(STACK_STATE_FILE); } catch { /* файла уже нет */ }
 }
 
 export default async function globalTeardown() {
