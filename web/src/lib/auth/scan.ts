@@ -20,9 +20,14 @@ export function cameraErrorText(error: unknown): string {
   return "Не удалось включить камеру";
 }
 
-/** Фрагмент из адресной строки: читается один раз и сразу убирается из адреса и истории. */
+/**
+ * Фрагмент из адресной строки: читается один раз и сразу убирается из адреса, затем `replace`
+ * заменяет запись истории навигацией роутера, чтобы и его состояние не помнило старый адрес.
+ */
 export function takeFragment(replace: () => void): string {
   const fragment = location.hash.slice(1);
-  if (location.hash) replace();
+  if (!location.hash) return fragment;
+  history.replaceState(history.state, "", `${location.pathname}${location.search}`);
+  replace();
   return fragment;
 }

@@ -227,13 +227,13 @@ test('password_change_checks_the_current_password_and_setting_a_first_one_works'
 test('qr_link_signed_out_explains_where_to_scan_and_strips_the_fragment', async ({ page }) => {
   await boot(page, `/qr#${QR_SECRET}`, (a) => { a.signedIn = false; });
   await expect(page.getByText('Откройте этот код на устройстве, где вы уже вошли в canterlot, или отсканируйте его в приложении: Настройки → Сеансы и вход → Сканировать код')).toBeVisible();
-  expect(new URL(page.url()).hash).toBe('');
+  await expect.poll(() => new URL(page.url()).hash).toBe('');
   await expect(signIn(page)).toHaveCount(0);
 });
 
 test('qr_link_signed_in_shows_the_approve_card_and_approves', async ({ page }, testInfo) => {
   const { auth } = await boot(page, `/qr#${QR_SECRET}`, (a) => { a.inspect = { ...a.inspect, other_country: true }; });
-  expect(new URL(page.url()).hash).toBe('');
+  await expect.poll(() => new URL(page.url()).hash).toBe('');
   const card = page.locator('[data-qr-approve]');
   await expect(card.getByText('код показан 12 с назад')).toBeVisible();
   await expect(card.getByText('203.0.113.9')).toBeVisible();
@@ -263,7 +263,7 @@ test('recovery_link_signs_in_and_opens_sessions_with_the_banner', async ({ page 
 test('bad_recovery_link_says_so_in_words', async ({ page }) => {
   await boot(page, '/recover#not-the-token', (a) => { a.signedIn = false; });
   await expect(page.getByRole('alert')).toContainText('Ссылка восстановления недействительна');
-  expect(new URL(page.url()).hash).toBe('');
+  await expect.poll(() => new URL(page.url()).hash).toBe('');
 });
 
 test('revoked_session_wipes_local_data_and_shows_sign_in', async ({ page }) => {
