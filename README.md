@@ -2,19 +2,21 @@
 
 <p align="center">
 
-[![Forgejo](https://shields.fenicu.com/badge/Forgejo-Fenicu%2Fcanterlot-brightgreen?logo=forgejo)](https://git.fenicu.com/Fenicu/canterlot)
-![версия](https://shields.fenicu.com/badge/%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F-1.30.0-00f4ee)
-[![история](https://shields.fenicu.com/badge/%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F-CHANGES.rst-6c757d)](CHANGES.rst)
-[![лицензия](https://shields.fenicu.com/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-blue)](LICENSE)
-![агенты](https://shields.fenicu.com/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode%20%C2%B7%20Antigravity-1f5457)
-![Rust](https://shields.fenicu.com/badge/rust-1.99.1-orange?logo=rust)
-![SvelteKit](https://shields.fenicu.com/badge/SvelteKit-3-FF3E00?logo=svelte&logoColor=white)
-![PostgreSQL](https://shields.fenicu.com/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)
-![Node](https://shields.fenicu.com/badge/node-24-339933?logo=node.js&logoColor=white)
+[![GitHub](https://img.shields.io/badge/GitHub-Fenicu%2Fcanterlot-brightgreen?logo=github)](https://github.com/Fenicu/canterlot)
+![версия](https://img.shields.io/badge/%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F-1.30.0-00f4ee)
+[![история](https://img.shields.io/badge/%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F-CHANGES.rst-6c757d)](CHANGES.rst)
+[![лицензия](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-blue)](LICENSE)
+![агенты](https://img.shields.io/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode%20%C2%B7%20Antigravity-1f5457)
+![Rust](https://img.shields.io/badge/rust-1.99.1-orange?logo=rust)
+![SvelteKit](https://img.shields.io/badge/SvelteKit-3-FF3E00?logo=svelte&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)
+![Node](https://img.shields.io/badge/node-24-339933?logo=node.js&logoColor=white)
 
 </p>
 
 Canterlot — self-hosted хаб для агентов программирования. Claude Code, Codex, OpenCode и Antigravity работают на машинах владельца, а сессии открываются с телефона через PWA: лента, разрешения и вопросы, очередь сообщений, доска плана, поиск по истории, лимиты и настройки. Antigravity работает на Google-аккаунте владельца и использует его каталог `~/.gemini`: настройки, MCP-серверы и история разговоров общие с Antigravity владельца.
+
+Разработка идёт в [Forgejo](https://git.fenicu.com/Fenicu/canterlot); GitHub — зеркало.
 
 Хаб написан на Rust и хранит состояние в PostgreSQL. На каждой рабочей машине запущен Rust-воркер, хаб и воркеры общаются по gRPC поверх TLS. Клиент — статическая сборка SvelteKit; её раздаёт обратный прокси (Caddy), а владельца проверяет сам хаб: страница входа в PWA, пароль, ссылка восстановления и сеансы браузера в cookie. Отдельного сервера приложений у клиента нет.
 
@@ -52,25 +54,25 @@ Canterlot — self-hosted хаб для агентов программиров�
 
 <table align="center">
   <tr>
-    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/sessions-dark.png"><img src="docs/screenshots/sessions-dark.png" width="240" alt="Список сессий с лимитами и группами"></a><br><sub>Сессии, лимиты и группы</sub></td>
-    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/chat-dark.png"><img src="docs/screenshots/chat-dark.png" width="240" alt="Чат с кодом, инструментами и заполнением контекста"></a><br><sub>Чат, код и инструменты</sub></td>
-    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/permission-light.png"><img src="docs/screenshots/permission-light.png" width="240" alt="Карточка разрешения на команду"></a><br><sub>Разрешения агента</sub></td>
+    <td align="center" valign="top"><a href="docs/screenshots/sessions-dark.png"><img src="docs/screenshots/sessions-dark.png" width="240" alt="Список сессий с лимитами и группами"></a><br><sub>Сессии, лимиты и группы</sub></td>
+    <td align="center" valign="top"><a href="docs/screenshots/chat-dark.png"><img src="docs/screenshots/chat-dark.png" width="240" alt="Чат с кодом, инструментами и заполнением контекста"></a><br><sub>Чат, код и инструменты</sub></td>
+    <td align="center" valign="top"><a href="docs/screenshots/permission-light.png"><img src="docs/screenshots/permission-light.png" width="240" alt="Карточка разрешения на команду"></a><br><sub>Разрешения агента</sub></td>
   </tr>
   <tr>
-    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/question-dark.png"><img src="docs/screenshots/question-dark.png" width="240" alt="Карточка вопроса с вариантами ответа"></a><br><sub>Вопросы с вариантами</sub></td>
-    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/plan-dark.png"><img src="docs/screenshots/plan-dark.png" width="240" alt="Вкладка «План»: задачи по состояниям, исполнители, находки и коммиты"></a><br><sub>Доска плана</sub></td>
-    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/plan-feed-light.png"><img src="docs/screenshots/plan-feed-light.png" width="240" alt="Лента оркестратора с карточками запуска делегата и правки плана"></a><br><sub>Карточки плана в ленте</sub></td>
+    <td align="center" valign="top"><a href="docs/screenshots/question-dark.png"><img src="docs/screenshots/question-dark.png" width="240" alt="Карточка вопроса с вариантами ответа"></a><br><sub>Вопросы с вариантами</sub></td>
+    <td align="center" valign="top"><a href="docs/screenshots/plan-dark.png"><img src="docs/screenshots/plan-dark.png" width="240" alt="Вкладка «План»: задачи по состояниям, исполнители, находки и коммиты"></a><br><sub>Доска плана</sub></td>
+    <td align="center" valign="top"><a href="docs/screenshots/plan-feed-light.png"><img src="docs/screenshots/plan-feed-light.png" width="240" alt="Лента оркестратора с карточками запуска делегата и правки плана"></a><br><sub>Карточки плана в ленте</sub></td>
   </tr>
   <tr>
-    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/delegation-dark.png"><img src="docs/screenshots/delegation-dark.png" width="240" alt="Панель делегирования: делегаты и их состояние"></a><br><sub>Панель делегирования</sub></td>
-    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/search-light.png"><img src="docs/screenshots/search-light.png" width="240" alt="Поиск по истории с подсвеченными совпадениями"></a><br><sub>Поиск по истории</sub></td>
-    <td align="center" valign="top"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/machines-dark.png"><img src="docs/screenshots/machines-dark.png" width="240" alt="Машина: ресурсы, сторож, крупные кэши и очередь тяжёлых задач"></a><br><sub>Машина, сторож и очередь</sub></td>
+    <td align="center" valign="top"><a href="docs/screenshots/delegation-dark.png"><img src="docs/screenshots/delegation-dark.png" width="240" alt="Панель делегирования: делегаты и их состояние"></a><br><sub>Панель делегирования</sub></td>
+    <td align="center" valign="top"><a href="docs/screenshots/search-light.png"><img src="docs/screenshots/search-light.png" width="240" alt="Поиск по истории с подсвеченными совпадениями"></a><br><sub>Поиск по истории</sub></td>
+    <td align="center" valign="top"><a href="docs/screenshots/machines-dark.png"><img src="docs/screenshots/machines-dark.png" width="240" alt="Машина: ресурсы, сторож, крупные кэши и очередь тяжёлых задач"></a><br><sub>Машина, сторож и очередь</sub></td>
   </tr>
   <tr>
-    <td align="center" valign="top" colspan="3"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/limits-light.png"><img src="docs/screenshots/limits-light.png" width="200" alt="История лимитов и скорость моделей"></a><br><sub>История лимитов и скорость</sub></td>
+    <td align="center" valign="top" colspan="3"><a href="docs/screenshots/limits-light.png"><img src="docs/screenshots/limits-light.png" width="200" alt="История лимитов и скорость моделей"></a><br><sub>История лимитов и скорость</sub></td>
   </tr>
   <tr>
-    <td align="center" colspan="3"><a href="https://git.fenicu.com/Fenicu/canterlot/src/branch/main/docs/screenshots/desktop.png"><img src="docs/screenshots/desktop.png" width="760" alt="Рабочий стол: список сессий, чат оркестратора и доска плана"></a><br><sub>Рабочий стол: список, чат и план рядом</sub></td>
+    <td align="center" colspan="3"><a href="docs/screenshots/desktop.png"><img src="docs/screenshots/desktop.png" width="760" alt="Рабочий стол: список сессий, чат оркестратора и доска плана"></a><br><sub>Рабочий стол: список, чат и план рядом</sub></td>
   </tr>
 </table>
 
@@ -79,15 +81,15 @@ Canterlot — self-hosted хаб для агентов программиров�
 Выпуск собирается один раз в контейнере Debian 13 на отдельной машине, а готовый
 каталог затем используют и выкат, и публикация. Собирать напрямую, без контейнера,
 нельзя ни на этой VM, ни на сборочной машине: прод — Debian 13 с glibc 2.41, а
-`mainpc-build` — Arch с glibc 2.44, и собранные там бинарники на проде не запустятся.
+сборочная машина — Arch с glibc 2.44, и собранные там бинарники на проде не запустятся.
 
 ```bash
-scripts/build-release.sh v1.24.0            # сборочная машина (CANTERLOT_BUILD_HOST, по умолчанию mainpc-build)
+scripts/build-release.sh v1.24.0            # сборочная машина (CANTERLOT_BUILD_HOST, по умолчанию canterlot-build)
 scripts/build-release.sh v1.24.0 --local    # та же сборка на местном docker, для проверки
 ```
 
 Тег должен быть локально и на origin. На сборочной машине нужны ssh-доступ (алиас
-`mainpc-build`), работающий docker и bare-репозиторий `~/canterlot.git`. Скрипт:
+`canterlot-build`), работающий docker и bare-репозиторий `~/canterlot.git`. Скрипт:
 
 1. отправляет тег в bare-репозиторий `~/canterlot.git` на сборочной машине;
 2. создаёт там чистую рабочую копию `~/release/src-<sha12>` на коммите тега;
@@ -124,8 +126,9 @@ scripts/publish-release.sh v1.24.0
 
 ### Полный гейт на сборочной машине
 
-Тот же прогон, что перед выпуском, можно снять на `mainpc-build` в контейнере
-Debian 13: быстрее, чем на рабочей VM, и без влияния на неё.
+Тот же прогон, что перед выпуском, можно снять на сборочной машине
+(`CANTERLOT_BUILD_HOST`) в контейнере Debian 13: быстрее, чем на рабочей VM, и без
+влияния на неё.
 
 ```bash
 scripts/gate-remote.sh 4d884712            # коммит на сборочной машине (CANTERLOT_BUILD_HOST)
@@ -171,7 +174,7 @@ Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестов�
 
 ## Развёртывание из готовых архивов
 
-В [выпусках на Forgejo](https://git.fenicu.com/Fenicu/canterlot/releases) лежат собранные хаб, воркер и PWA. Хаб и воркер собраны для x86_64 под glibc 2.41 и новее (Debian 13, Ubuntu 25.04 и новее). Подробности каждого шага — в [docs/deploy/pilot.md](docs/deploy/pilot.md), ключи конфигурации — в [docs/configuration.md](docs/configuration.md). Собрать всё из исходников можно по [docs/development.md](docs/development.md).
+В [выпусках на GitHub](https://github.com/Fenicu/canterlot/releases) лежат собранные хаб, воркер и PWA. Хаб и воркер собраны для x86_64 под glibc 2.41 и новее (Debian 13, Ubuntu 25.04 и новее). Подробности каждого шага — в [docs/deploy/pilot.md](docs/deploy/pilot.md), ключи конфигурации — в [docs/configuration.md](docs/configuration.md). Собрать всё из исходников можно по [docs/development.md](docs/development.md).
 
 Понадобятся:
 
@@ -191,8 +194,8 @@ Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестов�
 **1. Скачать и проверить.**
 
 ```bash
-VER=$(curl -fsS https://git.fenicu.com/api/v1/repos/Fenicu/canterlot/releases/latest | jq -r .tag_name | sed 's/^v//')
-base=https://git.fenicu.com/Fenicu/canterlot/releases/download/v$VER
+VER=$(curl -fsS https://api.github.com/repos/Fenicu/canterlot/releases/latest | jq -r .tag_name | sed 's/^v//')
+base=https://github.com/Fenicu/canterlot/releases/download/v$VER
 for f in SHA256SUMS canterlot-hub-$VER-x86_64-linux-gnu.tar.gz \
          canterlot-worker-$VER-x86_64-linux-gnu.tar.gz \
          canterlot-web-$VER.tar.gz canterlot-csp-$VER.txt; do

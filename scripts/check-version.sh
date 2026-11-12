@@ -26,7 +26,7 @@ if package != version:
 
 readme = Path("README.md").read_text(encoding="utf-8")
 badge = re.search(
-    r"shields\.fenicu\.com/badge/(?:%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F|версия)-(\d+\.\d+\.\d+)-",
+    r"img\.shields\.io/badge/(?:%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F|версия)-(\d+\.\d+\.\d+)-",
     readme,
 )
 if not badge:

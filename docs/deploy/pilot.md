@@ -930,7 +930,7 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
 6. flip воркера и один старт; защищённое ожидание `MainPID` с читаемым exe (`wait_worker_exe`: пустой `MainPID`, `MainPID=0` и ENOENT на переходе exec — не обрыв `set -e`, а следующий опрос; инцидент 1.18.1); exe из нового релиза; ожидание **голого** `state="live"` в журнале юнита (инциденты 1.16.0 и 1.19.0: разбор без конвейера с ранним выходом); `NRestarts=0`; инвариант сессий; печатается измеренный простой;
 7. **слияние старых чанков PWA** после старта воркера и до любой чистки: `_app/immutable` до трёх предыдущих релизов веба копируется в новый релиз `cp -rn` под web lock (открытые вкладки догружают свои чанки); затем чтение: ни одного пропущенного относительного пути из каждого источника и каждый файл dist нового релиза байт в байт на месте (`sha256sum -c`);
 8. **обслуживание**: у каждой живой сессии есть каталог исполнения и сокет `/run/user/<uid>/canterlot/<id>.sock`; на хостах нет `current.new`, `build.new` и `releases/.stage-*`; `canterlot.env.<web>` — 0600 и равен живому env. Нарушения — мягкие ошибки (в dry-run и репетиции — провал);
-9. `verify.sh`: два чтения (пауза `VERIFY_READ_GAP`, 60 с), версии, миграции, соединение воркера в текущем запуске, **каталог машины после старта** — возможности и харнессы из `EXPECT` релиза (с ожиданием до `CATALOG_WAIT` секунд), CSP, precompressed `Content-Encoding` (`br`/`zstd`/`gzip`, мягкая ошибка) на первом по `LC_ALL=C` полностью предсжатом JS-ассете релиза, счётчики ошибок журналов (новый вид WARN/ERROR хаба против суточной базы — жёсткая ошибка, кроме видов WARN из `VERIFY_WARN_KINDS_OK`, по умолчанию `config_key_deprecated sign_in_global_lock client_ip_missing`; неудачные входы, отказы CSRF на публичных путях входа и пределы запусков QR и ключа доступа хаб пишет INFO и в счёт не идут), курсоры SJ/CJ, коды сайтов (`SITE_CODES`: `hub.fenicu.com` отдаёт оболочку PWA с кодом 200, `auth.fenicu.com` не проверяется — узел выключен);
+9. `verify.sh`: два чтения (пауза `VERIFY_READ_GAP`, 60 с), версии, миграции, соединение воркера в текущем запуске, **каталог машины после старта** — возможности и харнессы из `EXPECT` релиза (с ожиданием до `CATALOG_WAIT` секунд), CSP, precompressed `Content-Encoding` (`br`/`zstd`/`gzip`, мягкая ошибка) на первом по `LC_ALL=C` полностью предсжатом JS-ассете релиза, счётчики ошибок журналов (новый вид WARN/ERROR хаба против суточной базы — жёсткая ошибка, кроме видов WARN из `VERIFY_WARN_KINDS_OK`, по умолчанию `config_key_deprecated sign_in_global_lock client_ip_missing`; неудачные входы, отказы CSRF на публичных путях входа и пределы запусков QR и ключа доступа хаб пишет INFO и в счёт не идут), курсоры SJ/CJ, коды сайтов (`SITE_CODES`: `hub.example.com` отдаёт оболочку PWA с кодом 200, `auth.example.com` не проверяется — узел выключен);
 10. **база GeoIP**: путь выкат спрашивает у выкатываемого хаба (`canterlot-hub geoip path --config /etc/canterlot/hub.toml` печатает действующий `[auth.geoip].path`, так что выкат и хаб смотрят в один файл); если файла на хабе нет или он старше `GEOIP_MAX_AGE_DAYS` (35) дней, `canterlot-hub geoip update` от имени `canterlot` через `run_write` (в репетиции печатается, dry-run только сообщает возраст); неудача — мягкая ошибка, места входа остаются пустыми;
 11. retention (`retain.sh --apply`) под своими `/proc`-guard'ами; цель и предыдущие релизы передаются `--keep`;
 12. чек-лист проверок со входом для владельца и шаблон раздела журнала выката.
@@ -944,7 +944,7 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
 - из `/etc/canterlot/hub.toml` убрать таблицу `[auth]` (вместе с `[auth.geoip]`) и ключ `session_check_interval` в `[http.ws]`: конфиг старого хаба `deny_unknown_fields`, с ними он не стартует;
 - если старый хаб пойдёт на этой же базе (без `rollback-db.sh`), отменить ждущие пуши входа: старый хаб не читает строку пуша без разговора, и весь его проход доставки падает, пока они не устареют.
   ```bash
-  ssh canterlot-hub "runuser -u canterlot -- psql -h /var/run/postgresql -d canterlot -c \"update owner_pushes set state='cancelled',updated_at=clock_timestamp() where state='pending' and kind in ('sign_in','sign_in_failures','sign_in_lock','session_country')\""
+  ssh hub "runuser -u canterlot -- psql -h /var/run/postgresql -d canterlot -c \"update owner_pushes set state='cancelled',updated_at=clock_timestamp() where state='pending' and kind in ('sign_in','sign_in_failures','sign_in_lock','session_country')\""
   ```
   После `rollback-db.sh` с дампом до релиза этого не нужно: таких строк там нет.
 - откат воркера ниже этого релиза: сначала убрать `[execution].delegate_mcp_servers` из `worker.toml` (тот же `deny_unknown_fields`).
@@ -972,42 +972,42 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
 5. **Боевой прогон** — в течение 2 часов после шага 3 или 4, без правок dist и toolkit между ними: скопировать строку `real run:` из конца лога и выполнить, добавив `2>&1 | tee .superpowers/deploy/cutover-$VER.log`. Если токен отвергнут (`expired` или `plan changed`) — повторить шаг 4. Конец: `cutover done: hub=SHA, worker=SHA, web=SHA, down N s, soft failures 0`.
 6. **Если `STOP-AND-REPORT`** — ничего не делать сверх напечатанного: вставить блок отчёта в журнал и позвать владельца. Если воркер уже проверен живым на новом релизе, он, хаб и PWA остаются работать: остановка воркера заглушила бы доклады, которые идут с этой же машины, поэтому руками его не гасить. Ручные команды восстановления в отчёте берут те же host lock; откат базы — только `rollback-db.sh`.
 7. **Журнал выката.** В `.superpowers/deploy/pilot-deploy-log.md` вставить шаблон раздела из конца лога cutover и заполнить: релиз и тег, токен (время выдачи, хэш плана) и пути трёх логов, строки `vzdump done`, `dump fully readable`, `hub on …`, `worker process … from release`, `worker state="live" … down time`, `chunk merge:`, `maintenance:`, `capabilities present`/`harness catalog has`, `precompressed …`, `verify PASS` (оба чтения), список `removed` из retention, все `SOFT-FAIL` как Deviations.
-8. **Приёмка прокси** — `EXPECTED_LOGIN=<логин владельца> scripts/check-proxy.sh https://hub.fenicu.com --positive` (§4.3): без сеанса JSON `401` хаба и вычищенные поддельные заголовки, затем вход по одноразовой ссылке во временный jar, адрес клиента в списке сеансов, выход. Владельцу придёт push о входе с этой машины; ссылка нигде не печатается.
+8. **Приёмка прокси** — `EXPECTED_LOGIN=<логин владельца> scripts/check-proxy.sh https://hub.example.com --positive` (§4.3): без сеанса JSON `401` хаба и вычищенные поддельные заголовки, затем вход по одноразовой ссылке во временный jar, адрес клиента в списке сеансов, выход. Владельцу придёт push о входе с этой машины; ссылка нигде не печатается.
 9. **Владельцу** — чек-лист `owner checklist: authenticated checks` из конца лога (вход в PWA паролем или ключом доступа и баннер обновления, `GET /api/v1/config`, живая сессия, новые функции релиза) в раздел «Left for the owner».
 
 ### 11.8. Первый релиз с собственным входом
 
-До этого релиза хаб брал владельца из `Remote-User` прокси, а перед `hub.fenicu.com` стоит временный `basic_auth` в Caddy (узел Authelia выключен). Порядок первого выката (ADR-0005, спека входа §12), строго по шагам:
+До этого релиза хаб брал владельца из `Remote-User` прокси, а перед `hub.example.com` стоит временный `basic_auth` в Caddy (узел Authelia выключен). Порядок первого выката (ADR-0005, спека входа §12), строго по шагам:
 
-1. **Обычный выкат по §11.7 с `basic_auth` на месте.** Пока он стоит, `https://hub.fenicu.com/` отвечает `401`, а новый хаб пишет новые виды WARN: `config_key_deprecated` (устаревшие `user_header` и `logout_url` в `hub.toml`), `client_ip_missing` (Caddy ещё не передаёт адрес клиента) и, если временный Caddy передаёт `Remote-User`, `identity_header_forwarded`. До dry-run на хосте хаба: в боевой `/etc/canterlot/hub.toml` добавить
+1. **Обычный выкат по §11.7 с `basic_auth` на месте.** Пока он стоит, `https://hub.example.com/` отвечает `401`, а новый хаб пишет новые виды WARN: `config_key_deprecated` (устаревшие `user_header` и `logout_url` в `hub.toml`), `client_ip_missing` (Caddy ещё не передаёт адрес клиента) и, если временный Caddy передаёт `Remote-User`, `identity_header_forwarded`. До dry-run на хосте хаба: в боевой `/etc/canterlot/hub.toml` добавить
    ```toml
    [auth.geoip]
    path = "/var/lib/canterlot/geoip/dbip-city-lite.mmdb"
    ```
    и создать каталог базы, принадлежащий служебному пользователю хаба: `install -d -o canterlot -g canterlot -m 0755 /var/lib/canterlot/geoip`. Без этой строки путь по умолчанию — `data/geoip/…` от каталога конфигурации, то есть `/etc/canterlot/data/geoip/`, куда `canterlot` писать не может (`geoip_dir_error`). Работающий старый хаб читает `hub.toml` только при старте, поэтому правка ему не мешает; но перезапускать старый хаб с ней нельзя (`[auth]` ему неизвестна, конфиг `deny_unknown_fields`), а при откате ниже этого релиза секция снимается (§11.4, правило отката на релиз без собственного входа). Гейт 3 preflight сверяет `hub.toml` с новыми структурами и секцию пропускает. Проверка: `runuser -u canterlot -- /opt/canterlot/releases/<sha>/bin/canterlot-hub geoip path --config /etc/canterlot/hub.toml` печатает `/var/lib/canterlot/geoip/dbip-city-lite.mmdb`. Затем для dry-run, репетиции и боевого прогона этого релиза в той же оболочке:
    ```bash
-   export SITE_CODES="meeting.fenicu.com:200 git.fenicu.com:200 caddy.fenicu.com:302 gotify.fenicu.com:200 immich.fenicu.com:200 bookshelf.fenicu.com:200 hub.fenicu.com:401"
+   export SITE_CODES="hub.example.com:401 git.example.com:200"
    export VERIFY_WARN_KINDS_OK="config_key_deprecated sign_in_global_lock client_ip_missing identity_header_forwarded"
    ```
    Переменные в план не входят, токен от них не меняется. Шаг geoip скачивает базу мест входа (файла ещё нет); его `SOFT-FAIL` выкат не останавливает, повтор — та же команда руками (`runuser -u canterlot -- /opt/canterlot/current/bin/canterlot-hub geoip update --config /etc/canterlot/hub.toml` на хабе). `check-proxy.sh` на этом шаге не запускается: `basic_auth` ещё отвечает вместо хаба.
 2. **Ссылка входа владельцу — только через Gotify.** На хосте хаба:
    ```bash
-   ssh canterlot-hub 'runuser -u canterlot -- /opt/canterlot/current/bin/canterlot-hub auth recovery-link --config /etc/canterlot/hub.toml --push'
+   ssh hub 'runuser -u canterlot -- /opt/canterlot/current/bin/canterlot-hub auth recovery-link --config /etc/canterlot/hub.toml --push'
    ```
    Ожидаемый вывод — `sent`; в доклад идёт только «ссылка отправлена в Gotify». Если команда отвечает ошибкой (`notify_not_configured`, недоступен Gotify и т. п.) — стоп: ссылку без `--push` выкат не выпускает. Оркестратору передаётся точная команда, которую владелец выполнит сам в своём ssh, и ссылка не появляется ни в одном транскрипте и журнале:
    ```bash
-   ssh canterlot-hub 'runuser -u canterlot -- /opt/canterlot/current/bin/canterlot-hub auth recovery-link --config /etc/canterlot/hub.toml'
+   ssh hub 'runuser -u canterlot -- /opt/canterlot/current/bin/canterlot-hub auth recovery-link --config /etc/canterlot/hub.toml'
    ```
 3. **Ждать подтверждения владельца**, что он вошёл по ссылке (PWA пока за `basic_auth`: сначала пароль Caddy, затем страница входа) и задал пароль или ключ доступа. Без подтверждения Caddy не трогать.
 4. **Caddy — одна просмотренная правка.** На хосте web сначала посмотреть глобальные опции Caddyfile (блок `{ … }` в начале файла и импортируемые из него файлы): есть ли `servers { trusted_proxies … }`. Если есть, это не мешает правке ниже (она берёт `{remote_host}`, а не `{client_ip}`), но в доклад идёт строка с найденным значением; `{client_ip}` в этой правке не использовать ни в каком случае (§4.2). Затем копия Caddyfile рядом с меткой времени (`cp -p Caddyfile Caddyfile.bak-<YYYYMMDDTHHMMSSZ>`), затем один diff, который показывается целиком до применения:
-   - убрать блок `basic_auth` сайта `hub.fenicu.com` (и копирование `Remote-User` в запрос к хабу, если оно есть);
+   - убрать блок `basic_auth` сайта `hub.example.com` (и копирование `Remote-User` в запрос к хабу, если оно есть);
    - оставить чистку `request_header -Remote-*` и `request_header -X-Forwarded-*`, оставить или добавить `request_header -X-Canterlot-Proxy` и `request_header -X-Canterlot-Client-Ip`;
    - рядом с существующим `header_up X-Canterlot-Proxy {file.…}` добавить `header_up X-Canterlot-Client-Ip {remote_host}` (§4.2).
 
    Затем `docker exec caddy caddy validate --config <Caddyfile в контейнере> --adapter caddyfile` и только при успехе `docker exec caddy caddy reload --config <Caddyfile в контейнере> --adapter caddyfile`. Ошибка проверки — вернуть копию, Caddy не перезагружать.
 5. **Приёмка.** Сначала без сеанса, затем с входом (владельцу придёт push о входе):
    ```bash
-   EXPECTED_LOGIN=<логин владельца> scripts/check-proxy.sh https://hub.fenicu.com
-   EXPECTED_LOGIN=<логин владельца> scripts/check-proxy.sh https://hub.fenicu.com --positive
+   EXPECTED_LOGIN=<логин владельца> scripts/check-proxy.sh https://hub.example.com
+   EXPECTED_LOGIN=<логин владельца> scripts/check-proxy.sh https://hub.example.com --positive
    ```
-   Провал любой проверки — вернуть копию Caddyfile (reload) и доложить; хаб при этом не откатывается. После приёмки `SITE_CODES` и `VERIFY_WARN_KINDS_OK` из оболочки убираются (умолчания уже ждут `hub.fenicu.com:200`), а `user_header` и `logout_url` стоит убрать из `hub.toml`, чтобы `config_key_deprecated` не повторялся при каждом рестарте.
+   Провал любой проверки — вернуть копию Caddyfile (reload) и доложить; хаб при этом не откатывается. После приёмки `SITE_CODES` и `VERIFY_WARN_KINDS_OK` из оболочки убираются (умолчания уже ждут `hub.example.com:200`), а `user_header` и `logout_url` стоит убрать из `hub.toml`, чтобы `config_key_deprecated` не повторялся при каждом рестарте.
