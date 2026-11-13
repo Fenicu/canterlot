@@ -299,7 +299,9 @@ impl Relay {
                     }
                 }
             }
-            if let Some(text) = self.pending_text.take() {
+            if !matches!(end, Some(End::ClientGone))
+                && let Some(text) = self.pending_text.take()
+            {
                 self.seq += 1;
                 let frame = json!({
                     "type": "text",
