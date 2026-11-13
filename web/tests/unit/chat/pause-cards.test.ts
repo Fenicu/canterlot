@@ -718,6 +718,17 @@ describe("chat/pauseCards", () => {
     ]);
   });
 
+  it("a_steered_message_in_transmitting_alone_has_no_pause_card", () => {
+    // Медленное доказательство вливания — передача, а не пауза: карточку
+    // создаёт только причина паузы хаба.
+    const input = { ...inputView("00000000-0000-4000-8000-000000000001", "Влито"), state: "transmitting" as const };
+    const cards = pauseHoldCards(
+      { pause_reasons: [], hold_reasons: [], queued: 0 },
+      { ...OPENCODE, liveExecution: true, inputs: [input] },
+    );
+    expect(cards).toEqual([]);
+  });
+
   it("one_unconfirmed_delivery_shows_the_input_text", () => {
     const inputId = "00000000-0000-4000-8000-000000000001";
     const cards = unconfirmedCards(

@@ -1371,6 +1371,47 @@ async fn steer_into_active_turn_is_proven_by_client_id_echo() {
     fake.close().await;
 }
 
+/// Сервер подтвердил `turn/steer` тем же ходом, а элемент `userMessage`
+/// приходит позже: это передача, а не неподтверждённый приём.
+#[tokio::test]
+async fn slow_steer_proof_is_transmitting_until_the_message_arrives() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(w_out(
+        json!({"id": 10, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}}),
+    ));
+    lines.push(turn_started("thread-mini", "turn-1"));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(w_in(11, "turn/steer", json!({})));
+    lines.push(w_out(json!({"id": 11, "result": {"turnId": "turn-1"}})));
+    lines.push(w("sleep", json!(800)));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    let mut fake = Fake::with_deadline(lines, Duration::from_millis(300));
+    fake.start().await;
+    let first = fake.start_turn("first").await;
+    let steered = fake.tx("send now");
+    let steer_id = steered.command_id;
+    let outcome = tokio::time::timeout(WAIT, fake.adapter.steer(&steered))
+        .await
+        .expect("steer stays within its limit");
+    assert!(
+        matches!(outcome, SteerOutcome::Transmitting),
+        "slow proof is a transmission: {outcome:?}"
+    );
+    let mut accepted = false;
+    for _ in 0..40 {
+        if let AdapterEvent::InputAccepted { command_id } = fake.event().await
+            && command_id == steer_id
+        {
+            accepted = true;
+            break;
+        }
+    }
+    assert!(accepted, "the late userMessage proves the steer");
+    fake.finish(first).await;
+}
+
 #[tokio::test]
 async fn steer_with_stale_turn_id_stays_queued() {
     // Гонка конца хода: сервер отверг `expectedTurnId` (`-32600`) — ввод

@@ -68,8 +68,8 @@ pub struct ClaudeCodeAdapter {
     tool_finals: HashMap<Uuid, AdapterEvent>,
     requests: HashMap<String, (String, Value)>,
     limits_calls: HashMap<Uuid, String>,
-    /// Вводы, о которых `transmit` вернул `Undetermined`: их позднее
-    /// доказательство уходит событием `InputAccepted`.
+    /// Вводы, о которых `transmit` вернул `Undetermined` или `steer` вернул
+    /// `Transmitting`: их позднее доказательство уходит событием `InputAccepted`.
     unconfirmed: HashSet<Uuid>,
     initialized: bool,
     /// Текущий процесс CLI уже прислал `system/init`; каждый запуск начинает с `false`.
@@ -1629,8 +1629,11 @@ impl Adapter for ClaudeCodeAdapter {
                 return SteerOutcome::Undetermined;
             }
             if timeout_at(until, self.pump()).await.is_err() {
+                // Кадр записан, процесс жив: доказательство придёт на границе
+                // шага идущего хода. Это передача, а не неподтверждённый приём;
+                // без доказательства после конца хода ввод станет неподтверждённым.
                 self.unconfirmed.insert(input.command_id);
-                return SteerOutcome::Undetermined;
+                return SteerOutcome::Transmitting;
             }
         }
     }

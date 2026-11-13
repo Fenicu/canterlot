@@ -2689,6 +2689,55 @@ fn stalled_turn(transmit: Duration) -> (Fake, Uuid) {
     (f, id)
 }
 
+/// CLI принял кадр вливания, но повторяет его только на следующей границе
+/// хода: медленное доказательство — это передача, а не неподтверждённый приём.
+#[tokio::test]
+async fn steer_with_a_slow_replay_is_transmitting_until_the_proof() {
+    use canterlot_worker::adapter::SteerOutcome;
+    let mut f = Fake::with_timers(
+        vec![
+            vec![
+                json!({"type":"stream_event","user_message_uuids":["@input"],"event":{"type":"message_start","message":{"id":"m1","model":"claude-haiku-test","usage":{}}}}),
+                json!("@sleep:900"),
+                json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"],"modelUsage":{}}),
+            ],
+            vec![
+                json!({"type":"command_lifecycle","command_uuid":"@input","session_id":"s","state":"started","uuid":Uuid::now_v7().to_string()}),
+                json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"],"modelUsage":{}}),
+            ],
+        ],
+        Duration::from_millis(300),
+        WAIT,
+    );
+    f.start().await;
+    let first = Uuid::now_v7();
+    f.send(&tx(first)).await;
+    let steered = Uuid::now_v7();
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(WAIT, f.adapter.steer(&tx(steered)))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, SteerOutcome::Transmitting),
+        "slow proof is a transmission: {outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "steer is bounded by the transmit deadline, not the CLI replay"
+    );
+    let mut accepted = false;
+    for _ in 0..40 {
+        if let AdapterEvent::InputAccepted { command_id } = f.event().await
+            && command_id == steered
+        {
+            accepted = true;
+            break;
+        }
+    }
+    assert!(accepted, "the late replay proves the steer");
+    f.close().await;
+}
+
 #[tokio::test]
 async fn interrupt_after_a_torn_steer_falls_back_to_sigint() {
     let _sigint =

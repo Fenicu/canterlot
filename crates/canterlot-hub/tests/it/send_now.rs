@@ -382,6 +382,141 @@ async fn steer_accepted_belongs_to_running_turn(pool: PgPool) -> TestResult {
     Ok(())
 }
 
+/// Медленное доказательство вливания — обычная передача: ввод в `transmitting`,
+/// паузы нет, слот чужого хода цел. Срок команды передающееся вливание не гасит.
+#[sqlx::test(migrations = "./migrations")]
+async fn steer_transmission_started_is_transmitting_without_pause(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    harness(&pool, &seed, "claude_code").await;
+    running(&pool, &seed).await;
+    let (first_id, first_cmd) = input(&pool, &seed, "first").await;
+    let (second_id, second_cmd) = input(&pool, &seed, "second").await;
+    gate_dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first_cmd).await;
+
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second_id, "k", &caps()).await?
+    else {
+        panic!("not requested");
+    };
+    assert!(matches!(
+        apply_steer(&pool, steer_command_id, InputReceipt::TransmissionStarted).await,
+        ApplyOutcome::Applied {
+            input_state: InputState::Transmitting
+        }
+    ));
+    assert_eq!(state(&pool, second_id).await, InputState::Transmitting);
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
+    let pauses: Value =
+        sqlx::query_scalar("select pause_reasons from queue_state where conversation_id = $1")
+            .bind(seed.conversation_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(pauses, json!([]), "transmission is not a pause");
+    let (_, delivery, _) = steer_row(&pool, second_cmd).await;
+    assert_eq!(delivery, "stored_on_machine");
+    // Передающееся вливание не гасится сроком команды: доказательство ждёт хода.
+    sqlx::query("update commands set created_at = now() - interval '1 hour' where id = $1")
+        .bind(steer_command_id)
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        expire_steers(&pool, std::time::Duration::from_secs(600)).await?,
+        0
+    );
+    assert_eq!(state(&pool, second_id).await, InputState::Transmitting);
+    // Доказательство: принято, ход и пауза не тронуты.
+    assert!(matches!(
+        apply_steer(&pool, steer_command_id, InputReceipt::Accepted).await,
+        ApplyOutcome::Applied {
+            input_state: InputState::Accepted
+        }
+    ));
+    assert_eq!(state(&pool, second_id).await, InputState::Accepted);
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
+    let (_, delivery, _) = steer_row(&pool, second_cmd).await;
+    assert_eq!(delivery, "completed");
+    Ok(())
+}
+
+/// Передающееся вливание без доказательства всё-таки становится паузой;
+/// позднее доказательство её снимает.
+#[sqlx::test(migrations = "./migrations")]
+async fn transmitting_steer_without_proof_pauses_and_late_proof_clears_it(
+    pool: PgPool,
+) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    harness(&pool, &seed, "claude_code").await;
+    running(&pool, &seed).await;
+    let (first_id, first_cmd) = input(&pool, &seed, "first").await;
+    let (second_id, _) = input(&pool, &seed, "second").await;
+    gate_dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first_cmd).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second_id, "k", &caps()).await?
+    else {
+        panic!("not requested");
+    };
+    apply_steer(&pool, steer_command_id, InputReceipt::TransmissionStarted).await;
+    assert!(matches!(
+        apply_steer(
+            &pool,
+            steer_command_id,
+            InputReceipt::AcceptanceUndetermined
+        )
+        .await,
+        ApplyOutcome::Applied {
+            input_state: InputState::AcceptanceUnconfirmed
+        }
+    ));
+    assert_eq!(
+        state(&pool, second_id).await,
+        InputState::AcceptanceUnconfirmed
+    );
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
+    let pauses: Value =
+        sqlx::query_scalar("select pause_reasons from queue_state where conversation_id = $1")
+            .bind(seed.conversation_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        pauses
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| {
+                reason["reason"] == "unconfirmed_delivery" && reason["input_id"] == json!(second_id)
+            })),
+        "the owner sees the pause: {pauses}"
+    );
+    // Позднее доказательство после эскалации принимается и снимает паузу.
+    assert!(matches!(
+        apply_steer(&pool, steer_command_id, InputReceipt::Accepted).await,
+        ApplyOutcome::Applied {
+            input_state: InputState::Accepted
+        }
+    ));
+    assert_eq!(state(&pool, second_id).await, InputState::Accepted);
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
+    let pauses: Value =
+        sqlx::query_scalar("select pause_reasons from queue_state where conversation_id = $1")
+            .bind(seed.conversation_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(pauses, json!([]));
+    Ok(())
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn turn_end_between_click_and_delivery_becomes_next_turn(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;

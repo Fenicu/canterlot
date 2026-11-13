@@ -30,7 +30,7 @@ describe("timeline/UserBubble optimistic", () => {
     retryNow.mockClear();
   });
 
-  function render(state: "saving" | "queued" | "on_machine") {
+  function render(state: "saving" | "queued" | "on_machine" | "transmitting") {
     const input = freshInput("k1", "привет", 1);
     input.state = state;
     input.optimistic = true;
@@ -51,6 +51,15 @@ describe("timeline/UserBubble optimistic", () => {
 
   it("a_queued_bubble_says_so_in_words", () => {
     expect(render("queued").textContent).toContain("В очереди");
+  });
+
+  it("a_steered_message_being_sent_is_neutral_and_offers_no_retry", () => {
+    // Вливание с медленным доказательством: обычная передача, не тревога.
+    const target = render("transmitting");
+    expect(target.querySelector('[data-state="transmitting"]')).not.toBeNull();
+    expect(target.textContent).toContain("Передаётся");
+    expect(target.textContent).not.toContain("Приём не подтверждён");
+    expect(target.textContent).not.toContain("Отправить повторно как новое");
   });
 
   it("a_send_the_hub_has_not_confirmed_offers_a_retry_inside_the_bubble", () => {
