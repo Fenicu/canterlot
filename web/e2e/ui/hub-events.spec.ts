@@ -54,6 +54,32 @@ async function boot(page: Page) {
             { sha: '9a0b1c2', title: 'Add tests' }
           ],
           changed_files: 3,
+          tests: [
+            {
+              tool: 'nextest',
+              passed: 3944,
+              failed: 2,
+              flaky: 2,
+              skipped: 54,
+              did_not_run: 0,
+              timed_out: 0,
+              duration_ms: 195_532,
+              ran_at: '2026-11-13T10:00:00.000Z',
+              stale_before: '14e6bd27'
+            },
+            {
+              tool: 'playwright',
+              passed: 32,
+              failed: 0,
+              flaky: 0,
+              skipped: 0,
+              did_not_run: 0,
+              timed_out: 0,
+              duration_ms: 38_000,
+              ran_at: '2026-11-13T10:05:00.000Z',
+              stale_before: null
+            }
+          ],
           answer,
           answer_bytes: answer.length,
           answer_block_id: api.id()
@@ -278,6 +304,31 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
   const labels = await card.locator('.facts dt').evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().right)));
   expect(Math.max(...labels)).toBeLessThan(values[0]!);
   await expect(card.getByText('Итог')).toHaveCount(0);
+  const tests = card.locator('[data-role="turn-tests"]');
+  await expect(tests.getByText('Тесты:', { exact: true })).toBeVisible();
+  const nextest = tests.locator('[data-tool="nextest"]');
+  await expect(nextest).toContainText(
+    '3944 прошли, 2 упали, 2 нестабильных, 54 пропущены, 3 мин 15 с'
+  );
+  await expect(nextest).toContainText('до коммита 14e6bd27 (устарел)');
+  const playwright = tests.locator('[data-tool="Playwright"]');
+  await expect(playwright).toContainText('32 прошли, 38 с');
+  await expect(playwright).toContainText('после последнего коммита');
+  const colour = (locator: typeof nextest) =>
+    locator.evaluate((node) => getComputedStyle(node).color);
+  const token = (name: string) =>
+    page.evaluate((name) => {
+      const probe = document.createElement('div');
+      probe.style.color = `var(${name})`;
+      document.body.append(probe);
+      const value = getComputedStyle(probe).color;
+      probe.remove();
+      return value;
+    }, name);
+  expect(await colour(nextest.locator('.test-main'))).toBe(await token('--danger'));
+  expect(await colour(nextest.locator('.test-marker'))).toBe(await token('--warning'));
+  expect(await colour(playwright.locator('.test-main'))).toBe(await token('--muted'));
+  expect(await colour(playwright.locator('.test-marker'))).toBe(await token('--muted'));
   const footer = card.locator('[data-role="event-footer"]');
   await expect(footer).toBeVisible();
   const titleBox = await card.locator('.title').boundingBox();
@@ -286,7 +337,7 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
   await page.screenshot({ path: `test-results/event-footer-${test.info().project.name}.png` });
   await card.getByRole('button', { name: 'Показать ответ' }).click();
   await expect(card.getByText('Итог')).toBeVisible();
-  await expect(card.getByText('прошли', { exact: false })).toBeVisible();
+  await expect(card.locator('.answer').getByText('прошли', { exact: false })).toBeVisible();
   await expect(card.getByRole('button', { name: 'Скрыть ответ' })).toBeVisible();
   await noOverflow(page);
 

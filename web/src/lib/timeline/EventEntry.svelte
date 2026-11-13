@@ -15,7 +15,8 @@
     eventTitle,
     isLongText,
     isSessionEvent,
-    sessionStatus
+    sessionStatus,
+    testLines
   } from '#lib/timeline/hubEvent.js';
   import { alarmView, contextView, limitView, machineView } from '#lib/timeline/system.js';
   import { nudgeEntryLine, nudgeExhaustedLine } from '#lib/timeline/nudge.js';
@@ -52,6 +53,7 @@
   );
   const exhausted = $derived(event ? nudgeExhaustedLine(event) : null);
   const facts = $derived(event ? eventFacts(event) : []);
+  const tests = $derived(event ? testLines(event) : []);
   const answer = $derived(event?.answer ?? '');
   const long = $derived(isLongText(input.text));
 </script>
@@ -80,6 +82,22 @@
           <div><dt>{fact.label}</dt><dd>{fact.value}</dd></div>
         {/each}
       </dl>
+    {/if}
+    {#if tests.length > 0}
+      <section class="tests" data-role="turn-tests">
+        <p class="tests-title">Тесты:</p>
+        <dl class="tests-list">
+          {#each tests as test (test.tool)}
+            <div class="test-row" data-tool={test.tool}>
+              <dt>{test.tool}</dt>
+              <dd>
+                <span class="test-main" data-tone={test.failed ? 'danger' : 'muted'}>{test.main}</span>
+                {#if test.marker}<span class="test-marker" data-tone={test.stale ? 'warning' : 'muted'}> · {test.marker}</span>{/if}
+              </dd>
+            </div>
+          {/each}
+        </dl>
+      </section>
     {/if}
     {#if exhausted}
       <p class="line nudge-exhausted" data-role="nudge-exhausted">{exhausted}</p>
@@ -189,6 +207,26 @@
     overflow-wrap: anywhere;
     white-space: pre-wrap;
   }
+  .tests { display: flex; flex-direction: column; gap: var(--s2); }
+  .tests-title { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
+  .tests-list {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    align-items: baseline;
+    gap: var(--s2) var(--s6);
+    margin: 0;
+  }
+  .test-row { display: contents; }
+  .test-row dt { color: var(--muted); font-size: var(--fs-sm); }
+  .test-row dd {
+    margin: 0;
+    color: var(--muted);
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
+  .test-main[data-tone='danger'] { color: var(--danger); }
+  .test-marker[data-tone='warning'] { color: var(--warning); }
   .answer-toggle {
     align-self: flex-start;
     margin-top: var(--s4);

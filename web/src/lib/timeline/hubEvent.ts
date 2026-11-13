@@ -5,6 +5,14 @@ import type { InputOrigin } from '#lib/stores/inputs.js';
 
 export type HubEvent = NonNullable<InputOrigin['event']>;
 export type HubFact = { label: string; value: string };
+/** Строка раздела «Тесты»: counters with duration and the commit marker separately. */
+export type TurnTestLine = {
+  tool: string;
+  main: string;
+  marker: string | null;
+  failed: boolean;
+  stale: boolean;
+};
 
 /** Поля сработавшего будильника: хаб кладёт их в origin рядом с общими полями события. */
 type AlarmFacts = {
@@ -121,6 +129,53 @@ export function eventFacts(event: HubEvent): HubFact[] {
 
 function quoted(title: string): string {
   return title ? `«${title}»` : 'Сессия';
+}
+
+const TEST_TOOLS: Record<string, string> = {
+  nextest: 'nextest',
+  playwright: 'Playwright',
+  vitest: 'vitest'
+};
+
+const TEST_WORDS = {
+  passed: ['прошёл', 'прошли', 'прошли'],
+  failed: ['упал', 'упали', 'упали'],
+  flaky: ['нестабильный', 'нестабильных', 'нестабильных'],
+  skipped: ['пропущен', 'пропущены', 'пропущены'],
+  did_not_run: ['не запустился', 'не запустились', 'не запустились'],
+  timed_out: ['истёк по таймауту', 'истекли по таймауту', 'истекли по таймауту']
+} as const;
+
+function counter(count: number, forms: readonly [string, string, string]): string {
+  return `${count} ${fmt.plural(count, forms as [string, string, string])}`;
+}
+
+/** Раздел «Тесты» итога: последний прогон каждого инструмента и отметка о коммите. */
+export function testLines(event: HubEvent): TurnTestLine[] {
+  if (!event.tests?.length) return [];
+  const hadCommits = (event.commits?.length ?? 0) > 0;
+  return event.tests.map((test) => {
+    const parts = [counter(test.passed, TEST_WORDS.passed)];
+    if (test.failed > 0) parts.push(counter(test.failed, TEST_WORDS.failed));
+    if (test.flaky > 0) parts.push(counter(test.flaky, TEST_WORDS.flaky));
+    if (test.skipped > 0) parts.push(counter(test.skipped, TEST_WORDS.skipped));
+    if (test.did_not_run > 0) parts.push(counter(test.did_not_run, TEST_WORDS.did_not_run));
+    if (test.timed_out > 0) parts.push(counter(test.timed_out, TEST_WORDS.timed_out));
+    if (test.duration_ms != null) parts.push(fmt.duration(test.duration_ms));
+    const stale = test.stale_before != null;
+    const marker = stale
+      ? `до коммита ${test.stale_before} (устарел)`
+      : hadCommits
+        ? 'после последнего коммита'
+        : null;
+    return {
+      tool: TEST_TOOLS[test.tool] ?? test.tool,
+      main: parts.join(', '),
+      marker,
+      failed: test.failed > 0,
+      stale
+    };
+  });
 }
 
 function branchClause(branch: string | null | undefined, kept: boolean): string {

@@ -11,7 +11,8 @@ import {
   eventTitle,
   isLongText,
   isSessionEvent,
-  sessionStatus
+  sessionStatus,
+  testLines
 } from '#lib/timeline/hubEvent.js';
 import type { InputOrigin } from '#lib/stores/inputs.js';
 
@@ -282,4 +283,107 @@ test('spawn_queue_lines_are_quiet_and_name_the_outcome', () => {
   expect(eventLine({ kind: 'spawn_queue', state: 'cancelled' }, '')).toBe('Запуск из очереди отменён, сессия не создана');
   expect(eventLine({ kind: 'spawn_queue', state: 'expired' }, '')).toBe('Срок ожидания запуска вышел, сессия не создана');
   expect(eventLine({ kind: 'spawn_queue', state: 'queued' }, '')).toBeNull();
+});
+
+const TURN_TESTS = [
+  {
+    tool: 'nextest',
+    passed: 3944,
+    failed: 2,
+    flaky: 2,
+    skipped: 54,
+    did_not_run: 0,
+    timed_out: 0,
+    duration_ms: 195_532,
+    ran_at: '2026-11-13T10:00:00.000Z',
+    stale_before: '14e6bd27'
+  },
+  {
+    tool: 'playwright',
+    passed: 32,
+    failed: 0,
+    flaky: 0,
+    skipped: 0,
+    did_not_run: 0,
+    timed_out: 0,
+    duration_ms: 38_000,
+    ran_at: '2026-11-13T10:05:00.000Z',
+    stale_before: null
+  }
+];
+
+test('test_lines_name_tools_counters_durations_and_the_commit_marker', () => {
+  expect(
+    testLines({
+      kind: 'session_result',
+      commits: [{ sha: 'bbbbbbbb', title: 'Add tests' }],
+      tests: TURN_TESTS
+    })
+  ).toEqual([
+    {
+      tool: 'nextest',
+      main: '3944 прошли, 2 упали, 2 нестабильных, 54 пропущены, 3 мин 15 с',
+      marker: 'до коммита 14e6bd27 (устарел)',
+      failed: true,
+      stale: true
+    },
+    {
+      tool: 'Playwright',
+      main: '32 прошли, 38 с',
+      marker: 'после последнего коммита',
+      failed: false,
+      stale: false
+    }
+  ]);
+});
+
+test('test_lines_omit_zero_counters_but_keep_passed', () => {
+  const line = testLines({
+    kind: 'session_result',
+    tests: [
+      {
+        tool: 'vitest',
+        passed: 0,
+        failed: 0,
+        flaky: 0,
+        skipped: 0,
+        did_not_run: 0,
+        timed_out: 0,
+        duration_ms: null,
+        ran_at: '2026-11-13T10:00:00.000Z',
+        stale_before: null
+      }
+    ]
+  })[0]!;
+  expect(line.main).toBe('0 прошли');
+  expect(line.marker).toBeNull();
+});
+
+test('test_lines_speak_russian_plurals_and_extra_counters', () => {
+  const line = testLines({
+    kind: 'session_result',
+    commits: [],
+    tests: [
+      {
+        tool: 'playwright',
+        passed: 1,
+        failed: 1,
+        flaky: 2,
+        skipped: 21,
+        did_not_run: 2,
+        timed_out: 1,
+        duration_ms: 1_000,
+        ran_at: '2026-11-13T10:00:00.000Z',
+        stale_before: null
+      }
+    ]
+  })[0]!;
+  expect(line.main).toBe(
+    '1 прошёл, 1 упал, 2 нестабильных, 21 пропущен, 2 не запустились, 1 истёк по таймауту, 1 с'
+  );
+  expect(line.marker).toBeNull();
+});
+
+test('a_turn_without_tests_has_no_test_lines', () => {
+  expect(testLines({ kind: 'session_result' })).toEqual([]);
 });
