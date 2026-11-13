@@ -40,6 +40,9 @@ mod media;
 mod revocation;
 
 pub const PROTOCOL_VERSION: u32 = canterlot_proto::limits::PROTOCOL_VERSION;
+/// Одновременных вызовов инструментов агента на машину: ожидание держит слот,
+/// поэтому без предела один воркер может занять пул базы сотнями `sessions.wait`.
+pub const AGENT_CALLS_PER_MACHINE: usize = 8;
 pub const KNOWN_CAPABILITIES: &[&str] = &[];
 pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_EXEC_V1,
@@ -127,6 +130,7 @@ pub struct HubGrpc {
     pub media_quota_bytes: u64,
     fetch_slots: attachments::FetchSlots,
     media_slots: media::UploadSlots,
+    agent_slots: agent::AgentSlots,
     #[cfg(feature = "fault-injection")]
     pub faults: crate::fault_injection::Faults,
     shutdown: CancellationToken,
@@ -359,6 +363,7 @@ impl HubGrpc {
                 .max_media_bytes_per_machine,
             fetch_slots: Default::default(),
             media_slots: Default::default(),
+            agent_slots: Default::default(),
             #[cfg(feature = "fault-injection")]
             faults: Default::default(),
             shutdown: CancellationToken::new(),

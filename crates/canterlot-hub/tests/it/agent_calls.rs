@@ -3,19 +3,24 @@
 //! Агент действует только на свою сессию: разговор и владелец выводятся
 //! из живого исполнения и поколения на вызвавшей машине, а не из аргументов.
 
+use std::time::Duration;
+
 use canterlot_hub::{
+    activity::{self, Thresholds},
     config::HubTimers,
     conversations,
+    delivery::ContentBlock,
     executions::{self, StartedExecution},
-    grpc::HubGrpc,
+    grpc::{AGENT_CALLS_PER_MACHINE, HubGrpc},
     installation, machines, presets,
     session::Registry,
     testkit,
 };
 use canterlot_proto::worker::v1::{AgentCallRequest, worker_data_server::WorkerData};
+use chrono::Utc;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tonic::Request;
+use tonic::{Code, Request};
 use uuid::Uuid;
 
 struct Fx {
@@ -891,4 +896,73 @@ async fn agent_preset_paths_never_see_nudge_text_presets(pool: PgPool) {
         .agent("presets.apply", json!({"id": nudge_id}), &Uuid::now_v7())
         .await;
     assert_eq!(applied.error_code, "profile_unknown");
+}
+
+fn thresholds() -> Thresholds {
+    Thresholds {
+        stalled_generating: Duration::from_secs(300),
+        stalled_tool: Duration::from_secs(1800),
+        idle_quiet: Duration::from_secs(5),
+        idle_background_max: Duration::from_secs(15 * 60),
+    }
+}
+
+/// Одновременные вызовы агента ограничены на машину: пока слоты заняты ожиданием,
+/// следующий вызов получает явный отказ `agent_call_limit`, а освобождение слота
+/// снова пропускает вызов.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn agent_call_is_capped_per_machine(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let target = testkit::seed_conversation(&fx.pool, fx.owner, fx.machine).await;
+    conversations::submit_message(
+        &fx.pool,
+        conversations::SubmitMessage {
+            owner_id: fx.owner,
+            conversation_id: target,
+            key: Uuid::now_v7().to_string(),
+            content: vec![ContentBlock::Text {
+                text: "работа".into(),
+            }],
+            attachment_ids: vec![],
+            retry_of: None,
+            received_at: Utc::now(),
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    activity::refresh(&fx.pool, target, Utc::now(), &thresholds(), Uuid::now_v7())
+        .await
+        .unwrap();
+
+    let holds: Vec<_> = (0..AGENT_CALLS_PER_MACHINE)
+        .map(|_| {
+            let grpc = fx.grpc.clone();
+            let request = fx.request(
+                "sessions.wait",
+                json!({"session_id": target, "timeout_seconds": 300}),
+                &Uuid::now_v7(),
+                None,
+                None,
+            );
+            tokio::spawn(async move { WorkerData::agent_call(&grpc, request).await })
+        })
+        .collect();
+    // Все вызовы успевают авторизоваться и занять слот до проверки отказа.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let refused = WorkerData::agent_call(
+        &fx.grpc,
+        fx.request("presets.list", json!({}), &Uuid::now_v7(), None, None),
+    )
+    .await
+    .expect_err("сверх предела машины — отказ");
+    assert_eq!(refused.code(), Code::ResourceExhausted);
+    assert_eq!(refused.message(), "agent_call_limit");
+
+    for hold in holds {
+        hold.abort();
+        let _ = hold.await;
+    }
+    fx.agent("presets.list", json!({}), &Uuid::now_v7()).await;
 }

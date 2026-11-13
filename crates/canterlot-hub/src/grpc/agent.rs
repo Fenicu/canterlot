@@ -5,13 +5,43 @@
 //! Текст пресетов — данные уровня сообщения: в журнал попадают только
 //! идентификатор вызова, инструмент, исполнение и код итога.
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak},
+};
+
 use canterlot_proto::{limits::MAX_AGENT_CALL_BYTES, worker::v1::*};
 use serde::Deserialize;
 use sqlx::Row;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use super::{HubGrpc, auth};
+use super::{AGENT_CALLS_PER_MACHINE, HubGrpc, auth};
+
+/// Слоты одновременных вызовов агента на машину: ожидание инструмента держит слот
+/// до ответа, поэтому без предела один воркер занимает пул базы сотнями опросов.
+#[derive(Clone, Default)]
+pub(super) struct AgentSlots(Arc<Mutex<HashMap<Uuid, Weak<Semaphore>>>>);
+
+impl AgentSlots {
+    #[allow(clippy::result_large_err)]
+    fn acquire(&self, machine: Uuid) -> Result<OwnedSemaphorePermit, Status> {
+        let mut slots = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        slots.retain(|_, slot| slot.strong_count() > 0);
+        let semaphore = slots
+            .get(&machine)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let semaphore = Arc::new(Semaphore::new(AGENT_CALLS_PER_MACHINE));
+                slots.insert(machine, Arc::downgrade(&semaphore));
+                semaphore
+            });
+        semaphore
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("agent_call_limit"))
+    }
+}
 
 /// Аргументы `presets.list`: без `id` — сводки, с `id` — пресет с текстом.
 #[derive(Deserialize)]
@@ -93,6 +123,7 @@ pub async fn agent_call(
         .get::<auth::AuthenticatedMachine>()
         .expect("authenticated machine")
         .machine_id;
+    let _permit = grpc.agent_slots.acquire(machine_id)?;
     let body = request.into_inner();
     let outcome = handle(grpc, machine_id, &body).await?;
     Ok(Response::new(outcome))
