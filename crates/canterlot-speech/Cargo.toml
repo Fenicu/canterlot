@@ -1,0 +1,31 @@
+[package]
+name = "canterlot-speech"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[features]
+# Сборка выпуска: CUDA 12.x, sm_70 (см. scripts/release-build/in-container.sh).
+cuda = ["transcribe-cpp/cuda"]
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+hound = "3.5.1"
+humantime-serde = "1.1.1"
+log = "0.4"
+rustix = { version = "1.1.5", features = ["process"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "process", "net", "io-util", "io-std", "fs"] }
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter"] }
+transcribe-cpp = { version = "=0.4.2", default-features = false }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["test-util"] }
