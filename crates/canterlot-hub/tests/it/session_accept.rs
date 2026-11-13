@@ -20,7 +20,7 @@ use canterlot_hub::{
     testkit::{self, FakeSession, TestClient, TestResponse},
 };
 use canterlot_proto::worker::v1::{
-    JournalRecord, JournalRecords, RecordBody, WorktreeRemoved, record_body::Body,
+    CommandRejected, JournalRecord, JournalRecords, RecordBody, WorktreeRemoved, record_body::Body,
 };
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -529,6 +529,48 @@ async fn accept_stops_then_removes_then_archives(pool: PgPool) {
     assert_eq!(origin["event"]["branch_kept"], true);
     assert_eq!(fx.open_subscriptions().await, 0);
     assert_eq!(fx.live_executions().await, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_session_that_died_before_its_worktree_was_created_is_accepted(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    // Воркер отверг запуск: исходный каталог не репозиторий git, на диске ничего нет.
+    let start: Uuid = sqlx::query_scalar(
+        "select id from commands where conversation_id=$1 and kind='start_execution'",
+    )
+    .bind(fx.child)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    Ingest::new(fx.pool.clone())
+        .apply_batch(
+            fx.machine,
+            sha2::Sha256::digest(fx.machine.as_bytes()).as_slice(),
+            JournalKind::Cj,
+            &JournalRecords {
+                journal_id: fx.journal.to_string(),
+                records: vec![JournalRecord {
+                    seq: 1,
+                    body: Some(RecordBody {
+                        body: Some(Body::CommandRejected(CommandRejected {
+                            command_id: start.to_string(),
+                            dispatch_attempt: 0,
+                            reason: "worktree_not_git".into(),
+                        })),
+                    }),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+    let worktree = fx.worktree().await;
+    assert_eq!(worktree["state"], "removed", "{worktree}");
+    let answer = fx.accept(false).await;
+    assert_eq!(answer["status"], "done", "{answer}");
+    assert!(fx.archived().await);
+    assert_eq!(fx.pending_cleanups().await, 0);
+    assert!(fx.commands("remove_worktree").await.is_empty());
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

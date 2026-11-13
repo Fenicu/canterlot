@@ -1725,8 +1725,46 @@ async fn reject_start(
             correlation_id,
         )
         .await?;
+        // Копия не создавалась: принимать её как готовую и слать уборку нечего.
+        if reason == "worktree_not_git" {
+            mark_worktree_never_created(conn, execution_id, correlation_id).await?;
+        }
     }
     complete_rejected(conn, command_id, dispatch_attempt, reason).await
+}
+
+/// Исходный каталог не git: рабочая копия не появилась, но приём должен её пропустить.
+async fn mark_worktree_never_created(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), IngestError> {
+    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "select c.id,c.owner_id from executions e join conversations c on c.id=e.conversation_id
+         where e.id=$1",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((conversation_id, owner_id)) = row else {
+        return Ok(());
+    };
+    let changed = sqlx::query(
+        "update conversations set
+           worktree=worktree||jsonb_build_object(
+             'state','removed','detail','worktree_not_git','branch_kept',false),
+           updated_at=clock_timestamp()
+         where id=$1 and worktree is not null and worktree->>'state'='active'",
+    )
+    .bind(conversation_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if changed > 0 {
+        crate::conversations::emit_attributes(conn, owner_id, conversation_id, correlation_id)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Очередь блокируется раньше строки команды: тот же порядок, что у квитанций,

@@ -500,6 +500,32 @@ async fn remove_deletes_a_branch_already_merged_elsewhere() {
 }
 
 #[tokio::test]
+async fn remove_reports_a_missing_copy_in_a_non_git_source_as_removed() {
+    let fixture = Fixture::new();
+    let plain = TempDir::new().unwrap();
+    let plain = fs::canonicalize(plain.path()).unwrap();
+    fs::write(plain.join("keep"), "keep").unwrap();
+    let before = snapshot(&plain, "");
+    let target = fixture.target("never-created");
+
+    let done = remove(
+        &fixture.root,
+        &plain,
+        &RemoveWorktree {
+            source_workdir: plain.to_string_lossy().into_owned(),
+            path: target.to_string_lossy().into_owned(),
+            branch: "canterlot/0190abf1".into(),
+            force: false,
+        },
+    )
+    .await;
+    assert_eq!((done.outcome, done.detail), ("removed", ""));
+    assert!(!done.branch_kept);
+    assert!(!target.exists());
+    assert_eq!(snapshot(&plain, ""), before);
+}
+
+#[tokio::test]
 async fn remove_refuses_path_outside_root() {
     let fixture = Fixture::new();
     let elsewhere = TempDir::new().unwrap();

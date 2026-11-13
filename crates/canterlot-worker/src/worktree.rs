@@ -302,17 +302,42 @@ pub async fn remove(root: &Path, source: &Path, request: &RemoveWorktree) -> Rem
     }
 }
 
+/// Каталог или его предок содержит `.git`: у пропавшей копии могли остаться метаданные и
+/// ветка. В не-git источнике git не нужен вовсе.
+fn inside_git_worktree(dir: &Path) -> bool {
+    dir.ancestors()
+        .any(|ancestor| fs::symlink_metadata(ancestor.join(".git")).is_ok())
+}
+
 async fn remove_inner(root: &Path, source: &Path, request: &RemoveWorktree) -> Removed {
-    if !valid_branch(&request.branch).await {
-        return Removed::failed("branch_not_allowed");
-    }
     let Some(target) = resolve_target(root, Path::new(&request.path)) else {
         return Removed::failed("path_outside_root");
     };
+    let present = fs::symlink_metadata(&target).is_ok();
+    // Копии нет, а исходный каталог не git: убирать нечего и git звать не за чем.
+    if !present && !inside_git_worktree(source) {
+        return Removed {
+            outcome: "removed",
+            detail: "",
+            branch_kept: false,
+        };
+    }
+    if !valid_branch(&request.branch).await {
+        return Removed::failed("branch_not_allowed");
+    }
     let Some(common) = common_dir(source).await else {
-        return Removed::failed("source_not_git");
+        // Копии нет: даже если `.git` нашёлся выше, убирать всё равно нечего.
+        return if present {
+            Removed::failed("source_not_git")
+        } else {
+            Removed {
+                outcome: "removed",
+                detail: "",
+                branch_kept: false,
+            }
+        };
     };
-    if fs::symlink_metadata(&target).is_err() {
+    if !present {
         forget_missing(source, &target).await;
     } else {
         if !is_worktree_of(&target, &common).await {
