@@ -1236,6 +1236,74 @@ async fn stalled_speech_write_is_engine_failed(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn hub_shutdown_during_dictionary_snapshot_drains_without_speech(pool: PgPool) {
+    let speech =
+        fake::start(|mut conn| async move { while conn.next_frame().await.is_some() {} }).await;
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("lock table dictation_terms in access exclusive mode")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let hub = spawn_hub(pool.clone(), speech.socket.clone(), fast_timers()).await;
+    let mut socket = open(&hub).await;
+    socket.start().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    hub.shutdown.send(()).unwrap();
+    assert_eq!(socket.next(TIMEOUT).await, None);
+    assert_eq!(socket.close_code, Some(1001));
+    let joined = tokio::time::timeout(TIMEOUT, hub.join)
+        .await
+        .expect("hub drains the blocked preparation")
+        .expect("hub join");
+    assert!(joined.is_ok(), "hub task failed");
+    assert_eq!(
+        speech
+            .connections
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    lock.rollback().await.unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn replacement_during_dictionary_snapshot_closes_the_old_socket(pool: PgPool) {
+    let speech = fake::start(|mut conn| async move {
+        let _ = conn.next().await;
+        conn.send(json!({"type":"state","state":"listening","mode":"gpu"}))
+            .await;
+        while conn.next_frame().await.is_some() {}
+    })
+    .await;
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("lock table dictation_terms in access exclusive mode")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let hub = spawn_hub(pool.clone(), speech.socket.clone(), fast_timers()).await;
+    let mut first = open(&hub).await;
+    first.start().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut second = open(&hub).await;
+    second.start().await;
+    assert_eq!(error_code(first).await, ("replaced".to_owned(), Some(1000)));
+    assert_eq!(
+        speech
+            .connections
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the replaced preparation never opens speech"
+    );
+    lock.rollback().await.unwrap();
+    assert_eq!(second.expect(TIMEOUT).await["state"], "listening");
+    assert_eq!(
+        speech
+            .connections
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn hub_shutdown_closes_with_1001(pool: PgPool) {
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;

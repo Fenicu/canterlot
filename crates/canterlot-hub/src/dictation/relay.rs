@@ -5,7 +5,10 @@
 //! освобождается поколением, соединение со службой закрывается (это `cancel`),
 //! клиент получает итог или ошибку и код закрытия, пишется одна строка журнала.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use futures_util::{SinkExt, StreamExt};
@@ -30,6 +33,8 @@ pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// Предел исходящего сообщения: служба отдаёт JSON до 262 144 байт, словарь замен
 /// его расширяет; 1 МиБ хватает здоровому клиенту, не превращая буфер в память.
 pub const MAX_OUTBOUND_BYTES: usize = 1024 * 1024;
+/// Сколько сообщений клиента копим, пока готовим диктовку: звук уже льётся после `start`.
+const MAX_PENDING_INPUT: usize = 256;
 
 /// Конец диктовки: единственный путь уборки.
 enum End {
@@ -61,7 +66,7 @@ impl End {
 struct Relay {
     state: AppState,
     session_id: uuid::Uuid,
-    slot: Slot,
+    slot: SlotGuard,
     ws: futures_util::stream::SplitSink<WebSocket, Message>,
     input: futures_util::stream::SplitStream<WebSocket>,
     speech: OwnedWriteHalf,
@@ -79,8 +84,84 @@ struct Relay {
     last_audio: Instant,
     finish_at: Option<Instant>,
     speech_write_dead: bool,
+    /// Сообщения клиента, пришедшие во время подготовки.
+    pending: VecDeque<Message>,
     /// Последнее обновление текста, ещё не отправленное клиенту.
     pending_text: Option<(String, String)>,
+}
+
+/// Слот на всё время диктовки: `Drop` освобождает его на любом пути выхода.
+struct SlotGuard {
+    state: std::sync::Arc<crate::dictation::State>,
+    generation: u64,
+    replaced: tokio_util::sync::CancellationToken,
+    held: bool,
+}
+
+impl SlotGuard {
+    fn new(state: std::sync::Arc<crate::dictation::State>, slot: Slot) -> Self {
+        Self {
+            state,
+            generation: slot.generation,
+            replaced: slot.replaced,
+            held: true,
+        }
+    }
+
+    fn release(&mut self) {
+        if self.held {
+            self.state.release(self.generation);
+            self.held = false;
+        }
+    }
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Подготовка диктовки: снимок словаря, проверка сеанса, соединение и `start`
+/// службе. Любой шаг отменяется заменой, отзывом, закрытием клиента, остановкой
+/// хаба и сроком `start`.
+struct Preparation<'a> {
+    state: &'a AppState,
+    session_id: uuid::Uuid,
+    slot: &'a SlotGuard,
+    input: &'a mut futures_util::stream::SplitStream<WebSocket>,
+    notices: &'a mut tokio::sync::broadcast::Receiver<std::sync::Arc<crate::bus::Notice>>,
+    started: Instant,
+    timers: &'a Timers,
+    pending: VecDeque<Message>,
+}
+
+impl Preparation<'_> {
+    async fn race<F: std::future::Future>(&mut self, future: F) -> Result<F::Output, End> {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut future => return Ok(output),
+                _ = self.slot.replaced.cancelled() => return Err(End::Replaced),
+                _ = self.state.shutdown.cancelled() => return Err(End::Shutdown),
+                message = self.input.next(), if self.pending.len() < MAX_PENDING_INPUT => match message {
+                    Some(Ok(message)) => self.pending.push_back(message),
+                    _ => return Err(End::ClientGone),
+                },
+                _ = tokio::time::sleep_until((self.started + self.timers.start_deadline).into()) => {
+                    return Err(End::Error("start_timeout"));
+                }
+                notice = self.notices.recv() => {
+                    if notice_about_sessions(&notice)
+                        && !session_is_live(self.state, self.session_id).await
+                    {
+                        return Err(End::Revoked);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Апгрейд WebSocket `/api/v1/dictation`.
@@ -100,7 +181,7 @@ async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
     let (mut ws, mut input) = socket.split();
     let timers = (*state.dictation_timers).clone();
     // Подписка до ожидания start: отзыв сеанса, пришедший в это окно, не теряется.
-    let notices = crate::bus::EventBus::local().subscribe();
+    let mut notices = crate::bus::EventBus::local().subscribe();
 
     let first = tokio::time::timeout(timers.first_message, input.next()).await;
     let Some(Ok(Message::Text(text))) = first.ok().flatten() else {
@@ -140,39 +221,71 @@ async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
         return;
     }
     let slot = match state.dictation_state.acquire(owner.session_id) {
-        Ok(slot) => slot,
+        Ok(slot) => SlotGuard::new(state.dictation_state.clone(), slot),
         Err(_) => {
             fail(&mut ws, &timers, "busy").await;
             return;
         }
     };
-    let dictionary = match snapshot_terms(&state, owner.owner_id).await {
-        Ok(terms) => Dictionary::new(&terms),
-        Err(()) => {
-            state.dictation_state.release(slot.generation);
+    let mut prep = Preparation {
+        state: &state,
+        session_id: owner.session_id,
+        slot: &slot,
+        input: &mut input,
+        notices: &mut notices,
+        started,
+        timers: &timers,
+        pending: VecDeque::new(),
+    };
+    let dictionary = match prep.race(snapshot_terms(&state, owner.owner_id)).await {
+        Ok(Ok(terms)) => Dictionary::new(&terms),
+        Ok(Err(())) => {
+            drop(prep);
             fail(&mut ws, &timers, "engine_failed").await;
+            return;
+        }
+        Err(end) => {
+            drop(prep);
+            finish_prep(&mut ws, &timers, end).await;
             return;
         }
     };
     // Отзыв мог прийти, пока шёл снимок словаря: до службы речи он не доходит.
-    if !session_is_live(&state, owner.session_id).await {
-        state.dictation_state.release(slot.generation);
-        close_socket(&mut ws, 4401).await;
-        return;
-    }
-    let mut speech = match client::connect(&state.dictation.socket, timers.speech_connect).await {
-        Ok(stream) => stream,
-        Err(client::NoService) => {
-            tracing::info!(
-                kind = "speech_unavailable",
-                socket = %state.dictation.socket.display(),
-                "speech service is not reachable"
-            );
-            state.dictation_state.release(slot.generation);
-            fail(&mut ws, &timers, "speech_unavailable").await;
+    let live = match prep.race(session_is_live(&state, owner.session_id)).await {
+        Ok(live) => live,
+        Err(end) => {
+            drop(prep);
+            finish_prep(&mut ws, &timers, end).await;
             return;
         }
     };
+    if !live {
+        drop(prep);
+        finish_prep(&mut ws, &timers, End::Revoked).await;
+        return;
+    }
+    let mut speech =
+        match prep
+            .race(client::connect(&state.dictation.socket, timers.speech_connect))
+            .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(client::NoService)) => {
+                tracing::info!(
+                    kind = "speech_unavailable",
+                    socket = %state.dictation.socket.display(),
+                    "speech service is not reachable"
+                );
+                drop(prep);
+                finish_prep(&mut ws, &timers, End::Error("speech_unavailable")).await;
+                return;
+            }
+            Err(end) => {
+                drop(prep);
+                finish_prep(&mut ws, &timers, end).await;
+                return;
+            }
+        };
     let start_message = json!({
         "type": "start",
         "protocol": 1,
@@ -180,21 +293,40 @@ async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
         "format": "s16le",
         "client": format!("hub/{}", env!("CARGO_PKG_VERSION")),
     });
-    let started_write = tokio::time::timeout(
+    let write = tokio::time::timeout(
         timers.write_stall,
         frame::write_json(&mut speech, &start_message),
-    )
-    .await;
-    if !matches!(started_write, Ok(Ok(()))) {
-        tracing::warn!(
-            kind = "speech_protocol_error",
-            error = "start",
-            "speech start failed"
-        );
-        state.dictation_state.release(slot.generation);
-        fail(&mut ws, &timers, "engine_failed").await;
-        return;
+    );
+    match prep.race(write).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(_))) => {
+            tracing::warn!(
+                kind = "speech_protocol_error",
+                error = "start",
+                "speech start failed"
+            );
+            drop(prep);
+            finish_prep(&mut ws, &timers, End::Error("engine_failed")).await;
+            return;
+        }
+        Ok(Err(_)) => {
+            tracing::warn!(
+                kind = "speech_protocol_error",
+                error = "write_stalled",
+                "speech write stalled"
+            );
+            drop(prep);
+            finish_prep(&mut ws, &timers, End::Error("engine_failed")).await;
+            return;
+        }
+        Err(end) => {
+            drop(prep);
+            finish_prep(&mut ws, &timers, end).await;
+            return;
+        }
     }
+    let pending = std::mem::take(&mut prep.pending);
+    drop(prep);
 
     let (speech_read, speech_write) = speech.into_split();
     let (frame_tx, frame_rx) = mpsc::channel(8);
@@ -235,6 +367,7 @@ async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
         last_audio: started,
         finish_at: None,
         speech_write_dead: false,
+        pending,
         pending_text: None,
     };
     let end = relay.run().await;
@@ -276,6 +409,33 @@ async fn close_socket(ws: &mut futures_util::stream::SplitSink<WebSocket, Messag
     .await;
 }
 
+/// Конец до создания `Relay`: те же сообщения и коды, что у `cleanup`.
+async fn finish_prep(
+    ws: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    timers: &Timers,
+    end: End,
+) {
+    match end {
+        End::Revoked => close_socket(ws, 4401).await,
+        End::Shutdown => close_socket(ws, 1001).await,
+        End::ClientGone | End::ClientStalled | End::Cancel => close_socket(ws, 1000).await,
+        End::Replaced => fail(ws, timers, "replaced").await,
+        End::Error(code) => fail(ws, timers, code).await,
+        End::Final { .. } => {}
+    }
+}
+
+/// Уведомление касается сеансов: переподключение слушателя и потеря тоже.
+fn notice_about_sessions(
+    notice: &Result<std::sync::Arc<crate::bus::Notice>, tokio::sync::broadcast::error::RecvError>,
+) -> bool {
+    notice
+        .as_ref()
+        .map_or(true, |notice| {
+            notice.scope == "*" || notice.scope == crate::owner_auth::BUS_SCOPE
+        })
+}
+
 /// Отказ до начала диктовки: ошибка и закрытие 1000.
 async fn fail(
     ws: &mut futures_util::stream::SplitSink<WebSocket, Message>,
@@ -310,7 +470,12 @@ impl Relay {
             let deadline = self.next_deadline();
             let tick = tokio::select! {
                 biased;
-                message = self.input.next() => Tick::Client(message),
+                message = async {
+                    match self.pending.pop_front() {
+                        Some(message) => Some(Ok(message)),
+                        None => self.input.next().await,
+                    }
+                } => Tick::Client(message),
                 frame = self.frames.recv() => Tick::Speech(frame),
                 _ = tokio::time::sleep_until(deadline.into()) => Tick::Deadline,
                 _ = self.slot.replaced.cancelled() => Tick::Replaced,
@@ -331,10 +496,7 @@ impl Relay {
                     }
                 }
                 Tick::Notice(notice) => {
-                    let relevant = notice.as_ref().map_or(true, |notice| {
-                        notice.scope == "*" || notice.scope == crate::owner_auth::BUS_SCOPE
-                    });
-                    if relevant && !self.session_live().await {
+                    if notice_about_sessions(&notice) && !self.session_live().await {
                         end = Some(End::Revoked);
                     }
                 }
@@ -653,7 +815,7 @@ impl Relay {
         let audio_ms = self.audio_bytes * 1000 / AUDIO_BYTES_PER_SECOND;
         self.reader.abort();
         self.frames.close();
-        self.state.dictation_state.release(self.slot.generation);
+        self.slot.release();
         // Закрытие соединения со службой равносильно `cancel`.
         let _ = tokio::time::timeout(Duration::from_secs(1), self.speech.shutdown()).await;
         tracing::info!(
