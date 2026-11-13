@@ -1,9 +1,7 @@
 /** Словарь замен диктовки: пары «шаблон → замена», частые пары и проверка перед сохранением. */
+import type { components } from "#lib/api/generated/openapi.js";
 
-export interface DictationTerm {
-  pattern: string;
-  replacement: string;
-}
+export type DictationTerm = components["schemas"]["Term"];
 
 export const TERM_LIMIT = 200;
 export const TERM_MAX_LENGTH = 100;

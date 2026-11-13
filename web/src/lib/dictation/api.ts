@@ -1,11 +1,10 @@
-/** Клиент диктовки: локальные типы контракта, пока сгенерированных ещё нет. */
+/** Клиент диктовки. Статус описан локально: OpenAPI отдаёт его перечисления простыми строками. */
 import { http, type HttpResponse } from "#lib/api/http.js";
+import type { components } from "#lib/api/generated/openapi.js";
 import type { DictationStatusView } from "./availability.js";
 import type { DictationTerm } from "./terms.js";
 
-export interface DictationTermsView {
-  terms: DictationTerm[];
-}
+export type DictationTermsView = components["schemas"]["TermsBody"];
 
 export function getDictationStatus(): Promise<HttpResponse<DictationStatusView>> {
   return http("GET", "/api/v1/dictation/status");
