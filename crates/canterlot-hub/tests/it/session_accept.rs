@@ -1400,6 +1400,11 @@ async fn after_an_interrupt_the_parents_next_message_is_delivered(pool: PgPool) 
         answer["hint"].as_str().unwrap().contains("session_send"),
         "{answer}"
     );
+    assert_eq!(
+        pauses(&fx, fx.child).await,
+        json!([]),
+        "interrupt no longer pauses the queue"
+    );
     let sent = send_to_child(&fx, "Продолжай с другим планом").await;
     assert_eq!(sent["target_paused"], false, "{sent}");
     assert_eq!(
@@ -1422,11 +1427,12 @@ async fn the_parent_never_lifts_the_owners_stop(pool: PgPool) {
     control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)
         .await
         .unwrap();
-    // Владелец остановил ход после родителя: его стоп остаётся.
-    canterlot_hub::delivery::control::request_stop(
+    // Владелец остановил исполнение после родителя: его пауза остаётся.
+    canterlot_hub::delivery::control::request_stop_execution(
         &fx.pool,
         fx.owner,
         fx.child,
+        false,
         "owner-stop-1",
         Uuid::now_v7(),
     )

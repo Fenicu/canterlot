@@ -238,6 +238,7 @@ async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot(pool: PgPoo
     let correlation = Uuid::now_v7();
     apply_run_finished(&pool, execution.execution_id, next.command_id, correlation).await?;
     assert_queue_event(&pool, &seed, correlation).await?;
+    // Прерывание не меняет очередь: события `queue_state_changed` у него нет.
     let correlation = Uuid::now_v7();
     request_stop(
         &pool,
@@ -247,7 +248,14 @@ async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot(pool: PgPoo
         correlation,
     )
     .await?;
-    assert_queue_event(&pool, &seed, correlation).await?;
+    let count: i64 = sqlx::query_scalar(
+        "select count(*) from events where correlation_id = $1 and kind = 'queue_state_changed'",
+    )
+    .bind(correlation)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(count, 0);
+    // Продолжать нечего, но явное действие по-прежнему отвечает `queue_resumed`.
     let correlation = Uuid::now_v7();
     continue_queue(
         &pool,
@@ -257,7 +265,20 @@ async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot(pool: PgPoo
         correlation,
     )
     .await?;
-    assert_queue_event(&pool, &seed, correlation).await?;
+    let count: i64 = sqlx::query_scalar(
+        "select count(*) from events where correlation_id = $1 and kind = 'queue_state_changed'",
+    )
+    .bind(correlation)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(count, 0);
+    let resumed: i64 = sqlx::query_scalar(
+        "select count(*) from events where correlation_id = $1 and kind = 'queue_resumed'",
+    )
+    .bind(correlation)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(resumed, 1);
     let last = submit_input(&pool, request(&seed, "last")).await?;
     dispatch(&pool, &seed).await;
     receipt(&pool, &last, 1, InputReceipt::Accepted).await;
