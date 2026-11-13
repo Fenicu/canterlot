@@ -135,14 +135,14 @@ describe("chat/pauseCards", () => {
       {
         reason: { reason: "user_stop" },
         liveExecution: true,
-        expectedTitle: "Очередь остановлена: вы прервали работу",
+        expectedTitle: "Очередь остановлена: вы остановили работу",
         expectedTone: "warning",
         expectedActionIds: ["continue_queue"],
       },
       {
         reason: { reason: "user_stop" },
         liveExecution: false,
-        expectedTitle: "Очередь остановлена: вы прервали работу",
+        expectedTitle: "Очередь остановлена: вы остановили работу",
         expectedTone: "warning",
         expectedActionIds: ["run"],
       },

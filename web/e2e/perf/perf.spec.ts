@@ -273,8 +273,8 @@ test.describe('perf: P-01…P-05', () => {
       const stop = page.getByRole('button', { name: 'Прервать', exact: true });
       await expect(stop).toBeVisible({ timeout: 30_000 });
       await stop.click();
-      await expect(page.getByRole('button', { name: 'Продолжить очередь', exact: true })).toBeVisible({ timeout: 30_000 });
-      await hub.json(`/api/v1/conversations/${id}/queue/continue`, { method: 'POST' });
+      // Прерывание не ставит очередь на паузу: ход заканчивается, продолжать нечего.
+      await expect(page.getByRole('button', { name: 'Продолжить очередь', exact: true })).toHaveCount(0);
       await hub.waitIdle(id, 60_000);
     }
     const { clicks, seen } = await page.evaluate(() => ({ clicks: (window as unknown as { __clicks: number[] }).__clicks, seen: (window as unknown as { __interrupts: { at: number }[] }).__interrupts.map((item) => item.at) }));

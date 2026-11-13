@@ -44,11 +44,11 @@ async fn owned_in_tx(
     Ok(target)
 }
 
-/// Ключ идемпотентности остановки по `session_interrupt`: по нему `session_send` узнаёт,
-/// что пауза очереди цели поставлена родителем, а не владельцем.
+/// Ключ идемпотентности для старых пауз `user_stop`, которые ставил `session_interrupt`:
+/// по нему `session_send` узнаёт, что паузу очереди цели поставил родитель, а не владелец.
 pub(super) const INTERRUPT_KEY_PREFIX: &str = "agenti:";
 
-const HINT_INTERRUPTED: &str = "The turn is being stopped; the process and worktree stay. The session's queue waits for your next session_send, which resumes it. Messages already queued run after that.";
+const HINT_INTERRUPTED: &str = "The turn is being stopped; the process and worktree stay. The queue is not paused: messages already queued run after this turn, and your next session_send is delivered normally.";
 
 fn idle() -> Value {
     json!({"status": "nothing_running", "hint": "The session has no live process."})

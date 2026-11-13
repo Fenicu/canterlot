@@ -277,10 +277,11 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
     )
     .await
     .unwrap();
-    control::request_stop(
+    control::request_stop_execution(
         &pool,
         f.seed.owner_id,
         f.seed.conversation_id,
+        false,
         "stop",
         Uuid::now_v7(),
     )

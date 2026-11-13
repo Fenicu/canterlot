@@ -1707,7 +1707,7 @@ async fn wake_respects_user_pause_and_only_releases_the_hold(pool: PgPool) {
     let reset = now + TimeDelta::hours(1);
     env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
         .await;
-    control::request_stop(&pool, env.owner, id, "stop", Uuid::now_v7())
+    control::request_stop_execution(&pool, env.owner, id, false, "stop", Uuid::now_v7())
         .await
         .unwrap();
     verified_reset(&env, reset).await;

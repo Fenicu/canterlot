@@ -141,29 +141,18 @@ async fn wave2_n2_sj_batch_and_stop_share_lock_order(pool: PgPool) -> TestResult
         let stop_pool = pool.clone();
         let owner = run.seed.owner_id;
         let conversation = run.seed.conversation_id;
+        // Прерывание хода больше не пишет очередь и не участвует в этом порядке блокировок.
         let stop = tokio::spawn(async move {
-            if round % 2 == 0 {
-                control::request_stop(
-                    &stop_pool,
-                    owner,
-                    conversation,
-                    &Uuid::now_v7().to_string(),
-                    Uuid::now_v7(),
-                )
-                .await
-                .map(|_| ())
-            } else {
-                control::request_stop_execution(
-                    &stop_pool,
-                    owner,
-                    conversation,
-                    false,
-                    &Uuid::now_v7().to_string(),
-                    Uuid::now_v7(),
-                )
-                .await
-                .map(|_| ())
-            }
+            control::request_stop_execution(
+                &stop_pool,
+                owner,
+                conversation,
+                false,
+                &Uuid::now_v7().to_string(),
+                Uuid::now_v7(),
+            )
+            .await
+            .map(|_| ())
         });
         timeout(Duration::from_secs(5), async {
             loop {

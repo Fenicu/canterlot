@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use canterlot_hub::{
     delivery::{
+        control,
         control::{
             CancelOutcome, ContinueOutcome, ControlError, SendNowOutcome, StopOutcome,
             cancel_input, continue_queue, request_send_now, request_stop,
@@ -561,7 +562,9 @@ async fn cancel_races_dispatch_without_false_cancel(pool: PgPool) -> TestResult 
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn stop_pauses_before_interrupt(pool: PgPool) -> TestResult {
+async fn interrupt_does_not_pause_the_queue_and_keeps_the_next_input_ready(
+    pool: PgPool,
+) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let first = input(&pool, &seed).await;
@@ -584,10 +587,7 @@ async fn stop_pauses_before_interrupt(pool: PgPool) -> TestResult {
     else {
         panic!("unexpected stop outcome: {result:?}");
     };
-    assert_eq!(
-        pauses(&pool, seed.conversation_id).await,
-        [PauseReason::UserStop]
-    );
+    assert_eq!(pauses(&pool, seed.conversation_id).await, []);
     let command: (String, String, Uuid, i64, Uuid) = sqlx::query_as(
         "select kind, delivery_state, execution_id, execution_generation, machine_id from commands where id = $1",
     ).bind(interrupt).fetch_one(&pool).await?;
@@ -601,23 +601,14 @@ async fn stop_pauses_before_interrupt(pool: PgPool) -> TestResult {
             seed.machine_id
         )
     );
-    let (queue_tx, command_tx, event_tx, key_tx): (String, String, String, String) =
-        sqlx::query_as(
-            "select q.xmin::text, c.xmin::text, e.xmin::text, k.xmin::text
-         from queue_state q join commands c on c.id = $2
-         join events e on e.correlation_id = $3
-         join idempotency_keys k on k.owner_id = $4 and k.key = 'stop'
-         where q.conversation_id = $1 and e.kind = 'queue_paused'",
-        )
-        .bind(seed.conversation_id)
-        .bind(interrupt)
-        .bind(correlation_id)
-        .bind(seed.owner_id)
-        .fetch_one(&pool)
-        .await?;
-    assert_eq!(queue_tx, command_tx);
-    assert_eq!(queue_tx, event_tx);
-    assert_eq!(queue_tx, key_tx);
+    // Пауза очереди не ставится, поэтому `queue_state_changed` и `queue_paused` не публикуются.
+    let event_count: i64 = sqlx::query_scalar(
+        "select count(*) from events where correlation_id = $1 and kind in ('queue_paused', 'queue_state_changed')",
+    )
+    .bind(correlation_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(event_count, 0);
     assert_eq!(state(&pool, first.input_id).await, InputState::Accepted);
     assert_eq!(state(&pool, second.input_id).await, InputState::Queued);
     assert_eq!(
@@ -633,11 +624,115 @@ async fn stop_pauses_before_interrupt(pool: PgPool) -> TestResult {
         Uuid::now_v7(),
     )
     .await?;
-    assert_eq!(
+    // Ход прерван, но следующий ввод уходит сам — без «Продолжить очередь».
+    assert!(matches!(
         dispatch(&pool, seed.conversation_id).await,
-        DispatchOutcome::Blocked(vec![BlockReason::Paused(vec![PauseReason::UserStop])])
+        DispatchOutcome::Dispatched { input_id, attempt: 1, .. } if input_id == second.input_id
+    ));
+    assert_eq!(state(&pool, second.input_id).await, InputState::Dispatched);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn interrupt_keeps_the_other_pause_reasons(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    running(&pool, &seed).await;
+    let pause = PauseReason::ProcessExited;
+    sqlx::query("update queue_state set pause_reasons = $2 where conversation_id = $1")
+        .bind(seed.conversation_id)
+        .bind(Json(vec![pause.clone()]))
+        .execute(&pool)
+        .await?;
+    request_stop(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        "stop",
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert_eq!(pauses(&pool, seed.conversation_id).await, [pause]);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn interrupt_keeps_an_existing_user_stop_pause(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    running(&pool, &seed).await;
+    // Старая пауза от прежнего прерывания переживает новое: миграции сохранённых причин нет.
+    sqlx::query("update queue_state set pause_reasons = $2 where conversation_id = $1")
+        .bind(seed.conversation_id)
+        .bind(Json(vec![PauseReason::UserStop]))
+        .execute(&pool)
+        .await?;
+    request_stop(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        "stop",
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert_eq!(
+        pauses(&pool, seed.conversation_id).await,
+        [PauseReason::UserStop]
     );
-    assert_eq!(state(&pool, second.input_id).await, InputState::Queued);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn interrupt_keeps_a_steer_as_the_next_turn(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    sqlx::query("update conversations set harness = 'codex' where id = $1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await?;
+    let execution = running(&pool, &seed).await;
+    let first = input(&pool, &seed).await;
+    let second = input(&pool, &seed).await;
+    dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first.command_id).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second.input_id).await?
+    else {
+        panic!("send now must create a steer");
+    };
+    request_stop(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        "stop",
+        Uuid::now_v7(),
+    )
+    .await?;
+    // Ход кончился между кликом и доставкой вливания: ввод остаётся в очереди.
+    assert_eq!(
+        apply_input_receipt(
+            &pool,
+            steer_command_id,
+            0,
+            InputReceipt::DispatchDeferred {
+                reason: "turn_ended".into()
+            },
+            Uuid::now_v7(),
+        )
+        .await?,
+        ApplyOutcome::Applied {
+            input_state: InputState::Queued
+        }
+    );
+    apply_run_finished(
+        &pool,
+        execution.execution_id,
+        first.command_id,
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert!(matches!(
+        dispatch(&pool, seed.conversation_id).await,
+        DispatchOutcome::Dispatched { input_id, attempt: 1, .. } if input_id == second.input_id
+    ));
+    assert_eq!(state(&pool, second.input_id).await, InputState::Dispatched);
     Ok(())
 }
 
@@ -699,10 +794,7 @@ async fn stop_withdraws_undelivered_dispatch(pool: PgPool) -> TestResult {
             }
         );
         assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
-        assert_eq!(
-            pauses(&pool, seed.conversation_id).await,
-            [PauseReason::UserStop]
-        );
+        assert_eq!(pauses(&pool, seed.conversation_id).await, []);
         let seq: i64 = sqlx::query_scalar("select input_seq from inputs where id = $1")
             .bind(head.input_id)
             .fetch_one(&pool)
@@ -720,10 +812,11 @@ async fn continue_releases_user_pause_and_dispatches_once(pool: PgPool) -> TestR
     let second = input(&pool, &seed).await;
     dispatch(&pool, seed.conversation_id).await;
     apply(&pool, first.command_id, InputReceipt::Accepted).await;
-    request_stop(
+    control::request_stop_execution(
         &pool,
         seed.owner_id,
         seed.conversation_id,
+        false,
         "stop",
         Uuid::now_v7(),
     )
@@ -891,10 +984,7 @@ async fn stop_and_continue_are_idempotent(pool: PgPool) -> TestResult {
         command_count(&pool, seed.conversation_id, "interrupt").await,
         1
     );
-    assert_eq!(
-        pauses(&pool, seed.conversation_id).await,
-        [PauseReason::UserStop]
-    );
+    assert_eq!(pauses(&pool, seed.conversation_id).await, []);
     let resumed = continue_queue(
         &pool,
         seed.owner_id,
@@ -1005,18 +1095,7 @@ async fn stop_without_live_execution_and_after_transmission(pool: PgPool) -> Tes
             withdraw_command_id: None
         }
     );
-    assert_eq!(
-        pauses(&pool, seed.conversation_id).await,
-        [PauseReason::UserStop]
-    );
-    continue_queue(
-        &pool,
-        seed.owner_id,
-        seed.conversation_id,
-        "continue",
-        Uuid::now_v7(),
-    )
-    .await?;
+    assert_eq!(pauses(&pool, seed.conversation_id).await, []);
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
     dispatch(&pool, seed.conversation_id).await;
@@ -1213,8 +1292,14 @@ async fn event_failure_rolls_back_controls_and_does_not_bind_keys(pool: PgPool) 
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
+    // Прерывание не трогает паузу; событие, на котором проверяется откат, — снятие
+    // отложенного продолжения по лимиту.
+    sqlx::query("update conversations set resume_pending = true where id = $1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await?;
     let before = snapshot(&pool, seed.conversation_id).await;
-    sqlx::query("alter table events add constraint reject_control_events check (kind not in ('input_state_changed', 'queue_paused', 'queue_resumed')) not valid")
+    sqlx::query("alter table events add constraint reject_control_events check (kind not in ('input_state_changed', 'queue_paused', 'queue_resumed', 'crunch_changed')) not valid")
         .execute(&pool).await?;
     assert!(matches!(
         cancel_input(
@@ -1361,8 +1446,12 @@ async fn control_command_failure_rolls_back_flags_pause_and_commands(pool: PgPoo
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
     dispatch(&pool, seed.conversation_id).await;
+    sqlx::query("update conversations set resume_pending = true where id = $1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await?;
     let before = snapshot(&pool, seed.conversation_id).await;
-    sqlx::query("alter table events add constraint reject_control_events check (kind not in ('input_state_changed', 'queue_paused')) not valid")
+    sqlx::query("alter table events add constraint reject_control_events check (kind not in ('input_state_changed', 'queue_paused', 'crunch_changed')) not valid")
         .execute(&pool).await?;
     assert!(matches!(
         cancel_input(
@@ -1455,7 +1544,7 @@ async fn concurrent_conflicts_across_queues_roll_back_loser(pool: PgPool) -> Tes
         }
         other => panic!("unexpected key race outcome: {other:?}"),
     };
-    assert_eq!(pauses(&pool, winner).await, [PauseReason::UserStop]);
+    assert_eq!(pauses(&pool, winner).await, []);
     assert_eq!(command_count(&pool, winner, "interrupt").await, 1);
     assert_eq!(snapshot(&pool, loser).await, loser_before);
     Ok(())

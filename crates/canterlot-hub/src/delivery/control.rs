@@ -230,20 +230,18 @@ pub async fn request_stop(
     let idempotency_key = idempotency_key.to_owned();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
-            let mut queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
             if let Some(outcome) =
                 lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
             {
                 return Ok(outcome);
             }
+            // Прерывание останавливает только текущий ход: очередь продолжает жить,
+            // а `owner_stop_input_seq` не даёт автоматически возобновить именно его.
             mark_owner_stop(&mut *conn, conversation_id, false).await?;
             crate::crunch::clear_resume_in_tx(&mut *conn, conversation_id, None, correlation_id)
                 .await?;
-            if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
-                queue.pause_reasons.0.push(PauseReason::UserStop);
-            }
             let slot = queue.slot()?;
-            queue.save(&mut *conn, &slot, None, correlation_id).await?;
             let live = executions::live(&mut *conn, conversation_id).await?;
             let interrupt_command_id = if let Some((execution_id, generation, _)) = live {
                 let existing: Option<Uuid> = sqlx::query_scalar(
@@ -280,16 +278,6 @@ pub async fn request_stop(
                 None
             };
             let withdraw_command_id = withdraw_dispatch(&mut *conn, &slot).await?;
-            events::append(
-                &mut *conn,
-                queue_event(
-                    &queue,
-                    "queue_paused",
-                    live.map(|(id, _, _)| id),
-                    correlation_id,
-                ),
-            )
-            .await?;
             let outcome = StopOutcome::Requested {
                 interrupt_command_id,
                 withdraw_command_id,

@@ -155,9 +155,9 @@
     (chat.settings.effective as { permission_mode?: string } | null | undefined)?.permission_mode ??
       ((chat.detail?.permission_mode as string | undefined) ?? '')
   );
-  // Строка «Ход прерван»: прерывание остановило ход, а не сессию. Видна, пока
-  // очередь на паузе `user_stop` и новый ход не идёт: продолжение и следующий
-  // ход её снимают. От остановленной сессии отличается живой исполняеммостью.
+  // Строка «Ход прерван»: прерывание остановило ход, а не сессию и не очередь.
+  // Видна, пока новый ход не идёт: следующий ввод её сменяет. От остановленной
+  // сессии отличается живой исполняеммостью.
   // Живая строка закрывает промежуток до строки эпизода: фаза агента или только что принятый запрос.
   const compactingRow = $derived(entries.some((entry) => entry.kind === 'compaction' && entry.compaction.ok === null));
   const compacting = $derived(!feed && !laneRoot && chat.compacting && !compactingRow);
@@ -214,9 +214,7 @@
     if (feed || laneRoot) return false;
     const status = (chat.interrupt as { status?: string } | null)?.status;
     if (status !== 'acknowledged' && status !== 'completed') return false;
-    if (turn) return false;
-    const pauses = chat.queue.pause_reasons as { reason?: string }[];
-    return pauses.some((pause) => pause?.reason === 'user_stop');
+    return !turn;
   });
   // Итог прерывания живёт там же, где была живая строка, и после хода без ответа.
   const interruptOutcome = $derived.by(() => {
