@@ -3,8 +3,12 @@
 use axum::{Json, extract::State};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+use serde::Serialize;
+use utoipa::ToSchema;
+
 use crate::{
     dictation::{
+        HealthState,
         dictionary::{self, TermError, TermsBody},
         terms,
     },
@@ -19,7 +23,55 @@ use super::{
 };
 
 pub fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(read_terms, replace_terms))
+    OpenApiRouter::new()
+        .routes(routes!(status))
+        .routes(routes!(read_terms, replace_terms))
+}
+
+/// Состояние службы распознавания речи для кнопки микрофона.
+#[derive(Serialize, ToSchema)]
+pub struct DictationStatus {
+    /// Можно начинать диктовку: включена в конфигурации и служба здорова.
+    pub available: bool,
+    /// Почему недоступна: `disabled`, `no_service` или `unhealthy`.
+    #[schema(nullable = false, value_type = Option<String>)]
+    pub reason: Option<String>,
+    #[schema(nullable = false, value_type = Option<String>)]
+    pub mode: Option<String>,
+    #[schema(nullable = false, value_type = Option<String>)]
+    pub engine: Option<String>,
+}
+
+#[utoipa::path(get,path="/api/v1/dictation/status",tag="dictation",responses((status=200,description="Служба речи доступна или причина отказа",body=DictationStatus)))]
+async fn status(State(s): State<AppState>, _o: Owner) -> Result<Json<DictationStatus>, ApiError> {
+    let unavailable = |reason: &str| DictationStatus {
+        available: false,
+        reason: Some(reason.to_owned()),
+        mode: None,
+        engine: None,
+    };
+    if !s.dictation.enabled {
+        return Ok(Json(unavailable("disabled")));
+    }
+    let health = s
+        .dictation_state
+        .health(&s.dictation, &s.dictation_timers)
+        .await;
+    Ok(Json(match health {
+        HealthState::Down => unavailable("no_service"),
+        HealthState::Up(health) if !health.ok => DictationStatus {
+            available: false,
+            reason: Some("unhealthy".to_owned()),
+            mode: health.mode,
+            engine: health.engine,
+        },
+        HealthState::Up(health) => DictationStatus {
+            available: true,
+            reason: None,
+            mode: health.mode,
+            engine: health.engine,
+        },
+    }))
 }
 
 impl From<TermError> for ApiError {

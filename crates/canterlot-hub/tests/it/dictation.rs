@@ -183,3 +183,225 @@ async fn terms_put_requires_an_idempotency_key_and_rejects_its_reuse(pool: PgPoo
     let error: Value = conflict.json();
     assert_eq!(error["error"]["code"], "idempotency_conflict");
 }
+
+// ------------------------------------------------------- служба речи и статус
+
+mod fake {
+    use std::{
+        future::Future,
+        path::{Path, PathBuf},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use canterlot_hub::dictation::frame::{self, Frame, ReadLimits};
+    use serde_json::Value;
+    use tokio::net::{UnixListener, UnixStream};
+
+    pub struct FakeConn {
+        stream: UnixStream,
+    }
+
+    impl FakeConn {
+        pub async fn next_frame(&mut self) -> Option<Frame> {
+            frame::read_frame(&mut self.stream, ReadLimits::CLIENT)
+                .await
+                .ok()
+        }
+
+        pub async fn next(&mut self) -> Option<Value> {
+            match self.next_frame().await? {
+                Frame::Json(bytes) => serde_json::from_slice(&bytes).ok(),
+                Frame::Audio(_) => None,
+            }
+        }
+
+        pub async fn send(&mut self, value: Value) {
+            frame::write_json(&mut self.stream, &value)
+                .await
+                .expect("fake speech write");
+        }
+
+        pub async fn send_frame(&mut self, kind: u8, payload: &[u8]) {
+            frame::write_frame(&mut self.stream, kind, payload)
+                .await
+                .expect("fake speech frame");
+        }
+    }
+
+    pub struct FakeSpeech {
+        pub socket: PathBuf,
+        pub connections: Arc<AtomicUsize>,
+        pub accepted: tokio::sync::mpsc::UnboundedReceiver<()>,
+        _dir: tempfile::TempDir,
+    }
+
+    pub async fn start<F, Fut>(handler: F) -> FakeSpeech
+    where
+        F: Fn(FakeConn) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        start_in(tempfile::tempdir().expect("speech dir"), handler).await
+    }
+
+    pub async fn start_in<F, Fut>(dir: tempfile::TempDir, handler: F) -> FakeSpeech
+    where
+        F: Fn(FakeConn) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let socket = dir.path().join("speech.sock");
+        let listener = UnixListener::bind(&socket).expect("fake speech socket");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counter = connections.clone();
+        let (tx, accepted) = tokio::sync::mpsc::unbounded_channel();
+        let handler = Arc::new(handler);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = tx.send(());
+                let handler = handler.clone();
+                tokio::spawn(async move { handler(FakeConn { stream }).await });
+            }
+        });
+        FakeSpeech {
+            socket,
+            connections,
+            accepted,
+            _dir: dir,
+        }
+    }
+
+    /// Каталог без сокета: служба не запущена.
+    pub fn missing_socket(dir: &Path) -> PathBuf {
+        dir.join("absent.sock")
+    }
+}
+
+async fn hub_with_dictation(
+    pool: PgPool,
+    socket: std::path::PathBuf,
+    enabled: bool,
+) -> (
+    canterlot_hub::testkit::TestHub,
+    canterlot_hub::testkit::TestClient,
+) {
+    use canterlot_hub::{config::DictationConfig, testkit};
+    let hub = testkit::spawn_test_hub_with(
+        pool,
+        testkit::TestHubOptions {
+            http: Some(testkit::test_http_config()),
+            dictation: Some(DictationConfig { enabled, socket }),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = testkit::TestClient::over_socket(hub.http_addr())
+        .await
+        .as_owner();
+    (hub, client)
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn status_reports_disabled_without_touching_the_socket(pool: PgPool) {
+    let (_hub, client) = hub_with_dictation(
+        pool,
+        fake::missing_socket(std::path::Path::new("/nonexistent")),
+        false,
+    )
+    .await;
+    let response = client
+        .send(Method::GET, "/api/v1/dictation/status", None, None)
+        .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.json::<Value>(),
+        json!({"available": false, "reason": "disabled", "mode": null, "engine": null})
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn status_reports_no_service_when_the_socket_is_missing(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_hub, client) = hub_with_dictation(pool, fake::missing_socket(dir.path()), true).await;
+    let response = client
+        .send(Method::GET, "/api/v1/dictation/status", None, None)
+        .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.json::<Value>(),
+        json!({"available": false, "reason": "no_service", "mode": null, "engine": null})
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn status_copies_health_and_caches_it_for_ten_seconds(pool: PgPool) {
+    let speech = fake::start(|mut conn| async move {
+        let Some(request) = conn.next().await else {
+            return;
+        };
+        assert_eq!(request["type"], "health");
+        conn.send(json!({
+            "type": "health",
+            "ok": true,
+            "engine": "warm",
+            "mode": "gpu",
+            "model": "parakeet",
+            "busy": false
+        }))
+        .await;
+    })
+    .await;
+    let (_hub, client) = hub_with_dictation(pool, speech.socket.clone(), true).await;
+    let expected = json!({"available": true, "reason": null, "mode": "gpu", "engine": "warm"});
+    for _ in 0..3 {
+        let response = client
+            .send(Method::GET, "/api/v1/dictation/status", None, None)
+            .await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.json::<Value>(), expected);
+    }
+    // Один запрос health на все вызовы внутри десятисекундного окна.
+    assert_eq!(
+        speech.connections.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn status_reports_unhealthy_and_failed_loads(pool: PgPool) {
+    let speech = fake::start(|mut conn| async move {
+        let _ = conn.next().await;
+        conn.send(json!({"type": "health", "ok": false, "engine": "cold", "mode": null, "model": "m", "busy": false}))
+            .await;
+    })
+    .await;
+    let (_hub, client) = hub_with_dictation(pool.clone(), speech.socket.clone(), true).await;
+    let response = client
+        .send(Method::GET, "/api/v1/dictation/status", None, None)
+        .await;
+    assert_eq!(
+        response.json::<Value>(),
+        json!({"available": false, "reason": "unhealthy", "mode": null, "engine": "cold"})
+    );
+
+    // Служба отвечает мусором — это тоже недоступность, а не unhealthy.
+    let speech = fake::start(|mut conn| async move {
+        let _ = conn.next().await;
+        conn.send(json!({"type": "state", "state": "listening", "mode": "gpu"}))
+            .await;
+    })
+    .await;
+    let (_hub, client) = hub_with_dictation(pool, speech.socket.clone(), true).await;
+    let response = client
+        .send(Method::GET, "/api/v1/dictation/status", None, None)
+        .await;
+    assert_eq!(
+        response.json::<Value>(),
+        json!({"available": false, "reason": "no_service", "mode": null, "engine": null})
+    );
+}

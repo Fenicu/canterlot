@@ -96,6 +96,8 @@ pub struct AppDeps {
     pub auth: AuthConfig,
     /// `[dictation]`: живая диктовка через службу распознавания речи.
     pub dictation: DictationConfig,
+    /// Сроки диктовки: контрактные умолчания, в тестах короче.
+    pub dictation_timers: crate::dictation::Timers,
     /// Хеширование паролей: боевые параметры argon2, в тестах дешёвые.
     pub passwords: crate::owner_auth::password::Passwords,
     pub shutdown: CancellationToken,
@@ -128,6 +130,8 @@ pub struct AppState {
     pub user_header: HeaderName,
     pub auth: Arc<AuthConfig>,
     pub dictation: Arc<DictationConfig>,
+    pub dictation_timers: Arc<crate::dictation::Timers>,
+    pub dictation_state: Arc<crate::dictation::State>,
     pub passwords: crate::owner_auth::password::Passwords,
     /// Место по IP из `[auth.geoip].path`; файл перечитывается при смене.
     pub geo: Arc<crate::owner_auth::geo::Geo>,
@@ -177,6 +181,8 @@ impl AppState {
             )),
             auth: Arc::new(deps.auth),
             dictation: Arc::new(deps.dictation),
+            dictation_timers: Arc::new(deps.dictation_timers),
+            dictation_state: Arc::new(crate::dictation::State::new()),
             passwords: deps.passwords,
             ws_tasks: tokio_util::task::TaskTracker::new(),
             #[cfg(feature = "fault-injection")]

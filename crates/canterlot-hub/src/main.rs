@@ -505,6 +505,7 @@ async fn serve(
             manifest,
             auth,
             dictation,
+            dictation_timers: Default::default(),
             passwords: Default::default(),
             shutdown: http_root.clone(),
         });
