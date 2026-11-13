@@ -34,12 +34,17 @@ const LIVENESS_POLL: Duration = Duration::from_millis(500);
 const BIND_RETRY: Duration = Duration::from_secs(5);
 const FIRST_LINE_TIMEOUT: Duration = Duration::from_secs(10);
 const STATE_VERSION: u32 = 1;
+/// Придержка выдачи после рестарта с непустой очередью: ожидающие переподключаются
+/// шагом 250 мс, за это время они возвращаются на свои места по времени запроса.
+pub const RESTORE_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub socket: PathBuf,
     pub state_file: PathBuf,
     pub slots: u32,
+    /// Сколько придерживать выдачу после восстановления непустой очереди.
+    pub restore_grace: Duration,
 }
 
 impl ServerConfig {
@@ -48,6 +53,7 @@ impl ServerConfig {
             socket: super::socket_path(runtime_dir, data_dir),
             state_file: data_dir.join(super::STATE_FILE),
             slots,
+            restore_grace: RESTORE_GRACE,
         }
     }
 }
@@ -83,16 +89,37 @@ struct Persisted {
 struct StateFile {
     version: u32,
     grants: Vec<Persisted>,
+    /// Ожидающих в памяти нет, но их место в очереди переживает рестарт числом:
+    /// по нему решается, придерживать ли выдачу, пока они переподключаются.
+    #[serde(default)]
+    waiters: u32,
+}
+
+/// Что дал файл состояния.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Restored {
+    /// Файл был: очередь могла существовать.
+    file: bool,
+    /// Сколько ожидающих было в момент последней записи.
+    waiters: u32,
 }
 
 struct State {
     scheduler: Scheduler<Meta>,
 }
 
+/// Запись снимка состояния в файл: подменяется в тестах, чтобы видеть, когда и в каком
+/// порядке идёт запись.
+type Write = Arc<dyn Fn(&Path, &StateFile) + Send + Sync>;
+
 struct Shared {
     state: Mutex<State>,
     changes: watch::Sender<Snapshot>,
     state_file: PathBuf,
+    /// Один писатель за раз: снимок снимается уже после того, как очередь дошла до него,
+    /// поэтому ранняя запись не может лечь поверх поздней и файл не стареет.
+    writing: tokio::sync::Mutex<()>,
+    write: Write,
     nproc: u32,
     /// Ошибка чтения `/proc` уже залогирована: не повторять её каждые 500 мс.
     liveness_warned: AtomicBool,
@@ -110,22 +137,29 @@ impl LeaseServer {
     pub fn start(config: ServerConfig, shutdown: watch::Receiver<bool>) -> Self {
         let mut scheduler = Scheduler::new(config.slots);
         let restored = restore(&config.state_file, &mut scheduler);
+        let grace = (restored.waiters > 0)
+            .then_some(config.restore_grace)
+            .filter(|grace| !grace.is_zero());
+        if let Some(grace) = grace {
+            scheduler.hold(super::now_ms().saturating_add(grace_ms(grace)));
+        }
         let shared = Arc::new(Shared {
             state: Mutex::new(State { scheduler }),
             changes: watch::channel(Snapshot::default()).0,
             state_file: config.state_file.clone(),
+            writing: tokio::sync::Mutex::new(()),
+            write: Arc::new(write_state),
             nproc: super::nproc(),
             liveness_warned: AtomicBool::new(false),
         });
         {
             let state = shared.state.lock().expect("lease state");
-            if restored {
-                persist(&shared.state_file, &state.scheduler);
-            }
             shared.publish(&state);
         }
+        // Запись восстановленного состояния — уже в задаче сервера: старт не ждёт диск.
+        let initial = restored.file.then_some(restored.waiters);
         let snapshot = shared.changes.subscribe();
-        let task = tokio::spawn(serve(shared, config.socket, shutdown));
+        let task = tokio::spawn(serve(shared, config.socket, shutdown, grace, initial));
         Self { snapshot, task }
     }
 
@@ -146,21 +180,27 @@ impl Drop for LeaseServer {
     }
 }
 
-/// Загружает выданные аренды и оставляет те, чья обёртка жива. `true`, если файл был.
-fn restore(path: &Path, scheduler: &mut Scheduler<Meta>) -> bool {
+/// Загружает выданные аренды и оставляет те, чья обёртка жива.
+fn restore(path: &Path, scheduler: &mut Scheduler<Meta>) -> Restored {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Restored::default(),
         Err(error) => {
             tracing::warn!(%error, "lease state unreadable, starting empty");
-            return true;
+            return Restored {
+                file: true,
+                waiters: 0,
+            };
         }
     };
     let file: StateFile = match serde_json::from_slice(&bytes) {
         Ok(file) => file,
         Err(error) => {
             tracing::warn!(%error, "lease state invalid, starting empty");
-            return true;
+            return Restored {
+                file: true,
+                waiters: 0,
+            };
         }
     };
     for grant in file.grants {
@@ -190,13 +230,21 @@ fn restore(path: &Path, scheduler: &mut Scheduler<Meta>) -> bool {
             },
         );
     }
-    true
+    Restored {
+        file: true,
+        waiters: file.waiters,
+    }
 }
 
-/// Атомарная замена файла: сбой посреди записи оставляет прошлую версию.
-fn persist(path: &Path, scheduler: &Scheduler<Meta>) {
-    let file = StateFile {
+fn grace_ms(grace: Duration) -> u64 {
+    u64::try_from(grace.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Снимок выданных аренд для `leases.json`.
+fn state_file_of(scheduler: &Scheduler<Meta>, waiters: u32) -> StateFile {
+    StateFile {
         version: STATE_VERSION,
+        waiters,
         grants: scheduler
             .holders()
             .iter()
@@ -213,15 +261,31 @@ fn persist(path: &Path, scheduler: &Scheduler<Meta>) {
                 dir: entry.meta.dir.clone(),
             })
             .collect(),
-    };
+    }
+}
+
+/// Снимок и запись подряд, без очереди: для тестов и для файла, который надо посеять.
+#[cfg(test)]
+fn persist(path: &Path, scheduler: &Scheduler<Meta>) {
+    let waiters = u32::try_from(scheduler.waiters().len()).unwrap_or(u32::MAX);
+    write_state(path, &state_file_of(scheduler, waiters));
+}
+
+/// Атомарная замена файла: сбой посреди записи оставляет прошлую версию.
+fn write_state(path: &Path, file: &StateFile) {
     let write = || -> io::Result<()> {
         let temporary = path.with_extension("json.tmp");
         let mut options = fs::OpenOptions::new();
         options.write(true).create(true).truncate(true).mode(0o600);
         let mut out = options.open(&temporary)?;
-        io::Write::write_all(&mut out, &serde_json::to_vec_pretty(&file)?)?;
+        io::Write::write_all(&mut out, &serde_json::to_vec_pretty(file)?)?;
         out.sync_all()?;
-        fs::rename(&temporary, path)
+        fs::rename(&temporary, path)?;
+        // Переименование переживает сбой питания только после fsync каталога.
+        if let Some(directory) = path.parent() {
+            fs::File::open(directory)?.sync_all()?;
+        }
+        Ok(())
     };
     if let Err(error) = write() {
         tracing::warn!(%error, path = %path.display(), "lease state not saved");
@@ -338,46 +402,94 @@ impl Shared {
         });
     }
 
-    fn release(&self, id: &str, reason: &'static str) {
-        let mut state = self.state.lock().expect("lease state");
-        let was_holder = state.scheduler.holder(id).is_some();
-        let (removed, granted) = state.scheduler.release(id, super::now_ms());
-        if let Some(entry) = removed {
-            tracing::info!(lease_id = %id, kind = entry.kind.as_str(), reason, holder = was_holder, "lease released");
-            if was_holder || !granted.is_empty() {
-                persist(&self.state_file, &state.scheduler);
+    /// Снимок состояния — под замком, запись с fsync — вне его и в блокирующем пуле:
+    /// медленный диск не держит ни замок состояния, ни потоки рантайма. Снимок уходит
+    /// подписчикам только после записи: что клиент увидел, то уже сохранено.
+    async fn save(&self) {
+        self.save_waiters(None).await;
+    }
+
+    /// Запись с числом ожидающих: при старте в памяти их ещё нет, а место в очереди
+    /// переживает рестарт именно этим числом.
+    async fn save_waiters(&self, waiters: Option<u32>) {
+        let _turn = self.writing.lock().await;
+        let file = {
+            let state = self.state.lock().expect("lease state");
+            let waiters = waiters.unwrap_or_else(|| {
+                u32::try_from(state.scheduler.waiters().len()).unwrap_or(u32::MAX)
+            });
+            state_file_of(&state.scheduler, waiters)
+        };
+        let write = self.write.clone();
+        let path = self.state_file.clone();
+        if tokio::task::spawn_blocking(move || write(&path, &file))
+            .await
+            .is_err()
+        {
+            tracing::warn!(path = %self.state_file.display(), "lease state not saved");
+        }
+        let state = self.state.lock().expect("lease state");
+        self.publish(&state);
+    }
+
+    async fn release(&self, id: &str, reason: &'static str) {
+        let released = {
+            let mut state = self.state.lock().expect("lease state");
+            let was_holder = state.scheduler.holder(id).is_some();
+            let (removed, _) = state.scheduler.release(id, super::now_ms());
+            if let Some(entry) = &removed {
+                tracing::info!(lease_id = %id, kind = entry.kind.as_str(), reason, holder = was_holder, "lease released");
             }
-            self.publish(&state);
+            removed.is_some()
+        };
+        // Ушедший ожидающий тоже меняет файл: по числу ожидающих решается придержка.
+        if released {
+            self.save().await;
         }
     }
 
-    fn sweep(&self) {
-        let mut state = self.state.lock().expect("lease state");
-        let now = super::now_ms();
-        let mut dead = Vec::new();
-        let mut unknown = None;
-        for entry in state
-            .scheduler
-            .holders()
-            .iter()
-            .chain(state.scheduler.waiters())
-        {
-            match liveness(entry.meta.wrapper_pid, entry.meta.start_ticks) {
-                Liveness::Alive => {}
-                Liveness::Dead => dead.push(entry.id.clone()),
-                Liveness::Unknown(error) => unknown = Some(error),
+    /// Придержка выдачи кончилась: ожидающие вернулись, очередь решает как обычно.
+    async fn end_grace(&self) {
+        let granted = {
+            let mut state = self.state.lock().expect("lease state");
+            !state.scheduler.resume(super::now_ms()).is_empty()
+        };
+        if granted {
+            self.save().await;
+        }
+    }
+
+    async fn sweep(&self) {
+        let released = {
+            let mut state = self.state.lock().expect("lease state");
+            let now = super::now_ms();
+            let mut dead = Vec::new();
+            let mut unknown = None;
+            for entry in state
+                .scheduler
+                .holders()
+                .iter()
+                .chain(state.scheduler.waiters())
+            {
+                match liveness(entry.meta.wrapper_pid, entry.meta.start_ticks) {
+                    Liveness::Alive => {}
+                    Liveness::Dead => dead.push(entry.id.clone()),
+                    Liveness::Unknown(error) => unknown = Some(error),
+                }
             }
+            self.report_liveness(unknown);
+            if dead.is_empty() {
+                return;
+            }
+            for id in &dead {
+                state.scheduler.release(id, now);
+                tracing::info!(lease_id = %id, "lease wrapper died, released");
+            }
+            true
+        };
+        if released {
+            self.save().await;
         }
-        self.report_liveness(unknown);
-        if dead.is_empty() {
-            return;
-        }
-        for id in &dead {
-            state.scheduler.release(id, now);
-            tracing::info!(lease_id = %id, "lease wrapper died, released");
-        }
-        persist(&self.state_file, &state.scheduler);
-        self.publish(&state);
     }
 
     /// Ошибку чтения `/proc` показываем один раз до первого успешного чтения:
@@ -394,17 +506,35 @@ impl Shared {
     }
 }
 
-async fn serve(shared: Arc<Shared>, socket: PathBuf, mut shutdown: watch::Receiver<bool>) {
+async fn serve(
+    shared: Arc<Shared>,
+    socket: PathBuf,
+    mut shutdown: watch::Receiver<bool>,
+    grace: Option<Duration>,
+    initial: Option<u32>,
+) {
     let sweeper = {
         let shared = shared.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(LIVENESS_POLL).await;
-                shared.sweep();
+                shared.sweep().await;
             }
         })
     };
     let _sweeper = AbortOnDrop(sweeper);
+    let expiring = grace.map(|grace| {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            shared.end_grace().await;
+        })
+    });
+    let _expiring = expiring.map(AbortOnDrop);
+    // До первого соединения: файл с восстановленными арендами и прежним числом ожидающих.
+    if let Some(waiters) = initial {
+        shared.save_waiters(Some(waiters)).await;
+    }
     let mut warned = false;
     let (listener, _lock) = loop {
         match tokio::task::spawn_blocking({
@@ -676,15 +806,13 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
             {
                 let mut state = shared.state.lock().expect("lease state");
                 let now = super::now_ms();
-                let phantom = release_phantom(&mut state.scheduler, pid, start_ticks, now);
-                let granted = state
+                release_phantom(&mut state.scheduler, pid, start_ticks, now);
+                state
                     .scheduler
                     .request(id.clone(), kind, requested_at_ms, now, meta);
-                if !phantom.is_empty() || !granted.is_empty() {
-                    persist(&shared.state_file, &state.scheduler);
-                }
-                shared.publish(&state);
             }
+            // Заявка всегда меняет очередь: в файл идут и держатели, и число ожидающих.
+            shared.save().await;
             tracing::info!(lease_id = %id, kind = kind.as_str(), pid, "lease requested");
             if wait(&shared, &id, &mut write, &mut lines, &mut changes).await {
                 hold(&shared, &id, lines).await;
@@ -775,7 +903,7 @@ async fn wait(
         match status {
             Status::Granted(message) => {
                 if send(write, message).await.is_err() {
-                    shared.release(id, "client gone");
+                    shared.release(id, "client gone").await;
                     return false;
                 }
                 return true;
@@ -794,7 +922,7 @@ async fn wait(
                         holders,
                     };
                     if send(write, message).await.is_err() {
-                        shared.release(id, "client gone");
+                        shared.release(id, "client gone").await;
                         return false;
                     }
                 }
@@ -806,7 +934,7 @@ async fn wait(
             }
             line = lines.next_line() => {
                 if !matches!(line, Ok(Some(_))) {
-                    shared.release(id, "client closed while waiting");
+                    shared.release(id, "client closed while waiting").await;
                     return false;
                 }
             }
@@ -817,7 +945,7 @@ async fn wait(
 /// Держит аренду до закрытия соединения клиентом.
 async fn hold(shared: &Shared, id: &str, mut lines: CappedLines<tokio::net::unix::OwnedReadHalf>) {
     while let Ok(Some(_)) = lines.next_line().await {}
-    shared.release(id, "client closed");
+    shared.release(id, "client closed").await;
 }
 
 /// Активные аренды для проверки в тестах без сокета.
@@ -836,6 +964,8 @@ fn holder_ids(shared: &Shared) -> std::collections::HashSet<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
 
     fn meta(pid: u32) -> Meta {
@@ -845,6 +975,23 @@ mod tests {
             execution_id: None,
             label: "l".into(),
             dir: "d".into(),
+        }
+    }
+
+    /// Очередь из держателя и ожидающего на один слот.
+    fn shared_at(path: &Path, write: Write) -> Shared {
+        let mut scheduler = Scheduler::new(1);
+        let me = std::process::id();
+        scheduler.request("held".into(), Kind::Build, 1, 10, meta(me));
+        scheduler.request("queued".into(), Kind::Build, 2, 20, meta(me));
+        Shared {
+            state: Mutex::new(State { scheduler }),
+            changes: watch::channel(Snapshot::default()).0,
+            state_file: path.to_path_buf(),
+            writing: tokio::sync::Mutex::new(()),
+            write,
+            nproc: 4,
+            liveness_warned: AtomicBool::new(false),
         }
     }
 
@@ -865,7 +1012,7 @@ mod tests {
         assert_eq!(saved.grants[0].since, 10);
 
         let mut after = Scheduler::new(2);
-        assert!(restore(&path, &mut after));
+        assert!(restore(&path, &mut after).file);
         let ids: Vec<_> = after.holders().iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["live"]);
         assert_eq!(after.holders()[0].since_ms, Some(10));
@@ -877,19 +1024,41 @@ mod tests {
         );
     }
 
+    /// Место ожидающих переживает рестарт числом: по нему решается придержка выдачи.
+    #[test]
+    fn persisted_queue_restores_as_a_waiter_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("leases.json");
+        let mut before = Scheduler::new(1);
+        let me = std::process::id();
+        before.request("held".into(), Kind::Build, 1, 10, meta(me));
+        before.request("queued".into(), Kind::Build, 2, 20, meta(me));
+        persist(&path, &before);
+        let saved: StateFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.waiters, 1);
+
+        let mut after = Scheduler::new(1);
+        let restored = restore(&path, &mut after);
+        assert_eq!(restored.waiters, 1);
+        assert!(restored.file);
+        assert_eq!(after.waiters().len(), 0);
+    }
+
     #[test]
     fn broken_state_file_starts_empty() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("leases.json");
         fs::write(&path, b"{not json").unwrap();
         let mut scheduler = Scheduler::<Meta>::new(2);
-        assert!(restore(&path, &mut scheduler));
+        let restored = restore(&path, &mut scheduler);
+        assert!(restored.file);
+        assert_eq!(restored.waiters, 0);
         assert!(scheduler.holders().is_empty());
-        assert!(!restore(&directory.path().join("missing"), &mut scheduler));
+        assert!(!restore(&directory.path().join("missing"), &mut scheduler).file);
     }
 
-    #[test]
-    fn sweep_releases_dead_holders_and_grants_next() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_releases_dead_holders_and_grants_next() {
         let directory = tempfile::tempdir().unwrap();
         let mut scheduler = Scheduler::new(1);
         let me = std::process::id();
@@ -901,10 +1070,12 @@ mod tests {
             state: Mutex::new(State { scheduler }),
             changes: watch::channel(Snapshot::default()).0,
             state_file: directory.path().join("leases.json"),
+            writing: tokio::sync::Mutex::new(()),
+            write: Arc::new(write_state),
             nproc: 4,
             liveness_warned: AtomicBool::new(false),
         };
-        shared.sweep();
+        shared.sweep().await;
         assert_eq!(
             holder_ids(&shared),
             std::collections::HashSet::from(["next".to_owned()])
@@ -914,6 +1085,67 @@ mod tests {
                 .unwrap();
         assert_eq!(saved.grants[0].lease_id, "next");
         assert_eq!(shared.changes.borrow().holders[0].lease_id, "next");
+    }
+
+    /// Запись состояния идёт не под замком состояния: на заторможенном диске иначе
+    /// встают все соединения аренды и потоки рантайма.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn state_write_does_not_hold_the_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let (started, began) = std::sync::mpsc::channel();
+        let (release, finish) = std::sync::mpsc::channel::<()>();
+        // Каналы за замком: сама запись Sync, а `Sender` и `Receiver` — нет.
+        let gate = std::sync::Mutex::new((started, finish));
+        let shared = Arc::new(shared_at(
+            &directory.path().join("leases.json"),
+            Arc::new(move |_, _| {
+                let (started, finish) = &*gate.lock().unwrap();
+                let _ = started.send(());
+                let _ = finish.recv_timeout(Duration::from_secs(10));
+            }),
+        ));
+        let saving = tokio::spawn({
+            let shared = shared.clone();
+            async move { shared.save().await }
+        });
+        began.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Пока идёт запись, замок состояния свободен: соединения аренды отвечают.
+        let free = shared.state.try_lock().is_ok();
+        release.send(()).unwrap();
+        saving.await.unwrap();
+        assert!(free, "the state lock was held during the write");
+    }
+
+    /// Ранний снимок не ложится поверх позднего: писатели идут чередом и снимают
+    /// состояние уже после того, как дошла очередь.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn older_snapshot_does_not_overwrite_a_newer_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("leases.json");
+        let (started, began) = std::sync::mpsc::channel();
+        let started = std::sync::Mutex::new(started);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first = calls.clone();
+        let shared = Arc::new(shared_at(
+            &path,
+            Arc::new(move |path: &Path, file: &StateFile| {
+                if first.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let _ = started.lock().unwrap().send(());
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                write_state(path, file);
+            }),
+        ));
+        let saving = tokio::spawn({
+            let shared = shared.clone();
+            async move { shared.save().await }
+        });
+        began.recv_timeout(Duration::from_secs(10)).unwrap();
+        // Снимок первой записи снят; отпускаем держателя и пишем уже новое состояние.
+        shared.release("held", "test").await;
+        saving.await.unwrap();
+        let saved: StateFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.grants[0].lease_id, "queued");
     }
 
     #[test]

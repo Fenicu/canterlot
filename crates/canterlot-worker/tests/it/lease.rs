@@ -23,6 +23,7 @@ struct Fixture {
     stop: watch::Sender<bool>,
     server: Option<LeaseServer>,
     slots: u32,
+    restore_grace: Duration,
 }
 
 impl Fixture {
@@ -36,17 +37,20 @@ impl Fixture {
             stop,
             server: None,
             slots,
+            restore_grace: lease::server::RESTORE_GRACE,
         };
         fixture.start().await;
         fixture
     }
 
     fn config(&self) -> ServerConfig {
-        ServerConfig::new(
+        let mut config = ServerConfig::new(
             Some(&self.root.path().join("runtime")),
             &self.root.path().join("data"),
             self.slots,
-        )
+        );
+        config.restore_grace = self.restore_grace;
+        config
     }
 
     fn socket(&self) -> PathBuf {
@@ -98,8 +102,11 @@ impl Fixture {
     fn job(&self, kind: &str, name: &str) -> Job {
         let held = self.path(&format!("{name}.held"));
         let go = self.path(&format!("{name}.go"));
+        let pid = self.path(&format!("{name}.pid"));
         let script = format!(
-            "echo \"$CANTERLOT_LEASE_HELD $CANTERLOT_TEST_THREADS $CARGO_BUILD_JOBS $PW_WORKERS $CANTERLOT_LEASE_BUDGET\" > {held:?}.tmp && mv {held:?}.tmp {held:?}; while [ ! -e {go:?} ]; do sleep 0.05; done"
+            "echo $$ > {pid:?}.tmp && mv {pid:?}.tmp {pid:?}; \
+             echo \"$CANTERLOT_LEASE_HELD $CANTERLOT_TEST_THREADS $CARGO_BUILD_JOBS $PW_WORKERS $CANTERLOT_LEASE_BUDGET\" > {held:?}.tmp && mv {held:?}.tmp {held:?}; \
+             while [ ! -e {go:?} ]; do sleep 0.05; done"
         );
         let mut command = self.wrapper(kind, &["sh", "-c", &script]);
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -107,6 +114,7 @@ impl Fixture {
             child: command.spawn().unwrap(),
             held,
             go,
+            command_pid: pid,
             reaped: false,
         }
     }
@@ -137,6 +145,8 @@ struct Job {
     child: std::process::Child,
     held: PathBuf,
     go: PathBuf,
+    /// pid и номер группы самой команды: она может быть в своей группе, не в группе обёртки.
+    command_pid: PathBuf,
     reaped: bool,
 }
 
@@ -179,9 +189,15 @@ impl Drop for Job {
         if self.reaped {
             return;
         }
-        // Неубранный лидер держит номер группы: команда убитой обёртки уходит вместе с ней.
-        if let Some(group) = rustix::process::Pid::from_raw(self.pid()) {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        // Неубранный лидер держит номер группы: убиваем группу обёртки и отдельную
+        // группу самой команды, иначе она пережила бы обёртку.
+        let command = std::fs::read_to_string(&self.command_pid)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok());
+        for pid in [Some(self.pid()), command].into_iter().flatten() {
+            if let Some(group) = rustix::process::Pid::from_raw(pid) {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
         }
         let _ = self.child.wait();
     }
@@ -302,6 +318,44 @@ async fn restart_keeps_live_grant_and_drops_dead_one() {
     fourth.wait_granted().await;
     assert!(third.finish().await.success());
     assert!(fourth.finish().await.success());
+}
+
+/// Рестарт с непустой очередью: ожидающий гейт переподключается и не теряет места —
+/// сборка, пришедшая в окно, не получает свободный слот раньше него.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_grace_keeps_the_queued_gate_ahead_of_a_new_build() {
+    let mut fixture = Fixture::new(2).await;
+    fixture.restore_grace = Duration::from_millis(1500);
+    let holder = fixture.job("build", "holder");
+    holder.wait_granted().await;
+    let gate = fixture.job("gate", "queued-gate");
+    fixture.waiters(1).await;
+
+    fixture.restart().await;
+    fixture.start().await;
+    // Сборка просит слот раньше, чем гейт успел переподключиться: один слот свободен.
+    let late = fixture.job("build", "late");
+    fixture.waiters(2).await;
+    let kinds: Vec<_> = fixture
+        .snapshot()
+        .waiters
+        .iter()
+        .map(|waiter| waiter.kind.clone())
+        .collect();
+    assert_eq!(kinds, ["gate", "build"], "gate lost its place");
+
+    // Окно придержки прошло: поздняя сборка не обогнала гейт.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(!late.granted(), "a new build overtook the restored queue");
+    assert!(!gate.granted());
+
+    assert!(holder.finish().await.success());
+    gate.wait_granted().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!late.granted(), "build started next to a gate");
+    assert!(gate.finish().await.success());
+    late.wait_granted().await;
+    assert!(late.finish().await.success());
 }
 
 fn output(mut command: Command) -> (std::process::ExitStatus, String, String) {
@@ -485,6 +539,60 @@ async fn exit_codes_and_signals_pass_through() {
 mod libc_signal {
     pub const INT: i32 = 2;
     pub const TERM: i32 = 15;
+}
+
+/// Куда уходит TERM: всей группе обёртки или только ей самой.
+#[derive(Clone, Copy)]
+enum Term {
+    Group,
+    Wrapper,
+}
+
+/// Сколько раз команда под арендой получила TERM. Команда ловит его и живёт до `done`.
+async fn term_deliveries(fixture: &Fixture, name: &str, target: Term) -> usize {
+    let log = fixture.path(&format!("{name}-term"));
+    let ready = fixture.path(&format!("{name}-ready"));
+    let done = fixture.path(&format!("{name}-done"));
+    let script = format!(
+        "trap 'echo term >> {log:?}' TERM; : > {ready:?}; while [ ! -e {done:?} ]; do sleep 0.05; done"
+    );
+    let mut command = fixture.wrapper("build", &["sh", "-c", &script]);
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut wrapper = command.spawn().unwrap();
+    let group = rustix::process::Pid::from_raw(i32::try_from(wrapper.id()).unwrap()).unwrap();
+    wait_for("command start", || ready.exists()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    match target {
+        Term::Group => rustix::process::kill_process_group(group, rustix::process::Signal::TERM),
+        Term::Wrapper => rustix::process::kill_process(group, rustix::process::Signal::TERM),
+    }
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let delivered = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    std::fs::write(&done, b"").unwrap();
+    let status = wrapper.wait().unwrap();
+    assert!(status.success(), "{status:?}");
+    delivered
+}
+
+/// Групповой TERM и TERM одной обёртке доходят до команды ровно по разу: в исполнениях
+/// агента и скриптах у неё своя группа процессов, и обёртка пересылает сигнал сама.
+#[tokio::test(flavor = "multi_thread")]
+async fn term_reaches_the_command_once() {
+    let fixture = Fixture::new(1).await;
+    assert_eq!(
+        term_deliveries(&fixture, "group", Term::Group).await,
+        1,
+        "group TERM reached the command twice"
+    );
+    assert_eq!(
+        term_deliveries(&fixture, "wrapper", Term::Wrapper).await,
+        1,
+        "targeted TERM reached the command twice"
+    );
 }
 
 /// Ctrl-C терминала достаётся всей группе: команда умирает, обёртка повторяет её сигнал
