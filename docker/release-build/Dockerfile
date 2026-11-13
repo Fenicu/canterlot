@@ -76,6 +76,12 @@ RUN set -eu; mkdir -p /usr/local/cuda-12.9 /tmp/cuda; cd /tmp/cuda; \
     /usr/local/cuda-12.9/bin/nvcc --version; \
     chmod -R a+rX /usr/local/cuda-12.9; rm -rf /tmp/cuda
 ENV CUDA_PATH=/usr/local/cuda-12.9
+# glibc 2.41 объявляет sinpi/cospi/sinpif/cospif с noexcept, а crt/math_functions.h
+# из CUDA 12.9 — без него, и nvcc падает уже на проверке компилятора. Правка та же,
+# что в пакетах CUDA дистрибутивов: добавить noexcept (true) к четырём объявлениям.
+RUN header=/usr/local/cuda-12.9/include/crt/math_functions.h \
+    && sed -i -E 's/^(extern __DEVICE_FUNCTIONS_DECL__ __device_builtin__ (double|float) +(sinpi|sinpif|cospi|cospif)\((double|float) x\));$/\1 noexcept (true);/' "$header" \
+    && test "$(grep -cE '(sinpi|sinpif|cospi|cospif)\((double|float) x\) noexcept \(true\);' "$header")" = 4
 
 # HOME произвольного uid: /home/canterlot открыт на запись, чтобы npm и git не
 # падали на первом же обращении. Кэши (cargo, target, npm) монтируются снаружи.
