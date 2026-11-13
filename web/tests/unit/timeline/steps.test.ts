@@ -81,6 +81,13 @@ describe("step groups", () => {
     expect(fold([...older, ...middle, ...newer], {}, folds)[0]?.key).toBe(first);
   });
 
+  it("three_consecutive_quiet_calls_fold_into_one_quiet_row", () => {
+    const tools = ["ToolSearch", "Monitor", "TaskStop"];
+    const list = tools.flatMap((tool) => step(tool));
+    const items = fold(list, { quiet: (block) => tools.includes(block.toolName ?? "") });
+    expect(shape(items)).toEqual(["quiet:3"]);
+  });
+
   it("a_split_group_gets_two_names", () => {
     const folds = new FeedFolds();
     const left = [...step(), ...step(), ...step()];

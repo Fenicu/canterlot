@@ -54,6 +54,8 @@ function isTool(entry: TimelineEntry): entry is BlockEntry {
 
 function isStep(entry: TimelineEntry, ctx: FoldContext): entry is BlockEntry {
   if (entry.kind !== "block" || ctx.stays?.(entry.block)) return false;
+  // Служебные вызовы собираются своей бледной строкой, а не шагами хода.
+  if (entry.block.kind === "tool_call" && ctx.quiet?.(entry.block)) return false;
   return entry.block.kind === "reasoning" || isTool(entry);
 }
 
@@ -110,28 +112,20 @@ export function foldSteps(list: TimelineEntry[], ctx: FoldContext): CardItem[] {
   const items: CardItem[] = [];
   const taken = new Set<string>();
   let run: TimelineEntry[] = [];
+  let quiet: TimelineEntry[] = [];
   const plain = (entry: TimelineEntry): void => {
     items.push({ kind: "entry", key: entry.key, entry });
   };
   const quietCall = (entry: TimelineEntry): boolean =>
     entry.kind === "block" && entry.block.kind === "tool_call" && ctx.quiet?.(entry.block) === true;
+  const closeQuiet = (): void => {
+    if (quiet.length >= 2) items.push({ kind: "quiet", key: `quiet:${quiet[0]!.key}`, entries: quiet });
+    else quiet.forEach(plain);
+    quiet = [];
+  };
   // Результат служебного вызова без своего вызова в ленте не стоит: он идёт вместе с вызовом.
   const spill = (entries: TimelineEntry[]): void => {
-    let quiet: TimelineEntry[] = [];
-    const close = (): void => {
-      if (quiet.length >= 2) items.push({ kind: "quiet", key: `quiet:${quiet[0]!.key}`, entries: quiet });
-      else quiet.forEach(plain);
-      quiet = [];
-    };
-    for (const entry of entries) {
-      if (quietCall(entry)) {
-        quiet.push(entry);
-        continue;
-      }
-      close();
-      plain(entry);
-    }
-    close();
+    for (const entry of entries) plain(entry);
   };
   const flush = (following: number): void => {
     if (run.filter(isTool).length + following >= MIN_STEPS) items.push(group(run, ctx, taken));
@@ -139,6 +133,12 @@ export function foldSteps(list: TimelineEntry[], ctx: FoldContext): CardItem[] {
     run = [];
   };
   for (const entry of list) {
+    if (quietCall(entry)) {
+      if (run.length > 0) flush(0);
+      quiet.push(entry);
+      continue;
+    }
+    closeQuiet();
     if (isStep(entry, ctx) && !running(entry.block, ctx)) {
       run.push(entry);
       continue;
@@ -146,6 +146,7 @@ export function foldSteps(list: TimelineEntry[], ctx: FoldContext): CardItem[] {
     flush(isStep(entry, ctx) ? 1 : 0);
     plain(entry);
   }
+  closeQuiet();
   const lastTool = ctx.live ? run.findLastIndex(isTool) : -1;
   const tail = lastTool >= 0 ? run.splice(lastTool) : [];
   flush(tail.length > 0 ? 1 : 0);
