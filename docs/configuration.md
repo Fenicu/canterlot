@@ -169,14 +169,6 @@ machine_unavailable_after = "3m"
 # components = ["Responses", "Login"]
 ```
 
-Живая диктовка в PWA (кнопка микрофона в поле ввода) идёт через службу `canterlot-speech`: хаб пересылает ей звук по unix-сокету и возвращает распознанный текст. Таблица `[dictation]` необязательна: без неё диктовка включена, а сокет — `/run/canterlot-speech/speech.sock`. Относительный путь `socket` считается от каталога файла конфигурации. `enabled = false` оставляет маршруты на месте, но `GET /api/v1/dictation/status` отвечает `reason: "disabled"`, а начатая диктовка получает `speech_unavailable`. Неизвестный ключ останавливает запуск.
-
-```toml
-# [dictation]
-# enabled = true
-# socket = "/run/canterlot-speech/speech.sock"
-```
-
 `enabled = false` выключает опрос, и при запуске хаб забывает сохранённое чтение: маршрут, полоса лимитов, `GET /api/v1/limits` и `canterlot_limits` сразу видят `unknown`, а не ждут, пока данные устареют; провайдер, о сбое которого уже сообщено, получает событие `provider_status_changed` с `unknown`, и открытая PWA убирает слово. Ключи провайдеров — только `claude` и `codex`; неизвестный ключ, `interval` меньше минуты или адрес не http(s) останавливают запуск (`config_invalid_provider_status`). Хаб старше этой таблицы её не знает (`deny_unknown_fields`): перед его запуском таблицу нужно убрать.
 
 Пуши владельцу через [Gotify](https://gotify.net) включает необязательная таблица `[notify.gotify]`; без неё пушей нет. Пример (раскомментируйте):
@@ -547,6 +539,14 @@ canterlot-hub machine rotate-token --config ~/.config/canterlot/hub.toml --machi
 Этот флаг очищает привязку CJ; без него ротация сохраняет её. Сверка оставшихся
 нетерминальных исполнений относится к следующему этапу; сброс не подтверждает их завершение.
 `machine add` создаёт новую идентичность без привязки CJ.
+
+Живая диктовка в PWA (кнопка микрофона в поле ввода) идёт через службу `canterlot-speech`: хаб пересылает ей звук по unix-сокету и возвращает распознанный текст. Таблица `[dictation]` необязательна: без неё диктовка включена, а сокет — `/run/canterlot-speech/speech.sock`. Относительный путь `socket` считается от каталога файла конфигурации. `enabled = false` оставляет маршруты на месте, но `GET /api/v1/dictation/status` отвечает `reason: "disabled"`, а начатая диктовка получает `speech_unavailable`. Неизвестный ключ останавливает запуск.
+
+```toml
+# [dictation]
+# enabled = true
+# socket = "/run/canterlot-speech/speech.sock"
+```
 
 ## Служба распознавания речи (speech.toml)
 

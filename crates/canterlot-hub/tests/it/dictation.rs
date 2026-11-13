@@ -223,7 +223,6 @@ mod fake {
                 .await
                 .expect("fake speech write");
         }
-
     }
 
     pub struct FakeSpeech {
@@ -510,7 +509,6 @@ mod ws {
                 .await
                 .expect("a text frame before the deadline")
         }
-
     }
 }
 
