@@ -28,6 +28,10 @@ const phone = { ...devices['Pixel 7'], browserName: 'chromium' as const };
 const DICTATION_MEDIA_SPEC = /dictation-worklet\.spec\.ts$/;
 const dictationAudio = fakeAudioFile();
 const LAYOUT_SPEC = /desktop-layout\.spec\.ts$/;
+// testIgnore проекта заменяет общий, а не дополняет: проекты phone и desktop повторяют его сами.
+const baseIgnore = isStackOrPerf
+  ? [LAYOUT_SPEC]
+  : ['**/e2e/stack/**', '**/e2e/perf/**', ...(screenshots ? [] : ['**/e2e/screenshots/**']), LAYOUT_SPEC];
 const firefoxLayout = (name: string, width: number, height: number) => ({
   name,
   workers: 1,
@@ -39,9 +43,7 @@ const firefoxLayout = (name: string, width: number, height: number) => ({
 export default defineConfig({
   testDir: './e2e',
   // Проект budget зависит от phone и desktop, поэтому прогон `e2e/ui` тянул бы за собой и сквозные наборы, которым нужен стенд.
-  testIgnore: isStackOrPerf
-    ? LAYOUT_SPEC
-    : ['**/e2e/stack/**', '**/e2e/perf/**', ...(screenshots ? [] : ['**/e2e/screenshots/**']), LAYOUT_SPEC],
+  testIgnore: baseIgnore,
   // Тесты независимы: пара «проект, тест» занимает воркер сама. Стенд и перф делят одно состояние и идут по одному.
   fullyParallel: !isStackOrPerf,
   workers: isStackOrPerf ? 1 : workers,
@@ -52,8 +54,8 @@ export default defineConfig({
     ? undefined
     : { command: 'node e2e/edge/serve.mjs', url: origin, reuseExistingServer: false },
   projects: [
-    { name: 'phone', grepInvert: /render_budget_during_long_stream|owner_messages_jump_long_task/, testIgnore: DICTATION_MEDIA_SPEC, use: phone },
-    { name: 'desktop', workers: isStackOrPerf ? 1 : undefined, testIgnore: DICTATION_MEDIA_SPEC, use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } },
+    { name: 'phone', grepInvert: /render_budget_during_long_stream|owner_messages_jump_long_task/, testIgnore: [...baseIgnore, DICTATION_MEDIA_SPEC], use: phone },
+    { name: 'desktop', workers: isStackOrPerf ? 1 : undefined, testIgnore: [...baseIgnore, DICTATION_MEDIA_SPEC], use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } },
     {
       name: 'dictation-media',
       testMatch: DICTATION_MEDIA_SPEC,
