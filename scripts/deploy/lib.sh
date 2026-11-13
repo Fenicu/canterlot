@@ -739,8 +739,9 @@ speech_soft() {
     printf '[%s] SPEECH-SOFT: %s (dictation only, the release goes on)\n' "$(date -u +%H:%M:%S)" "$*" >&2
     SPEECH_ISSUES=$((SPEECH_ISSUES + 1))
 }
-# Виды WARN службы, которые ждут без базы: сбои движка. Мягкие и в журнале хаба.
-SPEECH_WARN_KINDS_SOFT="${SPEECH_WARN_KINDS_SOFT:-engine_load_failed engine_failed engine_exited}"
+# Виды WARN без базы, которые ждут: сбои движка службы (`engine_*`) и сбои
+# диктовки в журнале хаба (`speech_engine_failed`, `speech_protocol_error`).
+SPEECH_WARN_KINDS_SOFT="${SPEECH_WARN_KINDS_SOFT:-engine_load_failed engine_failed engine_exited speech_engine_failed speech_protocol_error}"
 speech_warn_kind_soft() {
     local k
     for k in ${SPEECH_WARN_KINDS_SOFT}; do

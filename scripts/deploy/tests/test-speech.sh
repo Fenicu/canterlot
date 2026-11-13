@@ -177,7 +177,8 @@ $(SPEECH_LINE WARN "engine exited" engine_exited)
 $(SPEECH_LINE WARN "engine exited" engine_exited)
 $(SPEECH_LINE WARN "socket bind failed" socket_bind_failed)
 $(SPEECH_LINE INFO "speech unavailable" speech_unavailable)"
-FAKE_HUB_JOURNAL_LINES="$(HUB_WARN_LINE "dictation engine failed" engine_failed)"
+FAKE_HUB_JOURNAL_LINES="$(HUB_WARN_LINE "dictation engine failed" speech_engine_failed)
+$(HUB_WARN_LINE "dictation protocol error" speech_protocol_error)"
 if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
 unset FAKE_SPEECH_JOURNAL_LINES FAKE_HUB_JOURNAL_LINES
 L="${FAKE_ROOT}/cutover.log"
@@ -186,11 +187,48 @@ assert_not_contains "${L}" "HARD-FAIL:" "no hard failure"
 assert_contains "${L}" "SPEECH-SOFT: canterlot-speech journal: 1 WARN engine_load_failed in 30 min (engine failure, expected kind)" "engine_load_failed soft"
 assert_contains "${L}" "SPEECH-SOFT: canterlot-speech journal: 2 WARN engine_exited in 30 min (engine failure, expected kind)" "engine_exited soft"
 assert_contains "${L}" "SPEECH-SOFT: canterlot-speech journal: 1 WARN socket_bind_failed in 30 min (NEW kind)" "unexpected speech kind still soft"
-assert_contains "${L}" "SPEECH-SOFT: hub journal: 1 WARN engine_failed in 30 min (speech engine failure)" "engine_failed in the hub journal is soft"
-assert_contains "${L}" "WARN engine_failed (speech, soft)" "hub kind summary marks it"
+assert_contains "${L}" "SPEECH-SOFT: hub journal: 1 WARN speech_engine_failed in 30 min (speech engine failure)" "speech_engine_failed in the hub journal is soft"
+assert_contains "${L}" "SPEECH-SOFT: hub journal: 1 WARN speech_protocol_error in 30 min (speech engine failure)" "speech_protocol_error in the hub journal is soft"
+assert_contains "${L}" "WARN speech_engine_failed (speech, soft)" "hub kind summary marks it"
 assert_contains "${L}" "speech_unavailable (INFO, expected): 1" "speech_unavailable is INFO and expected"
-assert_not_contains "${L}" "new hub WARN kind not in the baseline: engine_failed" "engine_failed is not a new hard kind"
+assert_not_contains "${L}" "new hub WARN kind not in the baseline: speech_engine_failed" "speech_engine_failed is not a new hard kind"
+assert_not_contains "${L}" "new hub WARN kind not in the baseline: speech_protocol_error" "speech_protocol_error is not a new hard kind"
 teardown_case
+case_end
+
+# --- 7b. allowlist покрывает все WARN-виды speech_* в исходниках ---
+case_begin "speech WARN allowlist covers the hub kinds emitted by the code"
+ALLOW="$(bash -c 'source "$1/lib.sh"; printf "%s" "${SPEECH_WARN_KINDS_SOFT}"' _ "${DEPLOY_DIR}")"
+export ALLOW REPO_ROOT
+if python3 - <<'PY'
+import os
+import pathlib
+import re
+import sys
+
+allow = set(os.environ["ALLOW"].split())
+kinds = set()
+for path in pathlib.Path(os.environ["REPO_ROOT"], "crates").rglob("*.rs"):
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for call in re.finditer(r"tracing::warn!\(", text):
+        end = text.find(");", call.end())
+        body = text[call.end() : end if end >= 0 else len(text)]
+        kinds.update(re.findall(r'kind\s*=\s*"(speech_[^"]+)"', body))
+if not kinds:
+    print("no speech_* WARN kinds found in crates/*.rs")
+    sys.exit(1)
+missing = sorted(kinds - allow)
+if missing:
+    print("speech WARN kinds missing from SPEECH_WARN_KINDS_SOFT: " + " ".join(missing))
+    sys.exit(1)
+print("speech WARN kinds covered: " + " ".join(sorted(kinds)))
+PY
+then
+    case_ok "every speech_* WARN kind is in SPEECH_WARN_KINDS_SOFT"
+else
+    case_fail "a speech_* WARN kind is missing from SPEECH_WARN_KINDS_SOFT"
+fi
+unset ALLOW
 case_end
 
 # --- 8. dry-run и репетиция показывают шаги службы и не теряют токен ---
