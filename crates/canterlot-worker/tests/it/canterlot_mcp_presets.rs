@@ -441,6 +441,12 @@ async fn superseded_relay_does_not_reach_presets() {
 
 #[test]
 fn invalid_arguments_are_rejected_before_the_hub() {
+    let message = |reply: &mcp::McpAction| {
+        reply.as_error().expect("ошибка")["message"]
+            .as_str()
+            .expect("текст ошибки")
+            .to_owned()
+    };
     // Не объект.
     let reply = mcp::handle_rpc_with_provider(
         &json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -448,11 +454,12 @@ fn invalid_arguments_are_rejected_before_the_hub() {
         canterlot_worker::adapter::canterlot_mcp::ToolSet::ApproveAndLimits,
         "claude",
     );
-    assert_eq!(
-        reply.as_error().expect("ошибка")["message"],
-        "invalid_arguments"
+    assert_eq!(reply.as_error().expect("ошибка")["code"], -32602);
+    assert!(
+        message(&reply).starts_with("canterlot_presets_list: arguments must be a JSON object"),
+        "имя инструмента в ошибке"
     );
-    // Неизвестное поле.
+    // Неизвестное поле: назван аргумент и перечислены допустимые.
     let reply = mcp::handle_rpc_with_provider(
         &json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
         "params":{"name":"canterlot_presets_list","arguments":{"unknown":"поле"}}}),
@@ -460,8 +467,8 @@ fn invalid_arguments_are_rejected_before_the_hub() {
         "claude",
     );
     assert_eq!(
-        reply.as_error().expect("ошибка")["message"],
-        "invalid_arguments"
+        message(&reply),
+        "canterlot_presets_list: unknown argument 'unknown'; its arguments are: id. Fix the argument and call again; tools/list shows the schema."
     );
     // Неверный тип.
     let reply = mcp::handle_rpc_with_provider(
@@ -470,10 +477,11 @@ fn invalid_arguments_are_rejected_before_the_hub() {
         canterlot_worker::adapter::canterlot_mcp::ToolSet::ApproveAndLimits,
         "claude",
     );
-    assert_eq!(
-        reply.as_error().expect("ошибка")["message"],
-        "invalid_arguments"
+    assert!(
+        message(&reply).starts_with("canterlot_preset_save: argument 'title' must be a string;"),
+        "неверный тип назван"
     );
+    assert_eq!(reply.as_error().expect("ошибка")["code"], -32602);
     // Нет обязательных полей.
     let reply = mcp::handle_rpc_with_provider(
         &json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
@@ -481,9 +489,9 @@ fn invalid_arguments_are_rejected_before_the_hub() {
         canterlot_worker::adapter::canterlot_mcp::ToolSet::ApproveAndLimits,
         "claude",
     );
-    assert_eq!(
-        reply.as_error().expect("ошибка")["message"],
-        "invalid_arguments"
+    assert!(
+        message(&reply).starts_with("canterlot_preset_apply: missing required argument 'id';"),
+        "отсутствующий аргумент назван"
     );
     // Корректный вызов — не ошибка, а событие брокера (проверяется сокетом выше).
     let action = mcp::handle_rpc_with_provider(

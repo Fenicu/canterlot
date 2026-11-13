@@ -336,9 +336,101 @@ pub async fn call(
     }
 }
 
-/// Аргументы только известной формы; текст ошибки разбора цитирует их и наружу не идёт.
+/// Аргументы только известной формы; ошибка разбора называет инструмент, неверный аргумент
+/// и допустимые имена, но никогда не повторяет значения: в них бывают тексты и брифы.
 pub(crate) fn parse_arguments<T: serde::de::DeserializeOwned>(
+    tool: &str,
     arguments: Value,
 ) -> Result<T, ToolError> {
-    serde_json::from_value(arguments).map_err(|_| ToolError::new(ToolErrorCode::InvalidArguments))
+    match serde_json::from_value(arguments.clone()) {
+        Ok(value) => Ok(value),
+        Err(error) => Err(ToolError::with_message(
+            ToolErrorCode::InvalidArguments,
+            argument_error::<T>(tool, &arguments, &error),
+        )),
+    }
+}
+
+fn argument_error<T: serde::de::DeserializeOwned>(
+    tool: &str,
+    arguments: &Value,
+    error: &serde_json::Error,
+) -> String {
+    let detail = redact_values(&error.to_string());
+    if let Some(rest) = detail.strip_prefix("unknown field `")
+        && let Some((field, expected)) = rest.split_once('`')
+    {
+        let names = argument_names(expected);
+        return if names.is_empty() {
+            format!("{tool}: unknown argument '{field}'")
+        } else {
+            format!(
+                "{tool}: unknown argument '{field}'; its arguments are: {}",
+                names.join(", ")
+            )
+        };
+    }
+    if let Some(rest) = detail.strip_prefix("missing field `")
+        && let Some((field, _)) = rest.split_once('`')
+    {
+        return format!("{tool}: missing required argument '{field}'");
+    }
+    match offending_key::<T>(arguments) {
+        Some(key) => format!("{tool}: argument '{key}': {detail}"),
+        None => format!("{tool}: {detail}"),
+    }
+}
+
+/// Поле, без которого разбор проходит: у структур с `deny_unknown_fields` это и есть виновник.
+fn offending_key<T: serde::de::DeserializeOwned>(arguments: &Value) -> Option<String> {
+    let object = arguments.as_object()?;
+    object.keys().find_map(|key| {
+        let mut probe = object.clone();
+        probe.remove(key);
+        serde_json::from_value::<T>(Value::Object(probe))
+            .ok()
+            .map(|_| key.clone())
+    })
+}
+
+/// `expected one of `a`, `b` or `c`` → `a, b, c`.
+fn argument_names(expected: &str) -> Vec<String> {
+    let expected = expected
+        .strip_prefix(", expected one of ")
+        .unwrap_or(expected)
+        .trim();
+    expected
+        .replace(" or ", ", ")
+        .split(',')
+        .map(|name| name.trim().trim_matches('`').to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// Значения из сообщения serde вырезаются: в аргументах бывают брифы, тексты и заметки.
+fn redact_values(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut quoted = false;
+    let mut escaped = false;
+    for ch in message.chars() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            quoted = true;
+            continue;
+        }
+        out.push(ch);
+    }
+    while out.contains("  ") {
+        out = out.replace("  ", " ");
+    }
+    out.replace(" ,", ",").trim().to_owned()
 }

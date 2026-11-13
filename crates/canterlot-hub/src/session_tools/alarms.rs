@@ -1890,7 +1890,7 @@ pub async fn set(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: SetArgs = parse_arguments(arguments)?;
+    let args: SetArgs = parse_arguments("alarm_set", arguments)?;
     if !context.alarms_enabled {
         return Err(ToolError::with_message(
             ToolErrorCode::InvalidArguments,
@@ -2678,7 +2678,7 @@ pub async fn cancel(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: CancelArgs = parse_arguments(arguments)?;
+    let args: CancelArgs = parse_arguments("alarm_cancel", arguments)?;
     if args.alarm_id.is_some() == args.key.is_some() {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
@@ -2844,7 +2844,7 @@ pub async fn list(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: ListArgs = parse_arguments(arguments)?;
+    let args: ListArgs = parse_arguments("alarm_list", arguments)?;
     let include_finished = args.include_finished.unwrap_or(false);
     let mut conn = context.pool.acquire().await?;
     access::caller_in_tx(&mut conn, caller.owner_id, caller.conversation_id).await?;

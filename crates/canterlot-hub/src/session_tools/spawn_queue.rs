@@ -1575,7 +1575,7 @@ pub async fn cancel(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: CancelArgs = super::parse_arguments(arguments)?;
+    let args: CancelArgs = super::parse_arguments("spawn_cancel", arguments)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     conversations::lock_owner(&mut tx, caller.owner_id).await?;
     // Тот же идентификатор бывает и элементом очереди, и карточкой одобрения запуска.

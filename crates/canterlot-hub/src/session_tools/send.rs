@@ -236,7 +236,7 @@ pub async fn send(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: SendArgs = parse_arguments(arguments)?;
+    let args: SendArgs = parse_arguments("session_send", arguments)?;
     if args.text.len() > MAX_TEXT_BYTES {
         return Err(ToolError::new(ToolErrorCode::TextTooLarge));
     }
@@ -326,7 +326,7 @@ pub async fn subscribe(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: TargetArgs = parse_arguments(arguments)?;
+    let args: TargetArgs = parse_arguments("session_subscribe", arguments)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     let subscriber = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if args.session_id == subscriber.id {
@@ -395,7 +395,7 @@ pub async fn unsubscribe(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: TargetArgs = parse_arguments(arguments)?;
+    let args: TargetArgs = parse_arguments("session_unsubscribe", arguments)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     let subscriber = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if args.session_id == subscriber.id {

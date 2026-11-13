@@ -1074,7 +1074,7 @@ pub async fn spawn(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let mut args: SpawnArgs = parse_arguments(arguments)?;
+    let mut args: SpawnArgs = parse_arguments("session_spawn", arguments)?;
     check_arguments(&args)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;

@@ -214,7 +214,7 @@ pub async fn accept(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: AcceptArgs = parse_arguments(arguments)?;
+    let args: AcceptArgs = parse_arguments("session_accept", arguments)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     // Владелец раньше строк разговоров: тот же порядок у создания, удаления и архивации.
     conversations::lock_owner(&mut tx, caller.owner_id).await?;

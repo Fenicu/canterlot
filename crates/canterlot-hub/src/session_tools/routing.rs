@@ -1417,7 +1417,7 @@ pub async fn preview(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: PreviewArgs = super::parse_arguments(arguments)?;
+    let args: PreviewArgs = super::parse_arguments("route_preview", arguments)?;
     if !context.routing_enabled {
         return Err(ToolError::with_message(
             ToolErrorCode::InvalidArguments,

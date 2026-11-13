@@ -564,7 +564,7 @@ pub async fn list(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let _: ListArgs = parse_arguments(arguments)?;
+    let _: ListArgs = parse_arguments("plan_list", arguments)?;
     let mut conn = context.pool.acquire().await?;
     access::caller_in_tx(&mut conn, caller.owner_id, caller.conversation_id).await?;
     let rows = rows_of(&mut conn, caller.owner_id, caller.conversation_id).await?;
@@ -592,7 +592,7 @@ pub async fn add(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: AddArgs = parse_arguments(arguments)?;
+    let args: AddArgs = parse_arguments("plan_add", arguments)?;
     if args.tasks.is_empty() || args.tasks.len() > MAX_ADD {
         return Err(invalid(format!("pass 1 to {MAX_ADD} tasks")));
     }
@@ -666,7 +666,7 @@ pub async fn update(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: UpdateArgs = parse_arguments(arguments)?;
+    let args: UpdateArgs = parse_arguments("plan_update", arguments)?;
     let title = args.title.as_deref().map(clean_title).transpose()?;
     let note = args.note.as_deref().map(clean_note).transpose()?;
     let blocker = args.blocker.as_deref().map(clean_blocker).transpose()?;
@@ -794,7 +794,7 @@ pub async fn adopt(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: AdoptArgs = parse_arguments(arguments)?;
+    let args: AdoptArgs = parse_arguments("plan_adopt", arguments)?;
     if args.from_session_id == caller.conversation_id {
         return Err(invalid("from_session_id is this session"));
     }

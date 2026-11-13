@@ -187,9 +187,10 @@ fn session_tool_calls_map_to_hub_names() {
             tool_set,
             provider,
         );
+        assert_eq!(reply.as_error().expect("ошибка")["code"], -32602);
         assert_eq!(
             reply.as_error().expect("ошибка")["message"],
-            "invalid_arguments"
+            "session_send: arguments must be a JSON object. Fix the argument and call again; tools/list shows the schema."
         );
         // Без аргументов вызов проходит пустым объектом.
         let action = mcp::handle_rpc_with_provider(

@@ -559,59 +559,128 @@ fn preset_input_schema(mcp_name: &str) -> Value {
     }
 }
 
-fn is_string(value: Option<&Value>) -> bool {
-    value.is_some_and(|value| value.is_string())
-}
-
 /// Аргументы агентского вызова: объект; у пресетов ещё и объявленные типы.
 /// Инструменты сессий проверяет хаб, здесь только форма.
 pub fn valid_share_arguments(arguments: &Value) -> bool {
-    let Some(object) = arguments.as_object() else {
-        return false;
-    };
-    if object
-        .keys()
-        .any(|key| !matches!(key.as_str(), "path" | "title" | "note"))
-    {
-        return false;
-    }
-    object.get("path").is_some_and(Value::is_string)
-        && object.get("title").is_none_or(Value::is_string)
-        && object.get("note").is_none_or(Value::is_string)
+    check_arguments(&share_input_schema(), arguments).is_ok()
 }
 
 pub fn valid_preset_arguments(mcp_name: &str, arguments: &Value) -> bool {
-    let Some(object) = arguments.as_object() else {
+    if arguments.as_object().is_none() {
         return false;
-    };
+    }
     if is_session_tool(mcp_name) {
         return true;
     }
-    let allowed: &[&str] = match mcp_name {
-        "canterlot_presets_list" => &["id"],
-        "canterlot_preset_save" => &["id", "title", "description", "text", "base_revision"],
-        "canterlot_preset_apply" => &["id"],
-        _ => return false,
-    };
-    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+    if !matches!(
+        mcp_name,
+        "canterlot_presets_list" | "canterlot_preset_save" | "canterlot_preset_apply"
+    ) {
         return false;
     }
-    for key in ["id", "title", "description", "text"] {
-        if let Some(value) = object.get(key)
-            && !value.is_string()
-        {
-            return false;
+    check_arguments(&preset_input_schema(mcp_name), arguments).is_ok()
+}
+
+/// Проверка по объявленной схеме: называет неверный аргумент и перечисляет допустимые.
+fn check_arguments(schema: &Value, arguments: &Value) -> Result<(), String> {
+    let Some(object) = arguments.as_object() else {
+        return Err("arguments must be a JSON object".to_owned());
+    };
+    let properties = schema.get("properties").and_then(Value::as_object);
+    let known: Vec<&str> = properties
+        .map(|properties| properties.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let list = || {
+        if known.is_empty() {
+            "it takes no arguments".to_owned()
+        } else {
+            format!("its arguments are: {}", known.join(", "))
+        }
+    };
+    for key in object.keys() {
+        if !known.contains(&key.as_str()) {
+            return Err(format!("unknown argument '{key}'; {}", list()));
         }
     }
-    if let Some(revision) = object.get("base_revision")
-        && !revision.is_i64()
+    for field in schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
     {
-        return false;
+        if !object.contains_key(field) {
+            return Err(format!("missing required argument '{field}'; {}", list()));
+        }
     }
-    match mcp_name {
-        "canterlot_preset_save" => is_string(object.get("title")) && is_string(object.get("text")),
-        "canterlot_preset_apply" => is_string(object.get("id")),
-        _ => true,
+    for (key, value) in object {
+        let kind = properties
+            .and_then(|properties| properties.get(key))
+            .and_then(|spec| spec.get("type"))
+            .and_then(Value::as_str);
+        let Some(kind) = kind else { continue };
+        let ok = match kind {
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "number" => value.is_number(),
+            "array" => value.is_array(),
+            "object" => value.is_object(),
+            _ => true,
+        };
+        if !ok {
+            let label = match kind {
+                "string" => "a string",
+                "boolean" => "a boolean",
+                "integer" => "an integer",
+                "number" => "a number",
+                "array" => "an array",
+                "object" => "an object",
+                other => other,
+            };
+            return Err(format!("argument '{key}' must be {label}; {}", list()));
+        }
+    }
+    Ok(())
+}
+
+fn argument_error(tool: &str, detail: &str) -> String {
+    format!("{tool}: {detail}. Fix the argument and call again; tools/list shows the schema.")
+}
+
+/// Инструменты сессий проверяет хаб: у него та же схема и более точная ошибка.
+/// Здесь только форма: аргументы — объект.
+fn check_arguments_agent(mcp_name: &str, arguments: &Value) -> Result<(), String> {
+    if is_session_tool(mcp_name) {
+        if arguments.is_object() {
+            return Ok(());
+        }
+        return Err("arguments must be a JSON object".to_owned());
+    }
+    check_arguments(&preset_input_schema(mcp_name), arguments)
+}
+
+/// Неизвестный инструмент: перечисляем тот набор, который сервер отдал этому клиенту.
+fn unknown_tool_message(name: &str, tool_set: ToolSet, provider: &str) -> String {
+    let listing = tools_list(tool_set, provider);
+    let names: Vec<&str> = listing["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    let listed = names.join(", ");
+    if name.is_empty() {
+        format!(
+            "missing tool name; available tools: {listed}. Call tools/list for their arguments."
+        )
+    } else {
+        format!(
+            "unknown tool '{name}'; available tools: {listed}. Call tools/list for their arguments."
+        )
     }
 }
 
@@ -852,18 +921,22 @@ pub fn handle_rpc_with_provider(msg: &Value, tool_set: ToolSet, provider: &str) 
                 }
                 ("canterlot_limits", _) => ToolKind::Limits,
                 ("share_file", _) => {
-                    if !valid_share_arguments(&arguments) {
-                        return error(&id, -32602, "invalid_arguments");
+                    if let Err(detail) = check_arguments(&share_input_schema(), &arguments) {
+                        return error(&id, -32602, &argument_error("share_file", &detail));
                     }
                     ToolKind::ShareFile
                 }
                 (mcp_name, _) => {
                     let Some((_, tool)) = AGENT_TOOLS.iter().find(|(agent, _)| *agent == mcp_name)
                     else {
-                        return error(&id, -32602, "unknown tool");
+                        return error(
+                            &id,
+                            -32602,
+                            &unknown_tool_message(mcp_name, tool_set, provider),
+                        );
                     };
-                    if !valid_preset_arguments(mcp_name, &arguments) {
-                        return error(&id, -32602, "invalid_arguments");
+                    if let Err(detail) = check_arguments_agent(mcp_name, &arguments) {
+                        return error(&id, -32602, &argument_error(mcp_name, &detail));
                     }
                     ToolKind::Agent { tool }
                 }
@@ -874,7 +947,14 @@ pub fn handle_rpc_with_provider(msg: &Value, tool_set: ToolSet, provider: &str) 
                 arguments,
             }
         }
-        _ => error(&id, -32601, "method not found"),
+        _ => {
+            let hint = if method.is_empty() {
+                "method not found; use initialize, tools/list or tools/call".to_owned()
+            } else {
+                format!("method not found: {method}; use initialize, tools/list or tools/call")
+            };
+            error(&id, -32601, &hint)
+        }
     }
 }
 
@@ -1249,6 +1329,63 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn unknown_tool_lists_the_tools_of_this_session() {
+        let reply = handle_rpc_with_provider(
+            &json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                "params": {"name": "session_spawnn", "arguments": {"brief": "x"}}}),
+            ToolSet::LimitsOnly,
+            "codex",
+        );
+        let error = reply.as_error().expect("ошибка");
+        assert_eq!(error["code"], -32602);
+        let message = error["message"].as_str().expect("текст ошибки");
+        assert!(
+            message.starts_with("unknown tool 'session_spawnn'; available tools: "),
+            "{message}"
+        );
+        for name in [
+            "canterlot_limits",
+            "share_file",
+            "session_spawn",
+            "plan_list",
+        ] {
+            assert!(message.contains(name), "нет {name}: {message}");
+        }
+        assert!(
+            !message.contains("approve"),
+            "набор Codex без approve: {message}"
+        );
+        assert!(message.contains("Call tools/list"), "{message}");
+    }
+
+    #[test]
+    fn argument_errors_name_the_argument_and_the_valid_names() {
+        let message = |arguments: Value| {
+            handle_rpc_with_provider(
+                &json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                    "params": {"name": "share_file", "arguments": arguments}}),
+                ToolSet::ApproveAndLimits,
+                "claude",
+            )
+            .as_error()
+            .expect("ошибка")["message"]
+                .as_str()
+                .expect("текст ошибки")
+                .to_owned()
+        };
+        assert_eq!(
+            message(json!({"path": "a", "titl": "b"})),
+            "share_file: unknown argument 'titl'; its arguments are: note, path, title. Fix the argument and call again; tools/list shows the schema."
+        );
+        assert!(message(json!({})).starts_with(
+            "share_file: missing required argument 'path'; its arguments are: note, path, title."
+        ),);
+        assert!(message(json!({"path": 1})).starts_with(
+            "share_file: argument 'path' must be a string; its arguments are: note, path, title."
+        ),);
     }
 
     #[test]

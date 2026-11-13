@@ -230,7 +230,7 @@ pub async fn report(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: Args = parse_arguments(arguments)?;
+    let args: Args = parse_arguments("canterlot_limits", arguments)?;
     let mut conn = context.pool.acquire().await?;
     // То же правило видимости, что у полосы и экрана лимитов в PWA.
     let mut rows = crate::limits::shown(&mut conn, caller.owner_id).await?;

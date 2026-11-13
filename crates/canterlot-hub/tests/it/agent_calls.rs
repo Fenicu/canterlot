@@ -590,6 +590,72 @@ async fn tool_failure_logs_no_text(pool: PgPool) {
     }
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn argument_errors_name_the_field_and_never_echo_values(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    // Неизвестный аргумент: имя и список допустимых.
+    let unknown = fx
+        .agent(
+            "sessions.spawn",
+            json!({"brief": "x", "workdirr": "/tmp"}),
+            &Uuid::now_v7(),
+        )
+        .await;
+    assert_eq!(unknown.error_code, "invalid_arguments");
+    assert!(
+        unknown
+            .error_message
+            .contains("unknown argument 'workdirr'"),
+        "{}",
+        unknown.error_message
+    );
+    assert!(
+        unknown.error_message.contains("its arguments are:"),
+        "{}",
+        unknown.error_message
+    );
+    assert!(
+        unknown.error_message.contains("brief"),
+        "{}",
+        unknown.error_message
+    );
+    assert!(
+        unknown.error_message.contains("Fix the argument"),
+        "подсказка: {}",
+        unknown.error_message
+    );
+    // Обязательный аргумент назван.
+    let missing = fx.agent("sessions.spawn", json!({}), &Uuid::now_v7()).await;
+    assert_eq!(missing.error_code, "invalid_arguments");
+    assert!(
+        missing
+            .error_message
+            .starts_with("session_spawn: missing required argument 'brief'"),
+        "{}",
+        missing.error_message
+    );
+    // Неверный тип: поле названо, значение не повторяется.
+    let marker = format!("СЕКРЕТ_{}", Uuid::now_v7());
+    let mistyped = fx
+        .agent(
+            "sessions.spawn",
+            json!({"brief": marker, "isolated": marker}),
+            &Uuid::now_v7(),
+        )
+        .await;
+    assert_eq!(mistyped.error_code, "invalid_arguments");
+    assert!(
+        mistyped.error_message.contains("argument 'isolated'"),
+        "{}",
+        mistyped.error_message
+    );
+    assert!(
+        !mistyped.error_message.contains(&marker),
+        "значение в ошибке: {}",
+        mistyped.error_message
+    );
+}
+
 #[test]
 fn session_tool_error_codes_are_unique_snake_case_with_messages() {
     use canterlot_hub::session_tools::ToolErrorCode;

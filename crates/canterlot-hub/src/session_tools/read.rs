@@ -78,7 +78,7 @@ pub async fn list(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: ListArgs = parse_arguments(arguments)?;
+    let args: ListArgs = parse_arguments("sessions_list", arguments)?;
     let limit = bounded(args.limit, DEFAULT_LIMIT, 1, MAX_LIMIT)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     let session = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
@@ -318,7 +318,7 @@ pub async fn inspect(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: InspectArgs = parse_arguments(arguments)?;
+    let args: InspectArgs = parse_arguments("session_inspect", arguments)?;
     let count = bounded(args.messages, DEFAULT_MESSAGES, 0, MAX_MESSAGES)?;
     if match args.block_id {
         Some(_) => args.messages.is_some(),

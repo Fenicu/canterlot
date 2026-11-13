@@ -34,7 +34,7 @@ pub async fn search(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: SearchArgs = parse_arguments(arguments)?;
+    let args: SearchArgs = parse_arguments("history_search", arguments)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     let session = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     if let Some(target) = args.session_id {

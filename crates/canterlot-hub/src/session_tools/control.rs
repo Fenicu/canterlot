@@ -59,7 +59,7 @@ pub async fn interrupt(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: Args = parse_arguments(arguments)?;
+    let args: Args = parse_arguments("session_interrupt", arguments)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     let target = owned_in_tx(&mut tx, context, caller, args.session_id).await?;
     access::check_read_only(
@@ -97,7 +97,7 @@ pub async fn stop(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: Args = parse_arguments(arguments)?;
+    let args: Args = parse_arguments("session_stop", arguments)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     let target = owned_in_tx(&mut tx, context, caller, args.session_id).await?;
     access::check_read_only(

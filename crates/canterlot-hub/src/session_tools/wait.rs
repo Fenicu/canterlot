@@ -44,7 +44,7 @@ pub async fn wait(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: WaitArgs = parse_arguments(arguments)?;
+    let args: WaitArgs = parse_arguments("session_wait", arguments)?;
     let seconds = args.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT as i64);
     if !(1..=MAX_TIMEOUT as i64).contains(&seconds) {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));

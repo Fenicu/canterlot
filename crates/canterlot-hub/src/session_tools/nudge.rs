@@ -2005,7 +2005,7 @@ pub async fn set(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: SetArgs = parse_arguments(arguments)?;
+    let args: SetArgs = parse_arguments("nudge_set", arguments)?;
     validate_set(&args)?;
     if !context.nudge_enabled {
         return Err(ToolError::with_message(
@@ -2103,7 +2103,7 @@ pub async fn clear(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let args: ClearArgs = parse_arguments(arguments)?;
+    let args: ClearArgs = parse_arguments("nudge_clear", arguments)?;
     let now = Utc::now();
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
@@ -2151,7 +2151,7 @@ pub fn validate_spawn_arg(value: &Option<Value>) -> Result<(), ToolError> {
             if let Some(object) = value.as_object_mut() {
                 object.insert("session_id".to_owned(), json!(Uuid::nil()));
             }
-            let args: SetArgs = parse_arguments(value)?;
+            let args: SetArgs = parse_arguments("nudge_set", value)?;
             validate_set(&args)?;
             if args.report_file.is_some() {
                 return Err(ToolError::with_message(
@@ -2186,7 +2186,7 @@ pub async fn set_for_child_in_tx(
     if let Some(object) = value.as_object_mut() {
         object.insert("session_id".to_owned(), json!(child));
     }
-    let args: SetArgs = parse_arguments(value)?;
+    let args: SetArgs = parse_arguments("nudge_set", value)?;
     validate_set(&args)?;
     check_text_preset_in_tx(conn, owner_id, args.text_preset.as_deref()).await?;
     let rule = upsert_rule_in_tx(conn, owner_id, author, child, &args, None, now).await?;
