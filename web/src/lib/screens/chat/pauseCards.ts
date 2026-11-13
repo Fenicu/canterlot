@@ -128,7 +128,7 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
         cards.push({
           key: "pause:user_stop",
           tone: "warning",
-          title: "Очередь остановлена: вы прервали работу",
+          title: "Очередь остановлена: вы остановили работу",
           body: [],
           actions: forward,
         });

@@ -540,7 +540,7 @@ test('session_settings_show_permission_modes_by_label_never_raw', async ({ page 
 	await expect(page.getByText(/^(owner|bypass|read_only)$/)).toHaveCount(0);
 });
 
-test('interrupt_on_a_harness_that_exits_offers_resume_and_continue', async ({ page }) => {
+test('interrupt_on_a_harness_that_exits_offers_resume_without_a_queue_pause', async ({ page }) => {
 	const calls: { url: string; body: { continue_queue?: boolean } | null; key: string }[] = [];
 	page.on('request', (req) => {
 		if (req.url().includes('/api/v1/conversations/')) {
@@ -554,7 +554,7 @@ test('interrupt_on_a_harness_that_exits_offers_resume_and_continue', async ({ pa
 
 	const { hub, id } = await bootChat(page);
 
-	// Synthetic exit-on-interrupt: queue paused with user_stop, execution not live (no_live_execution)
+	// Synthetic exit-on-interrupt: очередь не на паузе, исполнение не живо (no_live_execution).
 	hub.append(`conversation:${id}`, {
 		kind: 'execution_state_changed',
 		conversation_id: id,
@@ -564,21 +564,22 @@ test('interrupt_on_a_harness_that_exits_offers_resume_and_continue', async ({ pa
 		kind: 'queue_state_changed',
 		conversation_id: id,
 		payload: {
-			pause_reasons: [{ reason: 'user_stop' }],
+			pause_reasons: [],
 			hold_reasons: [{ reason: 'no_live_execution' }],
 			run_slot: 'free'
 		}
 	});
 	hub.flush();
 
-	// Карточка предлагает единое действие
+	// Карточка предлагает запуск, а не паузу очереди.
+	await expect(page.getByRole('button', { name: 'Продолжить очередь', exact: true })).toHaveCount(0);
 	const button = page.getByRole('button', { name: 'Запустить', exact: true });
 	await expect(button).toBeVisible();
 	await button.click();
 
 	await expect.poll(() => calls.find((c) => c.url.endsWith('/resume'))).toBeDefined();
 	const resumeCall = calls.find((c) => c.url.endsWith('/resume'));
-	expect(resumeCall!.body).toEqual({ continue_queue: true });
+	expect(resumeCall!.body).toEqual({ continue_queue: false });
 	expect(resumeCall!.key).not.toBe('');
 });
 

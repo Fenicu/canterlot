@@ -169,11 +169,9 @@ test.describe('stack: input and queue', () => {
     await expect.poll(async () => (await hub.inputLog(id)).some((item) => item.text.includes('S-ответ')), { timeout: 30_000 }).toBe(true);
     expect(await page.locator('article.card [data-block]').allTextContents()).not.toContain('Q1-ответ');
 
-    // Прерываем A: очередь встаёт на паузу, «Продолжить очередь» запускает её по порядку Q1, S.
+    // Прерываем A: паузы очереди нет, она сама продолжает по порядку Q1, S.
     await page.getByRole('button', { name: 'Прервать', exact: true }).click();
-    const proceed = page.getByRole('button', { name: 'Продолжить очередь', exact: true });
-    await expect(proceed).toBeVisible({ timeout: 30_000 });
-    await proceed.click();
+    await expect(page.getByRole('button', { name: 'Продолжить очередь', exact: true })).toHaveCount(0);
     await expect(page.locator('article.card [data-block]').filter({ hasText: 'Q1-ответ' })).toBeVisible({ timeout: 40_000 });
     await expect(page.locator('article.card [data-block]').filter({ hasText: 'S-ответ' })).toBeVisible({ timeout: 40_000 });
     const text = (await page.locator('article.card [data-block]').allTextContents()).join('|');
@@ -205,7 +203,7 @@ test.describe('stack: input and queue', () => {
     await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(1);
 
     await page.getByRole('button', { name: 'Прервать', exact: true }).click();
-    await page.getByRole('button', { name: 'Продолжить очередь', exact: true }).click({ timeout: 30_000 });
+    await expect(page.getByRole('button', { name: 'Продолжить очередь', exact: true })).toHaveCount(0);
     await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-ответ' })).toBeVisible({ timeout: 40_000 });
     await expect(page.locator('article.bubble').filter({ hasText: 'Z-ответ' })).toBeVisible();
     await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(0);
@@ -251,6 +249,8 @@ test.describe('stack: input and queue', () => {
     await expect(page.locator('.strip').getByRole('button', { name: 'Отменить' })).toHaveCount(1, { timeout: 15_000 });
 
     await page.getByRole('button', { name: 'Прервать', exact: true }).click();
+    // Процесс вышел: новая сессия нужна, но паузы очереди нет — продолжаем без «Продолжить очередь».
+    await expect(page.getByRole('button', { name: 'Продолжить очередь', exact: true })).toHaveCount(0);
     const resume = page.getByRole('button', { name: 'Возобновить', exact: true });
     await expect(resume).toBeVisible({ timeout: 40_000 });
     await resume.click();

@@ -69,11 +69,11 @@ function startTurn(hub: FakeHub, api: FakeHubApi, id: string, opts: { answer?: b
   return { inputId, blockId };
 }
 
-/** Ход закончился: очередь на паузе, активность снова свободна. */
+/** Ход прерван: очередь не на паузе, активность снова свободна. */
 function finishTurn(hub: FakeHub, api: FakeHubApi, id: string, status = 'completed'): void {
   const scope = `conversation:${id}`;
   hub.append(scope, { kind: 'interrupt_state_changed', conversation_id: id, payload: { command_id: api.id(), status } });
-  hub.append(scope, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [{ reason: 'user_stop' }], hold_reasons: [], run_slot: 'free' } });
+  hub.append(scope, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [], hold_reasons: [], run_slot: 'free' } });
   hub.append(scope, {
     kind: 'derived_changed',
     conversation_id: id,
@@ -81,7 +81,7 @@ function finishTurn(hub: FakeHub, api: FakeHubApi, id: string, status = 'complet
       conversation_id: id,
       activity: { state: 'idle', evidence: {}, since: new Date().toISOString() },
       unread_count: 0,
-      queue: { queued: 0, pause_reasons: [{ reason: 'user_stop' }], hold_reasons: [] },
+      queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
       last_activity_at: AT,
       settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
       crunch: { enabled: false }
@@ -193,6 +193,36 @@ test('the_live_line_starts_the_turn_before_the_first_answer_and_shows_the_outcom
   await expect(outcome).toHaveText('Прервано');
   await expect(page.locator('[data-feed-empty]')).toHaveCount(0);
   await expect(line).toHaveCount(0);
+});
+
+test('interrupt_does_not_pause_the_queue_and_the_next_message_goes_out', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  startTurn(hub, api, id, { answer: false });
+  // Сообщение уже ждёт в очереди за идущим ходом.
+  const queuedInput = api.id();
+  hub.append(`conversation:${id}`, {
+    kind: 'input_queued',
+    conversation_id: id,
+    payload: { input_id: queuedInput, input_seq: '20', idempotency_key: api.id(), state: 'queued', content: [{ type: 'text', text: 'следующее сообщение' }] }
+  });
+  hub.flush();
+  const strip = page.locator('.strip');
+  await expect(strip.getByText('следующее сообщение')).toBeVisible();
+
+  await page.locator('[data-role="live-turn"]').getByRole('button', { name: 'Прервать' }).click();
+  finishTurn(hub, api, id);
+
+  // Паузы нет: карточки «Продолжить очередь» и «Очередь остановлена» не появляются.
+  await expect(page.getByRole('button', { name: 'Продолжить очередь', exact: true })).toHaveCount(0);
+  await expect(page.getByText('Очередь остановлена: вы остановили работу')).toHaveCount(0);
+  await expect(strip.getByText('В очереди')).toBeVisible();
+
+  // Обычный поток очереди: следующее сообщение уходит на машину без действия владельца.
+  hub.append(`conversation:${id}`, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [], hold_reasons: [], run_slot: { running: { input_id: queuedInput } } } });
+  hub.append(`conversation:${id}`, { kind: 'input_state_changed', conversation_id: id, payload: { input_id: queuedInput, state: 'dispatched', attempt: 1 } });
+  hub.flush();
+  await expect(strip.getByText('На машине')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Продолжить очередь', exact: true })).toHaveCount(0);
 });
 
 test('the_live_line_attaches_to_the_answer_without_a_second_one', async ({ page }) => {

@@ -48,7 +48,7 @@ export class InterruptControl {
       return;
     }
     if (!this.running) return;
-    // Живого исполнения нет: хаб поставил очередь на паузу, а прерывать на машине нечего.
+    // Живого исполнения нет: прерывать на машине нечего, очередь при этом не встаёт.
     const requested = (outcome as { requested?: { interrupt_command_id?: unknown } } | null)?.requested;
     if (requested && requested.interrupt_command_id == null) {
       this.applyStatus("not_applicable");
