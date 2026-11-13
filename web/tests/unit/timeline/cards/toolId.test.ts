@@ -5,7 +5,9 @@ import { CANTERLOT_MCP_NAMES, toolFamily, toolId } from '../../../../src/lib/tim
 
 /** Имена инструментов canterlot из воркера: реестр не должен отстать от схемы. */
 function workerTools(): string[] {
-  const source = readFileSync(resolve(process.cwd(), '../crates/canterlot-worker/src/adapter/canterlot_mcp/mcp.rs'), 'utf8');
+  const file = readFileSync(resolve(process.cwd(), '../crates/canterlot-worker/src/adapter/canterlot_mcp/mcp.rs'), 'utf8');
+  // Тестовый модуль нарочно зовёт несуществующие инструменты: они не часть схемы.
+  const source = file.split('#[cfg(test)]')[0]!;
   const agent = [...source.matchAll(/^\s*\("([a-z_]+)", "[a-z_.]+"\),$/gm)].map((match) => match[1]!);
   const own = [...source.matchAll(/"name": "([a-z_]+)"/g)].map((match) => match[1]!);
   return [...new Set([...agent, ...own])];
