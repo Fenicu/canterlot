@@ -59,7 +59,7 @@ async fn gather(git: &OsStr, workdir: &Path, head_before: Option<&str>) -> Optio
                     run(
                         git,
                         workdir,
-                        &["log", "--format=%H%x00%s", "--max-count=51", range],
+                        &["log", "--format=%H%x00%ct%x00%s", "--max-count=51", range],
                     )
                     .await
                 }
@@ -111,7 +111,14 @@ async fn gather(git: &OsStr, workdir: &Path, head_before: Option<&str>) -> Optio
 fn parse_log(bytes: &[u8], facts: &mut GitFacts) {
     let text = String::from_utf8_lossy(bytes);
     for line in text.lines().filter(|l| !l.is_empty()) {
-        let (sha, subject) = line.split_once('\0').unwrap_or((line, ""));
+        let mut parts = line.splitn(3, '\0');
+        let sha = parts.next().unwrap_or_default();
+        let committed_at_ms = parts
+            .next()
+            .and_then(|seconds| seconds.parse::<i64>().ok())
+            .and_then(|seconds| seconds.checked_mul(1000))
+            .unwrap_or_default();
+        let subject = parts.next().unwrap_or_default();
         if facts.commits.len() == MAX_COMMITS {
             facts.truncated = true;
             break;
@@ -121,6 +128,7 @@ fn parse_log(bytes: &[u8], facts: &mut GitFacts) {
         facts.commits.push(GitCommit {
             sha: sha.to_string(),
             subject,
+            committed_at_ms,
         });
     }
 }

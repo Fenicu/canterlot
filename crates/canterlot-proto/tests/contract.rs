@@ -1858,6 +1858,7 @@ fn session_tools_messages_are_stable() {
         commits: vec![GitCommit {
             sha: "5d6e7f8".into(),
             subject: "секретная тема".into(),
+            committed_at_ms: 0,
         }],
         files: vec![GitFile {
             path: "secret/path.rs".into(),
@@ -1906,6 +1907,7 @@ fn run_finished_debug_has_no_paths() {
             commits: vec![GitCommit {
                 sha: "5d6e7f8".into(),
                 subject: "private subject".into(),
+                committed_at_ms: 0,
             }],
             files: vec![GitFile {
                 path: "private/dir/file.rs".into(),

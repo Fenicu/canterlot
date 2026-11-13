@@ -416,6 +416,8 @@ message RunFinished {
 message GitCommit {
   string sha = 1;
   string subject = 2;
+  // Время коммита в миллисекундах Unix; 0 у старого воркера.
+  int64 committed_at_ms = 3;
 }
 
 message GitFile {

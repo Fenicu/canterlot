@@ -68,6 +68,14 @@ async fn git_facts_list_commits_and_files() {
     let subjects: Vec<_> = facts.commits.iter().map(|c| c.subject.as_str()).collect();
     assert_eq!(subjects, ["second change", "first change"]);
     assert_eq!(facts.commits[0].sha, after);
+    assert!(
+        facts
+            .commits
+            .iter()
+            .all(|commit| commit.committed_at_ms > 0),
+        "commit times are read for the stale marker"
+    );
+    assert!(facts.commits[0].committed_at_ms >= facts.commits[1].committed_at_ms);
     let mut files: Vec<_> = facts
         .files
         .iter()

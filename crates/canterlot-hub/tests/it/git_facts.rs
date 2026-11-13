@@ -19,6 +19,7 @@ fn facts(before: &str, after: &str, commits: &[(&str, &str)], files: &[(&str, &s
             .map(|(sha, subject)| GitCommit {
                 sha: (*sha).into(),
                 subject: (*subject).into(),
+                committed_at_ms: 0,
             })
             .collect(),
         files: files
