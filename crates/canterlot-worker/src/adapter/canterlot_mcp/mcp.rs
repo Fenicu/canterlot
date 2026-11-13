@@ -753,8 +753,7 @@ pub fn agent_tool_text(tool: &str, result: &crate::adapter::AgentCallResult) -> 
                 .filter(|object| object.get("hint").is_some_and(Value::is_string))
                 .and_then(|object| object.remove("hint"))
                 .and_then(|hint| hint.as_str().map(str::to_owned));
-            let mut text =
-                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+            let mut text = serde_json::to_string(&value).unwrap_or_else(|_| value.to_string());
             if tool == "limits.report"
                 && let Some(text) = value.get("text").and_then(Value::as_str)
             {
@@ -1483,6 +1482,26 @@ mod tests {
         let missing = initialize(json!({}));
         assert_eq!(missing["result"]["protocolVersion"], "2025-11-25");
         assert_eq!(missing["result"]["serverInfo"]["name"], SERVER_NAME,);
+    }
+
+    #[test]
+    fn agent_tool_answer_is_compact_json() {
+        let value =
+            json!({"tasks": [{"number": 1, "title": "Собрать"}], "hint": "Call plan_list."});
+        let (text, is_error) =
+            agent_tool_text("plan.list", &crate::adapter::AgentCallResult::Ok(value));
+        assert!(!is_error);
+        assert_eq!(
+            text,
+            "{\"tasks\":[{\"number\":1,\"title\":\"Собрать\"}]}\nCall plan_list."
+        );
+        assert!(!text.contains("\n  "), "JSON без отступов: {text}");
+        let (line, hint) = text.split_once('\n').expect("строка подсказки");
+        assert_eq!(
+            serde_json::from_str::<Value>(line).expect("сжатый JSON"),
+            json!({"tasks": [{"number": 1, "title": "Собрать"}]})
+        );
+        assert_eq!(hint, "Call plan_list.");
     }
 
     #[test]

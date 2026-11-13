@@ -189,8 +189,23 @@ test('every_card_expands_to_the_raw_call_and_result', async ({ page }) => {
   // Середину шапки занимает ссылка на делегата: раскрытие — по шеврону.
   await spawn.locator('.hit').click({ position: { x: 12, y: 12 } });
   const raw = spawn.locator('[data-role="card-raw"]');
-  await expect(raw).toContainText('"isolated":true');
+  await expect(raw).toContainText('"isolated": true');
   await expect(raw).toContainText('"status": "started"');
+});
+
+test('compact_json_answer_of_a_canterlot_tool_reads_indented', async ({ page }) => {
+  const { hub, api, seed } = await boot(page, { working: true });
+  const answer = JSON.stringify({
+    hits: [{ session_id: seed.child, block_id: api.id(), snippet: '**лимиты** и сброс' }],
+    next_cursor: null
+  });
+  const fresh = streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__history_search', { query: 'лимиты' }, { result: answer });
+  const block = await reveal(page, row(page, fresh.call).locator('.tool'));
+  await block.locator('.head').click();
+  const raw = block.locator('pre').last();
+  await expect(raw).toContainText('"hits": [');
+  await expect(raw).toContainText('"next_cursor": null');
+  await expect(raw).not.toContainText('{"hits":[{"session_id"');
 });
 
 test('generic_tools_and_unknown_tools_keep_the_plain_block', async ({ page }) => {

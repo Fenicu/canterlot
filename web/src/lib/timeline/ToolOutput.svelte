@@ -2,7 +2,7 @@
   import { fmt } from '#lib/format/ru.js';
   import { stripAnsi } from '#lib/render/ansi.js';
   import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
-  import { cleanToolOutput, takeToolPage } from '#lib/timeline/present.js';
+  import { cleanToolOutput, prettyToolOutput, takeToolPage } from '#lib/timeline/present.js';
 
   let {
     block,
@@ -20,7 +20,7 @@
   let offset = $state(0);
   let busy = $state(false);
   const TAIL_LINES = 20;
-  const clean = $derived(cleanToolOutput(stripAnsi(block.text)));
+  const clean = $derived(prettyToolOutput(cleanToolOutput(stripAnsi(block.text))));
   const shownLines = $derived(clean.split('\n'));
   const tail = $derived(shownLines.slice(-TAIL_LINES).join('\n'));
   const lines = $derived(block.lineCount ?? 0);
@@ -55,7 +55,7 @@
 <div class="out">
   {#if caption}<p class="caption">{caption}</p>{/if}
   {#if clean.trim() || full}
-    <pre>{full ? cleanToolOutput(full) : tail}</pre>
+    <pre>{full ? prettyToolOutput(cleanToolOutput(full)) : tail}</pre>
     {#if more}
       <button type="button" onclick={loadMore} aria-busy={busy}>Показать полностью{#if lines > 0}{` · ${lines} ${fmt.plural(lines, ['строка', 'строки', 'строк'])}`}{/if}</button>
     {/if}

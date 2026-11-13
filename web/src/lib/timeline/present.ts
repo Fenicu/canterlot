@@ -243,6 +243,54 @@ export function cleanToolOutput(text: string): string {
   return inner ? (inner[1] ?? "") : text;
 }
 
+/**
+ * Ответ агентского инструмента приходит сжатым JSON: владельцу показываем его с отступами.
+ * Хранимый текст не меняется, разбор карточек (`call.answer`) по-прежнему идёт по сырому.
+ */
+export function prettyToolOutput(text: string): string {
+  const whole = prettyJson(text.trim());
+  if (whole !== null) return whole;
+  const at = Math.max(text.lastIndexOf("\n{"), text.lastIndexOf("\n["));
+  if (at === -1) return text;
+  const tail = prettyJson(text.slice(at + 1).trim());
+  return tail === null ? text : text.slice(0, at + 1) + tail;
+}
+
+/** Сжатый JSON с начала строки — с отступами; хвост (подсказка, текст) не трогаем. */
+function prettyJson(text: string): string | null {
+  if (!text.startsWith("{") && !text.startsWith("[")) return null;
+  const end = jsonValueEnd(text);
+  if (end === null) return null;
+  try {
+    return JSON.stringify(JSON.parse(text.slice(0, end)), null, 2) + text.slice(end);
+  } catch {
+    return null;
+  }
+}
+
+/** Конец первого JSON-значения: учитывает строки и экранирование. */
+function jsonValueEnd(text: string): number | null {
+  let depth = 0;
+  let quoted = false;
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at];
+    if (quoted) {
+      if (char === "\\") at++;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') quoted = true;
+    else if (char === "{" || char === "[") depth++;
+    else if (char === "}" || char === "]") {
+      depth--;
+      if (depth === 0) return at + 1;
+      if (depth < 0) return null;
+    }
+  }
+  return null;
+}
+
+
 const MAIN_AGENTS = new Set(["orchestrator", "main", ""]);
 
 /** `orchestrator` — внутренняя метка хаба и адаптеров, владелец видит название инструмента сессии. */
