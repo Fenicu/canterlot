@@ -442,16 +442,17 @@ impl ChildEngine {
     }
 
     /// Мягкая остановка: закрыть stdin, подождать выхода, иначе SIGKILL.
-    pub async fn shutdown(mut self, wait: Duration) -> &'static str {
+    /// Возвращает способ и код выхода (`None` — завершён сигналом).
+    pub async fn shutdown(mut self, wait: Duration) -> (&'static str, Option<i32>) {
         let EngineLink { tx, rx } = self.link;
         drop(tx);
         drop(rx);
         match tokio::time::timeout(wait, self.child.wait()).await {
-            Ok(_) => "exited",
+            Ok(status) => ("exited", status.ok().and_then(|s| s.code())),
             Err(_) => {
                 let _ = self.child.start_kill();
                 let _ = self.child.wait().await;
-                "killed"
+                ("killed", None)
             }
         }
     }

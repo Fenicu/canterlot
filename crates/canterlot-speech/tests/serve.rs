@@ -494,3 +494,24 @@ async fn health_command_exit_codes() {
     assert_eq!(v["ok"], false);
     assert!(String::from_utf8_lossy(&out.stderr).contains("speech_unavailable"));
 }
+
+#[tokio::test]
+async fn idle_unload_is_a_clean_exit_without_running_atexit_handlers() {
+    // Ложный движок регистрирует atexit с abort, как деструкторы ggml-cuda после
+    // остановки рантайма CUDA: выход движка их запускать не должен.
+    let svc = Service::launch("atexit_abort", "idle_unload = \"1s\"", "");
+    let mut s = svc.start().await;
+    send_audio(&mut s, &[(true, 3)]).await;
+    send_json(&mut s, r#"{"type":"finish"}"#).await;
+    assert_eq!(read_all(&mut s).await.last().unwrap()["type"], "final");
+    svc.wait_log("reason=\"idle\"", 1).await;
+    let logs = svc.logs();
+    assert!(
+        logs.contains("kind=\"engine_unloaded\"") && logs.contains("status=0"),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains(" WARN ") && !logs.contains(" ERROR "),
+        "чистая выгрузка без предупреждений:\n{logs}"
+    );
+}

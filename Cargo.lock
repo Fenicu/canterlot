@@ -549,6 +549,7 @@ dependencies = [
  "clap",
  "hound",
  "humantime-serde",
+ "libc",
  "log",
  "rustix",
  "serde",

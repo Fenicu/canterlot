@@ -19,6 +19,9 @@ pub struct FakeSpec {
     pub cpu: bool,
     pub fail_load: bool,
     pub fail_decode: bool,
+    /// Обработчик atexit, который роняет процесс, как деструкторы ggml-cuda после
+    /// остановки рантайма CUDA: выход движка обязан их не запускать.
+    pub atexit_abort: bool,
 }
 
 impl FakeSpec {
@@ -32,6 +35,7 @@ impl FakeSpec {
                 None if part == "cpu" => spec.cpu = true,
                 None if part == "fail_load" => spec.fail_load = true,
                 None if part == "fail_decode" => spec.fail_decode = true,
+                None if part == "atexit_abort" => spec.atexit_abort = true,
                 _ => return Err(format!("неизвестная настройка ложного движка: {part}")),
             }
         }
@@ -47,6 +51,10 @@ impl Loader for FakeLoader {
         std::thread::sleep(Duration::from_millis(spec.load_ms));
         if spec.fail_load {
             return Err("load_failed".into());
+        }
+        if spec.atexit_abort {
+            // SAFETY: регистрация обработчика без состояния.
+            unsafe { libc::atexit(abort_at_exit) };
         }
         let loaded = Loaded {
             mode: if spec.cpu { Mode::Cpu } else { Mode::Gpu },
@@ -64,6 +72,10 @@ impl Loader for FakeLoader {
             }),
         ))
     }
+}
+
+extern "C" fn abort_at_exit() {
+    std::process::abort();
 }
 
 /// Кадр — речь, если средняя амплитуда больше 1000.

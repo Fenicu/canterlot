@@ -93,13 +93,7 @@ impl Server {
         // Активная диктовка видит stop сама; здесь только ждём слот и выключаем движок.
         let mut slot = self.slot.lock().await;
         if let Some(engine) = slot.engine.take() {
-            let how = engine.shutdown(UNLOAD_WAIT).await;
-            tracing::info!(
-                kind = "engine_unloaded",
-                reason = "shutdown",
-                how,
-                "engine stopped"
-            );
+            log_unload("shutdown", engine.shutdown(UNLOAD_WAIT).await);
         }
         slot.loaded = None;
     }
@@ -332,13 +326,7 @@ impl Server {
             return;
         }
         if let Some(engine) = slot.engine.take() {
-            let how = engine.shutdown(UNLOAD_WAIT).await;
-            tracing::info!(
-                kind = "engine_unloaded",
-                reason = "idle",
-                how,
-                "engine unloaded"
-            );
+            log_unload("idle", engine.shutdown(UNLOAD_WAIT).await);
         }
         slot.loaded = None;
         self.set_status(|s| {
@@ -349,6 +337,27 @@ impl Server {
 
     fn set_status(&self, f: impl FnOnce(&mut Status)) {
         f(&mut self.status.lock().unwrap());
+    }
+}
+
+/// Чистый выход движка — INFO; код не ноль, сигнал или SIGKILL — WARN.
+fn log_unload(reason: &'static str, (how, code): (&'static str, Option<i32>)) {
+    if how == "exited" && code == Some(0) {
+        tracing::info!(
+            kind = "engine_unloaded",
+            reason,
+            how,
+            status = 0,
+            "engine unloaded"
+        );
+    } else {
+        tracing::warn!(
+            kind = "engine_exited",
+            reason,
+            how,
+            status = code.unwrap_or(-1),
+            "engine did not exit cleanly"
+        );
     }
 }
 

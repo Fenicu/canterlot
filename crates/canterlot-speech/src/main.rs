@@ -65,6 +65,17 @@ enum Command {
     },
 }
 
+/// Завершение без atexit и статических деструкторов C++: деструктор контекста
+/// ggml-cuda, запущенный после остановки рантайма CUDA, роняет процесс (abort,
+/// код 134). VRAM и прочее освобождает ядро при выходе процесса.
+fn exit_now(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: _exit завершает процесс сразу; буферы Rust сброшены выше.
+    unsafe { libc::_exit(code) }
+}
+
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
@@ -147,14 +158,15 @@ fn main() -> ExitCode {
                 json,
                 text,
             };
-            match runtime().block_on(probe::run(cfg, l, &wav, opts)) {
-                Ok(true) => ExitCode::SUCCESS,
-                Ok(false) => ExitCode::FAILURE,
+            let code = match runtime().block_on(probe::run(cfg, l, &wav, opts)) {
+                Ok(true) => 0,
+                Ok(false) => 1,
                 Err(e) => {
                     eprintln!("{e}");
-                    ExitCode::FAILURE
+                    1
                 }
-            }
+            };
+            exit_now(code)
         }
         Command::Engine {
             config,
@@ -285,5 +297,5 @@ fn engine(path: PathBuf, fake: Option<String>, verified: Vec<String>) -> ExitCod
         serve_child(tokio::io::stdin(), tokio::io::stdout(), link).await;
     });
     // Рабочие потоки могут стоять в нативном прогоне: выход без ожидания их.
-    std::process::exit(0)
+    exit_now(0)
 }
