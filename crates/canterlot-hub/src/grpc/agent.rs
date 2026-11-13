@@ -173,7 +173,7 @@ async fn handle(
             };
             match crate::session_tools::call(&context, &caller, tool, arguments).await {
                 Ok(result) => ok(result),
-                Err(error) => err(error.code.as_str(), error.message),
+                Err(error) => err(error.code.as_str(), error.text()),
             }
         }
         _ => err("unknown_tool", "Неизвестный инструмент".into()),

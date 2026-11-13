@@ -657,6 +657,26 @@ async fn argument_errors_name_the_field_and_never_echo_values(pool: PgPool) {
 }
 
 #[test]
+fn every_tool_error_code_says_what_to_do_next() {
+    use canterlot_hub::session_tools::{ToolError, ToolErrorCode};
+    for code in ToolErrorCode::ALL {
+        let hint = code.hint();
+        assert!(!hint.trim().is_empty(), "{} без подсказки", code.as_str());
+        assert!(
+            hint.is_ascii() && hint.ends_with('.'),
+            "{}: подсказка по-английски и с точкой: {hint}",
+            code.as_str()
+        );
+        let text = ToolError::new(code).text();
+        assert!(
+            text.starts_with(code.default_message()) && text.ends_with(hint),
+            "{}: {text}",
+            code.as_str()
+        );
+    }
+}
+
+#[test]
 fn session_tool_error_codes_are_unique_snake_case_with_messages() {
     use canterlot_hub::session_tools::ToolErrorCode;
     let mut seen = std::collections::BTreeSet::new();

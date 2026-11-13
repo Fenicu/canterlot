@@ -566,7 +566,7 @@ async fn deny_returns_message() {
         .to_owned();
     assert_eq!(
         text,
-        "{\"behavior\":\"deny\",\"message\":\"Denied by the owner\"}"
+        "{\"behavior\":\"deny\",\"message\":\"Denied by the owner. Do not retry with different arguments; end your turn or ask the owner what to do.\"}"
     );
 }
 

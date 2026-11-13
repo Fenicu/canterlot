@@ -233,6 +233,73 @@ impl ToolErrorCode {
             Self::Internal => "The hub could not complete the call, try later",
         }
     }
+
+    /// Что делать дальше: каждый отказ несёт подсказку, по которой модель исправляется сама.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::UnknownTool => "Call tools/list to see the tools of this session.",
+            Self::SessionNotFound => "Call sessions_list to find a session id.",
+            Self::ReadOnlySession => {
+                "End your turn with a plain-text answer, or ask the owner to change the mode."
+            }
+            Self::RateLimited => {
+                "Wait, or arm alarm_set to be woken later; do not repeat the call."
+            }
+            Self::ChainDepthExceeded => {
+                "Answer the parent session yourself instead of sending another message."
+            }
+            Self::SpawnDepthExceeded => {
+                "Do the work in this session, or ask the owner to raise the nesting limit."
+            }
+            Self::HarnessUnknown => "Pass harness claude_code, codex or opencode.",
+            Self::ModelUnknown => {
+                "Pass a catalog model id, or call route_preview to let the policy choose."
+            }
+            Self::EffortNotAllowed => "Lower effort, or pass no effort for the model default.",
+            Self::WorkdirNotAllowed => "Pass workdir of a git repository or isolated=false.",
+            Self::PermissionModeTooWide => {
+                "Pass a mode no wider than this session's, or ask the owner to approve."
+            }
+            Self::ProfileUnknown => "Call canterlot_presets_list to see the preset ids.",
+            Self::MachineUnavailable => {
+                "Pass workdir on this machine, or start the session on another."
+            }
+            Self::CapabilityMissing => {
+                "Continue without this step, or ask the owner to update the worker."
+            }
+            Self::QueueFull => {
+                "Wait for the queue to drain, or cancel a queued spawn with spawn_cancel."
+            }
+            Self::ConversationClosed => "Start a new session with session_spawn.",
+            Self::NotParent => "Act only on sessions you started, or ask their parent.",
+            Self::NotDelegated => "Call this from a session started by an agent, or ask the owner.",
+            Self::AttachmentNotAvailable => {
+                "Pass attachment ids from this conversation, or upload the file again."
+            }
+            Self::TextTooLarge => "Send a shorter text, or hand the file over with share_file.",
+            Self::TooLarge => "Send less data in one call.",
+            Self::TooManyAlarms => "Cancel an alarm with alarm_cancel, then arm the new one.",
+            Self::AlarmNotFound => "Call alarm_list to see the armed alarms.",
+            Self::TaskTypeUnknown => "Call route_preview without task_type to list the task types.",
+            Self::NoExecutorAvailable => {
+                "Pass harness and model yourself, or ask the owner to adjust the routing policy."
+            }
+            Self::MachineBusy => {
+                "Queue the spawn with queue=true, or wait for the machine to free up."
+            }
+            Self::SpawnQueueFull => {
+                "Wait for a queued spawn to start, or cancel one with spawn_cancel."
+            }
+            Self::PathNotAllowed => "Pass a path under the session workdir or the temp directory.",
+            Self::PlanTaskNotFound => "Call plan_list to see task numbers.",
+            Self::PlanTaskClosed => "Pick an open task from plan_list.",
+            Self::PlanFull => "Finish or cancel tasks with plan_update before adding more.",
+            Self::InvalidArguments => {
+                "Fix the argument and call again; tools/list shows the schema."
+            }
+            Self::Internal => "Try again; if it repeats, tell the owner.",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +321,17 @@ impl ToolError {
             code,
             message: message.into(),
         }
+    }
+
+    /// Текст для модели: сообщение и следующий шаг. Код остаётся отдельным полем.
+    pub fn text(&self) -> String {
+        let message = self.message.trim_end();
+        let separator = if message.ends_with(['.', '!', '?']) {
+            " "
+        } else {
+            ". "
+        };
+        format!("{message}{separator}{}", self.code.hint())
     }
 }
 

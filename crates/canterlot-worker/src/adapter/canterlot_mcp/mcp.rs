@@ -684,6 +684,21 @@ fn unknown_tool_message(name: &str, tool_set: ToolSet, provider: &str) -> String
     }
 }
 
+/// Подсказка для кодов, которые ставит сам воркер: ответ хаба уже несёт свою.
+fn local_error_hint(code: &str) -> Option<&'static str> {
+    match code {
+        "hub_unreachable" => {
+            Some("The hub is not reachable; retry once, and tell the owner if it repeats.")
+        }
+        "hub_timeout" => Some(
+            "The hub did not answer in time; retry once instead of repeating the call blindly.",
+        ),
+        "hub_error" => Some("The hub rejected the call; tell the owner instead of retrying."),
+        "hub_unsupported" => Some("This hub is older than the worker; retry after it is updated."),
+        _ => None,
+    }
+}
+
 /// Текст ответа агентского инструмента и признак ошибки; текст пресета не трогаем.
 /// `hint` из результата хаба уходит отдельной строкой простого текста.
 pub fn agent_tool_text(tool: &str, result: &crate::adapter::AgentCallResult) -> (String, bool) {
@@ -728,7 +743,13 @@ pub fn agent_tool_text(tool: &str, result: &crate::adapter::AgentCallResult) -> 
             }
             (text, false)
         }
-        Outcome::Err { code, message } => (format!("{code}: {message}"), true),
+        Outcome::Err { code, message } => {
+            let text = match local_error_hint(code) {
+                Some(hint) => format!("{code}: {message}\n{hint}"),
+                None => format!("{code}: {message}"),
+            };
+            (text, true)
+        }
     }
 }
 
@@ -910,7 +931,11 @@ pub fn handle_rpc_with_provider(msg: &Value, tool_set: ToolSet, provider: &str) 
             let kind = match (name, tool_set) {
                 ("approve", ToolSet::ApproveAndLimits) => {
                     if !is_permission_prompt(msg, &arguments) {
-                        return error(&id, -32602, "approve is not for direct use");
+                        return error(
+                            &id,
+                            -32602,
+                            "approve is not for direct use; the CLI calls it for permission prompts, so call the tool you need instead",
+                        );
                     }
                     if arguments.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion")
                     {
@@ -1055,7 +1080,10 @@ pub fn is_question(arguments: &Value) -> bool {
 }
 
 pub fn deny_message(message: Option<&str>) -> String {
-    message.unwrap_or("Denied by the owner").to_owned()
+    message.map(str::to_owned).unwrap_or_else(|| {
+        "Denied by the owner. Do not retry with different arguments; end your turn or ask the owner what to do."
+            .to_owned()
+    })
 }
 
 pub fn cli_policy_mark(
