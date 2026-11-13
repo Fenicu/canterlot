@@ -34,12 +34,17 @@ const LIVENESS_POLL: Duration = Duration::from_millis(500);
 const BIND_RETRY: Duration = Duration::from_secs(5);
 const FIRST_LINE_TIMEOUT: Duration = Duration::from_secs(10);
 const STATE_VERSION: u32 = 1;
+/// Придержка выдачи после рестарта с непустой очередью: ожидающие переподключаются
+/// шагом 250 мс, за это время они возвращаются на свои места по времени запроса.
+pub const RESTORE_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub socket: PathBuf,
     pub state_file: PathBuf,
     pub slots: u32,
+    /// Сколько придерживать выдачу после восстановления непустой очереди.
+    pub restore_grace: Duration,
 }
 
 impl ServerConfig {
@@ -48,6 +53,7 @@ impl ServerConfig {
             socket: super::socket_path(runtime_dir, data_dir),
             state_file: data_dir.join(super::STATE_FILE),
             slots,
+            restore_grace: RESTORE_GRACE,
         }
     }
 }
@@ -83,6 +89,19 @@ struct Persisted {
 struct StateFile {
     version: u32,
     grants: Vec<Persisted>,
+    /// Ожидающих в памяти нет, но их место в очереди переживает рестарт числом:
+    /// по нему решается, придерживать ли выдачу, пока они переподключаются.
+    #[serde(default)]
+    waiters: u32,
+}
+
+/// Что дал файл состояния.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Restored {
+    /// Файл был: очередь могла существовать.
+    file: bool,
+    /// Сколько ожидающих было в момент последней записи.
+    waiters: u32,
 }
 
 struct State {
@@ -110,6 +129,12 @@ impl LeaseServer {
     pub fn start(config: ServerConfig, shutdown: watch::Receiver<bool>) -> Self {
         let mut scheduler = Scheduler::new(config.slots);
         let restored = restore(&config.state_file, &mut scheduler);
+        let grace = (restored.waiters > 0)
+            .then_some(config.restore_grace)
+            .filter(|grace| !grace.is_zero());
+        if let Some(grace) = grace {
+            scheduler.hold(super::now_ms().saturating_add(grace_ms(grace)));
+        }
         let shared = Arc::new(Shared {
             state: Mutex::new(State { scheduler }),
             changes: watch::channel(Snapshot::default()).0,
@@ -119,13 +144,13 @@ impl LeaseServer {
         });
         {
             let state = shared.state.lock().expect("lease state");
-            if restored {
-                persist(&shared.state_file, &state.scheduler);
+            if restored.file {
+                persist_with(&shared.state_file, &state.scheduler, restored.waiters);
             }
             shared.publish(&state);
         }
         let snapshot = shared.changes.subscribe();
-        let task = tokio::spawn(serve(shared, config.socket, shutdown));
+        let task = tokio::spawn(serve(shared, config.socket, shutdown, grace));
         Self { snapshot, task }
     }
 
@@ -146,21 +171,27 @@ impl Drop for LeaseServer {
     }
 }
 
-/// Загружает выданные аренды и оставляет те, чья обёртка жива. `true`, если файл был.
-fn restore(path: &Path, scheduler: &mut Scheduler<Meta>) -> bool {
+/// Загружает выданные аренды и оставляет те, чья обёртка жива.
+fn restore(path: &Path, scheduler: &mut Scheduler<Meta>) -> Restored {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Restored::default(),
         Err(error) => {
             tracing::warn!(%error, "lease state unreadable, starting empty");
-            return true;
+            return Restored {
+                file: true,
+                waiters: 0,
+            };
         }
     };
     let file: StateFile = match serde_json::from_slice(&bytes) {
         Ok(file) => file,
         Err(error) => {
             tracing::warn!(%error, "lease state invalid, starting empty");
-            return true;
+            return Restored {
+                file: true,
+                waiters: 0,
+            };
         }
     };
     for grant in file.grants {
@@ -190,13 +221,28 @@ fn restore(path: &Path, scheduler: &mut Scheduler<Meta>) -> bool {
             },
         );
     }
-    true
+    Restored {
+        file: true,
+        waiters: file.waiters,
+    }
+}
+
+fn grace_ms(grace: Duration) -> u64 {
+    u64::try_from(grace.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Атомарная замена файла: сбой посреди записи оставляет прошлую версию.
 fn persist(path: &Path, scheduler: &Scheduler<Meta>) {
+    let waiters = u32::try_from(scheduler.waiters().len()).unwrap_or(u32::MAX);
+    persist_with(path, scheduler, waiters)
+}
+
+/// Запись с числом ожидающих: при старте в памяти их ещё нет, а место в очереди
+/// переживает рестарт именно этим числом.
+fn persist_with(path: &Path, scheduler: &Scheduler<Meta>, waiters: u32) {
     let file = StateFile {
         version: STATE_VERSION,
+        waiters,
         grants: scheduler
             .holders()
             .iter()
@@ -341,14 +387,23 @@ impl Shared {
     fn release(&self, id: &str, reason: &'static str) {
         let mut state = self.state.lock().expect("lease state");
         let was_holder = state.scheduler.holder(id).is_some();
-        let (removed, granted) = state.scheduler.release(id, super::now_ms());
+        let (removed, _) = state.scheduler.release(id, super::now_ms());
         if let Some(entry) = removed {
             tracing::info!(lease_id = %id, kind = entry.kind.as_str(), reason, holder = was_holder, "lease released");
-            if was_holder || !granted.is_empty() {
-                persist(&self.state_file, &state.scheduler);
-            }
+            // Ушедший ожидающий тоже меняет файл: по числу ожидающих решается придержка.
+            persist(&self.state_file, &state.scheduler);
             self.publish(&state);
         }
+    }
+
+    /// Придержка выдачи кончилась: ожидающие вернулись, очередь решает как обычно.
+    fn end_grace(&self) {
+        let mut state = self.state.lock().expect("lease state");
+        let granted = state.scheduler.resume(super::now_ms());
+        if !granted.is_empty() {
+            persist(&self.state_file, &state.scheduler);
+        }
+        self.publish(&state);
     }
 
     fn sweep(&self) {
@@ -394,7 +449,12 @@ impl Shared {
     }
 }
 
-async fn serve(shared: Arc<Shared>, socket: PathBuf, mut shutdown: watch::Receiver<bool>) {
+async fn serve(
+    shared: Arc<Shared>,
+    socket: PathBuf,
+    mut shutdown: watch::Receiver<bool>,
+    grace: Option<Duration>,
+) {
     let sweeper = {
         let shared = shared.clone();
         tokio::spawn(async move {
@@ -405,6 +465,14 @@ async fn serve(shared: Arc<Shared>, socket: PathBuf, mut shutdown: watch::Receiv
         })
     };
     let _sweeper = AbortOnDrop(sweeper);
+    let expiring = grace.map(|grace| {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            shared.end_grace();
+        })
+    });
+    let _expiring = expiring.map(AbortOnDrop);
     let mut warned = false;
     let (listener, _lock) = loop {
         match tokio::task::spawn_blocking({
@@ -676,13 +744,12 @@ async fn connection(shared: Arc<Shared>, stream: UnixStream, uid: u32) -> io::Re
             {
                 let mut state = shared.state.lock().expect("lease state");
                 let now = super::now_ms();
-                let phantom = release_phantom(&mut state.scheduler, pid, start_ticks, now);
-                let granted = state
+                release_phantom(&mut state.scheduler, pid, start_ticks, now);
+                state
                     .scheduler
                     .request(id.clone(), kind, requested_at_ms, now, meta);
-                if !phantom.is_empty() || !granted.is_empty() {
-                    persist(&shared.state_file, &state.scheduler);
-                }
+                // Заявка всегда меняет очередь: в файл идут и держатели, и число ожидающих.
+                persist(&shared.state_file, &state.scheduler);
                 shared.publish(&state);
             }
             tracing::info!(lease_id = %id, kind = kind.as_str(), pid, "lease requested");
@@ -865,7 +932,7 @@ mod tests {
         assert_eq!(saved.grants[0].since, 10);
 
         let mut after = Scheduler::new(2);
-        assert!(restore(&path, &mut after));
+        assert!(restore(&path, &mut after).file);
         let ids: Vec<_> = after.holders().iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["live"]);
         assert_eq!(after.holders()[0].since_ms, Some(10));
@@ -877,15 +944,37 @@ mod tests {
         );
     }
 
+    /// Место ожидающих переживает рестарт числом: по нему решается придержка выдачи.
+    #[test]
+    fn persisted_queue_restores_as_a_waiter_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("leases.json");
+        let mut before = Scheduler::new(1);
+        let me = std::process::id();
+        before.request("held".into(), Kind::Build, 1, 10, meta(me));
+        before.request("queued".into(), Kind::Build, 2, 20, meta(me));
+        persist(&path, &before);
+        let saved: StateFile = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.waiters, 1);
+
+        let mut after = Scheduler::new(1);
+        let restored = restore(&path, &mut after);
+        assert_eq!(restored.waiters, 1);
+        assert!(restored.file);
+        assert_eq!(after.waiters().len(), 0);
+    }
+
     #[test]
     fn broken_state_file_starts_empty() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("leases.json");
         fs::write(&path, b"{not json").unwrap();
         let mut scheduler = Scheduler::<Meta>::new(2);
-        assert!(restore(&path, &mut scheduler));
+        let restored = restore(&path, &mut scheduler);
+        assert!(restored.file);
+        assert_eq!(restored.waiters, 0);
         assert!(scheduler.holders().is_empty());
-        assert!(!restore(&directory.path().join("missing"), &mut scheduler));
+        assert!(!restore(&directory.path().join("missing"), &mut scheduler).file);
     }
 
     #[test]

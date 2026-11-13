@@ -51,6 +51,8 @@ pub struct Scheduler<M> {
     holders: Vec<Entry<M>>,
     waiters: Vec<Entry<M>>,
     next_seq: u64,
+    /// Выдача придержана до этого момента: после рестарта ожидающие успевают вернуться.
+    hold_until_ms: Option<u64>,
 }
 
 impl<M: Clone> Scheduler<M> {
@@ -60,7 +62,20 @@ impl<M: Clone> Scheduler<M> {
             holders: Vec::new(),
             waiters: Vec::new(),
             next_seq: 0,
+            hold_until_ms: None,
         }
+    }
+
+    /// Придержать выдачу до `until_ms`: очередь пополняется, слоты не выдаются. Нужна
+    /// после рестарта, когда ожидающих в памяти ещё нет, а их место уже занято.
+    pub fn hold(&mut self, until_ms: u64) {
+        self.hold_until_ms = Some(until_ms);
+    }
+
+    /// Снять придержку и выдать всё, что помещается.
+    pub fn resume(&mut self, now_ms: u64) -> Vec<String> {
+        self.hold_until_ms = None;
+        self.schedule(now_ms)
     }
 
     pub fn slots(&self) -> u32 {
@@ -169,6 +184,12 @@ impl<M: Clone> Scheduler<M> {
     }
 
     fn schedule(&mut self, now_ms: u64) -> Vec<String> {
+        if let Some(until) = self.hold_until_ms {
+            if now_ms < until {
+                return Vec::new();
+            }
+            self.hold_until_ms = None;
+        }
         let mut granted = Vec::new();
         let mut used = self.used();
         while let Some(head) = self.waiters.first() {
@@ -374,6 +395,51 @@ mod tests {
                 case.name
             );
         }
+    }
+
+    /// Придержка после рестарта: пришедшая в окне сборка не занимает слот раньше
+    /// переподключившегося гейта, хотя место в очереди у неё позже по времени запроса.
+    #[test]
+    fn hold_keeps_the_returning_gate_ahead_of_a_late_build() {
+        let mut scheduler = Scheduler::new(2);
+        scheduler.restore("old".into(), Kind::Build, 1, 10, 1, ());
+        scheduler.hold(1_000);
+        assert!(
+            scheduler
+                .request("late".into(), Kind::Build, 20, 100, ())
+                .is_empty()
+        );
+        assert!(
+            scheduler
+                .request("gate".into(), Kind::Gate, 5, 110, ())
+                .is_empty()
+        );
+        assert_eq!(scheduler.position("gate"), Some(1));
+        assert_eq!(scheduler.position("late"), Some(2));
+
+        // Окно кончилось: гейт впереди и в два слота с одной сборкой не влезает.
+        assert!(scheduler.resume(1_000).is_empty());
+        assert_eq!(scheduler.waiters().len(), 2);
+        assert_eq!(scheduler.release("old", 1_100).1, ["gate"]);
+        assert!(scheduler.holder("late").is_none());
+        assert_eq!(scheduler.release("gate", 1_200).1, ["late"]);
+    }
+
+    /// Придержка без отдельного пробуждения снимается сама, когда время запроса её прошло.
+    #[test]
+    fn expired_hold_grants_on_the_next_request() {
+        let mut scheduler = Scheduler::new(1);
+        scheduler.hold(1_000);
+        assert!(
+            scheduler
+                .request("a".into(), Kind::Build, 1, 999, ())
+                .is_empty()
+        );
+        assert_eq!(
+            scheduler.request("b".into(), Kind::Build, 2, 1_000, ()),
+            ["a"]
+        );
+        assert_eq!(scheduler.waiters().len(), 1);
     }
 
     #[test]

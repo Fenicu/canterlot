@@ -23,6 +23,7 @@ struct Fixture {
     stop: watch::Sender<bool>,
     server: Option<LeaseServer>,
     slots: u32,
+    restore_grace: Duration,
 }
 
 impl Fixture {
@@ -36,17 +37,20 @@ impl Fixture {
             stop,
             server: None,
             slots,
+            restore_grace: lease::server::RESTORE_GRACE,
         };
         fixture.start().await;
         fixture
     }
 
     fn config(&self) -> ServerConfig {
-        ServerConfig::new(
+        let mut config = ServerConfig::new(
             Some(&self.root.path().join("runtime")),
             &self.root.path().join("data"),
             self.slots,
-        )
+        );
+        config.restore_grace = self.restore_grace;
+        config
     }
 
     fn socket(&self) -> PathBuf {
@@ -302,6 +306,44 @@ async fn restart_keeps_live_grant_and_drops_dead_one() {
     fourth.wait_granted().await;
     assert!(third.finish().await.success());
     assert!(fourth.finish().await.success());
+}
+
+/// Рестарт с непустой очередью: ожидающий гейт переподключается и не теряет места —
+/// сборка, пришедшая в окно, не получает свободный слот раньше него.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_grace_keeps_the_queued_gate_ahead_of_a_new_build() {
+    let mut fixture = Fixture::new(2).await;
+    fixture.restore_grace = Duration::from_millis(1500);
+    let holder = fixture.job("build", "holder");
+    holder.wait_granted().await;
+    let gate = fixture.job("gate", "queued-gate");
+    fixture.waiters(1).await;
+
+    fixture.restart().await;
+    fixture.start().await;
+    // Сборка просит слот раньше, чем гейт успел переподключиться: один слот свободен.
+    let late = fixture.job("build", "late");
+    fixture.waiters(2).await;
+    let kinds: Vec<_> = fixture
+        .snapshot()
+        .waiters
+        .iter()
+        .map(|waiter| waiter.kind.clone())
+        .collect();
+    assert_eq!(kinds, ["gate", "build"], "gate lost its place");
+
+    // Окно придержки прошло: поздняя сборка не обогнала гейт.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(!late.granted(), "a new build overtook the restored queue");
+    assert!(!gate.granted());
+
+    assert!(holder.finish().await.success());
+    gate.wait_granted().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!late.granted(), "build started next to a gate");
+    assert!(gate.finish().await.success());
+    late.wait_granted().await;
+    assert!(late.finish().await.success());
 }
 
 fn output(mut command: Command) -> (std::process::ExitStatus, String, String) {
