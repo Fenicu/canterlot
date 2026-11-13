@@ -87,6 +87,10 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "not_delegated",
   "worktree_removed",
   "worktree_not_removed",
+  "too_many_terms",
+  "term_empty",
+  "term_too_long",
+  "duplicate_term",
 ];
 
 const VALID_ACTIONS: ErrorAction[] = [
@@ -126,7 +130,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(73);
+    expect(ALL_ERROR_CODES.length).toBe(77);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(
