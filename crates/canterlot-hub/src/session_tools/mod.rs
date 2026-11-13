@@ -256,7 +256,9 @@ impl ToolErrorCode {
                 "Pass a catalog model id, or call route_preview to let the policy choose."
             }
             Self::EffortNotAllowed => "Lower effort, or pass no effort for the model default.",
-            Self::WorkdirNotAllowed => "Pass workdir of a git repository or isolated=false.",
+            Self::WorkdirNotAllowed => {
+                "Pass a workdir under the allowed roots, or omit it to use this session's."
+            }
             Self::PermissionModeTooWide => {
                 "Pass a mode no wider than this session's, or ask the owner to approve."
             }
@@ -294,6 +296,9 @@ impl ToolErrorCode {
             Self::PlanTaskNotFound => "Call plan_list to see task numbers.",
             Self::PlanTaskClosed => "Pick an open task from plan_list.",
             Self::PlanFull => "Finish or cancel tasks with plan_update before adding more.",
+            Self::AlreadyDecided => {
+                "The owner's answer stands; wait for its result instead of cancelling."
+            }
             Self::InvalidArguments => {
                 "Fix the argument and call again; tools/list shows the schema."
             }
