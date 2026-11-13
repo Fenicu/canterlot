@@ -65,7 +65,8 @@ async function boot(page: Page) {
               timed_out: 0,
               duration_ms: 195_532,
               ran_at: '2026-11-13T10:00:00.000Z',
-              stale_before: '14e6bd27'
+              freshness: 'stale',
+              stale_before: '14e6bd2'
             },
             {
               tool: 'playwright',
@@ -77,6 +78,7 @@ async function boot(page: Page) {
               timed_out: 0,
               duration_ms: 38_000,
               ran_at: '2026-11-13T10:05:00.000Z',
+              freshness: 'fresh',
               stale_before: null
             }
           ],
@@ -310,7 +312,7 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
   await expect(nextest).toContainText(
     '3944 прошли, 2 упали, 2 нестабильных, 54 пропущены, 3 мин 15 с'
   );
-  await expect(nextest).toContainText('до коммита 14e6bd27 (устарел)');
+  await expect(nextest).toContainText('до коммита 14e6bd2 (устарел)');
   const playwright = tests.locator('[data-tool="Playwright"]');
   await expect(playwright).toContainText('32 прошли, 38 с');
   await expect(playwright).toContainText('после последнего коммита');

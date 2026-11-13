@@ -15,7 +15,7 @@ use crate::{
     activity::{Evidence, OWNER_LOST, extract_request_summary},
     requests::RequestKind,
     session_tools::origin::{HubCommit, HubEvent},
-    test_summary::TestSummary,
+    test_summary::{TestFreshness, TestSummary},
 };
 
 /// Предел итогового ответа в тексте события.
@@ -732,7 +732,7 @@ fn tool_label(tool: &str) -> &str {
     }
 }
 
-fn tests_section(tests: &[TestSummary], had_commits: bool) -> String {
+fn tests_section(tests: &[TestSummary]) -> String {
     if tests.is_empty() {
         return String::new();
     }
@@ -757,10 +757,14 @@ fn tests_section(tests: &[TestSummary], had_commits: bool) -> String {
         if let Some(duration_ms) = test.duration_ms {
             parts.push(duration(duration_ms));
         }
-        if let Some(sha) = &test.stale_before {
-            parts.push(format!("stale (before commit {sha})"));
-        } else if had_commits {
-            parts.push("after the last commit".to_owned());
+        match test.freshness {
+            TestFreshness::Fresh => parts.push("after the last commit".to_owned()),
+            TestFreshness::Stale => {
+                if let Some(sha) = &test.stale_before {
+                    parts.push(format!("stale (before commit {sha})"));
+                }
+            }
+            TestFreshness::Unknown => {}
         }
         let _ = writeln!(out, "  {}: {}", tool_label(&test.tool), parts.join(", "));
     }
@@ -879,13 +883,7 @@ pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
         summary.git.as_ref(),
         summary.worktree.as_ref(),
     ));
-    head.push_str(&tests_section(
-        &summary.tests,
-        summary
-            .git
-            .as_ref()
-            .is_some_and(|git| !git.commits.is_empty()),
-    ));
+    head.push_str(&tests_section(&summary.tests));
     if let Some((path, branch)) = &summary.worktree {
         let _ = writeln!(head, "Worktree: {path}, branch {branch}.");
     }
@@ -1062,6 +1060,7 @@ mod tests {
             timed_out: 0,
             duration_ms: Some(duration_ms),
             ran_at: DateTime::from_timestamp_millis(0).unwrap(),
+            freshness: TestFreshness::Unknown,
             stale_before: None,
         }
     }
@@ -1071,28 +1070,31 @@ mod tests {
         let mut nextest = test("nextest", 3944, 2, 54, 195_000);
         nextest.flaky = 3;
         nextest.timed_out = 1;
+        nextest.freshness = TestFreshness::Fresh;
         let mut playwright = test("playwright", 32, 0, 0, 38_000);
-        playwright.stale_before = Some("14e6bd27".into());
+        playwright.freshness = TestFreshness::Stale;
+        playwright.stale_before = Some("14e6bd2".into());
         let mut vitest = test("vitest", 1504, 3, 0, 12_000);
         vitest.did_not_run = 2;
-        let section = tests_section(&[nextest, playwright, vitest], true);
+        vitest.freshness = TestFreshness::Fresh;
+        let section = tests_section(&[nextest, playwright, vitest]);
         assert_eq!(
             section,
             "Tests:\n\
              \x20 nextest: 3944 passed, 2 failed, 3 flaky, 54 skipped, 1 timed out, 3m15s, after the last commit\n\
-             \x20 Playwright: 32 passed, 38s, stale (before commit 14e6bd27)\n\
+             \x20 Playwright: 32 passed, 38s, stale (before commit 14e6bd2)\n\
              \x20 vitest: 1504 passed, 3 failed, 2 did not run, 12s, after the last commit\n"
         );
     }
 
     #[test]
-    fn tests_section_has_no_commit_marker_without_commits() {
-        let section = tests_section(&[test("vitest", 5, 0, 0, 1_000)], false);
+    fn unknown_freshness_has_no_commit_marker() {
+        let section = tests_section(&[test("vitest", 5, 0, 0, 1_000)]);
         assert_eq!(section, "Tests:\n  vitest: 5 passed, 1s\n");
     }
 
     #[test]
     fn no_tests_means_no_section() {
-        assert_eq!(tests_section(&[], true), "");
+        assert_eq!(tests_section(&[]), "");
     }
 }

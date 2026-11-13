@@ -68,6 +68,7 @@ fn hub_event_with_tests_fits_the_schema() {
             timed_out: 0,
             duration_ms: None,
             ran_at: chrono::Utc::now(),
+            freshness: canterlot_hub::test_summary::TestFreshness::Unknown,
             stale_before: None,
         }]),
         ..Default::default()

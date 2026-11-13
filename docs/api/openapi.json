@@ -18514,6 +18514,15 @@
         },
         "additionalProperties": false
       },
+      "TestFreshness": {
+        "type": "string",
+        "description": "Насколько прогон свеж относительно коммитов хода.",
+        "enum": [
+          "fresh",
+          "stale",
+          "unknown"
+        ]
+      },
       "TestSummary": {
         "type": "object",
         "description": "Сводка одного прогона. Нулевые счётчики, кроме `passed`, в текст не попадают.",
@@ -18525,7 +18534,8 @@
           "skipped",
           "did_not_run",
           "timed_out",
-          "ran_at"
+          "ran_at",
+          "freshness"
         ],
         "properties": {
           "did_not_run": {
@@ -18549,6 +18559,9 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/TestFreshness"
           },
           "passed": {
             "type": "integer",

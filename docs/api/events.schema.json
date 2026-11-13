@@ -7513,6 +7513,13 @@
         "ran_at": {
           "$ref": "#/$defs/Time"
         },
+        "freshness": {
+          "enum": [
+            "fresh",
+            "stale",
+            "unknown"
+          ]
+        },
         "stale_before": {
           "type": [
             "string",
@@ -7528,7 +7535,8 @@
         "skipped",
         "did_not_run",
         "timed_out",
-        "ran_at"
+        "ran_at",
+        "freshness"
       ],
       "additionalProperties": false
     },

@@ -4180,6 +4180,11 @@ export interface components {
             preset?: string | null;
             title: string;
         };
+        /**
+         * @description Насколько прогон свеж относительно коммитов хода.
+         * @enum {string}
+         */
+        TestFreshness: "fresh" | "stale" | "unknown";
         /** @description Сводка одного прогона. Нулевые счётчики, кроме `passed`, в текст не попадают. */
         TestSummary: {
             /** Format: int32 */
@@ -4190,6 +4195,7 @@ export interface components {
             failed: number;
             /** Format: int32 */
             flaky: number;
+            freshness: components["schemas"]["TestFreshness"];
             /** Format: int32 */
             passed: number;
             /**

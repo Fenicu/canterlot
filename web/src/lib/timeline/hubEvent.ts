@@ -153,7 +153,6 @@ function counter(count: number, forms: readonly [string, string, string]): strin
 /** Раздел «Тесты» итога: последний прогон каждого инструмента и отметка о коммите. */
 export function testLines(event: HubEvent): TurnTestLine[] {
   if (!event.tests?.length) return [];
-  const hadCommits = (event.commits?.length ?? 0) > 0;
   return event.tests.map((test) => {
     const parts = [counter(test.passed, TEST_WORDS.passed)];
     if (test.failed > 0) parts.push(counter(test.failed, TEST_WORDS.failed));
@@ -162,10 +161,10 @@ export function testLines(event: HubEvent): TurnTestLine[] {
     if (test.did_not_run > 0) parts.push(counter(test.did_not_run, TEST_WORDS.did_not_run));
     if (test.timed_out > 0) parts.push(counter(test.timed_out, TEST_WORDS.timed_out));
     if (test.duration_ms != null) parts.push(fmt.duration(test.duration_ms));
-    const stale = test.stale_before != null;
-    const marker = stale
+    const stale = test.freshness === 'stale';
+    const marker = stale && test.stale_before
       ? `до коммита ${test.stale_before} (устарел)`
-      : hadCommits
+      : test.freshness === 'fresh'
         ? 'после последнего коммита'
         : null;
     return {

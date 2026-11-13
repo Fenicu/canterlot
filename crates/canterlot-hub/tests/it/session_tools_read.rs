@@ -624,6 +624,7 @@ async fn inspect_shows_the_last_run_and_worktree(pool: PgPool) {
     assert_eq!(row["worktree"]["branch"], "canterlot/x");
 }
 
+const TEST_BASE: i64 = 1_760_000_000_000;
 const NEXTEST: &str = "     Summary [ 195.532s] 3946 tests run: 3944 passed (3 slow, 2 flaky), 2 failed, 54 skipped\n";
 const PLAYWRIGHT: &str =
     "  2 flaky\n  4 failed\n  92 skipped\n  2 did not run\n  32 passed (38s)\n";
@@ -653,7 +654,7 @@ fn block_final(id: Uuid, text: &str) -> Body {
 }
 
 /// Ход с nextest, затем коммитом и Playwright: тест до коммита устарел, после — свежий.
-async fn run_with_tests(f: &Fx) -> (Uuid, Uuid) {
+async fn run_with_tests(f: &Fx, commit_at: Option<i64>) -> (Uuid, Uuid) {
     let mut r = worker::Run::new(&f.pool).await;
     let target = r.seed.conversation_id;
     let input = r.input(&f.pool).await;
@@ -666,7 +667,7 @@ async fn run_with_tests(f: &Fx) -> (Uuid, Uuid) {
     let ms = Utc::now().timestamp_millis();
     r.send(vec![worker::accepted(input.command_id, ms)]).await;
 
-    let base = 1_760_000_000_000_i64;
+    let base = TEST_BASE;
     let nextest_call = Uuid::now_v7();
     let nextest = Uuid::now_v7();
     let playwright_call = Uuid::now_v7();
@@ -707,7 +708,7 @@ async fn run_with_tests(f: &Fx) -> (Uuid, Uuid) {
         commits: vec![GitCommit {
             sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             subject: "Add tests".into(),
-            committed_at_ms: base + 20_000,
+            committed_at_ms: commit_at.unwrap_or_default(),
         }],
         files: vec![GitFile {
             path: "src/lib.rs".into(),
@@ -726,7 +727,7 @@ async fn run_with_tests(f: &Fx) -> (Uuid, Uuid) {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn inspect_shows_tests_and_the_summary_names_the_stale_run(pool: PgPool) {
     let f = Fx::new(pool).await;
-    let (target, _) = run_with_tests(&f).await;
+    let (target, _) = run_with_tests(&f, Some(TEST_BASE + 20_000)).await;
 
     let answer = f
         .call(f.root, "sessions.inspect", json!({"session_id": target}))
@@ -740,7 +741,8 @@ async fn inspect_shows_tests_and_the_summary_names_the_stale_run(pool: PgPool) {
     assert_eq!(tests[0]["flaky"], 2);
     assert_eq!(tests[0]["skipped"], 54);
     assert_eq!(tests[0]["duration_ms"], 195_532);
-    assert_eq!(tests[0]["stale_before"], "bbbbbbbb");
+    assert_eq!(tests[0]["freshness"], "stale");
+    assert_eq!(tests[0]["stale_before"], "bbbbbbb");
     assert_eq!(tests[1]["tool"], "playwright");
     assert_eq!(tests[1]["passed"], 32);
     assert_eq!(tests[1]["failed"], 4);
@@ -748,6 +750,7 @@ async fn inspect_shows_tests_and_the_summary_names_the_stale_run(pool: PgPool) {
     assert_eq!(tests[1]["skipped"], 92);
     assert_eq!(tests[1]["did_not_run"], 2);
     assert_eq!(tests[1]["duration_ms"], 38_000);
+    assert_eq!(tests[1]["freshness"], "fresh");
     assert_eq!(tests[1]["stale_before"], Value::Null);
 
     let mut conn = f.pool.acquire().await.unwrap();
@@ -758,10 +761,37 @@ async fn inspect_shows_tests_and_the_summary_names_the_stale_run(pool: PgPool) {
     let text = summary::render(&summary);
     assert!(
         text.contains(
-            "Tests:\n  nextest: 3944 passed, 2 failed, 2 flaky, 54 skipped, 3m15s, stale (before commit bbbbbbbb)\n  Playwright: 32 passed, 4 failed, 2 flaky, 92 skipped, 2 did not run, 38s, after the last commit\n"
+            "Tests:\n  nextest: 3944 passed, 2 failed, 2 flaky, 54 skipped, 3m15s, stale (before commit bbbbbbb)\n  Playwright: 32 passed, 4 failed, 2 flaky, 92 skipped, 2 did not run, 38s, after the last commit\n"
         ),
         "{text}"
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_untimed_commit_makes_freshness_unknown(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (target, _) = run_with_tests(&f, None).await;
+
+    let answer = f
+        .call(f.root, "sessions.inspect", json!({"session_id": target}))
+        .await
+        .unwrap();
+    let tests = answer["last_run"]["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 2, "{tests:?}");
+    for test in tests {
+        assert_eq!(test["freshness"], "unknown", "{test}");
+        assert_eq!(test["stale_before"], Value::Null, "{test}");
+    }
+
+    let mut conn = f.pool.acquire().await.unwrap();
+    let summary = summary::build(&mut conn, f.owner, target, "idle", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let text = summary::render(&summary);
+    assert!(text.contains("Tests:"), "{text}");
+    assert!(!text.contains("after the last commit"), "{text}");
+    assert!(!text.contains("stale (before commit"), "{text}");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

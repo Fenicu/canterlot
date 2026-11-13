@@ -216,6 +216,7 @@ export interface TestSummary {
   timed_out: number;
   duration_ms?: number | null;
   ran_at: Time;
+  freshness: "fresh" | "stale" | "unknown";
   stale_before?: string | null;
 }
 export interface AlarmSession {

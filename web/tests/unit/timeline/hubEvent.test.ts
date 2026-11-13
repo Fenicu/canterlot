@@ -296,7 +296,8 @@ const TURN_TESTS = [
     timed_out: 0,
     duration_ms: 195_532,
     ran_at: '2026-11-13T10:00:00.000Z',
-    stale_before: '14e6bd27'
+    freshness: 'stale' as const,
+    stale_before: '14e6bd2'
   },
   {
     tool: 'playwright',
@@ -308,6 +309,7 @@ const TURN_TESTS = [
     timed_out: 0,
     duration_ms: 38_000,
     ran_at: '2026-11-13T10:05:00.000Z',
+    freshness: 'fresh' as const,
     stale_before: null
   }
 ];
@@ -323,7 +325,7 @@ test('test_lines_name_tools_counters_durations_and_the_commit_marker', () => {
     {
       tool: 'nextest',
       main: '3944 прошли, 2 упали, 2 нестабильных, 54 пропущены, 3 мин 15 с',
-      marker: 'до коммита 14e6bd27 (устарел)',
+      marker: 'до коммита 14e6bd2 (устарел)',
       failed: true,
       stale: true
     },
@@ -351,6 +353,7 @@ test('test_lines_omit_zero_counters_but_keep_passed', () => {
         timed_out: 0,
         duration_ms: null,
         ran_at: '2026-11-13T10:00:00.000Z',
+        freshness: 'unknown',
         stale_before: null
       }
     ]
@@ -374,6 +377,7 @@ test('test_lines_speak_russian_plurals_and_extra_counters', () => {
         timed_out: 1,
         duration_ms: 1_000,
         ran_at: '2026-11-13T10:00:00.000Z',
+        freshness: 'unknown',
         stale_before: null
       }
     ]
@@ -386,4 +390,28 @@ test('test_lines_speak_russian_plurals_and_extra_counters', () => {
 
 test('a_turn_without_tests_has_no_test_lines', () => {
   expect(testLines({ kind: 'session_result' })).toEqual([]);
+});
+
+test('unknown_freshness_has_no_marker_even_with_commits', () => {
+  const line = testLines({
+    kind: 'session_result',
+    commits: [{ sha: 'bbbbbbb', title: 'Add tests' }],
+    tests: [
+      {
+        tool: 'nextest',
+        passed: 3,
+        failed: 0,
+        flaky: 0,
+        skipped: 0,
+        did_not_run: 0,
+        timed_out: 0,
+        duration_ms: 2_000,
+        ran_at: '2026-11-13T10:00:00.000Z',
+        freshness: 'unknown',
+        stale_before: null
+      }
+    ]
+  })[0]!;
+  expect(line.marker).toBeNull();
+  expect(line.stale).toBe(false);
 });

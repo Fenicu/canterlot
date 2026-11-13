@@ -11,8 +11,20 @@ use serde_json::Value;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-/// Длина короткого хеша в отметке «до коммита».
-pub const SHORT_SHA: usize = 8;
+/// Длина короткого хеша в отметке «до коммита»: та же, что у остального итога.
+pub const SHORT_SHA: usize = 7;
+
+/// Насколько прогон свеж относительно коммитов хода.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TestFreshness {
+    /// После последнего коммита хода.
+    Fresh,
+    /// Был коммит после прогона.
+    Stale,
+    /// Коммитов нет или у какого-то нет времени: судить нельзя.
+    Unknown,
+}
 
 /// Сводка одного прогона. Нулевые счётчики, кроме `passed`, в текст не попадают.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -29,6 +41,7 @@ pub struct TestSummary {
     /// Время блока результата, в котором нашлась сводка.
     #[serde(with = "crate::model::utc_time")]
     pub ran_at: DateTime<Utc>,
+    pub freshness: TestFreshness,
     /// Короткий хеш первого коммита хода после прогона; `None`, если такого нет.
     pub stale_before: Option<String>,
 }
@@ -67,14 +80,23 @@ fn shell_name(raw: &str) -> bool {
     SHELLS.contains(&raw.trim().to_ascii_lowercase().as_str())
 }
 
-/// Команды могли прийти от старой версии воркера: отметки о времени коммита нет.
-fn first_code_commit_after(ran_at: DateTime<Utc>, commits: &[CommitTime]) -> Option<String> {
+/// Коммиты могли прийти от старого супервизора без времени: тогда судить нельзя.
+fn freshness(ran_at: DateTime<Utc>, commits: &[CommitTime]) -> (TestFreshness, Option<String>) {
+    if commits.is_empty() || commits.iter().any(|commit| commit.committed_at_ms <= 0) {
+        return (TestFreshness::Unknown, None);
+    }
     let ran_at = ran_at.timestamp_millis();
-    commits
+    let after = commits
         .iter()
         .filter(|commit| commit.committed_at_ms > ran_at && !commit.sha.is_empty())
-        .min_by_key(|commit| commit.committed_at_ms)
-        .map(|commit| commit.sha.chars().take(SHORT_SHA).collect())
+        .min_by_key(|commit| commit.committed_at_ms);
+    match after {
+        Some(commit) => (
+            TestFreshness::Stale,
+            Some(commit.sha.chars().take(SHORT_SHA).collect()),
+        ),
+        None => (TestFreshness::Fresh, None),
+    }
 }
 
 /// Снимает CSI-последовательности ANSI: отчёты печатают цвета даже без терминала.
@@ -380,6 +402,7 @@ async fn collect(conn: &mut PgConnection, command: Uuid) -> Result<Vec<TestSumma
                     timed_out: counts.timed_out,
                     duration_ms: counts.duration_ms,
                     ran_at,
+                    freshness: TestFreshness::Unknown,
                     stale_before: None,
                 },
             );
@@ -399,7 +422,7 @@ async fn collect(conn: &mut PgConnection, command: Uuid) -> Result<Vec<TestSumma
         let Some(mut summary) = found.remove(tool) else {
             continue;
         };
-        summary.stale_before = first_code_commit_after(summary.ran_at, &commits);
+        (summary.freshness, summary.stale_before) = freshness(summary.ran_at, &commits);
         out.push(summary);
     }
     Ok(out)
@@ -610,32 +633,44 @@ mod tests {
             commit("aaaaaaaaaaaaaaaa", 9_000),
         ];
         assert_eq!(
-            first_code_commit_after(ran(10_000), &commits).as_deref(),
-            Some("bbbbbbbb")
+            freshness(ran(10_000), &commits),
+            (TestFreshness::Stale, Some("bbbbbbb".into()))
         );
     }
 
     #[test]
-    fn a_run_after_the_last_commit_has_no_marker() {
+    fn a_run_after_the_last_commit_is_fresh() {
         let commits = [commit("aaaaaaaaaaaaaaaa", 9_000)];
-        assert_eq!(first_code_commit_after(ran(10_000), &commits), None);
+        assert_eq!(
+            freshness(ran(10_000), &commits),
+            (TestFreshness::Fresh, None)
+        );
     }
 
     #[test]
     fn a_commit_in_the_same_millisecond_is_not_after_the_run() {
         let commits = [commit("aaaaaaaaaaaaaaaa", 10_000)];
-        assert_eq!(first_code_commit_after(ran(10_000), &commits), None);
+        assert_eq!(
+            freshness(ran(10_000), &commits),
+            (TestFreshness::Fresh, None)
+        );
     }
 
     #[test]
-    fn a_turn_without_commits_has_no_marker() {
-        assert_eq!(first_code_commit_after(ran(10_000), &[]), None);
+    fn a_turn_without_commits_is_unknown() {
+        assert_eq!(freshness(ran(10_000), &[]), (TestFreshness::Unknown, None));
     }
 
     #[test]
-    fn a_commit_without_a_time_does_not_claim_to_be_later() {
-        let commits = [commit("aaaaaaaaaaaaaaaa", 0)];
-        assert_eq!(first_code_commit_after(ran(10_000), &commits), None);
+    fn a_commit_without_a_time_makes_freshness_unknown() {
+        let commits = [
+            commit("bbbbbbbbbbbbbbbb", 11_000),
+            commit("aaaaaaaaaaaaaaaa", 0),
+        ];
+        assert_eq!(
+            freshness(ran(10_000), &commits),
+            (TestFreshness::Unknown, None)
+        );
     }
 
     #[test]
