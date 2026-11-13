@@ -61,7 +61,7 @@ test.describe('собственный вход владельца', () => {
     await expect(page.getByRole('status').filter({ hasText: 'Ключ доступа добавлен' })).toBeVisible({ timeout: 20_000 });
     await expect(keys).toHaveCount(before + 1);
 
-    await page.goto(`${stack.baseUrl}/settings`);
+    await page.goto(`${stack.baseUrl}/settings?c=security`);
     await page.locator('main').getByRole('button', { name: 'Выйти', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Вход в canterlot' })).toBeVisible({ timeout: 20_000 });
     await page.getByRole('button', { name: 'Войти с ключом доступа' }).click();
@@ -115,7 +115,7 @@ test.describe('собственный вход владельца', () => {
     expect(body.error.code).toBe('session_revoked');
     expect(body.error.details?.reason).toBe('owner');
 
-    await actor.goto(`${stack.baseUrl}/settings`);
+    await actor.goto(`${stack.baseUrl}/settings?c=security`);
     await actor.locator('main').getByRole('button', { name: 'Выйти', exact: true }).click();
     await expect(actor.getByRole('heading', { name: 'Вход в canterlot' })).toBeVisible({ timeout: 20_000 });
     await victimContext.close();
