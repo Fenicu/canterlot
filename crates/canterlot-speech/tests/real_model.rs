@@ -57,7 +57,10 @@ async fn real_model_live_pipeline() {
     };
     let finished = probe::run(
         cfg.clone(),
-        Box::new(NativeLoader { config: cfg }),
+        Box::new(NativeLoader {
+            config: cfg,
+            verified: Vec::new(),
+        }),
         &wav,
         opts,
     )

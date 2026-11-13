@@ -8,7 +8,7 @@ use transcribe_cpp::{
     TimestampKind, VadSession, VadSessionOptions,
 };
 
-use crate::config::{Config, Device, verify_models};
+use crate::config::{Config, Device, verify_models_known};
 use crate::engine::{Asr, LoadResult, Loaded, Loader, Mode, Vad};
 use crate::live::{Decoded, Word};
 
@@ -51,13 +51,15 @@ pub fn init_native_logging() {
 
 pub struct NativeLoader {
     pub config: Config,
+    /// Отпечатки моделей, уже проверенных надзирателем (`config::verified_fingerprints`).
+    pub verified: Vec<String>,
 }
 
 impl Loader for NativeLoader {
     fn load(self: Box<Self>) -> LoadResult {
         let cfg = self.config;
         let started = Instant::now();
-        verify_models(&cfg).map_err(|_| "model_mismatch".to_owned())?;
+        verify_models_known(&cfg, &self.verified).map_err(|_| "model_mismatch".to_owned())?;
         let hash_ms = started.elapsed().as_millis() as u32;
 
         let vad_model = Model::load_with(

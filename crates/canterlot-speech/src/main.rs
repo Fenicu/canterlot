@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
-use canterlot_speech::config::{Config, DEFAULT_SOCKET, verify_models};
+use canterlot_speech::config::{Config, DEFAULT_SOCKET, verified_fingerprints};
 use canterlot_speech::engine::{ChildSpec, Loader, serve_child, spawn_inprocess};
 use canterlot_speech::fake::{FakeLoader, FakeSpec};
 use canterlot_speech::native::{NativeLoader, init_native_logging};
@@ -59,6 +59,9 @@ enum Command {
         config: PathBuf,
         #[arg(long)]
         fake_engine: Option<String>,
+        /// Отпечатки моделей, уже проверенных serve, через запятую.
+        #[arg(long, value_delimiter = ',')]
+        verified: Vec<String>,
     },
 }
 
@@ -81,11 +84,16 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("рантайм tokio")
 }
 
-fn loader(config: &Config, fake: Option<&str>) -> Result<Box<dyn Loader>, String> {
+fn loader(
+    config: &Config,
+    fake: Option<&str>,
+    verified: Vec<String>,
+) -> Result<Box<dyn Loader>, String> {
     Ok(match fake {
         Some(spec) => Box::new(FakeLoader(FakeSpec::parse(spec)?)),
         None => Box::new(NativeLoader {
             config: config.clone(),
+            verified,
         }),
     })
 }
@@ -119,6 +127,7 @@ fn main() -> ExitCode {
             init_native_logging();
             let l = Box::new(NativeLoader {
                 config: cfg.clone(),
+                verified: Vec::new(),
             });
             let opts = ProbeOptions {
                 realtime,
@@ -137,7 +146,8 @@ fn main() -> ExitCode {
         Command::Engine {
             config,
             fake_engine,
-        } => engine(config, fake_engine),
+            verified,
+        } => engine(config, fake_engine, verified),
     }
 }
 
@@ -150,10 +160,13 @@ fn serve(path: PathBuf, fake: Option<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(e) = verify_models(&config) {
-        tracing::error!(kind = "model_mismatch", error = %e, "model files rejected");
-        return ExitCode::FAILURE;
-    }
+    let verified = match verified_fingerprints(&config) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(kind = "model_mismatch", error = %e, "model files rejected");
+            return ExitCode::FAILURE;
+        }
+    };
     let program = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -165,6 +178,8 @@ fn serve(path: PathBuf, fake: Option<String>) -> ExitCode {
         "engine".to_owned(),
         "--config".to_owned(),
         path.to_string_lossy().into_owned(),
+        "--verified".to_owned(),
+        verified.join(","),
     ];
     if let Some(f) = &fake {
         args.push("--fake-engine".into());
@@ -232,7 +247,7 @@ fn health(socket: PathBuf) -> ExitCode {
     }
 }
 
-fn engine(path: PathBuf, fake: Option<String>) -> ExitCode {
+fn engine(path: PathBuf, fake: Option<String>, verified: Vec<String>) -> ExitCode {
     // Звук и текст живут в памяти этого процесса: без дампа памяти и ptrace от того же uid.
     let _ = rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable);
     let config = match Config::load(&path) {
@@ -245,7 +260,7 @@ fn engine(path: PathBuf, fake: Option<String>) -> ExitCode {
     if fake.is_none() {
         init_native_logging();
     }
-    let loader = match loader(&config, fake.as_deref()) {
+    let loader = match loader(&config, fake.as_deref(), verified) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("transcribe: {e}");

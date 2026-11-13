@@ -249,6 +249,63 @@ pub fn file_sha256(path: &Path) -> std::io::Result<String> {
     Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Отпечаток файла: устройство, inode, размер и время изменения. Замена файла
+/// (rename) или запись в него меняют отпечаток.
+pub fn fingerprint(path: &Path) -> std::io::Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path)?;
+    Ok(format!(
+        "{}:{}:{}:{}.{}",
+        m.dev(),
+        m.ino(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec()
+    ))
+}
+
+/// Отпечатки моделей после проверки sha256: `serve` передаёт их движку, и тот не
+/// пересчитывает sha256 неизменённых файлов (740 МБ — секунды без SHA-NI).
+pub fn verified_fingerprints(config: &Config) -> Result<Vec<String>, String> {
+    verify_models(config)?;
+    [&config.model, &config.vad]
+        .iter()
+        .map(|f| fingerprint(&f.path).map_err(|e| format!("{}: {e}", f.path.display())))
+        .collect()
+}
+
+/// Сверяет sha256 файлов, чей отпечаток не совпадает с уже проверенным.
+/// Возвращает число пересчитанных файлов.
+pub fn verify_models_known(config: &Config, known: &[String]) -> Result<usize, String> {
+    let mut hashed = 0;
+    for (i, (name, file)) in [("model", &config.model), ("vad", &config.vad)]
+        .into_iter()
+        .enumerate()
+    {
+        if known
+            .get(i)
+            .is_some_and(|k| fingerprint(&file.path).is_ok_and(|f| &f == k))
+        {
+            continue;
+        }
+        hashed += 1;
+        verify_one(name, file)?;
+    }
+    Ok(hashed)
+}
+
+fn verify_one(name: &str, file: &ModelFile) -> Result<(), String> {
+    let got = file_sha256(&file.path)
+        .map_err(|e| format!("{name}: не удалось прочитать {}: {e}", file.path.display()))?;
+    if !got.eq_ignore_ascii_case(&file.sha256) {
+        return Err(format!(
+            "{name}: sha256 {} не совпадает с конфигурацией",
+            file.path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Сверяет sha256 обоих файлов моделей; ошибка называет файл, но не содержимое.
 pub fn verify_models(config: &Config) -> Result<(), String> {
     for (name, file) in [("model", &config.model), ("vad", &config.vad)] {
@@ -334,5 +391,37 @@ sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
         let c = Config::load(&cfg_path).unwrap();
         let err = verify_models(&c).unwrap_err();
         assert!(err.starts_with("vad:"), "{err}");
+    }
+
+    #[test]
+    fn known_fingerprint_skips_hash_until_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (m, v) = (dir.path().join("m.gguf"), dir.path().join("v.gguf"));
+        std::fs::write(&m, b"model").unwrap();
+        std::fs::write(&v, b"vad").unwrap();
+        let text = MIN
+            .replace(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                &file_sha256(&m).unwrap(),
+            )
+            .replace(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                &file_sha256(&v).unwrap(),
+            );
+        let cfg_path = dir.path().join("speech.toml");
+        std::fs::write(&cfg_path, text).unwrap();
+        let c = Config::load(&cfg_path).unwrap();
+        let known = verified_fingerprints(&c).unwrap();
+        assert_eq!(verify_models_known(&c, &known).unwrap(), 0);
+        assert_eq!(verify_models_known(&c, &[]).unwrap(), 2);
+        // Подмена файла переименованием: другой inode, sha256 считается заново.
+        let tmp = dir.path().join("m.new");
+        std::fs::write(&tmp, b"other").unwrap();
+        std::fs::rename(&tmp, &m).unwrap();
+        assert!(
+            verify_models_known(&c, &known)
+                .unwrap_err()
+                .starts_with("model:")
+        );
     }
 }
