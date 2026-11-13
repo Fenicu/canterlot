@@ -585,7 +585,10 @@ impl Fixture {
         )
         .await
         .unwrap();
-        assert!(self.paused("user_stop").await);
+        assert!(
+            !self.paused("user_stop").await,
+            "an interrupt ends the turn without pausing the queue"
+        );
         (interrupt_command_id.unwrap(), withdraw_command_id)
     }
 
@@ -971,18 +974,20 @@ async fn control_service_restart_keeps_execution_and_answer(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn interrupt_pauses_queue_first_and_nothing_transmits_after(pool: PgPool) {
+async fn interrupt_ends_the_turn_and_the_next_input_is_transmitted_once(pool: PgPool) {
     sqlx::raw_sql(
-        "create function check_interrupt_pause() returns trigger language plpgsql as $$
+        "create function check_interrupt_owner_stop() returns trigger language plpgsql as $$
         begin
           if new.kind = 'interrupt' and not exists (
-            select 1 from queue_state where conversation_id = new.conversation_id
-              and pause_reasons @> '[{\"reason\":\"user_stop\"}]'::jsonb
-          ) then raise exception 'interrupt precedes queue pause'; end if;
+            select 1 from executions e where e.id = new.execution_id
+              and e.owner_stop_input_seq >= coalesce((
+                select max(i.input_seq) from inputs i join commands c on c.id = i.command_id
+                  where c.execution_id = e.id), 0)
+          ) then raise exception 'interrupt precedes owner stop'; end if;
           return new;
         end $$;
-        create trigger check_interrupt_pause before insert on commands
-          for each row execute function check_interrupt_pause();",
+        create trigger check_interrupt_owner_stop before insert on commands
+          for each row execute function check_interrupt_owner_stop();",
     )
     .execute(&pool)
     .await
@@ -996,12 +1001,13 @@ async fn interrupt_pauses_queue_first_and_nothing_transmits_after(pool: PgPool) 
                 r#"{"delta":"0000λ|"},{"delta":"0001λ|"},{"delta":"0002λ|"},{"hang":true}"#,
             ))
             .await;
-        let second = fixture.submit(answer(2, 0).0).await;
+        let (second_script, second_expected) = answer(2, 0);
+        let second = fixture.submit(second_script).await;
         fixture.wait_deltas(3).await;
         let before = fixture.faults().pause_next(Point::BeforeCommandSend);
         let (interrupt, _) = fixture.interrupt().await;
         let resume = timeout(WAIT, before).await.unwrap().unwrap();
-        assert!(fixture.paused("user_stop").await);
+        assert!(!fixture.paused("user_stop").await);
         assert!(
             !fixture
                 .store_probe
@@ -1018,47 +1024,39 @@ async fn interrupt_pauses_queue_first_and_nothing_transmits_after(pool: PgPool) 
             fixture.command_done(interrupt).await
         })
         .await;
-        until("slot freed after interrupt", async || {
-            fixture.slot().await == "free"
-        })
-        .await;
-        sleep(Duration::from_millis(300)).await;
-        assert!(fixture.paused("user_stop").await);
-        assert_eq!(fixture.input_state(first.input_id).await, "accepted");
-        assert_eq!(fixture.input_state(second.input_id).await, "queued");
-        assert!(fixture.faults().commands()[sent..].iter().all(|c| c.kind
-            != Some(std::mem::discriminant(&command::Kind::DeliverInput(
-                Default::default()
-            )))));
-        until("interrupt completion in SJ", async || {
-            fixture.sj().2.iter().any(|b| matches!(b, Body::InterruptStatus(f) if f.command_id == interrupt.to_string() && f.state == InterruptState::Completed as i32))
-        })
-        .await;
-        let bodies = fixture.sj().2;
-        assert_eq!(transmissions(&bodies, first.command_id), [1]);
-        assert!(transmissions(&bodies, second.command_id).is_empty());
-        assert_eq!(
-            bodies
-                .iter()
-                .filter(|b| matches!(b, Body::TransmissionStarted(_)))
-                .count(),
-            1
-        );
-        assert_eq!(fixture.cli_receipts(first.command_id), [1]);
-        assert!(fixture.cli_receipts(second.command_id).is_empty());
-        let states: Vec<String> =
-            sqlx::query_scalar("select state from blocks where execution_id = $1")
-                .bind(fixture.execution)
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(states.len(), 1);
-        assert!(
-            states
-                .iter()
-                .all(|s| matches!(s.as_str(), "incomplete" | "final"))
-        );
-        if profile == "synthetic-exit-on-interrupt" {
+        if profile == "synthetic" {
+            // Прерванный ход кончился, и очередь сама отдала следующий ввод.
+            until("next input accepted", async || {
+                fixture.input_state(second.input_id).await == "accepted"
+            })
+            .await;
+            until("next turn finished", async || {
+                fixture.slot().await == "free"
+            })
+            .await;
+            assert_eq!(fixture.input_state(first.input_id).await, "accepted");
+            let first_block: (String, String) = sqlx::query_as(
+                "select state, coalesce(content, '') from blocks where execution_id = $1 and input_command_id = $2",
+            )
+            .bind(fixture.execution)
+            .bind(first.command_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(matches!(first_block.0.as_str(), "incomplete" | "final"));
+            assert_eq!(first_block.1, "0000λ|0001λ|0002λ|");
+            let second_block: (String, String) = sqlx::query_as(
+                "select state, coalesce(content, '') from blocks where execution_id = $1 and input_command_id = $2",
+            )
+            .bind(fixture.execution)
+            .bind(second.command_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(second_block, ("final".into(), second_expected));
+            fixture.assert_never_left_running().await;
+            fixture.assert_same_processes(identities);
+        } else {
             fixture.wait_state("stopped").await;
             let outcome: String =
                 sqlx::query_scalar("select outcome from executions where id = $1")
@@ -1068,9 +1066,61 @@ async fn interrupt_pauses_queue_first_and_nothing_transmits_after(pool: PgPool) 
                     .unwrap();
             assert_eq!(outcome, "user_stop");
             assert!(!same_process(identities.1));
+            assert_eq!(fixture.input_state(first.input_id).await, "accepted");
+            // Ввод, попавший на машину в окне остановки, возвращается в очередь.
+            until("queued input returned", async || {
+                fixture.input_state(second.input_id).await == "queued"
+            })
+            .await;
+        }
+        // После прерывания отправлен только следующий ввод; прерванную команду не переслали.
+        let after = &fixture.faults().commands()[sent..];
+        assert!(
+            after
+                .iter()
+                .all(|c| c.command_id != first.command_id.to_string())
+        );
+        let dispatched: Vec<_> = after
+            .iter()
+            .filter(|c| {
+                c.kind
+                    == Some(std::mem::discriminant(&command::Kind::DeliverInput(
+                        Default::default(),
+                    )))
+            })
+            .map(|c| c.command_id.clone())
+            .collect();
+        let bodies = fixture.sj().2;
+        assert_eq!(transmissions(&bodies, first.command_id), [1]);
+        assert_eq!(fixture.cli_receipts(first.command_id), [1]);
+        if profile == "synthetic" {
+            assert_eq!(dispatched, [second.command_id.to_string()]);
+            assert_eq!(transmissions(&bodies, second.command_id), [1]);
+            assert_eq!(fixture.cli_receipts(second.command_id), [1]);
+            assert_eq!(
+                bodies
+                    .iter()
+                    .filter(|b| matches!(b, Body::TransmissionStarted(_)))
+                    .count(),
+                2
+            );
         } else {
-            fixture.assert_never_left_running().await;
-            fixture.assert_same_processes(identities);
+            // Исполнение остановилось: ввод мог попасть на машину в окне остановки,
+            // но передаваться агенту он не должен.
+            assert!(
+                dispatched
+                    .iter()
+                    .all(|id| id == &second.command_id.to_string())
+            );
+            assert!(transmissions(&bodies, second.command_id).is_empty());
+            assert!(fixture.cli_receipts(second.command_id).is_empty());
+            assert_eq!(
+                bodies
+                    .iter()
+                    .filter(|b| matches!(b, Body::TransmissionStarted(_)))
+                    .count(),
+                1
+            );
         }
         fixture.assert_contiguous().await;
         fixture.finish().await;
@@ -1325,18 +1375,10 @@ async fn withdrawn_input_is_redispatched_with_new_attempt_and_transmitted_once(p
     assert!(bodies.iter().any(|b| matches!(b, Body::InterruptStatus(f) if f.command_id == interrupt.to_string() && f.state == InterruptState::NotApplicable as i32)));
     assert!(transmissions(&bodies, input.command_id).is_empty());
     assert!(fixture.cli_receipts(input.command_id).is_empty());
-    assert_eq!(fixture.slot().await, "free");
+    // Прерывание не ставит очередь на паузу: снятый с отправки ввод уходит сам,
+    // без «Продолжить очередь», новым подходом.
+    assert!(!fixture.paused("user_stop").await);
     fs::write(fixture.exec_dir().join("fault_release"), []).unwrap();
-    control::continue_queue(
-        &pool,
-        fixture.owner,
-        fixture.conversation,
-        &Uuid::now_v7().to_string(),
-        Uuid::now_v7(),
-    )
-    .await
-    .unwrap();
-    fixture.hub().dispatcher.trigger(fixture.conversation);
     fixture.assert_answer(&input, &expected, 4).await;
     assert_eq!(fixture.attempt(input.command_id).await, 2);
     assert_eq!(transmissions(&fixture.sj().2, input.command_id), [2]);
