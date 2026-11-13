@@ -118,6 +118,29 @@ assert_contains "${FAKE_ROOT}/cutover.log" "health failed after 1 s: INFO kind=\
 teardown_case
 case_end
 
+# --- 4c. health висит: ожидание ограничено бюджетом по часам, а не числом попыток ---
+case_begin "speech health wait is bounded by the budget"
+setup_case "speech-healthslow"
+install_fake_speech "${SHA_NEW}"
+BIN="${HUB_RELEASES}/${SHA_NEW}/bin/canterlot-speech"
+printf '#!/usr/bin/env bash\nsleep 30\n' >"${BIN}"
+chmod 0755 "${BIN}"
+export SPEECH_HEALTH_WAIT=2
+START="$(date +%s)"
+if bash -c 'source "$1/lib.sh"; speech_wait_health "$2"' _ "${DEPLOY_DIR}" "${BIN}"; then
+    case_fail "hanging health reported ok"
+else
+    case_ok "hanging health reports failure"
+fi
+ELAPSED=$(( $(date +%s) - START ))
+if [ "${ELAPSED}" -le 5 ]; then
+    case_ok "wait bounded by the 2 s budget (${ELAPSED} s)"
+else
+    case_fail "wait took ${ELAPSED} s for a 2 s budget"
+fi
+teardown_case
+case_end
+
 # --- 5. рестарт дольше предела: мягко, ограничен ---
 case_begin "speech restart times out"
 setup_speech timeout

@@ -791,21 +791,39 @@ speech_plan() {
 }
 # Ответ health от имени пользователя хаба: так проверяется и доступ к сокету.
 # Печатает вывод команды (JSON или строку speech_unavailable), код — её код.
+# $2 — предел локального ssh, секунды (0 или пусто — без него).
 speech_health() {
-    ssh_hub "runuser -u $(shq "${SPEECH_CLIENT_USER}") -- timeout 10 $(shq "$1") health --socket $(shq "${SPEECH_SOCKET}") 2>&1"
+    local bin="$1" limit="${2:-0}" remote
+    remote="runuser -u $(shq "${SPEECH_CLIENT_USER}") -- timeout 10 $(shq "${bin}") health --socket $(shq "${SPEECH_SOCKET}") 2>&1"
+    if [ "${limit}" -gt 0 ]; then
+        timeout "${limit}" ssh -n -o BatchMode=yes -o ConnectTimeout=10 "${HUB_SSH}" "${remote}" </dev/null
+    else
+        ssh_hub "${remote}"
+    fi
 }
-# Ждать ok от health до SPEECH_HEALTH_WAIT секунд. Ставит SPEECH_HEALTH_OUT.
+# Ждать ok от health не дольше SPEECH_HEALTH_WAIT секунд по часам. Каждая попытка
+# ограничена остатком бюджета (минимум 1 с), а вывод пишется в файл: иначе потомок
+# медленной команды держал бы канал и ожидание выходило за бюджет. Ставит
+# SPEECH_HEALTH_OUT.
 speech_wait_health() {
-    local bin="$1" waited=0
+    local bin="$1" deadline remaining out
+    out="$(mktemp "${TMPDIR:-/tmp}/canterlot-speech-health.XXXXXX")" || return 1
+    deadline=$(( $(date +%s) + SPEECH_HEALTH_WAIT ))
     while :; do
-        if SPEECH_HEALTH_OUT="$(speech_health "${bin}")"; then
+        remaining=$(( deadline - $(date +%s) ))
+        [ "${remaining}" -ge 1 ] || remaining=1
+        : >"${out}"
+        if speech_health "${bin}" "${remaining}" >"${out}" 2>&1; then
+            SPEECH_HEALTH_OUT="$(cat "${out}")" || SPEECH_HEALTH_OUT=""
+            rm -f "${out}" # lint: local-temp
             return 0
         fi
-        if [ "${waited}" -ge "${SPEECH_HEALTH_WAIT}" ]; then
+        SPEECH_HEALTH_OUT="$(cat "${out}" 2>/dev/null)" || SPEECH_HEALTH_OUT=""
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+            rm -f "${out}" # lint: local-temp
             return 1
         fi
         sleep 1
-        waited=$((waited + 1))
     done
 }
 # Привести службу к релизу хаба $1 после его flip (cutover, откат). Всё мягкое:
