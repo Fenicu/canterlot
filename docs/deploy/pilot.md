@@ -340,30 +340,49 @@ sudo -u canterlot canterlot-hub init --config /etc/canterlot/hub.toml
 Создаётся системный юнит `/etc/systemd/system/canterlot-hub.service`:
 ```ini
 [Unit]
-Description=Canterlot Control Plane Hub
-After=network.target postgresql.service
-Wants=postgresql.service
+Description=canterlot hub
+Wants=network-online.target postgresql@18-main.service
+After=network-online.target postgresql@18-main.service
+StartLimitIntervalSec=10min
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=canterlot
 Group=canterlot
-WorkingDirectory=/etc/canterlot
+WorkingDirectory=/var/lib/canterlot
 ExecStart=/opt/canterlot/current/bin/canterlot-hub serve --config /etc/canterlot/hub.toml
-Restart=always
+Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=30s
 LimitNOFILE=65536
-# Звук диктовки и тексты сессий не должны попасть в дамп памяти.
 LimitCORE=0
-
-# Песочница systemd
+UMask=0077
+SyslogIdentifier=canterlot-hub
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
 ProtectSystem=strict
-ProtectHome=true
+ReadWritePaths=/var/lib/canterlot
+ProtectHome=yes
+PrivateTmp=yes
 PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
 SystemCallFilter=@system-service
-ReadWritePaths=/var/lib/canterlot /etc/canterlot/manifest
-ReadOnlyPaths=/etc/canterlot
+SystemCallFilter=~@privileged
 
 [Install]
 WantedBy=multi-user.target
@@ -375,7 +394,7 @@ systemctl daemon-reload
 systemctl enable --now canterlot-hub
 ```
 
-`ExecStart` указывает на ссылку `current` раскладки релизов (§11), которую переключает выкат. `LimitCORE=0` обязателен: без него юнит наследует `LimitCORE=infinity`, и дамп памяти упавшего хаба унёс бы на диск звук диктовки и тексты сессий. На уже установленном хабе лимит добавляется отдельным файлом, основной юнит не правится:
+`ExecStart` указывает на ссылку `current` раскладки релизов (§11), которую переключает выкат. `serve` манифест только читает (пишет его один раз `canterlot-hub init`, §2.6, вне юнита), поэтому `/etc/canterlot` в `ReadWritePaths` не входит. `LimitCORE=0` обязателен: без него юнит наследует `LimitCORE=infinity`, и дамп памяти упавшего хаба унёс бы на диск звук диктовки и тексты сессий. На уже установленном хабе лимит добавляется отдельным файлом, основной юнит не правится:
 
 ```bash
 install -d /etc/systemd/system/canterlot-hub.service.d
@@ -1159,7 +1178,7 @@ EOF
 chown root:canterlot /etc/canterlot/speech.toml && chmod 0640 /etc/canterlot/speech.toml
 ```
 
-Юнит — файл [`docs/deploy/canterlot-speech.service`](canterlot-speech.service) из репозитория, без правок: `User=canterlot-speech`, `Group=canterlot`, `SupplementaryGroups=video`; `ExecStart` из `/opt/canterlot/current`; `RuntimeDirectory=canterlot-speech` с режимом `0750` и `UMask=0007` (сокет `0660 canterlot-speech:canterlot`); `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes` (служба только читает модели и конфигурацию, `ReadWritePaths` нет); `DevicePolicy=closed` и явные `DeviceAllow` для пяти устройств NVIDIA; без `MemoryDenyWriteExecute` (драйвер CUDA отображает память с записью и исполнением) и без `PrivateDevices`; `MemoryMax=2G`, `MemorySwapMax=0`, `LimitCORE=0`; `Restart=on-failure`, `RestartSec=5s`, `TimeoutStopSec=15s`, не больше пяти неудачных запусков за 5 минут. Предел памяти: пик RSS на GPU — 506 МиБ, а запасной режим CPU держит в памяти процесса модель (740 МБ), промежуточные тензоры и до 10 минут звука одной диктовки; 2 ГиБ оставляют запас над этим и ограничивают службу внутри 6 ГиБ контейнера. Своп и дамп памяти выключены, чтобы звук и текст не попали на диск.
+Юнит — файл [`docs/deploy/canterlot-speech.service`](canterlot-speech.service) из репозитория, без правок: `User=canterlot-speech`, `Group=canterlot`, `SupplementaryGroups=video`; `ExecStart` из `/opt/canterlot/current`; `RuntimeDirectory=canterlot-speech` с режимом `0750` и `UMask=0007` (сокет `0660 canterlot-speech:canterlot`); `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes` (служба только читает модели и конфигурацию, `ReadWritePaths` нет); та же песочница, что у хаба (§2.7), где она не мешает CUDA: `SyslogIdentifier`, пустые `CapabilityBoundingSet=` и `AmbientCapabilities=`, `ProtectKernel*`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `RemoveIPC`, `SystemCallArchitectures=native` и `RestrictAddressFamilies=AF_UNIX` (сети у службы нет); `DevicePolicy=closed` и явные `DeviceAllow` для пяти устройств NVIDIA; без `MemoryDenyWriteExecute` (драйвер CUDA отображает память с записью и исполнением), без `PrivateDevices` и без `SystemCallFilter` (набор вызовов драйвера NVIDIA не проверен на живой карте); `MemoryMax=2G`, `MemorySwapMax=0`, `LimitCORE=0`; `Restart=on-failure`, `RestartSec=5s`, `TimeoutStopSec=15s`, не больше пяти неудачных запусков за 5 минут. Предел памяти: пик RSS на GPU — 506 МиБ, а запасной режим CPU держит в памяти процесса модель (740 МБ), промежуточные тензоры и до 10 минут звука одной диктовки; 2 ГиБ оставляют запас над этим и ограничивают службу внутри 6 ГиБ контейнера. Своп и дамп памяти выключены, чтобы звук и текст не попали на диск.
 
 ```bash
 # с машины воркера, из чекаута
