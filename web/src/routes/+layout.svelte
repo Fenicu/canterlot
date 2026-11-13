@@ -6,6 +6,7 @@
   import { onMount, type Component, type Snippet } from 'svelte';
   import { afterNavigate } from '$app/navigation';
   import { initTheme } from '#lib/theme.js';
+  import { dictationStatus } from '#lib/dictation/status.svelte.js';
   import { announce, mountAnnouncements } from '#lib/a11y/announce.js';
   import AppShell from '#lib/shell/AppShell.svelte';
   import type { ChangelogEntry } from '#lib/changelog.js';
@@ -23,6 +24,8 @@
 
   onMount(() => {
     initTheme();
+    // Старт приложения: доступность диктовки спрашивается один раз, дальше — по TTL.
+    void dictationStatus.refresh();
     // Первый вход ничего не показывает, но запоминает версию.
     void whatsNew.check();
   });

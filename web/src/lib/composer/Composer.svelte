@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { canSendNow } from '#lib/api/gate.js';
   import { loadConfig } from '#lib/api/config.js';
   import { getAttachment, putConversationDraft } from '#lib/api/client.js';
@@ -7,10 +7,16 @@
   import { ticker } from '#lib/ticker.svelte.js';
   import AttachmentTray from '#lib/composer/AttachmentTray.svelte';
   import ContextIndicator from '#lib/composer/ContextIndicator.svelte';
+  import DictationPanel from '#lib/composer/DictationPanel.svelte';
   import { filesFromPayload, hasFileDrag } from '#lib/composer/intake.js';
   import { ComposerModel, EMPTY_DRAFT_REASON, type Limits } from '#lib/composer/model.svelte.js';
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
   import { getEnterPref } from '#lib/composer/prefs.js';
+  import { insertDictated, type DraftAnchor } from '#lib/dictation/insertion.js';
+  import { createDictationSession } from '#lib/dictation/live.js';
+  import type { DictationSession, DictationView } from '#lib/dictation/session.js';
+  import { dictationStatus } from '#lib/dictation/status.svelte.js';
+  import { dictationEnabled } from '#lib/screens/settings/preferences.js';
   import { bindComposerRestore } from '#lib/composer/restore.js';
   import { bindReturned } from '#lib/composer/returned.js';
   import { decideEnter, isTouchPrimary } from '#lib/composer/sendRules.js';
@@ -82,6 +88,20 @@
   });
   let composing = $state(false);
   let receiving = $state(false);
+  let dictation = $state<DictationSession | null>(null);
+  let dictationView = $state<DictationView | null>(null);
+  let dictationAnchor = $state<DraftAnchor | null>(null);
+  let dictationNotice = $state('');
+  // Кнопка микрофона: служба доступна, выбор владельца включён, микрофон ещё не пропадал.
+  const canDictate = $derived(
+    !dictationView &&
+      dictationEnabled() &&
+      dictationStatus.available &&
+      !dictationStatus.missing &&
+      typeof navigator !== 'undefined' &&
+      Boolean(navigator.mediaDevices?.getUserMedia)
+  );
+  const composerBusy = $derived(model.sending);
   let dropDepth = 0;
   let held = false;
   let timer = 0;
@@ -154,13 +174,23 @@
       })
       .catch(() => undefined);
     const releaseTicker = ticker.retain();
+    void dictationStatus.refresh();
+    // Уход в фон заканчивает запись через обычный путь «Готово»: итог не теряется.
     const onVisibility = () => {
-      if (document.visibilityState === 'hidden') void model.flushDraft();
+      if (document.visibilityState === 'hidden') {
+        void model.flushDraft();
+        dictation?.finish();
+      } else {
+        void dictationStatus.refresh();
+      }
     };
     document.addEventListener('visibilitychange', onVisibility);
     void model.startDraft(chat.draft ?? null).then(() => model.remoteDraft(chat.draft));
     return () => {
       stop();
+      dictation?.dispose();
+      dictation = null;
+      dictationView = null;
       stopReturned();
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('dragover', blockDrop);
@@ -272,6 +302,52 @@
     void model.send();
   }
 
+  function startDictation() {
+    if (!canDictate || dictation) return;
+    const start = node?.selectionStart ?? model.text.length;
+    const end = node?.selectionEnd ?? model.text.length;
+    dictationAnchor = { text: model.text, start, end };
+    dictationNotice = '';
+    const session = createDictationSession({
+      onview: (view) => {
+        dictationView = view;
+        if (view.mic === 'missing') dictationStatus.hideForMissingMicrophone();
+        if (view.phase === 'closed') {
+          dictation = null;
+          dictationView = null;
+        }
+      },
+      oninsert: (text, notice) => void insertDictation(text, notice),
+      onunavailable: () => dictationStatus.noteUnavailable()
+    });
+    dictation = session;
+    void session.start();
+  }
+
+  // Вставка ровно одна: её решает сессия, а черновик сохраняется обычным путём поля ввода.
+  async function insertDictation(text: string, notice: string) {
+    const anchor = dictationAnchor ?? { text: model.text, start: model.text.length, end: model.text.length };
+    const result = insertDictated(model.text, anchor, text);
+    dictationAnchor = null;
+    model.text = result.text;
+    model.typed();
+    void model.flushDraft();
+    if (notice) dictationNotice = notice;
+    // Поле ввода возвращается на место после панели: курсор ставим, когда оно уже смонтировано.
+    await tick();
+    if (!node) return;
+    node.value = result.text;
+    node.focus();
+    node.setSelectionRange(result.caret, result.caret);
+  }
+
+  function cancelDictation() {
+    dictation?.cancel();
+    dictation = null;
+    dictationView = null;
+    dictationAnchor = null;
+  }
+
   function picked() {
     if (file?.files?.length) model.attach(file.files);
     if (file) file.value = '';
@@ -369,73 +445,86 @@
   ondragleave={dragLeave}
   ondrop={dropped}
 >
-  {#if notice}
+  {#if notice && !dictationView}
     <p class="reason" id={reasonId}>{notice}</p>
   {:else}
     <p class="sr-only" id={reasonId}>{model.gate.ok ? '' : EMPTY_DRAFT_REASON}</p>
   {/if}
-  <div class="capsule" class:receiving>
-    {#if receiving}<p class="dropzone" aria-hidden="true">Отпустите файлы</p>{/if}
-    <input bind:this={file} class="file" type="file" multiple tabindex="-1" aria-label="Выбрать файлы" onchange={picked} />
-    <AttachmentTray {uploads} conversationId={chat.id} />
-    <textarea
-      bind:this={node}
-      bind:value={model.text}
-      use:keepCaret
-      oninput={() => model.typed()}
-      onblur={() => void model.flushDraft()}
-      rows="1"
-      enterkeyhint="enter"
-      placeholder={suggestion ?? 'Сообщение агенту…'}
-      aria-label="Сообщение"
-      aria-describedby={suggestion ? `${reasonId} ${suggestionId}` : reasonId}
-      oncompositionstart={() => (composing = true)}
-      oncompositionend={() => (composing = false)}
-      onkeydown={onKey}
-      onpaste={pasted}
-    ></textarea>
-    <span class="attach"><IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} /></span>
-    <ContextIndicator {chat} />
-    {#if suggestion}
-      <p class="sr-only" id={suggestionId}>Подсказка: {suggestion}. {touch ? 'Кнопка «Подставить» вставит её в поле' : 'Tab вставит её в поле'}</p>
-    {/if}
-    {#if touch && suggestion}
-      <button type="button" class="accept" data-suggestion-accept onmousedown={(event) => event.preventDefault()} onclick={acceptSuggestion}>Подставить</button>
-    {/if}
-    {#if !touch}
+  <div class="capsule" class:receiving class:dictating={dictationView}>
+    {#if dictationView}
+      <DictationPanel
+        view={dictationView}
+        onfinish={() => dictation?.finish()}
+        oncancel={cancelDictation}
+        onpartial={() => dictation?.insertPartial()}
+      />
+    {:else}
+      {#if receiving}<p class="dropzone" aria-hidden="true">Отпустите файлы</p>{/if}
+      <input bind:this={file} class="file" type="file" multiple tabindex="-1" aria-label="Выбрать файлы" onchange={picked} />
+      <AttachmentTray {uploads} conversationId={chat.id} />
+      <textarea
+        bind:this={node}
+        bind:value={model.text}
+        use:keepCaret
+        oninput={() => model.typed()}
+        onblur={() => void model.flushDraft()}
+        rows="1"
+        enterkeyhint="enter"
+        placeholder={suggestion ?? 'Сообщение агенту…'}
+        aria-label="Сообщение"
+        aria-describedby={suggestion ? `${reasonId} ${suggestionId}` : reasonId}
+        oncompositionstart={() => (composing = true)}
+        oncompositionend={() => (composing = false)}
+        onkeydown={onKey}
+        onpaste={pasted}
+      ></textarea>
+      <span class="attach"><IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} /></span>
+      {#if canDictate}
+        <span class="mic"><IconButton icon="mic" label="Диктовка" inert={composerBusy} onclick={startDictation} /></span>
+      {/if}
+      <ContextIndicator {chat} />
+      {#if suggestion}
+        <p class="sr-only" id={suggestionId}>Подсказка: {suggestion}. {touch ? 'Кнопка «Подставить» вставит её в поле' : 'Tab вставит её в поле'}</p>
+      {/if}
+      {#if touch && suggestion}
+        <button type="button" class="accept" data-suggestion-accept onmousedown={(event) => event.preventDefault()} onclick={acceptSuggestion}>Подставить</button>
+      {/if}
+      {#if !touch}
+        <button
+          type="button"
+          class="clock"
+          aria-label="Отправить позже"
+          aria-haspopup="dialog"
+          aria-expanded={later}
+          aria-controls={laterId}
+          onclick={() => (later = !later)}
+        >
+          <Icon name="clock" />
+        </button>
+      {/if}
       <button
         type="button"
-        class="clock"
-        aria-label="Отправить позже"
-        aria-haspopup="dialog"
-        aria-expanded={later}
-        aria-controls={laterId}
-        onclick={() => (later = !later)}
+        class="send"
+        class:off={!model.gate.ok || model.sending}
+        aria-label="Отправить"
+        aria-busy={model.sending}
+        use:markSend
+        onpointerdown={pointerDown}
+        onpointermove={pointerMove}
+        onpointerup={pointerUp}
+        onmousedown={(event) => event.preventDefault()}
+        oncontextmenu={(event) => {
+          event.preventDefault();
+          later = true;
+        }}
+        onclick={sendClick}
       >
-        <Icon name="clock" />
+        <Icon name="send" />
       </button>
-    {/if}
-    <button
-      type="button"
-      class="send"
-      class:off={!model.gate.ok || model.sending}
-      aria-label="Отправить"
-      aria-busy={model.sending}
-      use:markSend
-      onpointerdown={pointerDown}
-      onpointermove={pointerMove}
-      onpointerup={pointerUp}
-      onmousedown={(event) => event.preventDefault()}
-      oncontextmenu={(event) => {
-        event.preventDefault();
-        later = true;
-      }}
-      onclick={sendClick}
-    >
-      <Icon name="send" />
-    </button>
+      {/if}
   </div>
-  {#if !touch}<p class="hint">{suggestion ? 'Tab: подставить подсказку · ' : ''}Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже</p>{/if}
+  {#if dictationNotice}<p class="notice" role="status" data-dictation-notice>{dictationNotice}</p>{/if}
+  {#if !touch && !dictationView}<p class="hint">{suggestion ? 'Tab: подставить подсказку · ' : ''}Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже</p>{/if}
   {#if SendLater}
     <SendLater
       open={later}
@@ -452,8 +541,8 @@
   .composer { display: flex; flex-direction: column; gap: var(--s2); max-height: var(--composer-limit); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
   .capsule {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-    grid-template-areas: 'input input input input' 'attach context clock send';
+    grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+    grid-template-areas: 'input input input input input' 'attach mic context clock send';
     align-items: center;
     gap: var(--s2);
     min-width: 0;
@@ -466,7 +555,7 @@
   .capsule.receiving { outline: var(--focus-width) dashed var(--accent); outline-offset: var(--s1); background: var(--accent-soft); }
   .dropzone { position: absolute; inset: var(--s1); z-index: 1; display: flex; align-items: center; justify-content: center; margin: 0; border-radius: var(--radius-card); background: var(--accent-soft); color: var(--text); font-size: var(--fs-meta); pointer-events: none; }
   .capsule:has(:global(.tray)) {
-    grid-template-areas: 'tray tray tray tray' 'input input input input' 'attach context clock send';
+    grid-template-areas: 'tray tray tray tray tray' 'input input input input input' 'attach mic context clock send';
   }
   .capsule:has(textarea:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
   textarea {
@@ -491,6 +580,7 @@
   }
   textarea:focus-visible { outline: none; }
   .attach { grid-area: attach; display: inline-flex; }
+  .mic { grid-area: mic; display: inline-flex; }
   .file { position: absolute; width: var(--s1); height: var(--s1); overflow: hidden; clip-path: inset(50%); }
   .clock, .send {
     width: var(--target);
@@ -509,6 +599,7 @@
   .send { grid-area: send; }
   .accept { grid-area: clock; min-height: var(--target); padding-inline: var(--s5); border: var(--s0); border-radius: var(--radius-round); background: var(--raised); color: var(--text); font-size: var(--fs-meta); }
   .off { background: var(--raised); color: var(--muted); }
-  .reason, .hint { margin: 0; padding-inline: var(--s5); color: var(--muted); font-size: var(--fs-sm); }
+  .reason, .hint, .notice { margin: 0; padding-inline: var(--s5); color: var(--muted); font-size: var(--fs-sm); }
   .reason { color: var(--danger); }
+  .capsule.dictating { grid-template-areas: 'dictation'; grid-template-columns: minmax(0, 1fr); padding: var(--s1); }
 </style>
