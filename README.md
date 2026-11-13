@@ -142,13 +142,13 @@ scripts/publish-release.sh v1.24.0
 `e2e/ui` + `e2e/parity` и сквозные сценарии на настоящем хабе). Порт тестовой
 PostgreSQL по умолчанию 55441, временный каталог — `/tmp` (длинный путь ломает
 сокеты супервизоров), бинарник воркера для аренды — установка в
-`$HOME/.local/opt/canterlot/current/bin`; все три (`CANTERLOT_TEST_PG_PORT`,
+`$HOME/.local/opt/canterlot/current/bin/canterlot-worker`; все три (`CANTERLOT_TEST_PG_PORT`,
 `CANTERLOT_GATE_TMPDIR`, `CANTERLOT_WORKER_BIN`) перекрываются окружением.
 
 Сводка в формате прежнего `result.txt` и логи складываются в
 `.superpowers/gate/<sha8>/` и печатаются в stdout. При полном успехе, чистой
 рабочей копии и неизменном HEAD гейт атомарно пишет аттестацию
-`.superpowers/gate/<full sha>.ok`; её требует `release.sh ship`. Грязная копия
+`.superpowers/gate/<full sha>.ok`; её будет требовать `release.sh ship` (задача P4). Грязная копия
 аттестации не даёт: такой прогон возможен только с `--no-attest`, и аттестация
 тогда не пишется. Каталог `.superpowers/` не отслеживается git.
 
@@ -169,7 +169,8 @@ scripts/gate-remote.sh 4d884712 --local    # то же на местном docke
 
 `REV` — любой коммит, не только тег (по умолчанию `HEAD`). Скрипт отправляет его
 в `~/canterlot.git` как `refs/gate/<sha12>`, создаёт отсоединённую рабочую копию
-`~/gate/src-<sha12>` и запускает в контейнере ровно три шага `/tmp/gate/run.sh`:
+`~/gate/src-<sha12>` и запускает в контейнере прежнюю трёхшаговую последовательность
+(как у частного `/tmp/gate/run.sh`):
 
 1. `VITE_UI_TESTS=1 npm run build` (после своего `npm ci`);
 2. `scripts/check.sh --all` — fmt, clippy, nextest с тестовой PostgreSQL;

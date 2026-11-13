@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Полный гейт Canterlot внутри контейнера canterlot-gate: ровно те же три шага,
-# что /tmp/gate/run.sh на VM, со своей PostgreSQL на 127.0.0.1:55441.
+# Полный гейт Canterlot внутри контейнера canterlot-gate: прежние три шага
+# /tmp/gate/run.sh (scripts/gate.sh на VM гоняет веб один раз), со своей
+# PostgreSQL на 127.0.0.1:55441.
 #
 #   scripts/gate/in-container.sh --src DIR --out DIR --sha SHA12
 #
