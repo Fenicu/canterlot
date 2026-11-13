@@ -13,8 +13,13 @@ class FakeSocket implements DictationSocket {
   sent: (string | ArrayBuffer)[] = [];
   bufferedAmount = 0;
   closed = false;
+  failFrames = 0;
   handlers!: { open(): void; message(data: string): void; close(code: number): void };
   send(data: string | ArrayBuffer): void {
+    if (typeof data !== "string" && this.failFrames > 0) {
+      this.failFrames -= 1;
+      throw new Error("socket_closed");
+    }
     this.sent.push(data);
   }
   close(): void {
@@ -163,6 +168,40 @@ describe("DictationSession start", () => {
     const harness = await listening();
     harness.capture.frame(30_000);
     expect(harness.last().level).toBeGreaterThan(0.5);
+  });
+});
+
+describe("DictationSession pre-start queue", () => {
+  it("flushes_forty_queued_frames_after_the_socket_opens", async () => {
+    const harness = listing();
+    await harness.session.start();
+    for (let index = 0; index < 40; index += 1) harness.capture.frame();
+    expect(harness.socket.frames).toHaveLength(0);
+    harness.socket.handlers.open();
+    expect(harness.socket.texts[0]!.type).toBe("start");
+    expect(harness.socket.frames).toHaveLength(40);
+    expect(harness.socket.sent[1]).toBeInstanceOf(ArrayBuffer);
+  });
+
+  it("ends_the_recording_instead_of_dropping_audio_when_the_queue_overflows", async () => {
+    const harness = listing();
+    await harness.session.start();
+    for (let index = 0; index < 40; index += 1) harness.capture.frame();
+    expect(harness.session.view.phase).toBe("loading");
+    harness.capture.frame();
+    expect(harness.session.view).toMatchObject({
+      phase: "failed",
+      message: "Связь прервалась",
+      canInsert: false,
+    });
+    expect(harness.capture.stopped).toBe(true);
+    expect(harness.socket.closed).toBe(true);
+    // Позднее открытие сокета не отправляет ни start, ни накопленный звук.
+    harness.socket.handlers.open();
+    expect(harness.socket.texts).toHaveLength(0);
+    expect(harness.socket.frames).toHaveLength(0);
+    expect(harness.inserts).toHaveLength(0);
+    expect(harness.session.view.phase).toBe("failed");
   });
 });
 
@@ -323,6 +362,20 @@ describe("DictationSession errors", () => {
     expect(harness.socket.texts.at(-1)).toEqual({ type: "finish" });
     harness.socket.handlers.message(JSON.stringify({ type: "final", text: "Привет", reason: "finish" }));
     expect(harness.inserts).toHaveLength(1);
+  });
+
+  it("ends_the_recording_when_a_frame_cannot_be_sent", async () => {
+    const harness = await listening();
+    harness.text("Привет", "", 1);
+    harness.socket.failFrames = 1;
+    harness.capture.frame();
+    expect(harness.session.view).toMatchObject({
+      phase: "review",
+      canInsert: true,
+      message: "Связь прервалась",
+    });
+    harness.session.insertPartial();
+    expect(harness.inserts).toEqual([{ text: "Привет", notice: "" }]);
   });
 
   it("explains_a_denied_microphone", async () => {

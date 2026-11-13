@@ -81,7 +81,8 @@ const SLOW_LINK_CHECK_MS = 500;
 const SLOW_LINK_CHECKS = 2;
 const GPU_DEADLINE_MS = 5_000;
 const CPU_DEADLINE_MS = 30_000;
-const MAX_QUEUED_FRAMES = 100;
+/** До открытия сокета копим не больше 4 с звука: хаб уже через 5 с зовёт опережение bad_audio. */
+const MAX_QUEUED_FRAMES = 40;
 
 export function dictationErrorText(code: string): string {
   return ERROR_TEXT[code] ?? "Диктовка прервалась из-за ошибки";
@@ -209,10 +210,14 @@ export class DictationSession {
   }
 
   #opened(): void {
-    if (this.#settled) return;
+    if (!this.#accepting()) return;
     this.#open = true;
     this.#sendText({ type: "start", sample_rate: 16_000, format: "s16le", client: this.#deps.client });
-    for (const frame of this.#queued.splice(0)) this.#sendFrame(frame);
+    for (const frame of this.#queued.splice(0)) {
+      if (this.#sendFrame(frame)) continue;
+      this.#review(CONNECTION_LOST_MESSAGE);
+      return;
+    }
   }
 
   #message(data: string): void {
@@ -351,15 +356,35 @@ export class DictationSession {
   #frame(frame: Uint8Array): void {
     if (!this.#accepting() || !this.#acceptFrames) return;
     this.#view.level = frameLevel(frame);
-    if (this.#open) this.#sendFrame(frame);
-    else if (this.#queued.length < MAX_QUEUED_FRAMES) this.#queued.push(frame);
+    if (this.#open) {
+      if (!this.#sendFrame(frame)) {
+        this.#review(CONNECTION_LOST_MESSAGE);
+        return;
+      }
+    } else if (this.#queued.length < MAX_QUEUED_FRAMES) this.#queued.push(frame);
+    else {
+      // Сокет не открылся за 4 с записи: копить дальше некуда, а терять звук молча нельзя.
+      this.#preStartOverflow();
+      return;
+    }
     this.#emit();
   }
 
-  #sendFrame(frame: Uint8Array): void {
-    if (!this.#socket) return;
-    const copy = new Uint8Array(frame);
-    this.#socket.send(copy.buffer);
+  #preStartOverflow(): void {
+    this.#queued.splice(0);
+    this.#review(CONNECTION_LOST_MESSAGE);
+  }
+
+  /** false — кадр не ушёл; вызывающий обязан закончить запись, а не терять звук молча. */
+  #sendFrame(frame: Uint8Array): boolean {
+    if (!this.#socket) return false;
+    try {
+      const copy = new Uint8Array(frame);
+      this.#socket.send(copy.buffer);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   #sendText(payload: Record<string, unknown>): void {
