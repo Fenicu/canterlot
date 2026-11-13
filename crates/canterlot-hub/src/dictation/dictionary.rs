@@ -173,18 +173,20 @@ impl Dictionary {
 
     /// Пара «окончательный текст / хвост» после замены.
     pub fn apply_update(&self, committed: &str, tentative: &str) -> (String, String) {
-        let committed = self.apply(committed);
+        let committed_out = self.apply(committed);
         if tentative.is_empty() {
-            return (committed, String::new());
+            return (committed_out, String::new());
         }
         if committed.is_empty() {
-            return (committed, self.apply(tentative));
+            return (committed_out, self.apply(tentative));
         }
+        // Граница проверяется на сырых частях: правило может захватывать и committed,
+        // и tentative, а уже заменённый committed его бы спрятал.
         let joined = self.apply(&format!("{committed} {tentative}"));
-        let prefix = format!("{committed} ");
+        let prefix = format!("{committed_out} ");
         match joined.strip_prefix(&prefix) {
-            Some(rest) => (committed, rest.to_owned()),
-            None => (committed, self.apply(tentative)),
+            Some(rest) => (committed_out, rest.to_owned()),
+            None => (committed_out, self.apply(tentative)),
         }
     }
 
@@ -354,6 +356,20 @@ mod tests {
         let (committed, tentative) = d.apply_update("мейн", "ветка");
         assert_eq!(committed, "main");
         assert_eq!(tentative, "ветка");
+    }
+
+    #[test]
+    fn committed_stays_raw_when_the_boundary_rule_expands_both_parts() {
+        let d = dictionary(&[("мейн", "main"), ("мейн ветка", "main branch")]);
+        assert_eq!(
+            d.apply_update("мейн", "ветка"),
+            ("main".to_owned(), "branch".to_owned())
+        );
+        let d = dictionary(&[("сессион", "session"), ("сессион спаун", "session spawn")]);
+        assert_eq!(
+            d.apply_update("нужен сессион", "спаун"),
+            ("нужен session".to_owned(), "spawn".to_owned())
+        );
     }
 
     #[test]
