@@ -14,6 +14,7 @@ import SessionsCard from './SessionsCard.svelte';
 import ShareCard from './ShareCard.svelte';
 import SpawnCard from './SpawnCard.svelte';
 import SubagentCard from './SubagentCard.svelte';
+import TaigaCard from './TaigaCard.svelte';
 import TodoCard from './TodoCard.svelte';
 import PlanAddCard from './plan/PlanAddCard.svelte';
 import PlanAdoptCard from './plan/PlanAdoptCard.svelte';
@@ -100,12 +101,17 @@ const REGISTRY: Record<string, CardDef<never>> = {
   'meta.list_agents': card(quiet),
   'meta.send_message': card(quiet),
   'meta.push_notification': card(quiet),
-  'todo.read': card(quiet)
+  'todo.read': card(quiet),
+  'taiga.whoami': card(quiet),
+  'taiga.project_schema': card(quiet),
+  'taiga.project_list': card(quiet),
+  'taiga.project_get': card(quiet),
+  'taiga.stats': card(quiet)
 } as Record<string, CardDef<never>>;
 
 /** Семейства, где карточка одна на все операции сервера. */
 const FAMILIES: Record<string, CardDef<never>> = {
-  taiga: card({ ...taiga, link: (_call, data) => (data.url ? { text: data.ref ? `#${data.ref}` : 'Taiga', href: data.url, external: true } : null) }),
+  taiga: card({ ...taiga, link: (_call, data) => (data.url ? { text: data.ref ? `#${data.ref}` : 'Taiga', href: data.url, external: true } : null) }, TaigaCard),
   context7: card(context7)
 } as Record<string, CardDef<never>>;
 

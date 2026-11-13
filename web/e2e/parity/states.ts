@@ -11,6 +11,7 @@ import { bootSecondary } from '../ui/secondary-fixture';
 import { seedConversation, seedMachineWatch } from '../../testing/fake-hub/seed';
 import { seedFeedCards } from '../../testing/fixtures/feed-cards';
 import { seedPlanCards } from '../../testing/fixtures/plan-cards';
+import { seedTaigaCards } from '../../testing/fixtures/taiga-cards';
 import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
 import { seedPlan } from '../../testing/fixtures/plan';
@@ -184,6 +185,35 @@ async function feedCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
     await page.locator('.feed-card[data-card="todo.write"] .hit').first().click();
     await expect(page.locator('[data-role="card-raw"]').first()).toBeVisible();
   }
+}
+
+/** Лента с карточками Taiga: правка, раскрытый комментарий или раскрытый список. */
+async function taigaCards(page: Page, at: 'update' | 'comment' | 'list'): Promise<void> {
+  const { hub, api } = fresh();
+  const seed = seedTaigaCards(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${seed.id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.feed-card').first()).toBeVisible();
+  await page.locator('.feed').evaluate((node) => {
+    node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
+    node.scrollTop = 0;
+  });
+  const selector = `.feed-card[data-card="taiga.${at === 'update' ? 'userstory_update' : at === 'comment' ? 'comment_add' : 'userstory_list'}"]`;
+  for (let step = 0; step < 80; step++) {
+    const found = page.locator(selector).first();
+    if ((await found.count()) > 0) {
+      await found.scrollIntoViewIfNeeded();
+      break;
+    }
+    await page.locator('.feed').evaluate((node) => {
+      node.scrollTop += node.clientHeight * 0.6;
+    });
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  }
+  if (at === 'comment') await page.locator(`${selector} [data-role="taiga-comment-toggle"]`).click();
+  if (at === 'list') await page.locator(`${selector} [data-role="taiga-more"]`).click();
+  await expect(page.locator(selector).first()).toBeVisible();
 }
 
 /** Лента оркестратора с вызовами доски плана: низ ленты или её начало с раскрытыми списками. */
@@ -512,6 +542,10 @@ export const SCREENS: Screen[] = [
   screen('feed-cards', false, PHONE, 'dark', (page) => feedCards(page, 'bottom')),
   screen('feed-cards-top', false, PHONE, 'dark', (page) => feedCards(page, 'top')),
   screen('feed-cards-desktop', false, DESKTOP, 'light', (page) => feedCards(page, 'bottom')),
+  screen('taiga-cards', false, PHONE, 'dark', (page) => taigaCards(page, 'update')),
+  screen('taiga-cards-comment', false, PHONE, 'dark', (page) => taigaCards(page, 'comment')),
+  screen('taiga-cards-list', false, PHONE, 'light', (page) => taigaCards(page, 'list')),
+  screen('taiga-cards-desktop', false, DESKTOP, 'light', (page) => taigaCards(page, 'update')),
   screen('plan-cards', false, PHONE, 'dark', (page) => planCards(page, 'bottom')),
   screen('plan-cards-top', false, PHONE, 'dark', (page) => planCards(page, 'top')),
   screen('plan-cards-desktop', false, DESKTOP, 'light', (page) => planCards(page, 'bottom')),
