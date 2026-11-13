@@ -15,6 +15,7 @@ use crate::{
     activity::{Evidence, OWNER_LOST, extract_request_summary},
     requests::RequestKind,
     session_tools::origin::{HubCommit, HubEvent},
+    test_summary::TestSummary,
 };
 
 /// Предел итогового ответа в тексте события.
@@ -26,8 +27,15 @@ const FILES_BUDGET: usize = 2 * 1024;
 const SHORT_FIELD: usize = 200;
 const PATH_FIELD: usize = 1024;
 
-/// Ход для итога: команда, длительность, git-факты и рабочее время.
-type RunRow = (Uuid, Option<i64>, Option<Value>, Option<i64>, bool);
+/// Ход для итога: команда, длительность, git-факты, рабочее время и итоги тестов.
+type RunRow = (
+    Uuid,
+    Option<i64>,
+    Option<Value>,
+    Option<i64>,
+    bool,
+    Option<Value>,
+);
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -107,6 +115,8 @@ pub struct SessionSummary {
     /// `None`, пока ход идёт и расход ещё не записан.
     tokens: Option<(i64, i64)>,
     git: Option<Git>,
+    /// Итоги тестов последнего хода окна: nextest, Playwright, vitest.
+    tests: Vec<TestSummary>,
     worktree: Option<(String, String)>,
     /// Взведённые будильники: сколько и когда ближайший. Заметки остаются у владельца.
     alarms: Option<(i64, DateTime<Utc>)>,
@@ -308,7 +318,7 @@ pub async fn build_bounded(
         "select r.input_command_id,
                 coalesce(r.duration_ms,
                   (extract(epoch from (coalesce(r.finished_at,now()) - r.started_at)) * 1000)::bigint),
-                r.git,w.working_ms,r.finished_at is null
+                r.git,w.working_ms,r.finished_at is null,r.tests
          from runs r
          left join run_working w on w.input_command_id=r.input_command_id
          where r.conversation_id=$1
@@ -330,6 +340,12 @@ pub async fn build_bounded(
     .fetch_all(&mut *conn)
     .await?;
     let run_ids: Vec<Uuid> = runs.iter().map(|run| run.0).collect();
+    // Раздел итога — про последний ход окна; у хода без прогонов он пуст.
+    let tests: Vec<TestSummary> = runs
+        .last()
+        .and_then(|run| run.5.clone())
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
     let (tokens_in, tokens_out): (i64, i64) = sqlx::query_as(
         "select coalesce(sum(input_tokens),0)::bigint,coalesce(sum(output_tokens),0)::bigint
          from run_model_usage where input_command_id = any($1)",
@@ -510,6 +526,7 @@ pub async fn build_bounded(
         },
         tokens,
         git,
+        tests,
         worktree,
         alarms: alarm_next.map(|next| (alarm_count, next)),
         nudges,
@@ -708,6 +725,48 @@ fn git_section(git: Option<&Git>, worktree: Option<&(String, String)>) -> String
     out
 }
 
+fn tool_label(tool: &str) -> &str {
+    match tool {
+        "playwright" => "Playwright",
+        other => other,
+    }
+}
+
+fn tests_section(tests: &[TestSummary], had_commits: bool) -> String {
+    if tests.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("Tests:\n");
+    for test in tests {
+        let mut parts = vec![format!("{} passed", test.passed)];
+        if test.failed > 0 {
+            parts.push(format!("{} failed", test.failed));
+        }
+        if test.flaky > 0 {
+            parts.push(format!("{} flaky", test.flaky));
+        }
+        if test.skipped > 0 {
+            parts.push(format!("{} skipped", test.skipped));
+        }
+        if test.did_not_run > 0 {
+            parts.push(format!("{} did not run", test.did_not_run));
+        }
+        if test.timed_out > 0 {
+            parts.push(format!("{} timed out", test.timed_out));
+        }
+        if let Some(duration_ms) = test.duration_ms {
+            parts.push(duration(duration_ms));
+        }
+        if let Some(sha) = &test.stale_before {
+            parts.push(format!("stale (before commit {sha})"));
+        } else if had_commits {
+            parts.push("after the last commit".to_owned());
+        }
+        let _ = writeln!(out, "  {}: {}", tool_label(&test.tool), parts.join(", "));
+    }
+    out
+}
+
 fn detail_section(detail: &Detail) -> String {
     match detail {
         Detail::None => String::new(),
@@ -820,6 +879,13 @@ pub fn render_bounded(summary: &SessionSummary, limit: usize) -> String {
         summary.git.as_ref(),
         summary.worktree.as_ref(),
     ));
+    head.push_str(&tests_section(
+        &summary.tests,
+        summary
+            .git
+            .as_ref()
+            .is_some_and(|git| !git.commits.is_empty()),
+    ));
     if let Some((path, branch)) = &summary.worktree {
         let _ = writeln!(head, "Worktree: {path}, branch {branch}.");
     }
@@ -906,6 +972,7 @@ impl SessionSummary {
                     .collect()
             }),
             changed_files: self.git.as_ref().map(|git| git.files.len() as i64),
+            tests: (!self.tests.is_empty()).then(|| self.tests.clone()),
             nudges: self.nudges,
             nudge_exhausted: self.nudge_exhausted.then_some(true),
             ..HubEvent::default()
@@ -978,4 +1045,54 @@ pub async fn event_text(
     Ok(build(conn, owner_id, target_id, state, armed_at)
         .await?
         .map(|summary| render(&summary)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test(tool: &str, passed: u32, failed: u32, skipped: u32, duration_ms: i64) -> TestSummary {
+        TestSummary {
+            tool: tool.to_owned(),
+            passed,
+            failed,
+            flaky: 0,
+            skipped,
+            did_not_run: 0,
+            timed_out: 0,
+            duration_ms: Some(duration_ms),
+            ran_at: DateTime::from_timestamp_millis(0).unwrap(),
+            stale_before: None,
+        }
+    }
+
+    #[test]
+    fn tests_section_names_every_tool_once() {
+        let mut nextest = test("nextest", 3944, 2, 54, 195_000);
+        nextest.flaky = 3;
+        nextest.timed_out = 1;
+        let mut playwright = test("playwright", 32, 0, 0, 38_000);
+        playwright.stale_before = Some("14e6bd27".into());
+        let mut vitest = test("vitest", 1504, 3, 0, 12_000);
+        vitest.did_not_run = 2;
+        let section = tests_section(&[nextest, playwright, vitest], true);
+        assert_eq!(
+            section,
+            "Tests:\n\
+             \x20 nextest: 3944 passed, 2 failed, 3 flaky, 54 skipped, 1 timed out, 3m15s, after the last commit\n\
+             \x20 Playwright: 32 passed, 38s, stale (before commit 14e6bd27)\n\
+             \x20 vitest: 1504 passed, 3 failed, 2 did not run, 12s, after the last commit\n"
+        );
+    }
+
+    #[test]
+    fn tests_section_has_no_commit_marker_without_commits() {
+        let section = tests_section(&[test("vitest", 5, 0, 0, 1_000)], false);
+        assert_eq!(section, "Tests:\n  vitest: 5 passed, 1s\n");
+    }
+
+    #[test]
+    fn no_tests_means_no_section() {
+        assert_eq!(tests_section(&[], true), "");
+    }
 }

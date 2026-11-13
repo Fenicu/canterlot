@@ -13432,6 +13432,16 @@
               "null"
             ]
           },
+          "tests": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TestSummary"
+            },
+            "description": "Итоги тестовых прогонов последнего хода: nextest, Playwright, vitest."
+          },
           "tokens_in": {
             "type": [
               "integer",
@@ -18503,6 +18513,75 @@
           }
         },
         "additionalProperties": false
+      },
+      "TestSummary": {
+        "type": "object",
+        "description": "Сводка одного прогона. Нулевые счётчики, кроме `passed`, в текст не попадают.",
+        "required": [
+          "tool",
+          "passed",
+          "failed",
+          "flaky",
+          "skipped",
+          "did_not_run",
+          "timed_out",
+          "ran_at"
+        ],
+        "properties": {
+          "did_not_run": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "flaky": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "passed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "ran_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Время блока результата, в котором нашлась сводка."
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "stale_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Короткий хеш первого коммита хода после прогона; `None`, если такого нет."
+          },
+          "timed_out": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "tool": {
+            "type": "string",
+            "description": "`nextest`, `playwright` или `vitest`."
+          }
+        }
       },
       "TimelineItem": {
         "oneOf": [

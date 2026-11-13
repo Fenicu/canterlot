@@ -66,6 +66,9 @@ pub struct HubEvent {
     pub tokens_out: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commits: Option<Vec<HubCommit>>,
+    /// Итоги тестовых прогонов последнего хода: nextest, Playwright, vitest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tests: Option<Vec<crate::test_summary::TestSummary>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_files: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

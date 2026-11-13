@@ -55,6 +55,28 @@ fn interrupt_progress_kinds_are_client_visible() {
     }
 }
 #[test]
+fn hub_event_with_tests_fits_the_schema() {
+    let event = canterlot_hub::session_tools::origin::HubEvent {
+        kind: "session_result".into(),
+        tests: Some(vec![canterlot_hub::test_summary::TestSummary {
+            tool: "nextest".into(),
+            passed: 1,
+            failed: 0,
+            flaky: 0,
+            skipped: 0,
+            did_not_run: 0,
+            timed_out: 0,
+            duration_ms: None,
+            ran_at: chrono::Utc::now(),
+            stale_before: None,
+        }]),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(event).unwrap();
+    assert!(validator("HubEvent").is_valid(&value), "{value}");
+}
+
+#[test]
 fn hidden_placeholder_has_a_schema_and_never_carries_a_payload() {
     let now = chrono::Utc::now();
     let source = |seq, scope, kind: &str| events::StoredEvent {

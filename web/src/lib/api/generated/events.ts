@@ -123,6 +123,7 @@ export interface HubEvent {
   tokens_out?: number;
   commits?: HubCommit[];
   changed_files?: number;
+  tests?: TestSummary[];
   answer?: string;
   answer_bytes?: number;
   answer_block_id?: Uuid;
@@ -165,6 +166,18 @@ export interface HubEvent {
 export interface HubCommit {
   sha: string;
   title: string;
+}
+export interface TestSummary {
+  tool: string;
+  passed: number;
+  failed: number;
+  flaky: number;
+  skipped: number;
+  did_not_run: number;
+  timed_out: number;
+  duration_ms?: number | null;
+  ran_at: Time;
+  stale_before?: string | null;
 }
 export interface AlarmSession {
   id: Uuid;

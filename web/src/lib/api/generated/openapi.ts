@@ -2683,6 +2683,8 @@ export interface components {
             /** @description `alarm` с условием `session_state`: цели и их состояние на момент срабатывания. */
             sessions?: components["schemas"]["AlarmSession"][] | null;
             state?: string | null;
+            /** @description Итоги тестовых прогонов последнего хода: nextest, Playwright, vitest. */
+            tests?: components["schemas"]["TestSummary"][] | null;
             /** Format: int64 */
             tokens_in?: number | null;
             /** Format: int64 */
@@ -4177,6 +4179,32 @@ export interface components {
             isolated?: boolean | null;
             preset?: string | null;
             title: string;
+        };
+        /** @description Сводка одного прогона. Нулевые счётчики, кроме `passed`, в текст не попадают. */
+        TestSummary: {
+            /** Format: int32 */
+            did_not_run: number;
+            /** Format: int64 */
+            duration_ms?: number | null;
+            /** Format: int32 */
+            failed: number;
+            /** Format: int32 */
+            flaky: number;
+            /** Format: int32 */
+            passed: number;
+            /**
+             * Format: date-time
+             * @description Время блока результата, в котором нашлась сводка.
+             */
+            ran_at: string;
+            /** Format: int32 */
+            skipped: number;
+            /** @description Короткий хеш первого коммита хода после прогона; `None`, если такого нет. */
+            stale_before?: string | null;
+            /** Format: int32 */
+            timed_out: number;
+            /** @description `nextest`, `playwright` или `vitest`. */
+            tool: string;
         };
         TimelineItem: (components["schemas"]["InputView"] & {
             /** @enum {string} */

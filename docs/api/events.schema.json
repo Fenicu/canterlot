@@ -7480,6 +7480,58 @@
       ],
       "additionalProperties": false
     },
+    "TestSummary": {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "type": "string"
+        },
+        "passed": {
+          "type": "integer"
+        },
+        "failed": {
+          "type": "integer"
+        },
+        "flaky": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        },
+        "did_not_run": {
+          "type": "integer"
+        },
+        "timed_out": {
+          "type": "integer"
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ran_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "stale_before": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "tool",
+        "passed",
+        "failed",
+        "flaky",
+        "skipped",
+        "did_not_run",
+        "timed_out",
+        "ran_at"
+      ],
+      "additionalProperties": false
+    },
     "HubEvent": {
       "type": "object",
       "properties": {
@@ -7515,6 +7567,12 @@
         },
         "changed_files": {
           "type": "integer"
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TestSummary"
+          }
         },
         "answer": {
           "type": "string"
