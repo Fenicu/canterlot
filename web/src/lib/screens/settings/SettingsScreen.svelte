@@ -28,6 +28,7 @@
   import SpawnWhitelist from './SpawnWhitelist.svelte';
   import LimitSettings from './LimitSettings.svelte';
   import PromptSuggestionSetting from './PromptSuggestionSetting.svelte';
+  import DictationSettings from './DictationSettings.svelte';
   import RoutingScreen from './RoutingScreen.svelte';
   import SignInSettings from '../signin/SignInSettings.svelte';
   import { SETTINGS_CATEGORIES, settingsCategory, type SettingsCategory } from './settingsNav.js';
@@ -143,6 +144,7 @@
             <section class="setting"><h3>Enter на клавиатуре</h3><p class="note">Авто: на телефоне новая строка, на компьютере отправка. Shift+Enter добавляет строку</p><Segmented name="enter" label="Enter на клавиатуре" options={[{ value: 'auto', label: 'Авто' }, { value: 'send', label: 'Отправка' }, { value: 'newline', label: 'Новая строка' }]} bind:value={enter} /></section>
             <div class="setting embedded"><PromptSuggestionSetting /></div>
           </div>
+          <DictationSettings />
           <h3 class="group-title">Лента</h3>
           <div class="group">
             <section class="setting"><h3>Рассуждения</h3><p class="note">Вживую показывает хвост мысли, пока агент думает, и складывает его в строку после ответа. Строкой оставляет начало мысли, Раскрыты показывает рассуждение целиком</p><Segmented name="reasoning" label="Рассуждения" options={[{ value: 'line', label: 'Строкой' }, { value: 'live', label: 'Вживую' }, { value: 'expanded', label: 'Раскрыты' }]} bind:value={() => reasoning, setReasoning} /></section>
