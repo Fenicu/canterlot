@@ -328,6 +328,22 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Сначала примите результат: рабочая копия ещё на машине",
   },
+  too_many_terms: {
+    action: "none",
+    message: "Слишком много терминов словаря",
+  },
+  term_empty: {
+    action: "none",
+    message: "Шаблон и замена не могут быть пустыми",
+  },
+  term_too_long: {
+    action: "none",
+    message: "Шаблон или замена длиннее 100 символов",
+  },
+  duplicate_term: {
+    action: "none",
+    message: "Шаблоны совпадают после нормализации",
+  },
 };
 
 export interface DescribedError {

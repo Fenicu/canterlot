@@ -122,6 +122,8 @@ async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
         fail(&mut ws, &timers, "bad_audio").await;
         return;
     }
+    // Все сроки диктовки считаются от `start` клиента, а не от соединения со службой.
+    let started = Instant::now();
     if !state.dictation.enabled {
         tracing::info!(
             kind = "speech_unavailable",
@@ -195,7 +197,6 @@ async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
         }
     });
 
-    let started = Instant::now();
     tracing::info!(
         kind = "dictation_started",
         client = %client,
