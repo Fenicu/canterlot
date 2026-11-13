@@ -13,7 +13,7 @@
 | `(MIT OR GPL-3.0-or-later)` | 0 | 1 | 0 | 1 |
 | `(MPL-2.0 OR Apache-2.0)` | 0 | 1 | 0 | 1 |
 | `0BSD OR MIT OR Apache-2.0` | 1 | 0 | 0 | 1 |
-| `Apache-2.0` | 8 | 5 | 20 | 33 |
+| `Apache-2.0` | 9 | 5 | 20 | 34 |
 | `Apache-2.0 / MIT` | 1 | 0 | 0 | 1 |
 | `Apache-2.0 AND ISC` | 1 | 0 | 0 | 1 |
 | `Apache-2.0 OR BSL-1.0` | 1 | 0 | 0 | 1 |
@@ -28,9 +28,9 @@
 | `BlueOak-1.0.0` | 0 | 0 | 2 | 2 |
 | `CC0-1.0` | 0 | 0 | 1 | 1 |
 | `ISC` | 3 | 3 | 10 | 16 |
-| `MIT` | 71 | 87 | 156 | 314 |
+| `MIT` | 73 | 87 | 156 | 316 |
 | `MIT AND BSD-3-Clause` | 1 | 0 | 0 | 1 |
-| `MIT OR Apache-2.0` | 248 | 0 | 0 | 248 |
+| `MIT OR Apache-2.0` | 249 | 0 | 0 | 249 |
 | `MIT OR Apache-2.0 OR BSD-1-Clause` | 1 | 0 | 0 | 1 |
 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | 2 | 0 | 0 | 2 |
 | `MIT OR Apache-2.0 OR Zlib` | 1 | 0 | 0 | 1 |
@@ -44,7 +44,7 @@
 | `Unlicense OR MIT` | 8 | 0 | 0 | 8 |
 | `Zlib` | 3 | 0 | 0 | 3 |
 | `Zlib OR Apache-2.0 OR MIT` | 1 | 0 | 0 | 1 |
-| **ИТОГО** | **466** | **120** | **208** | **794** |
+| **ИТОГО** | **470** | **120** | **208** | **798** |
 
 ## Требуют внимания
 
@@ -54,7 +54,7 @@
 
 ### Rust-крейты
 
-Среди Rust-крейтов рабочего пространства пакеты с неразрешёнными лицензиями отсутствуют (все 466 зависимостей удовлетворяют allowlist).
+Среди Rust-крейтов рабочего пространства пакеты с неразрешёнными лицензиями отсутствуют (все 470 зависимостей удовлетворяют allowlist).
 
 ### npm (runtime)
 
@@ -74,7 +74,7 @@
 
 ## Крейты Rust
 
-Зависимости рабочего пространства Cargo (исключая собственные крейты `canterlot-*` и прототипы `spikes`). Всего: 466.
+Зависимости рабочего пространства Cargo (исключая собственные крейты `canterlot-*` и прототипы `spikes`). Всего: 470.
 
 | Крейт | Версия | Лицензия | Выбрано | Репозиторий |
 | --- | --- | --- | --- | --- |
@@ -138,6 +138,7 @@
 | `clap_builder` | 4.6.7 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
 | `clap_derive` | 4.6.7 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
 | `clap_lex` | 1.1.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
+| `cmake` | 0.1.58 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/cmake-rs](https://github.com/rust-lang/cmake-rs) |
 | `cmov` | 0.5.4 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/utils](https://github.com/RustCrypto/utils) |
 | `colorchoice` | 1.0.5 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-cli/anstyle](https://github.com/rust-cli/anstyle) |
 | `const-oid` | 0.10.2 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/formats](https://github.com/RustCrypto/formats) |
@@ -224,6 +225,7 @@
 | `hex` | 0.4.3 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/KokaKiwi/rust-hex](https://github.com/KokaKiwi/rust-hex) |
 | `hkdf` | 0.13.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/KDFs/](https://github.com/RustCrypto/KDFs/) |
 | `hmac` | 0.13.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/MACs](https://github.com/RustCrypto/MACs) |
+| `hound` | 3.5.1 | `Apache-2.0` | `Apache-2.0` | [https://github.com/ruuda/hound](https://github.com/ruuda/hound) |
 | `http` | 1.5.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/hyperium/http](https://github.com/hyperium/http) |
 | `http-body` | 1.1.0 | `MIT` | `MIT` | [https://github.com/hyperium/http-body](https://github.com/hyperium/http-body) |
 | `http-body-util` | 0.1.5 | `MIT` | `MIT` | [https://github.com/hyperium/http-body](https://github.com/hyperium/http-body) |
@@ -468,6 +470,8 @@
 | `tracing-attributes` | 0.1.31 | `MIT` | `MIT` | [https://github.com/tokio-rs/tracing](https://github.com/tokio-rs/tracing) |
 | `tracing-core` | 0.1.36 | `MIT` | `MIT` | [https://github.com/tokio-rs/tracing](https://github.com/tokio-rs/tracing) |
 | `tracing-subscriber` | 0.3.23 | `MIT` | `MIT` | [https://github.com/tokio-rs/tracing](https://github.com/tokio-rs/tracing) |
+| `transcribe-cpp` | 0.4.2 | `MIT` | `MIT` | [https://github.com/handy-computer/transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) |
+| `transcribe-cpp-sys` | 0.4.2 | `MIT` | `MIT` | [https://github.com/handy-computer/transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) |
 | `try-lock` | 0.2.5 | `MIT` | `MIT` | [https://github.com/seanmonstar/try-lock](https://github.com/seanmonstar/try-lock) |
 | `tungstenite` | 0.29.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/snapview/tungstenite-rs](https://github.com/snapview/tungstenite-rs) |
 | `tungstenite` | 0.30.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/snapview/tungstenite-rs](https://github.com/snapview/tungstenite-rs) |
