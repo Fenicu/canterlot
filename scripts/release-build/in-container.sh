@@ -9,6 +9,9 @@
 #   CARGO_TARGET_DIR   каталог target на смонтированном кэше (обязателен);
 #   CARGO_HOME         каталог cargo на смонтированном кэше (ставит build-release.sh);
 #   npm_config_cache   кэш npm на смонтированном кэше;
+#   TRANSCRIBE_CMAKE_ARGS  флаги CMake для transcribe.cpp (по умолчанию sm_70,
+#                      GGML_NATIVE=OFF, без системного BLAS); их задаёт
+#                      build-release.sh и включает в ключ кэша нативной сборки;
 #   SITE_ORIGIN        адрес PWA для csp.txt (по умолчанию https://hub.example.com);
 #   WSS_ORIGIN         адрес WebSocket для проверки csp.txt (по умолчанию wss://hub.example.com).
 #
@@ -96,13 +99,16 @@ phase_done "синтетический воркер"
 # canterlot-speech: CUDA 12.9 из образа, код только для sm_70 (Tesla V100). CPU-часть
 # ggml без подстройки под сборочную машину (GGML_NATIVE=OFF: AVX2/FMA/F16C), без
 # системного BLAS. Хаб и воркер собраны выше отдельным вызовом и CUDA не видят.
+# Строку флагов задаёт scripts/build-release.sh (он же включает её в ключ кэша
+# нативной сборки); значение по умолчанию — для прямого запуска этого скрипта.
 phase "служба распознавания речи (CUDA)"
 cuda_root=${CUDA_PATH:-/usr/local/cuda-12.9}
 [[ -x "$cuda_root/bin/nvcc" ]] || die "нет nvcc в $cuda_root"
+export TRANSCRIBE_CMAKE_ARGS=${TRANSCRIBE_CMAKE_ARGS:--DCMAKE_CUDA_ARCHITECTURES=70 -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF}
+printf '    TRANSCRIBE_CMAKE_ARGS: %s\n' "$TRANSCRIBE_CMAKE_ARGS"
 (
     cd "$src"
     export PATH="$cuda_root/bin:$PATH" CUDACXX="$cuda_root/bin/nvcc" CUDAToolkit_ROOT="$cuda_root"
-    export TRANSCRIBE_CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=70 -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
     cargo build --release --locked -p canterlot-speech --features cuda
 )
 install -m 0755 "$CARGO_TARGET_DIR/release/canterlot-speech" "$out/hub/bin/"

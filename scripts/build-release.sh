@@ -50,6 +50,12 @@ log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
 q() { printf '%q' "$1"; }
 
+# Флаги CMake для transcribe.cpp: только sm_70 (Tesla V100), без подстройки под
+# сборочную машину и без системного BLAS. Входят в ключ кэша нативной сборки,
+# поэтому смена флагов не переиспользует старые объекты; целиком строку можно
+# перекрыть CANTERLOT_TRANSCRIBE_CMAKE_ARGS (проверка инвалидации, отладка).
+default_native_settings="-DCMAKE_CUDA_ARCHITECTURES=70 -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
+
 phase "проверка предусловий"
 [[ -n "$tag" ]] || { usage; exit 2; }
 [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "неверный тег: $tag (ожидался vX.Y.Z)" >&2; exit 2; }
@@ -189,31 +195,68 @@ else
     script_path="$in_container"
     cache_root=${CANTERLOT_BUILD_CACHE:-$HOME/.cache/canterlot-release-build}
 fi
-if [[ "$mode" == remote ]]; then
-    remote "mkdir -p $(q "$cache_root/cargo") $(q "$cache_root/target") $(q "$cache_root/npm")" \
-        || die "не удалось создать кэши в $cache_root"
-else
-    mkdir -p "$cache_root/cargo" "$cache_root/target" "$cache_root/npm"
-fi
 phase_done "образ"
 
+# --- кэши ---
+# Нативные объекты transcribe.cpp/ggml (CMake и nvcc) зависят от образа и флагов,
+# а не от версии Canterlot: у каждого их набора свой каталог target/<ключ>. Смена
+# образа или флагов начинает нативную часть заново, а не подмешивает чужие .o.
+phase "кэш сборки"
+cache_helper="$repo/scripts/release-build/cache.sh"
+[[ -f "$cache_helper" ]] || die "в $repo нет scripts/release-build/cache.sh"
+[[ "$cache_root" == /* && "$cache_root" != "/" ]] || die "странный каталог кэша: '$cache_root'"
+if [[ "$mode" == remote ]]; then
+    image_id=$(remote "docker image inspect --format '{{.Id}}' $(q "$image")") \
+        || die "не удалось прочитать id образа $image на $host"
+else
+    image_id=$("$docker_cmd" image inspect --format '{{.Id}}' "$image") \
+        || die "не удалось прочитать id образа $image"
+fi
+native_settings=${CANTERLOT_TRANSCRIBE_CMAKE_ARGS:-$default_native_settings}
+native_key=$(bash "$cache_helper" key "$image_id" "$native_settings") \
+    || die "не удалось посчитать ключ кэша нативной сборки"
+cargo_cache="$cache_root/cargo"
+npm_cache="$cache_root/npm"
+target_root="$cache_root/target"
+native_target="$target_root/$native_key"
+lock_file="$cache_root/.build.lock"
+log "кэш нативной сборки: $native_target (образ ${image_id#sha256:}, флаги: $native_settings)"
+if [[ "$mode" == remote ]]; then
+    remote "mkdir -p $(q "$cargo_cache") $(q "$npm_cache") $(q "$target_root") $(q "$native_target")" \
+        || die "не удалось создать кэши в $cache_root на $host"
+    ssh -o BatchMode=yes -o ConnectTimeout=15 "$host" "cat > $(q "$remote_tools/cache.sh")" <"$cache_helper" \
+        || die "не удалось скопировать cache.sh на $host"
+    remote 'command -v flock >/dev/null' || die "на $host нет flock"
+else
+    mkdir -p "$cargo_cache" "$npm_cache" "$target_root" "$native_target"
+    command -v flock >/dev/null || die "нет flock: без блокировки две сборки могут писать в один кэш"
+fi
+phase_done "кэш"
+
 # --- сборка в контейнере ---
+# flock на каталоге кэша держится до уборки чужих ключей: вторая сборка с тем же
+# кэшем ждёт, а не пишет в те же каталоги и не удаляет чужой свежий target.
 phase "сборка в контейнере"
 if [[ "$mode" == remote ]]; then
     # $(id -u) должен раскрыться на сборочной машине, поэтому строка собирается
     # здесь, а значения путей проходят через %q.
     # shellcheck disable=SC2016 # $(id -u) раскрывает удалённый shell
-    cmd=$(printf 'docker run --rm --user "$(id -u):$(id -g)" --cpus 24 --memory 40g --pids-limit 4096 -v %q:/src -v %q:/cache/cargo -v %q:/cache/target -v %q:/cache/npm -v %q:/out -v %q:/build/in-container.sh:ro -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target -e npm_config_cache=/cache/npm -e %q -e %q -w /src %q bash /build/in-container.sh --src /src --out /out --sha %q --commit %q' \
-        "$src" "$cache_root/cargo" "$cache_root/target" "$cache_root/npm" "$src/.release-out" "$script_path" \
+    cmd=$(printf 'set -e; exec 9>%q; flock 9; docker run --rm --user "$(id -u):$(id -g)" --cpus 24 --memory 40g --pids-limit 4096 -v %q:/src -v %q:/cache/cargo -v %q:/cache/target -v %q:/cache/npm -v %q:/out -v %q:/build/in-container.sh:ro -e CARGO_HOME=/cache/cargo -e CARGO_TARGET_DIR=/cache/target -e npm_config_cache=/cache/npm -e %q -e %q -e %q -w /src %q bash /build/in-container.sh --src /src --out /out --sha %q --commit %q; bash %q prune %q %q || echo "    ВНИМАНИЕ: старые кэши нативной сборки не убраны"' \
+        "$lock_file" "$src" "$cargo_cache" "$native_target" "$npm_cache" "$src/.release-out" "$script_path" \
         "SITE_ORIGIN=${CANTERLOT_SITE_ORIGIN:-https://hub.example.com}" \
-        "WSS_ORIGIN=${CANTERLOT_WSS_ORIGIN:-wss://hub.example.com}" "$image" "$sha12" "$commit")
+        "WSS_ORIGIN=${CANTERLOT_WSS_ORIGIN:-wss://hub.example.com}" \
+        "TRANSCRIBE_CMAKE_ARGS=$native_settings" "$image" "$sha12" "$commit" \
+        "$remote_tools/cache.sh" "$target_root" "$native_key")
     remote "$cmd" || die "сборка в контейнере на $host не удалась"
 else
+    exec {cache_lock_fd}>"$lock_file"
+    flock "$cache_lock_fd"
+    log "кэш $cache_root заблокирован"
     "$docker_cmd" run --rm --user "$(id -u):$(id -g)" --cpus 24 --memory 40g --pids-limit 4096 \
         -v "$src:/src" \
-        -v "$cache_root/cargo:/cache/cargo" \
-        -v "$cache_root/target:/cache/target" \
-        -v "$cache_root/npm:/cache/npm" \
+        -v "$cargo_cache:/cache/cargo" \
+        -v "$native_target:/cache/target" \
+        -v "$npm_cache:/cache/npm" \
         -v "$src/.release-out:/out" \
         -v "$script_path:/build/in-container.sh:ro" \
         -e CARGO_HOME=/cache/cargo \
@@ -221,10 +264,14 @@ else
         -e npm_config_cache=/cache/npm \
         -e "SITE_ORIGIN=${CANTERLOT_SITE_ORIGIN:-https://hub.example.com}" \
         -e "WSS_ORIGIN=${CANTERLOT_WSS_ORIGIN:-wss://hub.example.com}" \
+        -e "TRANSCRIBE_CMAKE_ARGS=$native_settings" \
         -w /src \
         "$image" \
         bash /build/in-container.sh --src /src --out /out --sha "$sha12" --commit "$commit" \
         || die "сборка в контейнере не удалась"
+    bash "$cache_helper" prune "$target_root" "$native_key" \
+        || log "ВНИМАНИЕ: старые кэши нативной сборки в $target_root не убраны"
+    exec {cache_lock_fd}>&-
 fi
 phase_done "сборка в контейнере"
 

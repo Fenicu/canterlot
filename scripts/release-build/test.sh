@@ -107,9 +107,42 @@ run 1 expect_of_with 'capability a_v1\nunknown z\n'
 grep -q 'неожиданная строка' "$out" || fail "expect_of не отказывает на чужой строке"
 run 1 expect_of_with ''
 
+# Кэш нативной сборки: ключ зависит от id образа и флагов CMake, prune убирает
+# только каталоги-ключи и никогда — текущий.
+cache=scripts/release-build/cache.sh
+id_a="sha256:$(printf 'a%.0s' $(seq 64))"
+id_b="sha256:$(printf 'b%.0s' $(seq 64))"
+settings='-DCMAKE_CUDA_ARCHITECTURES=70 -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF'
+key=$(bash "$cache" key "$id_a" "$settings")
+[[ "$key" =~ ^[0-9a-f]{16}$ ]] || fail "ключ кэша не 16 hex: $key"
+[[ "$(bash "$cache" key "$id_a" "$settings")" == "$key" ]] || fail "ключ кэша нестабилен"
+[[ "$(bash "$cache" key "$id_b" "$settings")" != "$key" ]] || fail "ключ кэша не зависит от образа"
+[[ "$(bash "$cache" key "$id_a" "$settings -DX=1")" != "$key" ]] || fail "ключ кэша не зависит от флагов"
+[[ "$(bash "$cache" key "$id_a" "$settings" | wc -c)" == 17 ]] || fail "ключ кэша длиннее строки"
+run 1 bash "$cache" key not-an-image-id "$settings"
+grep -q 'не id образа' "$out" || fail "cache.sh берёт не id образа"
+run 1 bash "$cache" prune "$tmp/cache" not-a-key
+
+croot="$tmp/cache/target"
+mkdir -p "$croot/$key" "$croot/0123456789abcdef" "$croot/release" "$croot/nothex"
+: >"$croot/key-file"
+run 0 bash "$cache" prune "$croot" "$key"
+[[ -d "$croot/$key" && -d "$croot/release" && -d "$croot/nothex" && -f "$croot/key-file" ]] \
+    || fail "prune тронул не только чужие ключи"
+[[ ! -e "$croot/0123456789abcdef" ]] || fail "prune не удалил старый ключ"
+grep -q 'старый кэш нативной сборки удалён' "$out" || fail "prune не сказал, что удалил"
+
+# build-release.sh обязан: держать блокировку кэша, передавать флаги CMake и в
+# ключ, и в контейнер, а in-container.sh — принимать их из окружения.
+grep -q 'flock' "$build" || fail "build-release.sh не блокирует кэш"
+grep -q 'cache.sh' "$build" || fail "build-release.sh не зовёт cache.sh"
+grep -q 'TRANSCRIBE_CMAKE_ARGS' "$build" || fail "build-release.sh не передаёт флаги CMake"
+grep -q 'TRANSCRIBE_CMAKE_ARGS' scripts/release-build/in-container.sh \
+    || fail "in-container.sh не принимает TRANSCRIBE_CMAKE_ARGS"
+
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck scripts/build-release.sh scripts/release-build/in-container.sh scripts/release-build/test.sh \
-        || fail "shellcheck"
+    shellcheck scripts/build-release.sh scripts/release-build/in-container.sh scripts/release-build/cache.sh \
+        scripts/release-build/test.sh || fail "shellcheck"
 fi
 
 printf 'все быстрые проверки прошли\n'
