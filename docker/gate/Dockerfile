@@ -13,8 +13,9 @@ FROM debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a47
 
 ARG DEBIAN_FRONTEND=noninteractive
 # build-essential, protobuf-compiler и pkg-config — сборка Rust (prost-build
-# зовёт protoc); binutils — objdump, jq — разбор lock-файлов, strace — тесты
-# долговечности каталогов; procps — ps/pgrep/pkill из scripts/reap-stray-tests.sh
+# зовёт protoc); cmake — transcribe.cpp для canterlot-speech (без CUDA);
+# binutils — objdump, jq — разбор lock-файлов, strace — тесты долговечности
+# каталогов; procps — ps/pgrep/pkill из scripts/reap-stray-tests.sh
 # и e2e/stack/global-teardown.ts; openssl — самоподписанные сертификаты стенда;
 # libnss-wrapper — passwd-запись для uid, который приходит снаружи (её требует
 # initdb, а в контейнере пользователя нет).
@@ -23,6 +24,7 @@ RUN apt-get update \
         binutils \
         build-essential \
         ca-certificates \
+        cmake \
         curl \
         git \
         gnupg \

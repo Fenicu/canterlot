@@ -77,7 +77,19 @@ if ((!unknown)); then
         esac
     done <<<"$changed"
 fi
-printf 'режим: %s, Rust: %s, web: %s\n' "$mode" "$((want_rust))" "$((want_web))"
+# canterlot-speech собирает transcribe.cpp; его фича cuda требует CUDA, поэтому крейт
+# идёт отдельно от прогонов --all-features и без cuda. В --fast — только если он менялся.
+want_speech=$want_rust
+if ((!unknown)) && [[ "$mode" == fast ]]; then
+    want_speech=0
+    while IFS= read -r path; do
+        case "$path" in
+            crates/canterlot-speech/* | Cargo.toml | Cargo.lock | rust-toolchain.toml | .cargo/* | .config/* | scripts/check.sh)
+                want_speech=1 ;;
+        esac
+    done <<<"$changed"
+fi
+printf 'режим: %s, Rust: %s, web: %s, canterlot-speech: %s\n' "$mode" "$((want_rust))" "$((want_web))" "$((want_speech))"
 
 if ((all)); then
     stage "версия"
@@ -95,6 +107,7 @@ nextest_filter() {
             crates/*)
                 crate=${path#crates/}
                 crate=${crate%%/*}
+                [[ "$crate" == canterlot-speech ]] && continue
                 rest=${path#crates/$crate/}
                 if [[ "$rest" =~ ^tests/it/([^/]+)\.rs$ ]]; then
                     # Один бинарник it: модуль выбирает свои тесты, main.rs — весь бинарник.
@@ -161,16 +174,30 @@ run_nextest() {
         fi
     fi
     local status=0
-    ${half_jobs:+env CARGO_BUILD_JOBS="$half_jobs"} cargo nextest run --workspace --all-features --profile "$profile" \
-        --test-threads "${CANTERLOT_TEST_THREADS:-$(nproc)}" "${filter[@]}" || status=$?
+    ${half_jobs:+env CARGO_BUILD_JOBS="$half_jobs"} cargo nextest run --workspace --exclude canterlot-speech \
+        --all-features --profile "$profile" --test-threads "${CANTERLOT_TEST_THREADS:-$(nproc)}" "${filter[@]}" || status=$?
     python3 scripts/slowest-tests.py "target/nextest/$profile/junit.xml" 8 || true
     return "$status"
 }
 
+run_speech_tests() {
+    ((want_speech)) || return 0
+    local profile=default
+    local -a filter=()
+    [[ "$mode" == fast ]] && profile=fast
+    [[ -n "$custom_filter" ]] && filter=(-E "$custom_filter" --no-tests=pass)
+    ${half_jobs:+env CARGO_BUILD_JOBS="$half_jobs"} cargo nextest run -p canterlot-speech --profile "$profile" \
+        --test-threads "${CANTERLOT_TEST_THREADS:-$(nproc)}" "${filter[@]}"
+}
+
 lint_rust() {
     # Один clippy с всеми фичами; сборка без фич только проверяется компиляцией,
-    # а из её тестов запускается единственный собственный.
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    # а из её тестов запускается единственный собственный. canterlot-speech —
+    # отдельно и без фич (cuda нужна только сборке выпуска).
+    cargo clippy --workspace --exclude canterlot-speech --all-targets --all-features -- -D warnings
+    if ((want_speech)); then
+        cargo clippy -p canterlot-speech --all-targets -- -D warnings
+    fi
     [[ "$mode" == fast ]] && return 0
     cargo check --workspace --all-targets
     cargo nextest run -p canterlot-worker --lib -E 'test(synthetic_profiles_are_disabled_without_feature)' --no-tests=fail
@@ -205,6 +232,7 @@ if ((want_rust)); then
     lint_pid=$!
     run_status=0
     run_nextest || run_status=$?
+    run_speech_tests || run_status=$?
     lint_status=0
     wait "$lint_pid" || lint_status=$?
     if ((lint_status)); then

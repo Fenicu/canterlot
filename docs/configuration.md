@@ -539,3 +539,47 @@ canterlot-hub machine rotate-token --config ~/.config/canterlot/hub.toml --machi
 Этот флаг очищает привязку CJ; без него ротация сохраняет её. Сверка оставшихся
 нетерминальных исполнений относится к следующему этапу; сброс не подтверждает их завершение.
 `machine add` создаёт новую идентичность без привязки CJ.
+
+## Служба распознавания речи (speech.toml)
+
+`canterlot-speech serve --config /etc/canterlot/speech.toml` — служба диктовки на хосте хаба: хаб пересылает ей звук из PWA по unix-сокету, она возвращает текст (устройство и протокол — [docs/design/dictation.md](design/dictation.md)). Модели скачиваются заранее: `parakeet-tdt-0.6b-v3` Q8_0 из `handy-computer/parakeet-tdt-0.6b-v3-gguf` и Silero VAD из `handy-computer/silero-vad-v6.2-gguf`. Неизвестные ключи — ошибка запуска; несовпадение sha256 модели — отказ запуска (и отказ загрузки движком).
+
+```toml
+socket = "/run/canterlot-speech/speech.sock" # права сокета задаёт UMask юнита (0660)
+device = "auto"      # auto: CUDA, при сбое инициализации или нехватке памяти GPU — CPU; gpu: только CUDA; cpu: только CPU
+threads = 4          # потоки CPU для распознавания (режим CPU и операции на CPU)
+idle_unload = "5m"   # движок без диктовок выгружается: процесс завершается, VRAM свободна
+
+[model]              # пути относительные к каталогу этого файла или абсолютные
+path = "/var/lib/canterlot-speech/models/parakeet-tdt-0.6b-v3-Q8_0.gguf"
+sha256 = "<64 шестнадцатеричных символа>"
+
+[vad]
+path = "/var/lib/canterlot-speech/models/silero-vad-v6.2.gguf"
+sha256 = "<64 шестнадцатеричных символа>"
+
+[limits]
+max_audio = "10m"       # звук одной диктовки; дальше итог с reason = too_long
+lifetime = "11m"        # жизнь диктовки от start, больше max_audio
+start_deadline = "30s"  # от start до готовности движка, с холодной загрузкой
+idle = "15s"            # без звука до finish
+max_lead = "5s"         # насколько звук может опережать реальное время
+queue_wait = "5s"       # ожидание занятого движка второй диктовкой
+cancel_grace = "2s"     # нативный прогон не вернулся после отмены — движок убивается
+write_timeout = "5s"    # запись кадра хабу
+finish_timeout = "60s"  # от finish до итога
+
+[live]
+tentative_interval = "500ms" # промежуточный хвост каждые 500 мс нового звука (только GPU)
+pause = "500ms"              # пауза, на которой режется сегмент
+max_segment = "20s"          # принудительный разрез длинного сегмента
+forced_window = "5s"         # где искать самый тихий кадр для принудительного разреза
+preroll = "200ms"            # звук перед началом речи
+overlap = "300ms"            # перекрытие после принудительного разреза
+vad_threshold = 0.5
+vad_neg_threshold = 0.35
+```
+
+`canterlot-speech health --socket PATH` печатает `{"ok":…,"engine":"cold"|"warm","mode":…,"model":…}` и выходит с кодом 0 только при `ok`; недоступный сокет — код 1 и строка `speech_unavailable` уровня INFO в stderr. `canterlot-speech probe --config FILE --wav FILE [--realtime] [--json] [--text]` прогоняет живой алгоритм на записи в одном процессе и печатает время загрузки, задержки обновлений, длительности распознавания, пик RSS и память GPU.
+
+Сборка выпуска (`--features cuda`) динамически зависит от `libcuda.so.1` (драйвер), `libcudart.so.12`, `libcublas.so.12` и `libcublasLt.so.12` (CUDA 12.x, CUDA 13 не поддерживает V100); без них бинарник не запускается. Сборка без фич — только CPU.
