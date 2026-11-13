@@ -102,8 +102,11 @@ impl Fixture {
     fn job(&self, kind: &str, name: &str) -> Job {
         let held = self.path(&format!("{name}.held"));
         let go = self.path(&format!("{name}.go"));
+        let pid = self.path(&format!("{name}.pid"));
         let script = format!(
-            "echo \"$CANTERLOT_LEASE_HELD $CANTERLOT_TEST_THREADS $CARGO_BUILD_JOBS $PW_WORKERS $CANTERLOT_LEASE_BUDGET\" > {held:?}.tmp && mv {held:?}.tmp {held:?}; while [ ! -e {go:?} ]; do sleep 0.05; done"
+            "echo $$ > {pid:?}.tmp && mv {pid:?}.tmp {pid:?}; \
+             echo \"$CANTERLOT_LEASE_HELD $CANTERLOT_TEST_THREADS $CARGO_BUILD_JOBS $PW_WORKERS $CANTERLOT_LEASE_BUDGET\" > {held:?}.tmp && mv {held:?}.tmp {held:?}; \
+             while [ ! -e {go:?} ]; do sleep 0.05; done"
         );
         let mut command = self.wrapper(kind, &["sh", "-c", &script]);
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
@@ -111,6 +114,7 @@ impl Fixture {
             child: command.spawn().unwrap(),
             held,
             go,
+            command_pid: pid,
             reaped: false,
         }
     }
@@ -141,6 +145,8 @@ struct Job {
     child: std::process::Child,
     held: PathBuf,
     go: PathBuf,
+    /// pid и номер группы самой команды: она может быть в своей группе, не в группе обёртки.
+    command_pid: PathBuf,
     reaped: bool,
 }
 
@@ -184,8 +190,14 @@ impl Drop for Job {
             return;
         }
         // Неубранный лидер держит номер группы: команда убитой обёртки уходит вместе с ней.
-        if let Some(group) = rustix::process::Pid::from_raw(self.pid()) {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        // Своя группа у команды убивается отдельно, иначе она пережила бы обёртку.
+        let command = std::fs::read_to_string(&self.command_pid)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok());
+        for pid in [Some(self.pid()), command].into_iter().flatten() {
+            if let Some(group) = rustix::process::Pid::from_raw(pid) {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
         }
         let _ = self.child.wait();
     }
@@ -527,6 +539,60 @@ async fn exit_codes_and_signals_pass_through() {
 mod libc_signal {
     pub const INT: i32 = 2;
     pub const TERM: i32 = 15;
+}
+
+/// Куда уходит TERM: всей группе обёртки или только ей самой.
+#[derive(Clone, Copy)]
+enum Term {
+    Group,
+    Wrapper,
+}
+
+/// Сколько раз команда под арендой получила TERM. Команда ловит его и живёт до `done`.
+async fn term_deliveries(fixture: &Fixture, name: &str, target: Term) -> usize {
+    let log = fixture.path(&format!("{name}-term"));
+    let ready = fixture.path(&format!("{name}-ready"));
+    let done = fixture.path(&format!("{name}-done"));
+    let script = format!(
+        "trap 'echo term >> {log:?}' TERM; : > {ready:?}; while [ ! -e {done:?} ]; do sleep 0.05; done"
+    );
+    let mut command = fixture.wrapper("build", &["sh", "-c", &script]);
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut wrapper = command.spawn().unwrap();
+    let group = rustix::process::Pid::from_raw(i32::try_from(wrapper.id()).unwrap()).unwrap();
+    wait_for("command start", || ready.exists()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    match target {
+        Term::Group => rustix::process::kill_process_group(group, rustix::process::Signal::TERM),
+        Term::Wrapper => rustix::process::kill_process(group, rustix::process::Signal::TERM),
+    }
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let delivered = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    std::fs::write(&done, b"").unwrap();
+    let status = wrapper.wait().unwrap();
+    assert!(status.success(), "{status:?}");
+    delivered
+}
+
+/// Групповой TERM и TERM одной обёртке доходят до команды ровно по разу: в исполнениях
+/// агента и скриптах у неё своя группа процессов, и обёртка пересылает сигнал сама.
+#[tokio::test(flavor = "multi_thread")]
+async fn term_reaches_the_command_once() {
+    let fixture = Fixture::new(1).await;
+    assert_eq!(
+        term_deliveries(&fixture, "group", Term::Group).await,
+        1,
+        "group TERM reached the command twice"
+    );
+    assert_eq!(
+        term_deliveries(&fixture, "wrapper", Term::Wrapper).await,
+        1,
+        "targeted TERM reached the command twice"
+    );
 }
 
 /// Ctrl-C терминала достаётся всей группе: команда умирает, обёртка повторяет её сигнал

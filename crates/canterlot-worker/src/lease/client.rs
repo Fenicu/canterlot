@@ -3,9 +3,12 @@
 //! Аренда никогда не делает сборку невозможной: любая ошибка связи или протокола —
 //! одна строка в stderr и запуск команды без аренды.
 //!
-//! Команда остаётся в группе процессов и сессии обёртки: убийство группы, дерева и
-//! сигналы терминала достаются обоим. Пока команда работает, обёртка не реагирует на
-//! INT и QUIT (группа их уже получила), TERM и HUP пересылает только ребёнку. Код выхода —
+//! Команда остаётся в сессии обёртки и, когда терминал принадлежит группе обёртки, в её
+//! группе процессов: Ctrl-C, Ctrl-Z и убийство группы достаются обоим, а INT и QUIT
+//! обёртка тогда не пересылает — группа их уже получила. В остальных случаях (исполнения
+//! агента, скрипты, фоновые задания) команда получает свою группу процессов: групповой
+//! сигнал достаётся одной обёртке и приходит команде ровно один раз — пересланным. TERM и
+//! HUP пересылаются всегда, INT и QUIT — только в этой, отдельной группе. Код выхода —
 //! код команды; умершая от сигнала команда — тот же сигнал на обёртке.
 
 use std::{
@@ -100,6 +103,19 @@ async fn caught(signal: &mut Option<SignalStream>) {
         }
         None => std::future::pending::<()>().await,
     }
+}
+
+fn in_foreground(pgrp: rustix::process::Pid, fd: impl std::os::fd::AsFd) -> bool {
+    rustix::termios::isatty(&fd) && rustix::termios::tcgetpgrp(&fd).is_ok_and(|owner| owner == pgrp)
+}
+
+/// Терминал принадлежит группе обёртки: она передняя, и Ctrl-C, Ctrl-Z и `tcsetpgrp`
+/// команды достаются ей же, как обычному процессу в терминале.
+fn owns_terminal() -> bool {
+    let pgrp = rustix::process::getpgrp();
+    in_foreground(pgrp, io::stdin())
+        || in_foreground(pgrp, io::stdout())
+        || in_foreground(pgrp, io::stderr())
 }
 
 /// Забирает уже доставленный сигнал, не дожидаясь нового.
@@ -427,6 +443,14 @@ pub async fn run(args: RunArgs) -> ExitCode {
         granted.budget,
         granted.playwright_workers,
     ));
+    // Своя группа процессов у команды только когда терминал не наш: групповой сигнал
+    // (`kill -TERM -<pgid>`, Ctrl-C, закрытие терминала) тогда достаётся одной обёртке,
+    // и команда получает его ровно один раз — пересланным. Передняя группа терминала
+    // остаётся как была: Ctrl-C, Ctrl-Z и `tcsetpgrp` команды работают в ней.
+    let isolate = !owns_terminal();
+    if isolate {
+        command.process_group(0);
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return spawn_failure(&args.command[0], &error),
@@ -437,7 +461,11 @@ pub async fn run(args: RunArgs) -> ExitCode {
         .and_then(rustix::process::Pid::from_raw);
     let forward = |sig: Signal| {
         if let Some(pid) = child_pid {
-            let _ = rustix::process::kill_process(pid, sig);
+            let _ = if isolate {
+                rustix::process::kill_process_group(pid, sig)
+            } else {
+                rustix::process::kill_process(pid, sig)
+            };
         }
     };
     // INT и QUIT, пришедшие между выдачей и spawn: команда ещё не существовала, и
@@ -462,8 +490,12 @@ pub async fn run(args: RunArgs) -> ExitCode {
     let status = loop {
         tokio::select! {
             status = child.wait() => break status,
-            _ = caught(&mut sigint) => {}
-            _ = caught(&mut sigquit) => {}
+            _ = caught(&mut sigint) => {
+                if isolate { forward(Signal::INT); }
+            }
+            _ = caught(&mut sigquit) => {
+                if isolate { forward(Signal::QUIT); }
+            }
             _ = caught(&mut sigterm) => forward(Signal::TERM),
             _ = caught(&mut sighup) => forward(Signal::HUP),
             line = lines.next_line(), if connected => {
