@@ -18,7 +18,7 @@ Canterlot — self-hosted хаб для агентов программиров�
 
 Разработка идёт в [Forgejo](https://git.fenicu.com/Fenicu/canterlot); GitHub — зеркало.
 
-Хаб написан на Rust и хранит состояние в PostgreSQL. На каждой рабочей машине запущен Rust-воркер, хаб и воркеры общаются по gRPC поверх TLS. Клиент — статическая сборка SvelteKit; её раздаёт обратный прокси (Caddy), а владельца проверяет сам хаб: страница входа в PWA, пароль, ссылка восстановления и сеансы браузера в cookie. Отдельного сервера приложений у клиента нет.
+Хаб написан на Rust и хранит состояние в PostgreSQL. На каждой рабочей машине запущен Rust-воркер, хаб и воркеры общаются по gRPC поверх TLS. Клиент — статическая сборка SvelteKit; её раздаёт обратный прокси (Caddy), а владельца проверяет сам хаб: страница входа в PWA, пароль, ссылка восстановления и сеансы браузера в cookie. Отдельного сервера приложений у клиента нет. Диктовку в поле ввода распознаёт служба `canterlot-speech` на хосте хаба (Parakeet v3 на GPU NVIDIA через transcribe.cpp, запасной режим на CPU): хаб пересылает ей звук по unix-сокету, звук и текст не попадают на диск ([устройство](docs/design/dictation.md), [настройка](docs/configuration.md)).
 
 Что можно делать из интерфейса:
 
@@ -109,8 +109,11 @@ scripts/build-release.sh v1.24.0 --local    # та же сборка на мес
 6. убирает рабочую копию на сборочной машине через `git worktree remove --force`.
 
 Внутри контейнера `scripts/release-build/in-container.sh` собирает хаб, воркер,
-синтетический воркер и PWA (`npm ci`, `PWA_VERSION=<sha12> npm run build`) и проверяет
-то же, что выкат: отсутствие libssl, `hub openapi` против `docs/api/openapi.json`,
+синтетический воркер, `canterlot-speech` с CUDA 12.9 для sm_70 (`hub/bin/canterlot-speech`;
+образ содержит nvcc, cudart, cublas и cccl из архивов redist NVIDIA с проверкой sha256)
+и PWA (`npm ci`, `PWA_VERSION=<sha12> npm run build`) и проверяет
+то же, что выкат: отсутствие libssl и CUDA у хаба, прямые зависимости `canterlot-speech`
+(только glibc, libstdc++ и `libcuda.so.1`, `libcudart.so.12`, `libcublas*.so.12`), `hub openapi` против `docs/api/openapi.json`,
 CSP, `_app/version.json`, `synthetic-cli` только в синтетическом воркере, SHA256SUMS
 и максимальную версию GLIBC не выше 2.41. Тестов здесь нет: полный прогон
 `scripts/check.sh` и `check-web.sh` уже прошёл на этом коммите.
