@@ -31,6 +31,56 @@ open(path, "w").write("seq = 0\nrecords = [%s, %s]\n" % (rec(live, 0), rec(dead,
 EOF
 }
 
+# dist цели: бинари отвечают на --version/openapi/capabilities, RELEASE с source=,
+# csp.txt выведен из 200.html и содержит один wss-origin, SHA256SUMS сходится.
+make_cutover_dist() {
+    DIST_DIR="${FAKE_ROOT}/dist/${SHA_NEW}"
+    mkdir -p "${DIST_DIR}/hub/bin" "${DIST_DIR}/worker/bin" "${DIST_DIR}/synthetic/bin" \
+        "${DIST_DIR}/web/_app/immutable/chunks"
+    cp "${REPO_ROOT}/docs/api/openapi.json" "${FAKE_ROOT}/state/openapi.json"
+    cp "${FAKE_WORKER_BIN}" "${DIST_DIR}/hub/bin/canterlot-hub"
+    cp "${FAKE_WORKER_BIN}" "${DIST_DIR}/worker/bin/canterlot-worker"
+    cp "${FAKE_WORKER_BIN}" "${DIST_DIR}/synthetic/bin/canterlot-worker"
+    printf '<html><script>window.x=1</script></html>\n' >"${DIST_DIR}/web/200.html"
+    printf '{"version":"%s"}' "${SHA_NEW}" >"${DIST_DIR}/web/_app/version.json"
+    printf 'console.log(1)\n' >"${DIST_DIR}/web/_app/immutable/chunks/probe.js"
+    # Сборка precompressed: проба verify выбирает только ассет со всеми соседями.
+    for ext in br zst gz; do
+        printf 'precompressed\n' >"${DIST_DIR}/web/_app/immutable/chunks/probe.js.${ext}"
+    done
+    printf 'sha=%s\ndate=x\nmigrations_last=0041_fake_harness.sql\nsource=%s%028d\n' "${SHA_NEW}" "${SHA_NEW}" 0 >"${DIST_DIR}/RELEASE"
+    printf "default-src 'self'; script-src '%s'; connect-src wss://hub.example.com" \
+        'sha256-hUmDl3yY/7GaaX+Zuy8aEy8IzxgpBs7xccqYHs2/7kQ=' >"${DIST_DIR}/csp.txt"
+    dist_resync
+}
+# Пересчитать SHA256SUMS dist после правки сценарием; копия у хаба — тоже.
+dist_resync() {
+    (cd "${DIST_DIR}" && find . -type f ! -name 'SHA256SUMS*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum >SHA256SUMS)
+    if [ -d "${HUB_RELEASES}/${SHA_NEW}" ]; then cp "${DIST_DIR}/SHA256SUMS" "${HUB_RELEASES}/${SHA_NEW}/SHA256SUMS"; fi
+}
+stage_cutover_dist() {
+    mkdir -p "${HUB_RELEASES}/${SHA_NEW}" "${WEB_RELEASES}/${SHA_NEW}" "${WORKER_RELEASES}/${SHA_NEW}"
+    cp -r "${DIST_DIR}/hub/." "${HUB_RELEASES}/${SHA_NEW}/"
+    cp "${DIST_DIR}/RELEASE" "${DIST_DIR}/SHA256SUMS" "${HUB_RELEASES}/${SHA_NEW}/"
+    cp -r "${DIST_DIR}/web/." "${WEB_RELEASES}/${SHA_NEW}/"
+    cp -r "${DIST_DIR}/worker/." "${WORKER_RELEASES}/${SHA_NEW}/"
+    cp "${DIST_DIR}/RELEASE" "${WORKER_RELEASES}/${SHA_NEW}/"
+}
+# Бинарь диктовки целевого релиза лежит и в dist (как после настоящей сборки).
+eval "$(declare -f install_fake_speech | sed '1s/install_fake_speech/_harness_install_fake_speech/')"
+install_fake_speech() {
+    _harness_install_fake_speech "$1"
+    if [ "$1" = "${SHA_NEW}" ] && [ -d "${DIST_DIR:-}/hub/bin" ]; then
+        cp "${HUB_RELEASES}/$1/bin/canterlot-speech" "${DIST_DIR}/hub/bin/canterlot-speech"
+        dist_resync
+    fi
+}
+# Убрать файл хаба цели и из dist, и из залитого каталога (релиз без него).
+remove_target_hub_file() {
+    rm -f "${HUB_RELEASES}/${SHA_NEW}/$1" "${DIST_DIR}/hub/$1"
+    dist_resync
+}
+
 setup_cutover() {
     setup_case "cutover-$1"
     export SITE_CODES="meeting.example.com:200 git.example.com:200 caddy.example.com:302 gotify.example.com:200 immich.example.com:200 bookshelf.example.com:200 hub.example.com:200"
@@ -52,34 +102,10 @@ setup_cutover() {
     mkdir -p "${WORKER_DATA}/cj"
     python3 -c "import struct,sys; sys.stdout.buffer.write(struct.pack('<Q', 50) + b'\0'*4)" >"${WORKER_DATA}/cj/ack"
     write_ownership
-    # Staged новый релиз.
-    mkdir -p "${HUB_RELEASES}/${SHA_NEW}/bin"
-    cp /bin/sleep "${HUB_RELEASES}/${SHA_NEW}/bin/canterlot-hub"
-    chmod +x "${HUB_RELEASES}/${SHA_NEW}/bin/canterlot-hub"
-    printf 'sha=%s\ndate=x\nmigrations_last=0041_fake_harness.sql\n' "${SHA_NEW}" >"${HUB_RELEASES}/${SHA_NEW}/RELEASE"
-    printf 'sha256-placeholder\n' >"${HUB_RELEASES}/${SHA_NEW}/SHA256SUMS"
-    mkdir -p "${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks"
-    printf '{"version":"%s"}' "${SHA_NEW}" >"${WEB_RELEASES}/${SHA_NEW}/_app/version.json"
-    printf 'console.log(1)\n' >"${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe.js"
-    # Сборка precompressed: проба verify выбирает только ассет со всеми соседями.
-    for ext in br zst gz; do
-        printf 'precompressed\n' >"${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe.js.${ext}"
-    done
-    mkdir -p "${WORKER_RELEASES}/${SHA_NEW}/bin"
-    cp "${FAKE_WORKER_BIN}" "${WORKER_RELEASES}/${SHA_NEW}/bin/canterlot-worker"
-    chmod +x "${WORKER_RELEASES}/${SHA_NEW}/bin/canterlot-worker"
-    printf 'sha=%s\ndate=x\nmigrations_last=0041_fake_harness.sql\n' "${SHA_NEW}" >"${WORKER_RELEASES}/${SHA_NEW}/RELEASE"
-    DIST_DIR="${FAKE_ROOT}/dist/${SHA_NEW}"
-    mkdir -p "${DIST_DIR}"
-    printf 'sha=%s\ndate=x\nmigrations_last=0041_fake_harness.sql\n' "${SHA_NEW}" >"${DIST_DIR}/RELEASE"
-    # CSP цели выведен из финального билда: хэш встроенного скрипта 200.html (проверка до flip).
-    mkdir -p "${DIST_DIR}/web"
-    printf '<html><script>window.x=1</script></html>\n' >"${DIST_DIR}/web/200.html"
-    printf "CSP-BODY-NEW script-src '%s'" 'sha256-hUmDl3yY/7GaaX+Zuy8aEy8IzxgpBs7xccqYHs2/7kQ=' >"${DIST_DIR}/csp.txt"
-    # dist web и залитый релиз совпадают файл в файл (как после stage.sh).
-    cp -r "${WEB_RELEASES}/${SHA_NEW}/." "${DIST_DIR}/web/"
-    cp "${DIST_DIR}/web/200.html" "${WEB_RELEASES}/${SHA_NEW}/"
-    : >"${DIST_DIR}/SHA256SUMS"
+    # Цель: полный dist (его проверяет target-check в общей предпроверке) и
+    # каталоги на хостах, залитые из него файл в файл, как после stage.sh.
+    make_cutover_dist
+    stage_cutover_dist
     printf '{"version":"%s"}' "${SHA_PREV}" >"${FAKE_ROOT}/container/version.json"
     printf 'CSP-BODY-PREV' >"${FAKE_ROOT}/container/csp"
     printf 'CANTERLOT_CSP="CSP-BODY-PREV"\n' >"${WEB_ENV}"

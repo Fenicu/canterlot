@@ -282,7 +282,7 @@ assert_contains "${R}" "rehearse: speech: health failing" "rehearsal summary nam
 grep -q '^  CONFIRM=' "${R}" && case_ok "token printed (speech never blocks)" || case_fail "no token"
 assert_eq "$(speech_restarts)" "0" "rehearsal restarts nothing"
 # Без бинаря в цели репетиция печатает стоп и выключение, но не делает их.
-rm -f "${HUB_RELEASES}/${SHA_NEW}/bin/canterlot-speech"
+remove_target_hub_file bin/canterlot-speech
 if bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --rehearse --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" \
         --state "${FAKE_ROOT}/rehearse.state" >"${FAKE_ROOT}/rehearse.log" 2>&1; then
     case_ok "rehearsal PASS for a target without the binary"
