@@ -109,7 +109,7 @@ finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Сводка в формате прежнего result.txt: коды и времена, затем nextest,
 # Playwright и первые упавшие тесты.
-rust_summary=$(grep -E 'Summary \[' "$log_dir/check.log" | tail -1 || true)
+mapfile -t rust_summary < <(grep -E 'Summary \[' "$log_dir/check.log" || true)
 mapfile -t playwright_summary < <(grep -E '^\s+[0-9]+ (passed|failed|flaky|did not run)' "$log_dir/web.log" || true)
 mapfile -t failed_rust < <(grep -E '^ +FAIL \[' "$log_dir/check.log" | head || true)
 mapfile -t failed_web < <(grep -E '^\s+[0-9]+\) ' "$log_dir/web.log" | sort -u | head || true)
@@ -117,7 +117,7 @@ mapfile -t failed_web < <(grep -E '^\s+[0-9]+\) ' "$log_dir/web.log" | sort -u |
 {
     printf '%s npm=%s check=%s %ss web=%s %ss\n' \
         "$short" "$npm_status" "$check_status" "$check_s" "$web_status" "$web_s"
-    [[ -n "$rust_summary" ]] && printf '%s\n' "$rust_summary"
+    ((${#rust_summary[@]})) && printf '%s\n' "${rust_summary[@]}"
     ((${#playwright_summary[@]})) && printf '%s\n' "${playwright_summary[@]}"
     ((${#failed_rust[@]})) && printf '%s\n' "${failed_rust[@]}"
     ((${#failed_web[@]})) && printf '%s\n' "${failed_web[@]}"
