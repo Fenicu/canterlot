@@ -35,6 +35,13 @@ struct StoredGit {
 struct StoredCommit {
     sha: String,
     subject: String,
+    /// Время коммита в миллисекундах Unix; 0, если старый воркер его не прислал.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    committed_at_ms: i64,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -57,6 +64,7 @@ impl From<&GitFacts> for StoredGit {
                 .map(|c| StoredCommit {
                     sha: c.sha.clone(),
                     subject: c.subject.clone(),
+                    committed_at_ms: c.committed_at_ms,
                 })
                 .collect(),
             files: facts
@@ -217,6 +225,7 @@ pub async fn finish_in_tx(
         return Ok(());
     }
     store_working(conn, command).await?;
+    crate::test_summary::store_in_tx(conn, command).await?;
     for usage in &fact.usage {
         sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) values($1,$2,$3,$4,$5,$6,$7) on conflict(input_command_id,model,agent) do update set input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens")
             .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).execute(&mut *conn).await?;
@@ -249,6 +258,7 @@ pub async fn close_open_in_tx(
         .await?;
     for command in closed {
         store_working(conn, command).await?;
+        crate::test_summary::store_in_tx(conn, command).await?;
     }
     for (provider, since) in &open {
         refresh_overlap(conn, provider, *since).await?;
@@ -283,6 +293,7 @@ async fn add_adopted(
         .await?;
     }
     merge_git(conn, command, fact).await?;
+    crate::test_summary::store_in_tx(conn, command).await?;
     for usage in &fact.usage {
         sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) values($1,$2,$3,$4,$5,$6,$7) on conflict(input_command_id,model,agent) do update set input_tokens=run_model_usage.input_tokens+excluded.input_tokens,output_tokens=run_model_usage.output_tokens+excluded.output_tokens,cache_read_tokens=run_model_usage.cache_read_tokens+excluded.cache_read_tokens,cache_write_tokens=run_model_usage.cache_write_tokens+excluded.cache_write_tokens")
             .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).execute(&mut *conn).await?;

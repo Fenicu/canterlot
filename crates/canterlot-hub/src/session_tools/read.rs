@@ -222,7 +222,7 @@ async fn processes(conn: &mut PgConnection, id: Uuid) -> Result<Vec<Value>, sqlx
 
 async fn last_run(conn: &mut PgConnection, id: Uuid) -> Result<Value, sqlx::Error> {
     let row = sqlx::query(
-        "select r.started_at,r.finished_at,r.duration_ms,r.git,
+        "select r.started_at,r.finished_at,r.duration_ms,r.git,r.tests,
                 coalesce(sum(u.input_tokens),0)::bigint input_tokens,
                 coalesce(sum(u.output_tokens),0)::bigint output_tokens
          from runs r left join run_model_usage u on u.input_command_id=r.input_command_id
@@ -251,6 +251,7 @@ async fn last_run(conn: &mut PgConnection, id: Uuid) -> Result<Value, sqlx::Erro
             "commits": git["commits"].as_array().map_or(0, Vec::len),
             "files": git["files"].as_array().map_or(0, Vec::len),
         })),
+        "tests": row.try_get::<Value, _>("tests")?,
     }))
 }
 

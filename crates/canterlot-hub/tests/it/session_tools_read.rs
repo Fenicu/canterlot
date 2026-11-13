@@ -1,15 +1,18 @@
 use std::{sync::Arc, time::Duration};
 
+use crate::support::task3 as worker;
 use canterlot_hub::{
     activity::{self, Thresholds},
+    blocks::checksum,
     config::SessionToolsConfig,
     executions,
     session_tools::{
-        self, Caller, ToolContext, ToolError, ToolErrorCode as Code, settle::SettleConfig,
+        self, Caller, ToolContext, ToolError, ToolErrorCode as Code, settle::SettleConfig, summary,
     },
     testkit,
 };
-use chrono::Utc;
+use canterlot_proto::worker::v1::{record_body::Body, *};
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -619,4 +622,183 @@ async fn inspect_shows_the_last_run_and_worktree(pool: PgPool) {
         .find(|s| s["id"] == json!(target))
         .unwrap();
     assert_eq!(row["worktree"]["branch"], "canterlot/x");
+}
+
+const NEXTEST: &str = "     Summary [ 195.532s] 3946 tests run: 3944 passed (3 slow, 2 flaky), 2 failed, 54 skipped\n";
+const PLAYWRIGHT: &str =
+    "  2 flaky\n  4 failed\n  92 skipped\n  2 did not run\n  32 passed (38s)\n";
+
+fn block_started(id: Uuid, kind: &str, command: Uuid, parent: Option<Uuid>, tool: &str) -> Body {
+    Body::BlockStarted(BlockStarted {
+        block_id: id.to_string(),
+        rev: 1,
+        kind: kind.into(),
+        input_command_id: command.to_string(),
+        parent_block_id: parent.map(|parent| parent.to_string()).unwrap_or_default(),
+        agent: "main".into(),
+        model: "synthetic-small".into(),
+        tool_name: tool.into(),
+        ..Default::default()
+    })
+}
+
+fn block_final(id: Uuid, text: &str) -> Body {
+    Body::BlockFinal(BlockFinal {
+        block_id: id.to_string(),
+        rev: 2,
+        text: text.into(),
+        checksum: checksum(text),
+        ..Default::default()
+    })
+}
+
+/// Ход с nextest, затем коммитом и Playwright: тест до коммита устарел, после — свежий.
+async fn run_with_tests(f: &Fx) -> (Uuid, Uuid) {
+    let mut r = worker::Run::new(&f.pool).await;
+    let target = r.seed.conversation_id;
+    let input = r.input(&f.pool).await;
+    sqlx::query("update conversations set owner_id=$2 where id=$1")
+        .bind(target)
+        .bind(f.owner)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![worker::accepted(input.command_id, ms)]).await;
+
+    let base = 1_760_000_000_000_i64;
+    let nextest_call = Uuid::now_v7();
+    let nextest = Uuid::now_v7();
+    let playwright_call = Uuid::now_v7();
+    let playwright = Uuid::now_v7();
+    r.send(vec![
+        block_started(nextest_call, "tool_call", input.command_id, None, "Bash"),
+        block_started(
+            nextest,
+            "tool_result",
+            input.command_id,
+            Some(nextest_call),
+            "",
+        ),
+        block_final(nextest, NEXTEST),
+        block_started(playwright_call, "tool_call", input.command_id, None, "bash"),
+        block_started(
+            playwright,
+            "tool_result",
+            input.command_id,
+            Some(playwright_call),
+            "",
+        ),
+        block_final(playwright, PLAYWRIGHT),
+    ])
+    .await;
+    for (block, at) in [(nextest, base + 10_000), (playwright, base + 30_000)] {
+        sqlx::query("update blocks set finished_at=$2 where block_id=$1")
+            .bind(block)
+            .bind(DateTime::from_timestamp_millis(at).unwrap())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    let git = GitFacts {
+        available: true,
+        head_before: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        head_after: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        commits: vec![GitCommit {
+            sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            subject: "Add tests".into(),
+            committed_at_ms: base + 20_000,
+        }],
+        files: vec![GitFile {
+            path: "src/lib.rs".into(),
+            status: "M".into(),
+        }],
+        ..Default::default()
+    };
+    let Body::RunFinished(mut fact) = worker::finished(&r, input.command_id, ms) else {
+        unreachable!()
+    };
+    fact.git = Some(git);
+    r.send(vec![Body::RunFinished(fact)]).await;
+    (target, input.command_id)
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn inspect_shows_tests_and_the_summary_names_the_stale_run(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (target, _) = run_with_tests(&f).await;
+
+    let answer = f
+        .call(f.root, "sessions.inspect", json!({"session_id": target}))
+        .await
+        .unwrap();
+    let tests = answer["last_run"]["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 2, "{tests:?}");
+    assert_eq!(tests[0]["tool"], "nextest");
+    assert_eq!(tests[0]["passed"], 3944);
+    assert_eq!(tests[0]["failed"], 2);
+    assert_eq!(tests[0]["flaky"], 2);
+    assert_eq!(tests[0]["skipped"], 54);
+    assert_eq!(tests[0]["duration_ms"], 195_532);
+    assert_eq!(tests[0]["stale_before"], "bbbbbbbb");
+    assert_eq!(tests[1]["tool"], "playwright");
+    assert_eq!(tests[1]["passed"], 32);
+    assert_eq!(tests[1]["failed"], 4);
+    assert_eq!(tests[1]["flaky"], 2);
+    assert_eq!(tests[1]["skipped"], 92);
+    assert_eq!(tests[1]["did_not_run"], 2);
+    assert_eq!(tests[1]["duration_ms"], 38_000);
+    assert_eq!(tests[1]["stale_before"], Value::Null);
+
+    let mut conn = f.pool.acquire().await.unwrap();
+    let summary = summary::build(&mut conn, f.owner, target, "idle", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let text = summary::render(&summary);
+    assert!(
+        text.contains(
+            "Tests:\n  nextest: 3944 passed, 2 failed, 2 flaky, 54 skipped, 3m15s, stale (before commit bbbbbbbb)\n  Playwright: 32 passed, 4 failed, 2 flaky, 92 skipped, 2 did not run, 38s, after the last commit\n"
+        ),
+        "{text}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn inspect_and_summary_have_no_tests_without_test_output(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let mut r = worker::Run::new(&f.pool).await;
+    let target = r.seed.conversation_id;
+    let input = r.input(&f.pool).await;
+    sqlx::query("update conversations set owner_id=$2 where id=$1")
+        .bind(target)
+        .bind(f.owner)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![worker::accepted(input.command_id, ms)]).await;
+    let call = Uuid::now_v7();
+    let result = Uuid::now_v7();
+    r.send(vec![
+        block_started(call, "tool_call", input.command_id, None, "Bash"),
+        block_started(result, "tool_result", input.command_id, Some(call), ""),
+        block_final(result, "    Finished `dev` profile in 1.2s\n"),
+    ])
+    .await;
+    r.send(vec![worker::finished(&r, input.command_id, ms)])
+        .await;
+
+    let answer = f
+        .call(f.root, "sessions.inspect", json!({"session_id": target}))
+        .await
+        .unwrap();
+    assert_eq!(answer["last_run"]["tests"], json!([]));
+
+    let mut conn = f.pool.acquire().await.unwrap();
+    let summary = summary::build(&mut conn, f.owner, target, "idle", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!summary::render(&summary).contains("Tests:"));
 }

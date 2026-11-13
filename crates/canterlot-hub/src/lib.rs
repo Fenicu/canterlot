@@ -61,6 +61,7 @@ pub mod singleton;
 pub mod snapshot;
 pub mod speed;
 pub mod subscriptions;
+pub mod test_summary;
 pub mod todos;
 
 #[cfg(any(test, feature = "testkit"))]
