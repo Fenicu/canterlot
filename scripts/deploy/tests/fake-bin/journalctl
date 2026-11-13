@@ -27,6 +27,10 @@ if [[ "$*" == *canterlot-hub* ]]; then
         if [ -n "${FAKE_HUB_JOURNAL_FILE:-}" ]; then cat "${FAKE_HUB_JOURNAL_FILE}"; fi
     fi
 fi
+# Служба диктовки: строки сценария (FAKE_SPEECH_JOURNAL_LINES), формат тот же.
+if [[ "$*" == *canterlot-speech* ]] && [ -n "${FAKE_SPEECH_JOURNAL_LINES:-}" ]; then
+    printf '%s\n' "${FAKE_SPEECH_JOURNAL_LINES}"
+fi
 if [[ "$*" == *canterlot-worker* ]]; then
     wp="Nov 03 12:00:02 devvm canterlot-worker[202]: ${ts}"
     # Сценарий ожидания live: первые N вызовов дают connecting/backoff и строку

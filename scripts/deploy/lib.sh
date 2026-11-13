@@ -247,13 +247,14 @@ plan_text() {
         "baseline hub=${b_hub} web=${b_web} worker=${b_worker}" \
         "dist SHA256SUMS=$(_plan_file_hash "${dist_dir}/SHA256SUMS") RELEASE=$(_plan_file_hash "${dist_dir}/RELEASE") EXPECT=$(_plan_file_hash "${dist_dir}/EXPECT") csp=$(_plan_file_hash "${dist_dir}/csp.txt")" \
         "hosts hub=${HUB_SSH} web=${WEB_SSH} proxmox=${PROXMOX_SSH} node=${PROXMOX_NODE} ct=${HUB_CTID} ip=${HUB_IP}" \
-        "paths hub=${HUB_BASE} web=${WEB_SITES_BASE} env=${WEB_ENV} worker=${WORKER_BASE} backups=${HUB_BACKUP_DIR} units=${WORKER_UNIT},${HUB_UNIT},${WEB_CONTAINER}" \
+        "paths hub=${HUB_BASE} web=${WEB_SITES_BASE} env=${WEB_ENV} worker=${WORKER_BASE} backups=${HUB_BACKUP_DIR} units=${WORKER_UNIT},${HUB_UNIT},${WEB_CONTAINER},${SPEECH_UNIT}" \
         "toolkit=${toolkit} retain=${RETAIN_COUNT}" \
         "steps:" \
         "  1 preflight snapshot (local state file); reserve ${sha} and the previous releases on every host" \
         "  2 stop worker ${WORKER_UNIT} (sessions keep running); prove no control worker is left" \
         "  3 fresh vzdump of CT ${HUB_CTID} + pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable" \
         "  4 hub flip ${b_hub} -> ${sha} under the host lock, one restart of ${HUB_UNIT}; readyz, migrations, exe, NRestarts" \
+        "  4b speech: restart ${SPEECH_UNIT} (bounded to ${SPEECH_RESTART_TIMEOUT} s) and ask health when installed, enabled and configured; stop and disable it when ${sha} has no canterlot-speech; every speech failure is soft" \
         "  5 PWA: canterlot.env.${sha} from dist csp.txt, build flip ${b_web} -> ${sha}, one recreate of ${WEB_CONTAINER}" \
         "  6 worker flip ${b_worker} -> ${sha}, start; guarded MainPID/exe wait; state=live wait; NRestarts" \
         "  7 merge old _app/immutable chunks of the previous web releases into ${sha} (no clobber), verify dist files intact" \
@@ -725,6 +726,136 @@ geoip_refresh() {
         log "geoip: update done"
     else
         soft "geoip update failed; sign-in locations stay empty until a later run"
+    fi
+}
+
+# --- служба распознавания речи (диктовка) ---
+# Её сбой никогда не останавливает выкат и откат. Поэтому отдельный счётчик, а не
+# soft(): мягкая ошибка в dry-run и репетиции отнимает токен боевого прогона.
+SPEECH_ISSUES=0
+# shellcheck disable=SC2034 # итог читают cutover, verify и rollback-db
+SPEECH_SUMMARY="not checked"
+speech_soft() {
+    printf '[%s] SPEECH-SOFT: %s (dictation only, the release goes on)\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    SPEECH_ISSUES=$((SPEECH_ISSUES + 1))
+}
+# Виды WARN службы, которые ждут без базы: сбои движка. Мягкие и в журнале хаба.
+SPEECH_WARN_KINDS_SOFT="${SPEECH_WARN_KINDS_SOFT:-engine_load_failed engine_failed engine_exited}"
+speech_warn_kind_soft() {
+    local k
+    for k in ${SPEECH_WARN_KINDS_SOFT}; do
+        if [ "${k}" = "$1" ]; then return 0; fi
+    done
+    return 1
+}
+# Состояние на хосте хаба одним чтением: "load= active= enabled= config= binary=".
+# $1 юнит, $2 speech.toml, $3 бинарь релиза.
+# shellcheck disable=SC2016 # удалённый скрипт раскрывает свои позиционные аргументы
+SPEECH_STATE_SCRIPT='s="$(systemctl show "$1" -p LoadState,ActiveState,UnitFileState 2>/dev/null)" || s=""; l="$(printf "%s\n" "$s" | sed -n "s/^LoadState=//p")"; a="$(printf "%s\n" "$s" | sed -n "s/^ActiveState=//p")"; e="$(printf "%s\n" "$s" | sed -n "s/^UnitFileState=//p")"; c=absent; if [ -f "$2" ]; then c=present; fi; b=absent; if [ -x "$3" ]; then b=present; fi; printf "load=%s active=%s enabled=%s config=%s binary=%s\n" "${l:-unknown}" "${a:-unknown}" "${e:-unknown}" "$c" "$b"'
+speech_state() {
+    ssh_hub "$(script_cmd_text "${SPEECH_STATE_SCRIPT}" "${SPEECH_UNIT}" "${SPEECH_CONFIG}" "$1")"
+}
+speech_field() { printf '%s\n' "$2" | tr ' ' '\n' | sed -n "s/^$1=//p"; }
+# Что делать со службой для релиза хаба $1 (только чтение). Ставит SPEECH_ACTION:
+# restart, disable (юнит есть, бинаря в релизе нет), skip (диктовка недоступна или
+# выключена руками), unknown (состояние не прочитать); SPEECH_REASON — пояснение,
+# SPEECH_STATE — строка состояния.
+speech_plan() {
+    local rel="$1" load enabled
+    SPEECH_BIN="${HUB_RELEASES}/${rel}/bin/canterlot-speech"
+    if ! SPEECH_STATE="$(speech_state "${SPEECH_BIN}" 2>/dev/null)" || [ -z "${SPEECH_STATE}" ]; then
+        SPEECH_STATE="unreadable"
+        SPEECH_ACTION=unknown
+        SPEECH_REASON="cannot read the state of ${SPEECH_UNIT} on the hub"
+        return 0
+    fi
+    load="$(speech_field load "${SPEECH_STATE}")"
+    enabled="$(speech_field enabled "${SPEECH_STATE}")"
+    if [ "${load}" != "loaded" ]; then
+        SPEECH_ACTION=skip
+        SPEECH_REASON="dictation unavailable: unit ${SPEECH_UNIT} is not installed"
+    elif [ "$(speech_field binary "${SPEECH_STATE}")" != "present" ]; then
+        SPEECH_ACTION=disable
+        SPEECH_REASON="dictation unavailable: release ${rel} has no bin/canterlot-speech"
+    elif [ "$(speech_field config "${SPEECH_STATE}")" != "present" ]; then
+        SPEECH_ACTION=skip
+        SPEECH_REASON="dictation unavailable: no ${SPEECH_CONFIG}"
+    elif [ "${enabled}" != "enabled" ]; then
+        SPEECH_ACTION=skip
+        SPEECH_REASON="dictation switched off by hand: ${SPEECH_UNIT} is ${enabled}"
+    else
+        SPEECH_ACTION=restart
+        SPEECH_REASON="${SPEECH_UNIT} installed and enabled, ${SPEECH_CONFIG} present, release ${rel} has the binary"
+    fi
+}
+# Ответ health от имени пользователя хаба: так проверяется и доступ к сокету.
+# Печатает вывод команды (JSON или строку speech_unavailable), код — её код.
+speech_health() {
+    ssh_hub "runuser -u $(shq "${SPEECH_CLIENT_USER}") -- timeout 10 $(shq "$1") health --socket $(shq "${SPEECH_SOCKET}") 2>&1"
+}
+# Ждать ok от health до SPEECH_HEALTH_WAIT секунд. Ставит SPEECH_HEALTH_OUT.
+speech_wait_health() {
+    local bin="$1" waited=0
+    while :; do
+        if SPEECH_HEALTH_OUT="$(speech_health "${bin}")"; then
+            return 0
+        fi
+        if [ "${waited}" -ge "${SPEECH_HEALTH_WAIT}" ]; then
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+# Привести службу к релизу хаба $1 после его flip (cutover, откат). Всё мягкое:
+# ничего не возвращает с ошибкой и не выходит. Ставит SPEECH_SUMMARY.
+# shellcheck disable=SC2034 # SPEECH_SUMMARY читает вызывающий
+speech_sync() {
+    local rel="$1" rc=0 after
+    speech_plan "${rel}"
+    log "speech: ${SPEECH_UNIT}: ${SPEECH_STATE}"
+    case "${SPEECH_ACTION}" in
+        unknown)
+            speech_soft "${SPEECH_REASON}"
+            SPEECH_SUMMARY="unknown (${SPEECH_REASON})"
+            return 0 ;;
+        skip)
+            log "speech: ${SPEECH_REASON}; ${SPEECH_UNIT} not touched"
+            SPEECH_SUMMARY="${SPEECH_REASON}"
+            return 0 ;;
+        disable)
+            log "speech: ${SPEECH_REASON}; stopping and disabling ${SPEECH_UNIT} so it is not left failing"
+            if ! run_write "stop and disable ${SPEECH_UNIT}" ssh_hub "timeout ${SPEECH_RESTART_TIMEOUT} systemctl stop $(shq "${SPEECH_UNIT}"); rc=\$?; systemctl disable $(shq "${SPEECH_UNIT}") && exit \"\${rc}\""; then
+                speech_soft "could not stop and disable ${SPEECH_UNIT}"
+            elif ! is_rehearse; then
+                after="$(speech_state "${SPEECH_BIN}" 2>/dev/null)" || after="unreadable"
+                case "$(speech_field active "${after}")/$(speech_field enabled "${after}")" in
+                    active/* | activating/* | */enabled) speech_soft "${SPEECH_UNIT} still running or enabled after stop+disable: ${after}" ;;
+                    *) log "speech: ${SPEECH_UNIT} stopped and disabled (${after})" ;;
+                esac
+            fi
+            SPEECH_SUMMARY="${SPEECH_REASON}; unit stopped and disabled"
+            return 0 ;;
+    esac
+    log "speech: ${SPEECH_REASON}; restarting ${SPEECH_UNIT} (bounded to ${SPEECH_RESTART_TIMEOUT} s)"
+    run_write "restart ${SPEECH_UNIT}" ssh_hub "timeout ${SPEECH_RESTART_TIMEOUT} systemctl restart $(shq "${SPEECH_UNIT}")" || rc=$?
+    case "${rc}" in
+        0) ;;
+        124)
+            speech_soft "${SPEECH_UNIT} restart timed out after ${SPEECH_RESTART_TIMEOUT} s"
+            SPEECH_SUMMARY="restart timed out after ${SPEECH_RESTART_TIMEOUT} s"
+            return 0 ;;
+        *)
+            speech_soft "${SPEECH_UNIT} restart failed (exit ${rc})"
+            SPEECH_SUMMARY="restart failed (exit ${rc})"
+            return 0 ;;
+    esac
+    if speech_wait_health "${SPEECH_BIN}"; then
+        log "speech: health ok: ${SPEECH_HEALTH_OUT}"
+        SPEECH_SUMMARY="ok"
+    else
+        speech_soft "${SPEECH_UNIT} health failed after ${SPEECH_HEALTH_WAIT} s: ${SPEECH_HEALTH_OUT##*$'\n'}"
+        SPEECH_SUMMARY="health failing"
     fi
 }
 
