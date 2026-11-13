@@ -39,3 +39,21 @@ export function saveReasoningPref(value: ReasoningPref): void {
   revisionSerial += 1;
   revision.set(revisionSerial);
 }
+
+/** Диктовка в поле ввода: кнопка микрофона и живой текст. */
+const DICTATION_KEY = 'canterlot.dictation';
+const dictationRevision = cell(0);
+let dictationSerial = 0;
+
+export function dictationEnabled(): boolean {
+  dictationRevision.get();
+  try {
+    return localStorage.getItem(DICTATION_KEY) !== 'off';
+  } catch { return true; }
+}
+
+export function saveDictationEnabled(enabled: boolean): void {
+  try { localStorage.setItem(DICTATION_KEY, enabled ? 'on' : 'off'); } catch { /* Выбор действует до закрытия приложения. */ }
+  dictationSerial += 1;
+  dictationRevision.set(dictationSerial);
+}
