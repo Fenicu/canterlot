@@ -67,6 +67,7 @@ struct Relay {
     speech: OwnedWriteHalf,
     frames: mpsc::Receiver<Result<Frame, frame::FrameError>>,
     reader: tokio::task::JoinHandle<()>,
+    notices: tokio::sync::broadcast::Receiver<std::sync::Arc<crate::bus::Notice>>,
     dictionary: Dictionary,
     timers: Timers,
     started: Instant,
@@ -98,6 +99,8 @@ pub fn upgrade(ws: WebSocketUpgrade, state: AppState, owner: Owner) -> axum::res
 async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
     let (mut ws, mut input) = socket.split();
     let timers = (*state.dictation_timers).clone();
+    // Подписка до ожидания start: отзыв сеанса, пришедший в это окно, не теряется.
+    let notices = crate::bus::EventBus::local().subscribe();
 
     let first = tokio::time::timeout(timers.first_message, input.next()).await;
     let Some(Ok(Message::Text(text))) = first.ok().flatten() else {
@@ -151,6 +154,12 @@ async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
             return;
         }
     };
+    // Отзыв мог прийти, пока шёл снимок словаря: до службы речи он не доходит.
+    if !session_is_live(&state, owner.session_id).await {
+        state.dictation_state.release(slot.generation);
+        close_socket(&mut ws, 4401).await;
+        return;
+    }
     let mut speech = match client::connect(&state.dictation.socket, timers.speech_connect).await {
         Ok(stream) => stream,
         Err(client::NoService) => {
@@ -214,6 +223,7 @@ async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
         speech: speech_write,
         frames: frame_rx,
         reader,
+        notices,
         dictionary,
         timers,
         started,
@@ -237,6 +247,33 @@ async fn snapshot_terms(
 ) -> Result<Vec<crate::dictation::dictionary::Term>, ()> {
     let mut conn = state.pool.acquire().await.map_err(|_| ())?;
     terms::load(&mut conn, owner_id).await.map_err(|_| ())
+}
+
+/// Сеанс устройства жив; сбой базы не считается отзывом.
+async fn session_is_live(state: &AppState, session_id: uuid::Uuid) -> bool {
+    match crate::owner_auth::sessions::is_live(&state.pool, session_id).await {
+        Ok(live) => live,
+        Err(error) => {
+            tracing::warn!(
+                kind = "ws_session_check_failed",
+                error = %crate::dberr::describe(&error),
+                "dictation session check failed"
+            );
+            true
+        }
+    }
+}
+
+/// Закрытие сокета до начала диктовки: без сообщения об ошибке, как `/api/v1/ws`.
+async fn close_socket(ws: &mut futures_util::stream::SplitSink<WebSocket, Message>, code: u16) {
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        ws.send(Message::Close(Some(CloseFrame {
+            code,
+            reason: "".into(),
+        }))),
+    )
+    .await;
 }
 
 /// Отказ до начала диктовки: ошибка и закрытие 1000.
@@ -268,7 +305,6 @@ impl Relay {
             self.state.http.ws.session_check_interval,
         );
         session_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut notices = crate::bus::EventBus::local().subscribe();
 
         loop {
             let deadline = self.next_deadline();
@@ -280,7 +316,7 @@ impl Relay {
                 _ = self.slot.replaced.cancelled() => Tick::Replaced,
                 _ = self.state.shutdown.cancelled() => Tick::Shutdown,
                 _ = session_check.tick() => Tick::SessionCheck,
-                notice = notices.recv() => Tick::Notice(notice),
+                notice = self.notices.recv() => Tick::Notice(notice),
             };
             let mut end = None;
             match tick {
@@ -327,17 +363,7 @@ impl Relay {
 
     /// Пока сеанс устройства жив; сбой базы не считается отзывом.
     async fn session_live(&self) -> bool {
-        match crate::owner_auth::sessions::is_live(&self.state.pool, self.session_id).await {
-            Ok(live) => live,
-            Err(error) => {
-                tracing::warn!(
-                    kind = "ws_session_check_failed",
-                    error = %crate::dberr::describe(&error),
-                    "dictation session check failed"
-                );
-                true
-            }
-        }
+        session_is_live(&self.state, self.session_id).await
     }
 
     fn next_deadline(&self) -> Instant {

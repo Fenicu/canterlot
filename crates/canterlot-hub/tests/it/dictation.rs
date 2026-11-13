@@ -705,6 +705,30 @@ async fn websocket_needs_a_live_session_and_an_allowed_origin(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn revocation_between_upgrade_and_start_never_reaches_speech(pool: PgPool) {
+    let speech =
+        fake::start(|mut conn| async move { while conn.next_frame().await.is_some() {} }).await;
+    let hub = spawn_hub(pool, speech.socket.clone(), fast_timers()).await;
+    let (id, token) = second_session(&hub).await;
+    let mut socket = ws::DictationWs::connect(hub.http_addr(), testkit::TEST_ORIGIN, Some(&token))
+        .await
+        .expect("upgrade before revocation");
+    sessions::revoke(&hub.app().pool, id, RevokeReason::Owner, None)
+        .await
+        .unwrap();
+    socket.start().await;
+    assert_eq!(socket.next(TIMEOUT).await, None);
+    assert_eq!(socket.close_code, Some(4401));
+    assert_eq!(
+        speech
+            .connections
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "speech never sees start"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn protocol_violations_answer_bad_request_or_bad_audio(pool: PgPool) {
     let speech =
         fake::start(|mut conn| async move { while conn.next_frame().await.is_some() {} }).await;
