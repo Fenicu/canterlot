@@ -9,7 +9,49 @@ use canterlot_proto::{
 use serde_json::{Map, Value, json};
 
 pub const SERVER_NAME: &str = "canterlot";
-const FALLBACK_PROTOCOL: &str = "2025-06-18";
+
+/// Версии протокола MCP, которые сервер понимает; самая новая первой.
+pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] =
+    ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// Ответ, когда клиент не назвал версию: самая новая поддерживаемая.
+const FALLBACK_PROTOCOL: &str = SUPPORTED_PROTOCOL_VERSIONS[0];
+
+/// Согласование версии: названную поддерживаемую отвечаем как есть, иную — самую новую.
+fn negotiate_protocol(requested: Option<&str>) -> &'static str {
+    requested
+        .and_then(|version| {
+            SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|supported| *supported == version)
+        })
+        .unwrap_or(FALLBACK_PROTOCOL)
+}
+
+/// Строка журнала один раз на соединение: версия протокола и клиент из `clientInfo`.
+/// Больше ничего из запроса в журнал не попадает.
+pub fn log_initialize(msg: &Value) {
+    let requested = msg
+        .pointer("/params/protocolVersion")
+        .and_then(Value::as_str);
+    let client_name = msg
+        .pointer("/params/clientInfo/name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let client_version = msg
+        .pointer("/params/clientInfo/version")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    tracing::info!(
+        kind = "mcp_initialize",
+        protocol_requested = requested.unwrap_or_default(),
+        protocol_answered = negotiate_protocol(requested),
+        client_name = client_name,
+        client_version = client_version,
+        "MCP connection initialized"
+    );
+}
 
 /// Набор инструментов MCP: Claude — approve и лимиты, Codex — только лимиты.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -903,10 +945,10 @@ pub fn handle_rpc_with_provider(msg: &Value, tool_set: ToolSet, provider: &str) 
     };
     match method {
         "initialize" => {
-            let version = msg
-                .pointer("/params/protocolVersion")
-                .and_then(Value::as_str)
-                .unwrap_or(FALLBACK_PROTOCOL);
+            let version = negotiate_protocol(
+                msg.pointer("/params/protocolVersion")
+                    .and_then(Value::as_str),
+            );
             reply(
                 &id,
                 json!({
@@ -1414,6 +1456,33 @@ mod tests {
         assert!(message(json!({"path": 1})).starts_with(
             "share_file: argument 'path' must be a string; its arguments are: note, path, title."
         ),);
+    }
+
+    #[test]
+    fn initialize_negotiates_a_supported_protocol_version() {
+        let initialize = |params: Value| {
+            handle_rpc_with_provider(
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params}),
+                ToolSet::LimitsOnly,
+                "codex",
+            )
+            .as_reply()
+            .expect("initialize")
+            .clone()
+        };
+        // Всё, что шлют записанные CLI, отвечаем той же версией.
+        for version in SUPPORTED_PROTOCOL_VERSIONS {
+            let answer = initialize(json!({"protocolVersion": version}));
+            assert_eq!(answer["result"]["protocolVersion"], version);
+        }
+        assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&"2025-11-25"));
+        // Незнакомая будущая версия получает самую новую поддерживаемую.
+        let newer = initialize(json!({"protocolVersion": "2026-07-28"}));
+        assert_eq!(newer["result"]["protocolVersion"], "2025-11-25");
+        // Без поля — тоже самая новая.
+        let missing = initialize(json!({}));
+        assert_eq!(missing["result"]["protocolVersion"], "2025-11-25");
+        assert_eq!(missing["result"]["serverInfo"]["name"], SERVER_NAME,);
     }
 
     #[test]

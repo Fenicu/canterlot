@@ -523,10 +523,15 @@ async fn serve_conn(
 ) {
     let mut buf = Vec::new();
     let mut rpc_to_request: HashMap<String, String> = HashMap::new();
+    let mut initialized = false;
     while let Some(line) = next_line(&mut reader, &mut buf).await {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if !initialized && msg.get("method").and_then(Value::as_str) == Some("initialize") {
+            initialized = true;
+            mcp::log_initialize(&msg);
+        }
         match mcp::handle_rpc_with_provider(&msg, tool_set, &provider) {
             mcp::McpAction::Reply(reply) => {
                 let _ = write_line(&writer, &reply).await;
