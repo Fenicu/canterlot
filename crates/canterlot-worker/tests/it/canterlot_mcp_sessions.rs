@@ -385,6 +385,41 @@ fn instructions_name_prefixed_tools_for_opencode() {
 }
 
 #[test]
+fn instructions_name_only_tools_served_to_that_provider() {
+    // Похожие на инструменты имена, которые на самом деле аргумент или исход вызова.
+    const NOT_TOOLS: [&str; 2] = ["plan_task", "pending_approval"];
+    for (tool_set, provider) in PROVIDERS {
+        let text = instructions_of(tool_set, provider);
+        let served: Vec<String> = tools_of(tool_set, provider)
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect();
+        let words = text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+        for word in words.filter(|word| word.contains('_') && !word.starts_with('_')) {
+            // У OpenCode клиент зовёт инструмент с префиксом сервера: `canterlot_<имя>`.
+            let name = if provider == "opencode" {
+                word.strip_prefix("canterlot_").unwrap_or(word)
+            } else {
+                word
+            };
+            if NOT_TOOLS.contains(&name) {
+                continue;
+            }
+            assert!(
+                served.iter().any(|tool| tool == name),
+                "{provider}: инструкция зовёт {word}, а tools/list его не отдаёт"
+            );
+        }
+        for tool in mcp::MODE_FREE_TOOLS {
+            assert!(
+                served.iter().any(|name| name == tool),
+                "{provider}: {tool} нет в tools/list"
+            );
+        }
+    }
+}
+
+#[test]
 fn tool_hint_is_appended() {
     let result = AgentCallResult::Ok(json!({
         "input_id": "i-1",
