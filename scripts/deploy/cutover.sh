@@ -68,6 +68,133 @@ REHEARSE=0
 ALLOW_SKIPPED=0
 SHADOW=0
 ALLOW_SAME_TARGET=0
+PLAN_HASH=""
+PHASE=""
+# --- файл результата: машиночитаемый итог любого выхода (его читает release.sh) ---
+# Путь: --result FILE; иначе рядом с логом, если stdout — файл; иначе в $TMPDIR.
+RESULT_FILE=""
+RESULT_WRITTEN=0
+RESULT_SIGNAL=""
+RESULT_TOKEN=""
+RESULT_TOKEN_UNTIL=""
+RESULT_RECOVERY=""
+RESULT_STOP_BLOCK=""
+RESULT_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RESULT_LOG="$(readlink "/proc/$$/fd/1" 2>/dev/null)" || RESULT_LOG=""
+[ -f "${RESULT_LOG}" ] || RESULT_LOG=""
+DEPLOY_SOFT_LOG=""
+VZDUMP_STARTED=0
+VZDUMP_DONE=0
+WORKER_STOPPED=0
+DUMP_VERIFIED=0
+HUB_FLIPPED=0
+WORKER_PROVEN=0
+result_mode() {
+    if [ "${DRY_RUN:-0}" = "1" ]; then printf dry-run
+    elif [ "${REHEARSE:-0}" = "1" ]; then printf rehearse
+    else printf execute; fi
+}
+result_path() {
+    if [ -n "${RESULT_FILE}" ]; then return 0; fi
+    if [ -n "${RESULT_LOG}" ]; then
+        RESULT_FILE="${RESULT_LOG%.log}.result"
+    else
+        RESULT_FILE="${TMPDIR:-/tmp}/canterlot-cutover-${SHA:-unknown}-$(result_mode)-$(date -u +%Y%m%dT%H%M%SZ).result"
+    fi
+}
+# Мягкие ошибки этого прогона и дочерних скриптов (verify, retain) пишутся по одной
+# строке в файл рядом с результатом: soft() — вид шага, speech_soft() — speech.
+result_soft_log_start() {
+    result_path
+    DEPLOY_SOFT_LOG="${RESULT_FILE}.soft"
+    export DEPLOY_SOFT_LOG
+    : >"${DEPLOY_SOFT_LOG}"
+}
+result_soft_kind() {
+    case "$1" in
+        pwa | pwa-done) printf pwa ;;
+        merging-chunks) printf chunk_merge ;;
+        verifying) printf verify ;;
+        worker-*) printf worker ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+one_line() { printf '%s' "$1" | tr '\n\r=' '  :'; }
+# $1 статус, $2 код выхода. Пишется один раз; провал записи только печатается.
+write_result() {
+    local status="$1" code="$2" soft_n=0 speech_n=0 kinds="" k n restore=0
+    [ "${RESULT_WRITTEN}" = "0" ] || return 0
+    RESULT_WRITTEN=1
+    result_path
+    if [ -n "${DEPLOY_SOFT_LOG}" ] && [ -f "${DEPLOY_SOFT_LOG}" ]; then
+        speech_n="$(grep -cx speech "${DEPLOY_SOFT_LOG}" || true)"
+        soft_n="$(grep -cvx speech "${DEPLOY_SOFT_LOG}" || true)"
+        while read -r n k; do
+            [ -n "${k:-}" ] || continue
+            kinds="${kinds:+${kinds},}${k}:${n}"
+        done < <(grep -vx speech "${DEPLOY_SOFT_LOG}" | while read -r k; do result_soft_kind "${k}"; printf '\n'; done | LC_ALL=C sort | uniq -c)
+    fi
+    if [ "$(result_mode)" = "execute" ]; then restore=1; fi
+    {
+        printf '%s=%s\n' \
+            format 1 \
+            mode "$(result_mode)" \
+            status "${status}" \
+            exit_code "${code}" \
+            signal "${RESULT_SIGNAL}" \
+            release "${SHA:-}" \
+            plan "${PLAN_HASH:-}" \
+            token "${RESULT_TOKEN}" \
+            token_valid_until "${RESULT_TOKEN_UNTIL}" \
+            started_at "${RESULT_STARTED}" \
+            finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            phase "${PHASE:-}" \
+            vzdump_done "$(yn "$((VZDUMP_DONE * restore))")" \
+            worker_stopped "$(yn "$((WORKER_STOPPED * restore))")" \
+            dump_verified "$(yn "$((DUMP_VERIFIED * restore))")" \
+            hub_flipped "$(yn "$((HUB_FLIPPED * restore))")" \
+            worker_live "$(yn "$((WORKER_PROVEN * restore))")" \
+            recovery "${RESULT_RECOVERY}" \
+            hard_failures "${HARD_FAILURES:-0}" \
+            soft_failures "${soft_n}" \
+            soft_by_kind "${kinds}" \
+            speech_soft_failures "${speech_n}" \
+            speech_summary "$(one_line "${SPEECH_SUMMARY:-}")" \
+            web_release "${WEB_SHA_EFF:-}" \
+            worker_downtime_s "${WORKER_DOWNTIME:-}" \
+            hub_interruption_s "${HUB_INTERRUPTION:-}" \
+            worker_stop_at "${WORKER_STOP_ISO:-}" \
+            vzdump_notes "$([ "$((VZDUMP_DONE * restore))" = "1" ] && printf 'pre-%s-%s' "${SHA}" "${RUN_TS}")" \
+            vzdump_archive "$([ "$((VZDUMP_DONE * restore))" = "1" ] && printf '%s' "${VZ_ARCHIVE:-}")" \
+            dump "$([ "$((DUMP_VERIFIED * restore))" = "1" ] && printf '%s/%s' "${HUB_BACKUP_DIR}" "${RUN_DUMP}")" \
+            stop_block "${RESULT_STOP_BLOCK}" \
+            log "${RESULT_LOG}"
+    } >"${RESULT_FILE}" 2>/dev/null || log "could not write the result file ${RESULT_FILE}"
+    if [ -n "${DEPLOY_SOFT_LOG}" ]; then rm -f "${DEPLOY_SOFT_LOG}"; fi  # lint: local-temp
+    log "result file: ${RESULT_FILE} (status ${status})"
+}
+yn() { if [ "$1" = "1" ]; then printf yes; else printf no; fi; }
+# Выход до ловушки прогона (аргументы, токен, предпроверка, ворота): ничего на
+# проде не тронуто — боевой прогон отказал, dry-run и репетиция не прошли.
+result_exit() {
+    local rc=$?
+    trap '' INT TERM HUP
+    set +e
+    if declare -F release_reservations >/dev/null; then release_reservations; fi
+    if [ -n "${REHEARSE_COUNT_FILE:-}" ]; then rm -f "${REHEARSE_COUNT_FILE}"; fi  # lint: local-temp
+    if [ "${rc}" = "0" ]; then
+        write_result "$([ "$(result_mode)" = "execute" ] && printf "done" || printf pass)" 0
+    elif [ "$(result_mode)" = "execute" ]; then
+        write_result refused "${rc}"
+    else
+        write_result fail "${rc}"
+    fi
+    exit "${rc}"
+}
+trap result_exit EXIT
+trap 'RESULT_SIGNAL=INT; exit 130' INT
+trap 'RESULT_SIGNAL=TERM; exit 143' TERM
+trap 'RESULT_SIGNAL=HUP; exit 129' HUP
 while (($#)); do
     case "$1" in
         --source) SOURCE_DIR="$2"; shift 2 ;;
@@ -79,12 +206,14 @@ while (($#)); do
         --shadow) SHADOW=1; shift ;;
         --execute) EXECUTE_ID="$2"; shift 2 ;;
         --confirm) CONFIRM="$2"; shift 2 ;;
+        --result) RESULT_FILE="$2"; shift 2 ;;
         -*) die "unknown flag: $1" ;;
         *) SHA="$(short_sha "$1")"; shift ;;
     esac
 done
 XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR
+result_soft_log_start
 
 [ "${DRY_RUN}${REHEARSE}" != "11" ] || die "--dry-run and --rehearse are separate modes: pick one"
 # Целевой релиз НИКОГДА не подменяется развёрнутым: dry-run и репетиция проверяют
@@ -134,7 +263,6 @@ if [ "${REHEARSE}" = "1" ]; then
     export DEPLOY_MODE=rehearse
     REHEARSE_COUNT_FILE="$(mktemp)"
     export REHEARSE_COUNT_FILE
-    trap 'rm -f "${REHEARSE_COUNT_FILE}"' EXIT  # lint: local-temp
     log "REHEARSAL: target ${SHA}; baseline (deployed): hub=${BASE_HUB} web=${BASE_WEB} worker=${BASE_WORKER}; plan ${PLAN_HASH}; every write is printed as WOULD-WRITE and NOT executed"
 fi
 if [ "${DRY_RUN}" = "1" ]; then
@@ -167,6 +295,8 @@ print_token() {
     now="$(date -u +%s)"
     token="$(confirm_token "${SHA}" "${PLAN_HASH}" "${now}")"
     until="$(date -u -d "@$((now + CONFIRM_TTL))" '+%Y-%m-%d %H:%M UTC')"
+    RESULT_TOKEN="${token}"
+    RESULT_TOKEN_UNTIL="$(date -u -d "@$((now + CONFIRM_TTL))" +%Y-%m-%dT%H:%M:%SZ)"
     printf '  CONFIRM=%s   # plan %s, valid until %s\n' "${token}" "${PLAN_HASH}" "${until}"
     printf '  real run:  scripts/deploy/cutover.sh --execute %s --confirm %s --source %s --dist %s\n' \
         "${SHA}" "${token}" "${SOURCE_DIR}" "${DIST_BASE:-${REPO_ROOT}/dist}"
@@ -298,6 +428,8 @@ if [ "${DRY_RUN}" = "1" ]; then
     # сколько в боевом прогоне: preflight (конфиги, ownership, журналы) и verify
     # (два чтения, тики, CSP, сайты) выполняются целиком. Ничего не пишется:
     # state-файл не передаём, spec_compat только печатается.
+    PHASE="dry-run"
+    export DEPLOY_SOFT_KIND=dry-run
     SOFT_BEFORE="${SOFT_FAILURES}"
     HARD_BEFORE="${HARD_FAILURES}"
     NOT_RUN=0
@@ -380,11 +512,13 @@ EOF
     fi
     if [ "${SOFT_FAILURES}" != "${SOFT_BEFORE}" ] || [ "${HARD_FAILURES}" != "${HARD_BEFORE}" ] || [ "${NOT_RUN}" != "0" ]; then
         log "dry-run FAIL: ${HARD_FAILURES} hard, ${SOFT_FAILURES} soft failures, not-run=${NOT_RUN}; no confirm token"
+        write_result fail 1
         exit 1
     fi
     owner_checklist
     print_token
     log "dry-run PASS: every read-only preflight/verify gate ran, nothing written"
+    write_result pass 0
     exit 0
 fi
 
@@ -396,6 +530,8 @@ fi
 # Общая предпроверка репетиции и боевого прогона: preflight и target-check цели
 # (dist, залитые каталоги на каждом хосте, бинари, openapi, EXPECT, база не впереди).
 # Репетиция поэтому строгое надмножество dry-run; пропуски (NOT RUN) не допускаются.
+PHASE="preflight"
+export DEPLOY_SOFT_KIND=preflight
 log "common preflight: preflight.sh and target-check.sh for ${SHA}"
 "${SCRIPT_DIR}/preflight.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" \
     || die "preflight failed for ${SHA}: refusing before any write"
@@ -439,11 +575,6 @@ if ! { run_write "reserve hub releases" reserve_releases hub "${SHA}" "${PREV_HU
         && run_write "reserve worker releases" reserve_releases worker "${SHA}" "${PREV_WORKER_SHA}"; }; then
     die "cannot reserve releases for the run"
 fi
-if is_rehearse; then
-    trap 'release_reservations; rm -f "${REHEARSE_COUNT_FILE}"' EXIT  # lint: local-temp
-else
-    trap 'release_reservations' EXIT
-fi
 
 # Stagedirs обязаны существовать до первого изменения (урок: flip в несуществующий релиз).
 [ -f "${DIST}/RELEASE" ] || die "no RELEASE in dist: ${DIST}"
@@ -479,13 +610,8 @@ if is_rehearse; then MIGR_EXPECT="${PREV_MIGR_MAX}"; else MIGR_EXPECT="${EXPECTE
 # - новый воркер доказан живым: доложить, ничего не гасить.
 PHASE="early"
 WORKER_WAS_ACTIVE=0
-VZDUMP_DONE=0
 WORKER_STOP_ISSUED=0
-WORKER_STOPPED=0
-DUMP_VERIFIED=0
 HUB_FLIP_STARTED=0
-HUB_FLIPPED=0
-WORKER_PROVEN=0
 WORKER_DOWNTIME=""
 HUB_INTERRUPTION=""
 VZ_ARCHIVE=""
@@ -495,7 +621,6 @@ RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DUMP="canterlot-pre-${SHA}-${RUN_TS}.dump"
 if systemctl --user is-active --quiet "${WORKER_UNIT}"; then WORKER_WAS_ACTIVE=1; fi
 
-yn() { if [ "$1" = "1" ]; then printf yes; else printf no; fi; }
 facts_line() {
     printf 'vzdump done=%s, worker stopped (verified)=%s, dump verified=%s, hub flip started=%s, hub link read back=%s, new worker live=%s' \
         "$(yn "${VZDUMP_DONE}")" "$(yn "${WORKER_STOPPED}")" "$(yn "${DUMP_VERIFIED}")" \
@@ -552,7 +677,13 @@ inventory_recheck() {
     return "${bad}"
 }
 
+# Блок доклада печатается и кладётся в файл рядом с результатом (путь — в результате).
 report_and_stop() {
+    result_path
+    RESULT_STOP_BLOCK="${RESULT_FILE%.result}.stop.txt"
+    report_block | tee "${RESULT_STOP_BLOCK}" || RESULT_STOP_BLOCK=""
+}
+report_block() {
     # Точное состояние на момент остановки + ручные команды (таблица Task 12).
     # Все запросы с запасным значением: обработчик не должен умирать сам.
     local hub_link hub_readyz migr_max migr_failed worker_state worker_link web_link live_n
@@ -643,6 +774,8 @@ recover_before_hub_flip() {
     if [ "${WORKER_STOP_ISSUED}" = "0" ]; then
         log "STOP before hub flip (phase ${PHASE}): nothing was stopped or flipped (vzdump done: $(yn "${VZDUMP_DONE}")); worker ${WORKER_UNIT}, hub and DB untouched"
         release_reservations
+        RESULT_RECOVERY="nothing_to_recover"
+        if [ "${VZDUMP_STARTED}" = "0" ]; then write_result refused 1; else write_result failed_before_flip 1; fi
         exit 1
     fi
     log "STOP before hub flip (phase ${PHASE}): hub and DB untouched, restarting worker"
@@ -650,6 +783,8 @@ recover_before_hub_flip() {
     if [ "${PREV_LINK}" != "${PREV_WORKER_SHA}" ]; then
         log "worker current is ${PREV_LINK}, expected previous release ${PREV_WORKER_SHA}: NOT starting it"
         release_reservations
+        RESULT_RECOVERY="needs_owner"
+        write_result failed_before_flip 1
         exit 1
     fi
     if [ "${WORKER_WAS_ACTIVE}" = "1" ]; then
@@ -660,17 +795,22 @@ recover_before_hub_flip() {
             if wait_worker_exe "${START_WAIT_POLLS:-60}"; then PREV_EXE="${WAIT_EXE}"; else PREV_EXE="unknown"; fi
             case "${PREV_EXE}" in
                 "${WORKER_RELEASES}/${PREV_WORKER_SHA}/"*)
+                    RESULT_RECOVERY="worker_restarted"
                     log "worker restarted on its previous release ${PREV_WORKER_SHA} (hub ${PREV_HUB_SHA} untouched)" ;;
                 *)
+                    RESULT_RECOVERY="needs_owner"
                     log "worker is active but its exe is ${PREV_EXE}, not previous release ${PREV_WORKER_SHA}: needs the owner loudly" ;;
             esac
         else
+            RESULT_RECOVERY="needs_owner"
             log "worker could NOT be restarted on ${PREV_WORKER_SHA}: needs the owner loudly"
         fi
     else
+        RESULT_RECOVERY="worker_restarted"
         log "worker was not active before the run; left stopped"
     fi
     release_reservations
+    write_result failed_before_flip 1
     exit 1
 }
 
@@ -690,6 +830,7 @@ post_flip_stop() {
         log "worker did NOT stop cleanly (ActiveState=${STOPPED_STATE}, MainPID=${STOPPED_PID}): needs the owner loudly"
     fi
     report_and_stop
+    write_result stop_and_report 1
     exit 1
 }
 
@@ -710,6 +851,7 @@ on_end() {
         log "REHEARSAL FAIL at phase ${PHASE}: nothing was written (every write above was printed only); fix the cause before a real run"
         release_reservations
         rm -f "${REHEARSE_COUNT_FILE}"  # lint: local-temp
+        write_result fail 1
         exit 1
     fi
     log "facts at the stop: $(facts_line)"
@@ -746,12 +888,16 @@ on_end() {
             log "failure after the worker was verified live on ${SHA}: leaving hub, PWA and worker running (retention skipped)"
         fi
         report_and_stop
+        write_result stop_and_report 1
         exit 1
     else
         post_flip_stop
     fi
 }
-trap on_end EXIT INT TERM HUP
+trap on_end EXIT
+trap 'RESULT_SIGNAL=INT; on_end' INT
+trap 'RESULT_SIGNAL=TERM; on_end' TERM
+trap 'RESULT_SIGNAL=HUP; on_end' HUP
 # shellcheck disable=SC2317 # вызывается из функций выше и ниже
 cutover_hard() { log "HARD-FAIL: $*"; exit 1; }
 
@@ -804,7 +950,6 @@ rehearse_start_wait_scenarios() {
     log "rehearse: real exec transitions: ${i} own short-lived children, exe unreadable ${misses} times, readable ${seen} times, no abort"
 }
 
-trap on_end EXIT INT TERM HUP
 # shellcheck disable=SC2317 # вызывается из функций выше и ниже
 cutover_hard() { log "HARD-FAIL: $*"; exit 1; }
 
@@ -816,6 +961,7 @@ log "order: vzdump (everything runs) -> read gates + session inventory again -> 
 control_worker_exact "before vzdump" || cutover_hard "control-worker scan before vzdump: refusing to start the cutover"
 log "fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${SHA}-${RUN_TS})"
 PHASE="backing-up"
+VZDUMP_STARTED=1
 VZ_OUT="$(run_write "vzdump" ssh_pmx "vzdump ${HUB_CTID} --mode snapshot --storage ${PBS_STORAGE} --notes-template 'pre-${SHA}-${RUN_TS}' 2>&1")" \
     || { printf '%s\n' "${VZ_OUT}" | tail -5 >&2; cutover_hard "vzdump failed"; }
 if is_rehearse; then
@@ -1217,6 +1363,7 @@ maintenance_check "${MAINT_LIVE_IDS}" "${WEB_SHA_EFF}"
 
 # Проверка под защитой ловушки: её провал — тоже STOP-and-report, не откат.
 PHASE="verifying"
+export DEPLOY_SOFT_KIND=verify
 log "running verification (two reads)"
 if is_rehearse; then
     # Репетиция проверяет живое состояние (развёрнутые релизы) тем же verify.sh;
@@ -1232,6 +1379,7 @@ geoip_refresh "${HUB_RELEASES}/${SHA}/bin/canterlot-hub"
 # передаются как --keep и не могут быть удалены даже если выпали из трёх свежих.
 # В репетиции retain.sh печатает план без --apply (ничего не удаляет).
 PHASE="retention"
+export DEPLOY_SOFT_KIND=retention
 RETAIN_ARGS=(--dist "${DIST_BASE:-${REPO_ROOT}/dist}" --keep "${SHA}" --keep "${PREV_HUB_SHA}" --keep "${PREV_WEB_SHA}" --keep "${PREV_WORKER_SHA}")
 if is_rehearse; then
     "${SCRIPT_DIR}/retain.sh" "${RETAIN_ARGS[@]}" || soft "retention plan failed"
@@ -1239,7 +1387,8 @@ elif ! "${SCRIPT_DIR}/retain.sh" --apply "${RETAIN_ARGS[@]}"; then
     soft "retention failed; artifacts stay, rerun retain.sh --apply after review"
 fi
 release_reservations
-trap - EXIT INT TERM HUP
+trap - INT TERM HUP
+trap result_exit EXIT
 if is_rehearse; then
     WRITES_PRINTED="$(wc -l <"${REHEARSE_COUNT_FILE}" 2>/dev/null || echo '?')"
     rm -f "${REHEARSE_COUNT_FILE}"  # lint: local-temp
@@ -1247,11 +1396,13 @@ if is_rehearse; then
     log "rehearse: speech: ${SPEECH_SUMMARY}; speech soft issues ${SPEECH_ISSUES} (never block the token)"
     if [ "${HARD_FAILURES}" != "0" ] || [ "${SOFT_FAILURES}" != "0" ]; then
         log "rehearsal FAIL: ${HARD_FAILURES} hard, ${SOFT_FAILURES} soft failures; ${WRITES_PRINTED} writes printed, none executed; no confirm token"
+        write_result fail 1
         exit 1
     fi
     owner_checklist
     print_token
     log "rehearsal PASS: the whole write path ran against the live system; ${WRITES_PRINTED} writes printed as WOULD-WRITE, none executed"
+    write_result pass 0
     exit 0
 fi
 log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s (worker stop -> live), hub interruption ${HUB_INTERRUPTION}s, soft failures ${SOFT_FAILURES}, speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
@@ -1284,3 +1435,4 @@ Release: \`${SHA}\` (\`<full sha>\`, tag \`vX.Y.Z\`), built by \`scripts/build-r
 ### Left for the owner
 - Authenticated checks (checklist above); <other>
 EOF
+write_result "done" 0

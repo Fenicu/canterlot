@@ -47,6 +47,7 @@ else
     case_ok "exit nonzero with a wrong --confirm"
 fi
 assert_contains "${FAKE_ROOT}/cutover.log" "malformed --confirm token" "wrong token reported"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: refused (bad token)"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"
 pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
@@ -59,6 +60,8 @@ case_begin "gates fail before stop"
 setup_cutover gatesfail
 export FAKE_CT_LOCK=1
 if run_cutover; then case_fail "exit 0 despite failed gates"; else case_ok "exit nonzero"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: refused (gates)"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" worker_stopped)" "no" "result file: worker not stopped"
 unset FAKE_CT_LOCK
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"
@@ -193,6 +196,7 @@ worker_stopped_ever && case_fail "worker was stopped before/after a failed vzdum
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_ok "worker still active" || case_fail "worker not active"
 assert_contains "${FAKE_ROOT}/cutover.log" "nothing was stopped or flipped" "nothing-to-recover path named"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)/$(result_of "${FAKE_ROOT}/cutover.result" recovery)" "failed_before_flip/nothing_to_recover" "result file: vzdump failure"
 assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
@@ -202,6 +206,11 @@ case_begin "pg_dump fails"
 setup_cutover pgdumpfail
 export FAKE_FAIL_PG_DUMP=1
 if run_cutover; then case_fail "exit 0 despite pg_dump failure"; else case_ok "exit nonzero"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "failed_before_flip" "result file: failed_before_flip"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" recovery)" "worker_restarted" "result file: worker restarted"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" vzdump_done)/$(result_of "${FAKE_ROOT}/cutover.result" worker_stopped)/$(result_of "${FAKE_ROOT}/cutover.result" dump_verified)/$(result_of "${FAKE_ROOT}/cutover.result" hub_flipped)" "yes/yes/no/no" "result file: facts"
+[ -n "$(result_of "${FAKE_ROOT}/cutover.result" vzdump_notes)" ] && case_ok "result file: vzdump restore point named" || case_fail "result file: no vzdump notes"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" dump)" "" "result file: no unverified dump named"
 unset FAKE_FAIL_PG_DUMP
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
@@ -324,6 +333,12 @@ worker_is "${SHA_PREV}" && case_ok "worker never flipped" || case_fail "worker m
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore, ever"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
 assert_contains "${FAKE_ROOT}/cutover.log" "rollback-db.sh" "manual restore command printed"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "stop_and_report" "result file: stop_and_report"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" hub_flipped)/$(result_of "${FAKE_ROOT}/cutover.result" worker_live)" "yes/no" "result file: facts"
+STOP_BLOCK="$(result_of "${FAKE_ROOT}/cutover.result" stop_block)"
+[ -n "${STOP_BLOCK}" ] && grep -q '^STOP-AND-REPORT (phase' "${STOP_BLOCK}" \
+    && case_ok "result file: stop block file holds the report" || case_fail "result file: no stop block at [${STOP_BLOCK}]"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" dump)" "$(find "${HUB_BACKUP_DIR}" -name "canterlot-pre-*.dump" | head -1)" "result file: the verified dump named"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_fail "worker started (must stay stopped)" || case_ok "worker stays stopped"
 assert_proc_alive "${SUP1}" "session 1 alive"
@@ -382,6 +397,10 @@ worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
 web_is "${SHA_PREV}" && case_ok "web flipped back to prev" || case_fail "web not prev"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 assert_contains "${FAKE_ROOT}/cutover.log" "PWA failure (soft" "PWA soft failure recorded"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "done" "result file: done despite the soft PWA failure"
+# Фейк роняет каждый recreate: и flip, и восстановление env — две мягкие ошибки PWA.
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" soft_by_kind)" "pwa:2" "result file: the soft failures counted as pwa"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" web_release)" "${SHA_PREV}" "result file: PWA stayed on the previous release"
 in_order "${FAKE_ROOT}/cutover.log" 'worker state="live" after start' "PWA step (all failures soft" "PWA failure (soft" \
     && case_ok "PWA step ran after the worker was live" || case_fail "PWA step not after the worker was live"
 assert_eq "$(grep -c 'stop canterlot-worker' "${FAKE_ROOT}/state/calls.log")" "1" "worker stopped exactly once (before the dump)"
@@ -536,6 +555,8 @@ export FAKE_ENCODING_FAIL=zstd
 if run_cutover; then case_ok "exit 0 (precompressed is soft)"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
 unset FAKE_ENCODING_FAIL
 assert_contains "${FAKE_ROOT}/cutover.log" "SOFT-FAIL: precompressed zstd: got 'none'" "encoding failure recorded softly"
+[[ "$(result_of "${FAKE_ROOT}/cutover.result" soft_by_kind)" =~ ^verify:[1-9][0-9]*$ ]] \
+    && case_ok "result file: verify.sh soft failures counted as verify" || case_fail "result file: soft_by_kind [$(result_of "${FAKE_ROOT}/cutover.result" soft_by_kind)]"
 assert_contains "${FAKE_ROOT}/cutover.log" "cutover done:" "cutover finished"
 assert_not_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "no stop-and-report"
 hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
@@ -615,6 +636,16 @@ assert_contains "${L}" "downtime: worker " "worker downtime printed"
 grep -qE 'downtime: worker [0-9]+ s \(stop -> state=live\), hub [0-9]+ s \(restart -> readyz ok\)' "${L}" \
     && case_ok "downtime line names both components" || case_fail "downtime line malformed: $(grep 'downtime:' "${L}")"
 assert_contains "${L}" "hub interruption: " "hub interruption measured"
+R="${FAKE_ROOT}/cutover.result"
+assert_eq "$(result_of "${R}" status)" "done" "result file: done"
+assert_eq "$(result_of "${R}" mode)" "execute" "result file: mode execute"
+assert_eq "$(result_of "${R}" soft_failures)/$(result_of "${R}" speech_soft_failures)" "0/0" "result file: no soft failures"
+[[ "$(result_of "${R}" worker_downtime_s)" =~ ^[0-9]+$ ]] && case_ok "result file: worker downtime" || case_fail "result file: worker downtime missing"
+[[ "$(result_of "${R}" hub_interruption_s)" =~ ^[0-9]+$ ]] && case_ok "result file: hub interruption" || case_fail "result file: hub interruption missing"
+assert_eq "$(result_of "${R}" vzdump_notes)" "$(sed -n 's/.*notes pre-\([^ ,)]*\).*/pre-\1/p' "${L}" | head -1)" "result file: vzdump notes"
+[ -n "$(result_of "${R}" dump)" ] && case_ok "result file: dump named" || case_fail "result file: no dump"
+assert_eq "$(result_of "${R}" token)" "" "result file: no token from a real run"
+assert_eq "$(result_of "${R}" log)" "${L}" "result file: log path"
 assert_eq "$(grep -c 'stop canterlot-worker' "${C}")" "1" "worker stopped once"
 assert_eq "$(grep -c 'start canterlot-worker' "${C}")" "1" "worker started once"
 assert_eq "$(compose_up_count)" "1" "exactly one caddy recreate"

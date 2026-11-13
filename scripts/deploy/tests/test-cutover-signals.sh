@@ -47,6 +47,8 @@ unset FAKE_VZDUMP_DELAY
 [ "${rc}" = "1" ] && case_ok "exit 1" || case_fail "exit ${rc}"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP before hub flip (phase backing-up)" "early path in the backup phase"
 assert_contains "${FAKE_ROOT}/cutover.log" "nothing was stopped or flipped" "nothing to recover"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "failed_before_flip" "result file: failed_before_flip on a signal"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" signal)" "TERM" "result file: signal TERM"
 worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
 assert_eq "$(cat "${FAKE_ROOT}/state/unit-local-canterlot-worker.pid")" "${WORKER_PID_BEFORE}" "the same worker process keeps running"
 pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
@@ -133,6 +135,7 @@ for hostbase in "${HUB_BASE}" "${WEB_SITES_BASE}" "${WORKER_BASE}"; do
 done
 grep -F -- "pid=" "${HUB_BASE}/.reserved.${SHA_NEW}" >/dev/null \
     && case_ok "the kept marker records its run pid" || case_fail "kept marker has no run pid"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)/$(result_of "${FAKE_ROOT}/cutover.result" signal)" "stop_and_report/INT" "result file: stop_and_report on INT"
 assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
@@ -152,6 +155,7 @@ hub_is "${SHA_NEW}" && case_ok "hub stays new (PWA never rolls back hub)" || cas
 worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT (phase pwa)" "stop-and-report printed in the PWA phase"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)/$(result_of "${FAKE_ROOT}/cutover.result" worker_live)" "stop_and_report/yes" "result file: stop_and_report with the worker live"
 assert_contains "${FAKE_ROOT}/cutover.log" "hub and worker keep running" "worker left running"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_ok "worker keeps running (proven live before the PWA step)" || case_fail "worker was stopped"

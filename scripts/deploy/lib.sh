@@ -675,7 +675,16 @@ check_ct_node() {
 HARD_FAILURES=0
 SOFT_FAILURES=0
 hard() { printf '[%s] HARD-FAIL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; HARD_FAILURES=$((HARD_FAILURES + 1)); }
-soft() { printf '[%s] SOFT-FAIL: %s (recorded, continuing)\n' "$(date -u +%H:%M:%S)" "$*" >&2; SOFT_FAILURES=$((SOFT_FAILURES + 1)); }
+soft() {
+    printf '[%s] SOFT-FAIL: %s (recorded, continuing)\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    SOFT_FAILURES=$((SOFT_FAILURES + 1))
+    soft_record "${PHASE:-${DEPLOY_SOFT_KIND:-other}}"
+}
+# Файл мягких ошибок прогона cutover (DEPLOY_SOFT_LOG): строка — вид шага; его
+# наследуют verify.sh и retain.sh, так что их ошибки тоже попадают в результат.
+soft_record() {
+    if [ -n "${DEPLOY_SOFT_LOG:-}" ]; then printf '%s\n' "$1" >>"${DEPLOY_SOFT_LOG}" 2>/dev/null || true; fi
+}
 check_summary() {
     log "hard failures: ${HARD_FAILURES}, soft failures: ${SOFT_FAILURES}"
     [ "${HARD_FAILURES}" -eq 0 ]
@@ -740,6 +749,7 @@ SPEECH_SUMMARY="not checked"
 speech_soft() {
     printf '[%s] SPEECH-SOFT: %s (dictation only, the release goes on)\n' "$(date -u +%H:%M:%S)" "$*" >&2
     SPEECH_ISSUES=$((SPEECH_ISSUES + 1))
+    soft_record speech
 }
 # Виды WARN без базы, которые ждут: сбои движка службы (`engine_*`) и сбои
 # диктовки в журнале хаба (`speech_engine_failed`, `speech_protocol_error`).

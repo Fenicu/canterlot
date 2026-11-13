@@ -82,6 +82,14 @@ assert_contains "${FAKE_ROOT}/rehearse.log" "dbip-city-lite.mmdb is 0 days old, 
 assert_contains "${FAKE_ROOT}/rehearse.log" "rehearsal PASS" "rehearsal PASS"
 [ -n "$(token_from "${FAKE_ROOT}/rehearse.log")" ] && case_ok "confirm token printed" || case_fail "no token"
 R="${FAKE_ROOT}/rehearse.result"
+assert_eq "$(result_of "${R}" status)" "pass" "result file: status pass"
+assert_eq "$(result_of "${R}" mode)" "rehearse" "result file: mode rehearse"
+assert_eq "$(result_of "${R}" token)" "$(token_from "${FAKE_ROOT}/rehearse.log")" "result file: the printed token"
+assert_eq "$(result_of "${R}" plan)" "$(token_from "${FAKE_ROOT}/rehearse.log" | cut -d- -f2)" "result file: the token's plan hash"
+assert_eq "$(result_of "${R}" release)" "${SHA_NEW}" "result file: release"
+assert_eq "$(result_of "${R}" vzdump_done)" "no" "result file: no restore point from a rehearsal"
+assert_eq "$(result_of "${R}" dump)" "" "result file: no dump from a rehearsal"
+assert_contains "${FAKE_ROOT}/rehearse.log" "result file: ${R} (status pass)" "result path printed at the end"
 grep -q 'docker fakeweb exec -i' "${FAKE_ROOT}/state/calls.log" && case_fail "loopback probe started" || case_ok "loopback probe never started"
 teardown_case
 case_end
@@ -103,6 +111,7 @@ printf 'tampered\n' >>"${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe.js
 : >"${FAKE_ROOT}/state/calls.log"
 if run_rehearse; then case_fail "rehearsal passed with a tampered staged tree"; else case_ok "rehearsal failed"; fi
 assert_contains "${FAKE_ROOT}/rehearse.log" "staged tree differs from the dist" "mismatch named"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)" "fail" "result file: status fail on a refused rehearsal"
 assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
 assert_not_contains "${FAKE_ROOT}/rehearse.log" "WOULD-WRITE #" "refused before the write path"
 assert_eq "$(mutations)" "" "no mutating command"
@@ -132,6 +141,7 @@ else
     case_ok "real run refused"
 fi
 assert_contains "${FAKE_ROOT}/cutover.log" "worker ${SHA_NEW}: staged tree differs from the dist" "mismatch named"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: refused before any write"
 assert_eq "$(mutations)" "" "nothing stopped, dumped or flipped"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 teardown_case
@@ -165,6 +175,8 @@ else
     case_ok "real run refused"
 fi
 assert_contains "${FAKE_ROOT}/cutover.log" "the plan changed since the token was issued" "plan change reported"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: a rejected token is refused"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" mode)" "execute" "result file: mode execute"
 assert_eq "$(grep -cE 'stop canterlot-worker|^vzdump ' "${FAKE_ROOT}/state/calls.log" || true)" "0" "nothing stopped or backed up"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 teardown_case
@@ -192,6 +204,8 @@ if run_rehearse; then case_fail "rehearsal passed with a broken site"; else case
 unset FAKE_SITE_FAIL
 assert_contains "${FAKE_ROOT}/rehearse.log" "REHEARSAL FAIL" "failure reported"
 assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)" "fail" "result file: status fail"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" token)" "" "result file: no token"
 assert_not_contains "${FAKE_ROOT}/rehearse.log" "STOP-AND-REPORT" "no recovery report in a rehearsal"
 assert_eq "$(mutations)" "" "no mutating command after the failure either"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"

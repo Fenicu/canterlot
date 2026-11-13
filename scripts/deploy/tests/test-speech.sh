@@ -103,6 +103,13 @@ assert_contains "${L}" "SPEECH-SOFT: canterlot-speech health failed after 1 s: {
 assert_contains "${L}" "SPEECH-SOFT: canterlot-speech health failed as canterlot:" "health failure reported by verify"
 assert_contains "${L}" "verify PASS" "verify still passes"
 assert_contains "${L}" "soft failures 0, speech: health failing" "summary: release soft failures untouched, speech failing"
+# Файл результата считает диктовку отдельно: публикации она не мешает.
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "done" "result file: done"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" soft_failures)" "0" "result file: no non-speech soft failures"
+[ "$(result_of "${FAKE_ROOT}/cutover.result" speech_soft_failures)" -ge 2 ] \
+    && case_ok "result file: speech soft failures counted separately (cutover and verify)" \
+    || case_fail "result file: speech soft failures $(result_of "${FAKE_ROOT}/cutover.result" speech_soft_failures)"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" speech_summary)" "health failing" "result file: speech summary"
 teardown_case
 case_end
 

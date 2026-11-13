@@ -168,6 +168,8 @@ in_order() {
     done
 }
 worker_stopped_ever() { grep -q 'stop canterlot-worker' "${FAKE_ROOT}/state/calls.log"; }
+# Значение ключа из файла результата cutover (ключ=значение).
+result_of() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
 pgdump_logged() { grep -q '^pg_dump ' "${FAKE_ROOT}/state/calls.log"; }
 compose_up_count() { grep -c "compose up -d caddy" "${FAKE_ROOT}/state/calls.log" || true; }
 # set -m: фоновые задания не игнорят INT (иначе trap cutover не сработает в harness).
