@@ -48,6 +48,17 @@ ls "${HUB_BASE}"/.reserved.* "${WORKER_BASE}"/.reserved.* >/dev/null 2>&1 && cas
 for label in "stop worker" "vzdump" "pg_dump" "hub flip" "hub restart" "write canterlot.env.${SHA_NEW}" "web build flip" "caddy recreate" "worker flip" "worker start" "merge old immutable chunks" "loopback caddy probe" "reserve hub releases" "release worker reservations"; do
     assert_contains "${FAKE_ROOT}/rehearse.log" "(${label}):" "WOULD-WRITE printed for: ${label}"
 done
+in_order "${FAKE_ROOT}/rehearse.log" "target check PASS for ${SHA_NEW}" "(vzdump):" \
+    "re-checking read gates and the session inventory after vzdump" "(stop worker):" "(pg_dump):" \
+    "dump fully readable" "(hub flip):" "(hub restart):" "(worker flip):" "(worker start):" \
+    'worker journal parse found state="live"' "(write canterlot.env.${SHA_NEW}):" "(web build flip):" \
+    "(caddy recreate):" "running verification" \
+    && case_ok "rehearsal prints the new order: vzdump, gates again, stop, dump, hub, worker live, PWA" \
+    || case_fail "rehearsal order differs"
+in_order "${FAKE_ROOT}/rehearse.log" "| steps:" "|   2 fresh vzdump of CT" "|   3 read gates and the session inventory again" \
+    "|   4 stop worker ${WORKER_UNIT}" "|   5 quiesced pg_dump" "|   6 hub flip" "|   7 worker flip" "|   8 PWA" \
+    && case_ok "plan text lists the new order" || case_fail "plan text order differs"
+assert_contains "${FAKE_ROOT}/rehearse.log" "rehearse: no down time" "rehearsal measures no down time"
 N="$(grep -c 'WOULD-WRITE #' "${FAKE_ROOT}/rehearse.log" || true)"
 [ "${N}" -ge 18 ] && case_ok "${N} writes printed" || case_fail "only ${N} writes printed"
 assert_contains "${FAKE_ROOT}/rehearse.log" "the control-worker scan finds exactly the live unit process" "control-worker scan exercised against the live worker"
@@ -70,6 +81,7 @@ assert_contains "${FAKE_ROOT}/rehearse.log" "owner checklist: authenticated chec
 assert_contains "${FAKE_ROOT}/rehearse.log" "dbip-city-lite.mmdb is 0 days old, no update" "geoip step read the live database age"
 assert_contains "${FAKE_ROOT}/rehearse.log" "rehearsal PASS" "rehearsal PASS"
 [ -n "$(token_from "${FAKE_ROOT}/rehearse.log")" ] && case_ok "confirm token printed" || case_fail "no token"
+R="${FAKE_ROOT}/rehearse.result"
 grep -q 'docker fakeweb exec -i' "${FAKE_ROOT}/state/calls.log" && case_fail "loopback probe started" || case_ok "loopback probe never started"
 teardown_case
 case_end

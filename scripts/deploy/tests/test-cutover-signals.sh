@@ -19,16 +19,39 @@ case_begin "INT after worker stop"
 setup_cutover sigint-stopped
 run_cutover_bg
 wait_for_log "${FAKE_ROOT}/cutover.log" "stopping worker" || case_fail "no stop marker"
-kill -INT "${CUTOVER_PID}" || case_fail "kill failed"
+kill -INT -- "-${CUTOVER_PID}" || case_fail "kill failed"
 rc=0; wait "${CUTOVER_PID}" || rc=$?
 [ "${rc}" = "1" ] && case_ok "exit 1" || case_fail "exit ${rc}"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 worker_is "${SHA_PREV}" && case_ok "worker still prev" || case_fail "worker moved"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
+grep -q '^vzdump ' "${FAKE_ROOT}/state/calls.log" && case_ok "vzdump ran before the stop" || case_fail "no vzdump before the stop"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_ok "worker restarted by trap" || case_fail "worker not started"
 assert_proc_alive "${SUP1}" "session 1 alive"
 assert_proc_alive "${SUP2}" "session 2 alive"
+teardown_case
+case_end
+
+# --- M2. TERM во время vzdump: ничего не остановлено — восстанавливать нечего ---
+case_begin "TERM during vzdump"
+setup_cutover sigterm-vzdump
+export FAKE_VZDUMP_DELAY=3
+WORKER_PID_BEFORE="$(cat "${FAKE_ROOT}/state/unit-local-canterlot-worker.pid")"
+: >"${FAKE_ROOT}/state/calls.log"
+run_cutover_bg
+wait_for_log "${FAKE_ROOT}/state/calls.log" "vzdump ${HUB_CTID}" || case_fail "no vzdump marker"
+kill -TERM "${CUTOVER_PID}" || case_fail "kill failed"
+rc=0; wait "${CUTOVER_PID}" || rc=$?
+unset FAKE_VZDUMP_DELAY
+[ "${rc}" = "1" ] && case_ok "exit 1" || case_fail "exit ${rc}"
+assert_contains "${FAKE_ROOT}/cutover.log" "STOP before hub flip (phase backing-up)" "early path in the backup phase"
+assert_contains "${FAKE_ROOT}/cutover.log" "nothing was stopped or flipped" "nothing to recover"
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+assert_eq "$(cat "${FAKE_ROOT}/state/unit-local-canterlot-worker.pid")" "${WORKER_PID_BEFORE}" "the same worker process keeps running"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+ls "${HUB_BASE}"/.reserved.* >/dev/null 2>&1 && case_fail "reservations left" || case_ok "reservations released"
 teardown_case
 case_end
 
@@ -56,7 +79,7 @@ if [ -n "${LATE_PHASE}" ]; then
     assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
 elif [ -n "${EARLY_PHASE}" ]; then
     case "${EARLY_PHASE}" in
-        early|worker-stopping|worker-stopped|backing-up|dumping|dump-verifying|backed-up)
+        early|backing-up|regating|worker-stopping|worker-stopped|dumping|dump-verifying|backed-up)
             case_ok "early path phase ${EARLY_PHASE}" ;;
         *) case_fail "unexpected early phase ${EARLY_PHASE}" ;;
     esac
@@ -76,10 +99,15 @@ case_end
 # --- O. INT после рестарта хаба: СТОП, без действий с базой/хабом, воркер остановлен ---
 case_begin "INT after hub restart"
 setup_cutover sigint-hubflipped
+# Старт воркера идёт сразу за хабом: задержка старта держит окно «хаб переключён,
+# воркер не доказан». INT — всей группе, как Ctrl-C в терминале: bash без
+# job control выполняет ловушку INT, только если дочерний процесс сам умер от INT.
+export FAKE_SYSTEMCTL_START_DELAY=3
 run_cutover_bg
 wait_for_log "${FAKE_ROOT}/cutover.log" "hub restarted once" || case_fail "no restart marker"
-kill -INT "${CUTOVER_PID}" || case_fail "kill failed"
+kill -INT -- "-${CUTOVER_PID}" || case_fail "kill failed"
 rc=0; wait "${CUTOVER_PID}" || rc=$?
+unset FAKE_SYSTEMCTL_START_DELAY
 [ "${rc}" = "1" ] && case_ok "exit 1" || case_fail "exit ${rc}"
 hub_is "${SHA_NEW}" && case_ok "hub stays flipped (no auto downgrade)" || case_fail "hub moved"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
@@ -109,7 +137,8 @@ assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
 
-# --- P. TERM в середине PWA: СТОП, воркер остановлен, хаб новый, без действий ---
+# --- P. TERM в середине PWA: PWA теперь после доказанно живого воркера —
+# доклад, хаб и воркер остаются работать, воркер не гасится ---
 case_begin "TERM during PWA"
 setup_cutover sigterm-pwa
 export FAKE_CADDY_UP_DELAY=5
@@ -120,10 +149,14 @@ rc=0; wait "${CUTOVER_PID}" || rc=$?
 unset FAKE_CADDY_UP_DELAY
 [ "${rc}" = "1" ] && case_ok "exit 1" || case_fail "exit ${rc}"
 hub_is "${SHA_NEW}" && case_ok "hub stays new (PWA never rolls back hub)" || case_fail "hub moved"
+worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
-assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
+assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT (phase pwa)" "stop-and-report printed in the PWA phase"
+assert_contains "${FAKE_ROOT}/cutover.log" "hub and worker keep running" "worker left running"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
-    && case_fail "worker started (must stay stopped)" || case_ok "worker stays stopped"
+    && case_ok "worker keeps running (proven live before the PWA step)" || case_fail "worker was stopped"
+assert_eq "$(grep -c 'stop canterlot-worker' "${FAKE_ROOT}/state/calls.log")" "1" "the handler did not stop the worker"
+assert_not_contains "${FAKE_ROOT}/cutover.log" "retain done" "retention skipped"
 assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
@@ -162,7 +195,8 @@ hub_is "${SHA_NEW}" && case_ok "hub stays new" || case_fail "hub moved"
 worker_is "${SHA_NEW}" && case_ok "worker stays flipped (no auto flip-back)" || case_fail "worker flipped back"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
-assert_contains "${FAKE_ROOT}/cutover.log" "leaving hub, PWA and worker running" "worker left running after proof"
+# Сразу после доказанного старта идёт шаг PWA: любая из двух веток «воркер жив».
+assert_contains "${FAKE_ROOT}/cutover.log" "after the worker was verified live on ${SHA_NEW}" "worker left running after proof"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_ok "worker stays running" || case_fail "worker was stopped after it was proven live"
 assert_proc_alive "${SUP1}" "session 1 alive"

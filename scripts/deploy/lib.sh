@@ -243,24 +243,26 @@ plan_text() {
         printf '%s %s\n' "$(_plan_file_hash "${DEPLOY_DIR}/${f}")" "${f}"
     done | sha256sum | cut -c1-12)"
     printf '%s\n' \
-        "plan v2 target=${sha}" \
+        "plan v3 target=${sha}" \
         "baseline hub=${b_hub} web=${b_web} worker=${b_worker}" \
         "dist SHA256SUMS=$(_plan_file_hash "${dist_dir}/SHA256SUMS") RELEASE=$(_plan_file_hash "${dist_dir}/RELEASE") EXPECT=$(_plan_file_hash "${dist_dir}/EXPECT") csp=$(_plan_file_hash "${dist_dir}/csp.txt")" \
         "hosts hub=${HUB_SSH} web=${WEB_SSH} proxmox=${PROXMOX_SSH} node=${PROXMOX_NODE} ct=${HUB_CTID} ip=${HUB_IP}" \
         "paths hub=${HUB_BASE} web=${WEB_SITES_BASE} env=${WEB_ENV} worker=${WORKER_BASE} backups=${HUB_BACKUP_DIR} units=${WORKER_UNIT},${HUB_UNIT},${WEB_CONTAINER},${SPEECH_UNIT}" \
         "toolkit=${toolkit} retain=${RETAIN_COUNT}" \
         "steps:" \
-        "  1 preflight snapshot (local state file); reserve ${sha} and the previous releases on every host" \
-        "  2 stop worker ${WORKER_UNIT} (sessions keep running); prove no control worker is left" \
-        "  3 fresh vzdump of CT ${HUB_CTID} + pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable" \
-        "  4 hub flip ${b_hub} -> ${sha} under the host lock, one restart of ${HUB_UNIT}; readyz, migrations, exe, NRestarts" \
-        "  4b speech: restart ${SPEECH_UNIT} (bounded to ${SPEECH_RESTART_TIMEOUT} s) and ask health when installed, enabled and configured; stop and disable it when ${sha} has no canterlot-speech; every speech failure is soft" \
-        "  5 PWA: canterlot.env.${sha} from dist csp.txt, build flip ${b_web} -> ${sha}, one recreate of ${WEB_CONTAINER}" \
-        "  6 worker flip ${b_worker} -> ${sha}, start; guarded MainPID/exe wait; state=live wait; NRestarts" \
-        "  7 merge old _app/immutable chunks of the previous web releases into ${sha} (no clobber), verify dist files intact" \
-        "  8 maintenance check (sockets, exec dirs, leftovers, env record); verify.sh twice incl. loopback Caddy probe and harness catalog" \
-        "  9 geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)" \
-        " 10 retention: keep ${RETAIN_COUNT} per component + every live release; literal paths re-checked right before deletion"
+        "  1 preflight snapshot (local state file) and target check (staged trees, dist, DB not ahead); reserve ${sha} and the previous releases on every host" \
+        "  2 fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${sha}-<ts>); the control worker is exactly the unit MainPID" \
+        "  3 read gates and the session inventory again (vzdump takes up to a minute)" \
+        "  4 stop worker ${WORKER_UNIT} (sessions keep running); prove no control worker is left" \
+        "  5 quiesced pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable" \
+        "  6 hub flip ${b_hub} -> ${sha} under the host lock, one restart of ${HUB_UNIT}; readyz, migrations, exe, NRestarts" \
+        "  7 worker flip ${b_worker} -> ${sha}, start; guarded MainPID/exe wait; state=live wait; NRestarts; downtime printed" \
+        "  8 PWA (soft, after the worker is live, never stops it): canterlot.env.${sha} from dist csp.txt, build flip ${b_web} -> ${sha}, one recreate of ${WEB_CONTAINER}" \
+        "  9 speech: restart ${SPEECH_UNIT} (bounded to ${SPEECH_RESTART_TIMEOUT} s) and ask health when installed, enabled and configured; stop and disable it when ${sha} has no canterlot-speech; every speech failure is soft" \
+        " 10 merge old _app/immutable chunks of the previous web releases into ${sha} (no clobber), verify dist files intact" \
+        " 11 maintenance check (sockets, exec dirs, leftovers, env record); verify.sh twice incl. loopback Caddy probe and harness catalog" \
+        " 12 geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)" \
+        " 13 retention: keep ${RETAIN_COUNT} per component + every live release; literal paths re-checked right before deletion"
 }
 plan_hash() { plan_text "$@" | sha256sum | cut -c1-12; }
 

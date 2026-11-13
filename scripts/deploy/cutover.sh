@@ -5,9 +5,11 @@
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     return 0
 fi
-# Выкат релиза одним прогоном: ворота, стоп воркера, свежие vzdump и pg_dump
-# (проверенный чтением каждого байта), flip хаба, рестарт хаба, flip PWA и один
-# recreate Caddy, flip и старт воркера, слияние старых чанков PWA, обслуживание,
+# Выкат релиза одним прогоном: ворота и общая предпроверка, свежий vzdump при
+# работающих хабе и воркере, ворота и инвентарь сессий заново, стоп воркера,
+# pg_dump при остановленном воркере (проверенный чтением каждого байта), flip и
+# рестарт хаба, flip и старт воркера до state="live", затем flip PWA и один
+# recreate Caddy (мягко), диктовка, слияние старых чанков PWA, обслуживание,
 # проверка, чистка.
 #
 # Три режима, один путь:
@@ -25,9 +27,11 @@ fi
 #       боевой прогон. Токен — из dry-run или репетиции того же релиза и того же
 #       плана (хэш plan_text), не старше 2 часов.
 #
-# Политика отката (решение владельца: никакой автоматики по базе):
+# Политика отката (решение владельца: никакой автоматики по базе), по записанным
+# фактам (vzdump, стоп воркера, проверенный дамп, ссылка хаба, живой новый воркер):
 # - До flip хаба: любая неудача или сигнал — только рестарт воркера на его
-#   собственном предыдущем релизе (хаб не тронут, пара заведомо совместимая).
+#   собственном предыдущем релизе (хаб не тронут, пара заведомо совместимая);
+#   если воркер ещё не останавливали (vzdump и повторные ворота), — ничего.
 # - С flip хаба и дальше: СТОП и доклад. Никаких действий с базой, никакого
 #   flip назад; воркер останавливаем и оставляем остановленным (его сессии живут
 #   в сопровождениях). Печатаем точное состояние и ручные команды восстановления
@@ -40,7 +44,8 @@ fi
 #   [http.ws].session_check_interval (deny_unknown_fields: иначе он не стартует), а
 #   ждущие пуши входа отменяются: старый хаб не читает строку пуша без разговора.
 #   Воркер ниже этого релиза не стартует с [execution].delegate_mcp_servers.
-# - PWA-ошибки мягкие всегда: записать, вернуть предыдущий build, продолжить.
+# - PWA идёт после доказанно живого воркера; её ошибки мягкие всегда: записать,
+#   вернуть предыдущий build, продолжить; воркер ради неё не гасится никогда.
 # - Диктовка (canterlot-speech) мягкая всегда: после старта воркера юнит
 #   перезапускается (не дольше SPEECH_RESTART_TIMEOUT) или, если в релизе нет
 #   бинаря, останавливается и выключается; итог только в отчёте, токен и откат
@@ -352,11 +357,13 @@ dry-run plan for ${SHA} (write steps are NOT RUN by design):
   target checked read-only: dist (SHA256SUMS, source=, versions, glibc, openapi, EXPECT), staged dirs on every host, migrations, CSP
   NOT RUN (write steps, never executed by a dry-run; --rehearse prints each one as WOULD-WRITE):
    - preflight snapshot/state file
+   - fresh vzdump (notes pre-${SHA}-<ts>) while hub and worker run; then read gates and the session inventory again
    - worker stop (systemctl --user stop ${WORKER_UNIT}); session processes keep running
-   - fresh vzdump (notes pre-${SHA}) + fresh pg_dump canterlot-pre-${SHA}-<ts>.dump
+   - quiesced pg_dump canterlot-pre-${SHA}-<ts>.dump, verified
    - hub flip: cd ${HUB_BASE} && ln -s releases/${SHA} + mv -T; restart ${HUB_UNIT} once
-   - PWA: canterlot.env.${SHA}, flip build, 'docker compose up -d ${WEB_CONTAINER}'
-   - worker flip + start; old _app/immutable chunk merge; verify.sh twice (the read-only verify gates above did run)
+   - worker flip + start, state=live wait (worker down time ends here)
+   - PWA after the worker is live (soft): canterlot.env.${SHA}, flip build, 'docker compose up -d ${WEB_CONTAINER}'
+   - old _app/immutable chunk merge; verify.sh twice (the read-only verify gates above did run)
    - precompressed Content-Encoding probe (would start a one-off loopback Caddy inside the container)
    - geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)
    - speech: restart ${SPEECH_UNIT} (bounded to ${SPEECH_RESTART_TIMEOUT} s) + health, or stop and disable it when ${SHA} has no canterlot-speech (soft, never blocks)
@@ -454,7 +461,7 @@ if ssh_hub "test -e '${HUB_BASE}/current.new'"; then
 fi
 EXPECTED_MIGR="$(grep '^migrations_last=' "${DIST}/RELEASE" | cut -d= -f2 | grep -oE '^[0-9]+' | sed 's/^0*//' || true)"
 [ -n "${EXPECTED_MIGR}" ] || die "bad migrations_last in ${DIST}/RELEASE"
-read_gates || die "read gates failed before worker stop"
+read_gates || die "read gates failed before any write"
 
 # Миграции ДО первого изменения.
 PREV_MIGR_MAX="$(hub_psql "select coalesce(max(version),0) from _sqlx_migrations where success")"
@@ -464,16 +471,86 @@ if is_rehearse; then MIGR_EXPECT="${PREV_MIGR_MAX}"; else MIGR_EXPECT="${EXPECTE
 
 # Единственная ловушка на весь прогон: ставится один раз, снимается только после
 # прошедшей проверки. Внутри обработчика сигналы глушатся, повторный вход невозможен.
-# До flip хаба: только рестарт воркера (хаб и база нетронуты — пара заведомо совместимая).
-# С flip хаба: остановить воркер и только доложить (см. report_and_stop).
+# Решение принимается по записанным фактам, а не по имени фазы:
+# - flip хаба не начинался: восстановление до flip (рестарт воркера на прежнем
+#   релизе, если его останавливали; иначе восстанавливать нечего);
+# - flip начат, ссылка не прочитана назад: чтение под host lock решает;
+# - хаб переключён, новый воркер не доказан живым: остановить воркер и доложить;
+# - новый воркер доказан живым: доложить, ничего не гасить.
 PHASE="early"
 WORKER_WAS_ACTIVE=0
+VZDUMP_DONE=0
+WORKER_STOP_ISSUED=0
+WORKER_STOPPED=0
+DUMP_VERIFIED=0
+HUB_FLIP_STARTED=0
+HUB_FLIPPED=0
 WORKER_PROVEN=0
+WORKER_DOWNTIME=""
+HUB_INTERRUPTION=""
+VZ_ARCHIVE=""
 DONE=0
 ROLLING_BACK=0
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DUMP="canterlot-pre-${SHA}-${RUN_TS}.dump"
 if systemctl --user is-active --quiet "${WORKER_UNIT}"; then WORKER_WAS_ACTIVE=1; fi
+
+yn() { if [ "$1" = "1" ]; then printf yes; else printf no; fi; }
+facts_line() {
+    printf 'vzdump done=%s, worker stopped (verified)=%s, dump verified=%s, hub flip started=%s, hub link read back=%s, new worker live=%s' \
+        "$(yn "${VZDUMP_DONE}")" "$(yn "${WORKER_STOPPED}")" "$(yn "${DUMP_VERIFIED}")" \
+        "$(yn "${HUB_FLIP_STARTED}")" "$(yn "${HUB_FLIPPED}")" "$(yn "${WORKER_PROVEN}")"
+}
+
+# Управляющий воркер до стопа: ровно процесс MainPID юнита и ничего больше
+# (find_control_worker сам по себе не ослабляется). Юнит не активен — никого.
+control_worker_exact() {
+    local label="$1" main_pid found=""
+    main_pid="$(unit_main_pid)" || main_pid=""
+    if found="$(find_control_worker)"; then
+        case "${found}" in
+            *"; worker process "*)
+                log "control-worker scan ${label} matched more than the unit MainPID ${main_pid:-none}: ${found}"
+                return 1 ;;
+        esac
+        if [ -n "${main_pid}" ] && [ "${main_pid}" != "0" ] && [[ "${found}" == "worker process ${main_pid} "* ]]; then
+            log "control-worker scan ${label}: exactly the unit process ${main_pid}"
+            return 0
+        fi
+        log "control-worker scan ${label} matched something other than the unit MainPID ${main_pid:-none}: ${found}"
+        return 1
+    fi
+    if [ -n "${main_pid}" ] && [ "${main_pid}" != "0" ]; then
+        log "control-worker scan ${label} did not see the unit process ${main_pid}"
+        return 1
+    fi
+    log "control-worker scan ${label}: no control worker runs (unit not active)"
+    return 0
+}
+
+# Инвентарь сессий после vzdump: каждый записанный процесс жив с тем же тиком, и
+# ни одна сессия не меняет состояние (строка created/starting/stopping/owner_lost
+# при живом супервизоре после ожидания). Новый супервизор без строки — к сведению,
+# как и перед стопом раньше.
+inventory_recheck() {
+    local label="$1" extra_id extra_state bad=0
+    if ! snapshot_drift "${STATE_FILE}" "${label}"; then
+        log "a recorded session process disappeared or changed its start tick ${label}"
+        return 1
+    fi
+    log "recorded session PIDs and ticks intact ${label} (new children allowed)"
+    settle_supervisor_rows "${WORKER_DATA}/executions" || { log "cannot reconcile supervisors with the hub ${label}"; return 1; }
+    while read -r extra_id extra_state; do
+        [ -n "${extra_id:-}" ] || continue
+        if is_transient_exec_state "${extra_state}"; then
+            log "session ${extra_id} is ${extra_state} ${label}: a session is changing state"
+            bad=1
+        else
+            log "supervisor ${extra_id} (hub row: ${extra_state}) appeared after the preflight: not in the tick snapshot (allowed)"
+        fi
+    done <<<"${SETTLED_EXTRA}"
+    return "${bad}"
+}
 
 report_and_stop() {
     # Точное состояние на момент остановки + ручные команды (таблица Task 12).
@@ -507,6 +584,7 @@ report_and_stop() {
     worker_unres_cmd="$(locked_cmd_text "${WORKER_BASE}/.deploy.lock" "${UNRESERVE_SCRIPT}" "${WORKER_BASE}" "${SHA}" "${PREV_WORKER_SHA}")"
     cat <<EOF
 STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touched.
+  facts: $(facts_line)
   live state:
     hub current        = ${hub_link} (was ${PREV_HUB_SHA} before this run)
     hub readyz         = ${hub_readyz}
@@ -515,7 +593,8 @@ STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touche
     web build          = ${web_link} (was releases/${PREV_WEB_SHA})
     live executions    = ${live_n} (sessions keep running in their supervisors and buffer journals)
     speech unit        = ${SPEECH_UNIT}: ${speech_now} (dictation only, never blocks recovery)
-    this run's dump   = ${HUB_BACKUP_DIR}/${RUN_DUMP} (verified readable before the hub flip: yes)
+    this run's dump   = ${HUB_BACKUP_DIR}/${RUN_DUMP} (quiesced after the worker stop, verified readable before the hub flip: $(yn "${DUMP_VERIFIED}"))
+    this run's vzdump = notes pre-${SHA}-${RUN_TS}${VZ_ARCHIVE:+, archive ${VZ_ARCHIVE}} (whole CT, taken earlier, while the worker still ran)
   manual recovery (Task 12 rollback table — run by hand, in this order).
   Every flip below takes the same host lock as cutover and retention, and re-checks
   the target release inside it:
@@ -536,12 +615,15 @@ STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touche
        otherwise stop and disable it so it is not left failing (no-op when the unit is not installed):
          ${speech_back_cmd}
     2. hub broken after a new migration (e.g. 0088_provider_status, 0091_dictation_terms): full DB restore
-       from this run's dump (manual only; rollback-db.sh also brings ${SPEECH_UNIT} in line with the release):
+       from this run's verified quiesced dump (manual only; rollback-db.sh also brings ${SPEECH_UNIT} in line with the release).
+       The vzdump above is a separate, earlier whole-CT restore point: restoring it loses what the worker
+       wrote between the vzdump and its stop, so it is the fallback when the dump itself is unusable:
          scripts/deploy/rollback-db.sh '${HUB_BACKUP_DIR}/${RUN_DUMP}' --to ${PREV_HUB_SHA}
          # it refuses while the worker is active, stops the hub, runs dropdb + createdb -O canterlot
          # + pg_restore --exit-on-error, starts the old hub and checks readyz loudly; on a failed
          # restore it starts nothing. Never start the worker on a restored DB by hand without review.
-    3. PWA broken: flip build back, restore env, one recreate:
+    3. PWA broken (the PWA step runs after the new worker is live; the worker is never stopped for it):
+       flip build back, restore env, one recreate:
          ${web_back_cmd}
     4. worker broken or stopped: flip ${WORKER_CURRENT} back, then start (never below a live supervisor release);
        a worker release before the delegate MCP allowlist refuses [execution].delegate_mcp_servers in
@@ -556,7 +638,13 @@ EOF
 }
 
 recover_before_hub_flip() {
-    # Хаб и база не тронуты: поднимаем воркер на его прежнем релизе.
+    # Хаб и база не тронуты. Воркер не останавливали — восстанавливать нечего;
+    # останавливали — поднимаем его на прежнем релизе.
+    if [ "${WORKER_STOP_ISSUED}" = "0" ]; then
+        log "STOP before hub flip (phase ${PHASE}): nothing was stopped or flipped (vzdump done: $(yn "${VZDUMP_DONE}")); worker ${WORKER_UNIT}, hub and DB untouched"
+        release_reservations
+        exit 1
+    fi
     log "STOP before hub flip (phase ${PHASE}): hub and DB untouched, restarting worker"
     PREV_LINK="$(readlink "${WORKER_CURRENT}" 2>/dev/null | sed 's|.*/||')"
     if [ "${PREV_LINK}" != "${PREV_WORKER_SHA}" ]; then
@@ -624,41 +712,44 @@ on_end() {
         rm -f "${REHEARSE_COUNT_FILE}"  # lint: local-temp
         exit 1
     fi
-    case "${PHASE}" in
-        early|worker-stopping|worker-stopped|backing-up|dumping|dump-verifying|backed-up)
+    log "facts at the stop: $(facts_line)"
+    if [ "${HUB_FLIP_STARTED}" = "0" ]; then
+        recover_before_hub_flip
+    elif [ "${HUB_FLIPPED}" = "0" ]; then
+        # Проверяем фактическое состояние current, а не флаг: mv мог успеть или
+        # не успеть. Точно прежний -> безопасное допеределочное восстановление;
+        # изменился или неизвестен -> STOP-and-report.
+        # Под тем же host lock, что и flip: если ssh оборвался, а удалённый flip ещё держит
+        # lock, чтение дождётся его конца и увидит настоящий current. Не удалось
+        # прочитать (транспорт, таймаут lock) — состояние неизвестно, то есть post-flip.
+        HUB_NOW_ABS="$(hub_locked 'readlink -m "$1"' "${HUB_CURRENT}" 2>/dev/null)" || HUB_NOW_ABS="UNKNOWN" # lint: read-only (lock-wait readback)
+        if [ -n "${PREV_HUB_SHA}" ] && [ "${HUB_NOW_ABS}" = "${HUB_RELEASES}/${PREV_HUB_SHA}" ]; then
+            log "hub flip failed but current is provably unchanged (${HUB_NOW_ABS}): pre-flip recovery"
+            run_write "remove leftover hub current.new" hub_locked 'rm -f "$1"' "${HUB_BASE}/current.new" || log "could not remove leftover current.new: needs the owner loudly"
+            HUB_FLIP_STARTED=0
             recover_before_hub_flip
-            ;;
-        hub-flipping)
-            # Проверяем фактическое состояние current, а не флаг фазы: mv мог
-            # успеть/не успеть. Точно прежний -> безопасное допеределочное
-            # восстановление; изменился или неизвестен -> STOP-and-report.
-            # Под тем же host lock, что и flip: если ssh оборвался, а удалённый flip ещё держит
-            # lock, чтение дождётся его конца и увидит настоящий current. Не удалось
-            # прочитать (транспорт, таймаут lock) — состояние неизвестно, то есть post-flip.
-            HUB_NOW_ABS="$(hub_locked 'readlink -m "$1"' "${HUB_CURRENT}" 2>/dev/null)" || HUB_NOW_ABS="UNKNOWN" # lint: read-only (lock-wait readback)
-            if [ -n "${PREV_HUB_SHA}" ] && [ "${HUB_NOW_ABS}" = "${HUB_RELEASES}/${PREV_HUB_SHA}" ]; then
-                log "hub flip failed but current is provably unchanged (${HUB_NOW_ABS}): pre-flip recovery"
-                run_write "remove leftover hub current.new" hub_locked 'rm -f "$1"' "${HUB_BASE}/current.new" || log "could not remove leftover current.new: needs the owner loudly"
-                recover_before_hub_flip
-            else
-                log "hub flip failed with current ${HUB_NOW_ABS} (was releases/${PREV_HUB_SHA}): treating as post-flip"
-                post_flip_stop
-            fi
-            ;;
-        *)
-            # Воркер уже доказанно жив на новом релизе (state="live", exe из
-            # релиза, NRestarts=0, инвариант сессий): гасить его нельзя — на этой
-            # же машине живут оркестратор и отчёты, остановка глушит их все
-            # (инцидент после 1.19.1: отчёт некому было доставить 25 минут).
-            # Хаб, PWA и воркер остаются работать, retention пропускается.
-            if [ "${WORKER_PROVEN}" = "1" ]; then
-                log "failure after the worker was verified live on ${SHA}: leaving hub, PWA and worker running (retention skipped)"
-                report_and_stop
-                exit 1
-            fi
+        else
+            log "hub flip failed with current ${HUB_NOW_ABS} (was releases/${PREV_HUB_SHA}): treating as post-flip"
+            HUB_FLIPPED=1
             post_flip_stop
-            ;;
-    esac
+        fi
+    elif [ "${WORKER_PROVEN}" = "1" ]; then
+        # Воркер уже доказанно жив на новом релизе (state="live", exe из
+        # релиза, NRestarts=0, инвариант сессий): гасить его нельзя — на этой
+        # же машине живут оркестратор и отчёты, остановка глушит их все
+        # (инцидент после 1.19.1: отчёт некому было доставить 25 минут).
+        # Хаб, воркер и PWA остаются как есть, retention пропускается; сбой или
+        # сигнал в шаге PWA тоже сюда: PWA идёт после доказанного воркера.
+        if [ "${PHASE}" = "pwa" ]; then
+            log "stopped during the PWA step after the worker was verified live on ${SHA}: hub and worker keep running; the PWA state is below (row 3 restores the previous build); retention skipped"
+        else
+            log "failure after the worker was verified live on ${SHA}: leaving hub, PWA and worker running (retention skipped)"
+        fi
+        report_and_stop
+        exit 1
+    else
+        post_flip_stop
+    fi
 }
 trap on_end EXIT INT TERM HUP
 # shellcheck disable=SC2317 # вызывается из функций выше и ниже
@@ -718,24 +809,45 @@ trap on_end EXIT INT TERM HUP
 cutover_hard() { log "HARD-FAIL: $*"; exit 1; }
 
 log "deployed hub release before cutover: ${PREV_HUB_SHA}"
+log "order: vzdump (everything runs) -> read gates + session inventory again -> worker stop -> quiesced pg_dump + verify -> hub flip + restart -> worker flip + start + live -> PWA flip + Caddy recreate -> speech, chunk merge, maintenance, verify x2, geoip, retention"
 
-# Ворота непосредственно перед стопом воркера.
-read_gates || cutover_hard "read gates failed"
-[ "$(ssh_hub "readlink '${HUB_CURRENT}'" | sed 's|.*/||')" = "${PREV_HUB_SHA}" ] || cutover_hard "hub current moved unexpectedly"
-# Инвентарь сопровождения заново, прямо перед стопом: каждый записанный процесс
-# обязан быть жив с тем же тиком; новые процессы (в том числе новые супервизоры
-# параллельных сессий) допустимы и печатаются, но не сравниваются как множество.
-if [ -f "${STATE_FILE}" ]; then
-    snapshot_drift "${STATE_FILE}" "before worker stop" \
-        || cutover_hard "a recorded session process disappeared or changed its start tick before the stop"
-    log "recorded session PIDs and ticks intact before the stop (new children allowed)"
+# 1. vzdump снимается, пока всё работает: снимок CT атомарен и не требует тишины
+# писателей. Несущая точка восстановления — проверенный pg_dump после стопа воркера.
+control_worker_exact "before vzdump" || cutover_hard "control-worker scan before vzdump: refusing to start the cutover"
+log "fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${SHA}-${RUN_TS})"
+PHASE="backing-up"
+VZ_OUT="$(run_write "vzdump" ssh_pmx "vzdump ${HUB_CTID} --mode snapshot --storage ${PBS_STORAGE} --notes-template 'pre-${SHA}-${RUN_TS}' 2>&1")" \
+    || { printf '%s\n' "${VZ_OUT}" | tail -5 >&2; cutover_hard "vzdump failed"; }
+if is_rehearse; then
+    log "rehearse: vzdump not run"
+else
+    case "${VZ_OUT}" in
+        *"Backup job finished successfully"*) ;;
+        *) printf '%s\n' "${VZ_OUT}" | tail -5 >&2; cutover_hard "vzdump did not report 'Backup job finished successfully'" ;;
+    esac
+    # Имя архива: формулировка PBS менялась (урок 1.16.1-1.18.1), поэтому запасной
+    # разбор по форме id ct/<ctid>/<время>Z.
+    VZ_ARCHIVE="$(printf '%s\n' "${VZ_OUT}" | grep -oE "creating (vzdump archive|Proxmox Backup Server archive) '[^']+'" | sed "s/.*'\(.*\)'/\1/" | tail -1 || true)"
+    [ -n "${VZ_ARCHIVE}" ] || VZ_ARCHIVE="$(printf '%s\n' "${VZ_OUT}" | grep -oE "ct/${HUB_CTID}/[0-9T:.-]+Z" | tail -1 || true)"
+    log "vzdump done: archive ${VZ_ARCHIVE:-unparsed (see the vzdump output)}, notes pre-${SHA}-${RUN_TS}"
 fi
+VZDUMP_DONE=1
 
+# 2. vzdump идёт до минуты: ворота чтения и инвентарь сессий заново, прямо перед стопом.
+PHASE="regating"
+log "re-checking read gates and the session inventory after vzdump"
+read_gates || cutover_hard "read gates failed after vzdump"
+[ "$(ssh_hub "readlink '${HUB_CURRENT}'" | sed 's|.*/||')" = "${PREV_HUB_SHA}" ] || cutover_hard "hub current moved unexpectedly"
+inventory_recheck "after vzdump" || cutover_hard "the session inventory changed after vzdump: refusing before the worker stop"
+control_worker_exact "before the worker stop" || cutover_hard "control-worker scan before the worker stop"
+
+# 3. Стоп воркера: писатели базы затихают для pg_dump.
 log "stopping worker ${WORKER_UNIT} (sessions survive in supervisors)"
 LIVE_MAIN_PID="$(unit_main_pid)"
 WORKER_STOP_EPOCH="$(date -u +%s)"
 WORKER_STOP_ISO="$(date -u '+%Y-%m-%d %H:%M:%S')"
 PHASE="worker-stopping"
+WORKER_STOP_ISSUED=1
 run_write "stop worker" systemctl --user stop "${WORKER_UNIT}"
 PHASE="worker-stopped"
 # Остановка подтверждается чтением (а не паузой): юнит inactive и MainPID 0.
@@ -778,24 +890,10 @@ fi
 snapshot_drift "${STATE_FILE}" "after worker stop" \
     || cutover_hard "a recorded session process disappeared or changed its start tick after the worker stop"
 log "recorded session PIDs and ticks unchanged after worker stop (new transient children allowed)"
+WORKER_STOPPED=1
 
-log "fresh vzdump and pg_dump under a unique name"
-PHASE="backing-up"
-VZ_OUT="$(run_write "vzdump" ssh_pmx "vzdump ${HUB_CTID} --mode snapshot --storage ${PBS_STORAGE} --notes-template 'pre-${SHA}-${RUN_TS}' 2>&1")" \
-    || { printf '%s\n' "${VZ_OUT}" | tail -5 >&2; cutover_hard "vzdump failed"; }
-if is_rehearse; then
-    log "rehearse: vzdump not run"
-else
-    case "${VZ_OUT}" in
-        *"Backup job finished successfully"*) ;;
-        *) printf '%s\n' "${VZ_OUT}" | tail -5 >&2; cutover_hard "vzdump did not report 'Backup job finished successfully'" ;;
-    esac
-    # Имя архива: формулировка PBS менялась (урок 1.16.1-1.18.1), поэтому запасной
-    # разбор по форме id ct/<ctid>/<время>Z.
-    VZ_ARCHIVE="$(printf '%s\n' "${VZ_OUT}" | grep -oE "creating (vzdump archive|Proxmox Backup Server archive) '[^']+'" | sed "s/.*'\(.*\)'/\1/" | tail -1 || true)"
-    [ -n "${VZ_ARCHIVE}" ] || VZ_ARCHIVE="$(printf '%s\n' "${VZ_OUT}" | grep -oE "ct/${HUB_CTID}/[0-9T:.-]+Z" | tail -1 || true)"
-    log "vzdump done: archive ${VZ_ARCHIVE:-unparsed (see the vzdump output)}, notes pre-${SHA}-${RUN_TS}"
-fi
+
+# 4. Дамп при остановленном воркере и его полная проверка до flip хаба.
 PHASE="dumping"
 run_write "pg_dump" ssh_hub "install -d -m 0700 -o postgres '${HUB_BACKUP_DIR}' && runuser -u postgres -- pg_dump -Fc -Z zstd:3 -f '${HUB_BACKUP_DIR}/${RUN_DUMP}' '${HUB_PG_DB}'" \
     || cutover_hard "pg_dump failed"
@@ -826,21 +924,26 @@ else
     cutover_hard "dump verification failed for ${DUMP_TO_CHECK}"
 fi
 PHASE="backed-up"
-log "restore points: vzdump notes pre-${SHA}-${RUN_TS}, pg_dump ${RUN_DUMP} (verified)"
+DUMP_VERIFIED=1
+log "restore points: vzdump notes pre-${SHA}-${RUN_TS} (taken before the worker stop), pg_dump ${RUN_DUMP} (quiesced, verified)"
 
+# 5. Хаб.
 # Хаб: flip с абсолютным cd (урок: flip в /root), проверка ссылки, один рестарт.
 RESTART_TS="$(ssh_hub "date -u '+%Y-%m-%d %H:%M:%S'")"
 # Значение пришло с хоста и попадёт в команду journalctl: только формат даты.
 [[ "${RESTART_TS}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || cutover_hard "unexpected hub timestamp: '${RESTART_TS}'"
 PHASE="hub-flipping"
+HUB_FLIP_STARTED=1
 HUB_LINK_AFTER="$(run_write "hub flip" hub_locked "${HUB_FLIP_SCRIPT}" "${HUB_BASE}" "${SHA}" "${HUB_CURRENT}")"
 # Отдельное чтение ссылки после flip: ровно releases/<sha> и абсолютная сверка.
 HUB_LINK_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'")" || cutover_hard "cannot read hub current after the flip"
 [ "${HUB_LINK_NOW}" = "releases/${HUB_EXPECT}" ] || cutover_hard "hub current did not move to ${HUB_EXPECT} (now ${HUB_LINK_NOW}, flip printed ${HUB_LINK_AFTER:-nothing})"
 [ "$(ssh_hub "readlink -m '${HUB_CURRENT}'")" = "${HUB_RELEASES}/${HUB_EXPECT}" ] \
     || cutover_hard "hub current resolves elsewhere"
+HUB_FLIPPED=1
 PHASE="hub-flipped"
 PHASE="hub-restarting"
+HUB_RESTART_EPOCH="$(date -u +%s)"
 run_write "hub restart" hub_locked 'systemctl restart "$1"' "${HUB_UNIT}" || cutover_hard "hub restart failed"
 log "hub restarted once; waiting for readyz"
 READYZ_OK=0
@@ -853,6 +956,13 @@ for _ in $(seq 1 "${READYZ_POLLS:-30}"); do
     sleep 1
 done
 [ "${READYZ_OK}" = "1" ] || cutover_hard "hub readyz failed after restart"
+HUB_INTERRUPTION=$(( $(date -u +%s) - HUB_RESTART_EPOCH ))
+if is_rehearse; then
+    log "rehearse: readyz ok without a restart; no hub interruption"
+    HUB_INTERRUPTION=0
+else
+    log "hub interruption: ${HUB_INTERRUPTION} s (restart -> readyz ok)"
+fi
 MIGR_MAX="$(hub_psql "select coalesce(max(version),0) from _sqlx_migrations where success")"
 [ "${MIGR_MAX}" = "${MIGR_EXPECT}" ] || cutover_hard "migrations max ${MIGR_MAX}, expected ${MIGR_EXPECT}"
 [ "$(hub_psql "select count(*) from _sqlx_migrations where not success")" = "0" ] || cutover_hard "failed migrations present"
@@ -881,8 +991,75 @@ HUB_NRESTARTS="$(ssh_hub "systemctl show '${HUB_UNIT}' -p NRestarts --value" 2>/
 PHASE="hub-verified"
 log "hub on ${HUB_EXPECT}: readyz ok, migrations ${MIGR_MAX}, process ${HUB_PID} from the release, NRestarts=0"
 
-# PWA: всё мягкое (урок: PWA никогда не откатывает хаб). Ловушка остаётся взведённой:
-# мягкие ошибки вызывают только soft(), а не выход, так что on_end не срабатывает.
+# 6. Воркер.
+# Воркер: ворота перед стартом жёсткие — новый воркер стартует только
+# против живого, полностью смигрированного хаба (пара совместима по построению).
+worker_start_gates() {
+    [ "$(ssh_hub "curl -fsS -m 5 'http://${HUB_IP}:8080/readyz'" 2>/dev/null)" = '{"status":"ok"}' ] \
+        || cutover_hard "hub readyz not ok before worker start"
+    [ "$(hub_psql "select coalesce(max(version),0) from _sqlx_migrations where success")" = "${MIGR_EXPECT}" ] \
+        || cutover_hard "hub migrations not at ${MIGR_EXPECT} before worker start"
+    [ "$(hub_psql "select count(*) from _sqlx_migrations where not success")" = "0" ] \
+        || cutover_hard "failed hub migrations before worker start"
+}
+worker_start_gates
+PHASE="worker-flipping"
+run_write "worker flip" worker_locked 'cd "$1" && ln -s "releases/$2" current.new && mv -T current.new current' \
+    "${WORKER_BASE}" "${SHA}" || cutover_hard "worker current did not move"
+link_points_to "${WORKER_CURRENT}" "${WORKER_BASE}" "releases/${WORKER_EXPECT}" \
+    || cutover_hard "worker current did not move"
+PHASE="worker-starting"
+run_write "worker start" worker_locked 'systemctl --user start "$1"' "${WORKER_UNIT}" || cutover_hard "worker start failed"
+# Процесс воркера: защищённое ожидание MainPID и читаемого exe (урок 1.18.1:
+# пустой MainPID, MainPID=0 и ENOENT на переходе exec роняли set -e молча).
+if ! wait_worker_exe "${START_WAIT_POLLS:-60}"; then
+    cutover_hard "worker did not get a MainPID with a readable exe after start (last MainPID '${WAIT_PID:-none}')"
+fi
+case "${WAIT_EXE}" in
+    "${WORKER_RELEASES}/${WORKER_EXPECT}/"*) log "worker process ${WAIT_PID} from release ${WORKER_EXPECT}" ;;
+    *) cutover_hard "worker process not from ${WORKER_EXPECT}: ${WAIT_EXE}" ;;
+esac
+if is_rehearse; then
+    # То же ожидание против настоящего юнита, с подмешанными состояниями старта.
+    rehearse_start_wait_scenarios
+fi
+# Ждём именно state="live" из журнала юнита, как это делает дежурный лог.
+# Голое state="live" (метка времени — префикс journald), без time="…" после него.
+# В репетиции окно — с момента, когда живой юнит последний раз стал активным.
+if is_rehearse; then
+    LIVE_SINCE_TS="$(systemctl --user show "${WORKER_UNIT}" -p ActiveEnterTimestamp --value 2>/dev/null)" || LIVE_SINCE_TS=""
+    LIVE_SINCE_EPOCH="$(date -u -d "${LIVE_SINCE_TS}" +%s 2>/dev/null)" || LIVE_SINCE_EPOCH="${WORKER_STOP_EPOCH}"
+else
+    LIVE_SINCE_EPOCH="${WORKER_STOP_EPOCH}"
+fi
+if ! LAST_STATE="$(live_from_journal "@$((LIVE_SINCE_EPOCH - 1))" "${WORKER_LIVE_WAIT:-90}")"; then
+    cutover_hard "worker did not reach state=\"live\" after start (last state: ${LAST_STATE:-none})"
+fi
+WORKER_LIVE_EPOCH="$(date -u +%s)"
+WORKER_DOWNTIME=$((WORKER_LIVE_EPOCH - WORKER_STOP_EPOCH))
+if is_rehearse; then
+    log "rehearse: worker journal parse found state=\"live\" of the running unit (since $(date -u -d "@${LIVE_SINCE_EPOCH}" '+%H:%M:%S') UTC)"
+    log "rehearse: no down time (nothing stopped or restarted)"
+else
+    log "worker state=\"live\" after start; measured down time: ${WORKER_DOWNTIME} s (stop ${WORKER_STOP_ISO} UTC)"
+    if [ "${WORKER_DOWNTIME}" -gt 180 ]; then
+        soft "worker down time ${WORKER_DOWNTIME} s exceeds the 3-minute outage grace; machine_outages will gain a row"
+    fi
+    log "downtime: worker ${WORKER_DOWNTIME} s (stop -> state=live), hub ${HUB_INTERRUPTION} s (restart -> readyz ok)"
+fi
+systemctl --user is-active --quiet "${WORKER_UNIT}" || cutover_hard "worker not active after start"
+WORKER_NRESTARTS="$(systemctl --user show "${WORKER_UNIT}" -p NRestarts --value 2>/dev/null)" || WORKER_NRESTARTS=""
+[ "${WORKER_NRESTARTS}" = "0" ] || cutover_hard "worker NRestarts is '${WORKER_NRESTARTS}', expected 0"
+PHASE="worker-started"
+# Записанные процессы сессий живы с теми же тиками; новые дети допустимы.
+snapshot_drift "${STATE_FILE}" "after worker start" \
+    || cutover_hard "a recorded session process disappeared or changed its start tick after the worker start"
+WORKER_PROVEN=1
+log "recorded session PIDs and ticks unchanged after worker start (new transient children allowed)"
+
+# 7. PWA — после доказанно живого воркера: он не ждёт flip билда и recreate Caddy.
+# Всё мягкое (урок: PWA никогда не откатывает хаб и не трогает воркер). Ловушка
+# остаётся взведённой: мягкие ошибки вызывают только soft(), а не выход.
 PHASE="pwa"
 log "PWA step (all failures soft)"
 PWA_FAIL=""
@@ -976,69 +1153,6 @@ else
     log "PWA on ${WEB_EXPECT}: build flipped, one Caddy recreate, version.json and CSP ok"
 fi
 PHASE="pwa-done"
-
-# Воркер: ворота перед стартом жёсткие — новый воркер стартует только
-# против живого, полностью смигрированного хаба (пара совместима по построению).
-worker_start_gates() {
-    [ "$(ssh_hub "curl -fsS -m 5 'http://${HUB_IP}:8080/readyz'" 2>/dev/null)" = '{"status":"ok"}' ] \
-        || cutover_hard "hub readyz not ok before worker start"
-    [ "$(hub_psql "select coalesce(max(version),0) from _sqlx_migrations where success")" = "${MIGR_EXPECT}" ] \
-        || cutover_hard "hub migrations not at ${MIGR_EXPECT} before worker start"
-    [ "$(hub_psql "select count(*) from _sqlx_migrations where not success")" = "0" ] \
-        || cutover_hard "failed hub migrations before worker start"
-}
-worker_start_gates
-PHASE="worker-flipping"
-run_write "worker flip" worker_locked 'cd "$1" && ln -s "releases/$2" current.new && mv -T current.new current' \
-    "${WORKER_BASE}" "${SHA}" || cutover_hard "worker current did not move"
-link_points_to "${WORKER_CURRENT}" "${WORKER_BASE}" "releases/${WORKER_EXPECT}" \
-    || cutover_hard "worker current did not move"
-PHASE="worker-starting"
-run_write "worker start" worker_locked 'systemctl --user start "$1"' "${WORKER_UNIT}" || cutover_hard "worker start failed"
-# Процесс воркера: защищённое ожидание MainPID и читаемого exe (урок 1.18.1:
-# пустой MainPID, MainPID=0 и ENOENT на переходе exec роняли set -e молча).
-if ! wait_worker_exe "${START_WAIT_POLLS:-60}"; then
-    cutover_hard "worker did not get a MainPID with a readable exe after start (last MainPID '${WAIT_PID:-none}')"
-fi
-case "${WAIT_EXE}" in
-    "${WORKER_RELEASES}/${WORKER_EXPECT}/"*) log "worker process ${WAIT_PID} from release ${WORKER_EXPECT}" ;;
-    *) cutover_hard "worker process not from ${WORKER_EXPECT}: ${WAIT_EXE}" ;;
-esac
-if is_rehearse; then
-    # То же ожидание против настоящего юнита, с подмешанными состояниями старта.
-    rehearse_start_wait_scenarios
-fi
-# Ждём именно state="live" из журнала юнита, как это делает дежурный лог.
-# Голое state="live" (метка времени — префикс journald), без time="…" после него.
-# В репетиции окно — с момента, когда живой юнит последний раз стал активным.
-if is_rehearse; then
-    LIVE_SINCE_TS="$(systemctl --user show "${WORKER_UNIT}" -p ActiveEnterTimestamp --value 2>/dev/null)" || LIVE_SINCE_TS=""
-    LIVE_SINCE_EPOCH="$(date -u -d "${LIVE_SINCE_TS}" +%s 2>/dev/null)" || LIVE_SINCE_EPOCH="${WORKER_STOP_EPOCH}"
-else
-    LIVE_SINCE_EPOCH="${WORKER_STOP_EPOCH}"
-fi
-if ! LAST_STATE="$(live_from_journal "@$((LIVE_SINCE_EPOCH - 1))" "${WORKER_LIVE_WAIT:-90}")"; then
-    cutover_hard "worker did not reach state=\"live\" after start (last state: ${LAST_STATE:-none})"
-fi
-WORKER_LIVE_EPOCH="$(date -u +%s)"
-WORKER_DOWNTIME=$((WORKER_LIVE_EPOCH - WORKER_STOP_EPOCH))
-if is_rehearse; then
-    log "rehearse: worker journal parse found state=\"live\" of the running unit (since $(date -u -d "@${LIVE_SINCE_EPOCH}" '+%H:%M:%S') UTC); no down time"
-else
-    log "worker state=\"live\" after start; measured down time: ${WORKER_DOWNTIME} s (stop ${WORKER_STOP_ISO} UTC)"
-    if [ "${WORKER_DOWNTIME}" -gt 180 ]; then
-        soft "worker down time ${WORKER_DOWNTIME} s exceeds the 3-minute outage grace; machine_outages will gain a row"
-    fi
-fi
-systemctl --user is-active --quiet "${WORKER_UNIT}" || cutover_hard "worker not active after start"
-WORKER_NRESTARTS="$(systemctl --user show "${WORKER_UNIT}" -p NRestarts --value 2>/dev/null)" || WORKER_NRESTARTS=""
-[ "${WORKER_NRESTARTS}" = "0" ] || cutover_hard "worker NRestarts is '${WORKER_NRESTARTS}', expected 0"
-PHASE="worker-started"
-# Записанные процессы сессий живы с теми же тиками; новые дети допустимы.
-snapshot_drift "${STATE_FILE}" "after worker start" \
-    || cutover_hard "a recorded session process disappeared or changed its start tick after the worker start"
-WORKER_PROVEN=1
-log "recorded session PIDs and ticks unchanged after worker start (new transient children allowed)"
 
 # Диктовка: служба живёт из current хаба, поэтому после flip её перезапускают.
 # Шаг стоит после доказанного старта воркера, чтобы ожидание рестарта и health не
@@ -1140,7 +1254,7 @@ if is_rehearse; then
     log "rehearsal PASS: the whole write path ran against the live system; ${WRITES_PRINTED} writes printed as WOULD-WRITE, none executed"
     exit 0
 fi
-log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s, soft failures ${SOFT_FAILURES}, speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
+log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s (worker stop -> live), hub interruption ${HUB_INTERRUPTION}s, soft failures ${SOFT_FAILURES}, speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
 owner_checklist
 cat <<EOF
 update note: the worker has connected to the new hub, so only forward fixes remain;
@@ -1150,7 +1264,7 @@ and [http.ws].session_check_interval from hub.toml, cancel pending sign-in pushe
 worker back below this release: remove [execution].delegate_mcp_servers from worker.toml first.
 hub back below the dictation release: remove [dictation] from hub.toml first; after any hub flip back restart
 ${SPEECH_UNIT}, or stop and disable it when that release has no bin/canterlot-speech (rollback-db.sh does it).
-restore points: ${RUN_DUMP} in ${HUB_BACKUP_DIR}, vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS}.
+restore points: ${RUN_DUMP} in ${HUB_BACKUP_DIR} (quiesced, verified: the one for a DB restore), vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS} (earlier, taken while the worker ran).
 PWA alone: build to releases/${PREV_WEB_SHA}, ${WEB_ENV}.${PREV_WEB_SHA}, one recreate.
 worker alone: flip current to ${PREV_WORKER_SHA}, restart (never below a live supervisor release).
 
@@ -1159,11 +1273,11 @@ worker alone: flip current to ${PREV_WORKER_SHA}, restart (never below a live su
 
 Release: \`${SHA}\` (\`<full sha>\`, tag \`vX.Y.Z\`), built by \`scripts/build-release.sh\`; dist \`${DIST}\`. Procedure: \`scripts/deploy/cutover.sh\` (rehearsal/dry-run token, then --execute).
 
-**Result: hub, PWA and worker on \`${SHA}\` (web ${WEB_SHA_EFF}), migrations ${MIGR_MAX} (0 failed), worker \`live\` after ${WORKER_DOWNTIME} s down (stop ${WORKER_STOP_ISO} UTC); recorded session PIDs/ticks intact; no automatic DB restore; capabilities and harnesses as declared by the release EXPECT; CSP equal, precompressed encodings observed, old chunks merged, maintenance clean, soft failures ${SOFT_FAILURES}; speech: ${SPEECH_SUMMARY}.**
+**Result: hub, PWA and worker on \`${SHA}\` (web ${WEB_SHA_EFF}), migrations ${MIGR_MAX} (0 failed), worker \`live\` after ${WORKER_DOWNTIME} s down (stop ${WORKER_STOP_ISO} UTC), hub interruption ${HUB_INTERRUPTION} s; recorded session PIDs/ticks intact; no automatic DB restore; capabilities and harnesses as declared by the release EXPECT; CSP equal, precompressed encodings observed, old chunks merged, maintenance clean, soft failures ${SOFT_FAILURES}; speech: ${SPEECH_SUMMARY}.**
 ### Steps
 1. Dist: \`sha256sum -c\` OK; \`RELEASE source=\`; EXPECT; versions; glibc; openapi.
 2. Rehearsal and/or dry-run: plan ${PLAN_HASH}, token issued <time>, logs <paths>.
-3. Cutover: stop -> vzdump ${VZ_ARCHIVE:-<archive>} -> pg_dump ${RUN_DUMP} + full read -> hub flip/restart -> PWA flip + one recreate -> worker flip/start; down ${WORKER_DOWNTIME} s.
+3. Cutover: vzdump ${VZ_ARCHIVE:-<archive>} -> gates + inventory again -> stop -> pg_dump ${RUN_DUMP} + full read -> hub flip/restart (${HUB_INTERRUPTION} s) -> worker flip/start/live (down ${WORKER_DOWNTIME} s) -> PWA flip + one recreate.
 4. Chunk merge, maintenance, verification (two reads), retention: <paste the log lines>.
 ### Deviations
 - <none or describe>

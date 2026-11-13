@@ -154,6 +154,20 @@ restore_logged() {
         END { exit found ? 0 : 1 }
     ' "${FAKE_ROOT}/state/calls.log"
 }
+# Первые вхождения образцов (grep -F) идут в файле строго по порядку.
+in_order() {
+    local file="$1" prev=0 pat n
+    shift
+    for pat in "$@"; do
+        n="$(grep -nF -- "${pat}" "${file}" | head -1 | cut -d: -f1)"
+        if [ -z "${n}" ] || [ "${n}" -le "${prev}" ]; then
+            printf 'out of order or missing: [%s] (line %s after %s)\n' "${pat}" "${n:-none}" "${prev}" >&2
+            return 1
+        fi
+        prev="${n}"
+    done
+}
+worker_stopped_ever() { grep -q 'stop canterlot-worker' "${FAKE_ROOT}/state/calls.log"; }
 pgdump_logged() { grep -q '^pg_dump ' "${FAKE_ROOT}/state/calls.log"; }
 compose_up_count() { grep -c "compose up -d caddy" "${FAKE_ROOT}/state/calls.log" || true; }
 # set -m: фоновые задания не игнорят INT (иначе trap cutover не сработает в harness).

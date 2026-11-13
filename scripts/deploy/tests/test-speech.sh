@@ -267,7 +267,7 @@ bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --dry-run --source "${REPO_ROOT}" -
 D="${FAKE_ROOT}/dry.log"
 assert_contains "${D}" "dry-run: speech: canterlot-speech installed and enabled, ${SPEECH_CONFIG} present, release ${SHA_NEW} has the binary; the real run restarts canterlot-speech after the worker is live (bounded to 30 s) and asks health (soft)" "dry-run names the speech action"
 assert_contains "${D}" "- speech: restart canterlot-speech (bounded to 30 s) + health, or stop and disable it" "NOT RUN list has the speech step"
-assert_contains "${D}" "4b speech: restart canterlot-speech (bounded to 30 s)" "plan has the speech step"
+assert_contains "${D}" "9 speech: restart canterlot-speech (bounded to 30 s)" "plan has the speech step"
 assert_eq "$(speech_restarts)" "0" "dry-run restarts nothing"
 if bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --rehearse --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" \
         --state "${FAKE_ROOT}/rehearse.state" >"${FAKE_ROOT}/rehearse.log" 2>&1; then

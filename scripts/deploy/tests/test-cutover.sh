@@ -188,8 +188,11 @@ hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 worker_is "${SHA_PREV}" && case_ok "worker still prev" || case_fail "worker moved"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
+# vzdump идёт до стопа: воркер не останавливался, восстанавливать нечего.
+worker_stopped_ever && case_fail "worker was stopped before/after a failed vzdump" || case_ok "worker never stopped (vzdump runs while everything runs)"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
-    && case_ok "worker restarted" || case_fail "worker not restarted"
+    && case_ok "worker still active" || case_fail "worker not active"
+assert_contains "${FAKE_ROOT}/cutover.log" "nothing was stopped or flipped" "nothing-to-recover path named"
 assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
@@ -379,6 +382,11 @@ worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
 web_is "${SHA_PREV}" && case_ok "web flipped back to prev" || case_fail "web not prev"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 assert_contains "${FAKE_ROOT}/cutover.log" "PWA failure (soft" "PWA soft failure recorded"
+in_order "${FAKE_ROOT}/cutover.log" 'worker state="live" after start' "PWA step (all failures soft" "PWA failure (soft" \
+    && case_ok "PWA step ran after the worker was live" || case_fail "PWA step not after the worker was live"
+assert_eq "$(grep -c 'stop canterlot-worker' "${FAKE_ROOT}/state/calls.log")" "1" "worker stopped exactly once (before the dump)"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker keeps running after the PWA failure" || case_fail "worker stopped by the PWA failure"
 assert_contains "${FAKE_ROOT}/cutover.log" "verify PASS" "verify passed after PWA fallback"
 [ "$(cat "${WEB_ENV}")" = "$(cat "${WEB_ENV}.${SHA_PREV}")" ] && case_ok "env restored to prev" || case_fail "env not restored"
 assert_proc_alive "${SUP1}" "session 1 alive"
@@ -580,6 +588,83 @@ if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -3 "$
 unset FAKE_DUMP_SIZE_BYTES
 assert_contains "${FAKE_ROOT}/cutover.log" "dump fully readable" "65 MB dump accepted by the default gate"
 hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
+teardown_case
+case_end
+
+# --- O1. новый порядок: vzdump при работающем всём, повторные ворота, стоп, дамп, хаб, воркер, PWA ---
+case_begin "cutover order: vzdump first, gates again, stop, dump, hub, worker live, then PWA"
+setup_cutover order
+: >"${FAKE_ROOT}/state/calls.log"
+if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
+C="${FAKE_ROOT}/state/calls.log"
+L="${FAKE_ROOT}/cutover.log"
+in_order "${C}" "vzdump ${HUB_CTID} --mode snapshot" "stop canterlot-worker" "pg_dump -Fc" "pg_restore --list" \
+    "restart canterlot-hub" "start canterlot-worker" "compose up -d caddy" \
+    && case_ok "commands: vzdump -> worker stop -> pg_dump -> dump verify -> hub restart -> worker start -> caddy recreate" \
+    || case_fail "commands out of order"
+in_order "${L}" "control-worker scan before vzdump: exactly the unit process" "vzdump done:" \
+    "re-checking read gates and the session inventory after vzdump" \
+    "recorded session PIDs and ticks intact after vzdump" "control-worker scan before the worker stop: exactly the unit process" \
+    "stopping worker" "dump fully readable" "hub restarted once" 'worker state="live" after start' \
+    "PWA step (all failures soft" "speech:" "chunk merge: " "running verification" \
+    && case_ok "log: the new order, gates and inventory re-run between vzdump and the stop" \
+    || case_fail "log out of order"
+REGATES="$(sed -n '/vzdump done:/,/stopping worker/p' "${L}" | grep -c 'read gates for target' || true)"
+[ "${REGATES}" -ge 1 ] && case_ok "read gates ran again between vzdump and the stop" || case_fail "no read gates between vzdump and the stop"
+assert_contains "${L}" "downtime: worker " "worker downtime printed"
+grep -qE 'downtime: worker [0-9]+ s \(stop -> state=live\), hub [0-9]+ s \(restart -> readyz ok\)' "${L}" \
+    && case_ok "downtime line names both components" || case_fail "downtime line malformed: $(grep 'downtime:' "${L}")"
+assert_contains "${L}" "hub interruption: " "hub interruption measured"
+assert_eq "$(grep -c 'stop canterlot-worker' "${C}")" "1" "worker stopped once"
+assert_eq "$(grep -c 'start canterlot-worker' "${C}")" "1" "worker started once"
+assert_eq "$(compose_up_count)" "1" "exactly one caddy recreate"
+hub_is "${SHA_NEW}" && web_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "all on new" || case_fail "not all on new"
+teardown_case
+case_end
+
+# --- O2. записанная сессия пропала во время vzdump: отказ до стопа воркера ---
+case_begin "a recorded session changed during vzdump aborts before any destructive step"
+setup_cutover vzdump-session-gone
+CLI1="$(cli_pid_of "${EXEC1}" "${SUP1}")"
+cat >"${FAKE_ROOT}/kill-cli.sh" <<HOOK
+#!/usr/bin/env bash
+kill ${CLI1} 2>/dev/null || true
+HOOK
+export FAKE_SSH_AFTER_CMD="vzdump ${HUB_CTID}" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/kill-cli.sh"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_cutover; then case_fail "exit 0 although a session changed"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+grep -q '^vzdump ' "${FAKE_ROOT}/state/calls.log" && case_ok "vzdump ran first" || case_fail "vzdump never ran"
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+assert_contains "${FAKE_ROOT}/cutover.log" "recorded session process gone (after vzdump)" "the change is named"
+assert_contains "${FAKE_ROOT}/cutover.log" "nothing was stopped or flipped" "nothing to recover"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker still active" || case_fail "worker not active"
+assert_proc_alive "${SUP2}" "session 2 alive"
+teardown_case
+case_end
+
+# --- O3. новая сессия стартует во время vzdump (строка starting): отказ до стопа ---
+case_begin "a session starting during vzdump aborts before any destructive step"
+setup_cutover vzdump-session-starting
+NEWID="$(new_exec_id)"
+cat >"${FAKE_ROOT}/start-session.sh" <<HOOK
+#!/usr/bin/env bash
+mkdir -p "${WORKER_DATA}/executions/${NEWID}"
+printf '%s starting\n' "${NEWID}" >>"${FAKE_ROOT}/state/exec-states"
+setsid bash -c "exec -a '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' supervise --exec-dir '${WORKER_DATA}/executions/${NEWID}'" >/dev/null 2>&1 <&- &
+sleep 0.3
+HOOK
+export FAKE_SSH_AFTER_CMD="vzdump ${HUB_CTID}" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/start-session.sh"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_cutover; then case_fail "exit 0 although a session was starting"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
+assert_contains "${FAKE_ROOT}/cutover.log" "session ${NEWID} is starting after vzdump" "the starting session is named"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 teardown_case
 case_end
 
