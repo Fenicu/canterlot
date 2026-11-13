@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Сборка выпуска внутри контейнера canterlot-release-build: хаб, воркер,
-# синтетический воркер и PWA из смонтированного чистого чекаута.
+# синтетический воркер, служба распознавания речи и PWA из смонтированного
+# чистого чекаута.
 #
 #   scripts/release-build/in-container.sh --src DIR --out DIR --sha SHA12 --commit SHA40
 #
@@ -92,6 +93,21 @@ phase "синтетический воркер"
 install -m 0755 "$CARGO_TARGET_DIR/release/canterlot-worker" "$out/synthetic/bin/"
 phase_done "синтетический воркер"
 
+# canterlot-speech: CUDA 12.9 из образа, код только для sm_70 (Tesla V100). CPU-часть
+# ggml без подстройки под сборочную машину (GGML_NATIVE=OFF: AVX2/FMA/F16C), без
+# системного BLAS. Хаб и воркер собраны выше отдельным вызовом и CUDA не видят.
+phase "служба распознавания речи (CUDA)"
+cuda_root=${CUDA_PATH:-/usr/local/cuda-12.9}
+[[ -x "$cuda_root/bin/nvcc" ]] || die "нет nvcc в $cuda_root"
+(
+    cd "$src"
+    export PATH="$cuda_root/bin:$PATH" CUDACXX="$cuda_root/bin/nvcc" CUDAToolkit_ROOT="$cuda_root"
+    export TRANSCRIBE_CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=70 -DGGML_NATIVE=OFF -DTRANSCRIBE_USE_SYSTEM_BLAS=OFF"
+    cargo build --release --locked -p canterlot-speech --features cuda
+)
+install -m 0755 "$CARGO_TARGET_DIR/release/canterlot-speech" "$out/hub/bin/"
+phase_done "служба распознавания речи"
+
 phase "PWA"
 (
     cd "$src/web"
@@ -125,7 +141,28 @@ phase "проверки выпуска"
 ldd_out=$(ldd "$out/hub/bin/canterlot-hub")
 case "$ldd_out" in
     *libssl*) die "hub линкует libssl" ;;
+    *cuda* | *cublas*) die "hub линкует CUDA" ;;
 esac
+# Прямые зависимости canterlot-speech: системные библиотеки glibc и C++ плюс ровно
+# библиотеки CUDA 12, которые стоят на проде (драйвер и redist cudart/cublas).
+speech_bin="$out/hub/bin/canterlot-speech"
+speech_needed=$(objdump -p "$speech_bin" | awk '$1 == "NEEDED" {print $2}' | sort)
+for lib in $speech_needed; do
+    case "$lib" in
+        libc.so.6 | libm.so.6 | libdl.so.2 | librt.so.1 | libpthread.so.0 | ld-linux-x86-64.so.2) ;;
+        libgcc_s.so.1 | libstdc++.so.6 | libgomp.so.1) ;;
+        libcuda.so.1 | libcudart.so.12 | libcublas.so.12 | libcublasLt.so.12) ;;
+        *) die "canterlot-speech зависит от неожиданной библиотеки $lib" ;;
+    esac
+done
+for lib in libcuda.so.1 libcudart.so.12 libcublas.so.12; do
+    grep -qx "$lib" <<<"$speech_needed" || die "canterlot-speech собран без CUDA: нет $lib"
+done
+if objdump -p "$speech_bin" | grep -qE 'RPATH|RUNPATH'; then
+    die "у canterlot-speech есть RPATH/RUNPATH"
+fi
+printf '    canterlot-speech NEEDED: %s\n' "$(tr '\n' ' ' <<<"$speech_needed")"
+LD_LIBRARY_PATH="$cuda_root/lib:$cuda_root/lib/stubs" ldd "$speech_bin" | sed 's/^/    ldd: /'
 "$out/hub/bin/canterlot-hub" openapi | cmp -s - "$src/docs/api/openapi.json" \
     || die "hub openapi отличается от docs/api/openapi.json"
 wss_n=$(grep -c -- "$wss_origin" "$out/csp.txt" || true)
@@ -148,7 +185,7 @@ expect_of "$out/worker/bin/canterlot-worker" | cmp -s - "$out/EXPECT" \
 max_glibc() {
     objdump -T "$1" | grep -o 'GLIBC_[0-9.]*' | sed 's/^GLIBC_//' | sort -V | tail -1
 }
-for bin in hub/bin/canterlot-hub worker/bin/canterlot-worker synthetic/bin/canterlot-worker; do
+for bin in hub/bin/canterlot-hub hub/bin/canterlot-speech worker/bin/canterlot-worker synthetic/bin/canterlot-worker; do
     version=$(max_glibc "$out/$bin")
     [[ -n "$version" ]] || die "у $bin не найдено версий символов GLIBC"
     highest=$(printf '%s\n2.41\n' "$version" | sort -V | tail -1)

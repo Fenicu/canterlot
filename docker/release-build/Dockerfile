@@ -10,11 +10,13 @@ FROM debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a47
 ARG DEBIAN_FRONTEND=noninteractive
 # protobuf-compiler нужен: crates/canterlot-proto/build.rs вызывает tonic-prost-build,
 # а prost-build не приносит protoc с собой. binutils — objdump для проверки GLIBC.
+# cmake собирает transcribe.cpp для canterlot-speech.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         binutils \
         build-essential \
         ca-certificates \
+        cmake \
         curl \
         git \
         jq \
@@ -49,6 +51,31 @@ RUN curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-
     && tar -xJf "node-v${NODE_VERSION}-linux-x64.tar.xz" -C /usr/local/node --strip-components=1 \
     && rm "node-v${NODE_VERSION}-linux-x64.tar.xz" \
     && for bin in node npm npx; do ln -sf "/usr/local/node/bin/${bin}" "/usr/local/bin/${bin}"; done
+
+# CUDA 12.9.1 для canterlot-speech --features cuda: только то, что нужно для
+# компиляции (nvcc, cudart с заглушкой libcuda.so, cublas, cccl). Репозиторий
+# NVIDIA для debian12 не проходит проверку подписи в trixie, поэтому берутся
+# архивы redist; пути и sha256 — из redistrib_12.9.1.json. CUDA 13 не
+# поддерживает Volta (sm_70), поэтому именно 12.x.
+ARG CUDA_REDIST=https://developer.download.nvidia.com/compute/cuda/redist
+RUN set -eu; mkdir -p /usr/local/cuda-12.9 /tmp/cuda; cd /tmp/cuda; \
+    for entry in \
+        "cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-12.9.86-archive.tar.xz 7a1a5b652e5ef85c82b721d10672fc9a2dbaab44e9bd3c65a69517bf53998c35" \
+        "cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.9.79-archive.tar.xz 1f6ad42d4f530b24bfa35894ccf6b7209d2354f59101fd62ec4a6192a184ce99" \
+        "libcublas/linux-x86_64/libcublas-linux-x86_64-12.9.1.4-archive.tar.xz 546addc4a9d82b8f23aa9ba9274b6bc0429a63008a31c759884ac24880796057" \
+        "cuda_cccl/linux-x86_64/cuda_cccl-linux-x86_64-12.9.27-archive.tar.xz 8b1a5095669e94f2f9afd7715533314d418179e9452be61e2fde4c82a3e542aa"; \
+    do \
+        set -- $entry; \
+        curl -fsSL -o archive.tar.xz "${CUDA_REDIST}/$1"; \
+        echo "$2  archive.tar.xz" | sha256sum -c -; \
+        tar -xJf archive.tar.xz -C /usr/local/cuda-12.9 --strip-components=1; \
+        rm archive.tar.xz; \
+    done; \
+    rm -f /usr/local/cuda-12.9/lib/libcublas_static.a /usr/local/cuda-12.9/lib/libcublasLt_static.a; \
+    ln -s lib /usr/local/cuda-12.9/lib64; \
+    /usr/local/cuda-12.9/bin/nvcc --version; \
+    chmod -R a+rX /usr/local/cuda-12.9; rm -rf /tmp/cuda
+ENV CUDA_PATH=/usr/local/cuda-12.9
 
 # HOME произвольного uid: /home/canterlot открыт на запись, чтобы npm и git не
 # падали на первом же обращении. Кэши (cargo, target, npm) монтируются снаружи.
