@@ -124,10 +124,23 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            // Как serve: sha256 при запуске, движок сверяет только отпечатки.
+            let hashed = std::time::Instant::now();
+            let verified = match verified_fingerprints(&cfg) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            eprintln!(
+                "sha256 моделей при запуске: {} мс",
+                hashed.elapsed().as_millis()
+            );
             init_native_logging();
             let l = Box::new(NativeLoader {
                 config: cfg.clone(),
-                verified: Vec::new(),
+                verified,
             });
             let opts = ProbeOptions {
                 realtime,
