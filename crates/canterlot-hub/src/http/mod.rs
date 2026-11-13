@@ -18,8 +18,8 @@ use utoipa_axum::router::OpenApiRouter;
 use crate::{
     attachments::BlobStore,
     config::{
-        ActivityConfig, AttachmentsConfig, AuthConfig, GuardsConfig, HttpConfig, LimitsConfig,
-        MachinesConfig, SessionToolsConfig,
+        ActivityConfig, AttachmentsConfig, AuthConfig, DictationConfig, GuardsConfig, HttpConfig,
+        LimitsConfig, MachinesConfig, SessionToolsConfig,
     },
     dispatcher::Dispatcher,
     installation::Installation,
@@ -93,6 +93,8 @@ pub struct AppDeps {
     pub manifest: PathBuf,
     /// `[auth]` после подстановки значений по умолчанию.
     pub auth: AuthConfig,
+    /// `[dictation]`: живая диктовка через службу распознавания речи.
+    pub dictation: DictationConfig,
     /// Хеширование паролей: боевые параметры argon2, в тестах дешёвые.
     pub passwords: crate::owner_auth::password::Passwords,
     pub shutdown: CancellationToken,
@@ -124,6 +126,7 @@ pub struct AppState {
     /// Заголовок старого прокси: его приход помечается `X-Canterlot-Proxy-Leak`.
     pub user_header: HeaderName,
     pub auth: Arc<AuthConfig>,
+    pub dictation: Arc<DictationConfig>,
     pub passwords: crate::owner_auth::password::Passwords,
     /// Место по IP из `[auth.geoip].path`; файл перечитывается при смене.
     pub geo: Arc<crate::owner_auth::geo::Geo>,
@@ -172,6 +175,7 @@ impl AppState {
                 crate::owner_auth::qr::MAX_POLLS,
             )),
             auth: Arc::new(deps.auth),
+            dictation: Arc::new(deps.dictation),
             passwords: deps.passwords,
             ws_tasks: tokio_util::task::TaskTracker::new(),
             #[cfg(feature = "fault-injection")]
