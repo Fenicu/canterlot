@@ -264,28 +264,30 @@ async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
         finish_prep(&mut ws, &timers, End::Revoked).await;
         return;
     }
-    let mut speech =
-        match prep
-            .race(client::connect(&state.dictation.socket, timers.speech_connect))
-            .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(client::NoService)) => {
-                tracing::info!(
-                    kind = "speech_unavailable",
-                    socket = %state.dictation.socket.display(),
-                    "speech service is not reachable"
-                );
-                drop(prep);
-                finish_prep(&mut ws, &timers, End::Error("speech_unavailable")).await;
-                return;
-            }
-            Err(end) => {
-                drop(prep);
-                finish_prep(&mut ws, &timers, end).await;
-                return;
-            }
-        };
+    let mut speech = match prep
+        .race(client::connect(
+            &state.dictation.socket,
+            timers.speech_connect,
+        ))
+        .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(client::NoService)) => {
+            tracing::info!(
+                kind = "speech_unavailable",
+                socket = %state.dictation.socket.display(),
+                "speech service is not reachable"
+            );
+            drop(prep);
+            finish_prep(&mut ws, &timers, End::Error("speech_unavailable")).await;
+            return;
+        }
+        Err(end) => {
+            drop(prep);
+            finish_prep(&mut ws, &timers, end).await;
+            return;
+        }
+    };
     let start_message = json!({
         "type": "start",
         "protocol": 1,
@@ -429,11 +431,9 @@ async fn finish_prep(
 fn notice_about_sessions(
     notice: &Result<std::sync::Arc<crate::bus::Notice>, tokio::sync::broadcast::error::RecvError>,
 ) -> bool {
-    notice
-        .as_ref()
-        .map_or(true, |notice| {
-            notice.scope == "*" || notice.scope == crate::owner_auth::BUS_SCOPE
-        })
+    notice.as_ref().map_or(true, |notice| {
+        notice.scope == "*" || notice.scope == crate::owner_auth::BUS_SCOPE
+    })
 }
 
 /// Отказ до начала диктовки: ошибка и закрытие 1000.
@@ -736,7 +736,9 @@ impl Relay {
                     self.pending_text = Some(self.dictionary.apply_update(committed, tentative));
                 }
                 Some("final") => {
-                    let text = self.dictionary.apply(value["text"].as_str().unwrap_or_default());
+                    let text = self
+                        .dictionary
+                        .apply(value["text"].as_str().unwrap_or_default());
                     let reason = match value["reason"].as_str() {
                         Some("too_long") => "too_long",
                         _ => "finish",

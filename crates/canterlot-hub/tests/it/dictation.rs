@@ -720,9 +720,7 @@ async fn revocation_between_upgrade_and_start_never_reaches_speech(pool: PgPool)
     assert_eq!(socket.next(TIMEOUT).await, None);
     assert_eq!(socket.close_code, Some(4401));
     assert_eq!(
-        speech
-            .connections
-            .load(std::sync::atomic::Ordering::SeqCst),
+        speech.connections.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "speech never sees start"
     );
@@ -929,7 +927,14 @@ async fn final_expanded_past_the_old_write_buffer_reaches_the_client(pool: PgPoo
     })
     .await;
     let hub = spawn_hub(pool, speech.socket.clone(), fast_timers()).await;
-    seed_term(&hub.app().pool, hub.installation.owner_id, 0, "a", &"b".repeat(100)).await;
+    seed_term(
+        &hub.app().pool,
+        hub.installation.owner_id,
+        0,
+        "a",
+        &"b".repeat(100),
+    )
+    .await;
     let mut socket = open(&hub).await;
     socket.start().await;
     assert_eq!(socket.expect(TIMEOUT).await["state"], "listening");
@@ -957,11 +962,21 @@ async fn final_expanded_past_the_outbound_limit_is_engine_failed(pool: PgPool) {
     })
     .await;
     let hub = spawn_hub(pool, speech.socket.clone(), fast_timers()).await;
-    seed_term(&hub.app().pool, hub.installation.owner_id, 0, "a", &"b".repeat(100)).await;
+    seed_term(
+        &hub.app().pool,
+        hub.installation.owner_id,
+        0,
+        "a",
+        &"b".repeat(100),
+    )
+    .await;
     let mut socket = open(&hub).await;
     socket.start().await;
     assert_eq!(socket.expect(TIMEOUT).await["state"], "listening");
-    assert_eq!(error_code(socket).await, ("engine_failed".to_owned(), Some(1000)));
+    assert_eq!(
+        error_code(socket).await,
+        ("engine_failed".to_owned(), Some(1000))
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -1257,9 +1272,7 @@ async fn hub_shutdown_during_dictionary_snapshot_drains_without_speech(pool: PgP
         .expect("hub join");
     assert!(joined.is_ok(), "hub task failed");
     assert_eq!(
-        speech
-            .connections
-            .load(std::sync::atomic::Ordering::SeqCst),
+        speech.connections.load(std::sync::atomic::Ordering::SeqCst),
         0
     );
     lock.rollback().await.unwrap();
@@ -1287,18 +1300,14 @@ async fn replacement_during_dictionary_snapshot_closes_the_old_socket(pool: PgPo
     second.start().await;
     assert_eq!(error_code(first).await, ("replaced".to_owned(), Some(1000)));
     assert_eq!(
-        speech
-            .connections
-            .load(std::sync::atomic::Ordering::SeqCst),
+        speech.connections.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "the replaced preparation never opens speech"
     );
     lock.rollback().await.unwrap();
     assert_eq!(second.expect(TIMEOUT).await["state"], "listening");
     assert_eq!(
-        speech
-            .connections
-            .load(std::sync::atomic::Ordering::SeqCst),
+        speech.connections.load(std::sync::atomic::Ordering::SeqCst),
         1
     );
 }
