@@ -1,6 +1,13 @@
 //! Словарь замен живой диктовки: GET отдаёт сохранённый список, PUT заменяет его целиком.
 
-use axum::{Json, extract::State};
+use axum::{
+    Json,
+    extract::{
+        State,
+        ws::{WebSocketUpgrade, rejection::WebSocketUpgradeRejection},
+    },
+    response::Response,
+};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use serde::Serialize;
@@ -18,14 +25,28 @@ use crate::{
 use super::{
     AppState,
     auth::{IdempotencyKey, Owner},
-    error::ApiError,
+    error::{ApiError, ErrorCode},
     extract::ApiJson,
 };
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
+        .routes(routes!(socket))
         .routes(routes!(status))
         .routes(routes!(read_terms, replace_terms))
+}
+
+#[utoipa::path(get,path="/api/v1/dictation",tag="dictation",responses((status=101,description="WSS диктовки: start, звук, finish/cancel; ответ state/text/final/error, см. docs/design/dictation.md §9")))]
+async fn socket(
+    State(state): State<AppState>,
+    owner: Owner,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<Response, ApiError> {
+    let ws = ws.map_err(|_| ApiError::new(ErrorCode::InvalidRequest))?;
+    if state.shutdown.is_cancelled() {
+        return Err(ApiError::new(ErrorCode::DbUnavailable));
+    }
+    Ok(crate::dictation::relay::upgrade(ws, state, owner))
 }
 
 /// Состояние службы распознавания речи для кнопки микрофона.

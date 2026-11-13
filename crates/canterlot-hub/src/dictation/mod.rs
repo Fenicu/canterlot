@@ -14,6 +14,7 @@ use crate::config::DictationConfig;
 pub mod client;
 pub mod dictionary;
 pub mod frame;
+pub mod relay;
 pub mod terms;
 
 pub use client::Health;
@@ -37,6 +38,8 @@ pub struct Timers {
     pub write_stall: Duration,
     /// Срок показания `health` в `GET /api/v1/dictation/status`.
     pub status_cache: Duration,
+    /// Насколько звук может опережать время с `start`.
+    pub max_lead: Duration,
 }
 
 impl Default for Timers {
@@ -50,12 +53,16 @@ impl Default for Timers {
             finish_final: Duration::from_secs(60),
             write_stall: Duration::from_secs(5),
             status_cache: Duration::from_secs(10),
+            max_lead: MAX_LEAD,
         }
     }
 }
 
 /// Звук не может опережать время с `start` больше чем на столько.
 pub const MAX_LEAD: Duration = Duration::from_secs(5);
+/// Пределы WS-сообщений диктовки: текст и звук проверяются вручную.
+pub const MAX_TEXT_BYTES: usize = 4096;
+pub const MAX_AUDIO_BYTES: usize = 8192;
 /// Байт звука в секунду: PCM s16le, 16 кГц, моно.
 pub const AUDIO_BYTES_PER_SECOND: u64 = 32_000;
 /// Занятый слот диктовки: поколение и сигнал замены новым `start`.

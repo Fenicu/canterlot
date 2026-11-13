@@ -138,7 +138,7 @@ impl Dictionary {
     pub fn new(terms: &[Term]) -> Self {
         let mut rules: Vec<Rule> = terms.iter().filter_map(compile).collect();
         // Сортировка устойчива: при равной длине побеждает порядок владельца.
-        rules.sort_by(|a, b| b.length.cmp(&a.length));
+        rules.sort_by_key(|rule| std::cmp::Reverse(rule.length));
         Self { rules }
     }
 
