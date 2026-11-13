@@ -225,7 +225,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 33, "screen coverage rows");
+    assert_eq!(rows, 34, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -706,6 +706,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             "/api/v1/prompt-suggestion-settings".into(),
             Some(json!({"enabled":false})),
             Some(json!({"enabled":true})),
+        ),
+        case(
+            Method::PUT,
+            "/api/v1/dictation/terms",
+            "/api/v1/dictation/terms".into(),
+            Some(json!({"terms":[{"pattern":"мейн","replacement":"main"}]})),
+            Some(json!({"terms":[{"pattern":"ветка","replacement":"branch"}]})),
         ),
         case(
             Method::POST,

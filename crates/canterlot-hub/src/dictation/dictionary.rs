@@ -32,6 +32,7 @@ impl std::fmt::Debug for Term {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TermsBody {
     pub terms: Vec<Term>,
 }

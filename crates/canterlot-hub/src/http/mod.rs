@@ -33,6 +33,7 @@ pub mod bookmarks;
 mod connection;
 pub mod conversations;
 pub mod crunch;
+pub mod dictation;
 pub mod drafts;
 pub mod error;
 pub mod extract;
@@ -221,6 +222,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(spawn_queue::routes())
         .merge(limit_settings::routes())
         .merge(prompt_suggestions::routes())
+        .merge(dictation::routes())
         .merge(machines::routes())
         .merge(limits::routes())
         .merge(snapshot::routes())

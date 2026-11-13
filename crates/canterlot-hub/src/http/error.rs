@@ -154,6 +154,10 @@ error_codes! {
     NotDelegated => "not_delegated", 409, Browser, Never, "Сессия не запущена агентом";
     WorktreeRemoved => "worktree_removed", 409, Delivery, Never, "Рабочая копия уже убрана";
     WorktreeNotRemoved => "worktree_not_removed", 409, Browser, AfterCondition, "Сначала примите результат: рабочая копия ещё на машине";
+    TooManyTerms => "too_many_terms", 422, Browser, Never, "Слишком много терминов словаря";
+    TermEmpty => "term_empty", 422, Browser, Never, "Шаблон и замена не могут быть пустыми";
+    TermTooLong => "term_too_long", 422, Browser, Never, "Шаблон или замена длиннее 100 символов";
+    DuplicateTerm => "duplicate_term", 422, Browser, Never, "Шаблоны совпадают после нормализации";
 }
 
 /// Причины отказа в `details.reason` и код, с которым каждая уходит владельцу:
