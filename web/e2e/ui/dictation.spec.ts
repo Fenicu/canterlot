@@ -51,15 +51,16 @@ test('mic_button_is_hidden_when_the_local_setting_is_off', async ({ page }) => {
 });
 
 test('panel_names_loading_then_listening', async ({ page }) => {
-  await bootDictation(page, {
+  const { hub } = await bootDictation(page, {
     configure: (dictation) => {
       dictation.status = { available: true, reason: null, mode: 'gpu', engine: 'warm' };
       dictation.state = 'loading';
-      dictation.loadingMs = 150;
+      dictation.holdLoading = true;
     }
   });
   await startDictation(page);
   await expect(panelState(page)).toHaveText(/Подключаю микрофон|Загружаю модель/);
+  hub.dictation.releaseLoading();
   await expect(panelState(page)).toHaveText('Слушаю');
   await expect(page.locator('[data-dictation-timer]')).toHaveText(/^\d{2}:\d{2}$/);
 });

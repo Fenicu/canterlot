@@ -45,8 +45,18 @@ export class FakeDictation {
   closeOnStart = false;
   /** Задержка между loading и listening. */
   loadingMs = 20;
+  /** Держать `loading`, пока тест не позовёт `releaseLoading()`. */
+  holdLoading = false;
+  private loadingWaiters: (() => void)[] = [];
+  private loadingReleased = false;
   /** Сообщения, которые хаб успел получить. */
   connections: FakeDictationConnection[] = [];
+
+  /** Отпустить ожидающие соединения из `loading` в `listening`. */
+  releaseLoading(): void {
+    this.loadingReleased = true;
+    for (const waiter of this.loadingWaiters.splice(0)) waiter();
+  }
 
   connect(socket: WebSocketRoute): void {
     const record: FakeDictationConnection = {
@@ -119,7 +129,11 @@ export class FakeDictation {
         }
         if (this.state === "loading") {
           send({ type: "state", state: "loading", mode: null });
-          schedule(this.loadingMs, listen);
+          if (this.holdLoading && !this.loadingReleased) {
+            this.loadingWaiters.push(listen);
+          } else {
+            schedule(this.loadingMs, listen);
+          }
         } else {
           listen();
         }
@@ -149,6 +163,7 @@ export class FakeDictation {
 
     socket.onClose(() => {
       record.closed = true;
+      this.loadingWaiters = this.loadingWaiters.filter((waiter) => waiter !== listen);
       for (const timer of timers) clearTimeout(timer);
     });
   }
