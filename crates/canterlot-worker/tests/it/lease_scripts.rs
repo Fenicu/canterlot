@@ -108,6 +108,8 @@ fn check_scripts_pick_gate_only_for_all_and_stack() {
     let bin = fake_worker(dir.path(), true);
     let cases: &[(&str, &[&str], &str)] = &[
         ("check.sh", &["--all"], "gate"),
+        ("check.sh", &["--all", "--no-web"], "gate"),
+        ("check.sh", &["--no-web"], "build"),
         ("check.sh", &[], "build"),
         ("check.sh", &["--fast"], "build"),
         ("check.sh", &["--fast", "-E", "binary(ws)"], "build"),
