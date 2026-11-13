@@ -6,7 +6,8 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
 fi
 # Копирование релиза на хосты: только tar-конвейеры, никогда rsync (урок: план говорил rsync).
 # Проверяет хэши, утверждает точный состав корней stagedir и двигает их в releases/<sha>
-# атомарным mv. Никогда не трогает current/build.
+# атомарным mv. Никогда не трогает current/build. Наличие bin/canterlot-speech
+# (служба диктовки) только сообщается: релиз без него законен.
 # Использование: scripts/deploy/stage.sh SHA [--dist DIR]
 set -euo pipefail
 
@@ -170,5 +171,14 @@ FINAL_WEB_NOW="$(deployed_sha web)"
 ssh_hub "test -d '${HUB_RELEASES}/${SHA}/bin'" || die "hub staged dir missing after move"
 ssh_web "test -d '${WEB_RELEASES}/${SHA}/_app'" || die "web staged dir missing after move"
 [ -x "${WORKER_RELEASES}/${SHA}/bin/canterlot-worker" ] || die "worker staged binary missing after move"
+# Служба диктовки едет в bin/ хаба вместе с ним (весь bin/ копируется выше).
+# Релиз без неё законен: диктовка на нём недоступна, это не ошибка stage.
+if [ -x "${DIST}/hub/bin/canterlot-speech" ] && ssh_hub "test -x '${HUB_RELEASES}/${SHA}/bin/canterlot-speech'"; then
+    log "hub ${SHA}: bin/canterlot-speech staged (dictation)"
+elif [ -e "${DIST}/hub/bin/canterlot-speech" ]; then
+    log "WARNING: hub ${SHA}: bin/canterlot-speech is in dist but not executable on the hub; dictation will be unavailable on this release"
+else
+    log "WARNING: release ${SHA} has no hub/bin/canterlot-speech: dictation will be unavailable on this release (not an error)"
+fi
 trap - EXIT
 log "staged ${SHA} everywhere; current/build untouched"

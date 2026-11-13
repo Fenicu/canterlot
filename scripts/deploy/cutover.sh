@@ -39,6 +39,10 @@ fi
 #   ждущие пуши входа отменяются: старый хаб не читает строку пуша без разговора.
 #   Воркер ниже этого релиза не стартует с [execution].delegate_mcp_servers.
 # - PWA-ошибки мягкие всегда: записать, вернуть предыдущий build, продолжить.
+# - Диктовка (canterlot-speech) мягкая всегда: после старта воркера юнит
+#   перезапускается (не дольше SPEECH_RESTART_TIMEOUT) или, если в релизе нет
+#   бинаря, останавливается и выключается; итог только в отчёте, токен и откат
+#   от неё не зависят.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -325,6 +329,15 @@ if [ "${DRY_RUN}" = "1" ]; then
         1) log "dry-run: geoip: ${GEOIP_WHY}; no update needed" ;;
         *) log "dry-run: geoip: ${GEOIP_WHY}; the real run would record a soft failure" ;;
     esac
+    # Диктовка: только чтение и план; её состояние dry-run не проваливает.
+    speech_plan "${SHA}"
+    log "dry-run: speech: ${SPEECH_UNIT}: ${SPEECH_STATE}"
+    case "${SPEECH_ACTION}" in
+        restart) log "dry-run: speech: ${SPEECH_REASON}; the real run restarts ${SPEECH_UNIT} after the worker is live (bounded to ${SPEECH_RESTART_TIMEOUT} s) and asks health (soft)" ;;
+        disable) log "dry-run: speech: ${SPEECH_REASON}; the real run stops and disables ${SPEECH_UNIT} (soft)" ;;
+        skip) log "dry-run: speech: ${SPEECH_REASON}; the real run leaves ${SPEECH_UNIT} alone" ;;
+        *) log "dry-run: speech: ${SPEECH_REASON}; the real run would record a speech soft failure (never blocks the release)" ;;
+    esac
     VERIFY_EXTRA=()
     [ "${ALLOW_SKIPPED}" = "0" ] || VERIFY_EXTRA=(--allow-skipped)
     if ! "${SCRIPT_DIR}/verify.sh" --dry-run --dist "${DIST_BASE:-${REPO_ROOT}/dist}" "${VERIFY_EXTRA[@]}"; then
@@ -344,6 +357,7 @@ dry-run plan for ${SHA} (write steps are NOT RUN by design):
    - worker flip + start; old _app/immutable chunk merge; verify.sh twice (the read-only verify gates above did run)
    - precompressed Content-Encoding probe (would start a one-off loopback Caddy inside the container)
    - geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)
+   - speech: restart ${SPEECH_UNIT} (bounded to ${SPEECH_RESTART_TIMEOUT} s) + health, or stop and disable it when ${SHA} has no canterlot-speech (soft, never blocks)
    - retention (retain.sh --apply --keep ${SHA} ...)
   WOULD RUN (only if the gates pass and the token matches this plan):
 EOF
@@ -464,6 +478,11 @@ report_and_stop() {
     worker_link="$(readlink "${WORKER_CURRENT}" 2>/dev/null || echo UNKNOWN)"
     web_link="$(ssh_web "readlink '${WEB_BUILD_LINK}'" 2>/dev/null || echo UNKNOWN)"
     live_n="$(hub_psql_soft "select count(*) from executions where state = 'running'")"
+    local speech_now speech_back_cmd
+    speech_now="$(speech_state "${HUB_CURRENT}/bin/canterlot-speech" 2>/dev/null)" || speech_now="UNKNOWN"
+    speech_back_cmd="$(ssh_cmd_text "${HUB_SSH}" "$(script_cmd_text \
+        'systemctl cat "$3" >/dev/null 2>&1 || exit 0; if test -x "$1/releases/$2/bin/canterlot-speech"; then timeout "$4" systemctl restart "$3"; else systemctl stop "$3"; systemctl disable "$3"; fi' \
+        "${HUB_BASE}" "${PREV_HUB_SHA}" "${SPEECH_UNIT}" "${SPEECH_RESTART_TIMEOUT}")")"
     local hub_back_cmd web_back_cmd worker_back_cmd hub_unres_cmd web_unres_cmd worker_unres_cmd
     hub_back_cmd="$(ssh_cmd_text "${HUB_SSH}" "$(locked_cmd_text "${HUB_BASE}/.deploy.lock" \
         'rm -f "$1/current.new" && '"${HUB_FLIP_SCRIPT}"' && systemctl restart "$4"' \
@@ -486,6 +505,7 @@ STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touche
     worker             = ${worker_state}, current ${worker_link} (was ${PREV_WORKER_SHA})
     web build          = ${web_link} (was releases/${PREV_WEB_SHA})
     live executions    = ${live_n} (sessions keep running in their supervisors and buffer journals)
+    speech unit        = ${SPEECH_UNIT}: ${speech_now} (dictation only, never blocks recovery)
     this run's dump   = ${HUB_BACKUP_DIR}/${RUN_DUMP} (verified readable before the hub flip: yes)
   manual recovery (Task 12 rollback table — run by hand, in this order).
   Every flip below takes the same host lock as cutover and retention, and re-checks
@@ -499,9 +519,15 @@ STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touche
           pushes first: the old hub cannot read a push row without a conversation and its whole delivery
           pass fails until they go stale:
             runuser -u canterlot -- psql -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' -c "update owner_pushes set state='cancelled',updated_at=clock_timestamp() where state='pending' and kind in ('sign_in','sign_in_failures','sign_in_lock','session_country')"
+       d. remove [dictation] from ${HUB_CONFIG} before starting a hub older than the dictation release
+          (deny_unknown_fields, like [provider_status]).
     1. hub broken, no new migration (flip back + one restart):
          ${hub_back_cmd}
-    2. hub broken after a new migration: full DB restore from this run's dump (manual only):
+       after any hub flip back (rows 1 and 2): restart ${SPEECH_UNIT} if the release has bin/canterlot-speech,
+       otherwise stop and disable it so it is not left failing (no-op when the unit is not installed):
+         ${speech_back_cmd}
+    2. hub broken after a new migration (e.g. 0088_provider_status, 0091_dictation_terms): full DB restore
+       from this run's dump (manual only; rollback-db.sh also brings ${SPEECH_UNIT} in line with the release):
          scripts/deploy/rollback-db.sh '${HUB_BACKUP_DIR}/${RUN_DUMP}' --to ${PREV_HUB_SHA}
          # it refuses while the worker is active, stops the hub, runs dropdb + createdb -O canterlot
          # + pg_restore --exit-on-error, starts the old hub and checks readyz loudly; on a failed
@@ -1005,6 +1031,12 @@ snapshot_drift "${STATE_FILE}" "after worker start" \
 WORKER_PROVEN=1
 log "recorded session PIDs and ticks unchanged after worker start (new transient children allowed)"
 
+# Диктовка: служба живёт из current хаба, поэтому после flip её перезапускают.
+# Шаг стоит после доказанного старта воркера, чтобы ожидание рестарта и health не
+# удлиняло простой. Всё мягкое: speech_sync не выходит и не трогает soft().
+PHASE="speech"
+speech_sync "${SHA}"
+
 # Старые чанки PWA: после старта воркера и ДО любой чистки (открытые вкладки
 # продолжают догружать свои чанки). Ошибки мягкие, как всё в PWA.
 PHASE="merging-chunks"
@@ -1089,6 +1121,7 @@ if is_rehearse; then
     WRITES_PRINTED="$(wc -l <"${REHEARSE_COUNT_FILE}" 2>/dev/null || echo '?')"
     rm -f "${REHEARSE_COUNT_FILE}"  # lint: local-temp
     plan_text "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" | sed 's/^/   | /'
+    log "rehearse: speech: ${SPEECH_SUMMARY}; speech soft issues ${SPEECH_ISSUES} (never block the token)"
     if [ "${HARD_FAILURES}" != "0" ] || [ "${SOFT_FAILURES}" != "0" ]; then
         log "rehearsal FAIL: ${HARD_FAILURES} hard, ${SOFT_FAILURES} soft failures; ${WRITES_PRINTED} writes printed, none executed; no confirm token"
         exit 1
@@ -1098,7 +1131,7 @@ if is_rehearse; then
     log "rehearsal PASS: the whole write path ran against the live system; ${WRITES_PRINTED} writes printed as WOULD-WRITE, none executed"
     exit 0
 fi
-log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s, soft failures ${SOFT_FAILURES}"
+log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s, soft failures ${SOFT_FAILURES}, speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
 owner_checklist
 cat <<EOF
 update note: the worker has connected to the new hub, so only forward fixes remain;
@@ -1106,6 +1139,8 @@ an old hub stops on VersionMissing and a DB restore now causes state_divergence.
 hub back to a release without own sign-in (1.29 and older): restore the Caddy auth block first, remove [auth]
 and [http.ws].session_check_interval from hub.toml, cancel pending sign-in pushes (row 0 of the rollback table).
 worker back below this release: remove [execution].delegate_mcp_servers from worker.toml first.
+hub back below the dictation release: remove [dictation] from hub.toml first; after any hub flip back restart
+${SPEECH_UNIT}, or stop and disable it when that release has no bin/canterlot-speech (rollback-db.sh does it).
 restore points: ${RUN_DUMP} in ${HUB_BACKUP_DIR}, vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS}.
 PWA alone: build to releases/${PREV_WEB_SHA}, ${WEB_ENV}.${PREV_WEB_SHA}, one recreate.
 worker alone: flip current to ${PREV_WORKER_SHA}, restart (never below a live supervisor release).
@@ -1115,7 +1150,7 @@ worker alone: flip current to ${PREV_WORKER_SHA}, restart (never below a live su
 
 Release: \`${SHA}\` (\`<full sha>\`, tag \`vX.Y.Z\`), built by \`scripts/build-release.sh\`; dist \`${DIST}\`. Procedure: \`scripts/deploy/cutover.sh\` (rehearsal/dry-run token, then --execute).
 
-**Result: hub, PWA and worker on \`${SHA}\` (web ${WEB_SHA_EFF}), migrations ${MIGR_MAX} (0 failed), worker \`live\` after ${WORKER_DOWNTIME} s down (stop ${WORKER_STOP_ISO} UTC); recorded session PIDs/ticks intact; no automatic DB restore; capabilities and harnesses as declared by the release EXPECT; CSP equal, precompressed encodings observed, old chunks merged, maintenance clean, soft failures ${SOFT_FAILURES}.**
+**Result: hub, PWA and worker on \`${SHA}\` (web ${WEB_SHA_EFF}), migrations ${MIGR_MAX} (0 failed), worker \`live\` after ${WORKER_DOWNTIME} s down (stop ${WORKER_STOP_ISO} UTC); recorded session PIDs/ticks intact; no automatic DB restore; capabilities and harnesses as declared by the release EXPECT; CSP equal, precompressed encodings observed, old chunks merged, maintenance clean, soft failures ${SOFT_FAILURES}; speech: ${SPEECH_SUMMARY}.**
 ### Steps
 1. Dist: \`sha256sum -c\` OK; \`RELEASE source=\`; EXPECT; versions; glibc; openapi.
 2. Rehearsal and/or dry-run: plan ${PLAN_HASH}, token issued <time>, logs <paths>.

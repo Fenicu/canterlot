@@ -12,6 +12,8 @@ fi
 # Использование: scripts/deploy/rollback-db.sh <dump> [--to <release>]
 # Отказывается работать, пока воркер активен (рассинхронизация!), и отказывается
 # что-либо стартовать, если pg_restore упал.
+# После старта старого хаба служба диктовки идёт за его релизом (мягко): рестарт,
+# а без bin/canterlot-speech в релизе — стоп и выключение юнита.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,6 +40,7 @@ export XDG_RUNTIME_DIR
 # Отменять пуши входа в восстановленной базе не нужно: дамп снят до релиза.
 if [ -n "${TO_RELEASE}" ]; then
     log "reminder: if ${TO_RELEASE} is a release without own sign-in (1.29 and older), BEFORE starting it: restore the Caddy auth block (basic_auth or forward_auth), and remove [auth] and [http.ws].session_check_interval from ${HUB_CONFIG}"
+    log "reminder: if ${TO_RELEASE} is older than the dictation release, remove [dictation] from ${HUB_CONFIG} BEFORE starting it (deny_unknown_fields, like [provider_status]); ${SPEECH_UNIT} follows the release after the restore (restart, or stop and disable without bin/canterlot-speech)"
 fi
 
 # Охранник юнита на время восстановления: даже если кто-то (или сам systemd после
@@ -199,9 +202,19 @@ log "starting hub"
 run_write "start hub" hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || die "hub failed to start after restore"
 sleep 3
 READYZ="$(ssh_hub "curl -fsS -m 5 'http://${HUB_IP}:8080/readyz'" 2>/dev/null || echo FAIL)"
+HUB_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'" | sed 's|.*/||')" || HUB_NOW="UNKNOWN"
 if [ "${READYZ}" = '{"status":"ok"}' ]; then
     log "old hub readyz ok"
 else
+    log "speech unit ${SPEECH_UNIT}: $(speech_state "${HUB_CURRENT}/bin/canterlot-speech" 2>/dev/null || echo UNKNOWN) (not touched: the hub is not ready)"
     die "old hub readyz FAILED after restore (got: ${READYZ}): needs the owner loudly"
 fi
-log "rollback-db done: hub on $(ssh_hub "readlink '${HUB_CURRENT}'" | sed 's|.*/||'), worker stays stopped (start it by hand)"
+# Диктовка следует за релизом хаба: рестарт или, без бинаря в релизе, стоп и
+# выключение юнита. Всё мягкое: откат базы от неё не зависит.
+if is_release_id "${HUB_NOW}"; then
+    speech_sync "${HUB_NOW}"
+else
+    speech_soft "cannot read the hub current release (${HUB_NOW}): ${SPEECH_UNIT} not touched"
+    SPEECH_SUMMARY="not touched (hub release unknown)"
+fi
+log "rollback-db done: hub on ${HUB_NOW}, worker stays stopped (start it by hand); speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"

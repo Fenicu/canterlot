@@ -1,0 +1,75 @@
+# Служба распознавания речи Canterlot (диктовка) на хосте хаба.
+# Ставится в /etc/systemd/system/canterlot-speech.service; порядок установки —
+# docs/deploy/pilot.md, раздел 12. Бинарь — из текущего релиза хаба, поэтому
+# выкат (scripts/deploy/cutover.sh) перезапускает юнит после flip хаба.
+[Unit]
+Description=canterlot speech recognition (dictation)
+# Падение при запуске (нет модели, sha256 не сходится, нет библиотек CUDA) не
+# крутится вечно: после пяти неудач за 5 минут юнит остаётся в failed.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=canterlot-speech
+Group=canterlot
+SupplementaryGroups=video
+ExecStart=/opt/canterlot/current/bin/canterlot-speech serve --config /etc/canterlot/speech.toml
+Restart=on-failure
+RestartSec=5s
+# По SIGTERM служба закрывает диктовки (shutting_down) и гасит движок: отмена
+# прогона ждёт до 2 с (cancel_grace), выход движка — до 5 с.
+TimeoutStopSec=15s
+SyslogIdentifier=canterlot-speech
+
+# Сокет /run/canterlot-speech/speech.sock: каталог 0750, сокет 0660
+# canterlot-speech:canterlot. Хаб (группа canterlot) подключается, остальные — нет.
+RuntimeDirectory=canterlot-speech
+RuntimeDirectoryMode=0750
+UMask=0007
+
+# Звук и текст не должны попасть ни в дамп памяти, ни в своп.
+LimitCORE=0
+MemorySwapMax=0
+# Пик RSS на GPU — 506 МиБ. Запасной режим CPU держит модель (740 МБ) в памяти
+# процесса вместе с промежуточными тензорами и до 10 минут звука одной диктовки;
+# 2 ГиБ — запас над этим и предел внутри 6 ГиБ контейнера (хаб, PostgreSQL, речь).
+MemoryMax=2G
+
+# Файловая система только на чтение: модели и конфигурация читаются, писать
+# службе некуда, кроме RuntimeDirectory. ReadWritePaths не нужен.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+# Службе нужен только unix-сокет; сети у неё нет.
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+# Устройства NVIDIA. PrivateDevices=yes спрятал бы /dev/nvidia*, поэтому закрытая
+# политика и явный список. MemoryDenyWriteExecute не ставится: драйвер CUDA
+# отображает память с правами записи и исполнения. SystemCallFilter тоже нет:
+# набор вызовов драйвера NVIDIA на живой карте не проверен, фильтр мог бы
+# отнять CUDA и молча увести движок в режим CPU.
+DevicePolicy=closed
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia-uvm rw
+DeviceAllow=/dev/nvidia-uvm-tools rw
+DeviceAllow=/dev/nvidia-modeset rw
+
+[Install]
+WantedBy=multi-user.target

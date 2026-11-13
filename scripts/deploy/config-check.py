@@ -5,7 +5,10 @@
 и ключи с отступом): неизвестная таблица и неизвестный ключ — ошибка.
 Карта таблица->структура выводится из типов полей исходника автоматически.
 
-Использование: config-check.py <config.rs> <RootStruct> <config.toml>
+Использование: config-check.py [--require] [--hex64 КЛЮЧ]... <config.rs> <RootStruct> <config.toml>
+--require: обязательные ключи (не Option, без serde default у поля и структуры) должны
+быть на месте, как их требует serde при запуске. --hex64 model.sha256: значение ключа —
+ровно 64 шестнадцатеричных символа (так проверяет speech.toml сама служба).
 Печатает только имена таблиц и ключей, никогда значения. Код возврата 1 при ошибках.
 Стандартная библиотека: tomllib, без uv и venv.
 """
@@ -78,6 +81,7 @@ def field_spec(field, tp, serde_attrs):
         "names": names,
         "flatten": "flatten" in options,
         "skip": skip,
+        "default": "default" in options,
     }
 
 
@@ -215,11 +219,55 @@ def check_dict(node, struct_name, structs, path, errors, warnings):
                 errors.append(f"key '{here}' is scalar but struct field is a table")
 
 
+def check_required(node, struct_name, structs, path, errors):
+    """Обязательные поля структуры есть в таблице; вложенные таблицы — рекурсивно."""
+    struct = structs[struct_name]
+    for _field, spec in struct["fields"].items():
+        if spec["flatten"]:
+            continue
+        present = [name for name in spec["names"] if name in node]
+        optional = (spec["type"].strip().startswith("Option<") or spec["default"]
+                    or struct["default"])
+        if not present:
+            if not optional:
+                here = f"{path}.{spec['names'][0]}" if path else spec["names"][0]
+                errors.append(f"missing required key '{here}'")
+            continue
+        kind = classify(spec["type"], structs)
+        value = node[present[0]]
+        if kind[0] == "struct" and isinstance(value, dict):
+            here = f"{path}.{present[0]}" if path else present[0]
+            check_required(value, kind[1], structs, here, errors)
+
+
+def check_hex64(doc, key, errors):
+    node = doc
+    for part in key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return  # отсутствие ловит --require
+        node = node[part]
+    if not (isinstance(node, str) and re.fullmatch(r"[0-9a-fA-F]{64}", node)):
+        errors.append(f"key '{key}' must be 64 hexadecimal characters")
+
+
 def main():
-    if len(sys.argv) != 4:
-        print("usage: config-check.py <config.rs> <RootStruct> <config.toml>", file=sys.stderr)
+    args = sys.argv[1:]
+    require = False
+    hex64 = []
+    while args and args[0].startswith("--"):
+        if args[0] == "--require":
+            require = True
+            args = args[1:]
+        elif args[0] == "--hex64" and len(args) > 1:
+            hex64.append(args[1])
+            args = args[2:]
+        else:
+            args = []
+    if len(args) != 3:
+        print("usage: config-check.py [--require] [--hex64 KEY]... <config.rs> <RootStruct> <config.toml>",
+              file=sys.stderr)
         return 2
-    src_path, root, toml_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    src_path, root, toml_path = args
     structs = parse_structs(src_path)
     if root not in structs:
         print(f"root struct '{root}' not found in {src_path}", file=sys.stderr)
@@ -236,12 +284,16 @@ def main():
         print("empty TOML document: nothing to check, refusing to pass vacuously", file=sys.stderr)
         return 1
     check_dict(doc, root, structs, "", errors, warnings)
+    if require:
+        check_required(doc, root, structs, "", errors)
+    for key in hex64:
+        check_hex64(doc, key, errors)
     for err in errors:
         print(err)
     for warn in warnings:
         print(f"warning: {warn}")
     if errors:
-        print(f"{len(errors)} unknown table(s)/key(s)", file=sys.stderr)
+        print(f"{len(errors)} problem(s): unknown, missing or malformed table(s)/key(s)", file=sys.stderr)
         return 1
     print(f"config OK against {root}: all tables and keys known")
     return 0

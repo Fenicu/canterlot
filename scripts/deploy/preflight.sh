@@ -8,7 +8,7 @@ fi
 # источников (хаб, процессы сопровождения в /proc, неосвобождённые записи ownership);
 # PIDs и стартовые тики CLI и релея; spec.toml против фикстур, spec_compat и декодирование
 # ownership новым ipc.proto; имена ВСЕХ таблиц и ключей worker.toml и hub.toml против
-# структур нового исходника; нет висячих stop/interrupt; нет открытой компактификации;
+# структур нового исходника (и speech.toml, если он есть: мягко); нет висячих stop/interrupt; нет открытой компактификации;
 # KillMode=process; нет vzdump и блокировки CT (провал осмотра — жёсткая ошибка);
 # новые миграции с пометкой о риске блокировок.
 # Использование: scripts/deploy/preflight.sh SHA --source DIR [--dist DIR] [--state FILE] [--dry-run]
@@ -206,7 +206,7 @@ for old_bin in ${OLD_BINS:-}; do
     ) || hard "spec_compat failed against ${old_bin}"
 done
 
-log "gate 3: every table and key of worker.toml and hub.toml against the new structs"
+log "gate 3: every table and key of worker.toml, hub.toml and speech.toml against the new structs"
 if ! python3 "${SCRIPT_DIR}/config-check.py" \
     "${SOURCE_DIR}/crates/canterlot-worker/src/config.rs" WorkerConfig \
     "${WORKER_CONFIG}"; then
@@ -216,6 +216,20 @@ fi
 if ! ssh_hub "cat '${HUB_CONFIG}'" | python3 "${SCRIPT_DIR}/config-check.py" \
     "${SOURCE_DIR}/crates/canterlot-hub/src/config.rs" HubConfig /dev/stdin; then
     hard "hub.toml has unknown tables or keys"
+fi
+# speech.toml службы диктовки: та же строгость, что у самой службы (неизвестные ключи,
+# обязательные ключи, sha256 модели и VAD — 64 hex). Нет файла — диктовка выключена.
+# Сбой только печатается (SPEECH-SOFT): диктовка выкат не останавливает.
+SPEECH_RS="${SOURCE_DIR}/crates/canterlot-speech/src/config.rs"
+if [ ! -f "${SPEECH_RS}" ]; then
+    log "speech.toml: the release checkout has no canterlot-speech, not checked"
+elif ! ssh_hub "test -e $(shq "${SPEECH_CONFIG}")"; then
+    log "speech.toml: no ${SPEECH_CONFIG} on the hub, dictation off (fine)"
+elif ssh_hub "cat $(shq "${SPEECH_CONFIG}")" | python3 "${SCRIPT_DIR}/config-check.py" --require \
+        --hex64 model.sha256 --hex64 vad.sha256 "${SPEECH_RS}" Config /dev/stdin; then
+    log "speech.toml: OK against the new canterlot-speech Config"
+else
+    speech_soft "${SPEECH_CONFIG} does not match the new canterlot-speech Config (see above): the service will refuse to start"
 fi
 
 log "gate 4: no pending stop or interrupt, no open compaction"
@@ -290,4 +304,5 @@ if [[ "${UTC_HOUR}" > "02:45" && "${UTC_HOUR}" < "03:45" ]]; then
 fi
 log "outside the 03:30 backup window (${UTC_HOUR} UTC)"
 
+[ "${SPEECH_ISSUES}" = "0" ] || log "speech: ${SPEECH_ISSUES} speech soft issue(s) above (dictation only, not counted)"
 check_summary && log "preflight PASS for ${SHA}"

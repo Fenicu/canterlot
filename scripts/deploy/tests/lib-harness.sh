@@ -117,6 +117,8 @@ setup_case() {
     export HUB_CONFIG="${FAKE_ROOT}/hub/etc/canterlot/hub.toml"
     export HUB_UNIT=canterlot-hub
     export HUB_BACKUP_DIR="${FAKE_ROOT}/hub/backups"
+    export SPEECH_UNIT=canterlot-speech SPEECH_CONFIG="${FAKE_ROOT}/hub/etc/canterlot/speech.toml"
+    export SPEECH_SOCKET=/run/canterlot-speech/speech.sock SPEECH_HEALTH_WAIT=1
     export HUB_PG_SOCKET=/var/run/postgresql HUB_PG_DB=canterlot HUB_PG_USER=canterlot
     export PBS_STORAGE=backup_storage
     export SITE_ORIGIN=https://hub.example.com WSS_ORIGIN=wss://hub.example.com
@@ -211,6 +213,39 @@ deploy_release() {
             ln -sfn "releases/${sha}" "${WORKER_CURRENT}"
             ;;
     esac
+}
+
+# Служба диктовки в релизе хаба: подменённый canterlot-speech отвечает только на
+# health; ответ — из $FAKE_ROOT/state/speech-health (ok | fail | unavailable).
+# Юнит «установлен»: файлы состояния фейкового systemctl (installed, enabled, active).
+install_fake_speech() {
+    local rel="$1" bin="${HUB_RELEASES}/$1/bin/canterlot-speech"
+    mkdir -p "${HUB_RELEASES}/${rel}/bin"
+    cat >"${bin}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = "health" ] || exit 0
+echo "canterlot-speech $* user=${FAKE_RUNUSER:-none}" >>"${FAKE_ROOT}/state/calls.log"
+case "$(cat "${FAKE_ROOT}/state/speech-health" 2>/dev/null || echo ok)" in
+    ok) echo '{"ok":true,"engine":"cold","mode":null,"model":"parakeet-tdt-0.6b-v3-Q8_0"}' ;;
+    fail) echo '{"ok":false,"engine":"cold","mode":null,"model":"parakeet-tdt-0.6b-v3-Q8_0"}'; exit 1 ;;
+    *) echo "INFO kind=\"speech_unavailable\" socket=\"${3:-}\" error=\"No such file or directory\"" >&2; exit 1 ;;
+esac
+EOF
+    chmod 0755 "${bin}"
+}
+install_speech_unit() {
+    local st="${FAKE_ROOT}/state/unit-fakehub-canterlot-speech"
+    : >"${st}.installed"
+    : >"${st}.enabled"
+    echo 1 >"${st}.active"
+    local hex
+    hex="$(printf 'c%.0s' $(seq 64))"
+    printf '[model]\npath = "m.gguf"\nsha256 = "%s"\n[vad]\npath = "v.gguf"\nsha256 = "%s"\n' "${hex}" "${hex}" >"${SPEECH_CONFIG}"
+}
+speech_state_is() {
+    FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" show canterlot-speech -p ActiveState,UnitFileState \
+        | tr '\n' ' ' | sed 's/ $//'
 }
 
 # Живая сессия: настоящие процессы (supervisor + CLI + relay) с подменённым argv[0].

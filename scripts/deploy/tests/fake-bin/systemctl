@@ -22,7 +22,7 @@ while [ "${i}" -lt "${#args[@]}" ]; do
         --value) show_value=1 ;;
         -p) i=$((i + 1)); prop="${args[${i}]:-}" ;;
         -p*) prop="${arg#-p}" ;;
-        is-active | is-enabled | start | stop | restart | show | mask | unmask | daemon-reload) op="${arg}" ;;
+        is-active | is-enabled | start | stop | restart | show | mask | unmask | daemon-reload | enable | disable) op="${arg}" ;;
         *) if [[ "${arg}" != -* ]]; then unit="${arg}"; fi ;;
     esac
     i=$((i + 1))
@@ -40,6 +40,7 @@ svc_exe_dir() {
     case "${unit}" in
         canterlot-hub) link="${HUB_CURRENT:?}" ;;
         canterlot-worker) link="${WORKER_CURRENT:?}" ;;
+        canterlot-speech) link="${HUB_CURRENT:?}" ;;
         *) echo "fake-systemctl: unknown unit ${unit}" >&2; exit 99 ;;
     esac
     cur="$(readlink "${link}")"
@@ -51,6 +52,7 @@ svc_exe_dir() {
     case "${unit}" in
         canterlot-hub) printf 'canterlot-hub' ;;
         canterlot-worker) printf 'canterlot-worker' ;;
+        canterlot-speech) printf 'canterlot-speech' ;;
         *) printf 'canterlot-svc' ;;
     esac
 }
@@ -109,6 +111,18 @@ case "${op}" in
                 NRestarts) if [ "${unit}" = "canterlot-worker" ]; then value="${FAKE_WORKER_NRESTARTS:-0}"; else value=0; fi ;;
                 ActiveEnterTimestamp) value="$(cat "${stfile}.since" 2>/dev/null || true)" ;;
                 ActiveState) value="${active_state}" ;;
+                # Юниты хаба и воркера установлены всегда; прочие (служба диктовки) —
+                # только если сценарий положил <файл юнита>.installed.
+                LoadState)
+                    case "${unit}" in
+                        canterlot-hub | canterlot-worker) value=loaded ;;
+                        *) if [ -f "${stfile}.installed" ]; then value=loaded; else value=not-found; fi ;;
+                    esac ;;
+                UnitFileState)
+                    case "${unit}" in
+                        canterlot-hub | canterlot-worker) value=enabled ;;
+                        *) if [ ! -f "${stfile}.installed" ]; then value=""; elif [ -f "${stfile}.enabled" ]; then value=enabled; else value=disabled; fi ;;
+                    esac ;;
                 SubState) value="${sub_state}" ;;
                 RefuseManualStart) if loaded_has "RefuseManualStart=yes"; then value=yes; else value=no; fi ;;
                 ExecCondition) if loaded_has "ExecCondition=/bin/false"; then value="{ path=/bin/false ; argv[]=/bin/false ; ignore_errors=no }"; else value=""; fi ;;
@@ -151,6 +165,12 @@ case "${op}" in
     unmask)
         rm -f "${stfile}.masked"
         ;;
+    enable)
+        : >"${stfile}.enabled"
+        ;;
+    disable)
+        rm -f "${stfile}.enabled"
+        ;;
     start)
         if loaded_has "RefuseManualStart=yes"; then
             echo "Failed to start ${unit}.service: Operation refused, unit ${unit}.service may be requested by dependency only (it is configured to refuse manual start/stop)." >&2
@@ -177,8 +197,17 @@ case "${op}" in
         # Как настоящий systemd: отсутствующий исполняемый файл — провал старта
         # (раньше фейк создавал его сам и скрывал dangling current).
         if [ ! -x "${exe}" ]; then
+            if [ "${unit}" = "canterlot-speech" ]; then echo failed >"${active_file}"; fi
             echo "fake-systemctl: Failed to start ${unit}.service: ${exe}: No such file or directory" >&2
             exit 1
+        fi
+        # Служба диктовки: процесса нет, только состояние; задержка старта —
+        # сценарий рестарта дольше предела.
+        if [ "${unit}" = "canterlot-speech" ]; then
+            if [ -n "${FAKE_SPEECH_START_DELAY:-}" ]; then command sleep "${FAKE_SPEECH_START_DELAY}"; fi
+            date -u '+%a %Y-%m-%d %H:%M:%S UTC' >"${stfile}.since"
+            echo 1 >"${active_file}"
+            exit 0
         fi
         setsid "${exe}" 1000 >/dev/null 2>&1 <&- &
         echo "$!" >"${pid_file}"

@@ -340,25 +340,49 @@ sudo -u canterlot canterlot-hub init --config /etc/canterlot/hub.toml
 Создаётся системный юнит `/etc/systemd/system/canterlot-hub.service`:
 ```ini
 [Unit]
-Description=Canterlot Control Plane Hub
-After=network.target postgresql.service
-Wants=postgresql.service
+Description=canterlot hub
+Wants=network-online.target postgresql@18-main.service
+After=network-online.target postgresql@18-main.service
+StartLimitIntervalSec=10min
+StartLimitBurst=10
 
 [Service]
 Type=simple
 User=canterlot
 Group=canterlot
-WorkingDirectory=/etc/canterlot
-ExecStart=/usr/local/bin/canterlot-hub serve --config /etc/canterlot/hub.toml
-Restart=always
+WorkingDirectory=/var/lib/canterlot
+ExecStart=/opt/canterlot/current/bin/canterlot-hub serve --config /etc/canterlot/hub.toml
+Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=30s
 LimitNOFILE=65536
-
-# Песочница systemd
+LimitCORE=0
+UMask=0077
+SyslogIdentifier=canterlot-hub
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/canterlot /etc/canterlot/manifest
-ReadOnlyPaths=/etc/canterlot
+ReadWritePaths=/var/lib/canterlot
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
 
 [Install]
 WantedBy=multi-user.target
@@ -369,6 +393,17 @@ WantedBy=multi-user.target
 systemctl daemon-reload
 systemctl enable --now canterlot-hub
 ```
+
+`ExecStart` указывает на ссылку `current` раскладки релизов (§11), которую переключает выкат. `serve` манифест только читает (пишет его один раз `canterlot-hub init`, §2.6, вне юнита), поэтому `/etc/canterlot` в `ReadWritePaths` не входит. `LimitCORE=0` обязателен: без него юнит наследует `LimitCORE=infinity`, и дамп памяти упавшего хаба унёс бы на диск звук диктовки и тексты сессий. На уже установленном хабе лимит добавляется отдельным файлом, основной юнит не правится:
+
+```bash
+install -d /etc/systemd/system/canterlot-hub.service.d
+printf '[Service]\nLimitCORE=0\n' > /etc/systemd/system/canterlot-hub.service.d/limits.conf
+systemctl daemon-reload
+systemctl show canterlot-hub -p LimitCORE   # LimitCORE=0
+```
+
+Лимит действует с ближайшего рестарта хаба (его делает следующий выкат); перезапускать хаб ради него отдельно не нужно. Распознавание речи идёт в отдельном юните `canterlot-speech` (§12): этой песочнице нужны устройства NVIDIA и память с записью и исполнением, а `PrivateDevices=yes` и `MemoryDenyWriteExecute=yes` хаба их запрещают.
 
 При старте `canterlot-hub serve` ([crates/canterlot-hub/src/main.rs:35](../../crates/canterlot-hub/src/main.rs#L35)) проверяет манифест, сверяет его с БД, применяет недостающие миграции под advisory lock, устанавливает panic hook и запускает gRPC и HTTP серверы.
 
@@ -906,6 +941,8 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
 - залитые каталоги на хабе, веб-хосте и воркере совпадают с dist по каждому файлу; после слияния старых immutable-чанков допустимы только лишние файлы под `_app/immutable/`;
 - миграции цели против базы: база не должна быть впереди, число ожидающих миграций печатается.
 
+`stage.sh` кладёт на хаб весь `hub/bin` dist, вместе с `canterlot-speech` (сборка с CUDA). Есть ли он в релизе, печатается отдельной строкой: `bin/canterlot-speech staged (dictation)` или `WARNING: release … has no hub/bin/canterlot-speech: dictation will be unavailable on this release (not an error)`; релиз без службы законен. `preflight.sh` (ворота 3) сверяет `/etc/canterlot/speech.toml`, если он есть, со структурой `Config` нового `crates/canterlot-speech/src/config.rs` так же строго, как служба при запуске: неизвестные таблицы и ключи, обязательные ключи (`[model]` и `[vad]` с `path` и `sha256`), `sha256` ровно из 64 шестнадцатеричных символов. Нет файла — диктовка выключена, это не ошибка; несовпадение — строка `SPEECH-SOFT`, выкат идёт дальше. Таблицу `[dictation]` в `hub.toml` ворота 3 принимают сами, как только она появится в `HubConfig` выкатываемого исходника.
+
 **Что релиз ждёт от воркера, объявляет сам релиз.** `scripts/release-build/in-container.sh` пишет в dist файл `EXPECT` (входит в `SHA256SUMS`) из вывода `canterlot-worker capabilities`: `format=1`, `capabilities=` (список `OPTIONAL_CAPABILITIES` из `crates/canterlot-worker/src/session.rs`) и `harnesses=` (харнессы этой сборки). `verify.sh` требует от машины в хабе все объявленные возможности и те объявленные харнессы, что включены в `worker.toml` (таблица есть и `enabled` не `false`; читаются только имена таблиц и ключ `enabled`). Релиз, который намеренно убирает харнесс или возможность, правки toolkit не требует. Dist без `EXPECT` (релизы до 1.20) — прежний список (`claude_histories_v1`, `path_probe_v1`; `claude_code`, `codex`, `opencode`) с предупреждением `WARNING: no …/EXPECT`.
 
 `stage.sh` копирует только tar-конвейерами, проверяет полный пофайловый состав и точный корень stagedir, публикует атомарным `mv -T` и не трогает `current`/`build`. Для openapi ему обязателен `--source` того чекаута, из которого собран dist.
@@ -928,12 +965,13 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
 4. flip хаба под host lock, отдельное чтение ссылки, один рестарт, `readyz`, миграции, `migrations_applied` в журнале с момента рестарта, PID/exe хаба только непустые и ненулевые (урок 1.19.0), `NRestarts=0`;
 5. PWA: `canterlot.env.<sha>` из `csp.txt` (0600, чтение назад), flip `build`, один `docker compose up -d caddy` (id контейнера до/после печатается), `version.json` и CSP в контейнере;
 6. flip воркера и один старт; защищённое ожидание `MainPID` с читаемым exe (`wait_worker_exe`: пустой `MainPID`, `MainPID=0` и ENOENT на переходе exec — не обрыв `set -e`, а следующий опрос; инцидент 1.18.1); exe из нового релиза; ожидание **голого** `state="live"` в журнале юнита (инциденты 1.16.0 и 1.19.0: разбор без конвейера с ранним выходом); `NRestarts=0`; инвариант сессий; печатается измеренный простой;
-7. **слияние старых чанков PWA** после старта воркера и до любой чистки: `_app/immutable` до трёх предыдущих релизов веба копируется в новый релиз `cp -rn` под web lock (открытые вкладки догружают свои чанки); затем чтение: ни одного пропущенного относительного пути из каждого источника и каждый файл dist нового релиза байт в байт на месте (`sha256sum -c`);
-8. **обслуживание**: у каждой живой сессии есть каталог исполнения и сокет `/run/user/<uid>/canterlot/<id>.sock`; на хостах нет `current.new`, `build.new` и `releases/.stage-*`; `canterlot.env.<web>` — 0600 и равен живому env. Нарушения — мягкие ошибки (в dry-run и репетиции — провал);
-9. `verify.sh`: два чтения (пауза `VERIFY_READ_GAP`, 60 с), версии, миграции, соединение воркера в текущем запуске, **каталог машины после старта** — возможности и харнессы из `EXPECT` релиза (с ожиданием до `CATALOG_WAIT` секунд), CSP, precompressed `Content-Encoding` (`br`/`zstd`/`gzip`, мягкая ошибка) на первом по `LC_ALL=C` полностью предсжатом JS-ассете релиза, счётчики ошибок журналов (новый вид WARN/ERROR хаба против суточной базы — жёсткая ошибка, кроме видов WARN из `VERIFY_WARN_KINDS_OK`, по умолчанию `config_key_deprecated sign_in_global_lock client_ip_missing`; неудачные входы, отказы CSRF на публичных путях входа и пределы запусков QR и ключа доступа хаб пишет INFO и в счёт не идут), курсоры SJ/CJ, коды сайтов (`SITE_CODES`: `hub.example.com` отдаёт оболочку PWA с кодом 200, `auth.example.com` не проверяется — узел выключен);
-10. **база GeoIP**: путь выкат спрашивает у выкатываемого хаба (`canterlot-hub geoip path --config /etc/canterlot/hub.toml` печатает действующий `[auth.geoip].path`, так что выкат и хаб смотрят в один файл); если файла на хабе нет или он старше `GEOIP_MAX_AGE_DAYS` (35) дней, `canterlot-hub geoip update` от имени `canterlot` через `run_write` (в репетиции печатается, dry-run только сообщает возраст); неудача — мягкая ошибка, места входа остаются пустыми;
-11. retention (`retain.sh --apply`) под своими `/proc`-guard'ами; цель и предыдущие релизы передаются `--keep`;
-12. чек-лист проверок со входом для владельца и шаблон раздела журнала выката.
+7. **служба диктовки** `canterlot-speech` (§12) после доказанного старта воркера, чтобы ожидание не удлиняло простой: юнит установлен, включён, есть `/etc/canterlot/speech.toml` и `bin/canterlot-speech` в релизе — один `systemctl restart` под `timeout` (`SPEECH_RESTART_TIMEOUT`, 30 с) и ожидание ответа `canterlot-speech health` от имени `canterlot` (`SPEECH_HEALTH_WAIT`, 20 с); в релизе нет бинаря — юнит останавливается и выключается, чтобы не остался в `failed`; юнита нет, нет `speech.toml` или юнит выключен руками — строка «dictation unavailable» или «switched off by hand», юнит не трогается. Сбой любого из этих шагов печатается строкой `SPEECH-SOFT` и попадает в итог (`speech: …` в строке `cutover done`), но не идёт в счёт мягких ошибок: токен dry-run и репетиции, проверка и откат от диктовки не зависят;
+8. **слияние старых чанков PWA** после старта воркера и до любой чистки: `_app/immutable` до трёх предыдущих релизов веба копируется в новый релиз `cp -rn` под web lock (открытые вкладки догружают свои чанки); затем чтение: ни одного пропущенного относительного пути из каждого источника и каждый файл dist нового релиза байт в байт на месте (`sha256sum -c`);
+9. **обслуживание**: у каждой живой сессии есть каталог исполнения и сокет `/run/user/<uid>/canterlot/<id>.sock`; на хостах нет `current.new`, `build.new` и `releases/.stage-*`; `canterlot.env.<web>` — 0600 и равен живому env. Нарушения — мягкие ошибки (в dry-run и репетиции — провал);
+10. `verify.sh`: два чтения (пауза `VERIFY_READ_GAP`, 60 с), версии, миграции, соединение воркера в текущем запуске, **каталог машины после старта** — возможности и харнессы из `EXPECT` релиза (с ожиданием до `CATALOG_WAIT` секунд), CSP, precompressed `Content-Encoding` (`br`/`zstd`/`gzip`, мягкая ошибка) на первом по `LC_ALL=C` полностью предсжатом JS-ассете релиза, счётчики ошибок журналов (новый вид WARN/ERROR хаба против суточной базы — жёсткая ошибка, кроме видов WARN из `VERIFY_WARN_KINDS_OK`, по умолчанию `config_key_deprecated sign_in_global_lock client_ip_missing`, и видов сбоев движка диктовки из `SPEECH_WARN_KINDS_SOFT` (`engine_load_failed engine_failed engine_exited`), которые идут строкой `SPEECH-SOFT`; неудачные входы, отказы CSRF на публичных путях входа и пределы запусков QR и ключа доступа хаб пишет INFO и в счёт не идут), курсоры SJ/CJ, коды сайтов (`SITE_CODES`: `hub.example.com` отдаёт оболочку PWA с кодом 200, `auth.example.com` не проверяется — узел выключен); в конце — диктовка, только мягко: состояние юнита, `canterlot-speech health --socket /run/canterlot-speech/speech.sock` локальным CLI на хабе от имени `canterlot` (без входа владельца и без HTTP), виды WARN/ERROR журнала `canterlot-speech` за 30 минут (сбои движка — ожидаемые, прочие — новые, все `SPEECH-SOFT`) и число строк `speech_unavailable` уровня INFO;
+11. **база GeoIP**: путь выкат спрашивает у выкатываемого хаба (`canterlot-hub geoip path --config /etc/canterlot/hub.toml` печатает действующий `[auth.geoip].path`, так что выкат и хаб смотрят в один файл); если файла на хабе нет или он старше `GEOIP_MAX_AGE_DAYS` (35) дней, `canterlot-hub geoip update` от имени `canterlot` через `run_write` (в репетиции печатается, dry-run только сообщает возраст); неудача — мягкая ошибка, места входа остаются пустыми;
+12. retention (`retain.sh --apply`) под своими `/proc`-guard'ами; цель и предыдущие релизы передаются `--keep`;
+13. чек-лист проверок со входом для владельца и шаблон раздела журнала выката.
 
 **Loopback-Caddy** для precompressed (решение владельца: допустим в боевом прогоне): один одноразовый процесс `caddy run` внутри контейнера на `127.0.0.1:18080` для всех трёх кодировок, под `timeout` (`PROBE_LIFETIME`, 60 с), с ловушкой на `EXIT`/`INT`/`TERM`/`HUP`; занятый порт — отказ до старта; старт и останов (`probe: loopback caddy pid N started/stopped`) попадают в журнал, а отдельное чтение после пробы доказывает, что порт снова закрыт. Проверяется первый по `LC_ALL=C` `.js`-файл под `_app/immutable`, у которого в релизе есть все три соседа (`<файл>.br`, `<файл>.zst`, `<файл>.gz`); если такого файла нет, это `SOFT-FAIL`, как и любая другая неудача пробы. В репетиции проба только печатается, в dry-run — `SKIPPED`.
 
@@ -952,6 +990,8 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
 
 **Откат хаба ниже релиза со статусом провайдеров.** Если в `/etc/canterlot/hub.toml` добавлена таблица `[provider_status]` (вместе с `[provider_status.claude]` и `[provider_status.codex]`), её убирают до старта старого хаба: тот же `deny_unknown_fields`. Без таблицы новый хаб опрашивает страницы с умолчаниями, и править конфиг не нужно. Релиз добавляет миграцию `0088_provider_status` (таблица `provider_status`), поэтому откат хаба после неё — строка 2 таблицы отката: полное восстановление базы из дампа прогона, а не flip назад на той же базе.
 
+**Откат хаба ниже релиза с диктовкой.** Таблица `[dictation]` в `/etc/canterlot/hub.toml` (ключи `enabled`, `socket`) убирается до старта старого хаба: тот же `deny_unknown_fields`, что у `[provider_status]`. Миграция `0091_dictation_terms` (словарь замен) подчиняется тому же правилу, что `0088_provider_status`: откат хаба после неё — строка 2, полное восстановление базы из дампа прогона. Служба `canterlot-speech` идёт за релизом хаба: после любого flip хаба назад её перезапускают, а если в том релизе нет `bin/canterlot-speech`, останавливают и выключают (`systemctl stop canterlot-speech && systemctl disable canterlot-speech`), чтобы юнит не остался в `failed`. `rollback-db.sh` делает это сам после старта старого хаба и пишет итог строкой `speech: …`; ручная команда для строки 1 напечатана в отчёте `STOP-AND-REPORT` вместе с состоянием юнита. Выключенный так юнит следующий выкат не включает обратно (он уважает выключение руками): после возврата на релиз с диктовкой — `systemctl enable --now canterlot-speech`.
+
 ### 11.5. Retention
 
 Автоматически после проверенного cutover (решение владельца). `retain.sh` держит 3 свежих релиза на компонент плюс каждый релиз, из которого живёт процесс (`/proc/<pid>/exe`), плюс всё, что передано `--keep` (цель и предыдущие релизы каждого компонента); локальный dist — так же (3 свежих + `--keep`). Никогда не удаляются цель, цели `current`/`build`, релиз, который реально раздаёт Caddy, и зарезервированные живой операцией. Без `--apply` только печатает план. Удаление — только буквальными абсолютными путями: каждый путь печатается (`REMOVE <путь>`) и проверяется заново непосредственно перед удалением (форма пути, имя релиза, не `current`/`build`, ни один процесс не исполняет файл из каталога, нет резерва); финальная сверка и удаление — одной удалённой командой под тем же `.deploy.lock`, что у flip и recreate; каждое удаление идёт через `run_write`, а `removed` печатается только после чтения пути с того хоста, где он живёт. Маркер резерва хранит прогон, pid и время: резерв устарел, только когда прогон уже не работает и маркер старше 2 ч (срока токена плана), и тогда `retain.sh` под тем же lock снимает его строкой `stale reservation of <sha> from <when> released` и может удалить релиз. Свежий резерв и резерв живого прогона уважаются; оставленные после STOP-AND-REPORT резервы защищают цель и предыдущий релиз, пока следующий успешный прогон не снимет их как устаревшие.
@@ -962,7 +1002,7 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
 
 `pipe-lint.py` ловит классы ошибок, которые уже роняли прод: `cmd | head|grep -q|sed …q|awk …exit` под `pipefail` (SIGPIPE 141, 1.19.0); незащищённое `VAR="$(…)"` в цикле ожидания под `set -e` (1.18.0, 1.18.1); `[ … ] && break|continue` и `[ … ] && cmd` последней командой тела цикла (1.17.0); `source` исполняемого файла или точки входа (1.16.1); `pgrep -f`, `ps | grep <литерал>` и подстроку `*canterlot-worker*` по командной строке (1.16.0); любую пишущую команду в скриптах выката мимо `run_write` (иначе репетиция её выполнила бы). Подавление — комментарий `# lint: <правило>-ok <причина>`; `test-lint.sh` проверяет, что каждое правило ловит образец и молчит на исправленной форме.
 
-Наборы: `lint`, `token` (2 часа, чужой релиз, чужой план, порча, старый суточный токен), `rehearse` (ничего не пишет, печатает каждую запись, сценарии ожидания старта, токен репетиции открывает боевой прогон того же плана, изменённый план и просроченный токен — отказ, провал репетиции без токена, shadow), `cutover` и `cutover-signals` (боевой путь, слияние чанков, обслуживание, пустой/нулевой `MainPID` при старте, `NRestarts`, `vzdump` без строки успеха, маленький дамп, сигналы в каждой фазе), `verify` (`EXPECT`, отключённый харнесс, убранный харнесс, поздний каталог, loopback-проба: старт/стоп/порт), `dryrun` (токен только при PASS, `EXPECT` против бинаря), `preflight`, `stage`, `retain`, `rollback-db`, `guardrails`, `invariants`, `site-env` (файл стенда перекрывает умолчания, явная переменная окружения — файл), `geoip` (путь из `canterlot-hub geoip path`, нет файла, свежий файл не трогается, старше 35 дней, неудача, хаб без пути и нечитаемый хаб — мягкие, репетиция только печатает), `check-proxy` (подменённые сайт и CLI хаба: JSON-401 хаба принят, `401` и `302` от Caddy и `X-Canterlot-Proxy-Leak` — провал, вход и выход по ссылке, адрес клиента, jar удалён, ссылка не напечатана). Ожидания стенда событийные (супервизор ищется точным сканом `/proc`, а не `pgrep -f` с паузой), бинарь фейкового воркера собирается один раз на прогон.
+Наборы: `lint`, `token` (2 часа, чужой релиз, чужой план, порча, старый суточный токен), `rehearse` (ничего не пишет, печатает каждую запись, сценарии ожидания старта, токен репетиции открывает боевой прогон того же плана, изменённый план и просроченный токен — отказ, провал репетиции без токена, shadow), `cutover` и `cutover-signals` (боевой путь, слияние чанков, обслуживание, пустой/нулевой `MainPID` при старте, `NRestarts`, `vzdump` без строки успеха, маленький дамп, сигналы в каждой фазе), `verify` (`EXPECT`, отключённый харнесс, убранный харнесс, поздний каталог, loopback-проба: старт/стоп/порт), `dryrun` (токен только при PASS, `EXPECT` против бинаря), `preflight`, `stage`, `retain`, `rollback-db`, `guardrails`, `invariants`, `site-env` (файл стенда перекрывает умолчания, явная переменная окружения — файл), `geoip` (путь из `canterlot-hub geoip path`, нет файла, свежий файл не трогается, старше 35 дней, неудача, хаб без пути и нечитаемый хаб — мягкие, репетиция только печатает), `speech` (служба диктовки: юнита нет, рестарт и health от имени хаба, цель без бинаря — стоп и выключение, health не ok и сокета нет, рестарт дольше предела, нет `speech.toml` и юнит выключен руками, виды WARN сбоев движка в журналах службы и хаба мягкие, dry-run и репетиция печатают шаги и не теряют токен, отчёт `STOP-AND-REPORT` с состоянием юнита, `rollback-db.sh` на релиз без бинаря и с ним, `config-check.py` по примеру `speech.toml` из `docs/configuration.md` и по плохим файлам, мягкий preflight, `stage.sh` с бинарём и без), `check-proxy` (подменённые сайт и CLI хаба: JSON-401 хаба принят, `401` и `302` от Caddy и `X-Canterlot-Proxy-Leak` — провал, вход и выход по ссылке, адрес клиента, jar удалён, ссылка не напечатана). Ожидания стенда событийные (супервизор ищется точным сканом `/proc`, а не `pgrep -f` с паузой), бинарь фейкового воркера собирается один раз на прогон.
 
 ### 11.7. Ранбук оператора (выкат следующего релиза)
 
@@ -970,11 +1010,11 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
 
 1. **Dist.** `cd "$DIST/$SHA" && sha256sum --quiet -c SHA256SUMS && cat RELEASE EXPECT` — все строки OK, `source=` начинается с `SHA`, `EXPECT` содержит `format=1`. В журнал: число файлов и строку `capabilities=`.
 2. **Stage.** `scripts/deploy/stage.sh "$SHA" --source "$SRC" --dist "$DIST" 2>&1 | tee .superpowers/deploy/stage-$VER.log` — конец `staged <SHA> everywhere; current/build untouched`.
-3. **Dry-run.** `scripts/deploy/cutover.sh "$SHA" --dry-run --source "$SRC" --dist "$DIST" 2>&1 | tee .superpowers/deploy/dryrun-$VER.log` — конец `dry-run PASS`; проверить в логе `target check PASS`, `preflight PASS`, `verify PASS`, строки `maintenance:` и `chunk merge preview:`. Любой `SOFT-FAIL`/`HARD-FAIL` — стоп, разобраться, повторить.
+3. **Dry-run.** `scripts/deploy/cutover.sh "$SHA" --dry-run --source "$SRC" --dist "$DIST" 2>&1 | tee .superpowers/deploy/dryrun-$VER.log` — конец `dry-run PASS`; проверить в логе `target check PASS`, `preflight PASS`, `verify PASS`, строки `maintenance:` и `chunk merge preview:`. Любой `SOFT-FAIL`/`HARD-FAIL` — стоп, разобраться, повторить. Строки `SPEECH-SOFT` (диктовка) выкат не останавливают: записать в журнал и разобраться отдельно (§12.6).
 4. **Репетиция.** `scripts/deploy/cutover.sh "$SHA" --rehearse --source "$SRC" --dist "$DIST" 2>&1 | tee .superpowers/deploy/rehearsal-$VER.log` — конец `rehearsal PASS: … N writes printed as WOULD-WRITE, none executed`. Проверить: строки `start-wait scenario` (пять штук и `real exec transitions`), `the control-worker scan finds exactly the live unit process`, `dump fully readable`, `verify PASS`; `current`/`build` на всех хостах не изменились.
-5. **Боевой прогон** — в течение 2 часов после шага 3 или 4, без правок dist и toolkit между ними: скопировать строку `real run:` из конца лога и выполнить, добавив `2>&1 | tee .superpowers/deploy/cutover-$VER.log`. Если токен отвергнут (`expired` или `plan changed`) — повторить шаг 4. Конец: `cutover done: hub=SHA, worker=SHA, web=SHA, down N s, soft failures 0`.
+5. **Боевой прогон** — в течение 2 часов после шага 3 или 4, без правок dist и toolkit между ними: скопировать строку `real run:` из конца лога и выполнить, добавив `2>&1 | tee .superpowers/deploy/cutover-$VER.log`. Если токен отвергнут (`expired` или `plan changed`) — повторить шаг 4. Конец: `cutover done: hub=SHA, worker=SHA, web=SHA, down N s, soft failures 0, speech: … (speech soft issues N)`.
 6. **Если `STOP-AND-REPORT`** — ничего не делать сверх напечатанного: вставить блок отчёта в журнал и позвать владельца. Если воркер уже проверен живым на новом релизе, он, хаб и PWA остаются работать: остановка воркера заглушила бы доклады, которые идут с этой же машины, поэтому руками его не гасить. Ручные команды восстановления в отчёте берут те же host lock; откат базы — только `rollback-db.sh`.
-7. **Журнал выката.** В `.superpowers/deploy/pilot-deploy-log.md` вставить шаблон раздела из конца лога cutover и заполнить: релиз и тег, токен (время выдачи, хэш плана) и пути трёх логов, строки `vzdump done`, `dump fully readable`, `hub on …`, `worker process … from release`, `worker state="live" … down time`, `chunk merge:`, `maintenance:`, `capabilities present`/`harness catalog has`, `precompressed …`, `verify PASS` (оба чтения), список `removed` из retention, все `SOFT-FAIL` как Deviations.
+7. **Журнал выката.** В `.superpowers/deploy/pilot-deploy-log.md` вставить шаблон раздела из конца лога cutover и заполнить: релиз и тег, токен (время выдачи, хэш плана) и пути трёх логов, строки `vzdump done`, `dump fully readable`, `hub on …`, `worker process … from release`, `worker state="live" … down time`, `chunk merge:`, `maintenance:`, `capabilities present`/`harness catalog has`, `precompressed …`, `verify PASS` (оба чтения), `speech: …` из строки `cutover done` и все `SPEECH-SOFT`, список `removed` из retention, все `SOFT-FAIL` как Deviations.
 8. **Приёмка прокси** — `EXPECTED_LOGIN=<логин владельца> scripts/check-proxy.sh https://hub.example.com --positive` (§4.3): без сеанса JSON `401` хаба и вычищенные поддельные заголовки, затем вход по одноразовой ссылке во временный jar, адрес клиента в списке сеансов, выход. Владельцу придёт push о входе с этой машины; ссылка нигде не печатается.
 9. **Владельцу** — чек-лист `owner checklist: authenticated checks` из конца лога (вход в PWA паролем или ключом доступа и баннер обновления, `GET /api/v1/config`, живая сессия, новые функции релиза) в раздел «Left for the owner».
 
@@ -1014,3 +1054,163 @@ scripts/deploy/cutover.sh --execute "$SHA" --confirm <CONFIRM> --source "$SRC" -
    EXPECTED_LOGIN=<логин владельца> scripts/check-proxy.sh https://hub.example.com --positive
    ```
    Провал любой проверки — вернуть копию Caddyfile (reload) и доложить; хаб при этом не откатывается. После приёмки `SITE_CODES` и `VERIFY_WARN_KINDS_OK` из оболочки убираются (умолчания уже ждут `hub.example.com:200`), а `user_header` и `logout_url` стоит убрать из `hub.toml`, чтобы `config_key_deprecated` не повторялся при каждом рестарте.
+
+## 12. Служба распознавания речи
+
+Диктовка в поле ввода PWA распознаётся службой `canterlot-speech` на хосте хаба ([docs/design/dictation.md](../design/dictation.md)): хаб принимает звук от PWA и пересылает его службе по unix-сокету `/run/canterlot-speech/speech.sock`. Служба работает в отдельном юните: песочница хаба (`PrivateDevices=yes`, `MemoryDenyWriteExecute=yes`, `ProtectSystem=strict`, `SystemCallFilter=@system-service`) не пускает к устройствам NVIDIA и запрещает память с записью и исполнением, без которых не работает драйвер CUDA. Бинарь едет в релизе хаба (`bin/canterlot-speech`, сборка с CUDA только для sm_70) и запускается из `current`, поэтому выкат и откат перезапускают юнит сами (§11.4, шаг 7). Сам юнит, драйвер, библиотеки CUDA, модели и `speech.toml` ставятся один раз руками, по шагам ниже (первая установка — 2026-11-13).
+
+Заполнители: `<CTID>` — номер контейнера хаба (`HUB_CTID` в `site.env`), `<HUB_SSH>` — алиас SSH хоста хаба (`HUB_SSH`), `<VER>` — версия драйвера NVIDIA на гипервизоре. Настоящие значения живут в `.superpowers/site.env` и в репозиторий не попадают.
+
+### 12.1. Гипервизор: устройства GPU и ресурсы контейнера
+
+На гипервизоре Proxmox, вне окна бэкапа 03:30 и не во время выката. Контейнер перезапускается: хаб недоступен около минуты, воркер переподключается сам, живые сессии продолжаются в своих сопровождениях.
+
+```bash
+# 1. Копия конфигурации контейнера
+cp -p /etc/pve/lxc/<CTID>.conf /root/lxc-<CTID>.conf.bak-$(date -u +%Y%m%dT%H%M%SZ)
+
+# 2. Узлы устройств есть на гипервизоре (nvidia-uvm появляется после загрузки модуля uvm)
+ls -l /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-modeset
+
+# 3. Проброс в контейнер; gid=44 — группа video внутри контейнера Debian
+pct set <CTID> -dev0 /dev/nvidia0,gid=44 -dev1 /dev/nvidiactl,gid=44 -dev2 /dev/nvidia-uvm,gid=44 \
+    -dev3 /dev/nvidia-uvm-tools,gid=44 -dev4 /dev/nvidia-modeset,gid=44
+
+# 4. Ресурсы: хаб, PostgreSQL и служба речи (её предел MemoryMax=2G)
+pct set <CTID> -cores 4 -memory 6144
+
+# 5. Перезапуск контейнера и проверка
+pct reboot <CTID>
+pct exec <CTID> -- ls -l /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-modeset
+```
+
+Если индексы `dev0`–`dev4` уже заняты другими пробросами, берутся свободные. После перезапуска: `readyz` хаба отвечает `{"status":"ok"}`, воркер снова `live`.
+
+### 12.2. Драйвер NVIDIA в контейнере (только пользовательская часть)
+
+Модуль ядра один на гипервизор, поэтому в контейнер ставится только пользовательская часть драйвера **ровно той же версии**, что модуль на гипервизоре, из того же `.run` от NVIDIA с `--no-kernel-module`. Так же устроены остальные контейнеры с GPU на этом гипервизоре.
+
+```bash
+# на гипервизоре: версия модуля
+nvidia-smi --query-gpu=driver_version --format=csv,noheader
+
+# в контейнере
+VER=<VER>
+cd /root
+curl -fLO "https://download.nvidia.com/XFree86/Linux-x86_64/${VER}/NVIDIA-Linux-x86_64-${VER}.run"
+sha256sum "NVIDIA-Linux-x86_64-${VER}.run"   # равен sha256 того же файла, которым ставился гипервизор
+sh "NVIDIA-Linux-x86_64-${VER}.run" --no-kernel-module --silent
+nvidia-smi                                    # видна Tesla V100, версия драйвера равна <VER>
+```
+
+После обновления драйвера на гипервизоре пользовательская часть в контейнере обновляется той же командой с новой версией, иначе `nvidia-smi` и служба получают `Driver/library version mismatch`, а движок уходит в режим CPU.
+
+### 12.3. Библиотеки CUDA 12.9.1
+
+Нужны только библиотеки рантайма: `libcudart.so.12`, `libcublas.so.12`, `libcublasLt.so.12` (`libcuda.so.1` даёт драйвер из §12.2). Они берутся из архивов redist NVIDIA, а не из apt: ключ репозитория NVIDIA для debian12 `sqv` в Debian 13 отвергает (привязка подписи на SHA1). Версия — 12.x: CUDA 13 больше не поддерживает Volta (sm_70), то есть V100. Версии и sha256 архивов берутся из `redistrib_12.9.1.json` (на 2026-11-13: `cuda_cudart` 12.9.79, `libcublas` 12.9.1.4).
+
+```bash
+REDIST=https://developer.download.nvidia.com/compute/cuda/redist
+work="$(mktemp -d)" && cd "${work}"
+curl -fsSLO "${REDIST}/redistrib_12.9.1.json"
+for comp in cuda_cudart libcublas; do
+    path="$(jq -r --arg c "${comp}" '.[$c]["linux-x86_64"].relative_path' redistrib_12.9.1.json)"
+    sum="$(jq -r --arg c "${comp}" '.[$c]["linux-x86_64"].sha256' redistrib_12.9.1.json)"
+    curl -fsSLo "${path##*/}" "${REDIST}/${path}"
+    printf '%s  %s\n' "${sum}" "${path##*/}" | sha256sum -c -     # обязано напечатать OK
+    tar -xJf "${path##*/}"
+done
+install -d -m 0755 /opt/cuda-12.9/lib
+cp -P ./*/lib/libcudart.so.12* ./*/lib/libcublas.so.12* ./*/lib/libcublasLt.so.12* /opt/cuda-12.9/lib/
+echo /opt/cuda-12.9/lib > /etc/ld.so.conf.d/cuda-12.9.conf
+ldconfig
+ldconfig -p | grep -E 'libcudart\.so\.12|libcublas(Lt)?\.so\.12'
+cd / && rm -rf "${work}"
+```
+
+Проверка после первого выката релиза со службой: `ldd /opt/canterlot/current/bin/canterlot-speech | grep 'not found'` ничего не печатает. Без любой из библиотек бинарь не запускается вовсе (юнит падает при старте), запасной режим CPU этого не покрывает.
+
+### 12.4. Пользователь, модели, `speech.toml` и юнит
+
+Служба работает от своего пользователя с основной группой `canterlot` (группа сокета, через неё к нему подключается хаб) и дополнительной `video` (устройства GPU):
+
+```bash
+useradd --system --gid canterlot --groups video --home-dir /var/lib/canterlot-speech \
+    --shell /usr/sbin/nologin canterlot-speech
+install -d -o canterlot-speech -g canterlot -m 0750 /var/lib/canterlot-speech /var/lib/canterlot-speech/models
+runuser -u canterlot-speech -- nvidia-smi    # GPU виден от имени службы
+```
+
+Модели: Parakeet TDT 0.6B v3 в квантовании Q8_0 из `handy-computer/parakeet-tdt-0.6b-v3-gguf` и Silero VAD v6.2 (F32) из `handy-computer/silero-vad-v6.2-gguf`. Локальные имена — как в примере [configuration.md](../configuration.md#служба-распознавания-речи-speechtoml). sha256 сверяется с хэшем файла на странице репозитория (Hugging Face показывает его для файлов LFS; на 2026-11-13 — значения в комментариях) и вписывается в `speech.toml`: служба сверяет его при каждом запуске и с другим файлом не стартует.
+
+```bash
+cd /var/lib/canterlot-speech/models
+HF=https://huggingface.co
+curl -fL -o parakeet-tdt-0.6b-v3-Q8_0.gguf \
+    "${HF}/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/main/parakeet-tdt-0.6b-v3-Q8_0.gguf"
+curl -fL -o silero-vad-v6.2.gguf \
+    "${HF}/handy-computer/silero-vad-v6.2-gguf/resolve/main/silero-vad-v6.2-F32.gguf"
+sha256sum parakeet-tdt-0.6b-v3-Q8_0.gguf silero-vad-v6.2.gguf
+# 5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7  parakeet-tdt-0.6b-v3-Q8_0.gguf (739508576 байт)
+# 0d871a800c420fdd5d1b17a3aea4296d1c39608f0ff4a9295eb76457eb1c88e6  silero-vad-v6.2.gguf (1241056 байт)
+chown canterlot-speech:canterlot ./*.gguf && chmod 0640 ./*.gguf
+```
+
+`/etc/canterlot/speech.toml` (`root:canterlot`, `0640`) — пример из [configuration.md](../configuration.md#служба-распознавания-речи-speechtoml); обязательны только модели, остальное имеет умолчания:
+
+```bash
+( umask 027
+  cat > /etc/canterlot/speech.toml <<'EOF'
+socket = "/run/canterlot-speech/speech.sock"
+device = "auto"
+threads = 4
+idle_unload = "5m"
+
+[model]
+path = "/var/lib/canterlot-speech/models/parakeet-tdt-0.6b-v3-Q8_0.gguf"
+sha256 = "<sha256 модели из sha256sum выше>"
+
+[vad]
+path = "/var/lib/canterlot-speech/models/silero-vad-v6.2.gguf"
+sha256 = "<sha256 VAD из sha256sum выше>"
+EOF
+)
+chown root:canterlot /etc/canterlot/speech.toml && chmod 0640 /etc/canterlot/speech.toml
+```
+
+Юнит — файл [`docs/deploy/canterlot-speech.service`](canterlot-speech.service) из репозитория, без правок: `User=canterlot-speech`, `Group=canterlot`, `SupplementaryGroups=video`; `ExecStart` из `/opt/canterlot/current`; `RuntimeDirectory=canterlot-speech` с режимом `0750` и `UMask=0007` (сокет `0660 canterlot-speech:canterlot`); `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes` (служба только читает модели и конфигурацию, `ReadWritePaths` нет); та же песочница, что у хаба (§2.7), где она не мешает CUDA: `SyslogIdentifier`, пустые `CapabilityBoundingSet=` и `AmbientCapabilities=`, `ProtectKernel*`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `RemoveIPC`, `SystemCallArchitectures=native` и `RestrictAddressFamilies=AF_UNIX` (сети у службы нет); `DevicePolicy=closed` и явные `DeviceAllow` для пяти устройств NVIDIA; без `MemoryDenyWriteExecute` (драйвер CUDA отображает память с записью и исполнением), без `PrivateDevices` и без `SystemCallFilter` (набор вызовов драйвера NVIDIA не проверен на живой карте); `MemoryMax=2G`, `MemorySwapMax=0`, `LimitCORE=0`; `Restart=on-failure`, `RestartSec=5s`, `TimeoutStopSec=15s`, не больше пяти неудачных запусков за 5 минут. Предел памяти: пик RSS на GPU — 506 МиБ, а запасной режим CPU держит в памяти процесса модель (740 МБ), промежуточные тензоры и до 10 минут звука одной диктовки; 2 ГиБ оставляют запас над этим и ограничивают службу внутри 6 ГиБ контейнера. Своп и дамп памяти выключены, чтобы звук и текст не попали на диск.
+
+```bash
+# с машины воркера, из чекаута
+scp docs/deploy/canterlot-speech.service <HUB_SSH>:/etc/systemd/system/canterlot-speech.service
+
+# на хосте хаба
+chmod 0644 /etc/systemd/system/canterlot-speech.service
+systemd-analyze verify /etc/systemd/system/canterlot-speech.service
+systemctl daemon-reload
+systemctl enable --now canterlot-speech
+systemctl status canterlot-speech --no-pager    # active (running); в журнале speech_started
+ls -ld /run/canterlot-speech /run/canterlot-speech/speech.sock
+# drwxr-x--- canterlot-speech canterlot /run/canterlot-speech
+# srw-rw---- canterlot-speech canterlot /run/canterlot-speech/speech.sock
+
+# хаб подключается, посторонний — нет
+runuser -u canterlot -- /opt/canterlot/current/bin/canterlot-speech health --socket /run/canterlot-speech/speech.sock
+# {"ok":true,"engine":"cold","mode":null,"model":"parakeet-tdt-0.6b-v3-Q8_0"}, код 0
+runuser -u nobody -- /opt/canterlot/current/bin/canterlot-speech health --socket /run/canterlot-speech/speech.sock
+# INFO kind="speech_unavailable" ... Permission denied, код 1
+```
+
+`LimitCORE=0` хаба (§2.7) ставится в тот же заход, если его ещё нет. Таблица `[dictation]` в `hub.toml` (`enabled`, `socket`) добавляется только после выката хаба, который её знает: старый хаб с ней не стартует (`deny_unknown_fields`). Первая диктовка после установки пишет в журнал `engine_loaded` с `mode=gpu`; `mode=cpu` при свободной карте значит, что CUDA не поднялась (версия драйвера, `DeviceAllow`, библиотеки), причина — в строках `ggml`/`CUDA` журнала службы.
+
+### 12.5. Выключение диктовки
+
+- Служба: `systemctl disable --now canterlot-speech`. Хаб видит недоступный сокет (`speech_unavailable`, INFO) и отвечает PWA, что диктовка недоступна. Выкат выключенный юнит не включает и не перезапускает (`dictation switched off by hand`). Включить обратно: `systemctl enable --now canterlot-speech`.
+- Хаб: `[dictation] enabled = false` в `hub.toml`; действует после рестарта хаба (конфиг читается при старте), поэтому для быстрого выключения удобнее остановить службу.
+
+### 12.6. Память GPU, журналы, сбои
+
+- **VRAM.** Движок — дочерний процесс службы: загружается на первую диктовку (холодный старт около 0,6 с плюс сверка sha256 при запуске службы) и через `idle_unload` (5 минут без диктовок) завершается целиком, освобождая память карты для других контейнеров. Пока движок загружен, он держит около 1,1 ГиБ VRAM. Если память карты занята другим пользователем GPU, при `device = "auto"` движок загружается на CPU (`mode=cpu`: медленнее, без промежуточного текста, только окончательный по паузам); следующая диктовка после выгрузки снова пробует GPU.
+- **Журнал**: `journalctl -u canterlot-speech`. Строки `kind=…` уровня INFO: `speech_started`, `engine_spawned`, `engine_loaded` (режим, время загрузки), `engine_unloaded`, `engine_killed` (причина), `dictation_started`, `dictation_finished` (длительность, задержки, режим, исход). WARN: `engine_load_failed`, `engine_failed`, `engine_exited` — сбои движка, следующая диктовка запускает его заново. Звук и распознанный текст в журнал не пишутся никогда.
+- **Выкат и проверка**: `cutover.sh` перезапускает службу после старта воркера (§11.4, шаг 7), `verify.sh` спрашивает `health` и читает её журнал. Всё это мягко: строки `SPEECH-SOFT` и итог `speech: …` в строке `cutover done` выкат, токен и откат не останавливают, их разбирают отдельно. Типичные причины: юнит в `failed` после пяти неудачных запусков (sha256 модели не сходится с `speech.toml`, нет библиотек CUDA — `systemctl status` и журнал), `health` с `"ok":false` (последняя загрузка движка не удалась), `speech_unavailable` у `health` (служба не слушает или у пользователя нет доступа к сокету).
+- **Откат**: правило §11.4 «Откат хаба ниже релиза с диктовкой» — `[dictation]` убирается из `hub.toml`, миграция `0091_dictation_terms` идёт по строке 2 (восстановление базы), юнит на релизе без бинаря останавливается и выключается (`rollback-db.sh` делает это сам).

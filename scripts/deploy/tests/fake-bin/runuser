@@ -11,4 +11,6 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ -n "${user}" ] || { echo "fake-runuser: no user" >&2; exit 99; }
+# Подменённые бинари видят, от чьего имени их запустили.
+export FAKE_RUNUSER="${user}"
 exec "$@"

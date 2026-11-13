@@ -6,7 +6,7 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
 fi
 # Проверка релиза: два чтения. Версии, миграции, живость воркера, счётчики ошибок
 # журнала с обеих сторон, PIDs и тики сессий, курсоры SJ и CJ, version.json PWA,
-# CSP, коды остальных сайтов.
+# CSP, коды остальных сайтов; в конце мягко — служба диктовки (юнит, health, журнал).
 # Каждое отклонение — жёсткая ошибка (счётчик, не печать). Тики сверяются на обоих
 # чтениях: против --state и против собственного снимка первого чтения, так что
 # PASS без сверки тиков невозможен. Снимки — в переменных shell, не в файлах:
@@ -615,6 +615,11 @@ check_hub_levels() {
             summary+="${n} ${level} ${kind} (expected, VERIFY_WARN_KINDS_OK); "
             continue
         fi
+        if [ "${level}" = "WARN" ] && speech_warn_kind_soft "${kind%%/*}"; then
+            speech_soft "hub journal: ${n} WARN ${kind} in ${HUB_WINDOW_MIN} min (speech engine failure)"
+            summary+="${n} ${level} ${kind} (speech, soft); "
+            continue
+        fi
         if [ "${b}" = "0" ]; then
             hard "new hub ${level} kind not in the baseline: ${kind} (${n} in ${HUB_WINDOW_MIN} min)"
             summary+="${n} ${level} ${kind} (NEW); "
@@ -634,6 +639,62 @@ check_hub_levels() {
     else
         log "hub WARN/ERROR kinds: none"
     fi
+}
+
+# Диктовка: юнит, health от имени пользователя хаба через локальный CLI (без входа
+# владельца и без HTTP) и журнал службы. Всё мягкое: печатается как SPEECH-SOFT и в
+# счёт hard/soft не идёт, verify от неё не проваливается. Ожидаемая недоступность
+# (юнита нет, нет speech.toml или бинаря в релизе, юнит выключен руками) — только строка.
+check_speech() {
+    local active slog line n key level kind seen=""
+    log "=== speech (dictation, soft) ==="
+    speech_plan "${HUB_SHA}"
+    log "speech: ${SPEECH_UNIT}: ${SPEECH_STATE}"
+    active="$(speech_field active "${SPEECH_STATE}")"
+    case "${SPEECH_ACTION}" in
+        unknown)
+            speech_soft "${SPEECH_REASON}"
+            SPEECH_SUMMARY="unknown"
+            return 0 ;;
+        skip | disable)
+            SPEECH_SUMMARY="${SPEECH_REASON}"
+            if [ "${SPEECH_ACTION}" = "disable" ] && [ "${active}" = "active" ]; then
+                speech_soft "${SPEECH_UNIT} is active although release ${HUB_SHA} has no bin/canterlot-speech"
+            else
+                log "speech: ${SPEECH_REASON}"
+            fi
+            [ "$(speech_field load "${SPEECH_STATE}")" = "loaded" ] || return 0 ;;
+        restart)
+            if [ "${active}" != "active" ]; then
+                speech_soft "${SPEECH_UNIT} is ${active}, expected active"
+                SPEECH_SUMMARY="unit ${active}"
+            elif SPEECH_HEALTH_OUT="$(speech_health "${SPEECH_BIN}")"; then
+                log "speech: health ok as ${SPEECH_CLIENT_USER}: ${SPEECH_HEALTH_OUT}"
+                SPEECH_SUMMARY="ok"
+            else
+                speech_soft "${SPEECH_UNIT} health failed as ${SPEECH_CLIENT_USER}: ${SPEECH_HEALTH_OUT##*$'\n'}"
+                SPEECH_SUMMARY="health failing"
+            fi ;;
+    esac
+    # Журнал службы: виды WARN сбоев движка ожидаемы (SPEECH_WARN_KINDS_SOFT), прочие
+    # WARN/ERROR — новые; и те и другие только печатаются как SPEECH-SOFT.
+    if ! slog="$(ssh_hub "journalctl -u $(shq "${SPEECH_UNIT}") --since -${HUB_WINDOW_MIN}min --no-pager")"; then
+        speech_soft "cannot read the ${SPEECH_UNIT} journal"
+        return 0
+    fi
+    while IFS=$'\t' read -r n key; do
+        [ -n "${key}" ] || continue
+        level="${key%% *}"; kind="${key#* }"
+        if [ "${level}" = "WARN" ] && speech_warn_kind_soft "${kind%%/*}"; then
+            speech_soft "${SPEECH_UNIT} journal: ${n} WARN ${kind} in ${HUB_WINDOW_MIN} min (engine failure, expected kind)"
+        else
+            speech_soft "${SPEECH_UNIT} journal: ${n} ${level} ${kind} in ${HUB_WINDOW_MIN} min (NEW kind)"
+        fi
+        seen+="${n} ${level} ${kind}; "
+    done < <(printf '%s\n' "${slog}" | level_kind_counts)
+    line="$(printf '%s\n' "${slog}" | grep -c 'kind="speech_unavailable"' || true)"
+    seen="${seen%; }"
+    log "speech journal: WARN/ERROR kinds: ${seen:-none}; speech_unavailable (INFO, expected): ${line}"
 }
 
 # Один проход чтения; префикс отличает первое и второе чтение.
@@ -831,6 +892,8 @@ if [ -n "${STATE_FILE}" ] && [ -f "${STATE_FILE}" ]; then
 fi
 check_ticks_own "read 2"
 compare_acks
+check_speech
+log "speech: ${SPEECH_SUMMARY}; speech soft issues ${SPEECH_ISSUES} (dictation only, not counted below)"
 
 if [ -n "${NOT_RUN_LIST}" ]; then
     if [ "${ALLOW_SKIPPED}" = "1" ]; then
