@@ -144,7 +144,7 @@ lease_self_wrap gate gate bash "$(realpath "$0")" "$@"
 
 Прежняя последовательность (`check.sh --all`, внутри которого полный `check-web.sh`, затем `check-web.sh --stack`) гоняла веб и Playwright дважды; новый гейт делает это один раз и не собирает web отдельным шагом — `check-web.sh` собирает сам.
 
-Порт тестовой PostgreSQL по умолчанию 55441 (`CANTERLOT_TEST_PG_PORT`), бинарник воркера для аренды — установка воркера в `$HOME/.local/opt/canterlot/current/bin` (`CANTERLOT_WORKER_BIN`); обе переменные перекрываются окружением.
+Порт тестовой PostgreSQL по умолчанию 55441 (`CANTERLOT_TEST_PG_PORT`), временный каталог — `/tmp` (`CANTERLOT_GATE_TMPDIR`: сокет исполнения не влезает в `SUN_LEN` при длинном пути), бинарник воркера для аренды — установка воркера в `$HOME/.local/opt/canterlot/current/bin` (`CANTERLOT_WORKER_BIN`); все три переменные перекрываются окружением.
 
 Сводка в формате прежнего `result.txt` (sha, коды возврата, длительности, строки nextest и Playwright, первые упавшие тесты) печатается в stdout и пишется в `.superpowers/gate/<sha8>/` вместе с логами `npm-ci.log`, `check.log` и `web.log`. При полном успехе, чистой рабочей копии в начале и в конце и неизменном HEAD гейт атомарно (временный файл и `rename`) пишет аттестацию `.superpowers/gate/<full sha>.ok` с sha, временем начала и конца, длительностями и строками сводки — её требует `release.sh ship`. Грязная рабочая копия аттестации не даёт: гейт отказывается работать, пока его не попросят явно с `--no-attest` (тогда прогон идёт, аттестация не пишется). `.superpowers/` не отслеживается git.
 

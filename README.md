@@ -140,9 +140,10 @@ scripts/publish-release.sh v1.24.0
 `canterlot-speech` без веб-половины) и один `scripts/check-web.sh --stack`
 (статические проверки, vitest, две сборки PWA, `vitest.build`, Playwright
 `e2e/ui` + `e2e/parity` и сквозные сценарии на настоящем хабе). Порт тестовой
-PostgreSQL по умолчанию 55441, бинарник воркера для аренды — установка в
-`$HOME/.local/opt/canterlot/current/bin`; обе переменные
-(`CANTERLOT_TEST_PG_PORT`, `CANTERLOT_WORKER_BIN`) перекрываются окружением.
+PostgreSQL по умолчанию 55441, временный каталог — `/tmp` (длинный путь ломает
+сокеты супервизоров), бинарник воркера для аренды — установка в
+`$HOME/.local/opt/canterlot/current/bin`; все три (`CANTERLOT_TEST_PG_PORT`,
+`CANTERLOT_GATE_TMPDIR`, `CANTERLOT_WORKER_BIN`) перекрываются окружением.
 
 Сводка в формате прежнего `result.txt` и логи складываются в
 `.superpowers/gate/<sha8>/` и печатаются в stdout. При полном успехе, чистой

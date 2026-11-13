@@ -15,6 +15,8 @@
 #   CANTERLOT_TEST_PG_PORT  порт тестовой PostgreSQL (по умолчанию 55441);
 #   CANTERLOT_WORKER_BIN    бинарник воркера для аренды (по умолчанию установка
 #                           воркера в $HOME/.local/opt/canterlot/current/bin);
+#   CANTERLOT_GATE_TMPDIR   временный каталог гейта (по умолчанию /tmp: сокет
+#                           исполнения не влезает в SUN_LEN при длинном пути);
 #   CANTERLOT_NO_LEASE=1    идти без аренды (отладка).
 #
 # Сводка и логи прогона — .superpowers/gate/<sha8>/. Аттестация пишется только
@@ -42,6 +44,11 @@ done
 # Значения частного скрипта остаются умолчаниями и перекрываются окружением.
 export CANTERLOT_WORKER_BIN="${CANTERLOT_WORKER_BIN:-$HOME/.local/opt/canterlot/current/bin/canterlot-worker}"
 export CANTERLOT_TEST_PG_PORT="${CANTERLOT_TEST_PG_PORT:-55441}"
+# Сокет исполнения — <TMPDIR>/canterlot/<uuid>.sock, а supervisor::ipc отвергает
+# путь длиннее 107 байт: длинный TMPDIR сессии роняет тесты хаба, супервизоров и
+# адаптеров. Как и контейнерный гейт, берём короткий /tmp; свой путь — в
+# CANTERLOT_GATE_TMPDIR.
+export TMPDIR="${CANTERLOT_GATE_TMPDIR:-/tmp}"
 
 clean_tree() { [[ -z "$(git status --porcelain)" ]]; }
 
