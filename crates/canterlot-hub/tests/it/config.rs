@@ -567,7 +567,11 @@ fn dictation_section_is_optional_and_relative_socket_sticks_to_the_config() {
         std::path::PathBuf::from("/run/canterlot-speech/speech.sock")
     );
 
-    fs::write(&path, format!("{base}[dictation]\nenabled = false\nsocket = 'speech.sock'\n")).unwrap();
+    fs::write(
+        &path,
+        format!("{base}[dictation]\nenabled = false\nsocket = 'speech.sock'\n"),
+    )
+    .unwrap();
     let config = HubConfig::load(&path).unwrap();
     assert!(!config.dictation.enabled);
     assert_eq!(config.dictation.socket, dir.path().join("speech.sock"));
