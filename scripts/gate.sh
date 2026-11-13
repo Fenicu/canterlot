@@ -50,12 +50,18 @@ export CANTERLOT_TEST_PG_PORT="${CANTERLOT_TEST_PG_PORT:-55441}"
 # CANTERLOT_GATE_TMPDIR.
 export TMPDIR="${CANTERLOT_GATE_TMPDIR:-/tmp}"
 
-clean_tree() { [[ -z "$(git status --porcelain)" ]]; }
+clean_tree() {
+    # git status может упасть (битый индекс, отказ safe.directory): пустой вывод
+    # тогда ничего не значит, поэтому проверка обязана провалиться, а не пройти.
+    local out
+    out=$(git status --porcelain) || return 1
+    [[ -z "$out" ]]
+}
 
 # Грязная копия не даёт аттестации, а без неё гейт нужен только по явной просьбе.
 if ((attest)) && ! clean_tree; then
     echo 'гейт: рабочая копия грязная, аттестация невозможна; запустите с --no-attest' >&2
-    git status --short >&2
+    git status --short >&2 || true
     exit 1
 fi
 
@@ -74,7 +80,7 @@ started=$SECONDS
 
 if ((attest)) && ! clean_tree; then
     echo 'гейт: рабочая копия стала грязной, пока ждали аренду; аттестация невозможна' >&2
-    git status --short >&2
+    git status --short >&2 || true
     exit 1
 fi
 
@@ -110,7 +116,7 @@ finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # Сводка в формате прежнего result.txt: коды и времена, затем nextest,
 # Playwright и первые упавшие тесты.
 mapfile -t rust_summary < <(grep -E 'Summary \[' "$log_dir/check.log" || true)
-mapfile -t playwright_summary < <(grep -E '^\s+[0-9]+ (passed|failed|flaky|did not run)' "$log_dir/web.log" || true)
+mapfile -t playwright_summary < <(grep -E '^\s+[0-9]+ (passed|failed|flaky|skipped|did not run)' "$log_dir/web.log" || true)
 mapfile -t failed_rust < <(grep -E '^ +FAIL \[' "$log_dir/check.log" | head || true)
 mapfile -t failed_web < <(grep -E '^\s+[0-9]+\) ' "$log_dir/web.log" | sort -u | head || true)
 
@@ -143,7 +149,7 @@ if [[ "$head_now" != "$sha" ]]; then
 fi
 if ! clean_tree; then
     echo 'гейт: рабочая копия стала грязной за прогон; аттестация не пишется' >&2
-    git status --short >&2
+    git status --short >&2 || true
     exit 1
 fi
 
