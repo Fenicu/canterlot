@@ -109,7 +109,8 @@ impl Default for SupervisorTimers {
     fn default() -> Self {
         Self {
             attach_wait: Duration::from_secs(30),
-            ready_deadline: Duration::from_secs(30),
+            // Claude Code ждёт каждый сервер MCP до 30 с (`MCP_TIMEOUT`), прежде чем прислать init.
+            ready_deadline: Duration::from_secs(90),
             transmit_deadline: Duration::from_secs(10),
             cli_version_probe: Duration::from_secs(5),
             stop_grace: Duration::from_secs(5),
@@ -608,5 +609,16 @@ impl WorkerAttachmentsConfig {
             && self.fetch_attempts > 0
             && !self.fetch_retry.is_zero()
             && !self.fetch_backoff_cap.is_zero()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_deadline_outlasts_the_cli_mcp_startup_timeout() {
+        // Один зависший сервер MCP задерживает init Claude Code на 30 с.
+        assert!(SupervisorTimers::default().ready_deadline >= Duration::from_secs(60));
     }
 }
