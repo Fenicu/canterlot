@@ -40,14 +40,27 @@ list() {
 }
 count() { wc -l <"$1" | tr -d ' '; }
 
+# Команды Playwright берутся из самих скриптов, а не задаются здесь: так сверка
+# увидит, если check-web.sh перестанет звать e2e/parity или package.json сузит
+# test:stack. Полная (не --fast) команда в check-web.sh одна.
+web_line=$(grep -E '^[[:space:]]*npx --no-install playwright test e2e/' "$web_check" || true)
+[[ -n "$web_line" && $(printf '%s\n' "$web_line" | grep -c .) == 1 ]] \
+    || fail 'check-web.sh: не одна полная команда Playwright вида «npx --no-install playwright test e2e/…»'
+web_filters=${web_line##*playwright test }
+stack_line=$(node -e "process.stdout.write(require('./web/package.json').scripts['test:stack'] || '')")
+[[ "$stack_line" == 'playwright test '* ]] || fail 'web/package.json: test:stack не «playwright test …»'
+stack_filters=${stack_line#playwright test }
+read -r -a web_args <<<"$web_filters"
+read -r -a stack_args <<<"$stack_filters"
+
 # Старый путь: полный веб-прогон внутри check.sh, такой же прогон внутри
 # check-web.sh --stack, затем сквозные сценарии. Новый: один веб-прогон
 # check-web.sh --stack и те же сквозные сценарии.
-list "$tmp/old-full" e2e/ui e2e/parity
-list "$tmp/old-stack-web" e2e/ui e2e/parity
-list "$tmp/old-stack" e2e/stack
-list "$tmp/new-web" e2e/ui e2e/parity
-list "$tmp/new-stack" e2e/stack
+list "$tmp/old-full" "${web_args[@]}"
+list "$tmp/old-stack-web" "${web_args[@]}"
+list "$tmp/old-stack" "${stack_args[@]}"
+list "$tmp/new-web" "${web_args[@]}"
+list "$tmp/new-stack" "${stack_args[@]}"
 
 # Оба прежних веб-прогона обязаны быть одинаковыми: это одна и та же команда
 # check-web.sh в полном и в --stack режимах.
@@ -61,6 +74,7 @@ new_count=$(count "$tmp/new-union")
 
 printf 'Сверка покрытия гейта\n'
 printf 'Playwright, идентичности (проект, спека, тест):\n'
+printf '  из скриптов: check-web.sh «%s», package.json «%s»\n' "$web_filters" "$stack_filters"
 printf '  прежний: check.sh --all → check-web.sh (полный)   %s\n' "$(count "$tmp/old-full")"
 printf '  прежний: check-web.sh --stack, веб-прогон         %s\n' "$(count "$tmp/old-stack-web")"
 printf '  новый:   check-web.sh --stack, веб-прогон         %s\n' "$(count "$tmp/new-web")"
@@ -75,6 +89,8 @@ printf '  объединение прежних = новый: да, %s иден�
 # Гейт обязан состоять ровно из одного npm ci, check.sh --all --no-web и
 # check-web.sh --stack; комментарии в счёте не участвуют.
 code=$(grep -vE '^[[:space:]]*#' "$gate")
+check_code=$(grep -vE '^[[:space:]]*#' "$check")
+web_code=$(grep -vE '^[[:space:]]*#' "$web_check")
 [[ $(printf '%s\n' "$code" | grep -cE '&& npm ci |^[[:space:]]*npm ci ') == 1 ]] \
     || fail 'в gate.sh не один npm ci'
 printf '%s\n' "$code" | grep -q 'bash scripts/check.sh --all --no-web' \
@@ -108,14 +124,13 @@ web_steps=(
     'VITE_UI_TESTS=1 npm run build'
     'PWA_BUILD_DIR=build-update'
     'npx --no-install vitest run --config vitest.build.config.ts'
-    'npx --no-install playwright test e2e/ui e2e/parity'
     'npm run stack:build && npm run test:stack'
 )
 for step in "${rust_steps[@]}"; do
-    grep -qF -- "$step" "$check" || fail "check.sh: пропал шаг «$step»"
+    printf '%s\n' "$check_code" | grep -qF -- "$step" || fail "check.sh: пропал шаг «$step»"
 done
 for step in "${web_steps[@]}"; do
-    grep -qF -- "$step" "$web_check" || fail "check-web.sh: пропал шаг «$step»"
+    printf '%s\n' "$web_code" | grep -qF -- "$step" || fail "check-web.sh: пропал шаг «$step»"
 done
 
 printf 'Не-Playwright шаги:\n'
