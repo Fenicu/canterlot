@@ -2299,10 +2299,10 @@ export interface components {
         DictationStatus: {
             /** @description Можно начинать диктовку: включена в конфигурации и служба здорова. */
             available: boolean;
-            engine?: string;
-            mode?: string;
+            engine: string | null;
+            mode: string | null;
             /** @description Почему недоступна: `disabled`, `no_service` или `unhealthy`. */
-            reason?: string;
+            reason: string | null;
         };
         DiskView: {
             /** Format: int64 */

@@ -12005,7 +12005,10 @@
         "type": "object",
         "description": "Состояние службы распознавания речи для кнопки микрофона.",
         "required": [
-          "available"
+          "available",
+          "reason",
+          "mode",
+          "engine"
         ],
         "properties": {
           "available": {
@@ -12013,13 +12016,22 @@
             "description": "Можно начинать диктовку: включена в конфигурации и служба здорова."
           },
           "engine": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "mode": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "reason": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Почему недоступна: `disabled`, `no_service` или `unhealthy`."
           }
         }

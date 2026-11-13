@@ -55,11 +55,11 @@ pub struct DictationStatus {
     /// Можно начинать диктовку: включена в конфигурации и служба здорова.
     pub available: bool,
     /// Почему недоступна: `disabled`, `no_service` или `unhealthy`.
-    #[schema(nullable = false, value_type = Option<String>)]
+    #[schema(required = true)]
     pub reason: Option<String>,
-    #[schema(nullable = false, value_type = Option<String>)]
+    #[schema(required = true)]
     pub mode: Option<String>,
-    #[schema(nullable = false, value_type = Option<String>)]
+    #[schema(required = true)]
     pub engine: Option<String>,
 }
 
