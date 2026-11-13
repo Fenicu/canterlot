@@ -2309,9 +2309,12 @@ impl Adapter for CodexAdapter {
                         return SteerOutcome::Undetermined;
                     }
                     if timeout_at(limit, self.pump_once()).await.is_err() {
+                        // Сервер уже подтвердил `turn/steer` тем же ходом: ввод
+                        // передаётся, а элемент `userMessage` придёт на границе шага.
+                        // Без него после конца хода ввод станет неподтверждённым.
                         self.proof_for = None;
                         self.unconfirmed.insert(input.command_id);
-                        return SteerOutcome::Undetermined;
+                        return SteerOutcome::Transmitting;
                     }
                 }
             }

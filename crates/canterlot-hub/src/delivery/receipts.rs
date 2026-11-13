@@ -181,15 +181,13 @@ pub async fn apply_input_receipt_in_tx(
     ) {
         Some(Ignored::Terminal)
     } else if steer {
-        // Steer действует только на ввод, который всё ещё ждёт в очереди
-        // (или на запоздалое доказательство непринятого): ушедший дальше ввод
-        // принадлежит обычной доставке. Хранение и начало передачи steer
-        // не присылает.
-        if state != InputState::Queued && !late_acceptance
-            || matches!(
-                receipt,
-                InputReceipt::Stored | InputReceipt::TransmissionStarted
-            )
+        // Steer действует на ввод, который ждёт в очереди или уже передаётся
+        // влитым кадром (или на запоздалое доказательство непринятого): ушедший
+        // дальше ввод принадлежит обычной доставке. Хранение steer не присылает,
+        // а начало передачи законно только из очереди.
+        if !matches!(state, InputState::Queued | InputState::Transmitting) && !late_acceptance
+            || receipt == InputReceipt::Stored
+            || (receipt == InputReceipt::TransmissionStarted && state != InputState::Queued)
         {
             Some(Ignored::NotMonotonic)
         } else {
@@ -535,9 +533,12 @@ pub(crate) async fn settle_steers_of_execution_in_tx(
 }
 
 /// Недогасшие вливания старше `$1` секунд; под неё заведён частичный индекс
-/// `commands_steer_open`.
+/// `commands_steer_open`. Уже передающееся вливание сюда не попадает: его
+/// доказательство ждёт границы шага идущего хода, а не срока команды. Потерю
+/// такого вливания закрывает конец исполнения и срок воркера.
 pub const OPEN_STEERS_SQL: &str = "select id from commands where kind = 'steer_input'
    and delivery_state <> 'completed'
+   and coalesce(last_status, '') <> 'transmission_started'
    and created_at < now() - make_interval(secs => $1) order by created_at, id";
 
 /// Гасит вливания, итог которых не пришёл за `older_than`. Возвращает их число.

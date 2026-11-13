@@ -214,6 +214,11 @@ struct Supervisor {
     transmitted: HashSet<Uuid>,
     cancel_marks: HashMap<Uuid, u32>,
     reported: HashSet<(Uuid, u32, &'static str)>,
+    /// Влитые вводы, доказательство которых ещё не пришло. Значение — начало
+    /// простоя после конца хода; `None` — ход ещё идёт.
+    pending_steers: HashMap<(Uuid, u32), Option<Instant>>,
+    /// Сколько простой после конца хода ждёт доказательства вливания.
+    steer_grace: Duration,
     active_turn: Option<Uuid>,
     /// Команда, которой приписан идущий запуск без ввода.
     adopted_turn: Option<Uuid>,
@@ -260,6 +265,10 @@ struct Supervisor {
     shares: ShareQueue,
     share_jobs: mpsc::UnboundedSender<ShareJob>,
 }
+
+/// Сколько простой после конца хода ждёт доказательства вливания, прежде чем
+/// приём будет назван неподтверждённым: обычно новый ход стартует сразу.
+const STEER_IDLE_GRACE: Duration = Duration::from_secs(30);
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -425,6 +434,8 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         transmitted: HashSet::new(),
         cancel_marks: HashMap::new(),
         reported: HashSet::new(),
+        pending_steers: HashMap::new(),
+        steer_grace: STEER_IDLE_GRACE,
         active_turn: None,
         adopted_turn: None,
         turn_started: None,
@@ -729,6 +740,15 @@ impl Supervisor {
         if let Some(earliest) = self.agent_calls.values().min() {
             consider(*earliest);
         }
+        if let Some(earliest) = self
+            .pending_steers
+            .values()
+            .flatten()
+            .map(|idle| *idle + self.steer_grace)
+            .min()
+        {
+            consider(earliest);
+        }
         wake
     }
 
@@ -737,6 +757,7 @@ impl Supervisor {
         self.drive_stop().await?;
         self.try_transmit().await?;
         self.expire_agent_calls().await;
+        self.expire_pending_steers()?;
         self.sj.flush()?;
         self.pump_shipping();
         if let Lifecycle::Draining { outcome } = &self.lifecycle
@@ -1056,6 +1077,38 @@ impl Supervisor {
                     .await;
             }
         }
+    }
+
+    /// Влитый ввод не дождался доказательства за срок простоя: владелец видит
+    /// «приём не подтверждён» и может повторить. Позднее доказательство снимет
+    /// паузу обычным путём.
+    fn expire_pending_steers(&mut self) -> Result<(), SupervisorError> {
+        let now = Instant::now();
+        let due: Vec<(Uuid, u32)> = self
+            .pending_steers
+            .iter()
+            .filter(|(_, idle)| idle.is_some_and(|at| now.duration_since(at) >= self.steer_grace))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in due {
+            self.pending_steers.remove(&key);
+            let Some(input) = self.inputs.get(&key) else {
+                continue;
+            };
+            if input.accepted
+                || input.state != InputState::Transmitting
+                || self.reported.contains(&(key.0, key.1, "unconfirmed"))
+            {
+                continue;
+            }
+            self.record(Body::AcceptanceUnconfirmed(InputAcceptanceUnconfirmed {
+                command_id: key.0.to_string(),
+                dispatch_attempt: key.1,
+                reason: "undetermined".into(),
+            }))?;
+            self.reported.insert((key.0, key.1, "unconfirmed"));
+        }
+        Ok(())
     }
 
     /// При остановке все ожидающие вызовы получают `supervisor_stopping`.
@@ -2057,6 +2110,7 @@ impl Supervisor {
         let outcome = adapter.steer(&transmission).await;
         match outcome {
             SteerOutcome::Accepted(_) => {
+                self.pending_steers.remove(&key);
                 if let Some(input) = self.inputs.get_mut(&key) {
                     input.accepted = true;
                     input.state = InputState::Done;
@@ -2068,7 +2122,23 @@ impl Supervisor {
                 }))?;
                 self.send(ack(command.command_id.clone(), attempt, "steer_accepted"));
             }
+            SteerOutcome::Transmitting => {
+                // Кадр уже в stdin, процесс жив: это обычная передача, а не
+                // неподтверждённый приём. Доказательство придёт на границе шага.
+                self.record(Body::TransmissionStarted(InputTransmissionStarted {
+                    command_id: command.command_id.clone(),
+                    dispatch_attempt: attempt,
+                    machine_time_ms: now_ms(),
+                }))?;
+                self.pending_steers.insert(key, None);
+                self.send(ack(
+                    command.command_id.clone(),
+                    attempt,
+                    "steer_transmitting",
+                ));
+            }
             SteerOutcome::Rejected(reason) => {
+                self.pending_steers.remove(&key);
                 let reason: String = reason.chars().take(128).collect();
                 self.inputs.remove(&key);
                 self.record(Body::InputRejected(InputRejected {
@@ -2079,6 +2149,7 @@ impl Supervisor {
                 self.send(ack(command.command_id.clone(), attempt, "steer_rejected"));
             }
             SteerOutcome::NotApplicable(reason) => {
+                self.pending_steers.remove(&key);
                 self.inputs.remove(&key);
                 self.record(Body::DispatchDeferred(InputDispatchDeferred {
                     command_id: command.command_id.clone(),
@@ -2088,6 +2159,7 @@ impl Supervisor {
                 self.send(ack(command.command_id.clone(), attempt, "steer_deferred"));
             }
             SteerOutcome::Undetermined => {
+                self.pending_steers.remove(&key);
                 self.record(Body::AcceptanceUnconfirmed(InputAcceptanceUnconfirmed {
                     command_id: command.command_id.clone(),
                     dispatch_attempt: attempt,
@@ -2544,6 +2616,12 @@ impl Supervisor {
                     // следующий ввод уйдёт в тот же CLI. Без сброса решения
                     // следующего хода отклонялись бы как «во время прерывания».
                     self.aborting_turn = false;
+                    // Вливание ещё не доказано, а ход кончился: новый ход с ним
+                    // обычно стартует сразу, поэтому срок простоя пошёл.
+                    let now = Instant::now();
+                    for idle in self.pending_steers.values_mut() {
+                        idle.get_or_insert(now);
+                    }
                 }
                 for ((command, _), input) in self.inputs.iter_mut() {
                     if *command == input_command_id && input.state == InputState::Transmitting {
@@ -2662,8 +2740,8 @@ impl Supervisor {
                 self.begin_stop(StopCause::Exited { code, signal }, false)?;
             }
             AdapterEvent::InputAccepted { command_id } => {
-                // Позднее доказательство: ввод ещё передаётся и о нём уже сказано
-                // «не подтверждён»; хаб снимает паузу unconfirmed_delivery.
+                // Доказательство вливания: ввод ещё передаётся; если о нём уже
+                // сказано «не подтверждён», хаб снимает паузу unconfirmed_delivery.
                 let key = self
                     .inputs
                     .iter()
@@ -2672,9 +2750,9 @@ impl Supervisor {
                             && input.state == InputState::Transmitting
                             && !input.accepted
                     })
-                    .map(|(key, _)| *key)
-                    .filter(|key| self.reported.contains(&(key.0, key.1, "unconfirmed")));
+                    .map(|(key, _)| *key);
                 if let Some(key) = key {
+                    self.pending_steers.remove(&key);
                     if let Some(input) = self.inputs.get_mut(&key) {
                         input.accepted = true;
                     }
@@ -3220,6 +3298,7 @@ impl Supervisor {
         if let Some((id, attempt)) = self.pending_compaction.take() {
             self.compaction_record(&id, attempt, CompactionState::Superseded)?;
         }
+        self.pending_steers.clear();
         let mut keys: Vec<_> = self.inputs.keys().copied().collect();
         keys.sort();
         for key in keys {
@@ -3456,6 +3535,7 @@ mod tests {
         agent_call_errors: Vec<(Uuid, String)>,
         ack_interrupt: bool,
         steer_accept: bool,
+        steer_transmitting: bool,
         steer_undetermined: bool,
         refused: Vec<String>,
         compact_calls: usize,
@@ -3548,6 +3628,8 @@ mod tests {
                     command_id: input.command_id,
                     kind: "stub_steer",
                 })
+            } else if state.steer_transmitting {
+                SteerOutcome::Transmitting
             } else if state.steer_undetermined {
                 SteerOutcome::Undetermined
             } else {
@@ -3640,6 +3722,8 @@ mod tests {
             transmitted: HashSet::new(),
             cancel_marks: HashMap::new(),
             reported: HashSet::new(),
+            pending_steers: HashMap::new(),
+            steer_grace: STEER_IDLE_GRACE,
             active_turn: None,
             adopted_turn: None,
             turn_started: None,
@@ -4044,6 +4128,145 @@ mod tests {
         assert!(bodies.iter().any(|body| matches!(
             body,
             Body::InputAccepted(accepted) if accepted.command_id == key.0.to_string()
+        )));
+    }
+
+    #[tokio::test]
+    async fn slow_steer_proof_is_transmitting_without_pause() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        {
+            let mut state = state.lock().unwrap();
+            state.steer_transmitting = true;
+            state.ack_interrupt = true;
+        }
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let deliver = steer_deliver(&supervisor, first.0, "slow proof");
+        let key = steer_key(&deliver);
+        supervisor.on_steer(deliver).await.unwrap();
+        // Кадр записан, доказательство ещё в пути: это передача, а не пауза.
+        assert!(matches!(
+            supervisor.inputs[&key].state,
+            InputState::Transmitting
+        ));
+        assert!(!supervisor.inputs[&key].accepted);
+        assert_eq!(supervisor.active_turn, Some(first.0));
+        assert_eq!(supervisor.pending_steers.get(&key), Some(&None));
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(
+            bodies.iter().any(|body| matches!(
+                body,
+                Body::TransmissionStarted(started) if started.command_id == key.0.to_string()
+            )),
+            "transmission started: {bodies:?}"
+        );
+        assert!(
+            bodies
+                .iter()
+                .all(|body| !matches!(body, Body::AcceptanceUnconfirmed(_))),
+            "no false pause: {bodies:?}"
+        );
+        // Сопровождение не занято ожиданием: прерывание проходит сразу.
+        supervisor
+            .on_interrupt(Uuid::now_v7().to_string(), 0)
+            .await
+            .unwrap();
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::InterruptStatus(status)
+                if status.state == InterruptState::Acknowledged as i32
+        )));
+        // Доказательство пришло: ввод принят, ход чужой и цел.
+        supervisor
+            .on_adapter_event(AdapterEvent::InputAccepted { command_id: key.0 })
+            .await
+            .unwrap();
+        assert!(supervisor.inputs[&key].accepted);
+        assert!(supervisor.pending_steers.is_empty());
+        assert_eq!(supervisor.active_turn, Some(first.0));
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::InputAccepted(accepted) if accepted.command_id == key.0.to_string()
+        )));
+    }
+
+    #[tokio::test]
+    async fn steer_without_proof_after_turn_end_becomes_unconfirmed_after_grace() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().steer_transmitting = true;
+        supervisor.steer_grace = Duration::from_millis(20);
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let deliver = steer_deliver(&supervisor, first.0, "never replayed");
+        let key = steer_key(&deliver);
+        supervisor.on_steer(deliver).await.unwrap();
+        supervisor
+            .on_adapter_event(AdapterEvent::RunFinished {
+                input_command_id: first.0,
+                usage: Vec::new(),
+                context_tokens: 0,
+                context_window_tokens: 0,
+            })
+            .await
+            .unwrap();
+        assert!(
+            supervisor
+                .pending_steers
+                .get(&key)
+                .is_some_and(|idle| idle.is_some()),
+            "idle period started"
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        supervisor.expire_pending_steers().unwrap();
+        assert!(supervisor.pending_steers.is_empty());
+        assert!(supervisor.reported.contains(&(key.0, key.1, "unconfirmed")));
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::AcceptanceUnconfirmed(unconfirmed)
+                if unconfirmed.command_id == key.0.to_string()
+                    && unconfirmed.reason == "undetermined"
+        )));
+        // Позднее доказательство после тревоги всё ещё принимается.
+        supervisor
+            .on_adapter_event(AdapterEvent::InputAccepted { command_id: key.0 })
+            .await
+            .unwrap();
+        assert!(supervisor.inputs[&key].accepted);
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::InputAccepted(accepted) if accepted.command_id == key.0.to_string()
+        )));
+    }
+
+    #[tokio::test]
+    async fn steer_pending_when_the_process_exits_ends_unconfirmed() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().steer_transmitting = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let deliver = steer_deliver(&supervisor, first.0, "cli dies");
+        let key = steer_key(&deliver);
+        supervisor.on_steer(deliver).await.unwrap();
+        // Процесс вышел, доказательства не будет: путь остановки тот же, что и раньше.
+        supervisor
+            .on_adapter_event(AdapterEvent::ProcessExited {
+                code: Some(1),
+                signal: None,
+            })
+            .await
+            .unwrap();
+        supervisor.finish_stop().unwrap();
+        assert!(supervisor.pending_steers.is_empty());
+        let bodies = shipped_bodies(&mut supervisor);
+        assert!(bodies.iter().any(|body| matches!(
+            body,
+            Body::AcceptanceUnconfirmed(unconfirmed)
+                if unconfirmed.command_id == key.0.to_string()
+                    && unconfirmed.reason == "execution_terminal"
         )));
     }
 
