@@ -1,10 +1,14 @@
+// Снимки панели и настроек диктовки для ревью: `PW_SCREENSHOTS=1 npx playwright test e2e/screenshots/dictation-shots.spec.ts --project=phone --project=desktop`.
+// Файлы ложатся в DICTATION_SHOTS_OUT (по умолчанию /tmp/dictation-shots).
 import { mkdirSync } from 'node:fs';
-import { expect, test } from './fixtures';
-import { bootSecondary } from './secondary-fixture';
-import { bootDictation, panel, startDictation } from './dictation-fixture';
+import { expect, test } from '../ui/fixtures';
+import { bootSecondary } from '../ui/secondary-fixture';
+import { bootDictation, panel, startDictation } from '../ui/dictation-fixture';
 
-const DIR = '/tmp/d3-shots';
-mkdirSync(DIR, { recursive: true });
+test.skip(process.env.PW_SCREENSHOTS !== '1', 'снимки для ревью снимаются отдельно');
+
+const DIR = process.env.DICTATION_SHOTS_OUT ?? '/tmp/dictation-shots';
+if (process.env.PW_SCREENSHOTS === '1') mkdirSync(DIR, { recursive: true });
 
 const shot = (name: string, project: string) => `${DIR}/${name}-${project}.png`;
 
