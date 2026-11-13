@@ -414,6 +414,12 @@ require_release_id() {
     is_release_id "$1" || die "invalid release id: '${1}' (expected 12 or 40 hex characters)"
 }
 
+# Совпадения lock-риска в новом миграционном файле: `lock` и `drop` только словами
+# целиком, иначе `clock_timestamp()` в обычном `create table` даёт ложный риск.
+migration_lock_risks() {
+    grep -ioE '\<(lock|drop)\>[^;]*|create +(unique +)?index[^;]*' "$1" | tr '\n' ';' || true
+}
+
 # Текущий задеплоенный релиз компонента по ссылке current/build.
 # Пустой ответ (обрыв ssh, битая ссылка) — громкая смерть, а не пустая строка,
 # которую вызывающий прочитал бы как «всё хорошо».

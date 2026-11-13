@@ -626,5 +626,20 @@ assert_contains "${FAKE_ROOT}/out.log" "cannot discover the node of CT 101" "dis
 teardown_case
 case_end
 
+# 15. lock-risk нового миграционного файла: слова целиком, иначе clock_timestamp()
+# в обычном create table даёт ложный «lock_timestamp(),».
+migration_risks() {
+    bash -c 'set -euo pipefail; source "$1"; migration_lock_risks "$2"' _ \
+        "${DEPLOY_DIR}/lib.sh" "$1"
+}
+case_begin "migration lock-risk heuristic"
+FIXTURES="${HARNESS_DIR}/fixtures/migrations"
+risks="$(migration_risks "${FIXTURES}/0091_dictation_terms.sql")"
+assert_eq "${risks}" "" "plain create table with clock_timestamp() is not a lock risk"
+risks="$(migration_risks "${FIXTURES}/0092_lock_table.sql")"
+assert_eq "${risks}" "lock table conversations in access exclusive mode;" \
+    "a real lock table is still reported"
+case_end
+
 printf 'preflight harness: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

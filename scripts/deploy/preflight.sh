@@ -290,7 +290,7 @@ NEW_MIGR="$(grep '^migrations_last=' "${DIST}/RELEASE" 2>/dev/null | cut -d= -f2
 log "migrations: deployed ends at ${OLD_MIGR}, new ends at ${NEW_MIGR}"
 if [ "${OLD_MIGR}" != "${NEW_MIGR}" ]; then
     for mig in $(find "${SOURCE_DIR}/crates/canterlot-hub/migrations" -maxdepth 1 -name '*.sql' -printf '%f\n' | sort | awk -v old="${OLD_MIGR}" '$0 > old'); do
-        RISKS="$(grep -ioE 'lock[^;]*|drop[^;]*|create +(unique +)?index[^;]*' "${SOURCE_DIR}/crates/canterlot-hub/migrations/${mig}" | tr '\n' ';' || true)"
+        RISKS="$(migration_lock_risks "${SOURCE_DIR}/crates/canterlot-hub/migrations/${mig}")"
         log "new migration ${mig} lock-risk: ${RISKS:-none spotted (hub is down during migration, no writers)}"
     done
 else
