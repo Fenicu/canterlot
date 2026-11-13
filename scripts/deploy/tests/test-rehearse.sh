@@ -89,6 +89,7 @@ assert_eq "$(result_of "${R}" plan)" "$(token_from "${FAKE_ROOT}/rehearse.log" |
 assert_eq "$(result_of "${R}" release)" "${SHA_NEW}" "result file: release"
 assert_eq "$(result_of "${R}" vzdump_done)" "no" "result file: no restore point from a rehearsal"
 assert_eq "$(result_of "${R}" dump)" "" "result file: no dump from a rehearsal"
+assert_eq "$(result_of "${R}" worker_downtime_s)/$(result_of "${R}" hub_interruption_s)/$(result_of "${R}" worker_stop_at)" "//" "result file: no downtime from a rehearsal"
 assert_contains "${FAKE_ROOT}/rehearse.log" "result file: ${R} (status pass)" "result path printed at the end"
 grep -q 'docker fakeweb exec -i' "${FAKE_ROOT}/state/calls.log" && case_fail "loopback probe started" || case_ok "loopback probe never started"
 teardown_case

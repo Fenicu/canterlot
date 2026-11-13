@@ -134,6 +134,7 @@ write_result() {
             kinds="${kinds:+${kinds},}${k}:${n}"
         done < <(grep -vx speech "${DEPLOY_SOFT_LOG}" | while read -r k; do result_soft_kind "${k}"; printf '\n'; done | LC_ALL=C sort | uniq -c)
     fi
+    # Простой и точки восстановления — только у боевого прогона: репетиция ничего не останавливает.
     if [ "$(result_mode)" = "execute" ]; then restore=1; fi
     {
         printf '%s=%s\n' \
@@ -161,9 +162,9 @@ write_result() {
             speech_soft_failures "${speech_n}" \
             speech_summary "$(one_line "${SPEECH_SUMMARY:-}")" \
             web_release "${WEB_SHA_EFF:-}" \
-            worker_downtime_s "${WORKER_DOWNTIME:-}" \
-            hub_interruption_s "${HUB_INTERRUPTION:-}" \
-            worker_stop_at "${WORKER_STOP_ISO:-}" \
+            worker_downtime_s "$([ "${restore}" = "1" ] && printf '%s' "${WORKER_DOWNTIME:-}")" \
+            hub_interruption_s "$([ "${restore}" = "1" ] && printf '%s' "${HUB_INTERRUPTION:-}")" \
+            worker_stop_at "$([ "${restore}" = "1" ] && printf '%s' "${WORKER_STOP_ISO:-}")" \
             vzdump_notes "$([ "$((VZDUMP_DONE * restore))" = "1" ] && printf 'pre-%s-%s' "${SHA}" "${RUN_TS}")" \
             vzdump_archive "$([ "$((VZDUMP_DONE * restore))" = "1" ] && printf '%s' "${VZ_ARCHIVE:-}")" \
             dump "$([ "$((DUMP_VERIFIED * restore))" = "1" ] && printf '%s/%s' "${HUB_BACKUP_DIR}" "${RUN_DUMP}")" \
