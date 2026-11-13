@@ -540,6 +540,14 @@ canterlot-hub machine rotate-token --config ~/.config/canterlot/hub.toml --machi
 нетерминальных исполнений относится к следующему этапу; сброс не подтверждает их завершение.
 `machine add` создаёт новую идентичность без привязки CJ.
 
+Живая диктовка в PWA (кнопка микрофона в поле ввода) идёт через службу `canterlot-speech`: хаб пересылает ей звук по unix-сокету и возвращает распознанный текст. Таблица `[dictation]` необязательна: без неё диктовка включена, а сокет — `/run/canterlot-speech/speech.sock`. Относительный путь `socket` считается от каталога файла конфигурации. `enabled = false` оставляет маршруты на месте, но `GET /api/v1/dictation/status` отвечает `reason: "disabled"`, а начатая диктовка получает `speech_unavailable`. Неизвестный ключ останавливает запуск.
+
+```toml
+# [dictation]
+# enabled = true
+# socket = "/run/canterlot-speech/speech.sock"
+```
+
 ## Служба распознавания речи (speech.toml)
 
 `canterlot-speech serve --config /etc/canterlot/speech.toml` — служба диктовки на хосте хаба: хаб пересылает ей звук из PWA по unix-сокету, она возвращает текст (устройство и протокол — [docs/design/dictation.md](design/dictation.md)). Модели скачиваются заранее: `parakeet-tdt-0.6b-v3` Q8_0 из `handy-computer/parakeet-tdt-0.6b-v3-gguf` и Silero VAD из `handy-computer/silero-vad-v6.2-gguf`. Неизвестные ключи — ошибка запуска; несовпадение sha256 модели — отказ запуска (и отказ загрузки движком).

@@ -20,6 +20,7 @@ pub mod db;
 pub mod dberr;
 pub mod deletion;
 pub mod delivery;
+pub mod dictation;
 pub mod dispatcher;
 pub mod drafts;
 pub mod events;

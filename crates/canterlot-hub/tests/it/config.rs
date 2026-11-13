@@ -553,3 +553,29 @@ fn session_tools_config_defaults_match_the_plan() {
     fs::write(&path, format!("{PILOT_BASE}[session_tools]\nbogus = 1\n")).unwrap();
     assert!(HubConfig::load(&path).is_err());
 }
+
+#[test]
+fn dictation_section_is_optional_and_relative_socket_sticks_to_the_config() {
+    let base = "database_url_file = 'db'\ngrpc_listen = '127.0.0.1:7443'\ntls_cert = 'cert'\ntls_key = 'key'\nmanifest = 'manifest'\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, base).unwrap();
+    let config = HubConfig::load(&path).unwrap();
+    assert!(config.dictation.enabled);
+    assert_eq!(
+        config.dictation.socket,
+        std::path::PathBuf::from("/run/canterlot-speech/speech.sock")
+    );
+
+    fs::write(
+        &path,
+        format!("{base}[dictation]\nenabled = false\nsocket = 'speech.sock'\n"),
+    )
+    .unwrap();
+    let config = HubConfig::load(&path).unwrap();
+    assert!(!config.dictation.enabled);
+    assert_eq!(config.dictation.socket, dir.path().join("speech.sock"));
+
+    fs::write(&path, format!("{base}[dictation]\nsockett = 'x'\n")).unwrap();
+    assert!(HubConfig::load(&path).is_err());
+}

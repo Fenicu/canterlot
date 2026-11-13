@@ -6897,6 +6897,209 @@
         }
       }
     },
+    "/api/v1/dictation": {
+      "get": {
+        "tags": [
+          "dictation"
+        ],
+        "operationId": "get__api_v1_dictation",
+        "responses": {
+          "101": {
+            "description": "WSS диктовки: start, звук, finish/cancel; ответ state/text/final/error, см. docs/design/dictation.md §9",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dictation/status": {
+      "get": {
+        "tags": [
+          "dictation"
+        ],
+        "operationId": "get__api_v1_dictation_status",
+        "responses": {
+          "200": {
+            "description": "Служба речи доступна или причина отказа",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DictationStatus"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dictation/terms": {
+      "get": {
+        "tags": [
+          "dictation"
+        ],
+        "operationId": "get__api_v1_dictation_terms",
+        "responses": {
+          "200": {
+            "description": "Словарь замен в порядке владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TermsBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "dictation"
+        ],
+        "operationId": "put__api_v1_dictation_terms",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TermsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Список заменён целиком",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TermsBody"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -11798,6 +12001,41 @@
           }
         }
       },
+      "DictationStatus": {
+        "type": "object",
+        "description": "Состояние службы распознавания речи для кнопки микрофона.",
+        "required": [
+          "available",
+          "reason",
+          "mode",
+          "engine"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "Можно начинать диктовку: включена в конфигурации и служба здорова."
+          },
+          "engine": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Почему недоступна: `disabled`, `no_service` или `unhealthy`."
+          }
+        }
+      },
       "DiskView": {
         "type": "object",
         "required": [
@@ -12025,7 +12263,11 @@
           "no_executor_available",
           "not_delegated",
           "worktree_removed",
-          "worktree_not_removed"
+          "worktree_not_removed",
+          "too_many_terms",
+          "term_empty",
+          "term_too_long",
+          "duplicate_term"
         ]
       },
       "ErrorDetails": {
@@ -18510,6 +18752,36 @@
           },
           "title": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Term": {
+        "type": "object",
+        "required": [
+          "pattern",
+          "replacement"
+        ],
+        "properties": {
+          "pattern": {
+            "type": "string"
+          },
+          "replacement": {
+            "type": "string"
+          }
+        }
+      },
+      "TermsBody": {
+        "type": "object",
+        "required": [
+          "terms"
+        ],
+        "properties": {
+          "terms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Term"
+            }
           }
         },
         "additionalProperties": false

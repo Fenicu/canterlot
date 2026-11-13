@@ -336,6 +336,7 @@ async fn serve(
         notify,
         auth,
         provider_status,
+        dictation,
         ..
     } = config;
     if let Some(http) = &http_config {
@@ -503,6 +504,8 @@ async fn serve(
             blobs,
             manifest,
             auth,
+            dictation,
+            dictation_timers: Default::default(),
             passwords: Default::default(),
             shutdown: http_root.clone(),
         });

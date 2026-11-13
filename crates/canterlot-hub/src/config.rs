@@ -43,6 +43,26 @@ pub struct HubConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub provider_status: ProviderStatusConfig,
+    #[serde(default)]
+    pub dictation: DictationConfig,
+}
+
+/// `[dictation]`: живая диктовка в PWA через службу распознавания речи.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DictationConfig {
+    pub enabled: bool,
+    /// Сокет `canterlot-speech serve`; относительный путь считается от файла конфигурации.
+    pub socket: PathBuf,
+}
+
+impl Default for DictationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            socket: PathBuf::from("/run/canterlot-speech/speech.sock"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,6 +153,7 @@ impl HubConfig {
             &mut config.manifest,
             &mut config.attachments.blob_dir,
             &mut config.auth.geoip.path,
+            &mut config.dictation.socket,
         ] {
             if path.is_relative() {
                 *path = base.join(&*path);

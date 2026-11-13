@@ -37,6 +37,7 @@ mod crunch;
 mod crunch_http;
 mod delete_running_job;
 mod derived;
+mod dictation;
 mod dispatch;
 mod edit_input;
 mod event_schema;

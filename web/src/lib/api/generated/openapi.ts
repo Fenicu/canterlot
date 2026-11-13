@@ -1153,6 +1153,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/dictation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_dictation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/dictation/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_dictation_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/dictation/terms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_dictation_terms"];
+        put: operations["put__api_v1_dictation_terms"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -2247,6 +2295,15 @@ export interface components {
             task?: string | null;
             tool_name?: string | null;
         };
+        /** @description Состояние службы распознавания речи для кнопки микрофона. */
+        DictationStatus: {
+            /** @description Можно начинать диктовку: включена в конфигурации и служба здорова. */
+            available: boolean;
+            engine: string | null;
+            mode: string | null;
+            /** @description Почему недоступна: `disabled`, `no_service` или `unhealthy`. */
+            reason: string | null;
+        };
         DiskView: {
             /** Format: int64 */
             free_bytes: number;
@@ -2290,7 +2347,7 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed";
+        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed" | "too_many_terms" | "term_empty" | "term_too_long" | "duplicate_term";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
             /** @description Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`. */
@@ -4179,6 +4236,13 @@ export interface components {
             isolated?: boolean | null;
             preset?: string | null;
             title: string;
+        };
+        Term: {
+            pattern: string;
+            replacement: string;
+        };
+        TermsBody: {
+            terms: components["schemas"]["Term"][];
         };
         /**
          * @description Насколько прогон свеж относительно коммитов хода.
@@ -8285,6 +8349,142 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionUsageView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_dictation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WSS диктовки: start, звук, finish/cancel; ответ state/text/final/error, см. docs/design/dictation.md §9 */
+            101: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_dictation_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Служба речи доступна или причина отказа */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DictationStatus"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_dictation_terms: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Словарь замен в порядке владельца */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TermsBody"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_dictation_terms: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TermsBody"];
+            };
+        };
+        responses: {
+            /** @description Список заменён целиком */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TermsBody"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

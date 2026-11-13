@@ -149,6 +149,8 @@ pub async fn test_app_deps(
         blobs,
         manifest,
         auth: test_auth_config(&http),
+        dictation: Default::default(),
+        dictation_timers: Default::default(),
         passwords: test_passwords(),
         shutdown: tokio_util::sync::CancellationToken::new(),
     };
@@ -185,6 +187,9 @@ pub struct TestHubOptions {
     pub session_tools: crate::config::SessionToolsConfig,
     pub orchestrator: crate::config::OrchestratorConfig,
     pub machines: crate::config::MachinesConfig,
+    /// `[dictation]` тестового хаба; настройка службы речи и её таймеры.
+    pub dictation: Option<crate::config::DictationConfig>,
+    pub dictation_timers: Option<crate::dictation::Timers>,
     pub attachments: Option<(
         crate::config::AttachmentsConfig,
         std::sync::Arc<dyn crate::attachments::BlobStore>,
@@ -286,6 +291,8 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         session_tools,
         orchestrator,
         machines,
+        dictation: dictation_config,
+        dictation_timers,
         attachments: attachment_store,
         addr,
         pki,
@@ -301,6 +308,8 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
     seed_test_session(&pool, installation.owner_id).await;
     let (attachments, blobs) =
         attachment_store.unwrap_or_else(|| test_blob_store(directory.path()));
+    let dictation = dictation_config.unwrap_or_default();
+    let dictation_timers = dictation_timers.unwrap_or_default();
     let registry = Registry::new(timers.clone());
     let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
     let mut state =
@@ -386,6 +395,8 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
                 blobs,
                 manifest,
                 auth,
+                dictation,
+                dictation_timers,
                 passwords: test_passwords(),
                 shutdown: root.clone(),
             });
