@@ -291,9 +291,17 @@ case_end
 # --- G4. неполный целевой hub-релиз: отказ до остановки воркера ---
 case_begin "incomplete hub target blocks cutover before stop"
 setup_cutover incompletetarget
+# Бинарь пропадает ПОСЛЕ target-check (он бы поймал это раньше): проверяется
+# собственная проверка cutover перед первым изменением.
+cat >"${FAKE_ROOT}/rm-hub-bin.sh" <<EOF
+#!/usr/bin/env bash
 rm -f "${HUB_RELEASES}/${SHA_NEW}/bin/canterlot-hub"
+EOF
+export FAKE_SSH_AFTER_CMD="${SHA_NEW}/bin'" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/rm-hub-bin.sh"
 : >"${FAKE_ROOT}/state/calls.log"
 if run_cutover; then case_fail "exit 0 with incomplete hub target"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+assert_contains "${FAKE_ROOT}/cutover.log" "target check PASS for ${SHA_NEW}" "the target check passed before the binary vanished"
 assert_contains "${FAKE_ROOT}/cutover.log" "hub target release ${SHA_NEW} is incomplete" "incomplete target reported"
 grep -q 'stop canterlot-worker' "${FAKE_ROOT}/state/calls.log" \
     && case_fail "worker stopped before prereq check" || case_ok "worker never stopped"
@@ -380,8 +388,20 @@ case_end
 # --- J2. dist csp.txt пропал: отказ ДО любого flip, ничего не тронуто ---
 case_begin "missing dist csp refuses before any flip"
 setup_cutover pwacspmissing
+# csp.txt пропадает сразу после target-check (последнее его чтение — CSP контейнера).
+cat >"${FAKE_ROOT}/rm-csp.sh" <<EOF
+#!/usr/bin/env bash
+[ ! -e "${FAKE_ROOT}/state/rm-csp-ran" ] || exit 0
+: >"${FAKE_ROOT}/state/rm-csp-ran"
 rm -f "${FAKE_ROOT}/dist/${SHA_NEW}/csp.txt"
-if run_cutover; then case_fail "exit 0 without a dist CSP"; else case_ok "exit nonzero"; fi
+EOF
+TOKEN="$(confirm_for "${SHA_NEW}")"
+export FAKE_SSH_AFTER_CMD="printenv CANTERLOT_CSP" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/rm-csp.sh"
+bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" \
+    --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && J2_RC=0 || J2_RC=$?
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+[ "${J2_RC}" != "0" ] && case_ok "exit nonzero" || case_fail "exit 0 without a dist CSP"
+assert_contains "${FAKE_ROOT}/cutover.log" "target check PASS for ${SHA_NEW}" "the target check passed before csp.txt vanished"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub flipped"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker flipped"
 assert_contains "${FAKE_ROOT}/cutover.log" "CSP is not derived from the final PWA build, refusing before any flip" "refusal reported"
@@ -393,8 +413,11 @@ case_end
 # --- J2b. csp.txt не выведен из финального билда (устаревший хэш): отказ до flip ---
 case_begin "stale csp hash refuses before any flip"
 setup_cutover pwacspstale
-printf "CSP-BODY-NEW script-src 'sha256-STALE'" >"${FAKE_ROOT}/dist/${SHA_NEW}/csp.txt"
+printf "default-src 'self'; script-src 'sha256-STALE'; connect-src wss://hub.example.com" >"${FAKE_ROOT}/dist/${SHA_NEW}/csp.txt"
+dist_resync
 if run_cutover; then case_fail "exit 0 with a stale CSP hash"; else case_ok "exit nonzero"; fi
+assert_contains "${FAKE_ROOT}/cutover.log" "target CSP is not derived from the dist build" "the common preflight's target check refused it"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub flipped"
 assert_contains "${FAKE_ROOT}/cutover.log" "differ from the dist web/200.html inline scripts" "mismatch counts reported"
 assert_not_contains "${FAKE_ROOT}/cutover.log" "STALE" "hash value not printed"

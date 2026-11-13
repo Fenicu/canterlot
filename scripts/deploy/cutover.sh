@@ -18,7 +18,9 @@ fi
 #       репетиция: ВЕСЬ путь записи против живой системы, но каждая запись идёт
 #       через run_write и только печатается (WOULD-WRITE); все чтения, ожидания,
 #       разборы и циклы — настоящие, включая ожидание старта воркера с пустым
-#       MainPID, MainPID=0 и ENOENT на переходе exec. Печатает токен.
+#       MainPID, MainPID=0 и ENOENT на переходе exec. Общая с боевым прогоном
+#       предпроверка — preflight и target-check цели, поэтому репетиция строгое
+#       надмножество dry-run. Печатает токен.
 #   cutover.sh --execute SHA --confirm TOKEN [--source DIR] [--dist DIR] [--state FILE]
 #       боевой прогон. Токен — из dry-run или репетиции того же релиза и того же
 #       плана (хэш plan_text), не старше 2 часов.
@@ -384,7 +386,14 @@ fi
 # В репетиции каждая запись проходит через run_write и печатается; чтения после
 # неё видят живое (неизменённое) состояние, поэтому ожидаемые значения после
 # записи — «как сейчас»: *_EXPECT ниже.
-"${SCRIPT_DIR}/preflight.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}"
+# Общая предпроверка репетиции и боевого прогона: preflight и target-check цели
+# (dist, залитые каталоги на каждом хосте, бинари, openapi, EXPECT, база не впереди).
+# Репетиция поэтому строгое надмножество dry-run; пропуски (NOT RUN) не допускаются.
+log "common preflight: preflight.sh and target-check.sh for ${SHA}"
+"${SCRIPT_DIR}/preflight.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" \
+    || die "preflight failed for ${SHA}: refusing before any write"
+"${SCRIPT_DIR}/target-check.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" \
+    || die "target check failed for ${SHA}: refusing before any write"
 
 # CSP, который уйдёт в canterlot.env.<sha>, обязан быть выведен из финального PWA-билда
 # этого же dist: проверка до любого изменения (урок 1.5.0).

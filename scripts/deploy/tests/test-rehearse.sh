@@ -74,6 +74,57 @@ grep -q 'docker fakeweb exec -i' "${FAKE_ROOT}/state/calls.log" && case_fail "lo
 teardown_case
 case_end
 
+# --- V3: репетиция — надмножество dry-run: target-check в общей предпроверке ---
+case_begin "rehearsal runs the target check (staged trees, dist, DB not ahead)"
+setup_cutover rehearse-target
+if run_rehearse; then case_ok "exit 0"; else case_fail "rehearsal failed"; tail -10 "${FAKE_ROOT}/rehearse.log"; fi
+assert_contains "${FAKE_ROOT}/rehearse.log" "target check PASS for ${SHA_NEW}" "target check ran inside the rehearsal"
+assert_contains "${FAKE_ROOT}/rehearse.log" "web ${SHA_NEW}: staged tree equals the dist (every file hash)" "staged web tree compared"
+assert_contains "${FAKE_ROOT}/rehearse.log" "worker ${SHA_NEW}: staged tree equals the dist (every file hash)" "staged worker tree compared"
+assert_contains "${FAKE_ROOT}/rehearse.log" "migrations: database at 40, target ends at 41" "DB-not-ahead compared"
+teardown_case
+case_end
+
+case_begin "a staged-tree mismatch fails the rehearsal like the dry-run"
+setup_cutover rehearse-staged-mismatch
+printf 'tampered\n' >>"${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe.js"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_rehearse; then case_fail "rehearsal passed with a tampered staged tree"; else case_ok "rehearsal failed"; fi
+assert_contains "${FAKE_ROOT}/rehearse.log" "staged tree differs from the dist" "mismatch named"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "WOULD-WRITE #" "refused before the write path"
+assert_eq "$(mutations)" "" "no mutating command"
+teardown_case
+case_end
+
+case_begin "a database ahead of the target fails the rehearsal like the dry-run"
+setup_cutover rehearse-db-ahead
+sed -i 's/^MIGR_MAX=.*/MIGR_MAX=42/' "${FAKE_ROOT}/state/db.txt"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_rehearse; then case_fail "rehearsal passed with the DB ahead"; else case_ok "rehearsal failed"; fi
+assert_contains "${FAKE_ROOT}/rehearse.log" "database is ahead of the target release: migrations max 42 > target migrations_last 41" "DB ahead named"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
+assert_eq "$(mutations)" "" "no mutating command"
+teardown_case
+case_end
+
+case_begin "the real run refuses a staged-tree mismatch before touching anything"
+setup_cutover execute-staged-mismatch
+TOKEN="$(confirm_for "${SHA_NEW}")"
+printf 'tampered\n' >>"${WORKER_RELEASES}/${SHA_NEW}/RELEASE"
+: >"${FAKE_ROOT}/state/calls.log"
+if bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" \
+        --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1; then
+    case_fail "real run accepted a tampered staged tree"
+else
+    case_ok "real run refused"
+fi
+assert_contains "${FAKE_ROOT}/cutover.log" "worker ${SHA_NEW}: staged tree differs from the dist" "mismatch named"
+assert_eq "$(mutations)" "" "nothing stopped, dumped or flipped"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+teardown_case
+case_end
+
 case_begin "the rehearsal token unlocks the real run of the same plan"
 setup_cutover rehearse-execute
 if run_rehearse; then case_ok "rehearsal exit 0"; else case_fail "rehearsal failed"; tail -10 "${FAKE_ROOT}/rehearse.log"; fi
@@ -138,11 +189,8 @@ case_end
 case_begin "shadow rehearsal of the deployed release (what production runs at the end)"
 setup_cutover shadow
 # dist развёрнутого релиза (как в проде: dist/255ccb1bbe37 лежит в сборочном worktree).
-cp -r "${DIST_DIR}" "${FAKE_ROOT}/dist/${SHA_PREV}"
-printf 'sha=%s\ndate=x\nmigrations_last=0040_monthly_limits.sql\n' "${SHA_PREV}" >"${FAKE_ROOT}/dist/${SHA_PREV}/RELEASE"
 cp "${DIST_DIR}/web/200.html" "${WEB_RELEASES}/${SHA_PREV}/"
-rm -rf "${FAKE_ROOT}/dist/${SHA_PREV}/web"
-cp -r "${WEB_RELEASES}/${SHA_PREV}" "${FAKE_ROOT}/dist/${SHA_PREV}/web"
+make_dist_from_staged "${SHA_PREV}"
 SHADOW_CSP="$(cat "${FAKE_ROOT}/dist/${SHA_PREV}/csp.txt")"
 printf 'CANTERLOT_CSP="%s"\n' "${SHADOW_CSP}" | tee "${WEB_ENV}" >"${WEB_ENV}.${SHA_PREV}"
 chmod 0600 "${WEB_ENV}.${SHA_PREV}"

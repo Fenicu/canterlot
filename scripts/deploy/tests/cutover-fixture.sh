@@ -66,6 +66,22 @@ stage_cutover_dist() {
     cp -r "${DIST_DIR}/worker/." "${WORKER_RELEASES}/${SHA_NEW}/"
     cp "${DIST_DIR}/RELEASE" "${WORKER_RELEASES}/${SHA_NEW}/"
 }
+# dist развёрнутого релиза из его залитых каталогов (shadow): RELEASE с source=,
+# SHA256SUMS, копии RELEASE/SHA256SUMS у хаба и воркера; веб берётся как есть.
+make_dist_from_staged() {
+    local sha="$1" d="${FAKE_ROOT}/dist/$1"
+    rm -rf "${d}"
+    mkdir -p "${d}/hub" "${d}/worker" "${d}/synthetic/bin"
+    cp -r "${HUB_RELEASES}/${sha}/bin" "${d}/hub/"
+    cp -r "${WORKER_RELEASES}/${sha}/bin" "${d}/worker/"
+    cp "${FAKE_WORKER_BIN}" "${d}/synthetic/bin/canterlot-worker"
+    cp -r "${WEB_RELEASES}/${sha}" "${d}/web"
+    printf 'sha=%s\ndate=x\nmigrations_last=0040_monthly_limits.sql\nsource=%s%028d\n' "${sha}" "${sha}" 0 >"${d}/RELEASE"
+    cp "${DIST_DIR}/csp.txt" "${d}/csp.txt"
+    (cd "${d}" && find . -type f ! -name 'SHA256SUMS*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum >SHA256SUMS)
+    cp "${d}/RELEASE" "${d}/SHA256SUMS" "${HUB_RELEASES}/${sha}/"
+    cp "${d}/RELEASE" "${WORKER_RELEASES}/${sha}/"
+}
 # Бинарь диктовки целевого релиза лежит и в dist (как после настоящей сборки).
 eval "$(declare -f install_fake_speech | sed '1s/install_fake_speech/_harness_install_fake_speech/')"
 install_fake_speech() {
@@ -89,6 +105,9 @@ setup_cutover() {
     deploy_release hub "${SHA_PREV}"
     deploy_release web "${SHA_PREV}"
     deploy_release worker "${SHA_PREV}"
+    # Развёрнутый хаб — тот же фейковый бинарь, что у цели: shadow-репетиция
+    # проверяет развёрнутый релиз тем же target-check (--version, openapi).
+    cp "${FAKE_WORKER_BIN}" "${HUB_RELEASES}/${SHA_PREV}/bin/canterlot-hub"
     printf 'MIGR_MAX=40\nFAILED=0\npayload-predump\n' >"${FAKE_ROOT}/state/db.txt"
     cp "${FAKE_ROOT}/state/db.txt" "${FAKE_ROOT}/state/db-pre.txt"
     printf '%s\n%s\n' "${EXEC1}" "${EXEC2}" >"${FAKE_ROOT}/state/live-ids"
