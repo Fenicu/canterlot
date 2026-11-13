@@ -184,6 +184,69 @@ async fn terms_put_requires_an_idempotency_key_and_rejects_its_reuse(pool: PgPoo
     assert_eq!(error["error"]["code"], "idempotency_conflict");
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn concurrent_term_replacements_serialize_per_owner(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    // Оба DELETE обязаны пройти до вставок: иначе блокировки строк сами
+    // выстроят транзакции и гонка не проявится.
+    sqlx::query(
+        "create function dictation_terms_slow_delete() returns trigger language plpgsql
+         as $$ begin perform pg_sleep(0.1); return null; end $$",
+    )
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger dictation_terms_slow_delete after delete on dictation_terms
+         for each statement execute function dictation_terms_slow_delete()",
+    )
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let list = |prefix: &str| {
+        let terms: Vec<Value> = (0..5)
+            .map(|i| term(&format!("{prefix}{i}"), &format!("x{i}")))
+            .collect();
+        json!({"terms": terms})
+    };
+    let a = list("альфа");
+    let b = list("бета");
+    let put = |key: &'static str, body: Value| {
+        let client = f.client.clone();
+        async move {
+            client
+                .send(
+                    Method::PUT,
+                    "/api/v1/dictation/terms",
+                    Some(key),
+                    Some(body),
+                )
+                .await
+        }
+    };
+    let (ra, rb) = tokio::join!(
+        put("dictation-concurrent-a", a.clone()),
+        put("dictation-concurrent-b", b.clone())
+    );
+    assert_eq!(ra.status, 200, "first concurrent PUT");
+    assert_eq!(rb.status, 200, "second concurrent PUT");
+    let ra: Value = ra.json();
+    let rb: Value = rb.json();
+    assert_eq!(ra, a);
+    assert_eq!(rb, b);
+    let stored: Value = f.get("/api/v1/dictation/terms").await;
+    assert!(
+        stored == a || stored == b,
+        "stored list is one of the two requests: {stored}"
+    );
+    let rows: i64 = sqlx::query_scalar("select count(*) from dictation_terms where owner_id=$1")
+        .bind(f.seed.owner_id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 5);
+}
+
 // ------------------------------------------------------- служба речи и статус
 
 mod fake {

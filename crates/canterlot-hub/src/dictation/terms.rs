@@ -28,6 +28,12 @@ pub async fn replace(
     owner_id: Uuid,
     terms: &[Term],
 ) -> Result<(), sqlx::Error> {
+    // Замена списка одного владельца идёт под блокировкой его строки: иначе два
+    // PUT с разными ключами переплетут DELETE/INSERT и разойдутся с ответом.
+    sqlx::query("select id from owners where id=$1 for update")
+        .bind(owner_id)
+        .fetch_one(&mut *conn)
+        .await?;
     sqlx::query("delete from dictation_terms where owner_id=$1")
         .bind(owner_id)
         .execute(&mut *conn)
