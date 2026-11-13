@@ -9,6 +9,7 @@ use canterlot_hub::{
     crunch::JobOutcome,
     dispatcher::Dispatcher,
     http,
+    requests::{self, DecisionResult},
     scheduler::{ClaimedJob, JobKind, Scheduler},
     session::Registry,
     session_tools::{
@@ -17,6 +18,7 @@ use canterlot_hub::{
     },
     testkit::{self, FakeSession, TestClient},
 };
+use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -173,6 +175,77 @@ impl Fx {
             json!({"harness":"opencode","model":"opencode-go/beam-free","brief":"b"}),
         )
         .await
+    }
+
+    /// Запуск вне белого списка ждёт решения владельца карточкой `spawn_approval`.
+    async fn spawn_pending(&self) -> Uuid {
+        sqlx::query("update owners set spawn_whitelist=$2 where id=$1")
+            .bind(self.owner)
+            .bind(json!([{"harness":"opencode","model":"opencode-go/beam-free"}]))
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        let answer = self
+            .call(
+                "sessions.spawn",
+                json!({
+                    "harness":"opencode",
+                    "model":"opencode-go/deepseek-v4.1-flash",
+                    "brief":"b"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer["status"], "pending_approval", "{answer}");
+        serde_json::from_value(answer["request_id"].clone()).unwrap()
+    }
+
+    async fn children(&self) -> i64 {
+        sqlx::query_scalar("select count(*) from conversations where parent_conversation_id=$1")
+            .bind(self.parent)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn run_job(&self, payload: Value) -> JobOutcome {
+        let job = ClaimedJob {
+            id: Uuid::now_v7(),
+            kind: JobKind::SessionTask,
+            owner_id: self.owner,
+            conversation_id: Some(self.parent),
+            run_at: Utc::now(),
+            payload,
+            attempts: 0,
+        };
+        let runtime = spawn_queue::Runtime {
+            registry: Some(&self.context.registry),
+            session_tools: &self.context.config,
+            spawn_queue: &self.context.spawn_queue,
+            guards: &self.context.guards,
+            routing_enabled: self.context.routing_enabled,
+            routing_stale: self.context.routing_stale,
+            routing_queue_horizon: self.context.routing_queue_horizon,
+        };
+        let thresholds = Thresholds::from(&ActivityConfig::default());
+        let mut tx = self.pool.begin().await.unwrap();
+        let outcome = jobs::run_in_tx(
+            &mut tx,
+            &job,
+            Utc::now(),
+            Uuid::now_v7(),
+            Some(&self.context.registry),
+            &self.context.settle,
+            &thresholds,
+            Some(&runtime),
+            None,
+            &LimitsConfig::default(),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        outcome
     }
 
     async fn runtime_call(
@@ -472,6 +545,208 @@ async fn spawn_cancel_answers_three_ways_and_refuses_another_parent(pool: PgPool
         .unwrap();
     assert_eq!(answer["status"], "already_started", "{answer}");
     assert!(answer["session_id"].is_string(), "{answer}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_cancel_withdraws_a_pending_approval_before_the_owner_decides(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let request = f.spawn_pending().await;
+    let before = f.children().await;
+
+    let answer = f
+        .call("spawn_queue.cancel", json!({"queue_id": request}))
+        .await
+        .unwrap();
+    assert_eq!(
+        answer,
+        json!({"status": "cancelled", "request_id": request})
+    );
+
+    let (state, winner): (String, Option<Uuid>) =
+        sqlx::query_as("select state,winner_decision_id from requests where id=$1")
+            .bind(request)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "closed_without_decision");
+    assert!(winner.is_none());
+    let event: Value = sqlx::query_scalar(
+        "select payload from events where conversation_id=$1 and kind='request_closed'
+         order by id desc limit 1",
+    )
+    .bind(f.parent)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(event["request_id"], json!(request));
+    assert_eq!(event["reason"], "cancelled");
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from requests where conversation_id=$1
+           and state in ('open','decision_saved','decision_transmitting')",
+    )
+    .bind(f.parent)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0, "the owner has no pending card left");
+
+    // Запоздавшее задание запуска не создаёт сессию по отозванному запросу.
+    let outcome = f
+        .run_job(json!({"action": "spawn", "request_id": request}))
+        .await;
+    assert!(
+        matches!(outcome, JobOutcome::Done(ref value) if value["skipped"] == true),
+        "{outcome:?}"
+    );
+    assert_eq!(f.children().await, before);
+
+    let again = f
+        .call("spawn_queue.cancel", json!({"queue_id": request}))
+        .await
+        .unwrap();
+    assert_eq!(
+        again,
+        json!({"status": "already_cancelled", "request_id": request})
+    );
+}
+
+/// Решение владельца тем же порядком блокировок, что у HTTP-обработчика.
+async fn owner_decides(
+    pool: &PgPool,
+    owner: Uuid,
+    parent: Uuid,
+    request: Uuid,
+    key: &str,
+) -> Result<DecisionResult, requests::RequestDomainError> {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(parent)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("select id from conversations where id=$1 and owner_id=$2 for no key update")
+        .bind(parent)
+        .bind(owner)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap();
+    let generation: i64 = sqlx::query_scalar("select generation from requests where id=$1")
+        .bind(request)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let decision = DecisionPayload::Permission {
+        behavior: PermissionBehavior::Allow,
+        message: None,
+    };
+    let outcome =
+        requests::save_decision_in_tx(&mut tx, parent, request, generation, &decision, key).await;
+    tx.commit().await.unwrap();
+    outcome
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_cancel_after_the_owner_decided_changes_nothing(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let request = f.spawn_pending().await;
+    let decided = owner_decides(&f.pool, f.owner, f.parent, request, "owner-decided").await;
+    assert!(
+        matches!(decided, Ok(DecisionResult::Committed { .. })),
+        "{decided:?}"
+    );
+    let before = f.children().await;
+
+    let error = f
+        .call("spawn_queue.cancel", json!({"queue_id": request}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::AlreadyDecided);
+    let state: String = sqlx::query_scalar("select state from requests where id=$1")
+        .bind(request)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "decision_saved", "the owner's decision stays");
+
+    let outcome = f
+        .run_job(json!({"action": "spawn", "request_id": request}))
+        .await;
+    assert!(matches!(outcome, JobOutcome::Done(_)), "{outcome:?}");
+    assert_eq!(f.children().await, before + 1, "the session is created");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_cancel_of_a_pending_approval_refuses_another_parent_and_an_unknown_id(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let request = f.spawn_pending().await;
+    let foreign = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let foreign_exec = canterlot_hub::executions::start(&f.pool, f.owner, foreign, Uuid::now_v7())
+        .await
+        .unwrap();
+    let foreign_caller = Caller {
+        owner_id: f.owner,
+        conversation_id: foreign,
+        execution_id: foreign_exec.execution_id,
+        machine_id: f.machine,
+        call_id: Uuid::now_v7(),
+    };
+    let refused = session_tools::call(
+        &f.context,
+        &foreign_caller,
+        "spawn_queue.cancel",
+        json!({"queue_id": request}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code, Code::NotParent);
+    let state: String = sqlx::query_scalar("select state from requests where id=$1")
+        .bind(request)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "open");
+
+    let unknown = f
+        .call("spawn_queue.cancel", json!({"queue_id": Uuid::now_v7()}))
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code, Code::NotParent);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_cancel_and_the_owners_decision_have_exactly_one_winner(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let request = f.spawn_pending().await;
+    let (cancel_result, decision_result) = tokio::join!(
+        f.call("spawn_queue.cancel", json!({"queue_id": request})),
+        owner_decides(&f.pool, f.owner, f.parent, request, "race-owner"),
+    );
+    let decision_result = decision_result.unwrap();
+    let decision_won = matches!(&decision_result, DecisionResult::Committed { .. });
+    let state: String = sqlx::query_scalar("select state from requests where id=$1")
+        .bind(request)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    match cancel_result {
+        Ok(answer) => {
+            assert!(!decision_won, "{decision_result:?}");
+            assert_eq!(answer["status"], "cancelled");
+            assert_eq!(state, "closed_without_decision");
+            assert!(
+                matches!(
+                    decision_result,
+                    DecisionResult::AlreadyClosed { .. } | DecisionResult::Conflict { .. }
+                ),
+                "{decision_result:?}"
+            );
+        }
+        Err(error) => {
+            assert!(decision_won, "{decision_result:?}");
+            assert_eq!(error.code, Code::AlreadyDecided);
+            assert_eq!(state, "decision_saved");
+        }
+    }
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

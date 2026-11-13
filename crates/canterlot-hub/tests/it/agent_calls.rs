@@ -622,6 +622,7 @@ fn session_tool_error_codes_are_unique_snake_case_with_messages() {
         "plan_task_not_found",
         "plan_task_closed",
         "plan_full",
+        "already_decided",
         "invalid_arguments",
     ] {
         assert!(seen.contains(expected), "{expected} missing");

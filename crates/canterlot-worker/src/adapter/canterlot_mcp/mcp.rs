@@ -329,7 +329,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "effort": {"type": "string"},
                 "title": {"type": "string"},
                 "workdir": {"type": "string", "description": "Defaults to the workdir of this session."},
-                "isolated": {"type": "boolean", "description": "Work in a new git worktree."},
+                "isolated": {"type": "boolean", "description": "Work in a new git worktree. A workdir outside a git repository starts and fails with worktree_not_git; accept that session to archive it."},
                 "base": {"type": "string", "description": "Git ref the worktree starts from."},
                 "preset": {"type": "string", "description": "Instruction preset id, default clean."},
                 "permission_mode": {"type": "string", "description": "Not wider than this session's mode."},
@@ -353,7 +353,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
         }),
         "spawn_cancel" => json!({
             "type": "object",
-            "properties": {"queue_id": {"type": "string", "description": "Queued spawn id (UUID)."}},
+            "properties": {"queue_id": {"type": "string", "description": "Queued spawn id or the request_id of a spawn waiting for owner approval (UUID)."}},
             "required": ["queue_id"],
             "additionalProperties": false,
         }),

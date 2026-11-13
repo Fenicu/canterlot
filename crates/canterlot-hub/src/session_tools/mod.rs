@@ -113,12 +113,13 @@ pub enum ToolErrorCode {
     PlanTaskNotFound,
     PlanTaskClosed,
     PlanFull,
+    AlreadyDecided,
     InvalidArguments,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -150,6 +151,7 @@ impl ToolErrorCode {
         Self::PlanTaskNotFound,
         Self::PlanTaskClosed,
         Self::PlanFull,
+        Self::AlreadyDecided,
         Self::InvalidArguments,
         Self::Internal,
     ];
@@ -187,6 +189,7 @@ impl ToolErrorCode {
             Self::PlanTaskNotFound => "plan_task_not_found",
             Self::PlanTaskClosed => "plan_task_closed",
             Self::PlanFull => "plan_full",
+            Self::AlreadyDecided => "already_decided",
             Self::InvalidArguments => "invalid_arguments",
             Self::Internal => "internal_error",
         }
@@ -225,6 +228,7 @@ impl ToolErrorCode {
             Self::PlanTaskNotFound => "No such task in your plan",
             Self::PlanTaskClosed => "The plan task is done or cancelled",
             Self::PlanFull => "The plan holds too many tasks",
+            Self::AlreadyDecided => "The owner has already answered this request",
             Self::InvalidArguments => "Invalid arguments",
             Self::Internal => "The hub could not complete the call, try later",
         }

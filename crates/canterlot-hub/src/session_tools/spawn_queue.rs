@@ -26,6 +26,7 @@ use crate::{
     crunch::JobOutcome,
     delivery::SubmitError,
     events::{self, NewEvent, Scope},
+    requests::RequestState,
     scheduler::ClaimedJob,
     session::Registry,
 };
@@ -1577,18 +1578,111 @@ pub async fn cancel(
     let args: CancelArgs = super::parse_arguments(arguments)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     conversations::lock_owner(&mut tx, caller.owner_id).await?;
-    let answer = cancel_in_tx(
-        &mut tx,
-        caller.owner_id,
-        caller.conversation_id,
-        args.queue_id,
-        caller.call_id,
-        Utc::now(),
-        false,
-    )
-    .await?;
+    // Тот же идентификатор бывает и элементом очереди, и карточкой одобрения запуска.
+    let request: Option<(Uuid, crate::requests::RequestKind)> =
+        sqlx::query_as("select conversation_id,kind from requests where id=$1")
+            .bind(args.queue_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let answer = match request {
+        Some((request_parent, crate::requests::RequestKind::SpawnApproval)) => {
+            cancel_spawn_request_in_tx(
+                &mut tx,
+                caller.owner_id,
+                caller.conversation_id,
+                request_parent,
+                args.queue_id,
+                caller.call_id,
+            )
+            .await?
+        }
+        _ => {
+            cancel_in_tx(
+                &mut tx,
+                caller.owner_id,
+                caller.conversation_id,
+                args.queue_id,
+                caller.call_id,
+                Utc::now(),
+                false,
+            )
+            .await?
+        }
+    };
     tx.commit().await?;
     Ok(answer)
+}
+
+/// Отзыв карточки одобрения запуска. Порядок блокировок как у ответа владельца:
+/// очередь родителя, строка разговора, строка запроса; поэтому побеждает ровно один.
+async fn cancel_spawn_request_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    parent: Uuid,
+    request_parent: Uuid,
+    request_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<Value, ToolError> {
+    super::send::lock_queue(conn, parent).await?;
+    let owned: Option<Uuid> = sqlx::query_scalar(
+        "select id from conversations where id=$1 and owner_id=$2 for no key update",
+    )
+    .bind(parent)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if owned.is_none() || request_parent != parent {
+        return Err(ToolError::new(ToolErrorCode::NotParent));
+    }
+    let row: Option<(RequestState, Uuid)> = sqlx::query_as(
+        "select state,execution_id from requests
+         where id=$1 and conversation_id=$2 and kind='spawn_approval' for update",
+    )
+    .bind(request_id)
+    .bind(parent)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((state, execution_id)) = row else {
+        return Err(ToolError::new(ToolErrorCode::NotParent));
+    };
+    match state {
+        RequestState::Open => {}
+        RequestState::ClosedWithoutDecision => {
+            return Ok(json!({"status": "already_cancelled", "request_id": request_id}));
+        }
+        _ => {
+            return Err(ToolError::with_message(
+                ToolErrorCode::AlreadyDecided,
+                "The owner already answered this spawn request; nothing was cancelled",
+            ));
+        }
+    }
+    sqlx::query("update requests set state=$2,updated_at=clock_timestamp() where id=$1")
+        .bind(request_id)
+        .bind(RequestState::ClosedWithoutDecision.as_str())
+        .execute(&mut *conn)
+        .await?;
+    events::append(
+        conn,
+        NewEvent {
+            scope: Scope::Conversation { id: parent },
+            kind: "request_closed",
+            conversation_id: Some(parent),
+            execution_id: Some(execution_id),
+            payload: json!({"request_id": request_id, "reason": "cancelled"}),
+            correlation_id,
+        },
+    )
+    .await?;
+    // Ожидавший пуша о карточке больше нет.
+    sqlx::query(
+        "update owner_pushes set state='cancelled',updated_at=clock_timestamp()
+         where dedupe_key=$1 and state='pending'",
+    )
+    .bind(format!("{}:{}", crate::notify::KIND_WAITING, request_id))
+    .execute(&mut *conn)
+    .await?;
+    Ok(json!({"status": "cancelled", "request_id": request_id}))
 }
 
 /// `queued_spawns` в `sessions_list`: число и ближайший срок.
