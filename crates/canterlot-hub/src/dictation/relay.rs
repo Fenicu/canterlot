@@ -24,9 +24,12 @@ use crate::{
     http::{AppState, auth::Owner},
 };
 
-/// Предел сообщения WebSocket: текст проверяется вручную (4096), звук — 8192;
-/// запас нужен, чтобы превышение давало `bad_audio`, а не обрыв 1009.
+/// Предел входящего сообщения WebSocket: текст проверяется вручную (4096), звук —
+/// 8192; запас нужен, чтобы превышение давало `bad_audio`, а не обрыв 1009.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+/// Предел исходящего сообщения: служба отдаёт JSON до 262 144 байт, словарь замен
+/// его расширяет; 1 МиБ хватает здоровому клиенту, не превращая буфер в память.
+pub const MAX_OUTBOUND_BYTES: usize = 1024 * 1024;
 
 /// Конец диктовки: единственный путь уборки.
 enum End {
@@ -85,7 +88,7 @@ pub fn upgrade(ws: WebSocketUpgrade, state: AppState, owner: Owner) -> axum::res
     ws.max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
         .write_buffer_size(0)
-        .max_write_buffer_size(MAX_MESSAGE_BYTES)
+        .max_write_buffer_size(MAX_OUTBOUND_BYTES)
         .on_upgrade(move |socket| async move {
             let _token = token;
             handle_socket(state, owner, socket).await;
@@ -310,7 +313,9 @@ impl Relay {
                     "tentative": text.1,
                     "seq": self.seq,
                 });
-                if self.send(frame).await.is_err() {
+                if self.oversized(&frame) {
+                    end = Some(End::Error("engine_failed"));
+                } else if self.send(frame).await.is_err() {
                     end = Some(End::ClientStalled);
                 }
             }
@@ -543,13 +548,17 @@ impl Relay {
                     self.pending_text = Some(self.dictionary.apply_update(committed, tentative));
                 }
                 Some("final") => {
-                    let text = value["text"].as_str().unwrap_or_default();
+                    let text = self.dictionary.apply(value["text"].as_str().unwrap_or_default());
                     let reason = match value["reason"].as_str() {
                         Some("too_long") => "too_long",
                         _ => "finish",
                     };
+                    let frame = json!({"type": "final", "text": &text, "reason": reason});
+                    if self.oversized(&frame) {
+                        return Some(End::Error("engine_failed"));
+                    }
                     return Some(End::Final {
-                        text: self.dictionary.apply(text),
+                        text,
                         reason: reason.to_owned(),
                     });
                 }
@@ -579,6 +588,23 @@ impl Relay {
             frame = self.frames.try_recv().ok();
             frame.as_ref()?;
         }
+    }
+
+    /// Расширенный словарём кадр больше предела: конец `engine_failed`. В журнал
+    /// идут только размеры — текст остаётся в памяти.
+    fn oversized(&self, frame: &Value) -> bool {
+        let size = frame.to_string().len();
+        if size <= MAX_OUTBOUND_BYTES {
+            return false;
+        }
+        tracing::warn!(
+            kind = "speech_protocol_error",
+            error = "oversized",
+            size,
+            limit = MAX_OUTBOUND_BYTES,
+            "transformed dictation message exceeds the outbound limit"
+        );
+        true
     }
 
     async fn send_json(&mut self, value: Value) -> Result<(), ()> {

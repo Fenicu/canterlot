@@ -891,6 +891,56 @@ async fn too_long_final_is_passed_through(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn final_expanded_past_the_old_write_buffer_reaches_the_client(pool: PgPool) {
+    let raw = vec!["a"; 3_000].join(" ");
+    let speech = fake::start(move |mut conn| {
+        let raw = raw.clone();
+        async move {
+            let _ = conn.next().await;
+            conn.send(json!({"type":"state","state":"listening","mode":"gpu"}))
+                .await;
+            conn.send(json!({"type":"final","text":raw,"reason":"finish"}))
+                .await;
+        }
+    })
+    .await;
+    let hub = spawn_hub(pool, speech.socket.clone(), fast_timers()).await;
+    seed_term(&hub.app().pool, hub.installation.owner_id, 0, "a", &"b".repeat(100)).await;
+    let mut socket = open(&hub).await;
+    socket.start().await;
+    assert_eq!(socket.expect(TIMEOUT).await["state"], "listening");
+    let frame = socket.expect(TIMEOUT).await;
+    assert_eq!(frame["type"], "final");
+    let text = frame["text"].as_str().unwrap();
+    assert_eq!(text.len(), 3_000 * 100 + 2_999);
+    assert!(text.starts_with(&"b".repeat(100)));
+    assert_eq!(socket.next(TIMEOUT).await, None);
+    assert_eq!(socket.close_code, Some(1000));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn final_expanded_past_the_outbound_limit_is_engine_failed(pool: PgPool) {
+    let raw = vec!["a"; 11_000].join(" ");
+    let speech = fake::start(move |mut conn| {
+        let raw = raw.clone();
+        async move {
+            let _ = conn.next().await;
+            conn.send(json!({"type":"state","state":"listening","mode":"gpu"}))
+                .await;
+            conn.send(json!({"type":"final","text":raw,"reason":"finish"}))
+                .await;
+        }
+    })
+    .await;
+    let hub = spawn_hub(pool, speech.socket.clone(), fast_timers()).await;
+    seed_term(&hub.app().pool, hub.installation.owner_id, 0, "a", &"b".repeat(100)).await;
+    let mut socket = open(&hub).await;
+    socket.start().await;
+    assert_eq!(socket.expect(TIMEOUT).await["state"], "listening");
+    assert_eq!(error_code(socket).await, ("engine_failed".to_owned(), Some(1000)));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn same_device_replaces_and_another_device_gets_busy(pool: PgPool) {
     let speech = fake::start(|mut conn| async move {
         let _ = conn.next().await;
