@@ -553,7 +553,7 @@ canterlot-hub machine rotate-token --config ~/.config/canterlot/hub.toml --machi
 `canterlot-speech serve --config /etc/canterlot/speech.toml` — служба диктовки на хосте хаба: хаб пересылает ей звук из PWA по unix-сокету, она возвращает текст (устройство и протокол — [docs/design/dictation.md](design/dictation.md)). Модели скачиваются заранее: `parakeet-tdt-0.6b-v3` Q8_0 из `handy-computer/parakeet-tdt-0.6b-v3-gguf` и Silero VAD из `handy-computer/silero-vad-v6.2-gguf`. Неизвестные ключи — ошибка запуска; несовпадение sha256 модели — отказ запуска (и отказ загрузки движком).
 
 ```toml
-socket = "/run/canterlot-speech/speech.sock" # права сокета задаёт UMask юнита (0660)
+socket = "/run/canterlot-speech/speech.sock" # права сокета задаёт UMask=0117 юнита (0660)
 device = "auto"      # auto: CUDA, при сбое инициализации или нехватке памяти GPU — CPU; gpu: только CUDA; cpu: только CPU
 threads = 4          # потоки CPU для распознавания (режим CPU и операции на CPU)
 idle_unload = "5m"   # движок без диктовок выгружается: процесс завершается, VRAM свободна
