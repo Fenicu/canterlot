@@ -1351,14 +1351,20 @@ async fn command_lifecycle_proves_delivery_before_a_slow_first_answer_frame() {
     ]]);
     // Срок доставки короче паузы двойника перед первым кадром ответа: приём доказывает
     // кадр CLI о старте команды, а не ожидание холодного кэша модели.
-    f.adapter = Box::new(adapter::claude_code::ClaudeCodeAdapter::new(
-        ClaudeCodeConfig {
-            executable: f.dir.path().join("fake-cli"),
-            ..Default::default()
-        },
-        f.dir.path().join("exec"),
-        Duration::from_millis(300),
-    ));
+    // Запуск двойника под нагрузкой бывает дольше срока доставки, поэтому у init свой
+    // срок: иначе он съедал окно доказательства, и передача возвращала Undetermined.
+    std::fs::write(f.dir.path().join("init-delay"), "700").unwrap();
+    f.adapter = Box::new(
+        adapter::claude_code::ClaudeCodeAdapter::new(
+            ClaudeCodeConfig {
+                executable: f.dir.path().join("fake-cli"),
+                ..Default::default()
+            },
+            f.dir.path().join("exec"),
+            Duration::from_millis(300),
+        )
+        .with_ready_deadline(WAIT),
+    );
     f.start().await;
     let outcome = tokio::time::timeout(WAIT, f.adapter.transmit(&tx(id), &f.group))
         .await
