@@ -18,7 +18,8 @@
 #
 # Коды выхода: 0 — выпуск опубликован; 1 — остановка (причина в файле итога);
 # 2 — отказ предусловий или аргументов; 3 — уже идёт другой выпуск или есть
-# сохранённое состояние (нужен --continue).
+# сохранённое состояние (нужен --continue); 4 — не записался итог, журнал или
+# состояние (исход выпуска — в том, что записалось, и в логе; --continue допишет).
 #
 # Окружение: CANTERLOT_RELEASE_DIR (каталог логов, состояния и журнала, по умолчанию
 # .superpowers/deploy), CANTERLOT_GATE_DIR (аттестации гейта, .superpowers/gate),
@@ -165,15 +166,15 @@ state_set() {
     value=$(one_line "$2")
     tmp="$STATE.tmp.$$"
     if [[ -f $STATE ]] && grep -q "^$key=" "$STATE"; then
-        awk -v k="$key" -v v="$value" 'index($0, k "=") == 1 { print k "=" v; next } { print }' "$STATE" >"$tmp"
+        awk -v k="$key" -v v="$value" 'index($0, k "=") == 1 { print k "=" v; next } { print }' "$STATE" >"$tmp" || return 1
     else
-        { [[ -f $STATE ]] && cat "$STATE"; printf '%s=%s\n' "$key" "$value"; } >"$tmp"
+        { [[ -f $STATE ]] && cat "$STATE"; printf '%s=%s\n' "$key" "$value"; } >"$tmp" || return 1
     fi
-    mv -f "$tmp" "$STATE"
+    mv -f "$tmp" "$STATE" || return 1
 }
 phase_status() { state_get "phase_$1" | awk '{print $1}'; }
 phase_set() {
-    state_set "phase_$1" "$2 $(ts)"
+    state_set "phase_$1" "$2 $(ts)" || return 1
     log "phase $1: $2"
 }
 
@@ -242,8 +243,8 @@ write_result() {
             rehearsal_log "$REHEARSAL_LOG" \
             cutover_result "$cr" \
             cutover_log "$CUTOVER_LOG"
-    } >"$tmp"
-    mv -f "$tmp" "$RESULT"
+    } >"$tmp" || return 1
+    mv -f "$tmp" "$RESULT" || return 1
 }
 
 # Раздел журнала выката: на каждом пути после старта (итог, фазы, логи, хвосты).
@@ -320,28 +321,46 @@ print_owner_checklist() {
     fi
 }
 
-# Итог любого пути после старта: файл итога, раздел журнала, сводка.
+# Итог любого пути после старта: раздел журнала, состояние, файл итога, сводка.
+# Каждая запись проверяется: сбой любой из них — итог reporting_failed и код 4
+# (исход выпуска — в причине и в ключе published), фаза journal отмечается
+# только после записанного раздела, так что --continue допишет только отчёт.
+FINISH_CODE=""
 finish() {
     finish_record "$@"
-    exit "$2"
+    exit "$FINISH_CODE"
 }
 finish_record() {
-    local status=$1 code=$2 reason=$3
+    local status=$1 code=$2 reason=$3 failed="" outcome=$1
     FINISHED=1
     set +e
-    write_result "$status" "$code" "$reason"
     if [[ -f $STATE ]]; then
-        [[ $status != "done" ]] || phase_set journal "done"
-        append_journal "$status" "$reason"
-        state_set last_status "$status"
+        if append_journal "$status" "$reason"; then
+            if [[ $status == "done" ]] && ! phase_set journal "done"; then failed+=" state ($STATE)"; fi
+        else
+            failed+=" journal ($JOURNAL)"
+        fi
+        state_set last_status "$status" || [[ $failed == *"state ("* ]] || failed+=" state ($STATE)"
     fi
-    if [[ $status == "done" || $status == stopped_before_publish || $status == publish_failed ]]; then
+    if [[ -n $failed ]]; then
+        reason="release $outcome: $reason; REPORTING FAILED:$failed"
+        status=reporting_failed
+        code=4
+    fi
+    if ! write_result "$status" "$code" "$reason"; then
+        failed+=" result ($RESULT)"
+        code=4
+    fi
+    FINISH_CODE=$code
+    if [[ $outcome == "done" || $outcome == stopped_before_publish || $outcome == publish_failed ]]; then
         print_owner_checklist
     fi
     if [[ -n $CUTOVER_RESULT && $(kv "$CUTOVER_RESULT" stop_block) != "" ]]; then
         log "STOP block: $(kv "$CUTOVER_RESULT" stop_block)"
     fi
-    if [[ $status == "done" ]]; then
+    if [[ -n $failed ]]; then
+        log "release REPORTING FAILED:$failed; the release itself: $outcome (published: $PUBLISHED): $3; fix the destination, then scripts/release.sh ship $VER --continue redoes the reporting only"
+    elif [[ $status == "done" ]]; then
         log "release PASS: $VER ($SHA12) deployed and published; result $RESULT"
     else
         log "release STOP ($status): $reason; result $RESULT"
@@ -355,7 +374,7 @@ on_exit() {
     set +e
     if [[ $FINISHED == 0 && $RUN_STARTED == 1 ]]; then
         finish_record error 1 "release.sh stopped unexpectedly (exit $rc) in phase $CURRENT_PHASE; see $LOG"
-        rc=1
+        rc=$FINISH_CODE
     fi
     exec 1>&- 2>&-
     [[ -z $TEE_PID ]] || wait "$TEE_PID" 2>/dev/null

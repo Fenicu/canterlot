@@ -326,6 +326,32 @@ assert_eq "$(rres status)" "failed_before_cutover" "result: failed before the cu
 teardown_case
 case_end
 
+# ---------------------------------------------------------------- сбой отчётности
+case_begin "an unwritable journal is a reporting failure: exit 4, no PASS, publication kept, --continue redoes the reporting"
+setup_release journal-unwritable
+cutover_plan "${HAPPY_PLAN[@]}"
+mkdir -p "${RDIR}/pilot-deploy-log.md"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "4" "exit 4 (reporting failed)"
+assert_not_contains "${FAKE_ROOT}/release.out" "release PASS" "no PASS line"
+assert_contains "${FAKE_ROOT}/release.out" "REPORTING FAILED" "the reporting failure is printed"
+assert_eq "$(calls_count publish-release)" "1" "published once"
+assert_eq "$(rres status)/$(rres exit_code)/$(rres published)" "reporting_failed/4/yes" "result: reporting failed, published yes"
+assert_contains "${RDIR}/release-${RVER}.result" "release done" "result: the release outcome kept in the reason"
+assert_eq "$(rstate phase_publish)" "done" "state: publish done"
+[ "$(rstate phase_journal)" != "done" ] && case_ok "state: journal phase not done" || case_fail "state: journal marked done without a section"
+rmdir "${RDIR}/pilot-deploy-log.md"
+: >"${FAKE_ROOT}/state/calls.log"
+run_release ship "${RVER}" --continue
+assert_eq "${RREL_RC}" "0" "--continue: exit 0"
+assert_eq "$(grep -c . "${FAKE_ROOT}/state/calls.log" || true)" "0" "--continue: nothing re-run (no tag, push, build, cutover, check-proxy, publish)"
+assert_contains "${RDIR}/pilot-deploy-log.md" "by scripts/release.sh: done" "--continue: the journal section written"
+assert_eq "$(rres status)/$(rres published)" "done/yes" "--continue: result done"
+assert_eq "$(rstate phase_journal)" "done" "--continue: journal phase done"
+assert_contains "${FAKE_ROOT}/release.out" "release PASS" "--continue: PASS line"
+teardown_case
+case_end
+
 # ---------------------------------------------------------------- повторы репетиции
 case_begin "a transient rehearsal failure is retried once, then the release goes on"
 setup_release transient-once
