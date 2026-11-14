@@ -40,6 +40,7 @@
   import GroupTabs from './GroupTabs.svelte';
   import { buildSections, tabCounts, type Tab, type TreeNode } from './grouping';
   import { readTab, resolveTab, writeTab } from './listTab';
+  import { activeGroupId, setActiveGroupId } from './activeGroup.svelte';
   import LimitsStrip from './LimitsStrip.svelte';
   import { diskLimits, lowDiskNotice, type DiskNotice } from '../machines/model.js';
   import SearchBar from './SearchBar.svelte';
@@ -69,6 +70,11 @@
   let kidsCollapsed = $state<string[]>([]);
   let kidsExpanded = $state<string[]>([]);
   let tab = $state<Tab>(readTab());
+  const newHref = $derived(tab.kind === 'group' ? `/new?group=${encodeURIComponent(tab.id)}` : '/new');
+  $effect(() => {
+    const id = tab.kind === 'group' ? tab.id : '';
+    if (activeGroupId() !== id) setActiveGroupId(id);
+  });
   let query = $state('');
   let searchOpen = $state(false);
   let results = $state<ListRow[] | null>(null);
@@ -414,7 +420,7 @@
     {#if create}
       <a
         class="create"
-        href={resolve('new')}
+        href={resolve(newHref as '/new')}
         aria-label="Новая сессия"
       ><Icon name="plus" /></a>
     {/if}

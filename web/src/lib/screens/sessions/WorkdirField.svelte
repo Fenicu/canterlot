@@ -101,7 +101,7 @@
       aria-controls={items.length > 0 ? listId : undefined}
       aria-activedescendant={active >= 0 ? optionId(active) : undefined}
       bind:value
-      placeholder="/home/user/project"
+      placeholder="например ~/myprojects/…"
       autocomplete="off"
       autocapitalize="off"
       spellcheck={false}

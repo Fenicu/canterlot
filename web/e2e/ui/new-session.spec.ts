@@ -1,14 +1,45 @@
 import type { Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { FakeHub, FakeHubApi, seedPresets } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, seedConversation, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
+import type { ListRow } from '../../src/lib/stores/list.svelte';
 import { expect, fillWorkdir, resizeViewport, test } from './fixtures';
 
-async function boot(page: Page, options: { solo?: boolean; home?: string | null; histories?: boolean; models?: { id: string; title: string; efforts: string[] }[]; extraHarness?: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[] }[]; permission_modes: string[] } } = {}) {
+interface BootOptions {
+  solo?: boolean;
+  home?: string | null;
+  histories?: boolean;
+  models?: { id: string; title: string; efforts: string[] }[];
+  extraHarness?: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[] }[]; permission_modes: string[] };
+  /** Без прошлых сессий: форма ведёт себя как в первый запуск. */
+  noSessions?: boolean;
+  /** Ещё одна сессия позже всех посеянных: из неё форма берёт прошлые настройки. */
+  latest?: Partial<ListRow>;
+}
+
+async function boot(page: Page, options: BootOptions = {}) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
-  const { machine } = seedMockupSessions(api);
+  const ids = seedMockupSessions(api);
+  const { machine } = ids;
+  if (options.noSessions) {
+    api.list.clear();
+    api.details.clear();
+    api.counts = { all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] };
+  }
+  if (options.latest) {
+    seedConversation(api, {
+      title: 'Прошлая сессия',
+      machine: { id: machine, name: 'workstation' },
+      harness: { id: 'claude', title: 'Claude Code', provider: 'claude' },
+      workdir: '/srv/canterlot',
+      model: 'opus',
+      effort: 'medium',
+      created_at: '2026-11-10T10:00:00.000Z',
+      ...options.latest
+    });
+  }
   if (options.solo) {
     for (const id of [...api.machines.keys()]) if (id !== machine) api.machines.delete(id);
   }
@@ -19,9 +50,10 @@ async function boot(page: Page, options: { solo?: boolean; home?: string | null;
   if (options.extraHarness) record.harnesses.push(options.extraHarness);
   seedPresets(api);
   await installChatRoutes(page, hub, api, '00000000-0000-4000-8000-0000000000d1');
-  await page.goto('/sessions');
+  // Готовность данных важнее события load: под нагрузкой оно приходит после таймаута теста.
+  await page.goto('/sessions', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
-  return { api, hub, machine };
+  return { api, hub, machine, ids };
 }
 
 const pathField = (page: Page) => page.getByRole('textbox', { name: 'Рабочая папка' });
@@ -181,7 +213,7 @@ test('new_session_hides_claude_history_for_a_worker_without_the_capability', asy
 });
 
 test('new_session_takes_the_only_machine_and_loads_it_like_a_manual_pick', async ({ page }) => {
-  const { machine } = await boot(page, { solo: true, home: '/home/owner' });
+  const { machine } = await boot(page, { solo: true, home: '/home/owner', noSessions: true });
   await page.getByRole('link', { name: 'Новая сессия' }).click();
   await expect(page.getByRole('combobox', { name: 'Машина' })).toHaveValue(machine);
   await expect(page.getByRole('button', { name: '/srv/canterlot' })).toBeVisible();
@@ -190,7 +222,7 @@ test('new_session_takes_the_only_machine_and_loads_it_like_a_manual_pick', async
 });
 
 test('new_session_takes_the_only_machine_when_it_arrives_after_the_form_opened', async ({ page }) => {
-  const { machine } = await boot(page, { solo: true, home: '/home/owner' });
+  const { machine } = await boot(page, { solo: true, home: '/home/owner', noSessions: true });
   await page.goto('/new');
   await expect(page.getByRole('combobox', { name: 'Машина' })).toHaveValue(machine);
   await expect(page.getByRole('button', { name: '/srv/canterlot' })).toBeVisible();
@@ -198,15 +230,92 @@ test('new_session_takes_the_only_machine_when_it_arrives_after_the_form_opened',
 });
 
 test('new_session_leaves_the_choice_to_the_owner_with_two_machines', async ({ page }) => {
-  await boot(page, { home: '/home/owner' });
+  await boot(page, { home: '/home/owner', noSessions: true });
   await page.goto('/new');
   await expect(page.getByRole('option', { name: 'workstation' })).toBeAttached();
   await expect(page.getByRole('combobox', { name: 'Машина' })).toHaveValue('');
   await expect(pathField(page)).toHaveValue('');
 });
 
+test('new_session_prefills_the_last_session_into_a_one_tap_summary', async ({ page }) => {
+  await boot(page, { home: '/srv', latest: { workdir: '/srv/canterlot' } });
+  const bodies: { machine_id?: string; workdir?: string; harness?: string; model?: string; effort?: string }[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/conversations') {
+      bodies.push({ ...(request.postDataJSON() as object) });
+    }
+  });
+  await page.getByRole('link', { name: 'Новая сессия', exact: true }).click();
+  await expect(page.locator('[data-role="new-session-summary"]')).toHaveText(
+    'Как в прошлый раз · workstation · ~/canterlot · opus-5.5 · Обычное'
+  );
+  await expect(page.getByRole('combobox', { name: 'Машина' })).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Рабочая папка' })).toHaveCount(0);
+  const create = page.getByRole('button', { name: 'Создать' });
+  await expect(create).toBeEnabled();
+  await create.click();
+  await expect(page).toHaveURL(/\/c\//);
+  expect(bodies[0]).toMatchObject({ workdir: '/srv/canterlot', harness: 'claude', model: 'opus', effort: 'medium' });
+});
+
+test('new_session_summary_expands_into_the_prefilled_pickers', async ({ page }) => {
+  const { machine } = await boot(page, { home: '/srv', latest: {} });
+  await page.getByRole('link', { name: 'Новая сессия', exact: true }).click();
+  await expect(page.locator('[data-role="new-session-summary"]')).toBeVisible();
+  await page.getByRole('button', { name: 'Изменить' }).click();
+  await expect(page.locator('[data-role="new-session-summary"]')).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Машина' })).toHaveValue(machine);
+  await expect(pathField(page)).toHaveValue('/srv/canterlot');
+  await expect(page.getByRole('radio', { name: 'Claude Code' })).toBeChecked();
+  await expect(page.getByRole('combobox', { name: 'Модель' })).toHaveValue('opus');
+  await expect(page.getByRole('combobox', { name: 'Усилие' })).toHaveValue('medium');
+  await expect(page.getByRole('button', { name: 'Создать' })).toBeEnabled();
+});
+
+test('new_session_removed_model_opens_the_full_form_with_an_empty_model', async ({ page }) => {
+  const { machine } = await boot(page, { home: '/srv', latest: { model: 'opus-5.4-removed' } });
+  await page.getByRole('link', { name: 'Новая сессия', exact: true }).click();
+  await expect(page.locator('[data-role="new-session-summary"]')).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Машина' })).toHaveValue(machine);
+  await expect(pathField(page)).toHaveValue('/srv/canterlot');
+  await expect(page.getByRole('radio', { name: 'Claude Code' })).toBeChecked();
+  await expect(page.getByRole('combobox', { name: 'Модель' })).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: 'Усилие' })).toHaveValue('');
+  await expect(page.getByRole('button', { name: 'Создать' })).toBeDisabled();
+});
+
+test('new_session_in_a_group_prefills_from_that_group', async ({ page }) => {
+  const { api, ids } = await boot(page, { home: '/srv' });
+  seedConversation(api, {
+    title: 'Свежая чужая группа',
+    machine: { id: ids.machine, name: 'workstation' },
+    harness: { id: 'claude', title: 'Claude Code', provider: 'claude' },
+    groups: [ids.review],
+    workdir: '/srv/other',
+    model: 'opus',
+    effort: 'high',
+    created_at: '2026-11-12T10:00:00.000Z'
+  });
+  seedConversation(api, {
+    title: 'Свежая своя группа',
+    machine: { id: ids.machine, name: 'workstation' },
+    harness: { id: 'claude', title: 'Claude Code', provider: 'claude' },
+    groups: [ids.canterlot],
+    workdir: '/srv/grouped',
+    model: 'opus',
+    effort: 'medium',
+    created_at: '2026-11-11T10:00:00.000Z'
+  });
+  await page.getByRole('tab', { name: /^canterlot/ }).click();
+  await page.getByRole('link', { name: 'Новая сессия', exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/new\\?group=${ids.canterlot}$`));
+  await expect(page.locator('[data-role="new-session-summary"]')).toHaveText(
+    'Как в прошлый раз · workstation · ~/grouped · opus-5.5 · Обычное'
+  );
+});
+
 test('new_session_prefills_home_and_recent_folders_do_not_replace_it', async ({ page }) => {
-  await boot(page, { home: '/home/owner' });
+  await boot(page, { home: '/home/owner', noSessions: true });
   await page.goto('/new');
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await expect(page.getByRole('button', { name: '/srv/notes' })).toBeVisible();
@@ -216,7 +325,7 @@ test('new_session_prefills_home_and_recent_folders_do_not_replace_it', async ({ 
 });
 
 test('new_session_stays_empty_for_a_worker_without_a_home', async ({ page }) => {
-  await boot(page, { solo: true, home: null });
+  await boot(page, { solo: true, home: null, noSessions: true });
   await page.goto('/new');
   await expect(page.getByRole('button', { name: '/srv/notes' })).toBeVisible();
   await expect(pathField(page)).toHaveValue('');
@@ -270,6 +379,7 @@ test('new_session_suggestion_is_chosen_by_pointer_and_the_field_keeps_focus', as
   await boot(page, { solo: true });
   await openWithMachine(page);
   await pathField(page).click();
+  await pathField(page).fill('');
   await pathField(page).pressSequentially('/srv/');
   if (hasTouch) await hint(page, '/srv/notes').tap();
   else await hint(page, '/srv/notes').click();
@@ -328,6 +438,7 @@ test('new_session_agent_radio_keeps_its_place_when_suggestions_appear', async ({
   };
   await pathField(page).click();
   const before = await gap();
+  await pathField(page).fill('');
   await pathField(page).pressSequentially('/srv/c');
   await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toBeVisible();
   expect(await gap()).toBe(before);

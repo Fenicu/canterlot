@@ -21,6 +21,7 @@
   import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount, untrack } from 'svelte';
   import { defaultModelId, historySize, keptHarness, machineProblem, NewSessionModel, prefillWorkdir, soleEffort, soleMachine } from './newSessionModel';
+  import { latestSession, prefillFromSession, shortenHomePath } from './newSessionPrefill';
   import WorkdirField from './WorkdirField.svelte';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
@@ -44,6 +45,11 @@
   let resumeItems = $state<{ id: string; modified_at_ms: number; size: number; preview: string }[]>([]);
   let resumeNativeId = $state('');
   let resumeFor = $state('');
+  let collapsed = $state(false);
+  let prefillDone = $state(false);
+  let prefillModelBlock = $state('');
+  let touched = $state(false);
+  const groupId = page.url.searchParams.get('group') ?? '';
 
   const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
   const machine = $derived(machines.find((item) => item.id === machineId));
@@ -101,6 +107,14 @@
   );
   const imagesNote = $derived(modelImagesNote(models.find((item) => item.id === modelId)?.images));
   const catalogNote = $derived(provider === 'antigravity' ? ANTIGRAVITY_CATALOG_NOTE : '');
+  const summaryModel = $derived(models.find((item) => item.id === modelId));
+  const summary = $derived([
+    'Как в прошлый раз',
+    machine?.name ?? '',
+    shortenHomePath(path, machine?.home_dir ?? ''),
+    summaryModel ? catalogModelLabel(summaryModel) : modelId,
+    effortLabel(effort)
+  ].join(' · '));
   const gate = $derived.by(() => {
     if (!model) return { ok: false as const, reason: 'Открываю форму' };
     model.machineId = machineId;
@@ -132,6 +146,28 @@
     return () => {
       alive = false;
     };
+  });
+
+  // Прошлые настройки берутся один раз, когда список уже пришёл; тронутая форма не переписывается.
+  $effect(() => {
+    const current = runtime;
+    if (!current || prefillDone || touched) return;
+    const status = current.list.status;
+    if (status !== 'live' && status !== 'degraded') return;
+    prefillDone = true;
+    const previous = prefillFromSession(
+      latestSession(current.list.items.values(), groupId),
+      current.machines.items.values()
+    );
+    if (!previous) return;
+    machineId = previous.machineId;
+    harness = previous.harness;
+    path = previous.workdir;
+    modelId = previous.modelId;
+    effort = previous.effort;
+    // Модель прошлой сессии ушла из каталога: поле остаётся пустым, а не берёт первую попавшуюся.
+    prefillModelBlock = previous.machineId && previous.harness && !previous.modelId ? `${previous.machineId}|${previous.harness}` : '';
+    collapsed = Boolean(previous.machineId && previous.harness && previous.workdir && previous.modelId && previous.effort);
   });
 
   // Другой агент может не знать выбранный режим: тогда снова действует значение по умолчанию.
@@ -219,6 +255,7 @@
   $effect(() => {
     const list = models;
     untrack(() => {
+      if (prefillModelBlock && prefillModelBlock === `${machineId}|${harness}` && !modelId) return;
       modelId = defaultModelId(list, modelId);
     });
   });
@@ -250,65 +287,72 @@
 </script>
 
 {#snippet fields()}
-  <div class="fields">
-    <Select label="Машина" options={machineOptions} bind:value={machineId} />
-    {#if recent.length > 0}
-      <div role="group" aria-label="Недавние папки" class="recent">
-        <p class="hint">Недавние папки</p>
-        {#each recent as item (item)}
-          <button type="button" class="recent-item" onclick={() => { path = item; }}>{item}</button>
-        {/each}
+  <div class="fields" oninput={() => { touched = true; }} onchange={() => { touched = true; }}>
+    {#if collapsed}
+      <div class="summary">
+        <p class="summary-line" data-role="new-session-summary">{summary}</p>
+        <Button variant="text" onclick={() => { collapsed = false; }}>Изменить</Button>
       </div>
-    {/if}
-    <WorkdirField {machineId} bind:value={path} />
-    <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
-    {#if canResume}
-      <details class="resume" bind:open={resumeOpen} data-role="claude-history">
-        <summary>Продолжить историю Claude Code</summary>
-        {#if resumeLoading}
-          <p class="hint">Загружаю истории…</p>
-        {:else if resumeError}
-          <p class="error" role="alert">{resumeError}</p>
-        {:else if resumeItems.length === 0}
-          <p class="hint">В этой папке нет историй Claude Code</p>
-        {:else}
-          <ul class="histories">
-            {#each resumeItems as item (item.id)}
-              <li>
-                <button
-                  type="button"
-                  class="history"
-                  class:selected={resumeNativeId === item.id}
-                  aria-pressed={resumeNativeId === item.id}
-                  onclick={() => chooseHistory(item.id)}
-                >
-                  <span class="when">{fmt.stamp(item.modified_at_ms, Date.now())}</span>
-                  <span class="size">{historySize(item.size)}</span>
-                  <span class="preview">{item.preview || 'Без первого сообщения'}</span>
-                </button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </details>
-    {/if}
-    {#if provider === 'antigravity'}
-      <Select label="Модель" options={modelOptions} bind:value={modelId} />
     {:else}
-      <div class="pair">
+      <Select label="Машина" options={machineOptions} bind:value={machineId} />
+      {#if recent.length > 0}
+        <div role="group" aria-label="Недавние папки" class="recent">
+          <p class="hint">Недавние папки</p>
+          {#each recent as item (item)}
+            <button type="button" class="recent-item" onclick={() => { path = item; }}>{item}</button>
+          {/each}
+        </div>
+      {/if}
+      <WorkdirField {machineId} bind:value={path} />
+      <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
+      {#if canResume}
+        <details class="resume" bind:open={resumeOpen} data-role="claude-history">
+          <summary>Продолжить историю Claude Code</summary>
+          {#if resumeLoading}
+            <p class="hint">Загружаю истории…</p>
+          {:else if resumeError}
+            <p class="error" role="alert">{resumeError}</p>
+          {:else if resumeItems.length === 0}
+            <p class="hint">В этой папке нет историй Claude Code</p>
+          {:else}
+            <ul class="histories">
+              {#each resumeItems as item (item.id)}
+                <li>
+                  <button
+                    type="button"
+                    class="history"
+                    class:selected={resumeNativeId === item.id}
+                    aria-pressed={resumeNativeId === item.id}
+                    onclick={() => chooseHistory(item.id)}
+                  >
+                    <span class="when">{fmt.stamp(item.modified_at_ms, Date.now())}</span>
+                    <span class="size">{historySize(item.size)}</span>
+                    <span class="preview">{item.preview || 'Без первого сообщения'}</span>
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </details>
+      {/if}
+      {#if provider === 'antigravity'}
         <Select label="Модель" options={modelOptions} bind:value={modelId} />
-        <Select label="Усилие" options={effortOptions} bind:value={effort} />
-      </div>
+      {:else}
+        <div class="pair">
+          <Select label="Модель" options={modelOptions} bind:value={modelId} />
+          <Select label="Усилие" options={effortOptions} bind:value={effort} />
+        </div>
+      {/if}
+      <ModelResolutionNote entry={models.find((item) => item.id === modelId)} />
+      {#if harness && models.length === 0}<p class="hint">{NO_MODELS_HINT}</p>{/if}
+      {#if catalogNote}<p class="hint">{catalogNote}</p>{/if}
+      {#if imagesNote}<p class="hint">{imagesNote}</p>{/if}
     {/if}
-    <ModelResolutionNote entry={models.find((item) => item.id === modelId)} />
-    {#if harness && models.length === 0}<p class="hint">{NO_MODELS_HINT}</p>{/if}
-    {#if catalogNote}<p class="hint">{catalogNote}</p>{/if}
-    {#if imagesNote}<p class="hint">{imagesNote}</p>{/if}
     {#if permissionOptions.length > 0}
       <Select label="Режим разрешений" options={permissionOptions} bind:value={permission} hint={permissionHint(permission, provider)} />
     {/if}
     <Select label="Инструкции" options={presetOptions} bind:value={profile} hint={selectedPreset?.description} />
-    <Toggle block label="Кранч" bind:checked={crunch} />
+    <Toggle block label="Кранч" hint="Продолжать после восстановления лимитов" bind:checked={crunch} />
     {#if crunch}<Textarea label="Текст продолжения" bind:value={resume} />{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if model?.errors.machine}<p class="error">{model.errors.machine}</p>{/if}
@@ -349,6 +393,8 @@
     padding: var(--s6) var(--s8) var(--s8);
   }
   .fields { display: flex; flex-direction: column; gap: var(--s6); }
+  .summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); }
+  .summary-line { flex: 1 1 0; min-width: 0; margin: 0; color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--gauge-width)), 1fr)); gap: var(--s4); }
   .error { margin: 0; color: var(--danger); }
   .hint { color: var(--muted); font-size: var(--fs-sm); margin: 0; }

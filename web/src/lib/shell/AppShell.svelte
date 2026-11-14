@@ -6,6 +6,7 @@
   import { browserRuntime } from '#lib/app/browser.js';
   import type { ChatLease } from '#lib/screens/chat/open.js';
   import SessionList from '#lib/screens/sessions/SessionList.svelte';
+  import { activeGroupId } from '#lib/screens/sessions/activeGroup.svelte.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import type { Snippet, Component } from 'svelte';
   import { onMount } from 'svelte';
@@ -38,6 +39,8 @@
   const path = $derived(page.url.pathname);
   const onSessions = $derived(path === '/' || path === '/sessions');
   const standalonePage = $derived(path === '/settings' || path === '/settings/sign-in' || path === '/changes' || path === '/share' || path === '/search' || path === '/bookmarks' || path === '/plan' || path.startsWith('/plan/'));
+  // Кнопка «Новая сессия» на телефоне помнит открытую группу: форма возьмёт её прошлую сессию.
+  const createHref = $derived(activeGroupId() ? `/new?group=${encodeURIComponent(activeGroupId())}` : '/new');
   const onChat = $derived(path.startsWith('/c/'));
   // Код входа и ссылка восстановления работают и без сеанса: страница входа их не закрывает.
   const authRoute = $derived(path === '/qr' || path === '/recover');
@@ -291,7 +294,7 @@
       <div class="page">{@render children()}</div>
     {/if}
     {#if !onChat && !standalonePage}
-      <Nav current={nav} create={onSessions || onNew} />
+      <Nav current={nav} create={onSessions || onNew} {createHref} />
     {/if}
   {:else if laidOut}
     <div class="panes">
