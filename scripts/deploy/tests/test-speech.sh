@@ -103,6 +103,13 @@ assert_contains "${L}" "SPEECH-SOFT: canterlot-speech health failed after 1 s: {
 assert_contains "${L}" "SPEECH-SOFT: canterlot-speech health failed as canterlot:" "health failure reported by verify"
 assert_contains "${L}" "verify PASS" "verify still passes"
 assert_contains "${L}" "soft failures 0, speech: health failing" "summary: release soft failures untouched, speech failing"
+# Файл результата считает диктовку отдельно: публикации она не мешает.
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "done" "result file: done"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" soft_failures)" "0" "result file: no non-speech soft failures"
+[ "$(result_of "${FAKE_ROOT}/cutover.result" speech_soft_failures)" -ge 2 ] \
+    && case_ok "result file: speech soft failures counted separately (cutover and verify)" \
+    || case_fail "result file: speech soft failures $(result_of "${FAKE_ROOT}/cutover.result" speech_soft_failures)"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" speech_summary)" "health failing" "result file: speech summary"
 teardown_case
 case_end
 
@@ -267,7 +274,7 @@ bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --dry-run --source "${REPO_ROOT}" -
 D="${FAKE_ROOT}/dry.log"
 assert_contains "${D}" "dry-run: speech: canterlot-speech installed and enabled, ${SPEECH_CONFIG} present, release ${SHA_NEW} has the binary; the real run restarts canterlot-speech after the worker is live (bounded to 30 s) and asks health (soft)" "dry-run names the speech action"
 assert_contains "${D}" "- speech: restart canterlot-speech (bounded to 30 s) + health, or stop and disable it" "NOT RUN list has the speech step"
-assert_contains "${D}" "4b speech: restart canterlot-speech (bounded to 30 s)" "plan has the speech step"
+assert_contains "${D}" "9 speech: restart canterlot-speech (bounded to 30 s)" "plan has the speech step"
 assert_eq "$(speech_restarts)" "0" "dry-run restarts nothing"
 if bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --rehearse --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" \
         --state "${FAKE_ROOT}/rehearse.state" >"${FAKE_ROOT}/rehearse.log" 2>&1; then
@@ -282,7 +289,7 @@ assert_contains "${R}" "rehearse: speech: health failing" "rehearsal summary nam
 grep -q '^  CONFIRM=' "${R}" && case_ok "token printed (speech never blocks)" || case_fail "no token"
 assert_eq "$(speech_restarts)" "0" "rehearsal restarts nothing"
 # Без бинаря в цели репетиция печатает стоп и выключение, но не делает их.
-rm -f "${HUB_RELEASES}/${SHA_NEW}/bin/canterlot-speech"
+remove_target_hub_file bin/canterlot-speech
 if bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --rehearse --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" \
         --state "${FAKE_ROOT}/rehearse.state" >"${FAKE_ROOT}/rehearse.log" 2>&1; then
     case_ok "rehearsal PASS for a target without the binary"

@@ -11,7 +11,74 @@ source "${DEPLOY_DIR}/deploy.conf"
 
 # Журнал и ошибки — по-английски; комментарии — по-русски.
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
-die() { printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
+# FAIL_EXPLAINED=1 — выход объяснён (die, die_after, cutover_hard): выход с ошибкой без
+# него (set -e, необработанный сбой) файл результата записывает как unknown.
+# shellcheck disable=SC2034 # читает cutover.sh (ловушки выхода)
+FAIL_EXPLAINED=0
+die() { FAIL_EXPLAINED=1; fail_code unknown; printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; handled_exit 1; }
+
+# Коды отказов прогона (fail_codes в файле результата cutover): строка на отказ в
+# файле DEPLOY_FAIL_LOG, его наследуют дочерние preflight.sh, target-check.sh,
+# verify.sh. Явный код — у узнаваемых причин; отказ без кода пишется как unknown.
+# Переходные (release.sh повторяет по ним репетицию): session_starting, vzdump_busy.
+fail_code() {
+    if [ -n "${DEPLOY_FAIL_LOG:-}" ]; then printf '%s\n' "$1" >>"${DEPLOY_FAIL_LOG}" 2>/dev/null || true; fi
+}
+fail_count() {
+    if [ -n "${DEPLOY_FAIL_LOG:-}" ] && [ -f "${DEPLOY_FAIL_LOG}" ]; then wc -l <"${DEPLOY_FAIL_LOG}" | tr -d ' '; else printf 0; fi
+}
+# fail_mark перед проверкой, die_after — её отказ: причина уже записана с кодом
+# после метки (внутри проверки или дочернего скрипта); иначе — unknown.
+FAIL_MARK=0
+fail_mark() { FAIL_MARK="$(fail_count)"; }
+# shellcheck disable=SC2034 # FAIL_EXPLAINED читает cutover.sh
+die_after() {
+    FAIL_EXPLAINED=1
+    [ "$(fail_count)" -gt "${FAIL_MARK}" ] || fail_code unknown
+    printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    handled_exit 1
+}
+# Обработанный выход дочернего скрипта выката (preflight, target-check, verify):
+# перед своим отказом он пишет отметку «rc=N codes=…» в файл DEPLOY_HANDLED_FILE,
+# который дал ему run_child родителя. Пишет только сам процесс скрипта, не его
+# подоболочка; внукам файл не передаётся.
+HANDLED_FILE="${DEPLOY_HANDLED_FILE:-}"
+unset DEPLOY_HANDLED_FILE
+FAIL_START="$(fail_count)"
+handled_exit() {
+    local rc="$1" codes=""
+    if [ -n "${HANDLED_FILE}" ] && [ "${BASHPID}" = "$$" ]; then
+        if [ -n "${DEPLOY_FAIL_LOG:-}" ] && [ -f "${DEPLOY_FAIL_LOG}" ]; then
+            codes="$(tail -n +"$((FAIL_START + 1))" "${DEPLOY_FAIL_LOG}" | paste -sd, -)" || codes=""
+        fi
+        printf 'rc=%s codes=%s\n' "${rc}" "${codes}" >"${HANDLED_FILE}" 2>/dev/null || true
+    fi
+    exit "${rc}"
+}
+# Итог проверок дочернего скрипта: PASS или обработанный отказ.
+summary_exit() {
+    if check_summary; then log "$1"; else handled_exit 1; fi
+}
+# Запуск дочернего скрипта выката. Отказ без отметки обработанного выхода (set -e,
+# необработанный сбой, сигнал) записывается кодом unknown: коды, которые ребёнок
+# успел записать до этого, такой выход не объясняют.
+run_child() {
+    local f rc=0 got=""
+    if [ -z "${DEPLOY_FAIL_LOG:-}" ]; then
+        "$@" || rc=$?
+        return "${rc}"
+    fi
+    f="${DEPLOY_FAIL_LOG}.handled"
+    rm -f "${f}"  # lint: local-temp
+    DEPLOY_HANDLED_FILE="${f}" "$@" || rc=$?
+    if [ -f "${f}" ]; then got="$(sed -n 's/^rc=\([0-9]*\) .*/\1/p' "${f}")"; fi
+    rm -f "${f}"  # lint: local-temp
+    if [ "${rc}" != "0" ] && [ "${got}" != "${rc}" ]; then
+        log "${1##*/} exited ${rc} outside its handled failure path (crash, set -e or signal): recorded as unknown"
+        fail_code unknown
+    fi
+    return "${rc}"
+}
 
 # Все вызовы ssh только с -n либо с явным конвейером (урок: ssh ел stdin).
 # Все вызовы docker только с </dev/null (урок: docker без stdin виснет в скрипте).
@@ -243,24 +310,26 @@ plan_text() {
         printf '%s %s\n' "$(_plan_file_hash "${DEPLOY_DIR}/${f}")" "${f}"
     done | sha256sum | cut -c1-12)"
     printf '%s\n' \
-        "plan v2 target=${sha}" \
+        "plan v3 target=${sha}" \
         "baseline hub=${b_hub} web=${b_web} worker=${b_worker}" \
         "dist SHA256SUMS=$(_plan_file_hash "${dist_dir}/SHA256SUMS") RELEASE=$(_plan_file_hash "${dist_dir}/RELEASE") EXPECT=$(_plan_file_hash "${dist_dir}/EXPECT") csp=$(_plan_file_hash "${dist_dir}/csp.txt")" \
         "hosts hub=${HUB_SSH} web=${WEB_SSH} proxmox=${PROXMOX_SSH} node=${PROXMOX_NODE} ct=${HUB_CTID} ip=${HUB_IP}" \
         "paths hub=${HUB_BASE} web=${WEB_SITES_BASE} env=${WEB_ENV} worker=${WORKER_BASE} backups=${HUB_BACKUP_DIR} units=${WORKER_UNIT},${HUB_UNIT},${WEB_CONTAINER},${SPEECH_UNIT}" \
         "toolkit=${toolkit} retain=${RETAIN_COUNT}" \
         "steps:" \
-        "  1 preflight snapshot (local state file); reserve ${sha} and the previous releases on every host" \
-        "  2 stop worker ${WORKER_UNIT} (sessions keep running); prove no control worker is left" \
-        "  3 fresh vzdump of CT ${HUB_CTID} + pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable" \
-        "  4 hub flip ${b_hub} -> ${sha} under the host lock, one restart of ${HUB_UNIT}; readyz, migrations, exe, NRestarts" \
-        "  4b speech: restart ${SPEECH_UNIT} (bounded to ${SPEECH_RESTART_TIMEOUT} s) and ask health when installed, enabled and configured; stop and disable it when ${sha} has no canterlot-speech; every speech failure is soft" \
-        "  5 PWA: canterlot.env.${sha} from dist csp.txt, build flip ${b_web} -> ${sha}, one recreate of ${WEB_CONTAINER}" \
-        "  6 worker flip ${b_worker} -> ${sha}, start; guarded MainPID/exe wait; state=live wait; NRestarts" \
-        "  7 merge old _app/immutable chunks of the previous web releases into ${sha} (no clobber), verify dist files intact" \
-        "  8 maintenance check (sockets, exec dirs, leftovers, env record); verify.sh twice incl. loopback Caddy probe and harness catalog" \
-        "  9 geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)" \
-        " 10 retention: keep ${RETAIN_COUNT} per component + every live release; literal paths re-checked right before deletion"
+        "  1 preflight snapshot (local state file) and target check (staged trees, dist, DB not ahead); reserve ${sha} and the previous releases on every host" \
+        "  2 fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${sha}-<ts>); the control worker is exactly the unit MainPID" \
+        "  3 read gates and the session inventory again (vzdump takes up to a minute)" \
+        "  4 stop worker ${WORKER_UNIT} (sessions keep running); prove no control worker is left" \
+        "  5 quiesced pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable" \
+        "  6 hub flip ${b_hub} -> ${sha} under the host lock, one restart of ${HUB_UNIT}; readyz, migrations, exe, NRestarts" \
+        "  7 worker flip ${b_worker} -> ${sha}, start; guarded MainPID/exe wait; state=live wait; NRestarts; downtime printed" \
+        "  8 PWA (soft, after the worker is live, never stops it): canterlot.env.${sha} from dist csp.txt, build flip ${b_web} -> ${sha}, one recreate of ${WEB_CONTAINER}" \
+        "  9 speech: restart ${SPEECH_UNIT} (bounded to ${SPEECH_RESTART_TIMEOUT} s) and ask health when installed, enabled and configured; stop and disable it when ${sha} has no canterlot-speech; every speech failure is soft" \
+        " 10 merge old _app/immutable chunks of the previous web releases into ${sha} (no clobber), verify dist files intact" \
+        " 11 maintenance check (sockets, exec dirs, leftovers, env record); verify.sh twice incl. loopback Caddy probe and harness catalog" \
+        " 12 geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)" \
+        " 13 retention: keep ${RETAIN_COUNT} per component + every live release; literal paths re-checked right before deletion"
 }
 plan_hash() { plan_text "$@" | sha256sum | cut -c1-12; }
 
@@ -678,8 +747,29 @@ check_ct_node() {
 # Счётчик жёстких и мягких сбоев для cutover: жёсткие откатывают, мягкие пишутся и идут дальше.
 HARD_FAILURES=0
 SOFT_FAILURES=0
-hard() { printf '[%s] HARD-FAIL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; HARD_FAILURES=$((HARD_FAILURES + 1)); }
-soft() { printf '[%s] SOFT-FAIL: %s (recorded, continuing)\n' "$(date -u +%H:%M:%S)" "$*" >&2; SOFT_FAILURES=$((SOFT_FAILURES + 1)); }
+hard() {
+    printf '[%s] HARD-FAIL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    HARD_FAILURES=$((HARD_FAILURES + 1))
+    fail_code "${HARD_CODE:-unknown}"
+    HARD_CODE=""
+}
+# Ошибка с явным кодом отказа: hard_code|soft_code КОД СООБЩЕНИЕ.
+HARD_CODE=""
+hard_code() { HARD_CODE="$1"; shift; hard "$@"; }
+SOFT_CODE=""
+soft_code() { SOFT_CODE="$1"; shift; soft "$@"; }
+soft() {
+    printf '[%s] SOFT-FAIL: %s (recorded, continuing)\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    SOFT_FAILURES=$((SOFT_FAILURES + 1))
+    soft_record "${PHASE:-${DEPLOY_SOFT_KIND:-other}}"
+    fail_code "${SOFT_CODE:-unknown}"
+    SOFT_CODE=""
+}
+# Файл мягких ошибок прогона cutover (DEPLOY_SOFT_LOG): строка — вид шага; его
+# наследуют verify.sh и retain.sh, так что их ошибки тоже попадают в результат.
+soft_record() {
+    if [ -n "${DEPLOY_SOFT_LOG:-}" ]; then printf '%s\n' "$1" >>"${DEPLOY_SOFT_LOG}" 2>/dev/null || true; fi
+}
 check_summary() {
     log "hard failures: ${HARD_FAILURES}, soft failures: ${SOFT_FAILURES}"
     [ "${HARD_FAILURES}" -eq 0 ]
@@ -744,6 +834,7 @@ SPEECH_SUMMARY="not checked"
 speech_soft() {
     printf '[%s] SPEECH-SOFT: %s (dictation only, the release goes on)\n' "$(date -u +%H:%M:%S)" "$*" >&2
     SPEECH_ISSUES=$((SPEECH_ISSUES + 1))
+    soft_record speech
 }
 # Виды WARN без базы, которые ждут: сбои движка службы (`engine_*`) и сбои
 # диктовки в журнале хаба (`speech_engine_failed`, `speech_protocol_error`).
@@ -1006,6 +1097,14 @@ settle_supervisor_rows() {
 is_transient_exec_state() {
     case " ${SUPERVISOR_TRANSIENT_STATES} " in *" $1 "*) return 0 ;; esac
     return 1
+}
+# Код отказа для сессии в переходном состоянии: старт (created/starting) проходит
+# сам за секунды, остановка и потеря владельца — нет.
+session_code() {
+    case "$1" in
+        created | starting) printf session_starting ;;
+        *) printf session_stopping ;;
+    esac
 }
 
 # Все потомки PID (дети, внуки, ...): ps один раз, без pgrep -f.

@@ -14,6 +14,11 @@ fi
 # что-либо стартовать, если pg_restore упал.
 # После старта старого хаба служба диктовки идёт за его релизом (мягко): рестарт,
 # а без bin/canterlot-speech в релизе — стоп и выключение юнита.
+# Дамп — проверенный pg_dump прогона (canterlot-pre-<sha>-<ts>.dump): его снимают
+# после стопа воркера, при затихших писателях, и это несущая точка восстановления.
+# vzdump того же прогона (notes pre-<sha>-<ts>) снят раньше, пока воркер работал:
+# это отдельная точка восстановления всего CT, и её восстановление теряет записи
+# между vzdump и стопом воркера.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -131,6 +136,7 @@ assert_worker_stopped "before any change"
 
 # Все предпосылки проверяются ДО остановки хаба: иначе битый дамп или
 # несуществующий релиз оставляли бы хаб остановленным без плана восстановления.
+log "restoring the run's quiesced pg_dump (taken after the worker stop); the run's vzdump is an earlier whole-CT point taken while the worker ran"
 ssh_hub "test -s '${DUMP}'" || die "dump not found or empty: ${DUMP}"
 verify_dump "${DUMP}" || die "dump verification failed before stopping the hub: ${DUMP}"
 # Без --to хаб поднимется на том релизе, на который сейчас указывает current:

@@ -112,7 +112,7 @@ setup_dryrun() {
 # Хэши содержимого, не только имена: dry-run мог перезаписать существующий
 # файл тем же набором имён, и сравнение списков это пропускало.
 snapshot_tree() {
-    find "${FAKE_ROOT}" -type f ! -name '*.log' -print0 2>/dev/null \
+    find "${FAKE_ROOT}" -type f ! -name '*.log' ! -name '*.result' ! -name '*.result.soft' ! -name '*.result.codes' ! -name '*.result.codes.handled' -print0 2>/dev/null \
         | LC_ALL=C sort -z \
         | xargs -0 -r sha256sum 2>/dev/null || true
 }
@@ -131,17 +131,19 @@ fs_unchanged() {
 }
 
 # Дозор во время прогона: фиксирует любой новый файл внутри FAKE_ROOT
-# с шагом 0.2 c. Нарушение — в файл вне FAKE_ROOT.
+# с шагом 0.2 c. Нарушение — в файл вне FAKE_ROOT. Свои локальные файлы прогона
+# (лог, результат, .soft, .codes и отметка выхода дочернего скрипта .codes.handled)
+# не в счёт.
 watch_start() {
     WATCH_BASE="/tmp/canterlot-watch-base-${RANDOM}.txt"
     WATCH_LOG="/tmp/canterlot-watch-${RANDOM}.log"
     export WATCH_BASE WATCH_LOG
-    find "${FAKE_ROOT}" -type f | grep -v '/dry\.log$' | LC_ALL=C sort >"${WATCH_BASE}"
+    find "${FAKE_ROOT}" -type f | grep -vE '/dry\.(log|result|result\.soft|result\.codes|result\.codes\.handled)$' | LC_ALL=C sort >"${WATCH_BASE}"
     ( while true; do
-        if ! find "${FAKE_ROOT}" -type f 2>/dev/null | grep -v '/dry\.log$' | LC_ALL=C sort | cmp -s "${WATCH_BASE}" -; then
+        if ! find "${FAKE_ROOT}" -type f 2>/dev/null | grep -vE '/dry\.(log|result|result\.soft|result\.codes|result\.codes\.handled)$' | LC_ALL=C sort | cmp -s "${WATCH_BASE}" -; then
             echo "NEW FILE DURING DRY-RUN at $(date -u +%T)" >>"${WATCH_LOG}"
-            find "${FAKE_ROOT}" -type f 2>/dev/null | grep -v '/dry\.log$' | LC_ALL=C sort | comm -13 "${WATCH_BASE}" - | head -5 >>"${WATCH_LOG}"
-            find "${FAKE_ROOT}" -type f 2>/dev/null | grep -v '/dry\.log$' | LC_ALL=C sort >"${WATCH_BASE}"
+            find "${FAKE_ROOT}" -type f 2>/dev/null | grep -vE '/dry\.(log|result|result\.soft|result\.codes|result\.codes\.handled)$' | LC_ALL=C sort | comm -13 "${WATCH_BASE}" - | head -5 >>"${WATCH_LOG}"
+            find "${FAKE_ROOT}" -type f 2>/dev/null | grep -vE '/dry\.(log|result|result\.soft|result\.codes|result\.codes\.handled)$' | LC_ALL=C sort >"${WATCH_BASE}"
         fi
         sleep 0.2
       done ) &
@@ -195,6 +197,11 @@ assert_contains "${FAKE_ROOT}/dry.log" "dry-run plan for ${TARGET}" "plan printe
 assert_contains "${FAKE_ROOT}/dry.log" "target check PASS for ${TARGET}" "target release was checked, not the deployed one"
 assert_contains "${FAKE_ROOT}/dry.log" "baseline (deployed): hub=${DEPLOYED}" "deployed release named as the baseline"
 assert_contains "${FAKE_ROOT}/dry.log" "dry-run PASS" "dry-run passed"
+# Единственный локальный файл dry-run — его файл результата рядом с логом.
+grep -qx 'status=pass' "${FAKE_ROOT}/dry.result" && case_ok "result file: status pass" || case_fail "result file: no status=pass"
+grep -qx 'mode=dry-run' "${FAKE_ROOT}/dry.result" && case_ok "result file: mode dry-run" || case_fail "result file: wrong mode"
+[ ! -e "${FAKE_ROOT}/dry.result.soft" ] && case_ok "soft log removed" || case_fail "soft log left behind"
+[ ! -e "${FAKE_ROOT}/dry.result.codes" ] && case_ok "codes log removed" || case_fail "codes log left behind"
 assert_contains "${FAKE_ROOT}/dry.log" "maintenance: 2 live executions, each checked for its exec dir and socket" "maintenance checked in the dry-run"
 assert_contains "${FAKE_ROOT}/dry.log" "chunk merge preview: from ${DEPLOYED}" "chunk merge previewed"
 assert_contains "${FAKE_ROOT}/dry.log" "owner checklist: authenticated checks" "owner checklist printed"

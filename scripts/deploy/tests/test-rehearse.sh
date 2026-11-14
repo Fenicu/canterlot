@@ -48,6 +48,17 @@ ls "${HUB_BASE}"/.reserved.* "${WORKER_BASE}"/.reserved.* >/dev/null 2>&1 && cas
 for label in "stop worker" "vzdump" "pg_dump" "hub flip" "hub restart" "write canterlot.env.${SHA_NEW}" "web build flip" "caddy recreate" "worker flip" "worker start" "merge old immutable chunks" "loopback caddy probe" "reserve hub releases" "release worker reservations"; do
     assert_contains "${FAKE_ROOT}/rehearse.log" "(${label}):" "WOULD-WRITE printed for: ${label}"
 done
+in_order "${FAKE_ROOT}/rehearse.log" "target check PASS for ${SHA_NEW}" "(vzdump):" \
+    "re-checking read gates and the session inventory after vzdump" "(stop worker):" "(pg_dump):" \
+    "dump fully readable" "(hub flip):" "(hub restart):" "(worker flip):" "(worker start):" \
+    'worker journal parse found state="live"' "(write canterlot.env.${SHA_NEW}):" "(web build flip):" \
+    "(caddy recreate):" "running verification" \
+    && case_ok "rehearsal prints the new order: vzdump, gates again, stop, dump, hub, worker live, PWA" \
+    || case_fail "rehearsal order differs"
+in_order "${FAKE_ROOT}/rehearse.log" "| steps:" "|   2 fresh vzdump of CT" "|   3 read gates and the session inventory again" \
+    "|   4 stop worker ${WORKER_UNIT}" "|   5 quiesced pg_dump" "|   6 hub flip" "|   7 worker flip" "|   8 PWA" \
+    && case_ok "plan text lists the new order" || case_fail "plan text order differs"
+assert_contains "${FAKE_ROOT}/rehearse.log" "rehearse: no down time" "rehearsal measures no down time"
 N="$(grep -c 'WOULD-WRITE #' "${FAKE_ROOT}/rehearse.log" || true)"
 [ "${N}" -ge 18 ] && case_ok "${N} writes printed" || case_fail "only ${N} writes printed"
 assert_contains "${FAKE_ROOT}/rehearse.log" "the control-worker scan finds exactly the live unit process" "control-worker scan exercised against the live worker"
@@ -70,7 +81,70 @@ assert_contains "${FAKE_ROOT}/rehearse.log" "owner checklist: authenticated chec
 assert_contains "${FAKE_ROOT}/rehearse.log" "dbip-city-lite.mmdb is 0 days old, no update" "geoip step read the live database age"
 assert_contains "${FAKE_ROOT}/rehearse.log" "rehearsal PASS" "rehearsal PASS"
 [ -n "$(token_from "${FAKE_ROOT}/rehearse.log")" ] && case_ok "confirm token printed" || case_fail "no token"
+R="${FAKE_ROOT}/rehearse.result"
+assert_eq "$(result_of "${R}" status)" "pass" "result file: status pass"
+assert_eq "$(result_of "${R}" mode)" "rehearse" "result file: mode rehearse"
+assert_eq "$(result_of "${R}" token)" "$(token_from "${FAKE_ROOT}/rehearse.log")" "result file: the printed token"
+assert_eq "$(result_of "${R}" plan)" "$(token_from "${FAKE_ROOT}/rehearse.log" | cut -d- -f2)" "result file: the token's plan hash"
+assert_eq "$(result_of "${R}" release)" "${SHA_NEW}" "result file: release"
+assert_eq "$(result_of "${R}" vzdump_done)" "no" "result file: no restore point from a rehearsal"
+assert_eq "$(result_of "${R}" dump)" "" "result file: no dump from a rehearsal"
+assert_eq "$(result_of "${R}" worker_downtime_s)/$(result_of "${R}" hub_interruption_s)/$(result_of "${R}" worker_stop_at)" "//" "result file: no downtime from a rehearsal"
+assert_contains "${FAKE_ROOT}/rehearse.log" "result file: ${R} (status pass)" "result path printed at the end"
 grep -q 'docker fakeweb exec -i' "${FAKE_ROOT}/state/calls.log" && case_fail "loopback probe started" || case_ok "loopback probe never started"
+teardown_case
+case_end
+
+# --- V3: репетиция — надмножество dry-run: target-check в общей предпроверке ---
+case_begin "rehearsal runs the target check (staged trees, dist, DB not ahead)"
+setup_cutover rehearse-target
+if run_rehearse; then case_ok "exit 0"; else case_fail "rehearsal failed"; tail -10 "${FAKE_ROOT}/rehearse.log"; fi
+assert_contains "${FAKE_ROOT}/rehearse.log" "target check PASS for ${SHA_NEW}" "target check ran inside the rehearsal"
+assert_contains "${FAKE_ROOT}/rehearse.log" "web ${SHA_NEW}: staged tree equals the dist (every file hash)" "staged web tree compared"
+assert_contains "${FAKE_ROOT}/rehearse.log" "worker ${SHA_NEW}: staged tree equals the dist (every file hash)" "staged worker tree compared"
+assert_contains "${FAKE_ROOT}/rehearse.log" "migrations: database at 40, target ends at 41" "DB-not-ahead compared"
+teardown_case
+case_end
+
+case_begin "a staged-tree mismatch fails the rehearsal like the dry-run"
+setup_cutover rehearse-staged-mismatch
+printf 'tampered\n' >>"${WEB_RELEASES}/${SHA_NEW}/_app/immutable/chunks/probe.js"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_rehearse; then case_fail "rehearsal passed with a tampered staged tree"; else case_ok "rehearsal failed"; fi
+assert_contains "${FAKE_ROOT}/rehearse.log" "staged tree differs from the dist" "mismatch named"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)" "fail" "result file: status fail on a refused rehearsal"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "WOULD-WRITE #" "refused before the write path"
+assert_eq "$(mutations)" "" "no mutating command"
+teardown_case
+case_end
+
+case_begin "a database ahead of the target fails the rehearsal like the dry-run"
+setup_cutover rehearse-db-ahead
+sed -i 's/^MIGR_MAX=.*/MIGR_MAX=42/' "${FAKE_ROOT}/state/db.txt"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_rehearse; then case_fail "rehearsal passed with the DB ahead"; else case_ok "rehearsal failed"; fi
+assert_contains "${FAKE_ROOT}/rehearse.log" "database is ahead of the target release: migrations max 42 > target migrations_last 41" "DB ahead named"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
+assert_eq "$(mutations)" "" "no mutating command"
+teardown_case
+case_end
+
+case_begin "the real run refuses a staged-tree mismatch before touching anything"
+setup_cutover execute-staged-mismatch
+TOKEN="$(confirm_for "${SHA_NEW}")"
+printf 'tampered\n' >>"${WORKER_RELEASES}/${SHA_NEW}/RELEASE"
+: >"${FAKE_ROOT}/state/calls.log"
+if bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" \
+        --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1; then
+    case_fail "real run accepted a tampered staged tree"
+else
+    case_ok "real run refused"
+fi
+assert_contains "${FAKE_ROOT}/cutover.log" "worker ${SHA_NEW}: staged tree differs from the dist" "mismatch named"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: refused before any write"
+assert_eq "$(mutations)" "" "nothing stopped, dumped or flipped"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 teardown_case
 case_end
 
@@ -102,6 +176,8 @@ else
     case_ok "real run refused"
 fi
 assert_contains "${FAKE_ROOT}/cutover.log" "the plan changed since the token was issued" "plan change reported"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: a rejected token is refused"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" mode)" "execute" "result file: mode execute"
 assert_eq "$(grep -cE 'stop canterlot-worker|^vzdump ' "${FAKE_ROOT}/state/calls.log" || true)" "0" "nothing stopped or backed up"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 teardown_case
@@ -129,20 +205,89 @@ if run_rehearse; then case_fail "rehearsal passed with a broken site"; else case
 unset FAKE_SITE_FAIL
 assert_contains "${FAKE_ROOT}/rehearse.log" "REHEARSAL FAIL" "failure reported"
 assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)" "fail" "result file: status fail"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" token)" "" "result file: no token"
 assert_not_contains "${FAKE_ROOT}/rehearse.log" "STOP-AND-REPORT" "no recovery report in a rehearsal"
 assert_eq "$(mutations)" "" "no mutating command after the failure either"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"
 teardown_case
 case_end
 
+# --- коды отказа (fail_codes): release.sh повторяет репетицию только при переходных ---
+case_begin "a clean rehearsal reports no failure codes"
+setup_cutover codes-pass
+if run_rehearse; then case_ok "exit 0"; else case_fail "rehearsal failed"; tail -10 "${FAKE_ROOT}/rehearse.log"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "" "result file: fail_codes empty"
+grep -q '^fail_codes=' "${FAKE_ROOT}/rehearse.result" && case_ok "result file: fail_codes key present" || case_fail "result file: no fail_codes key"
+[ ! -e "${FAKE_ROOT}/rehearse.result.codes" ] && case_ok "codes log removed" || case_fail "codes log left behind"
+teardown_case
+case_end
+
+case_begin "a CT backup lock fails the rehearsal with the transient code vzdump_busy"
+setup_cutover codes-ctlock
+export FAKE_CT_LOCK=1
+if run_rehearse; then case_fail "rehearsal passed with a CT lock"; else case_ok "rehearsal failed"; fi
+unset FAKE_CT_LOCK
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)" "fail" "result file: fail"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "vzdump_busy" "result file: only vzdump_busy"
+teardown_case
+case_end
+
+case_begin "a session that stays starting fails the rehearsal with the transient code session_starting"
+setup_cutover codes-starting
+EXEC3="$(new_exec_id)"
+spawn_session "${EXEC3}" "${SHA_PREV}" 300
+printf '%s starting\n' "${EXEC3}" >"${FAKE_ROOT}/state/exec-states"
+if run_rehearse; then case_fail "rehearsal passed with a starting session"; else case_ok "rehearsal failed"; fi
+assert_contains "${FAKE_ROOT}/rehearse.log" "whose hub row is still starting" "starting row named"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "session_starting" "result file: only session_starting"
+teardown_case
+case_end
+
+case_begin "a session that stays stopping is not transient"
+setup_cutover codes-stopping
+EXEC3="$(new_exec_id)"
+spawn_session "${EXEC3}" "${SHA_PREV}" 300
+printf '%s stopping\n' "${EXEC3}" >"${FAKE_ROOT}/state/exec-states"
+if run_rehearse; then case_fail "rehearsal passed with a stopping session"; else case_ok "rehearsal failed"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "session_stopping" "result file: session_stopping"
+teardown_case
+case_end
+
+case_begin "a failure without a known cause is coded unknown"
+setup_cutover codes-unknown
+export FAKE_SITE_FAIL=meeting.example.com
+if run_rehearse; then case_fail "rehearsal passed with a broken site"; else case_ok "rehearsal failed"; fi
+unset FAKE_SITE_FAIL
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "unknown" "result file: unknown"
+teardown_case
+case_end
+
+case_begin "a rejected token is coded and happens before any write"
+setup_cutover codes-token
+OLD="$(issue_token "${SHA_NEW}" "${FAKE_ROOT}/dist" "$(( $(date -u +%s) - 7300 ))")"
+bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${OLD}" --source "${REPO_ROOT}" \
+    --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && case_fail "expired token accepted" || case_ok "expired token refused"
+R="${FAKE_ROOT}/cutover.result"
+assert_eq "$(result_of "${R}" status)/$(result_of "${R}" phase)/$(result_of "${R}" fail_codes)" "refused/token/token_expired" "result file: expired token before any write"
+run_rehearse || true
+TOKEN="$(token_from "${FAKE_ROOT}/rehearse.log")"
+printf '\n' >>"${DIST_DIR}/SHA256SUMS"
+bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" \
+    --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && case_fail "changed plan accepted" || case_ok "changed plan refused"
+assert_eq "$(result_of "${R}" status)/$(result_of "${R}" phase)/$(result_of "${R}" fail_codes)" "refused/token/token_plan_changed" "result file: changed plan before any write"
+bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm 1-2-3 --source "${REPO_ROOT}" \
+    --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && case_fail "malformed token accepted" || case_ok "malformed token refused"
+assert_eq "$(result_of "${R}" fail_codes)" "token_invalid" "result file: token_invalid"
+assert_eq "$(grep -cE 'stop canterlot-worker|^vzdump ' "${FAKE_ROOT}/state/calls.log" || true)" "0" "nothing stopped or backed up"
+teardown_case
+case_end
+
 case_begin "shadow rehearsal of the deployed release (what production runs at the end)"
 setup_cutover shadow
 # dist развёрнутого релиза (как в проде: dist/255ccb1bbe37 лежит в сборочном worktree).
-cp -r "${DIST_DIR}" "${FAKE_ROOT}/dist/${SHA_PREV}"
-printf 'sha=%s\ndate=x\nmigrations_last=0040_monthly_limits.sql\n' "${SHA_PREV}" >"${FAKE_ROOT}/dist/${SHA_PREV}/RELEASE"
 cp "${DIST_DIR}/web/200.html" "${WEB_RELEASES}/${SHA_PREV}/"
-rm -rf "${FAKE_ROOT}/dist/${SHA_PREV}/web"
-cp -r "${WEB_RELEASES}/${SHA_PREV}" "${FAKE_ROOT}/dist/${SHA_PREV}/web"
+make_dist_from_staged "${SHA_PREV}"
 SHADOW_CSP="$(cat "${FAKE_ROOT}/dist/${SHA_PREV}/csp.txt")"
 printf 'CANTERLOT_CSP="%s"\n' "${SHADOW_CSP}" | tee "${WEB_ENV}" >"${WEB_ENV}.${SHA_PREV}"
 chmod 0600 "${WEB_ENV}.${SHA_PREV}"

@@ -47,6 +47,7 @@ else
     case_ok "exit nonzero with a wrong --confirm"
 fi
 assert_contains "${FAKE_ROOT}/cutover.log" "malformed --confirm token" "wrong token reported"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: refused (bad token)"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"
 pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
@@ -59,6 +60,9 @@ case_begin "gates fail before stop"
 setup_cutover gatesfail
 export FAKE_CT_LOCK=1
 if run_cutover; then case_fail "exit 0 despite failed gates"; else case_ok "exit nonzero"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: refused (gates)"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" worker_stopped)" "no" "result file: worker not stopped"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" fail_codes)" "vzdump_busy" "result file: the CT backup lock coded vzdump_busy"
 unset FAKE_CT_LOCK
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"
@@ -139,18 +143,22 @@ assert_contains "${FAKE_ROOT}/cutover.log" "cannot query compactions table" "que
 teardown_case
 case_end
 
-# --- B. набор супервизоров изменился после preflight: новый допустим, записанный пропавший — нет ---
-case_begin "new supervisor is allowed, a recorded one disappearing is not"
+# --- B. супервизор без строки хаба появился после preflight: сверка после vzdump
+# (как ворота 1) отказывает до стопа воркера. Новая полноценная сессия со строкой
+# running допустима и входит в снимок (test-cutover-guarantees.sh).
+case_begin "a new supervisor without a hub row after the preflight aborts before the worker stop"
 setup_cutover supset
 run_cutover_bg
 wait_for_log "${FAKE_ROOT}/cutover.log" "preflight PASS" || case_fail "no preflight marker"
-# Новый супервизор (без строки хаба) — это не дрейф записанных процессов.
 SUPX_DIR="${WORKER_DATA}/executions/ffffffff-ffff-4fff-8fff-ffffffffffff"
 mkdir -p "${SUPX_DIR}"
 setsid bash -c "exec -a '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' supervise --exec-dir '${SUPX_DIR}'" >/dev/null 2>&1 <&- &
 rc=0; wait "${CUTOVER_PID}" || rc=$?
-[ "${rc}" = "0" ] && case_ok "exit 0 with a new supervisor (set equality not required)" || case_fail "exit ${rc} on a new supervisor"
-hub_is "${SHA_NEW}" && case_ok "hub flipped" || case_fail "hub not flipped"
+[ "${rc}" != "0" ] && case_ok "exit ${rc} on a supervisor without a hub row" || case_fail "exit 0 with a leaked supervisor"
+assert_contains "${FAKE_ROOT}/cutover.log" "supervisor runs for execution ffffffff-ffff-4fff-8fff-ffffffffffff with no live hub row" "the supervisor is named"
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub flipped"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" fail_codes)" "session_inventory" "result file: code session_inventory"
 assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
@@ -188,8 +196,12 @@ hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 worker_is "${SHA_PREV}" && case_ok "worker still prev" || case_fail "worker moved"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
+# vzdump идёт до стопа: воркер не останавливался, восстанавливать нечего.
+worker_stopped_ever && case_fail "worker was stopped before/after a failed vzdump" || case_ok "worker never stopped (vzdump runs while everything runs)"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
-    && case_ok "worker restarted" || case_fail "worker not restarted"
+    && case_ok "worker still active" || case_fail "worker not active"
+assert_contains "${FAKE_ROOT}/cutover.log" "nothing was stopped or flipped" "nothing-to-recover path named"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)/$(result_of "${FAKE_ROOT}/cutover.result" recovery)" "failed_before_flip/nothing_to_recover" "result file: vzdump failure"
 assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
@@ -199,6 +211,11 @@ case_begin "pg_dump fails"
 setup_cutover pgdumpfail
 export FAKE_FAIL_PG_DUMP=1
 if run_cutover; then case_fail "exit 0 despite pg_dump failure"; else case_ok "exit nonzero"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "failed_before_flip" "result file: failed_before_flip"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" recovery)" "worker_restarted" "result file: worker restarted"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" vzdump_done)/$(result_of "${FAKE_ROOT}/cutover.result" worker_stopped)/$(result_of "${FAKE_ROOT}/cutover.result" dump_verified)/$(result_of "${FAKE_ROOT}/cutover.result" hub_flipped)" "yes/yes/no/no" "result file: facts"
+[ -n "$(result_of "${FAKE_ROOT}/cutover.result" vzdump_notes)" ] && case_ok "result file: vzdump restore point named" || case_fail "result file: no vzdump notes"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" dump)" "" "result file: no unverified dump named"
 unset FAKE_FAIL_PG_DUMP
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
@@ -291,9 +308,17 @@ case_end
 # --- G4. неполный целевой hub-релиз: отказ до остановки воркера ---
 case_begin "incomplete hub target blocks cutover before stop"
 setup_cutover incompletetarget
+# Бинарь пропадает ПОСЛЕ target-check (он бы поймал это раньше): проверяется
+# собственная проверка cutover перед первым изменением.
+cat >"${FAKE_ROOT}/rm-hub-bin.sh" <<EOF
+#!/usr/bin/env bash
 rm -f "${HUB_RELEASES}/${SHA_NEW}/bin/canterlot-hub"
+EOF
+export FAKE_SSH_AFTER_CMD="${SHA_NEW}/bin'" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/rm-hub-bin.sh"
 : >"${FAKE_ROOT}/state/calls.log"
 if run_cutover; then case_fail "exit 0 with incomplete hub target"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+assert_contains "${FAKE_ROOT}/cutover.log" "target check PASS for ${SHA_NEW}" "the target check passed before the binary vanished"
 assert_contains "${FAKE_ROOT}/cutover.log" "hub target release ${SHA_NEW} is incomplete" "incomplete target reported"
 grep -q 'stop canterlot-worker' "${FAKE_ROOT}/state/calls.log" \
     && case_fail "worker stopped before prereq check" || case_ok "worker never stopped"
@@ -313,6 +338,12 @@ worker_is "${SHA_PREV}" && case_ok "worker never flipped" || case_fail "worker m
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore, ever"
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "stop-and-report printed"
 assert_contains "${FAKE_ROOT}/cutover.log" "rollback-db.sh" "manual restore command printed"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "stop_and_report" "result file: stop_and_report"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" hub_flipped)/$(result_of "${FAKE_ROOT}/cutover.result" worker_live)" "yes/no" "result file: facts"
+STOP_BLOCK="$(result_of "${FAKE_ROOT}/cutover.result" stop_block)"
+[ -n "${STOP_BLOCK}" ] && grep -q '^STOP-AND-REPORT (phase' "${STOP_BLOCK}" \
+    && case_ok "result file: stop block file holds the report" || case_fail "result file: no stop block at [${STOP_BLOCK}]"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" dump)" "$(find "${HUB_BACKUP_DIR}" -name "canterlot-pre-*.dump" | head -1)" "result file: the verified dump named"
 FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
     && case_fail "worker started (must stay stopped)" || case_ok "worker stays stopped"
 assert_proc_alive "${SUP1}" "session 1 alive"
@@ -371,6 +402,15 @@ worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
 web_is "${SHA_PREV}" && case_ok "web flipped back to prev" || case_fail "web not prev"
 restore_logged && case_fail "database restore ran" || case_ok "no dropdb/createdb/pg_restore restore"
 assert_contains "${FAKE_ROOT}/cutover.log" "PWA failure (soft" "PWA soft failure recorded"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "done" "result file: done despite the soft PWA failure"
+# Фейк роняет каждый recreate: и flip, и восстановление env — две мягкие ошибки PWA.
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" soft_by_kind)" "pwa:2" "result file: the soft failures counted as pwa"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" web_release)" "${SHA_PREV}" "result file: PWA stayed on the previous release"
+in_order "${FAKE_ROOT}/cutover.log" 'worker state="live" after start' "PWA step (all failures soft" "PWA failure (soft" \
+    && case_ok "PWA step ran after the worker was live" || case_fail "PWA step not after the worker was live"
+assert_eq "$(grep -c 'stop canterlot-worker' "${FAKE_ROOT}/state/calls.log")" "1" "worker stopped exactly once (before the dump)"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker keeps running after the PWA failure" || case_fail "worker stopped by the PWA failure"
 assert_contains "${FAKE_ROOT}/cutover.log" "verify PASS" "verify passed after PWA fallback"
 [ "$(cat "${WEB_ENV}")" = "$(cat "${WEB_ENV}.${SHA_PREV}")" ] && case_ok "env restored to prev" || case_fail "env not restored"
 assert_proc_alive "${SUP1}" "session 1 alive"
@@ -380,8 +420,20 @@ case_end
 # --- J2. dist csp.txt пропал: отказ ДО любого flip, ничего не тронуто ---
 case_begin "missing dist csp refuses before any flip"
 setup_cutover pwacspmissing
+# csp.txt пропадает сразу после target-check (последнее его чтение — CSP контейнера).
+cat >"${FAKE_ROOT}/rm-csp.sh" <<EOF
+#!/usr/bin/env bash
+[ ! -e "${FAKE_ROOT}/state/rm-csp-ran" ] || exit 0
+: >"${FAKE_ROOT}/state/rm-csp-ran"
 rm -f "${FAKE_ROOT}/dist/${SHA_NEW}/csp.txt"
-if run_cutover; then case_fail "exit 0 without a dist CSP"; else case_ok "exit nonzero"; fi
+EOF
+TOKEN="$(confirm_for "${SHA_NEW}")"
+export FAKE_SSH_AFTER_CMD="printenv CANTERLOT_CSP" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/rm-csp.sh"
+bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" \
+    --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && J2_RC=0 || J2_RC=$?
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+[ "${J2_RC}" != "0" ] && case_ok "exit nonzero" || case_fail "exit 0 without a dist CSP"
+assert_contains "${FAKE_ROOT}/cutover.log" "target check PASS for ${SHA_NEW}" "the target check passed before csp.txt vanished"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub flipped"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker flipped"
 assert_contains "${FAKE_ROOT}/cutover.log" "CSP is not derived from the final PWA build, refusing before any flip" "refusal reported"
@@ -393,8 +445,11 @@ case_end
 # --- J2b. csp.txt не выведен из финального билда (устаревший хэш): отказ до flip ---
 case_begin "stale csp hash refuses before any flip"
 setup_cutover pwacspstale
-printf "CSP-BODY-NEW script-src 'sha256-STALE'" >"${FAKE_ROOT}/dist/${SHA_NEW}/csp.txt"
+printf "default-src 'self'; script-src 'sha256-STALE'; connect-src wss://hub.example.com" >"${FAKE_ROOT}/dist/${SHA_NEW}/csp.txt"
+dist_resync
 if run_cutover; then case_fail "exit 0 with a stale CSP hash"; else case_ok "exit nonzero"; fi
+assert_contains "${FAKE_ROOT}/cutover.log" "target CSP is not derived from the dist build" "the common preflight's target check refused it"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub flipped"
 assert_contains "${FAKE_ROOT}/cutover.log" "differ from the dist web/200.html inline scripts" "mismatch counts reported"
 assert_not_contains "${FAKE_ROOT}/cutover.log" "STALE" "hash value not printed"
@@ -505,6 +560,8 @@ export FAKE_ENCODING_FAIL=zstd
 if run_cutover; then case_ok "exit 0 (precompressed is soft)"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
 unset FAKE_ENCODING_FAIL
 assert_contains "${FAKE_ROOT}/cutover.log" "SOFT-FAIL: precompressed zstd: got 'none'" "encoding failure recorded softly"
+[[ "$(result_of "${FAKE_ROOT}/cutover.result" soft_by_kind)" =~ ^verify:[1-9][0-9]*$ ]] \
+    && case_ok "result file: verify.sh soft failures counted as verify" || case_fail "result file: soft_by_kind [$(result_of "${FAKE_ROOT}/cutover.result" soft_by_kind)]"
 assert_contains "${FAKE_ROOT}/cutover.log" "cutover done:" "cutover finished"
 assert_not_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "no stop-and-report"
 hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
@@ -557,6 +614,93 @@ if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -3 "$
 unset FAKE_DUMP_SIZE_BYTES
 assert_contains "${FAKE_ROOT}/cutover.log" "dump fully readable" "65 MB dump accepted by the default gate"
 hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
+teardown_case
+case_end
+
+# --- O1. новый порядок: vzdump при работающем всём, повторные ворота, стоп, дамп, хаб, воркер, PWA ---
+case_begin "cutover order: vzdump first, gates again, stop, dump, hub, worker live, then PWA"
+setup_cutover order
+: >"${FAKE_ROOT}/state/calls.log"
+if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
+C="${FAKE_ROOT}/state/calls.log"
+L="${FAKE_ROOT}/cutover.log"
+in_order "${C}" "vzdump ${HUB_CTID} --mode snapshot" "stop canterlot-worker" "pg_dump -Fc" "pg_restore --list" \
+    "restart canterlot-hub" "start canterlot-worker" "compose up -d caddy" \
+    && case_ok "commands: vzdump -> worker stop -> pg_dump -> dump verify -> hub restart -> worker start -> caddy recreate" \
+    || case_fail "commands out of order"
+in_order "${L}" "control-worker scan before vzdump: exactly the unit process" "vzdump done:" \
+    "re-checking read gates and the session inventory after vzdump" \
+    "recorded session PIDs and ticks intact after vzdump" "control-worker scan before the worker stop: exactly the unit process" \
+    "stopping worker" "dump fully readable" "hub restarted once" 'worker state="live" after start' \
+    "PWA step (all failures soft" "speech:" "chunk merge: " "running verification" \
+    && case_ok "log: the new order, gates and inventory re-run between vzdump and the stop" \
+    || case_fail "log out of order"
+REGATES="$(sed -n '/vzdump done:/,/stopping worker/p' "${L}" | grep -c 'read gates for target' || true)"
+[ "${REGATES}" -ge 1 ] && case_ok "read gates ran again between vzdump and the stop" || case_fail "no read gates between vzdump and the stop"
+assert_contains "${L}" "downtime: worker " "worker downtime printed"
+grep -qE 'downtime: worker [0-9]+ s \(stop -> state=live\), hub [0-9]+ s \(restart -> readyz ok\)' "${L}" \
+    && case_ok "downtime line names both components" || case_fail "downtime line malformed: $(grep 'downtime:' "${L}")"
+assert_contains "${L}" "hub interruption: " "hub interruption measured"
+R="${FAKE_ROOT}/cutover.result"
+assert_eq "$(result_of "${R}" status)" "done" "result file: done"
+assert_eq "$(result_of "${R}" mode)" "execute" "result file: mode execute"
+assert_eq "$(result_of "${R}" soft_failures)/$(result_of "${R}" speech_soft_failures)" "0/0" "result file: no soft failures"
+[[ "$(result_of "${R}" worker_downtime_s)" =~ ^[0-9]+$ ]] && case_ok "result file: worker downtime" || case_fail "result file: worker downtime missing"
+[[ "$(result_of "${R}" hub_interruption_s)" =~ ^[0-9]+$ ]] && case_ok "result file: hub interruption" || case_fail "result file: hub interruption missing"
+assert_eq "$(result_of "${R}" vzdump_notes)" "$(sed -n 's/.*notes pre-\([^ ,)]*\).*/pre-\1/p' "${L}" | head -1)" "result file: vzdump notes"
+[ -n "$(result_of "${R}" dump)" ] && case_ok "result file: dump named" || case_fail "result file: no dump"
+assert_eq "$(result_of "${R}" token)" "" "result file: no token from a real run"
+assert_eq "$(result_of "${R}" log)" "${L}" "result file: log path"
+assert_eq "$(grep -c 'stop canterlot-worker' "${C}")" "1" "worker stopped once"
+assert_eq "$(grep -c 'start canterlot-worker' "${C}")" "1" "worker started once"
+assert_eq "$(compose_up_count)" "1" "exactly one caddy recreate"
+hub_is "${SHA_NEW}" && web_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "all on new" || case_fail "not all on new"
+teardown_case
+case_end
+
+# --- O2. записанная сессия пропала во время vzdump: отказ до стопа воркера ---
+case_begin "a recorded session changed during vzdump aborts before any destructive step"
+setup_cutover vzdump-session-gone
+CLI1="$(cli_pid_of "${EXEC1}" "${SUP1}")"
+cat >"${FAKE_ROOT}/kill-cli.sh" <<HOOK
+#!/usr/bin/env bash
+kill ${CLI1} 2>/dev/null || true
+HOOK
+export FAKE_SSH_AFTER_CMD="vzdump ${HUB_CTID}" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/kill-cli.sh"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_cutover; then case_fail "exit 0 although a session changed"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+grep -q '^vzdump ' "${FAKE_ROOT}/state/calls.log" && case_ok "vzdump ran first" || case_fail "vzdump never ran"
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+assert_contains "${FAKE_ROOT}/cutover.log" "recorded session process gone (after vzdump)" "the change is named"
+assert_contains "${FAKE_ROOT}/cutover.log" "nothing was stopped or flipped" "nothing to recover"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker still active" || case_fail "worker not active"
+assert_proc_alive "${SUP2}" "session 2 alive"
+teardown_case
+case_end
+
+# --- O3. новая сессия стартует во время vzdump (строка starting): отказ до стопа ---
+case_begin "a session starting during vzdump aborts before any destructive step"
+setup_cutover vzdump-session-starting
+NEWID="$(new_exec_id)"
+cat >"${FAKE_ROOT}/start-session.sh" <<HOOK
+#!/usr/bin/env bash
+mkdir -p "${WORKER_DATA}/executions/${NEWID}"
+printf '%s starting\n' "${NEWID}" >>"${FAKE_ROOT}/state/exec-states"
+setsid bash -c "exec -a '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' supervise --exec-dir '${WORKER_DATA}/executions/${NEWID}'" >/dev/null 2>&1 <&- &
+sleep 0.3
+HOOK
+export FAKE_SSH_AFTER_CMD="vzdump ${HUB_CTID}" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/start-session.sh"
+: >"${FAKE_ROOT}/state/calls.log"
+if run_cutover; then case_fail "exit 0 although a session was starting"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+pgdump_logged && case_fail "pg_dump ran" || case_ok "pg_dump never ran"
+assert_contains "${FAKE_ROOT}/cutover.log" "session ${NEWID} is starting after vzdump" "the starting session is named"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 teardown_case
 case_end
 

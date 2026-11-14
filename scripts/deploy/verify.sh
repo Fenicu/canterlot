@@ -902,4 +902,4 @@ if [ -n "${NOT_RUN_LIST}" ]; then
         hard "comparisons NOT RUN (use --allow-skipped only to acknowledge a known gap)"
     fi
 fi
-check_summary && log "verify PASS"
+summary_exit "verify PASS"

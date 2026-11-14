@@ -136,6 +136,16 @@ scripts/publish-release.sh v1.24.0
 
 Выкат production — только через `scripts/deploy` (см. §11 `docs/deploy/pilot.md`, ранбук — §11.7): он проверяет готовый dist из `build-release.sh`, `cutover.sh <id> --dry-run` или `--rehearse` (весь путь записи, записи только печатаются) выдаёт токен, а боевой прогон `cutover.sh --execute <id> --confirm <токен>` принимает его 2 часа и только для того же плана. Значения своего стенда — в `.superpowers/site.env`, образец в [docs/deploy/site.env.example](docs/deploy/site.env.example).
 
+Выпуск после ручной записи в `CHANGES.rst` — три команды (ранбук — §11.7 `docs/deploy/pilot.md`):
+
+```bash
+scripts/release.sh prepare 1.35.0    # бамп версии во всех местах, cargo update -w, check-version, коммит «Выпустить версию 1.35.0»
+scripts/gate.sh                      # полный гейт, аттестация .superpowers/gate/<sha>.ok
+scripts/release.sh ship 1.35.0       # тег, push, сборка, stage, репетиция, боевой прогон, check-proxy, публикация, журнал
+```
+
+`ship` можно запускать в фоне: ход — в `.superpowers/deploy/release-1.35.0.log`, итог — в `release-1.35.0.result`. Он публикует только после `cutover done` без мягких ошибок, репетицию повторяет один раз и только на переходных кодах (стартующая сессия, идущий vzdump), боевой прогон не повторяет никогда; после остановки — `scripts/release.sh ship 1.35.0 --continue`.
+
 ### Полный гейт на сборочной машине
 
 Тот же прогон, что перед выпуском, можно снять на сборочной машине

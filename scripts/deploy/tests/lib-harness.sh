@@ -28,11 +28,13 @@ export -f date
 # Бинарь фейкового воркера собирается один раз на прогон (а не на кейс): cc на
 # каждом кейсе стоил секунды. Игнорирует argv (как демон/supervise/relay) и живёт
 # до сигнала; `capabilities` печатает список, как настоящий воркер (или файл
-# $FAKE_ROOT/state/worker-capabilities, если сценарий его положил).
+# $FAKE_ROOT/state/worker-capabilities, если сценарий его положил); `--version`
+# печатает имя по argv[0] и версию, `openapi` — файл $FAKE_ROOT/state/openapi.json.
+# Тот же бинарь служит хабом и воркером целевого dist: target-check спрашивает их.
 fake_worker_build() {
     local cache uid
     uid="$(id -u)"
-    cache="${HARNESS_CACHE_DIR:-/tmp}/canterlot-fake-worker-v2.${uid}"
+    cache="${HARNESS_CACHE_DIR:-/tmp}/canterlot-fake-worker-v3.${uid}"
     if [ ! -x "${cache}" ]; then
         cat >"${cache}.c" <<'EOF'
 #include <stdio.h>
@@ -40,6 +42,22 @@ fake_worker_build() {
 #include <string.h>
 #include <unistd.h>
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--version") == 0) {
+        const char *name = strrchr(argv[0], '/');
+        printf("%s 1.17.0\n", name ? name + 1 : argv[0]);
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "openapi") == 0) {
+        const char *root = getenv("FAKE_ROOT");
+        char path[4096];
+        if (!root) return 1;
+        snprintf(path, sizeof path, "%s/state/openapi.json", root);
+        FILE *f = fopen(path, "r");
+        if (!f) return 1;
+        int c; while ((c = fgetc(f)) != EOF) putchar(c);
+        fclose(f);
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "capabilities") == 0) {
         const char *root = getenv("FAKE_ROOT");
         char path[4096];
