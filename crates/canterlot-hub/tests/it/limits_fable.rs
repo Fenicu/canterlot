@@ -6,7 +6,7 @@ use std::sync::Arc;
 use canterlot_hub::{
     blocks::ExecutionRef,
     config::{HubTimers, LimitsConfig, SessionToolsConfig},
-    ingest::Ingest,
+    ingest::{Ingest, IngestOutcome, JournalKind},
     limits::{self, DataConfidence, Observation, ObservationSource, Window},
     session_tools::{self, Caller, ToolContext, settle::SettleConfig},
     testkit,
@@ -145,15 +145,18 @@ async fn the_verbatim_fable_frame_reaches_the_hub_limits(pool: PgPool) {
     let mut run = ingest_support::Run::new(&pool).await;
     testkit::offer_provider(&pool, run.seed.machine_id, "claude").await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
-    {
+    // В базе остаётся токен сессии: иначе проверка отзывов (раз в секунду) закроет её
+    // и сотрёт сдвиг часов, без которого наблюдение не пишется.
+    let wire_credential = {
         use sha2::{Digest, Sha256};
-        sqlx::query("update machine_credentials set token_sha256=$2 where machine_id=$1")
-            .bind(run.seed.machine_id)
-            .bind(Sha256::digest(run.seed.machine_id.to_string().as_bytes()).to_vec())
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
+        Sha256::digest(run.seed.machine_id.to_string().as_bytes()).to_vec()
+    };
+    sqlx::query("update machine_credentials set token_sha256=$2 where machine_id=$1")
+        .bind(run.seed.machine_id)
+        .bind(&wire_credential)
+        .execute(&pool)
+        .await
+        .unwrap();
     let _client = ingest_support::connect(
         &hub,
         &run.seed,
@@ -162,28 +165,35 @@ async fn the_verbatim_fable_frame_reaches_the_hub_limits(pool: PgPool) {
         Utc::now().timestamp_millis() as u64,
     )
     .await;
-    sqlx::query("update machine_credentials set token_sha256=$2 where machine_id=$1")
-        .bind(run.seed.machine_id)
-        .bind(run.seed.credential_digest())
-        .execute(&pool)
-        .await
-        .unwrap();
-    // Под нагрузкой сдвиг часов машины ещё не известен: без него наблюдение не пишется.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while hub.registry.to_hub_time(run.seed.machine_id, 1).is_none() {
-        assert!(std::time::Instant::now() < deadline, "clock offset known");
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    assert!(
+        hub.registry.clock_offset(run.seed.machine_id).is_some(),
+        "the hello sets the clock offset before the reply"
+    );
     run.ingest = Ingest::new(pool.clone()).with_registry(hub.registry.clone());
-    run.send(vec![Body::LimitObserved(LimitObservation {
+    let batch = run.batch(vec![Body::LimitObserved(LimitObservation {
         provider: "claude".into(),
         window: LimitWindow::WeeklyFable as i32,
         used_permille: used,
         resets_at_ms: reset_ms,
         observed_machine_ms: Utc::now().timestamp_millis() as u64,
         ..Default::default()
-    })])
-    .await;
+    })]);
+    assert_eq!(
+        run.ingest
+            .apply_batch(
+                run.seed.machine_id,
+                &wire_credential,
+                JournalKind::Sj,
+                &batch
+            )
+            .await
+            .unwrap(),
+        IngestOutcome::Committed { up_to_seq: run.seq }
+    );
+    assert!(
+        hub.registry.session_info(run.seed.machine_id).is_some(),
+        "the session outlived the write"
+    );
     let mut conn = pool.acquire().await.unwrap();
     let claude = limits::current(&mut conn)
         .await
