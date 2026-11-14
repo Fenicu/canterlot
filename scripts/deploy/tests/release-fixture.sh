@@ -221,8 +221,9 @@ release_bump_commit() {
 attest_head() {
     local sha="${1:-$(git -C "${RREPO}" rev-parse HEAD)}" content_sha="${2:-}"
     mkdir -p "${RREPO}/.superpowers/gate"
-    printf 'sha=%s\nnpm_ci_exit=0\ncheck_exit=0\nweb_exit=%s\nsummary=fixture\n' \
-        "${content_sha:-${sha}}" "${ATTEST_WEB_EXIT:-0}" >"${RREPO}/.superpowers/gate/${sha}.ok"
+    printf 'sha=%s\nnpm_ci_exit=0\ncheck_exit=0\ndeploy_exit=%s\nweb_exit=%s\nsummary=fixture\n' \
+        "${content_sha:-${sha}}" "${ATTEST_DEPLOY_EXIT:-0}" "${ATTEST_WEB_EXIT:-0}" \
+        >"${RREPO}/.superpowers/gate/${sha}.ok"
 }
 cutover_plan() { printf '%s\n' "$@" >"${FAKE_ROOT}/state/cutover-plan"; rm -f "${FAKE_ROOT}/state/cutover-n"; }
 

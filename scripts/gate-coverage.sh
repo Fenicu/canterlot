@@ -86,8 +86,9 @@ fi
 printf '  объединение прежних = новый: да, %s идентичностей\n' "$new_count"
 
 # --- не-Playwright шаги: те же скрипты и команды ---
-# Гейт обязан состоять ровно из одного npm ci, check.sh --all --no-web и
-# check-web.sh --stack; комментарии в счёте не участвуют.
+# Гейт обязан состоять ровно из одного npm ci, check.sh --all --no-web,
+# набора scripts/deploy/tests/run.sh и check-web.sh --stack; комментарии в счёте
+# не участвуют.
 code=$(grep -vE '^[[:space:]]*#' "$gate")
 check_code=$(grep -vE '^[[:space:]]*#' "$check")
 web_code=$(grep -vE '^[[:space:]]*#' "$web_check")

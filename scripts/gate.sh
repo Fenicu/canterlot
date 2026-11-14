@@ -70,6 +70,9 @@ source scripts/lease.sh
 lease_self_wrap gate "gate.sh${original_args[*]:+ ${original_args[*]}}" \
     bash "$PWD/scripts/gate.sh" "${original_args[@]}"
 
+# shellcheck disable=SC1091 # путь к scripts/deploy/changed.sh задаётся рабочей копией
+source scripts/deploy/changed.sh
+
 # Аренда могла ждать долго: начало прогона и HEAD фиксируются после неё.
 sha=$(git rev-parse HEAD)
 short=${sha:0:8}
@@ -102,6 +105,24 @@ bash scripts/check.sh --all --no-web >"$log_dir/check.log" 2>&1 || check_status=
 check_s=$((SECONDS - s))
 printf '    check.sh --all --no-web: %ds, код %s\n' "$check_s" "$check_status"
 
+# --- наборы scripts/deploy: отдельным шагом, не вместе с веб-половиной ---
+# Тайминговые кейсы не терпят соседнего Playwright, поэтому шаг идёт здесь, а
+# check-web.sh --stack — только после него. Diff — от последнего тега vX.Y.Z.
+# В check.sh --all шаг не встроен: контейнерный гейт гоняет его без shellcheck,
+# а наборы начинаются с shellcheck.
+printf '\n==> scripts/deploy/tests/run.sh\n'
+s=$SECONDS
+deploy_exit=skipped
+deploy_s=0
+if deploy_tests_needed all; then
+    deploy_exit=0
+    bash scripts/deploy/tests/run.sh >"$log_dir/deploy.log" 2>&1 || deploy_exit=$?
+    deploy_s=$((SECONDS - s))
+    printf '    deploy tests: %ds, код %s\n' "$deploy_s" "$deploy_exit"
+else
+    printf '    deploy tests: skipped (no changes since the last release tag)\n'
+fi
+
 # --- вся веб-половина и сквозные сценарии: один прогон ---
 printf '\n==> scripts/check-web.sh --stack\n'
 s=$SECONDS
@@ -121,8 +142,8 @@ mapfile -t failed_rust < <(grep -E '^ +FAIL \[' "$log_dir/check.log" | head || t
 mapfile -t failed_web < <(grep -E '^\s+[0-9]+\) ' "$log_dir/web.log" | sort -u | head || true)
 
 {
-    printf '%s npm=%s check=%s %ss web=%s %ss\n' \
-        "$short" "$npm_status" "$check_status" "$check_s" "$web_status" "$web_s"
+    printf '%s npm=%s check=%s %ss deploy=%s %ss web=%s %ss\n' \
+        "$short" "$npm_status" "$check_status" "$check_s" "$deploy_exit" "$deploy_s" "$web_status" "$web_s"
     ((${#rust_summary[@]})) && printf '%s\n' "${rust_summary[@]}"
     ((${#playwright_summary[@]})) && printf '%s\n' "${playwright_summary[@]}"
     ((${#failed_rust[@]})) && printf '%s\n' "${failed_rust[@]}"
@@ -132,7 +153,8 @@ mapfile -t failed_web < <(grep -E '^\s+[0-9]+\) ' "$log_dir/web.log" | sort -u |
 cat "$log_dir/result.txt"
 printf 'гейт %s за %ds\n' "$short" "$total_s"
 
-if ((npm_status != 0 || check_status != 0 || web_status != 0)); then
+if ((npm_status != 0 || check_status != 0 || web_status != 0)) \
+    || [[ "$deploy_exit" != 0 && "$deploy_exit" != skipped ]]; then
     printf 'гейт: провал, аттестация не пишется; логи в %s\n' "$log_dir" >&2
     exit 1
 fi
@@ -164,6 +186,8 @@ tmp="$attestation.tmp.$$"
     printf 'npm_ci_duration_s=%s\n' "$npm_s"
     printf 'check_exit=%s\n' "$check_status"
     printf 'check_duration_s=%s\n' "$check_s"
+    printf 'deploy_exit=%s\n' "$deploy_exit"
+    printf 'deploy_duration_s=%s\n' "$deploy_s"
     printf 'web_exit=%s\n' "$web_status"
     printf 'web_duration_s=%s\n' "$web_s"
     printf 'logs=%s\n' "$log_dir"

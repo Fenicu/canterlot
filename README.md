@@ -151,7 +151,10 @@ scripts/release.sh ship 1.35.0       # тег, push, сборка, stage, реп
 Полный гейт на рабочей VM — `scripts/gate.sh`. Он держит одну аренду `gate` весь
 прогон и гоняет веб ровно один раз: один `npm ci` в `web/`,
 `scripts/check.sh --all --no-web` (версия, fmt, clippy, nextest и
-`canterlot-speech` без веб-половины) и один `scripts/check-web.sh --stack`
+`canterlot-speech` без веб-половины), наборы `scripts/deploy/tests/run.sh`
+(только если с последнего тега `vX.Y.Z` менялась обвязка выката — `scripts/deploy/**`,
+`release.sh`, `check-proxy.sh`, `check-version.sh` или `lease.sh`) и один
+`scripts/check-web.sh --stack`
 (статические проверки, vitest, две сборки PWA, `vitest.build`, Playwright
 `e2e/ui` + `e2e/parity` и сквозные сценарии на настоящем хабе). Порт тестовой
 PostgreSQL по умолчанию 55441, временный каталог — `/tmp` (длинный путь ломает
@@ -162,7 +165,9 @@ PostgreSQL по умолчанию 55441, временный каталог — 
 Сводка в формате прежнего `result.txt` и логи складываются в
 `.superpowers/gate/<sha8>/` и печатаются в stdout. При полном успехе, чистой
 рабочей копии и неизменном HEAD гейт атомарно пишет аттестацию
-`.superpowers/gate/<full sha>.ok`; её требует `release.sh ship`. Грязная копия
+`.superpowers/gate/<full sha>.ok`; её требует `release.sh ship`. Аттестация пишет
+`deploy_exit=0` или `deploy_exit=skipped`: пропуск наборов выката `release.sh`
+принимает наравне с успешным прогоном. Грязная копия
 аттестации не даёт: такой прогон возможен только с `--no-attest`, и аттестация
 тогда не пишется. Каталог `.superpowers/` не отслеживается git.
 
@@ -190,6 +195,9 @@ scripts/gate-remote.sh 4d884712 --local    # то же на местном docke
 2. `scripts/check.sh --all` — fmt, clippy, nextest с тестовой PostgreSQL;
 3. `scripts/check-web.sh --stack` — проверки web, Playwright и сквозные сценарии
    на настоящем хабе и воркере.
+
+Наборы `scripts/deploy/tests/run.sh` контейнерный гейт не запускает: их гоняет
+`scripts/gate.sh` на самой VM отдельным шагом.
 
 Образ `canterlot-gate:<hash>` (`docker/gate/Dockerfile`) — Debian trixie по digest,
 Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестовой базы VM),

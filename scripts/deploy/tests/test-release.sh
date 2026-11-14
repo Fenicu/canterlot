@@ -147,6 +147,20 @@ rm -f "${RDIR}/release-${RVER}.result"
 ATTEST_WEB_EXIT=1 attest_head
 run_release ship "${RVER}"
 assert_refused "records web_exit=1"
+rm -f "${RDIR}/release-${RVER}.result"
+ATTEST_WEB_EXIT=skipped attest_head
+run_release ship "${RVER}"
+assert_refused "records web_exit=skipped"
+teardown_case
+case_end
+
+case_begin "ship accepts an attestation with a skipped deploy step"
+setup_release deploy-skipped
+ATTEST_DEPLOY_EXIT=skipped attest_head
+cutover_plan "${HAPPY_PLAN[@]}"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "0" "exit 0"
+assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published"
 teardown_case
 case_end
 

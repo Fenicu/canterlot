@@ -480,7 +480,7 @@ preconditions() {
     [[ -s $att ]] || refuse "no gate attestation for HEAD $head ($att): run scripts/gate.sh"
     [[ $(kv "$att" sha) == "$head" ]] || refuse "the gate attestation $att was written for another commit"
     while IFS='=' read -r key value; do
-        if [[ $key == *_exit && $value != 0 ]]; then refuse "the gate attestation $att records $key=$value"; fi
+        if [[ $key == *_exit && $value != 0 && ! ($key == deploy_exit && $value == skipped) ]]; then refuse "the gate attestation $att records $key=$value"; fi
     done <"$att"
     while IFS='=' read -r key value; do
         if [[ $key == SITE_ORIGIN ]]; then SITE_ORIGIN_EFF=$value; fi

@@ -33,6 +33,9 @@ while (($#)); do
     shift
 done
 
+# shellcheck disable=SC1091 # путь к scripts/deploy/changed.sh задаётся рабочей копией
+source scripts/deploy/changed.sh
+
 lease_kind=build
 ((all)) && lease_kind=gate
 source scripts/lease.sh
@@ -272,6 +275,19 @@ if ((want_web)); then
         bash scripts/check-web.sh
     fi
     stage_done web
+fi
+
+# --- deploy ---
+# Наборы обвязки идут долго (~10 минут) и содержат тайминги, поэтому в --fast —
+# только когда diff их затронул; в гейте это отдельный шаг scripts/gate.sh.
+if [[ "$mode" == fast ]] && ((!all)); then
+    if deploy_tests_needed fast "${merge_base:-}"; then
+        stage "deploy tests"
+        bash scripts/deploy/tests/run.sh
+        stage_done "deploy tests"
+    else
+        printf 'deploy: skipped (no deploy changes)\n'
+    fi
 fi
 
 bash scripts/list-quarantine.sh
