@@ -115,6 +115,8 @@ test('model_picker_shows_what_each_alias_runs_now_and_a_one_time_change_notice',
 test('new_session_picker_names_the_current_version_of_each_alias', async ({ page }) => {
 	await boot(page);
 	await page.goto('/new');
+	// Форма взяла настройки прошлой сессии и свёрнута в одну строку.
+	await page.getByRole('button', { name: 'Изменить' }).click();
 	await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
 	await page.getByRole('radio', { name: 'Claude Code' }).check();
 	const model = page.getByRole('combobox', { name: 'Модель' });
