@@ -232,8 +232,10 @@
     {@const op = getRuntime().journal.ops.get(input.key)}
     <div class="item" data-state={input.state}>
       <span class="pill">
-        <span class="label accent">{input.state === 'saving' && offline ? 'Ждёт связи' : deliveryLabel(input.state)}</span>
-        <span class="text" title={input.text}>{input.text}</span>
+        <span class="body">
+          <span class="label accent">{input.state === 'saving' && offline ? 'Ждёт связи' : deliveryLabel(input.state)}</span>
+          <span class="text" title={input.text}>{input.text}</span>
+        </span>
         {#if input.state === 'queued' && input.id && turnLive && canSteer}
           <button
             type="button"
@@ -337,8 +339,10 @@
   {#each shownScheduled as item (item.id)}
     <div class="item">
       <span class="pill">
-        <span class="label">{atOf(item)}</span>
-        <span class="text" title={textOf(item)}>{textOf(item)}</span>
+        <span class="body">
+          <span class="label">{atOf(item)}</span>
+          <span class="text" title={textOf(item)}>{textOf(item)}</span>
+        </span>
         {#if notes[item.id] !== 'Уже отправлено'}
           <span class="row-actions">
             <span class="inline-actions">
@@ -381,8 +385,10 @@
   {#each shownFailed as item (item.id)}
     <div class="item">
       <span class="pill failed">
-        <span class="label danger">Не отправлено</span>
-        <span class="text" title={textOf(item)}>{textOf(item)}</span>
+        <span class="body">
+          <span class="label danger">Не отправлено</span>
+          <span class="text" title={textOf(item)}>{textOf(item)}</span>
+        </span>
       </span>
       <span class="actions"><Button onclick={() => takeBackFailed(item)}>Вернуть в черновик</Button></span>
     </div>
@@ -422,6 +428,8 @@
   .label.accent { color: var(--accent-link); }
   :global([data-stale]) .label.accent { color: var(--muted); }
   .label.danger { color: var(--danger); }
+  /* Стол читает подпись и текст как две колонки строки; телефон собирает их в один поток. */
+  .body { display: contents; }
   .text { flex: 1 1 12ch; min-width: 0; display: -webkit-box; overflow: hidden; color: var(--text); text-overflow: clip; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   .pill :global(button) { color: var(--secondary); }
   /* Вливание — текстовое действие: значок «play» читался как «запустить». */
@@ -429,21 +437,32 @@
   .row-actions { flex: none; display: inline-flex; align-items: center; }
   .inline-actions { display: inline-flex; align-items: center; }
   .overflow { display: none; min-width: var(--target); min-height: var(--target); align-items: center; justify-content: center; border: var(--s0); border-radius: var(--radius-round); background: var(--transparent); color: var(--secondary); }
-  /* На телефоне редкие действия строки живут в «⋯», а вливание — отдельной строкой:
-     длинная подпись не отнимает ширину у текста. */
+  /* На телефоне текст занимает всю строку, подпись стоит его началом, а действия — второй строкой. */
   @media (pointer: coarse) {
     .pill {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) auto;
       grid-template-areas:
-        'label text text'
-        'steer . actions';
+        'body body'
+        'steer actions';
       column-gap: var(--s4);
       row-gap: var(--s1);
     }
-    .label { grid-area: label; align-self: start; padding-block: var(--s3); }
-    .text { grid-area: text; align-self: start; padding-block: var(--s3); }
-    .steer { grid-area: steer; justify-self: start; }
+    .body {
+      grid-area: body;
+      display: -webkit-box;
+      min-width: 0;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+    }
+    .label { display: inline; color: var(--muted); font-size: var(--fs-xs); }
+    .label.accent { color: var(--muted); }
+    .label.danger { color: var(--danger); }
+    .label::after { content: ' · '; color: var(--secondary); }
+    .text { display: inline; flex: none; overflow: visible; }
+    .steer { grid-area: steer; justify-self: start; padding-inline: var(--s2); background: var(--transparent); }
     .row-actions { grid-area: actions; justify-self: end; }
     .inline-actions { display: none; }
     .overflow { display: inline-flex; }

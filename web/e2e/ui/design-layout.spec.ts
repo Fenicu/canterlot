@@ -417,6 +417,21 @@ test.describe('очередь и вложения', () => {
     // На телефоне действия живут в «⋯», на столе остаются в строке.
     if (phone) {
       await expect(strip.locator('.pill').first().getByRole('button', { name: /^Действия с сообщением/ })).toBeVisible();
+      // Текст занимает всю строку: его начало совпадает с левым отступом заявки, а не с колонкой подписи.
+      const pill = strip.locator('.pill').first();
+      const body = pill.locator('.body');
+      const pillBox = (await pill.boundingBox())!;
+      const bodyBox = (await body.boundingBox())!;
+      const padLeft = await pill.evaluate((node) => parseFloat(getComputedStyle(node).paddingLeft));
+      expect(bodyBox.x).toBeCloseTo(pillBox.x + padLeft, 0);
+      // Высота считается от настоящих строк и строки действий, а не от прежней однострочной полосы.
+      const lineHeight = await body.evaluate((node) => parseFloat(getComputedStyle(node).lineHeight));
+      const fontSize = await body.evaluate((node) => parseFloat(getComputedStyle(node).fontSize));
+      const line = Number.isFinite(lineHeight) ? lineHeight : fontSize * 1.4;
+      const control = (await pill.locator('.row-actions .overflow').boundingBox())!.height;
+      const rowCap = line * 2 + control + 12;
+      expect(first!.height).toBeLessThanOrEqual(rowCap);
+      expect((await strip.boundingBox())!.height).toBeLessThanOrEqual(rowCap * 2 + 24);
     } else {
       await expect(strip.locator('.pill').first().getByRole('button', { name: 'Изменить' })).toBeVisible();
     }
