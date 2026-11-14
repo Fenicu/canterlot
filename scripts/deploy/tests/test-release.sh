@@ -71,6 +71,12 @@ teardown_case
 case_end
 
 # ---------------------------------------------------------------- предусловия
+# Попытка N записана своим файлом итога, release-X.Y.Z.result указывает на неё.
+assert_attempt() {
+    local a="${RDIR}/release-${RVER}.attempt-$1.result"
+    assert_eq "$(sed -n 's/^status=//p' "${a}" 2>/dev/null)/$(sed -n 's/^attempt=//p' "${a}" 2>/dev/null)" "$2/$1" "attempt $1: own result file, status $2"
+    assert_eq "$(readlink "${RDIR}/release-${RVER}.result")" "release-${RVER}.attempt-$1.result" "the latest result points to attempt $1"
+}
 # Отказ до старта: код 2, итог refused, ни состояния, ни тега, ни вызовов.
 assert_refused() {
     assert_eq "${RREL_RC}" "2" "exit 2"
@@ -78,7 +84,12 @@ assert_refused() {
     assert_eq "$(rres status)" "refused" "result file: refused"
     [ ! -e "${RDIR}/release-${RVER}.state" ] && case_ok "no state written" || case_fail "state written"
     assert_eq "$(grep -cvE '^$' "${FAKE_ROOT}/state/calls.log" || true)" "0" "no tag, push, build or cutover"
-    [ ! -e "${RDIR}/pilot-deploy-log.md" ] && case_ok "no journal section" || case_fail "journal written"
+    # Кейс может отказать несколько раз подряд: номер попытки растёт с каждым запуском.
+    local n
+    n="$(find "${RDIR}" -maxdepth 1 -name "release-${RVER}.attempt-*.result" -printf '%f\n' | sed -n 's/.*\.attempt-\([0-9]*\)\.result$/\1/p' | sort -n | tail -1)"
+    assert_attempt "${n:-none}" refused
+    assert_contains "${RDIR}/pilot-deploy-log.md" "release.sh ship ${RVER} attempt ${n}: refused (exit 2)" "journal: the refusal recorded briefly"
+    assert_not_contains "${RDIR}/pilot-deploy-log.md" "## Update to" "journal: no release section"
 }
 
 case_begin "ship refuses a dirty tree"
@@ -180,6 +191,51 @@ assert_eq "${RREL_RC}" "3" "exit 3"
 assert_contains "${FAKE_ROOT}/release.out" "another scripts/release.sh holds" "lock reported"
 [ ! -e "${RDIR}/release-${RVER}.state" ] && case_ok "no state written" || case_fail "state written"
 assert_eq "$(grep -c . "${FAKE_ROOT}/state/calls.log" || true)" "0" "nothing ran"
+assert_attempt 1 blocked
+assert_contains "${RDIR}/pilot-deploy-log.md" "attempt 1: blocked (exit 3)" "journal: the blocked attempt recorded briefly"
+teardown_case
+case_end
+
+# ---------------------------------------------------------------- попытки
+case_begin "a refused --continue is recorded as its own attempt, the previous result kept"
+setup_release continue-refused
+cutover_plan "${HAPPY_PLAN[@]}"
+: >"${FAKE_ROOT}/state/build-fail"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "1" "first attempt: exit 1"
+FIRST="$(cat "${RDIR}/release-${RVER}.attempt-1.result")"
+printf 'x\n' >>"${RREPO}/README.md"
+run_release ship "${RVER}" --continue
+assert_eq "${RREL_RC}" "2" "refused --continue: exit 2"
+assert_eq "$(cat "${RDIR}/release-${RVER}.attempt-1.result")" "${FIRST}" "attempt 1 result untouched"
+assert_attempt 2 refused
+assert_eq "$(sed -n 's/^continued=//p' "${RDIR}/release-${RVER}.attempt-2.result")" "yes" "attempt 2: marked as --continue"
+assert_contains "${RDIR}/pilot-deploy-log.md" "release.sh ship ${RVER} --continue attempt 2: refused (exit 2)" "journal: the refused --continue recorded"
+assert_eq "$(rstate phase_tag)/$(rstate phase_push)" "done/done" "state: phases kept"
+teardown_case
+case_end
+
+case_begin "a signal before the run starts still leaves a result"
+setup_release early-signal
+( cd "${RREPO}" && mv scripts/check-version.sh scripts/check-version.real.sh && cat >scripts/check-version.sh <<'EOF'
+#!/usr/bin/env bash
+: >"${FAKE_ROOT}/state/check-version-running"
+/bin/sleep 2
+exec "$(dirname "$0")/check-version.real.sh" "$@"
+EOF
+chmod +x scripts/check-version.sh && git add -A && git commit -qm "Медленная проверка версии стенда" )
+attest_head
+cutover_plan "${HAPPY_PLAN[@]}"
+( cd "${RREPO}" && exec bash scripts/release.sh ship "${RVER}" ) >"${FAKE_ROOT}/release.out" 2>&1 &
+RPID=$!
+for _ in $(seq 1 300); do [ -e "${FAKE_ROOT}/state/check-version-running" ] && break; command sleep 0.05; done
+kill -TERM "${RPID}" || case_fail "kill failed"
+rc=0; wait "${RPID}" || rc=$?
+[ "${rc}" != "0" ] && case_ok "exit ${rc}" || case_fail "exit 0 after TERM"
+assert_attempt 1 interrupted
+assert_contains "${RDIR}/release-${RVER}.attempt-1.result" "SIGTERM" "result: the signal named"
+assert_contains "${RDIR}/pilot-deploy-log.md" "attempt 1: interrupted" "journal: the interrupted attempt recorded"
+assert_eq "$(grep -cvE '^$' "${FAKE_ROOT}/state/calls.log" || true)" "0" "nothing ran"
 teardown_case
 case_end
 
@@ -223,13 +279,14 @@ setup_release again
 cutover_plan "${HAPPY_PLAN[@]}"
 run_release ship "${RVER}"
 : >"${FAKE_ROOT}/state/calls.log"
-RESULT_BEFORE="$(cat "${RDIR}/release-${RVER}.result")"
+RESULT_BEFORE="$(cat "${RDIR}/release-${RVER}.attempt-1.result")"
 run_release ship "${RVER}"
 assert_eq "${RREL_RC}" "3" "exit 3"
 assert_contains "${FAKE_ROOT}/release.out" "a release state exists" "state reported"
 assert_contains "${FAKE_ROOT}/release.out" "phase_publish=done" "phases printed"
 assert_eq "$(grep -c . "${FAKE_ROOT}/state/calls.log" || true)" "0" "nothing re-run"
-assert_eq "$(cat "${RDIR}/release-${RVER}.result")" "${RESULT_BEFORE}" "result untouched"
+assert_eq "$(cat "${RDIR}/release-${RVER}.attempt-1.result")" "${RESULT_BEFORE}" "the first attempt's result untouched"
+assert_attempt 2 state_exists
 teardown_case
 case_end
 

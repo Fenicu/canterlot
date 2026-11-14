@@ -11,8 +11,9 @@
 #       тег, push main + тег одной атомарной операцией, сборка, проверка dist, stage,
 #       репетиция, боевой прогон по её токену, check-proxy без входа, публикация,
 #       раздел журнала выката. Можно запускать отсоединённо: ход — в
-#       .superpowers/deploy/release-X.Y.Z.log, фазы — в release-X.Y.Z.state, итог —
-#       в release-X.Y.Z.result (формат — pilot.md §11.7). Повторный запуск без
+#       .superpowers/deploy/release-X.Y.Z.log, фазы — в release-X.Y.Z.state, итог
+#       каждой попытки — в release-X.Y.Z.attempt-N.result, release-X.Y.Z.result —
+#       ссылка на последнюю (формат — pilot.md §11.7). Повторный запуск без
 #       --continue только печатает сохранённое состояние; --continue продолжает с
 #       первой незавершённой фазы и никогда не повторяет боевой прогон.
 #
@@ -136,6 +137,8 @@ SHA12=""
 CONTINUE=0
 STATE=""
 RESULT=""
+ATTEMPT=""
+ATTEMPT_RESULT=""
 LOG=""
 JOURNAL=""
 STATE_DIR=""
@@ -199,8 +202,10 @@ cutover_result_complete() {
     return 1
 }
 
+# Итог пишется в файл своей попытки (прошлые не перезаписываются), затем
+# release-X.Y.Z.result атомарно переводится на него.
 write_result() {
-    local status=$1 code=$2 reason=$3 cr=${CUTOVER_RESULT} pending tmp
+    local status=$1 code=$2 reason=$3 cr=${CUTOVER_RESULT} pending tmp link
     pending="check-proxy --positive (sign-in, orchestrator); owner checklist (authenticated checks)"
     if [[ -n $cr && -f $cr && $(kv "$cr" speech_soft_failures) =~ ^[1-9] ]]; then
         pending+="; speech soft failures $(kv "$cr" speech_soft_failures) (dictation, see SPEECH-SOFT in the cutover log)"
@@ -208,10 +213,12 @@ write_result() {
     if [[ -n $cr && -f $cr && $(kv "$cr" status) == stop_and_report ]]; then
         pending="STOP-AND-REPORT: paste the STOP block into the deploy log and call the owner; $pending"
     fi
-    tmp="$RESULT.tmp.$$"
+    [[ -n $ATTEMPT_RESULT ]] || return 1
+    tmp="$ATTEMPT_RESULT.tmp.$$"
     {
         printf '%s=%s\n' \
             format 1 \
+            attempt "$ATTEMPT" \
             version "$VER" \
             tag "$TAG" \
             sha "$SHA" \
@@ -244,7 +251,42 @@ write_result() {
             cutover_result "$cr" \
             cutover_log "$CUTOVER_LOG"
     } >"$tmp" || return 1
-    mv -f "$tmp" "$RESULT" || return 1
+    mv -f "$tmp" "$ATTEMPT_RESULT" || return 1
+    link="$RESULT.tmp.$$"
+    ln -sfn "${ATTEMPT_RESULT##*/}" "$link" || return 1
+    mv -fT "$link" "$RESULT" || return 1
+}
+
+# Номер попытки: первый свободный release-X.Y.Z.attempt-N.result, созданный
+# эксклюзивно (две одновременные попытки не получат один номер).
+new_attempt() {
+    local n=1
+    while ! (set -C; : >"$STATE_DIR/release-$VER.attempt-$n.result") 2>/dev/null; do
+        n=$((n + 1))
+        ((n < 10000)) || return 1
+    done
+    ATTEMPT=$n
+    ATTEMPT_RESULT="$STATE_DIR/release-$VER.attempt-$n.result"
+}
+
+# Короткая запись попытки, не дошедшей до старта (отказ, блокировка, сигнал).
+journal_brief() {
+    printf '\n### release.sh ship %s%s attempt %s: %s (exit %s), %s UTC\n\n%s. Result `%s`, log `%s`.\n' \
+        "$VER" "$([[ $CONTINUE == 1 ]] && echo ' --continue')" "$ATTEMPT" "$1" "$2" "$(date -u '+%d.%m, %H:%M')" \
+        "$(one_line "$3")" "$ATTEMPT_RESULT" "$LOG" >>"$JOURNAL"
+}
+# Итог такой попытки: свой файл итога и запись в журнале; сбой записи — код 4.
+record_attempt() {
+    local status=$1 code=$2 reason=$3 failed=""
+    FINISHED=1
+    set +e
+    journal_brief "$status" "$code" "$reason" || failed+=" journal ($JOURNAL)"
+    write_result "$status" "$code" "$reason${failed:+; REPORTING FAILED:$failed}" || failed+=" result (${ATTEMPT_RESULT:-$RESULT})"
+    FINISH_CODE=$code
+    if [[ -n $failed ]]; then
+        log "REPORTING FAILED:$failed for attempt ${ATTEMPT:-?} ($status)"
+        FINISH_CODE=4
+    fi
 }
 
 # Раздел журнала выката: на каждом пути после старта (итог, фазы, логи, хвосты).
@@ -375,6 +417,12 @@ on_exit() {
     if [[ $FINISHED == 0 && $RUN_STARTED == 1 ]]; then
         finish_record error 1 "release.sh stopped unexpectedly (exit $rc) in phase $CURRENT_PHASE; see $LOG"
         rc=$FINISH_CODE
+    elif [[ $FINISHED == 0 && -n $SIGNALED ]]; then
+        record_attempt interrupted 1 "release.sh got SIG$SIGNALED before the run started; nothing ran"
+        rc=$FINISH_CODE
+    elif [[ $FINISHED == 0 && -n $ATTEMPT ]]; then
+        record_attempt error 1 "release.sh stopped unexpectedly (exit $rc) before the run started; see $LOG"
+        rc=$FINISH_CODE
     fi
     exec 1>&- 2>&-
     [[ -z $TEE_PID ]] || wait "$TEE_PID" 2>/dev/null
@@ -401,14 +449,9 @@ check_pin() {
 
 refuse() {
     printf '[%s] REFUSED: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
-    # Итог отказа пишется только для нового выпуска: при --continue файл итога
-    # хранит прошлую остановку, а состояние — пройденные фазы.
-    if [[ $CONTINUE == 0 && ! -f $STATE ]]; then
-        FINISHED=1
-        write_result refused 2 "$*"
-    fi
-    FINISHED=1
-    exit 2
+    # Отказ — своя попытка: итог прошлой остановки и состояние фаз не трогаются.
+    record_attempt refused 2 "$*"
+    exit "$FINISH_CODE"
 }
 
 site_values() {
@@ -730,13 +773,15 @@ resume_after_execute() {
     if ! cutover_result_complete "$r" || [[ $(kv "$r" status) != "done" ]] \
         || [[ -n $(cutover_inconsistency "$r" "$(state_get execute_exit)") ]]; then
         log "the real cutover already ran (phase execute: $(state_get phase_execute)); it is never re-run"
+        local why
         if cutover_result_complete "$r"; then
-            log "cutover status $(kv "$r" status), process exit $(state_get execute_exit); $(cutover_inconsistency "$r" "$(state_get execute_exit)"); STOP block: $(kv "$r" stop_block)"
+            why="cutover status $(kv "$r" status), process exit $(state_get execute_exit); $(cutover_inconsistency "$r" "$(state_get execute_exit)"); STOP block: $(kv "$r" stop_block)"
         else
-            log "no complete cutover result ($r): read $CUTOVER_LOG and check whether cutover.sh still runs"
+            why="no complete cutover result ($r): read $CUTOVER_LOG and check whether cutover.sh still runs"
         fi
-        FINISHED=1
-        exit 1
+        log "$why"
+        record_attempt continue_refused 1 "the real cutover already ran and is not done cleanly ($why); it is never re-run, nothing published"
+        exit "$FINISH_CODE"
     fi
     [[ $(phase_status execute) == "done" ]] || phase_set execute "done"
     log "the real cutover is done ($r): resuming check-proxy, publication and the journal"
@@ -760,32 +805,43 @@ ship() {
     exec > >(tee -a --output-error=warn "$LOG") 2>&1
     TEE_PID=$!
     trap on_exit EXIT
-    log "release.sh ship $VER$([[ $CONTINUE == 1 ]] && echo ' --continue') (pid $$, log $LOG)"
+    # До старта сигнал — выход с итогом interrupted; после старта — флаг SIGNALED.
+    trap 'SIGNALED=INT; exit 130' INT
+    trap 'SIGNALED=TERM; exit 143' TERM
+    # Отвалившийся терминал выпуск не останавливает (запуск в фоне).
+    trap '' HUP
+    new_attempt || { log "cannot create an attempt result in $STATE_DIR"; exit 4; }
+    log "release.sh ship $VER$([[ $CONTINUE == 1 ]] && echo ' --continue') attempt $ATTEMPT (pid $$, log $LOG, result $ATTEMPT_RESULT)"
     # Выпуск один на чекаут. Блокировку наследуют дети: пока жив cutover.sh,
     # даже после гибели release.sh, второй запуск её не получит.
     exec 9>>"$STATE_DIR/release.lock"
     if ! flock -n 9; then
         log "another scripts/release.sh holds $STATE_DIR/release.lock: not starting"
         [[ ! -f $STATE ]] || report_state
-        exit 3
+        record_attempt blocked 3 "another scripts/release.sh holds $STATE_DIR/release.lock"
+        exit "$FINISH_CODE"
     fi
     if [[ -f $STATE ]]; then
         if [[ $CONTINUE == 0 ]]; then
             report_state
-            exit 3
+            record_attempt state_exists 3 "a saved release state exists ($STATE): resume with --continue"
+            exit "$FINISH_CODE"
         fi
         SHA=$(state_get sha)
-        [[ $SHA =~ ^[0-9a-f]{40}$ ]] || { log "state $STATE has no pinned sha"; exit 2; }
+        if ! [[ $SHA =~ ^[0-9a-f]{40}$ ]]; then
+            log "state $STATE has no pinned sha"
+            record_attempt refused 2 "state $STATE has no pinned sha"
+            exit "$FINISH_CODE"
+        fi
     elif [[ $CONTINUE == 1 ]]; then
         log "no saved state $STATE: nothing to continue (run without --continue)"
-        exit 2
+        record_attempt refused 2 "no saved state $STATE: nothing to continue"
+        exit "$FINISH_CODE"
     fi
     preconditions
     RUN_STARTED=1
     trap 'SIGNALED=INT' INT
     trap 'SIGNALED=TERM' TERM
-    # Отвалившийся терминал выпуск не останавливает (запуск в фоне).
-    trap '' HUP
     STARTED_AT=$(ts)
     if [[ -z $SHA ]]; then
         SHA=$(git rev-parse HEAD)
