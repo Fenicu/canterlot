@@ -447,6 +447,7 @@
         'steer actions';
       column-gap: var(--s4);
       row-gap: var(--s1);
+      padding-block: var(--s2);
     }
     .body {
       grid-area: body;

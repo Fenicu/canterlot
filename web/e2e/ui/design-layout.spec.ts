@@ -423,7 +423,12 @@ test.describe('очередь и вложения', () => {
       const pillBox = (await pill.boundingBox())!;
       const bodyBox = (await body.boundingBox())!;
       const padLeft = await pill.evaluate((node) => parseFloat(getComputedStyle(node).paddingLeft));
+      const padTop = await pill.evaluate((node) => parseFloat(getComputedStyle(node).paddingTop));
+      const padBottom = await pill.evaluate((node) => parseFloat(getComputedStyle(node).paddingBottom));
+      expect(padTop).toBeCloseTo(padBottom, 0);
       expect(bodyBox.x).toBeCloseTo(pillBox.x + padLeft, 0);
+      // Текст стоит внутри скругления: верхняя кромка не режет первую строку.
+      expect(bodyBox.y).toBeGreaterThanOrEqual(pillBox.y + padTop - 0.5);
       // Высота считается от настоящих строк и строки действий, а не от прежней однострочной полосы.
       const lineHeight = await body.evaluate((node) => parseFloat(getComputedStyle(node).lineHeight));
       const fontSize = await body.evaluate((node) => parseFloat(getComputedStyle(node).fontSize));
