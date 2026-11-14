@@ -58,6 +58,7 @@ mod history;
 mod history_search;
 mod http_core;
 mod http_requests;
+mod images;
 mod in_tx;
 mod ingest;
 mod installation;

@@ -32,6 +32,7 @@ pub mod grpc;
 pub mod history;
 pub mod http;
 pub mod idempotency;
+pub mod images;
 pub mod ingest;
 pub mod installation;
 pub mod leases;

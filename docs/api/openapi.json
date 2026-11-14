@@ -4506,6 +4506,99 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/images": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "operationId": "get__api_v1_conversations__id__images",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "around",
+            "in": "query",
+            "description": "Место картинки в виде `<kind>:<uuid>`: окно вокруг неё вместо страницы от края.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Все картинки разговора в порядке ленты: вложения, картинки блоков и файлы",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImagesPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/inputs": {
       "get": {
         "tags": [
@@ -13732,6 +13825,137 @@
               "null"
             ],
             "description": "`accepted`: `removed`, `none`, `dirty` или `failed`."
+          }
+        }
+      },
+      "ImageItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "mime",
+          "size",
+          "created_at",
+          "seq"
+        ],
+        "properties": {
+          "attachment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Ссылка на `/api/v1/attachments/{id}/content` у вложения и файла."
+          },
+          "block_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "description": "`<kind>:<uuid>`; тот же адрес принимает `around`."
+          },
+          "input_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ImageKind"
+          },
+          "media_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Ссылка на `/api/v1/media/{id}` у картинки блока."
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seq": {
+            "type": "string",
+            "description": "Место в ленте: переход к сообщению или блоку."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "ImageKind": {
+        "type": "string",
+        "description": "Что за картинка: от этого зависит адрес выдачи файла.",
+        "enum": [
+          "input_attachment",
+          "block_media",
+          "block_file"
+        ]
+      },
+      "ImagesPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "offset"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImageItem"
+            },
+            "description": "Старые первыми."
+          },
+          "next_after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько картинок старше `items[0]`: по нему считается номер в просмотрщике."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },

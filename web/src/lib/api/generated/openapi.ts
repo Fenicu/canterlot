@@ -768,6 +768,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/images": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_conversations__id__images"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/inputs": {
         parameters: {
             query?: never;
@@ -2758,6 +2774,54 @@ export interface components {
             working_ms?: number | null;
             /** @description `accepted`: `removed`, `none`, `dirty` или `failed`. */
             worktree?: string | null;
+        };
+        ImageItem: {
+            /**
+             * Format: uuid
+             * @description Ссылка на `/api/v1/attachments/{id}/content` у вложения и файла.
+             */
+            attachment_id?: string | null;
+            /** Format: uuid */
+            block_id?: string | null;
+            created_at: string;
+            /** Format: int32 */
+            height?: number | null;
+            /** @description `<kind>:<uuid>`; тот же адрес принимает `around`. */
+            id: string;
+            /** Format: uuid */
+            input_id?: string | null;
+            kind: components["schemas"]["ImageKind"];
+            /**
+             * Format: uuid
+             * @description Ссылка на `/api/v1/media/{id}` у картинки блока.
+             */
+            media_id?: string | null;
+            mime: string;
+            name?: string | null;
+            /** @description Место в ленте: переход к сообщению или блоку. */
+            seq: string;
+            /** Format: int64 */
+            size: number;
+            /** Format: int32 */
+            width?: number | null;
+        };
+        /**
+         * @description Что за картинка: от этого зависит адрес выдачи файла.
+         * @enum {string}
+         */
+        ImageKind: "input_attachment" | "block_media" | "block_file";
+        ImagesPage: {
+            /** @description Старые первыми. */
+            items: components["schemas"]["ImageItem"][];
+            next_after?: string | null;
+            next_before?: string | null;
+            /**
+             * Format: int64
+             * @description Сколько картинок старше `items[0]`: по нему считается номер в просмотрщике.
+             */
+            offset: number;
+            /** Format: int64 */
+            total: number;
         };
         InputContentBlock: {
             text: string;
@@ -7039,6 +7103,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HistoryPage"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__images: {
+        parameters: {
+            query?: {
+                before?: string;
+                after?: string;
+                /** @description Место картинки в виде `<kind>:<uuid>`: окно вокруг неё вместо страницы от края. */
+                around?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Все картинки разговора в порядке ленты: вложения, картинки блоков и файлы */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImagesPage"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

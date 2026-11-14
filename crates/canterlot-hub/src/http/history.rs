@@ -10,6 +10,7 @@ use crate::{
         self, BlockPage, DelegationNode, HistoryCursor, HistoryError, HistoryPage, LanePage,
         RunInfo,
     },
+    images::{self, ImagesCursor, ImagesPage},
 };
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,7 @@ use uuid::Uuid;
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(page))
+        .routes(routes!(images))
         .routes(routes!(block))
         .routes(routes!(run))
         .routes(routes!(delegation))
@@ -32,6 +34,16 @@ pub struct HistoryParams {
     pub before: Option<String>,
     pub after: Option<String>,
     /// Место в ленте: окно вокруг него вместо страницы от края.
+    pub around: Option<String>,
+    pub limit: Option<i64>,
+}
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct ImagesParams {
+    pub before: Option<String>,
+    pub after: Option<String>,
+    /// Место картинки в виде `<kind>:<uuid>`: окно вокруг неё вместо страницы от края.
     pub around: Option<String>,
     pub limit: Option<i64>,
 }
@@ -103,6 +115,43 @@ async fn page(
                 .execute(&mut *conn)
                 .await?;
             history::page(&mut *conn, o.owner_id, id, cursor, limit)
+                .await?
+                .ok_or_else(missing)
+        })
+    })
+    .await?;
+    Ok(Json(result))
+}
+#[utoipa::path(get,path="/api/v1/conversations/{id}/images",tag="history",params(("id"=Uuid,Path),ImagesParams),responses((status=200,description="Все картинки разговора в порядке ленты: вложения, картинки блоков и файлы",body=ImagesPage)))]
+async fn images(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiQuery(p): ApiQuery<ImagesParams>,
+) -> Result<Json<ImagesPage>, ApiError> {
+    let limit = p.limit.unwrap_or(60);
+    let directions = [p.before.is_some(), p.after.is_some(), p.around.is_some()]
+        .into_iter()
+        .filter(|set| *set)
+        .count();
+    if !(1..=200).contains(&limit) || directions > 1 {
+        return Err(invalid());
+    }
+    let cursor = match (p.before, p.after, p.around) {
+        (Some(n), None, None) => ImagesCursor::Before(images::parse_key(&n).ok_or_else(invalid)?),
+        (None, Some(n), None) => ImagesCursor::After(images::parse_key(&n).ok_or_else(invalid)?),
+        (None, None, Some(n)) => {
+            let (kind, item) = images::parse_item_id(&n).ok_or_else(invalid)?;
+            ImagesCursor::Around(kind, item)
+        }
+        _ => ImagesCursor::Tail,
+    };
+    let result = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            images::page(&mut *conn, o.owner_id, id, cursor, limit)
                 .await?
                 .ok_or_else(missing)
         })
