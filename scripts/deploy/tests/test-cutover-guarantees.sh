@@ -75,5 +75,34 @@ assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "session_star
 teardown_case
 case_end
 
+# --- мягкие ошибки дочерних скриптов не дают токена ---
+case_begin "child verify soft failures fail the rehearsal and issue no token"
+setup_cutover soft-child-rehearse
+# Развёрнутый билд без br-соседа: проба precompressed в verify не находит ассет.
+rm -f "${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/probe.js.br"
+rc=0; run_rehearse || rc=$?
+[ "${rc}" != "0" ] && case_ok "rehearsal exit ${rc}" || case_fail "rehearsal exit 0 despite verify soft failures"
+assert_contains "${FAKE_ROOT}/rehearse.log" "SOFT-FAIL: precompressed check" "verify soft failure printed"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "rehearsal PASS" "no PASS line"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)/$(result_of "${FAKE_ROOT}/rehearse.result" token)" "fail/" "result file: fail without a token"
+[ "$(result_of "${FAKE_ROOT}/rehearse.result" soft_failures)" -ge 1 ] && case_ok "result file: soft failures counted" || case_fail "result file: soft_failures 0"
+teardown_case
+case_end
+
+case_begin "child preflight soft failures fail the dry-run and issue no token"
+setup_cutover soft-child-dryrun
+RELAY1="$(ps -eo pid=,args= | awk -v id="${EXEC1}" '$0 ~ "mcp-relay" && $0 ~ id {print $1; exit}')"
+kill "${RELAY1}" && case_ok "relay of session 1 stopped" || case_fail "setup: no relay"
+rc=0
+bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --dry-run --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" \
+    >"${FAKE_ROOT}/dry.log" 2>&1 || rc=$?
+[ "${rc}" != "0" ] && case_ok "dry-run exit ${rc}" || case_fail "dry-run exit 0 despite a preflight soft failure"
+assert_contains "${FAKE_ROOT}/dry.log" "SOFT-FAIL: no mcp-relay for live execution" "preflight soft failure printed"
+assert_not_contains "${FAKE_ROOT}/dry.log" "CONFIRM=" "no token printed"
+assert_eq "$(result_of "${FAKE_ROOT}/dry.result" status)/$(result_of "${FAKE_ROOT}/dry.result" token)" "fail/" "result file: fail without a token"
+teardown_case
+case_end
+
 printf 'cutover-guarantees harness: %s passed, %s failed (cumulative)\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

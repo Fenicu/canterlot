@@ -123,6 +123,15 @@ result_soft_kind() {
     esac
 }
 one_line() { printf '%s' "$1" | tr '\n\r=' '  :'; }
+# Мягкие ошибки прогона вместе с дочерними (общий файл; диктовка не в счёт): по ним,
+# а не по счётчику этого процесса, решаются PASS и токен.
+soft_total() {
+    if [ -n "${DEPLOY_SOFT_LOG}" ] && [ -f "${DEPLOY_SOFT_LOG}" ]; then
+        grep -cvx speech "${DEPLOY_SOFT_LOG}" || true
+    else
+        printf '%s\n' "${SOFT_FAILURES}"
+    fi
+}
 # $1 статус, $2 код выхода. Пишется один раз; провал записи только печатается.
 write_result() {
     local status="$1" code="$2" soft_n=0 speech_n=0 kinds="" k n restore=0 codes=""
@@ -452,7 +461,7 @@ if [ "${DRY_RUN}" = "1" ]; then
     # state-файл не передаём, spec_compat только печатается.
     PHASE="dry-run"
     export DEPLOY_SOFT_KIND=dry-run
-    SOFT_BEFORE="${SOFT_FAILURES}"
+    SOFT_BEFORE="$(soft_total)"
     HARD_BEFORE="${HARD_FAILURES}"
     NOT_RUN=0
     if ! run_child "${SCRIPT_DIR}/preflight.sh" "${SHA}" --dry-run --source "${SOURCE_DIR}" \
@@ -532,8 +541,9 @@ EOF
     if [ "${NOT_RUN}" != "0" ] && [ "${ALLOW_SKIPPED}" = "1" ]; then
         log "dry-run: read-only gate gaps explicitly allowed (--allow-skipped)"
     fi
-    if [ "${SOFT_FAILURES}" != "${SOFT_BEFORE}" ] || [ "${HARD_FAILURES}" != "${HARD_BEFORE}" ] || [ "${NOT_RUN}" != "0" ]; then
-        log "dry-run FAIL: ${HARD_FAILURES} hard, ${SOFT_FAILURES} soft failures, not-run=${NOT_RUN}; no confirm token"
+    SOFT_NOW="$(soft_total)"
+    if [ "${SOFT_NOW}" != "${SOFT_BEFORE}" ] || [ "${HARD_FAILURES}" != "${HARD_BEFORE}" ] || [ "${NOT_RUN}" != "0" ]; then
+        log "dry-run FAIL: ${HARD_FAILURES} hard, ${SOFT_NOW} soft failures (with child scripts), not-run=${NOT_RUN}; no confirm token"
         write_result fail 1
         exit 1
     fi
@@ -1428,8 +1438,9 @@ if is_rehearse; then
     rm -f "${REHEARSE_COUNT_FILE}"  # lint: local-temp
     plan_text "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" | sed 's/^/   | /'
     log "rehearse: speech: ${SPEECH_SUMMARY}; speech soft issues ${SPEECH_ISSUES} (never block the token)"
-    if [ "${HARD_FAILURES}" != "0" ] || [ "${SOFT_FAILURES}" != "0" ]; then
-        log "rehearsal FAIL: ${HARD_FAILURES} hard, ${SOFT_FAILURES} soft failures; ${WRITES_PRINTED} writes printed, none executed; no confirm token"
+    SOFT_NOW="$(soft_total)"
+    if [ "${HARD_FAILURES}" != "0" ] || [ "${SOFT_NOW}" != "0" ]; then
+        log "rehearsal FAIL: ${HARD_FAILURES} hard, ${SOFT_NOW} soft failures (with child scripts); ${WRITES_PRINTED} writes printed, none executed; no confirm token"
         write_result fail 1
         exit 1
     fi
@@ -1439,7 +1450,8 @@ if is_rehearse; then
     write_result pass 0
     exit 0
 fi
-log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s (worker stop -> live), hub interruption ${HUB_INTERRUPTION}s, soft failures ${SOFT_FAILURES}, speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
+SOFT_NOW="$(soft_total)"
+log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s (worker stop -> live), hub interruption ${HUB_INTERRUPTION}s, soft failures ${SOFT_NOW}, speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
 owner_checklist
 cat <<EOF
 update note: the worker has connected to the new hub, so only forward fixes remain;
@@ -1458,7 +1470,7 @@ worker alone: flip current to ${PREV_WORKER_SHA}, restart (never below a live su
 
 Release: \`${SHA}\` (\`<full sha>\`, tag \`vX.Y.Z\`), built by \`scripts/build-release.sh\`; dist \`${DIST}\`. Procedure: \`scripts/deploy/cutover.sh\` (rehearsal/dry-run token, then --execute).
 
-**Result: hub, PWA and worker on \`${SHA}\` (web ${WEB_SHA_EFF}), migrations ${MIGR_MAX} (0 failed), worker \`live\` after ${WORKER_DOWNTIME} s down (stop ${WORKER_STOP_ISO} UTC), hub interruption ${HUB_INTERRUPTION} s; recorded session PIDs/ticks intact; no automatic DB restore; capabilities and harnesses as declared by the release EXPECT; CSP equal, precompressed encodings observed, old chunks merged, maintenance clean, soft failures ${SOFT_FAILURES}; speech: ${SPEECH_SUMMARY}.**
+**Result: hub, PWA and worker on \`${SHA}\` (web ${WEB_SHA_EFF}), migrations ${MIGR_MAX} (0 failed), worker \`live\` after ${WORKER_DOWNTIME} s down (stop ${WORKER_STOP_ISO} UTC), hub interruption ${HUB_INTERRUPTION} s; recorded session PIDs/ticks intact; no automatic DB restore; capabilities and harnesses as declared by the release EXPECT; CSP equal, precompressed encodings observed, old chunks merged, maintenance clean, soft failures ${SOFT_NOW}; speech: ${SPEECH_SUMMARY}.**
 ### Steps
 1. Dist: \`sha256sum -c\` OK; \`RELEASE source=\`; EXPECT; versions; glibc; openapi.
 2. Rehearsal and/or dry-run: plan ${PLAN_HASH}, token issued <time>, logs <paths>.
