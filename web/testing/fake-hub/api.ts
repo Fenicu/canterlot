@@ -24,6 +24,8 @@ type SearchPage = components['schemas']['SearchPage'];
 type SearchSegment = components['schemas']['SnippetSegment'];
 type BookmarkView = components['schemas']['BookmarkView'];
 type BookmarkPage = components['schemas']['BookmarkPage'];
+type ImagesPage = components['schemas']['ImagesPage'];
+type ImageItem = components['schemas']['ImageItem'];
 
 const SEARCH_CAP = 200;
 const SEARCH_WINDOW = 90;
@@ -1228,6 +1230,120 @@ export class FakeHubApi {
 		return this.page(id, query);
 	}
 
+	/** Все картинки разговора в порядке ленты, как их собирает хаб. */
+	imageRows(id: string): FakeImageRow[] {
+		const rows: FakeImageRow[] = [];
+		for (const entry of this.histories.get(id) ?? []) {
+			if (waiting(entry)) continue;
+			if (entry.kind === 'input') {
+				if (!entry.feed_seq) continue;
+				entry.attachments.forEach((file, position) => {
+					if (!isImageFile(file)) return;
+					rows.push({
+						rank: position,
+						item: {
+							id: `input_attachment:${file.attachment_id}`,
+							kind: 'input_attachment',
+							media_id: null,
+							attachment_id: file.attachment_id,
+							name: file.name,
+							mime: file.mime,
+							size: file.size,
+							width: null,
+							height: null,
+							created_at: entry.created_at,
+							seq: entry.feed_seq!,
+							input_id: entry.id,
+							block_id: null
+						}
+					});
+				});
+			} else if (entry.kind === 'block') {
+				(entry.media ?? []).forEach((media, position) => {
+					if (media.ready === false) return;
+					rows.push({
+						rank: position,
+						item: {
+							id: `block_media:${media.media_id}`,
+							kind: 'block_media',
+							media_id: media.media_id,
+							attachment_id: null,
+							name: null,
+							mime: media.mime,
+							size: 0,
+							width: media.width ?? null,
+							height: media.height ?? null,
+							created_at: entry.created_at,
+							seq: entry.created_seq,
+							input_id: null,
+							block_id: entry.id
+						}
+					});
+				});
+				(entry.files ?? []).forEach((file, position) => {
+					if (!isImageFile(file)) return;
+					rows.push({
+						rank: position,
+						item: {
+							id: `block_file:${file.attachment_id}`,
+							kind: 'block_file',
+							media_id: null,
+							attachment_id: file.attachment_id,
+							name: file.name,
+							mime: file.mime,
+							size: file.size,
+							width: file.width ?? null,
+							height: file.height ?? null,
+							created_at: entry.created_at,
+							seq: entry.created_seq,
+							input_id: null,
+							block_id: entry.id
+						}
+					});
+				});
+			}
+		}
+		return rows.sort((a, b) => imageOrder(a, b));
+	}
+
+	async images(id: string, query: { before?: string; after?: string; around?: string; limit?: number } = {}): Promise<ImagesPage> {
+		const rows = this.imageRows(id);
+		const limit = query.limit ?? 60;
+		const cursor = (row: FakeImageRow): string => `${row.item.seq}:${row.rank}:${row.item.id.split(':')[1]}`;
+		const parse = (value: string) => {
+			const [seq, rank, item] = value.split(':');
+			return { seq: seq ?? '0', rank: Number(rank ?? 0), item: item ?? '' };
+		};
+		let start: number;
+		if (query.around) {
+			const at = rows.findIndex((row) => row.item.id === query.around);
+			if (at < 0) throw new Error('not_found');
+			const older = limit <= 2 ? 1 : Math.max(1, Math.floor(limit / 4));
+			start = Math.max(0, at - older + 1);
+		} else if (query.before) {
+			const key = parse(query.before);
+			const older = rows.filter((row) => imageCompare(row, key) < 0);
+			start = Math.max(0, older.length - limit);
+		} else if (query.after) {
+			const key = parse(query.after);
+			start = rows.findIndex((row) => imageCompare(row, key) > 0);
+			if (start < 0) start = rows.length;
+		} else {
+			start = Math.max(0, rows.length - limit);
+		}
+		const slice = rows.slice(start, start + limit);
+		const before = start > 0 ? cursor(slice[0]!) : null;
+		const end = start + slice.length;
+		const after = end < rows.length ? cursor(slice[slice.length - 1]!) : null;
+		return {
+			items: slice.map((row) => row.item),
+			total: rows.length,
+			offset: start,
+			next_before: before ?? null,
+			next_after: after ?? null
+		};
+	}
+
 	async inputs(id: string, query: { before?: string; limit?: number } = {}): Promise<components['schemas']['OwnerInputsPage']> {
 		const all = (this.histories.get(id) ?? [])
 			.filter((item): item is HistoryInput => item.kind === 'input' && Boolean(item.feed_seq) && !waiting(item))
@@ -1413,6 +1529,29 @@ type BackgroundTask = components['schemas']['BackgroundTaskView'];
 
 function seqOf(item: HistoryItem): string {
 	return item.kind === 'input' ? item.feed_seq || item.created_seq : item.created_seq;
+}
+
+export interface FakeImageRow {
+	rank: number;
+	item: ImageItem;
+}
+
+const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** Как `attachmentKind` в PWA: тип картинки или общий тип с картинным расширением. */
+export function isImageFile(file: { name: string; mime: string }): boolean {
+	if (IMAGE_MIMES.has(file.mime)) return true;
+	return (file.mime === '' || file.mime === 'application/octet-stream') && /\.(png|jpe?g|gif|webp)$/i.test(file.name);
+}
+
+function imageCompare(row: FakeImageRow, key: { seq: string; rank: number; item: string }): number {
+	const seq = cmp(row.item.seq, key.seq);
+	return seq !== 0 ? seq : row.rank - key.rank || row.item.id.split(':')[1]!.localeCompare(key.item);
+}
+
+function imageOrder(a: FakeImageRow, b: FakeImageRow): number {
+	const seq = cmp(a.item.seq, b.item.seq);
+	return seq !== 0 ? seq : a.rank - b.rank || a.item.id.localeCompare(b.item.id);
 }
 
 function cmp(a: string, b: string): number {

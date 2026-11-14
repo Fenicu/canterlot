@@ -5,6 +5,8 @@
   import Icon from '#lib/ui/Icon.svelte';
   import { durationMs, fadeMs } from '#lib/motion.js';
   import { declaredSize, downloadName, preloads, shotCaption, shotSrc, type ViewerShot } from '#lib/viewer/shots.js';
+  import { Gallery, galleryId, galleryPosition, mergeGalleryShots, type GalleryAnchor, type GalleryItem } from '#lib/viewer/gallery.js';
+  import { gallerySource } from '#lib/viewer/gallery-context.js';
   import {
     clampView,
     coverRect,
@@ -27,7 +29,22 @@
     type View
   } from '#lib/viewer/zoom.js';
 
-  let { shots, start = 0, title, heading = 'Картинки ответа', onclose }: { shots: ViewerShot[]; start?: number; title: string; heading?: string; onclose: () => void } = $props();
+  let {
+    shots,
+    start = 0,
+    title,
+    heading = 'Картинки ответа',
+    anchor = null,
+    onclose
+  }: {
+    shots: ViewerShot[];
+    start?: number;
+    title: string;
+    heading?: string;
+    /** Место нажатой картинки в общем списке сессии: без него листаются только `shots`. */
+    anchor?: GalleryAnchor | null;
+    onclose: () => void;
+  } = $props();
 
   const ROUTE_KEY = 'image-viewer';
   /** Через столько без касаний элементы управления прячутся сами. */
@@ -37,23 +54,48 @@
   const DOUBLE_TAP_SLOP = 32;
   const captionId = $props.id();
 
-  let index = $state(untrack(() => Math.min(Math.max(0, start), shots.length - 1)));
+  const source = gallerySource();
+  // Список всей сессии грузится вокруг нажатой картинки; пока он в пути, видны кадры сообщения.
+  const gallery = untrack(() => (source && anchor ? new Gallery((query) => source.page(query), galleryId(anchor.kind, anchor.id)) : null));
+
+  let currentId = $state(untrack(() => shots[Math.min(Math.max(0, start), shots.length - 1)]?.media_id ?? ''));
+  /** Кадр, с которого открыли просмотрщик: подпись карточки относится только к нему. */
+  const openedId = untrack(() => currentId);
+  /** Страницы хаба; без них лента просмотрщика — только кадры вызвавшей карточки. */
+  let galleryShots = $state<ViewerShot[] | null>(null);
+  let anchors = $state<Record<string, GalleryItem>>({});
+  let total = $state<number | null>(null);
+  /** Сколько картинок старше первого кадра списка: номер в разговоре. */
+  let offset = $state(0);
+  let hasOlder = $state(false);
+  let hasNewer = $state(false);
+  /** Хаб не ответил: листаем кадры карточки, как раньше. */
+  let fallback = $state(false);
+
   let chrome = $state(true);
   let zoomed = $state(false);
   let gesture = $state<'idle' | 'pan' | 'pinch' | 'swipe' | 'dismiss'>('idle');
   /** Натуральный размер каждой картинки: из описания, миниатюры или загруженного оригинала. */
-  let naturals = $state<Record<number, Size>>({});
+  let naturals = $state<Record<string, Size>>({});
   /** Оригинал раскодирован и заменил миниатюру. */
-  let ready = $state<Record<number, boolean>>({});
-  let failed = $state<Record<number, boolean>>({});
+  let ready = $state<Record<string, boolean>>({});
+  let failed = $state<Record<string, boolean>>({});
   /** Миниатюра из ленты, которую можно показать до оригинала. */
-  let previews = $state<Record<number, string>>({});
+  let previews = $state<Record<string, string>>({});
 
-  const shot = $derived(shots[index] ?? shots[0]!);
+  const list = $derived(galleryShots ?? shots);
+  const index = $derived.by(() => {
+    const found = list.findIndex((entry) => entry.media_id === currentId);
+    return found >= 0 ? found : Math.min(Math.max(0, start), Math.max(0, list.length - 1));
+  });
+  const shot = $derived(list[index] ?? list[0]!);
+  const position = $derived(galleryPosition(offset, index));
+  const knownTotal = $derived(total ?? (gallery && !fallback ? null : list.length));
+  const many = $derived((knownTotal ?? list.length) > 1);
+  const currentAnchor = $derived(anchors[shot.media_id] ?? null);
   const src = $derived(shotSrc(shot));
-  const caption = $derived(shotCaption(shot, naturals[index] ?? declaredSize(shot)));
-  const many = $derived(shots.length > 1);
-  const slides = $derived([index - 1, index, index + 1].filter((i) => i >= 0 && i < shots.length));
+  const caption = $derived(shotCaption(shot, naturals[shot.media_id] ?? declaredSize(shot)));
+  const slides = $derived([index - 1, index, index + 1].filter((i) => i >= 0 && i < list.length));
 
   let dialog: HTMLDialogElement;
   let stage: HTMLDivElement;
@@ -75,6 +117,8 @@
   let tapTimer: ReturnType<typeof setTimeout> | undefined;
   let frame = 0;
   let resize: ResizeObserver | null = null;
+  let olderLoading = false;
+  let newerLoading = false;
 
   // Указатели сцены: позиция каждого пальца и начало текущего жеста.
   // Счётчик пальцев живёт вне реактивности: он меняется на каждом событии указателя и разметку не трогает.
@@ -85,12 +129,13 @@
   let lastTap: { time: number; point: Point } | null = null;
   let samples: { time: number; x: number; y: number }[] = [];
 
-  function naturalOf(i: number): Size | null {
-    return naturals[i] ?? declaredSize(shots[i]!);
+  function naturalOf(entry: ViewerShot | undefined): Size | null {
+    if (!entry) return null;
+    return naturals[entry.media_id] ?? declaredSize(entry);
   }
 
   function viewOf(i: number): View {
-    const natural = naturalOf(i);
+    const natural = naturalOf(list[i]);
     if (!natural) return { scale: 1, x: 0, y: 0 };
     return i === index ? view : fitView(size, natural);
   }
@@ -110,7 +155,7 @@
       const own = i === index ? drag : { x: 0, y: 0 };
       node.style.transform = `translate3d(${offset + own.x}px, ${own.y}px, 0)`;
       const target = frameOf(i);
-      const natural = naturalOf(i);
+      const natural = naturalOf(list[i]);
       if (target && natural) {
         target.style.width = `${natural.width}px`;
         target.style.height = `${natural.height}px`;
@@ -144,7 +189,7 @@
     view = next;
     swipeX = nextSwipe;
     drag = nextDrag;
-    zoomed = isZoomed(view, size, naturalOf(index) ?? size);
+    zoomed = isZoomed(view, size, naturalOf(shot) ?? size);
     const duration = durationMs('--duration-expand');
     if (duration > 0) {
       stage.dataset.settling = '';
@@ -156,7 +201,7 @@
 
   function setView(next: View): void {
     view = next;
-    zoomed = isZoomed(view, size, naturalOf(index) ?? size);
+    zoomed = isZoomed(view, size, naturalOf(shot) ?? size);
     schedule();
   }
 
@@ -171,7 +216,7 @@
   }
 
   function refit(): void {
-    const natural = naturalOf(index);
+    const natural = naturalOf(shot);
     if (!natural) return;
     view = zoomed ? clampView(view, size, natural) : fitView(size, natural);
     zoomed = isZoomed(view, size, natural);
@@ -200,8 +245,8 @@
   }
 
   // Миниатюры в ленте: откуда въезжает кадр, куда уходит и куда вернуть фокус.
-  function thumbOf(i: number): HTMLImageElement | null {
-    const id = shots[i]?.media_id;
+  function thumbOf(entry: ViewerShot | undefined): HTMLImageElement | null {
+    const id = entry?.media_id;
     if (!id) return null;
     const all = [...document.querySelectorAll<HTMLImageElement>(`[data-viewer-thumb="${CSS.escape(id)}"]`)];
     const scope = opener?.closest('[data-key]');
@@ -217,18 +262,77 @@
   }
 
   function collectPreviews(): void {
-    const next: Record<number, string> = {};
-    const found: Record<number, Size> = {};
-    shots.forEach((_, i) => {
-      const thumb = thumbOf(i);
+    const next: Record<string, string> = {};
+    const found: Record<string, Size> = {};
+    for (const entry of list) {
+      const thumb = thumbOf(entry);
       if (thumb?.complete && thumb.naturalWidth > 0) {
-        next[i] = thumb.currentSrc || thumb.src;
-        if (!declaredSize(shots[i]!)) found[i] = { width: thumb.naturalWidth, height: thumb.naturalHeight };
+        next[entry.media_id] = thumb.currentSrc || thumb.src;
+        if (!declaredSize(entry)) found[entry.media_id] = { width: thumb.naturalWidth, height: thumb.naturalHeight };
       }
-    });
+    }
     previews = next;
     naturals = { ...found, ...naturals };
   }
+
+  /** Страница хаба заменила кадры карточки: место нажатой картинки сохраняется её id. */
+  function applyGallery(): void {
+    if (!gallery) return;
+    anchors = Object.fromEntries(gallery.items.map((item) => [item.media_id ?? item.attachment_id ?? '', item]));
+    galleryShots = mergeGalleryShots(gallery.items, shots);
+    total = gallery.total;
+    offset = gallery.offset;
+    hasOlder = gallery.before !== null;
+    hasNewer = gallery.after !== null;
+    collectPreviews();
+    // Кадры и их места приходят в разметку следующим тиком: тогда и пересчитываем ленту.
+    void tick().then(() => {
+      if (!closing) paintNow();
+    });
+  }
+
+  async function moreOlder(): Promise<number> {
+    if (!gallery || olderLoading || !hasOlder) return 0;
+    olderLoading = true;
+    try {
+      const added = await gallery.older();
+      applyGallery();
+      return added;
+    } catch {
+      fallback = true;
+      return 0;
+    } finally {
+      olderLoading = false;
+    }
+  }
+
+  async function moreNewer(): Promise<number> {
+    if (!gallery || newerLoading || !hasNewer) return 0;
+    newerLoading = true;
+    try {
+      const added = await gallery.newer();
+      applyGallery();
+      return added;
+    } catch {
+      fallback = true;
+      return 0;
+    } finally {
+      newerLoading = false;
+    }
+  }
+
+  // Близко к краю — догружаем соседнюю страницу, не дожидаясь упора в последнюю картинку.
+  $effect(() => {
+    const at = index;
+    const count = list.length;
+    const older = hasOlder;
+    const newer = hasNewer;
+    if (!gallery || (!older && !newer)) return;
+    untrack(() => {
+      if (older && at <= 2) void moreOlder();
+      if (newer && count - 1 - at <= 2) void moreNewer();
+    });
+  });
 
   function easeToken(): string {
     return getComputedStyle(document.documentElement).getPropertyValue('--ease-viewer-open').trim() || 'ease-out';
@@ -240,15 +344,16 @@
 
   /** Въезд: кадр ложится на миниатюру и раскрывается в вписанный вид, фон проявляется. */
   function enter(): void {
-    const natural = naturalOf(index);
+    const natural = naturalOf(shot);
     const target = frameOf(index);
     const fade = fadeMs('--duration-viewer-fade');
     const duration = durationMs('--duration-viewer-open');
-    const rect = visibleRect(thumbOf(index));
+    const thumb = thumbOf(shot);
+    const rect = visibleRect(thumb);
     const stageBox = stage.getBoundingClientRect();
     if (duration > 0 && natural && target && rect) {
       const { view: from, clip: cut } = coverRect({ x: rect.left - stageBox.left, y: rect.top - stageBox.top, width: rect.width, height: rect.height }, natural);
-      const radius = parseFloat(getComputedStyle(thumbOf(index)!.closest('button, a') ?? document.body).borderTopLeftRadius) || 0;
+      const radius = parseFloat(getComputedStyle(thumb!.closest('button, a') ?? document.body).borderTopLeftRadius) || 0;
       target.animate(
         [
           { transform: transformOf(from), clipPath: clip(cut, radius / from.scale) },
@@ -265,11 +370,11 @@
 
   /** Уход: кадр с текущего места возвращается на миниатюру; если её не видно, просмотрщик гаснет. */
   async function leave(): Promise<void> {
-    const natural = naturalOf(index);
+    const natural = naturalOf(shot);
     const target = frameOf(index);
     const duration = durationMs('--duration-viewer-open');
     const fade = fadeMs('--duration-viewer-fade');
-    const thumb = thumbOf(index);
+    const thumb = thumbOf(shot);
     const rect = visibleRect(thumb);
     const stageBox = stage.getBoundingClientRect();
     const opacity = Number(backdrop.style.opacity || 1);
@@ -299,7 +404,7 @@
   }
 
   function restoreFocus(): void {
-    const thumb = thumbOf(index)?.closest<HTMLElement>('button, a');
+    const thumb = thumbOf(shot)?.closest<HTMLElement>('button, a');
     (thumb ?? opener)?.focus({ preventScroll: true });
   }
 
@@ -317,16 +422,41 @@
     onclose();
   }
 
+  /** Закрыть просмотрщик и показать место картинки в чате. */
+  async function reveal(): Promise<void> {
+    const item = currentAnchor;
+    if (!item || !source) return;
+    await close();
+    source.reveal(item);
+  }
+
   async function go(next: number, fromSwipe = false): Promise<void> {
-    if (next < 0 || next >= shots.length || next === index) {
+    if (next < 0) {
+      const added = await moreOlder();
+      if (added > 0) next += added;
+      else {
+        if (fromSwipe) animateTo(view);
+        return;
+      }
+    } else if (next >= list.length) {
+      // Догруженная страница не перескакивает свои кадры: листаем на первый из новых.
+      const count = list.length;
+      const added = await moreNewer();
+      if (added > 0) next = count;
+      else {
+        if (fromSwipe) animateTo(view);
+        return;
+      }
+    }
+    if (next < 0 || next >= list.length || list[next]?.media_id === currentId) {
       if (fromSwipe) animateTo(view);
       return;
     }
     const step = next - index;
     // Лента остаётся на месте: новый индекс сдвигает её на ширину кадра, а остаток уезжает переходом.
     const carried = swipeX + step * (size.width + gap());
-    index = next;
-    view = fitView(size, naturalOf(next) ?? size);
+    currentId = list[next]!.media_id;
+    view = fitView(size, naturalOf(list[next]) ?? size);
     zoomed = false;
     swipeX = carried;
     await tick();
@@ -390,7 +520,7 @@
     if (!pointers.has(event.pointerId) || closing) return;
     const point = local(event);
     pointers.set(event.pointerId, point);
-    const natural = naturalOf(index);
+    const natural = naturalOf(shot);
     if (!natural) return;
     if (gesture === 'pinch' && pinch && pointers.size >= 2) {
       const [a, b] = [...pointers.values()] as [Point, Point];
@@ -415,9 +545,9 @@
     if (gesture === 'pan') {
       setView(rubberView({ scale: press.view.scale, x: press.view.x + dx, y: press.view.y + dy }, size, natural));
     } else if (gesture === 'swipe') {
-      // У первой и последней картинки лента тянется с сопротивлением.
-      const min = index === shots.length - 1 ? 0 : -Infinity;
-      const max = index === 0 ? 0 : Infinity;
+      // У края списка лента тянется с сопротивлением, только если дальше ничего нет.
+      const min = index === list.length - 1 && !hasNewer ? 0 : -Infinity;
+      const max = index === 0 && !hasOlder ? 0 : Infinity;
       swipeX = rubber(press.swipeX + dx, min, max, size.width);
       schedule();
     } else if (gesture === 'dismiss') {
@@ -431,7 +561,7 @@
     if (lastTap && now - lastTap.time < DOUBLE_TAP_MS && Math.hypot(point.x - lastTap.point.x, point.y - lastTap.point.y) < DOUBLE_TAP_SLOP) {
       clearTimeout(tapTimer);
       lastTap = null;
-      const natural = naturalOf(index);
+      const natural = naturalOf(shot);
       if (natural) animateTo(toggleZoom(view, point, size, natural));
       return;
     }
@@ -447,7 +577,7 @@
     if (!pointers.has(event.pointerId)) return;
     const point = local(event);
     pointers.delete(event.pointerId);
-    const natural = naturalOf(index);
+    const natural = naturalOf(shot);
     const cancelled = event.type === 'pointercancel';
     if (gesture === 'pinch') {
       if (pointers.size === 1 && natural) {
@@ -494,7 +624,7 @@
   }
 
   function wheel(event: WheelEvent): void {
-    const natural = naturalOf(index);
+    const natural = naturalOf(shot);
     if (!natural || closing) return;
     event.preventDefault();
     const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? size.height : 1;
@@ -512,7 +642,7 @@
   }
 
   function zoomBy(direction: 1 | -1 | 0): void {
-    const natural = naturalOf(index);
+    const natural = naturalOf(shot);
     if (!natural) return;
     if (direction === 0) return animateTo(fitView(size, natural));
     const centre = { x: size.width / 2, y: size.height / 2 };
@@ -552,7 +682,7 @@
       return;
     }
     if (event.ctrlKey || event.metaKey || event.altKey) return;
-    const natural = naturalOf(index);
+    const natural = naturalOf(shot);
     if (event.key === '+' || event.key === '=') zoomBy(1);
     else if (event.key === '-' || event.key === '_') zoomBy(-1);
     else if (event.key === '0') zoomBy(0);
@@ -568,19 +698,19 @@
   }
 
   // Загрузка: миниатюра видна сразу, оригинал заменяет её, когда раскодирован, на том же кадре без скачка.
-  function loaded(i: number, image: HTMLImageElement): void {
+  function loaded(id: string, image: HTMLImageElement): void {
     const natural = { width: image.naturalWidth, height: image.naturalHeight };
-    const known = naturalOf(i);
+    const known = naturalOf(list.find((entry) => entry.media_id === id));
     if (!known || known.width !== natural.width || known.height !== natural.height) {
-      naturals = { ...naturals, [i]: natural };
-      if (i === index) {
+      naturals = { ...naturals, [id]: natural };
+      if (id === currentId) {
         view = fitView(size, natural);
         zoomed = false;
       }
     }
     const reveal = () => {
       if (closing) return;
-      ready = { ...ready, [i]: true };
+      ready = { ...ready, [id]: true };
       paintNow();
     };
     if (typeof image.decode === 'function') image.decode().then(reveal, reveal);
@@ -589,10 +719,20 @@
   }
 
   onMount(() => {
-    opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : thumbOf(index)?.closest('button, a') ?? null;
+    opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : thumbOf(shot)?.closest('button, a') ?? null;
     shell = document.getElementById('app-shell');
     previousInert = shell?.inert ?? false;
     collectPreviews();
+    if (gallery) {
+      untrack(() => {
+        void gallery!
+          .start()
+          .then(applyGallery)
+          .catch(() => {
+            fallback = true;
+          });
+      });
+    }
     dialog.showModal();
     stage.focus({ preventScroll: true });
     if (shell) shell.inert = true;
@@ -657,34 +797,35 @@
     tabindex="-1"
     role="group"
     aria-roledescription="картинка"
-    aria-label={many ? `${index + 1} из ${shots.length}` : caption || 'Картинка'}
+    aria-label={many ? (knownTotal === null ? String(position) : `${position} из ${knownTotal}`) : caption || 'Картинка'}
     onpointerdown={pointerDown}
     onpointermove={pointerMove}
     onpointerup={pointerUp}
     onpointercancel={pointerUp}
     onlostpointercapture={pointerUp}
   >
-    {#each slides as i (i)}
+    {#each slides as i (list[i]?.media_id ?? i)}
+      {@const entry = list[i]!}
       <div class="slide" data-index={i} data-current={i === index ? '' : undefined}>
-        <div class="frame" data-ready={ready[i] ? '' : undefined}>
-          {#if previews[i] && !ready[i]}
-            <img class="preview" src={previews[i]} alt="" draggable="false" />
+        <div class="frame" data-ready={ready[entry.media_id] ? '' : undefined}>
+          {#if previews[entry.media_id] && !ready[entry.media_id]}
+            <img class="preview" src={previews[entry.media_id]} alt="" draggable="false" />
           {/if}
-          {#if i === index || preloads(shots[i]!)}
+          {#if i === index || preloads(entry)}
             <img
               class="full"
-              src={shotSrc(shots[i]!)}
-              alt={shotCaption(shots[i]!, naturalOf(i)) || `Картинка ${i + 1}`}
+              src={shotSrc(entry)}
+              alt={shotCaption(entry, naturalOf(entry)) || `Картинка ${i + 1}`}
               decoding="async"
               draggable="false"
-              onload={(event) => loaded(i, event.currentTarget as HTMLImageElement)}
-              onerror={() => { failed = { ...failed, [i]: true }; }}
+              onload={(event) => loaded(entry.media_id, event.currentTarget as HTMLImageElement)}
+              onerror={() => { failed = { ...failed, [entry.media_id]: true }; }}
             />
           {/if}
         </div>
-        {#if failed[i]}
+        {#if failed[entry.media_id]}
           <p class="status">Картинка недоступна</p>
-        {:else if !ready[i] && !previews[i]}
+        {:else if !ready[entry.media_id] && !previews[entry.media_id]}
           <p class="status">Картинка загружается</p>
         {/if}
       </div>
@@ -692,18 +833,23 @@
   </div>
   <div class="chrome" bind:this={chromeBox} onfocusin={() => showChrome(true)} onfocusout={() => showChrome()}>
     <div class="top">
-      <button type="button" class="control round" aria-label="Закрыть" onclick={() => void close()}><Icon name="close" /></button>
-      {#if many}<p class="counter" aria-live="polite">{index + 1} из {shots.length}</p>{/if}
+      <div class="header-actions">
+        <button type="button" class="control round" aria-label="Закрыть" onclick={() => void close()}><Icon name="close" /></button>
+        {#if currentAnchor}
+          <button type="button" class="control round" aria-label="Показать в чате" title="Показать в чате" onclick={() => void reveal()}><Icon name="chats" /></button>
+        {/if}
+      </div>
+      {#if many}<p class="counter" aria-live="polite">{knownTotal === null ? position : `${position} из ${knownTotal}`}</p>{/if}
       <!-- Адрес служебный, маршрутизатор здесь не участвует. -->
       <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
       <a class="control save" href={src} download={downloadName(shot)}><Icon name="download" />Сохранить</a>
     </div>
     {#if many}
-      <button type="button" class="control round side prev" aria-label="Предыдущая картинка" {...edge(index === 0)} onclick={() => void go(index - 1)}><Icon name="back" /></button>
-      <button type="button" class="control round side next" aria-label="Следующая картинка" {...edge(index === shots.length - 1)} onclick={() => void go(index + 1)}><Icon name="chevron" /></button>
+      <button type="button" class="control round side prev" aria-label="Предыдущая картинка" {...edge(index === 0 && !hasOlder)} onclick={() => void go(index - 1)}><Icon name="back" /></button>
+      <button type="button" class="control round side next" aria-label="Следующая картинка" {...edge(index === list.length - 1 && !hasNewer)} onclick={() => void go(index + 1)}><Icon name="chevron" /></button>
     {/if}
     <div class="bottom">
-      <p class="caption" id={captionId}>{caption}{#if title}<span class="title">{title}</span>{/if}</p>
+      <p class="caption" id={captionId}>{caption}{#if title && shot.media_id === openedId}<span class="title">{title}</span>{/if}</p>
     </div>
   </div>
 </dialog>
@@ -772,7 +918,8 @@
     left: 0;
     /* Три колонки: счётчик стоит ровно по центру, как бы ни отличались кнопки по краям. */
     display: grid;
-    grid-template-columns: 1fr auto 1fr;
+    /* Боковые колонки равны даже при широких действиях справа: счётчик стоит ровно по центру. */
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
     gap: var(--s4);
     padding: calc(env(safe-area-inset-top) + var(--s4)) calc(env(safe-area-inset-right) + var(--s4)) var(--s4) calc(env(safe-area-inset-left) + var(--s4));
@@ -794,7 +941,7 @@
   }
   .control:hover { background: var(--viewer-control-hover); }
   .control[aria-disabled='true'] { color: var(--viewer-muted); cursor: default; opacity: var(--opacity-dim); }
-  .top > .control:first-child { justify-self: start; }
+  .header-actions { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: var(--s2); }
   .save { grid-column: 3; justify-self: end; padding-inline: var(--s6) var(--s8); border-radius: var(--radius-pill); }
   .counter {
     grid-column: 2;

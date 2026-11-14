@@ -1,6 +1,7 @@
 import {
   conversationBlock,
   conversationHistory,
+  conversationImages,
   conversationInputs,
   conversationLane,
   conversationSnapshot,
@@ -144,6 +145,10 @@ async function createChatSession(id: string): Promise<ChatStore> {
       },
       async inputs(conversationId, query) {
         const response = await conversationInputs(conversationId, query);
+        return response.data;
+      },
+      async images(conversationId, query) {
+        const response = await conversationImages(conversationId, query);
         return response.data;
       },
       async lane(conversationId, blockId, query) {

@@ -24,6 +24,7 @@
   import { rowIndexOfInput } from '#lib/timeline/ownerMessages.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
+  import { setGallerySource } from '#lib/viewer/gallery-context.js';
   import { feedEvents, listSession, planBefore, previousCall, setFeedCards } from '#lib/timeline/cards/context.js';
   import {
     HeightIndex,
@@ -149,6 +150,24 @@
     events: (sessionId) => feedEvents(entries, sessionId),
     planBefore: (block, number) => planBefore(entries, block, number),
     openPlan: (orchestratorId) => onOpenPlan?.(orchestratorId) ?? false
+  });
+  // Просмотрщик картинок листает всю сессию: страницы берёт у разговора, а «Показать в чате» прыгает
+  // тем же механизмом, что закладка или совпадение поиска. В ленте субагента прыжок ведёт адресом.
+  setGallerySource({
+    page: (query) => chat.images(query),
+    reveal: (item) => {
+      if (!feed) {
+        if (item.block_id) chat.requestBlockJump(item.block_id, item.seq);
+        else if (item.input_id) chat.requestJump(item.input_id, item.seq);
+        return;
+      }
+      const params = new URLSearchParams();
+      if (item.block_id) params.set('block', item.block_id);
+      else if (item.input_id) params.set('input', item.input_id);
+      params.set('seq', item.seq);
+      // Ветка субагента не умеет прыгать по своей ленте: адрес открывает разговор на месте картинки.
+      window.location.assign(`/c/${encodeURIComponent(chat.id)}?${params.toString()}`);
+    }
   });
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
   const permissionMode = $derived(

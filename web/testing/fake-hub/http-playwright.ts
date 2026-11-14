@@ -123,6 +123,23 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       });
       return;
     }
+    if (route.request().method() === 'GET' && kind === 'images') {
+      const limit = url.searchParams.get('limit');
+      try {
+        await route.fulfill({
+          json: await api.images(id, {
+            before: url.searchParams.get('before') ?? undefined,
+            after: url.searchParams.get('after') ?? undefined,
+            around: url.searchParams.get('around') ?? undefined,
+            limit: limit ? Number(limit) : undefined
+          }),
+          headers
+        });
+      } catch {
+        await route.fulfill({ status: 404, headers, json: { error: { code: 'not_found', message: 'Картинка не найдена' } } });
+      }
+      return;
+    }
     if (route.request().method() === 'GET' && kind === 'inputs') {
       const limit = url.searchParams.get('limit');
       await route.fulfill({

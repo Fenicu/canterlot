@@ -545,6 +545,21 @@ export function conversationInputs(
   );
 }
 
+export function conversationImages(
+  conversationId: string,
+  query?: Query,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_conversations__id__images"]>>
+> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/conversations/${id(conversationId)}/images`, query),
+    undefined,
+    opts,
+  );
+}
+
 export function conversationBlock(  conversationId: string,
   blockId: string,
   query?: Query,

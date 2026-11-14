@@ -10,6 +10,7 @@
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
   import { opensViewer, type ViewerShot } from '#lib/viewer/shots.js';
+  import type { GalleryAnchor } from '#lib/viewer/gallery.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
   let {
@@ -31,12 +32,14 @@
     onToggle: () => void;
     load: (blockId: string, offset: number) => Promise<BlockPage>;
   } = $props();
-  let viewing = $state<number | null>(null);
-  let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading?: string; onclose: () => void }> | null>(null);
+  let viewing = $state<{ index: number; anchor: GalleryAnchor } | null>(null);
+  let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading?: string; anchor?: GalleryAnchor | null; onclose: () => void }> | null>(null);
 
   async function view(index: number): Promise<void> {
+    const media = readyShots[index];
+    if (!media) return;
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
-    viewing = index;
+    viewing = { index, anchor: { kind: 'block_media', id: media.media_id } };
   }
   // Сводка приходит с финалом блока и сама по себе не реактивна.
   const title = $derived.by(() => {
@@ -73,12 +76,15 @@
         caption: [file.title || file.name, file.size > 0 ? fmt.bytes(file.size) : ''].filter(Boolean).join(' · ')
       }))
   );
-  let fileViewing: number | null = $state(null);
+  let fileViewing = $state<{ index: number; anchor: GalleryAnchor } | null>(null);
 
   async function viewFile(file: { attachment_id: string; name: string; mime: string; size?: number }): Promise<void> {
     if (!isImage(file)) return;
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
-    fileViewing = Math.max(0, fileShots.findIndex((shot) => shot.media_id === file.attachment_id));
+    fileViewing = {
+      index: Math.max(0, fileShots.findIndex((shot) => shot.media_id === file.attachment_id)),
+      anchor: { kind: 'block_file', id: file.attachment_id }
+    };
   }
   const isCliPolicy = $derived(block.approvedBy === 'cli_policy');
 </script>
@@ -138,10 +144,10 @@
   {/if}
 </div>
 {#if viewing !== null && Viewer}
-  <Viewer shots={readyShots} start={viewing} title={title.argument || title.name || 'инструмент'} onclose={() => { viewing = null; }} />
+  <Viewer shots={readyShots} start={viewing.index} anchor={viewing.anchor} title={title.argument || title.name || 'инструмент'} onclose={() => { viewing = null; }} />
 {/if}
 {#if fileViewing !== null && Viewer}
-  <Viewer shots={fileShots} start={fileViewing} title={title.argument || title.name || 'файл'} heading="Файл" onclose={() => { fileViewing = null; }} />
+  <Viewer shots={fileShots} start={fileViewing.index} anchor={fileViewing.anchor} title={title.argument || title.name || 'файл'} heading="Файл" onclose={() => { fileViewing = null; }} />
 {/if}
 
 <style>

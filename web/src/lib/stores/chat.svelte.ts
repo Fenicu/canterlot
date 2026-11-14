@@ -132,6 +132,7 @@ export interface HistoryPage {
 
 export type OwnerInputView = components["schemas"]["OwnerInputView"];
 export type OwnerInputsPage = components["schemas"]["OwnerInputsPage"];
+export type ImagesPage = components["schemas"]["ImagesPage"];
 
 /** Страница ленты одного субагента: корень и потомки по возрастанию номера, без корня. */
 export interface LanePage {
@@ -150,6 +151,11 @@ export interface ChatApi {
   ): Promise<HistoryPage>;
   /** Сообщения владельца для списка перехода; без него список недоступен. */
   inputs?(id: string, query?: { before?: string; limit?: number }): Promise<OwnerInputsPage>;
+  /** Все картинки разговора для общего просмотрщика; без него листаются только свои кадры. */
+  images?(
+    id: string,
+    query?: { before?: string; after?: string; around?: string; limit?: number },
+  ): Promise<ImagesPage>;
   /** Страница ленты субагента; без `before` отдаёт самых новых потомков. */
   lane?(
     id: string,
@@ -591,6 +597,15 @@ export class ChatStore {
     const fetchInputs = this.deps.api.inputs;
     if (!fetchInputs) throw new Error("inputs_unavailable");
     return fetchInputs.call(this.deps.api, this.id, query);
+  }
+
+  /** Страница картинок всей сессии вокруг одной: просмотрщик листает их, а не только своё сообщение. */
+  async images(
+    query: { before?: string; after?: string; around?: string; limit?: number } = {},
+  ): Promise<ImagesPage> {
+    const fetchImages = this.deps.api.images;
+    if (!fetchImages) throw new Error("images_unavailable");
+    return fetchImages.call(this.deps.api, this.id, query);
   }
 
   /**

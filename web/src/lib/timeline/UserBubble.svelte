@@ -10,6 +10,7 @@
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
   import type { Component } from 'svelte';
+  import type { GalleryAnchor } from '#lib/viewer/gallery.js';
   import type { ViewerShot } from '#lib/viewer/shots.js';
   import StageTrack from '#lib/ui/StageTrack.svelte';
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
@@ -57,8 +58,8 @@
       (input.state === 'accepted' && !agentWorking)
   );
   // Просмотрщик грузится при первом открытии: в ленте он нужен редко.
-  let viewing = $state<number | null>(null);
-  let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading: string; onclose: () => void }> | null>(null);
+  let viewing = $state<{ index: number; anchor: GalleryAnchor } | null>(null);
+  let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading: string; anchor?: GalleryAnchor | null; onclose: () => void }> | null>(null);
   const images = $derived(input.attachments.filter((file) => attachmentKind(file) === 'image'));
   const shots = $derived(
     images.map((file) => ({
@@ -73,7 +74,10 @@
 
   async function view(attachmentId: string): Promise<void> {
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
-    viewing = Math.max(0, images.findIndex((file) => file.attachment_id === attachmentId));
+    viewing = {
+      index: Math.max(0, images.findIndex((file) => file.attachment_id === attachmentId)),
+      anchor: { kind: 'input_attachment', id: attachmentId }
+    };
   }
   const unsure = $derived(unconfirmed(getRuntime().journal.ops.get(input.key)));
 
@@ -291,7 +295,7 @@
   {/if}
 </article>
 {#if viewing !== null && Viewer}
-  <Viewer {shots} start={viewing} title={input.text.slice(0, 80) || 'Сообщение'} heading="Вложения" onclose={() => { viewing = null; }} />
+  <Viewer {shots} start={viewing.index} anchor={viewing.anchor} title={input.text.slice(0, 80) || 'Сообщение'} heading="Вложения" onclose={() => { viewing = null; }} />
 {/if}
 {#if ask}
   <ConfirmDialog title="Повторная отправка" body={ask} confirmLabel="Отправить" onconfirm={() => answer(true)} onclose={() => answer(false)} />

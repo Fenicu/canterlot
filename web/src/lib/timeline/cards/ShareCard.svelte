@@ -4,6 +4,7 @@
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
   import type { ViewerShot } from '#lib/viewer/shots.js';
+  import type { GalleryAnchor } from '#lib/viewer/gallery.js';
   import CardLine from './CardLine.svelte';
   import CardShell from './CardShell.svelte';
   import type { ShareData } from './defs/share';
@@ -11,8 +12,8 @@
 
   let { call, data, line, link, word, env }: CardProps<ShareData> = $props();
   // Просмотрщик открывается так же, как у вложений сообщения и у обычного блока: грузится при первом касании.
-  let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading: string; onclose: () => void }> | null>(null);
-  let viewing = $state<number | null>(null);
+  let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading: string; anchor?: GalleryAnchor | null; onclose: () => void }> | null>(null);
+  let viewing = $state<{ index: number; anchor: GalleryAnchor } | null>(null);
   // Картинкой файл считается так же, как в плитке и в обычном блоке: по типу или по расширению.
   const isImage = (file: { name: string; mime: string; size?: number }) => attachmentKind({ name: file.name, mime: file.mime, image: false, size: file.size }) === 'image';
   const shots = $derived<ViewerShot[]>(
@@ -32,7 +33,10 @@
 
   async function view(id: string): Promise<void> {
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
-    viewing = Math.max(0, shots.findIndex((shot) => shot.media_id === id));
+    viewing = {
+      index: Math.max(0, shots.findIndex((shot) => shot.media_id === id)),
+      anchor: { kind: 'block_file', id }
+    };
   }
 </script>
 
@@ -53,7 +57,7 @@
   {#if data.error}<p class="danger">{data.error}</p>{/if}
 </CardShell>
 {#if viewing !== null && Viewer}
-  <Viewer {shots} start={viewing} title={data.title || data.files[0]?.name || 'Файл'} heading="Файл" onclose={() => { viewing = null; }} />
+  <Viewer {shots} start={viewing.index} anchor={viewing.anchor} title={data.title || data.files[0]?.name || 'Файл'} heading="Файл" onclose={() => { viewing = null; }} />
 {/if}
 
 <style>
