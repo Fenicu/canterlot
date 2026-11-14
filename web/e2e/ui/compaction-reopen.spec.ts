@@ -131,7 +131,7 @@ test('requested_compaction_shows_the_running_state_before_the_agent_starts', asy
 	await expect(page.getByText('Контекст сжат автоматически')).toBeVisible();
 	await expect(page.locator(RUNNING)).toHaveCount(0);
 	await expect(indicator(page)).not.toHaveAttribute('data-compacting', 'true');
-	await expect(indicator(page)).toContainText('Контекст 90%');
+	await expect(indicator(page)).toContainText('Контекст: ост. 10%');
 	await expect(indicator(page)).toHaveAttribute('data-tone', 'danger');
 });
 

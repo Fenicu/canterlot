@@ -39,7 +39,7 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
       await open(page);
       // Лимиты и служебный поиск инструментов — карточки реестра, а не строки с именем инструмента.
       await expect(page.locator('.feed-card[data-card="canterlot.limits"] .lead')).toHaveText('Лимиты');
-      await expect(page.locator('.feed-card[data-card="canterlot.limits"] [data-provider="claude"] [data-window="five"] .pct')).toHaveText(/^осталось\s85%$/);
+      await expect(page.locator('.feed-card[data-card="canterlot.limits"] [data-provider="claude"] [data-window="five"] .pct')).toHaveText(/^осталось\s*ост\.\s*85%$/);
       await expect(page.locator('.card [data-role="answer-footer"] strong').last()).toHaveText('Claude');
       for (const leak of ['rchestrator', 'claude-opus-5-5', 'mcp__', '0,0 с', 'Bash: ', 'Read: ', 'Agent: ', 'инструмент']) {
         await expect(page.locator('.tool .head, .card [data-role="answer-footer"], .sub')).not.toContainText([leak]);

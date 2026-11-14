@@ -107,7 +107,7 @@ test('every_card_renders_from_a_seeded_orchestrator_feed', async ({ page }) => {
   await expect((await reveal(page, card(page, seed.blocks.accept!))).locator('[data-role="accept-facts"]')).toHaveText('3 коммита · рабочая копия убрана · ветка canterlot/5e1f0a2b оставлена');
   await expect((await reveal(page, card(page, seed.blocks.accept!))).locator('[data-role="card-state"]')).toHaveText('остановлена');
   const limits = await reveal(page, card(page, seed.blocks.limits!));
-  await expect(limits.locator('[data-provider="codex"] [data-window="week"] .pct')).toHaveText(/^осталось\s17%$/);
+  await expect(limits.locator('[data-provider="codex"] [data-window="week"] .pct')).toHaveText(/^осталось\s*ост\.\s*17%$/);
   await expect(limits.locator('[data-provider="codex"] [data-window="week"] .pct')).toHaveAttribute('data-tone', 'warning');
   await expect(limits.locator('[data-provider="opencode"] [data-window="five"] .pct')).toHaveAttribute('data-tone', 'danger');
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

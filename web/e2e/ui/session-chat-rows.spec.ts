@@ -167,9 +167,9 @@ test('limits_show_one_plaque_per_provider_in_a_row', async ({ page }) => {
   await boot(page);
   const plaques = page.locator('[data-limit-plaques] .plaque');
   await expect(plaques).toHaveCount(3);
-  await expect(plaques.nth(0)).toContainText(/Claude\s*осталось75%\s*нед/);
-  await expect(plaques.nth(1)).toContainText(/Codex\s*осталось10%\s*нед/);
-  await expect(plaques.nth(2)).toContainText(/OpenCode\s*осталось54%\s*мес/);
+  await expect(plaques.nth(0)).toContainText(/Claude\s*осталось\s*ост\.\s*75%\s*нед/);
+  await expect(plaques.nth(1)).toContainText(/Codex\s*осталось\s*ост\.\s*10%\s*нед/);
+  await expect(plaques.nth(2)).toContainText(/OpenCode\s*осталось\s*ост\.\s*54%\s*мес/);
   const boxes = await plaques.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().top));
   expect(new Set(boxes.map(Math.round)).size).toBe(1);
   await page.locator('[data-limit-plaques]').click();

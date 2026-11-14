@@ -65,7 +65,32 @@ test('collapsed_strip_shows_the_remaining_share_of_both_windows_per_provider', a
   await expectPlaques(page, ['Claude', 'Codex']);
   const plaques = page.locator('[data-limit-plaques] .plaque');
   await expect(plaques.nth(0)).toContainText(/4%\s*нед/);
-  await expect(plaques.nth(0).locator('.pct[data-tone="danger"]')).toHaveText(/4%/);
+  // Слово на экране, а не только для чтения вслух: процент — это остаток.
+  await expect(plaques.nth(0).locator('.unit')).toHaveText(/^ост\.\s*$/);
+  await expect(plaques.nth(0).locator('.pct[data-tone="danger"]')).toHaveText(/ост\.\s*4%/);
+  // Тесное окно кричит и числом: цвет числа совпадает с цветом заливки.
+  const danger = await plaques.nth(0).locator('.pct').evaluate((node) => getComputedStyle(node).color);
+  const dangerToken = await page.evaluate(() => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--danger)';
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  expect(danger).toBe(dangerToken);
+  await expect(plaques.nth(0).locator('[role="meter"]')).toHaveAttribute('data-tone', 'danger');
+  // Здоровая заливка тихая: цвет не акцентный.
+  const healthy = await plaques.nth(1).locator('[role="meter"] > span').evaluate((node) => getComputedStyle(node).backgroundColor);
+  const accentToken = await page.evaluate(() => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--accent)';
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  expect(healthy).not.toBe(accentToken);
   await expect(plaques.nth(0).locator('.reset-short')).toHaveText(/^(23ч\d+м|1д)$/);
   await expect(plaques.nth(1)).toContainText(/85%\s*нед/);
   const strip = await openStrip(page);
@@ -125,10 +150,9 @@ test('expanded_strip_puts_resets_beside_meters_and_offers_the_refresh_button', a
   const strip = page.locator('.limits').first();
   await strip.locator('summary').click();
   await expect(strip.locator('.reset').first()).toBeVisible();
-  // Раскрытая полоса говорит словами; на узкой полосе слово «сброс» уходит, отсчёт остаётся.
-  const words = strip.locator('.reset').first().locator('.reset-full:visible, .reset-bare:visible, .reset-span:visible');
-  await expect(words).toHaveText(/^(сброс )?(через )?(59\u00a0мин|1\u00a0ч)$/);
-  await expect(strip.locator('.reset-short:visible')).toHaveCount(0);
+  // Раскрытая полоса говорит словами там, где они влезают; на узкой — сжатым отсчётом, полная дата в подсказке.
+  const words = strip.locator('.reset').first().locator('.reset-full:visible, .reset-bare:visible, .reset-span:visible, .reset-short:visible');
+  await expect(words).toHaveText(/^(сброс )?(через )?(59\u00a0мин|1\u00a0ч)$|^(59м|1ч)$/);
   await expect(strip.locator('.reset')).toHaveCount(4);
   await expect(strip.locator('.updated')).toHaveText(/^обновлено \d\d:\d\d$/);
   await expect(strip.getByRole('button', { name: 'Обновить лимиты' })).toBeVisible();
@@ -545,7 +569,7 @@ async function windowMetrics(page: Page): Promise<WindowMetrics[]> {
         bandBottom: bandBox.bottom,
         meterTop: meterBox.top,
         meterBottom: meterBox.bottom,
-        value: (value.textContent ?? '').replace(/^осталось\s*/, '').trim(),
+        value: (value.textContent ?? '').replace(/^(осталось\s*)?(ост\.\s*)?/, '').trim(),
         valueOverflow: value.scrollWidth - value.clientWidth,
         resetOverflow: reset ? reset.scrollWidth - reset.clientWidth : 0,
         resetLines: reset ? reset.getClientRects().length : 0,
@@ -584,6 +608,7 @@ async function expectPlaques(page: Page, names: readonly string[]): Promise<void
 }
 
 async function expectFourProviderStrip(page: Page, open: boolean): Promise<void> {
+  const width = (await page.viewportSize())?.width ?? 0;
   const strip = page.locator('.limits').first();
   const isOpen = await strip.evaluate((node) => (node as HTMLDetailsElement).open);
   if (isOpen !== open) await strip.locator('summary').click();
@@ -626,7 +651,7 @@ async function expectFourProviderStrip(page: Page, open: boolean): Promise<void>
   expect(resets).toHaveLength(5);
   for (const item of resets) {
     expect(item.resetLines, `${item.window} reset lines`).toBe(1);
-    expect(item.resetOverflow, `${item.window} reset overflow`).toBeLessThanOrEqual(0);
+    expect(item.resetOverflow, `${width}px ${item.window} reset overflow`).toBeLessThanOrEqual(0);
     expect(Math.abs(item.resetHeight - item.resetLineHeight), `${item.window} reset height`).toBeLessThanOrEqual(1);
   }
 }
@@ -792,7 +817,6 @@ test('stripes_span_the_strip_and_the_chevron_keeps_its_place_in_both_states', as
       // Свёрнутая полоса — плашки в один ряд, раскрытая — полосы строк на всю ширину.
       await expectPlaques(page, FOUR_PROVIDERS);
       await strip.locator('summary').click();
-      await expect(strip.locator('.reset-short:visible')).toHaveCount(0);
       await settled();
       const expanded = await stripGeometry(page);
       expectStripGeometry(expanded);

@@ -17,17 +17,23 @@ export function contextPercent(tokens: number, window: number | null | undefined
 	return Math.floor((tokens / window) * 100);
 }
 
+/** Остаток контекста: та же шкала «сколько осталось», что у лимитов провайдера. */
+export function contextRemaining(tokens: number, window: number | null | undefined): number | null {
+	const used = contextPercent(tokens, window);
+	return used === null ? null : Math.max(0, 100 - used);
+}
+
 export function contextTone(percent: number | null): ContextTone {
 	if (percent !== null && percent >= CONTEXT_DANGER_PCT) return 'danger';
 	if (percent !== null && percent >= CONTEXT_WARN_PCT) return 'warning';
 	return 'accent';
 }
 
-/** Короткая подпись индикатора: «Контекст 64%», без окна — токены. */
+/** Короткая подпись индикатора: «Контекст: ост. 36%», без окна — токены. */
 export function contextBadge(tokens: number, window: number | null | undefined): string {
-	const percent = contextPercent(tokens, window);
-	if (percent === null) return `Контекст ${fmt.tokensShort(tokens)}`;
-	return `Контекст ${percent}%`;
+	const remaining = contextRemaining(tokens, window);
+	if (remaining === null) return `Контекст: ${fmt.tokensShort(tokens)}`;
+	return `Контекст: ост. ${remaining}%`;
 }
 
 /** Раскрытие по нажатию: «640 тыс. из 1 млн токенов», без окна — только токены. */

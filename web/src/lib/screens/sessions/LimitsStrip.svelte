@@ -57,8 +57,8 @@
   <span class="meter" data-window={window} data-stale={m.stale || undefined} data-known={m.known}>
     <span class="name pname" title={first ? name : undefined}>{first ? name : ''}</span>
     <span class="tag">{tag}</span>
-    <span class="bar" aria-hidden="true"><Gauge value={m.fill} tone={m.tone} dim={m.stale || !m.known} label="{name} {tag}" /></span>
-    <b class="pct" data-tone={m.tone}><span class="sr-only">осталось </span>{m.text}</b>
+    <span class="bar" aria-hidden="true"><Gauge value={m.fill} tone={m.tone} quiet dim={m.stale || !m.known} label="{name} {tag}" /></span>
+    <b class="pct" data-tone={m.tone}><span class="sr-only">осталось </span><span class="unit" aria-hidden="true">ост.&nbsp;</span>{m.text}</b>
     {#if m.reset}
       <!-- Свёрнутая полоса показывает сжатый отсчёт, раскрытая — словами; полная дата в подсказке. -->
       <span class="reset" data-forecast={m.forecast?.before ? 'before' : undefined} title={resetTitle(m)}>
@@ -96,7 +96,7 @@
                 <span class="pname">{row.label}</span>
                 {#if row.status}{@render statusWord(row.status)}{/if}
                 {#if plaque}
-                  <b class="pct" data-tone={plaque.meter.tone} class:dim={plaque.meter.stale || !plaque.meter.known}><span class="sr-only">осталось </span>{plaque.meter.text}</b>
+                  <b class="pct" data-tone={plaque.meter.tone} class:dim={plaque.meter.stale || !plaque.meter.known}><span class="sr-only">осталось </span><span class="unit" aria-hidden="true">ост.&nbsp;</span>{plaque.meter.text}</b>
                   <span class="tag">{plaque.tag}</span>
                   {#if plaque.meter.reset}
                     <span class="plaque-reset" data-forecast={plaque.meter.forecast?.before ? 'before' : undefined} title={resetTitle(plaque.meter)}>
@@ -109,7 +109,7 @@
                 {/if}
                 {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
               </span>
-              {#if plaque}<span class="bar" aria-hidden="true"><Gauge value={plaque.meter.fill} tone={plaque.meter.tone} dim={plaque.meter.stale || !plaque.meter.known} label="{row.label} {plaque.tag}" /></span>{/if}
+              {#if plaque}<span class="bar" aria-hidden="true"><Gauge value={plaque.meter.fill} tone={plaque.meter.tone} quiet dim={plaque.meter.stale || !plaque.meter.known} label="{row.label} {plaque.tag}" /></span>{/if}
             </span>
           {/each}
           <span class="sr-only">Подробнее о лимитах</span>
@@ -223,6 +223,10 @@
     grid-template-columns: minmax(0, 1fr) minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content max-content minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content max-content var(--chevron-column);
     column-gap: var(--s1);
   }
+  /* В свёрнутой полосе слово «ост.» занимает место: оно мельче числа и не раздувает колонку. */
+  .limits:not([open]) .row { padding-inline: var(--s4); }
+  .limits:not([open]) .unit { font-size: var(--fs-xs); }
+  .limits:not([open]) .meter[data-window='week'] > .tag { padding-inline-start: var(--s2); }
   .limits:not([open]) .meter { display: contents; }
   .limits:not([open]) .meter[data-window='fable'], .limits:not([open]) .meter[data-window='month'] { display: none; }
   .limits:not([open]) .name:empty { display: none; }
@@ -259,6 +263,8 @@
   .tag { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
   .bar { display: inline-flex; }
   .pct { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* Слово «осталось» видно и на экране: без него процент читается как израсходованный. */
+  .unit { color: var(--muted); font-weight: var(--weight-normal); }
   .pct[data-tone='warning'], .reserve { color: var(--warning); }
   .pct[data-tone='danger'] { color: var(--danger); }
   .meter[data-stale] .pct, .meter[data-known='false'] .pct { color: var(--muted); font-weight: var(--weight-normal); }
@@ -280,13 +286,10 @@
   .status-detail .incident { display: block; min-height: 0; color: var(--secondary); overflow-wrap: anywhere; }
   .status-detail a.incident { color: var(--accent-link); }
   /* В узкой раскрытой полосе сброс теряет слово «сброс», затем «через», но никогда не переносится. */
-  @container (max-width: 30em) {
+  /* В узкой раскрытой полосе сброс теряет слова: остаётся сжатый отсчёт «47ч59м», полная дата — в подсказке. */
+  @container (max-width: 33em) {
     .limits[open] .reset-full { display: none; }
-    .limits[open] .reset-bare { display: inline; }
-  }
-  @container (max-width: 26em) {
-    .limits[open] .reset-bare { display: none; }
-    .limits[open] .reset-span { display: inline; }
+    .limits[open] .reset-short { display: inline; }
   }
   .chevron {
     grid-row: 1;
@@ -308,6 +311,9 @@
   .plaque .reset-short { font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .plaque-reset[data-forecast='before'] { color: var(--warning); }
   .plaque .pct { color: var(--text); }
+  /* Тревога окрашивает число и в плашке: иначе тесное окно выглядит как здоровое. */
+  .plaque .pct[data-tone='warning'] { color: var(--warning); }
+  .plaque .pct[data-tone='danger'] { color: var(--danger); }
   .plaque .pct.dim { color: var(--muted); font-weight: var(--weight-normal); }
   .plaque .bar { display: flex; --gauge-width: 100%; }
   .plaques { min-height: var(--target); }

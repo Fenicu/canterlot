@@ -5,6 +5,7 @@ import {
 	contextBadge,
 	contextDetails,
 	contextPercent,
+	contextRemaining,
 	contextTone
 } from '#lib/timeline/compaction.js';
 
@@ -34,14 +35,16 @@ describe('compaction line', () => {
 });
 
 describe('context fill', () => {
-	it('shows fill, not remainder', () => {
+	it('shows the remainder, matching the limit gauges', () => {
 		expect(contextPercent(640_000, 1_000_000)).toBe(64);
-		expect(contextBadge(640_000, 1_000_000)).toBe('Контекст 64%');
+		expect(contextRemaining(640_000, 1_000_000)).toBe(36);
+		expect(contextBadge(640_000, 1_000_000)).toBe('Контекст: ост. 36%');
 	});
 	it('never invents a percent without a window', () => {
 		expect(contextPercent(640_000, null)).toBeNull();
 		expect(contextPercent(640_000, 0)).toBeNull();
-		expect(contextBadge(640_000, null)).toBe('Контекст 640 тыс.');
+		expect(contextRemaining(640_000, null)).toBeNull();
+		expect(contextBadge(640_000, null)).toBe('Контекст: 640 тыс.');
 		expect(contextDetails(640_000, null)).toBe('640 тыс. токенов');
 	});
 	it('details name used of the window', () => {

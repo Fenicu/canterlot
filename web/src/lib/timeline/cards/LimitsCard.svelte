@@ -21,8 +21,8 @@
             {#each row.meters as meter (meter.window)}
               <span class="meter" data-window={meter.window}>
                 <span class="tag">{meterTag(meter.window)}</span>
-                <span class="bar" aria-hidden="true"><Gauge value={meter.remaining} tone={meter.tone} label="{row.label} {meterTag(meter.window)}" /></span>
-                <b class="pct" data-tone={meter.tone}><span class="sr-only">осталось&nbsp;</span>{meter.text}</b>
+                <span class="bar" aria-hidden="true"><Gauge value={meter.remaining} tone={meter.tone} quiet label="{row.label} {meterTag(meter.window)}" /></span>
+                <b class="pct" data-tone={meter.tone}><span class="sr-only">осталось&nbsp;</span><span class="unit" aria-hidden="true">ост.&nbsp;</span>{meter.text}</b>
               </span>
             {/each}
           {/if}
@@ -42,6 +42,7 @@
   .tag { color: var(--muted); font-size: var(--fs-xs); }
   .bar { display: inline-flex; align-self: center; }
   .pct { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; }
+  .unit { color: var(--muted); font-weight: var(--weight-normal); }
   .pct[data-tone='warning'] { color: var(--warning); }
   .pct[data-tone='danger'] { color: var(--danger); }
 </style>

@@ -86,15 +86,18 @@ for (const theme of ['dark', 'light'] as const) {
 		hub.flush();
 		await expect(feed.getByText('Сжимает контекст')).toHaveCount(0);
 		await expect(ctx).not.toHaveAttribute('data-compacting', 'true');
-		await expect(ctx).toContainText('Контекст 64%');
+		await expect(ctx).toContainText('Контекст: ост. 36%');
 		await expect(ctx).toHaveAttribute('data-tone', 'accent');
+		await expect(ctx.getByRole('meter')).toHaveAttribute('aria-valuenow', '36');
 		api.pushContext(id, 750_000, 1_000_000);
 		hub.flush();
-		await expect(ctx).toContainText('Контекст 75%');
+		await expect(ctx).toContainText('Контекст: ост. 25%');
+		await expect(ctx.getByRole('meter')).toHaveAttribute('aria-valuenow', '25');
 		await expect(ctx).toHaveAttribute('data-tone', 'warning');
 		api.pushContext(id, 950_000, 1_000_000);
 		hub.flush();
-		await expect(ctx).toContainText('Контекст 95%');
+		await expect(ctx).toContainText('Контекст: ост. 5%');
+		await expect(ctx.getByRole('meter')).toHaveAttribute('aria-valuenow', '5');
 		await expect(ctx).toHaveAttribute('data-tone', 'danger');
 
 		await ctx.click();

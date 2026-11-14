@@ -23,7 +23,7 @@
             <span class="label">{row.label}</span>
             <b class="value">{row.value}</b>
             {#if row.reset}<time class="reset" datetime={new Date(row.resetAt).toISOString()} aria-label={row.resetLong} use:timeTip={row.resetAt}>{row.reset}</time>{/if}
-            <span class="gauge"><Gauge value={row.fill} tone={row.tone} dim={row.stale} label="{block.label}, {row.label}" /></span>
+            <span class="gauge"><Gauge value={row.fill} tone={row.tone} quiet dim={row.stale} label="{block.label}, {row.label}" /></span>
             <!-- Прогноз по средней скорости окна: предупреждение, только если окно кончится раньше сброса. -->
             {#if row.forecast}<p class="forecast" data-forecast={row.forecast.before ? 'before' : 'calm'}><span class="verdict">{row.forecast.text}</span><span class="pace" title="Средняя скорость расхода окна">{row.forecast.pace}</span></p>{/if}
           </div>

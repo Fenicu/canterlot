@@ -384,7 +384,7 @@ for (const width of [320, 360, 390]) {
     startTurn(hub, api, id);
     await expect(page.locator('[data-working]')).toBeVisible();
     await expect.poll(() => truncated(page), 'running').toEqual([]);
-    await expect(indicator).toContainText('96');
+    await expect(indicator).toContainText('Контекст: ост. 4%');
     // Сжатие показывает в индикаторе свою строку: она тоже помещается.
     hub.append(`conversation:${id}`, { kind: 'phase_changed', conversation_id: id, payload: { phase: 'context_maintenance', tool_name: null, summary: null } });
     hub.flush();

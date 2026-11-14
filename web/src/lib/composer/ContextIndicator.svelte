@@ -10,6 +10,7 @@
 		contextBadge,
 		contextDetails,
 		contextPercent,
+		contextRemaining,
 		contextTone,
 		compactionRunningLine,
 		type ContextTone
@@ -22,10 +23,11 @@
 	let error = $state('');
 
 	const snapshot = $derived(chat.context);
-	const percent = $derived(snapshot ? contextPercent(snapshot.tokens, snapshot.window) : null);
+	const usedPercent = $derived(snapshot ? contextPercent(snapshot.tokens, snapshot.window) : null);
+	const remaining = $derived(snapshot ? contextRemaining(snapshot.tokens, snapshot.window) : null);
 	const compacting = $derived(chat.compacting);
 	// Сжатие и есть ответ на полный контекст: пока оно идёт, тревожный цвет не нужен.
-	const tone: ContextTone = $derived(compacting ? 'accent' : contextTone(percent));
+	const tone: ContextTone = $derived(compacting ? 'accent' : contextTone(usedPercent));
 	const gaugeTone = $derived(tone === 'accent' ? 'normal' : tone);
 	const badge = $derived(snapshot ? contextBadge(snapshot.tokens, snapshot.window) : '');
 	const label = $derived(compacting ? compactionRunningLine() : badge);
@@ -81,10 +83,10 @@
 		data-tone={tone}
 		data-compacting={compacting ? 'true' : undefined}
 		aria-expanded={open}
-		aria-label="Контекст: {label}"
+		aria-label={label.startsWith('Контекст') ? label : `Контекст: ${label}`}
 		onclick={toggle}
 	>
-		<span class="track"><Gauge value={percent ?? 0} tone={gaugeTone} dim={percent === null} label={badge} /></span>
+		<span class="track"><Gauge value={remaining ?? 0} tone={gaugeTone} quiet dim={remaining === null} label={badge} /></span>
 		<span class="label">{label}</span>
 	</button>
 	{#if open}
@@ -124,7 +126,7 @@
 	.ctx[data-tone='danger'] {
 		color: var(--danger);
 	}
-	/* В узкой строке уступает шкала, а не подпись: «Контекст 63%» и «Сжимает контекст» видны целиком. */
+	/* В узкой строке уступает шкала, а не подпись: «Контекст: ост. 37%» и «Сжимает контекст» видны целиком. */
 	.track {
 		display: flex;
 		flex: 0 1 var(--gauge-width);
