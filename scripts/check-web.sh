@@ -38,7 +38,8 @@ lease_self_wrap "$lease_kind" "check-web.sh${original_args[*]:+ ${original_args[
     bash "$(cd .. && pwd)/scripts/check-web.sh" "${original_args[@]}"
 
 # Lock-файл ставится и вне локальной сети: в нём только публичный реестр npm.
-foreign=$(grep -oE '"resolved": "[^"]+' web/package-lock.json | grep -vc '"resolved": "https://registry.npmjs.org/' || true)
+[[ -f package-lock.json ]] || { echo 'BLOCKED: нет web/package-lock.json' >&2; exit 1; }
+foreign=$(grep -oE '"resolved": "[^"]+' package-lock.json | grep -vc '"resolved": "https://registry.npmjs.org/' || true)
 if ((foreign)); then
     echo "BLOCKED: в web/package-lock.json $foreign ссылок не на https://registry.npmjs.org/;" \
         "заменить адрес реестра в полях resolved" >&2
