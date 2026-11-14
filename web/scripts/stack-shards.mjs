@@ -18,7 +18,7 @@ function shardCount() {
 
 const shards = shardCount();
 const extraArgs = process.argv.slice(2);
-console.log(`stack: ${shards} шарда, свой стенд на шард (CANTERLOT_STACK_SHARDS меняет число)`);
+process.stdout.write(`stack: ${shards} шарда, свой стенд на шард (CANTERLOT_STACK_SHARDS меняет число)\n`);
 
 const results = await Promise.all(
   Array.from({ length: shards }, (_, i) => {
@@ -40,24 +40,21 @@ const results = await Promise.all(
           stdio: ['ignore', 'pipe', 'pipe']
         }
       );
-      let tail = '';
       const tag = (chunk) => {
-        const text = chunk.toString();
-        tail += text;
-        for (const line of text.split('\n')) {
-          if (line.trim()) console.log(`[shard ${slot}] ${line}`);
+        for (const line of chunk.toString().split('\n')) {
+          if (line.trim()) process.stdout.write(`[shard ${slot}] ${line}\n`);
         }
       };
       child.stdout.on('data', tag);
       child.stderr.on('data', tag);
-      child.on('close', (code) => resolve({ slot, code: code ?? 1, tail }));
+      child.on('close', (code) => resolve({ slot, code: code ?? 1 }));
     });
   })
 );
 
 const failed = results.filter((r) => r.code !== 0);
-console.log(`stack: шардов прошло ${shards - failed.length}/${shards}`);
+process.stdout.write(`stack: шардов прошло ${shards - failed.length}/${shards}\n`);
 if (failed.length > 0) {
-  for (const r of failed) console.error(`[shard ${r.slot}] exit ${r.code}`);
+  for (const r of failed) process.stderr.write(`[shard ${r.slot}] exit ${r.code}\n`);
   process.exit(1);
 }
