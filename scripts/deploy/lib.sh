@@ -747,9 +747,16 @@ check_ct_node() {
 # Счётчик жёстких и мягких сбоев для cutover: жёсткие откатывают, мягкие пишутся и идут дальше.
 HARD_FAILURES=0
 SOFT_FAILURES=0
+# Файл жёстких ошибок прогона (DEPLOY_HARD_LOG): строка на событие HARD-FAIL; его
+# наследуют дочерние preflight.sh, target-check.sh, verify.sh, поэтому результат
+# cutover считает и их отказы.
+hard_record() {
+    if [ -n "${DEPLOY_HARD_LOG:-}" ]; then printf 'hard\n' >>"${DEPLOY_HARD_LOG}" 2>/dev/null || true; fi
+}
 hard() {
     printf '[%s] HARD-FAIL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
     HARD_FAILURES=$((HARD_FAILURES + 1))
+    hard_record
     fail_code "${HARD_CODE:-unknown}"
     HARD_CODE=""
 }

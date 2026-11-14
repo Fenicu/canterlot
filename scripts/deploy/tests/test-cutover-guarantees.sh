@@ -27,6 +27,7 @@ run_cutover && case_fail "exit 0 despite a failed vzdump" || case_ok "exit nonze
 unset FAKE_FAIL_VZDUMP
 assert_contains "${FAKE_ROOT}/cutover.log" "HARD-FAIL: vzdump failed" "hard failure printed"
 assert_eq "$(result_of "$(R_FILE)" hard_failures)" "1" "result file: hard_failures=1"
+assert_eq "$(result_of "$(R_FILE)" fail_codes)" "unknown" "result file: the uncoded cutover_hard keeps its code"
 teardown_case
 case_end
 

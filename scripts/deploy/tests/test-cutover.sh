@@ -544,6 +544,8 @@ unset FAKE_SITE_FAIL
 assert_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT (phase verifying)" "stop-and-report in the verifying phase"
 assert_contains "${FAKE_ROOT}/cutover.log" "site meeting.example.com: 500, expected 200" "failure named"
 assert_contains "${FAKE_ROOT}/cutover.log" "leaving hub, PWA and worker running" "kept the deployment running"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" hard_failures)" "2" "result file: both verify reads counted"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" fail_codes)" "verify_site" "result file: the verify failure coded"
 hub_is "${SHA_NEW}" && case_ok "hub stays new" || case_fail "hub moved"
 web_is "${SHA_NEW}" && case_ok "PWA stays new" || case_fail "web moved"
 worker_is "${SHA_NEW}" && case_ok "worker stays new" || case_fail "worker moved"

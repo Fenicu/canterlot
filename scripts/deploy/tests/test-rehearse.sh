@@ -218,8 +218,10 @@ case_begin "a clean rehearsal reports no failure codes"
 setup_cutover codes-pass
 if run_rehearse; then case_ok "exit 0"; else case_fail "rehearsal failed"; tail -10 "${FAKE_ROOT}/rehearse.log"; fi
 assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "" "result file: fail_codes empty"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" hard_failures)" "0" "result file: hard_failures 0"
 grep -q '^fail_codes=' "${FAKE_ROOT}/rehearse.result" && case_ok "result file: fail_codes key present" || case_fail "result file: no fail_codes key"
 [ ! -e "${FAKE_ROOT}/rehearse.result.codes" ] && case_ok "codes log removed" || case_fail "codes log left behind"
+[ ! -e "${FAKE_ROOT}/rehearse.result.hard" ] && case_ok "hard log removed" || case_fail "hard log left behind"
 teardown_case
 case_end
 
@@ -254,12 +256,15 @@ assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "session_stop
 teardown_case
 case_end
 
-case_begin "a failure without a known cause is coded unknown"
-setup_cutover codes-unknown
+case_begin "a verify failure is coded by area and counted once per read"
+setup_cutover codes-verify-site
 export FAKE_SITE_FAIL=meeting.example.com
 if run_rehearse; then case_fail "rehearsal passed with a broken site"; else case_ok "rehearsal failed"; fi
 unset FAKE_SITE_FAIL
-assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "unknown" "result file: unknown"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "verify_site" "result file: verify_site without unknown"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" hard_failures)" "2" "result file: one hard failure per read"
+N="$(grep -c 'HARD-FAIL: site meeting.example.com' "${FAKE_ROOT}/rehearse.log" || true)"
+assert_eq "${N}" "2" "two HARD-FAIL lines from the two reads"
 teardown_case
 case_end
 

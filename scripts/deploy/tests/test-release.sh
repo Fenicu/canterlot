@@ -435,7 +435,7 @@ teardown_case
 case_end
 
 case_begin "a non-transient rehearsal failure stops at once"
-for plan in "rehearse fail fail_codes=session_starting,unknown" "rehearse fail fail_codes=hub_readyz" "rehearse fail fail_codes=" \
+for plan in "rehearse fail fail_codes=session_starting,unknown" "rehearse fail fail_codes=hub_readyz" "rehearse fail fail_codes=verify_site" "rehearse fail fail_codes=" \
         "rehearse fail fail_codes=vzdump_busy signal=TERM exit_code=143" "rehearse truncated fail_codes=vzdump_busy" "rehearse none" \
         "rehearse pass soft_failures=1 fail_codes=unknown"; do
     setup_release nontransient

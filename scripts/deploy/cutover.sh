@@ -87,6 +87,7 @@ RESULT_LOG="$(readlink "/proc/$$/fd/1" 2>/dev/null)" || RESULT_LOG=""
 [ -f "${RESULT_LOG}" ] || RESULT_LOG=""
 DEPLOY_SOFT_LOG=""
 DEPLOY_FAIL_LOG=""
+DEPLOY_HARD_LOG=""
 VZDUMP_STARTED=0
 VZDUMP_DONE=0
 WORKER_STOPPED=0
@@ -108,13 +109,17 @@ result_path() {
 }
 # Мягкие ошибки этого прогона и дочерних скриптов (verify, retain) пишутся по одной
 # строке в файл рядом с результатом: soft() — вид шага, speech_soft() — speech.
+# Жёсткие ошибки — строкой на событие HARD-FAIL: так в результат попадают и отказы
+# дочерних скриптов, у которых свой процесс и свой счётчик.
 result_soft_log_start() {
     result_path
     DEPLOY_SOFT_LOG="${RESULT_FILE}.soft"
     DEPLOY_FAIL_LOG="${RESULT_FILE}.codes"
-    export DEPLOY_SOFT_LOG DEPLOY_FAIL_LOG
+    DEPLOY_HARD_LOG="${RESULT_FILE}.hard"
+    export DEPLOY_SOFT_LOG DEPLOY_FAIL_LOG DEPLOY_HARD_LOG
     : >"${DEPLOY_SOFT_LOG}"
     : >"${DEPLOY_FAIL_LOG}"
+    : >"${DEPLOY_HARD_LOG}"
 }
 result_soft_kind() {
     case "$1" in
@@ -135,12 +140,22 @@ soft_total() {
         printf '%s\n' "${SOFT_FAILURES}"
     fi
 }
+# Жёсткие ошибки прогона вместе с дочерними (общий файл): по нему, а не по счётчику
+# этого процесса, пишется hard_failures в результат.
+hard_total() {
+    if [ -n "${DEPLOY_HARD_LOG}" ] && [ -f "${DEPLOY_HARD_LOG}" ]; then
+        wc -l <"${DEPLOY_HARD_LOG}" | tr -d ' '
+    else
+        printf '%s\n' "${HARD_FAILURES}"
+    fi
+}
 # $1 статус, $2 код выхода. Пишется один раз; провал записи только печатается.
 write_result() {
-    local status="$1" code="$2" soft_n=0 speech_n=0 kinds="" k n restore=0 codes=""
+    local status="$1" code="$2" soft_n=0 speech_n=0 kinds="" k n restore=0 codes="" hard_n=0
     [ "${RESULT_WRITTEN}" = "0" ] || return 0
     RESULT_WRITTEN=1
     result_path
+    hard_n="$(hard_total)"
     if [ -n "${DEPLOY_SOFT_LOG}" ] && [ -f "${DEPLOY_SOFT_LOG}" ]; then
         speech_n="$(grep -cx speech "${DEPLOY_SOFT_LOG}" || true)"
         soft_n="$(grep -cvx speech "${DEPLOY_SOFT_LOG}" || true)"
@@ -174,7 +189,7 @@ write_result() {
             hub_flipped "$(yn "$((HUB_FLIPPED * restore))")" \
             worker_live "$(yn "$((WORKER_PROVEN * restore))")" \
             recovery "${RESULT_RECOVERY}" \
-            hard_failures "${HARD_FAILURES:-0}" \
+            hard_failures "${hard_n}" \
             soft_failures "${soft_n}" \
             soft_by_kind "${kinds}" \
             fail_codes "${codes}" \
@@ -192,6 +207,7 @@ write_result() {
     } >"${RESULT_FILE}" 2>/dev/null || log "could not write the result file ${RESULT_FILE}"
     if [ -n "${DEPLOY_SOFT_LOG}" ]; then rm -f "${DEPLOY_SOFT_LOG}"; fi  # lint: local-temp
     if [ -n "${DEPLOY_FAIL_LOG}" ]; then rm -f "${DEPLOY_FAIL_LOG}" "${DEPLOY_FAIL_LOG}.handled"; fi  # lint: local-temp
+    if [ -n "${DEPLOY_HARD_LOG}" ]; then rm -f "${DEPLOY_HARD_LOG}"; fi  # lint: local-temp
     log "result file: ${RESULT_FILE} (status ${status})"
 }
 yn() { if [ "$1" = "1" ]; then printf yes; else printf no; fi; }
@@ -992,11 +1008,12 @@ trap 'RESULT_SIGNAL=INT; on_end' INT
 trap 'RESULT_SIGNAL=TERM; on_end' TERM
 trap 'RESULT_SIGNAL=HUP; on_end' HUP
 # shellcheck disable=SC2317 # вызывается из функций выше и ниже
-cutover_hard() { FAIL_EXPLAINED=1; HARD_FAILURES=$((HARD_FAILURES + 1)); fail_code unknown; log "HARD-FAIL: $*"; exit 1; }
+cutover_hard() { FAIL_EXPLAINED=1; HARD_FAILURES=$((HARD_FAILURES + 1)); hard_record; fail_code unknown; log "HARD-FAIL: $*"; exit 1; }
 # Отказ проверки, чья причина уже записана с кодом после fail_mark (иначе unknown).
 cutover_hard_after() {
     FAIL_EXPLAINED=1
     HARD_FAILURES=$((HARD_FAILURES + 1))
+    hard_record
     [ "$(fail_count)" -gt "${FAIL_MARK}" ] || fail_code unknown
     log "HARD-FAIL: $*"
     exit 1
@@ -1465,12 +1482,15 @@ maintenance_check "${MAINT_LIVE_IDS}" "${WEB_SHA_EFF}"
 PHASE="verifying"
 export DEPLOY_SOFT_KIND=verify
 log "running verification (two reads)"
+fail_mark
 if is_rehearse; then
     # Репетиция проверяет живое состояние (развёрнутые релизы) тем же verify.sh;
     # его единственная запись (loopback-проба) печатается через run_write.
-    run_child "${SCRIPT_DIR}/verify.sh" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}"
+    run_child "${SCRIPT_DIR}/verify.sh" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" \
+        || die_after "verification failed against the live state: see the HARD-FAIL lines above"
 else
-    run_child "${SCRIPT_DIR}/verify.sh" "${SHA}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" --web-sha "${WEB_SHA_EFF}"
+    run_child "${SCRIPT_DIR}/verify.sh" "${SHA}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" --web-sha "${WEB_SHA_EFF}" \
+        || die_after "verification failed for ${SHA}: see the HARD-FAIL lines above"
 fi
 # База GeoIP для мест входа: после проверки, ошибки мягкие (место входа просто пусто).
 PHASE="geoip"

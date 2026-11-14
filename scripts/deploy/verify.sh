@@ -132,7 +132,7 @@ sup_pid_of_exec() {
 # Сверка тиков против файла снимка: любое изменение — жёстко.
 check_ticks_file() {
     local file="$1" label="$2"
-    [ -f "${file}" ] || { hard "tick snapshot file missing: ${file}"; return; }
+    [ -f "${file}" ] || { hard_code verify_ticks "tick snapshot file missing: ${file}"; return; }
     while IFS= read -r line; do
         case "${line}" in
             worker\ * | "") continue ;;
@@ -145,12 +145,12 @@ check_ticks_file() {
                            if gone_is_normal_end "${exec_id}"; then
                                note_session_ended "${exec_id}" "${label}"
                            else
-                               ok=0; hard "session process gone (${label}): ${exec_id} ${role} ${old_pid}"
+                               ok=0; hard_code verify_ticks "session process gone (${label}): ${exec_id} ${role} ${old_pid}"
                            fi
                            continue
                        fi
                        new_tick="$(tr ' ' '\n' <"/proc/${old_pid}/stat" 2>/dev/null | sed -n '22p' || echo gone)"
-                       [ "${new_tick}" = "${old_tick}" ] || { ok=0; hard "tick changed (${label}): ${exec_id} ${role} ${old_pid}"; }
+                       [ "${new_tick}" = "${old_tick}" ] || { ok=0; hard_code verify_ticks "tick changed (${label}): ${exec_id} ${role} ${old_pid}"; }
                    done
                done
                [ "${ok}" = "1" ] && log "exec ${exec_id}: ticks unchanged (${label})" ;;
@@ -165,18 +165,18 @@ check_ticks_own() {
         [ -n "${line}" ] || continue
         # shellcheck disable=SC2086
         set -- ${line}
-        [ "$#" -eq 4 ] || { hard "bad own snapshot line: ${line}"; continue; }
+        [ "$#" -eq 4 ] || { hard_code verify_ticks "bad own snapshot line: ${line}"; continue; }
         exec_id="$1"; role="$2"; old_pid="$3"; old_tick="$4"
         if ! proc_is_live "${old_pid}"; then
             if gone_is_normal_end "${exec_id}"; then
                 note_session_ended "${exec_id}" "${label}"
             else
-                hard "session process gone (${label}): ${exec_id} ${role} ${old_pid}"
+                hard_code verify_ticks "session process gone (${label}): ${exec_id} ${role} ${old_pid}"
             fi
             continue
         fi
         new_tick="$(tr ' ' '\n' <"/proc/${old_pid}/stat" 2>/dev/null | sed -n '22p' || echo gone)"
-        [ "${new_tick}" = "${old_tick}" ] || hard "tick changed (${label}): ${exec_id} ${role} ${old_pid}"
+        [ "${new_tick}" = "${old_tick}" ] || hard_code verify_ticks "tick changed (${label}): ${exec_id} ${role} ${old_pid}"
     done <<<"${OWN_SNAP}"
     log "own tick snapshot unchanged (${label})"
 }
@@ -185,21 +185,21 @@ take_own_snapshot() {
     local live_ids
     OWN_SNAP=""
     if ! live_ids="$(hub_psql "select id::text from executions where state='running' order by 1")"; then
-        hard "cannot list live executions for the own snapshot"
+        hard_code verify_ticks "cannot list live executions for the own snapshot"
         return
     fi
     for exec_id in ${live_ids:-}; do
         sup_line="$(proc_ticks "${exec_id}" | grep supervise | grep -v mcp-relay | sed -n 1p)"
-        [ -n "${sup_line}" ] || { hard "no supervisor for live execution ${exec_id}"; continue; }
+        [ -n "${sup_line}" ] || { hard_code verify_ticks "no supervisor for live execution ${exec_id}"; continue; }
         sup_pid="${sup_line%% *}"; sup_tick="$(printf '%s' "${sup_line}" | cut -d' ' -f2)"
         OWN_SNAP+="${exec_id} sup ${sup_pid} ${sup_tick}"$'\n'
         # Роли точные: супервизор, его CLI и релеи. Потомки CLI (вызовы инструментов
         # параллельных сессий) приходят и уходят и в снимок не входят.
         if ! cli_line="$(session_cli_pid "${sup_pid}")"; then
-            hard "cannot list children of supervisor ${sup_pid} for ${exec_id}"
+            hard_code verify_ticks "cannot list children of supervisor ${sup_pid} for ${exec_id}"
             continue
         fi
-        [ -n "${cli_line}" ] || { hard "no CLI child of supervisor ${sup_pid} for ${exec_id}"; continue; }
+        [ -n "${cli_line}" ] || { hard_code verify_ticks "no CLI child of supervisor ${sup_pid} for ${exec_id}"; continue; }
         OWN_SNAP+="${exec_id} cli ${cli_line}"$'\n'
     done
     # Релеи: по всей таблице процессов, а не только среди прямых детей. Иначе
@@ -223,7 +223,7 @@ compare_acks() {
         [ -n "${line}" ] || continue
         # shellcheck disable=SC2086
         set -- ${line}
-        [ "$#" -eq 3 ] || { hard "bad ack snapshot line: ${line}"; continue; }
+        [ "$#" -eq 3 ] || { hard_code verify_acks "bad ack snapshot line: ${line}"; continue; }
         id="$1"; kind="$2"; old="$3"
         if [ "${id}" = "cj" ]; then
             new="$(read_ack "${WORKER_DATA}/cj/ack" || echo unreadable)"
@@ -237,7 +237,7 @@ compare_acks() {
                 if [ "${id}" != "cj" ] && ack_gone_is_end "${id}" "${kind} ack not re-read"; then
                     continue
                 fi
-                hard "cannot re-read ${kind} ack for ${id}"
+                hard_code verify_acks "cannot re-read ${kind} ack for ${id}"
                 continue ;;
             *) ;;
         esac
@@ -246,7 +246,7 @@ compare_acks() {
         if [ "${new}" -ge "${old}" ] 2>/dev/null; then
             log "${kind} ack ${id}: ${old} -> ${new}"
         else
-            hard "${kind} ack decreased for ${id}: ${old} -> ${new}"
+            hard_code verify_acks "${kind} ack decreased for ${id}: ${old} -> ${new}"
         fi
     done <<<"${ACKS_1}"
 }
@@ -255,20 +255,20 @@ snap_acks() {
     ACKS_1=""
     local exec_id sj cj live_ids
     if ! live_ids="$(hub_psql "select id::text from executions where state='running' order by 1")"; then
-        hard "cannot list live executions for ack snapshots"
+        hard_code verify_acks "cannot list live executions for ack snapshots"
         return
     fi
     for exec_id in ${live_ids:-}; do
         sj="$(read_ack "${WORKER_DATA}/executions/${exec_id}/sj/ack" || echo unreadable)"
         if [ "${sj}" = "unreadable" ] || [ -z "${sj}" ]; then
-            ack_gone_is_end "${exec_id}" "sj ack not readable" || hard "cannot read sj ack for ${exec_id}"
+            ack_gone_is_end "${exec_id}" "sj ack not readable" || hard_code verify_acks "cannot read sj ack for ${exec_id}"
         else
             ACKS_1+="${exec_id} sj ${sj}"$'\n'
         fi
     done
     cj="$(read_ack "${WORKER_DATA}/cj/ack" || echo unreadable)"
     if [ "${cj}" = "unreadable" ] || [ -z "${cj}" ]; then
-        hard "cannot read cj ack"
+        hard_code verify_acks "cannot read cj ack"
     else
         ACKS_1+="cj cj ${cj}"$'\n'
     fi
@@ -352,15 +352,15 @@ worker_machine_id() {
 check_worker_connected() {
     local since since_epoch uptime wlog last_state machine_id row avail age waited=0 problem=""
     if ! since="$(systemctl --user show "${WORKER_UNIT}" -p ActiveEnterTimestamp --value 2>/dev/null)" || [ -z "${since}" ]; then
-        hard "no fresh worker connection: cannot read the start time of ${WORKER_UNIT}"
+        hard_code verify_worker "no fresh worker connection: cannot read the start time of ${WORKER_UNIT}"
         return
     fi
     if ! since_epoch="$(date -d "${since}" +%s 2>/dev/null)"; then
-        hard "no fresh worker connection: cannot parse the start time '${since}'"
+        hard_code verify_worker "no fresh worker connection: cannot parse the start time '${since}'"
         return
     fi
     if ! machine_id="$(worker_machine_id)"; then
-        hard "no fresh worker connection: cannot read machine_id from ${WORKER_CONFIG}"
+        hard_code verify_worker "no fresh worker connection: cannot read machine_id from ${WORKER_CONFIG}"
         return
     fi
     while :; do
@@ -376,7 +376,7 @@ check_worker_connected() {
         fi
         if [ -z "${problem}" ]; then
             row="$(hub_psql "select availability || ':' || coalesce(floor(extract(epoch from (now() - reported_at)))::bigint::text, 'never') from machines where id = '${machine_id}'")" \
-                || { hard "no fresh worker connection: cannot read the machine row"; return; }
+                || { hard_code verify_worker "no fresh worker connection: cannot read the machine row"; return; }
             avail="${row%%:*}"; age="${row##*:}"
             if [ "${avail}" != "available" ]; then
                 problem="hub does not see the worker: machine availability is '${avail:-missing}'"
@@ -386,7 +386,7 @@ check_worker_connected() {
         fi
         [ -n "${problem}" ] || break
         if [ "${waited}" -ge "${CONNECT_WAIT}" ]; then
-            hard "no fresh worker connection: ${problem}"
+            hard_code verify_worker "no fresh worker connection: ${problem}"
             return
         fi
         sleep 1
@@ -400,17 +400,17 @@ check_worker_connected() {
 check_machine_catalog() {
     local machine_id caps harnesses cap h missing waited=0
     if ! machine_id="$(worker_machine_id)"; then
-        hard "capability check: cannot read machine_id from ${WORKER_CONFIG}"
+        hard_code verify_worker "capability check: cannot read machine_id from ${WORKER_CONFIG}"
         return
     fi
     while :; do
         missing=""
         if ! caps="$(hub_psql "select array_to_string(capabilities, ',') from machines where id = '${machine_id}'")"; then
-            hard "capability check: cannot read machines.capabilities"
+            hard_code verify_worker "capability check: cannot read machines.capabilities"
             return
         fi
         if ! harnesses="$(hub_psql "select string_agg(harness, ',' order by harness) from machine_harnesses where machine_id = '${machine_id}'")"; then
-            hard "harness catalog: cannot read machine_harnesses"
+            hard_code verify_worker "harness catalog: cannot read machine_harnesses"
             return
         fi
         for cap in ${REQUIRED_CAPABILITIES}; do
@@ -428,10 +428,10 @@ check_machine_catalog() {
         [ -n "${missing}" ] || break
         if [ "${waited}" -ge "${CATALOG_WAIT}" ]; then
             for cap in ${REQUIRED_CAPABILITIES}; do
-                case ",${caps}," in *",${cap},"*) ;; *) hard "capability check: machine lacks ${cap}" ;; esac
+                case ",${caps}," in *",${cap},"*) ;; *) hard_code verify_worker "capability check: machine lacks ${cap}" ;; esac
             done
             for h in ${REQUIRED_HARNESSES}; do
-                case ",${harnesses}," in *",${h},"*) ;; *) hard "harness catalog: machine lacks ${h}" ;; esac
+                case ",${harnesses}," in *",${h},"*) ;; *) hard_code verify_worker "harness catalog: machine lacks ${h}" ;; esac
             done
             return
         fi
@@ -621,13 +621,13 @@ check_hub_levels() {
             continue
         fi
         if [ "${b}" = "0" ]; then
-            hard "new hub ${level} kind not in the baseline: ${kind} (${n} in ${HUB_WINDOW_MIN} min)"
+            hard_code verify_hub "new hub ${level} kind not in the baseline: ${kind} (${n} in ${HUB_WINDOW_MIN} min)"
             summary+="${n} ${level} ${kind} (NEW); "
             continue
         fi
         allowed=$(( (b * HUB_WINDOW_MIN * WARN_RATE_FACTOR + HUB_BASELINE_MIN - 1) / HUB_BASELINE_MIN + WARN_RATE_SLACK ))
         if [ "${n}" -gt "${allowed}" ]; then
-            hard "hub ${level} rate increase: ${kind}: ${n} in ${HUB_WINDOW_MIN} min, baseline ${b} per ${HUB_BASELINE_MIN} min (allowed up to ${allowed})"
+            hard_code verify_hub "hub ${level} rate increase: ${kind}: ${n} in ${HUB_WINDOW_MIN} min, baseline ${b} per ${HUB_BASELINE_MIN} min (allowed up to ${allowed})"
             summary+="${n} ${level} ${kind} (RATE UP); "
         else
             summary+="${n} ${level} ${kind} (baseline ${b}/${HUB_BASELINE_MIN} min, allowed ${allowed}); "
@@ -703,51 +703,51 @@ verify_read() {
     log "=== verification read ${tag} ==="
     # Каждое имя сначала читается и проверяется (deployed_sha), потом сравнивается и
     # только потом может попасть в команду на хосте.
-    HUB_NOW="$(deployed_sha hub)" || { hard "cannot read the deployed hub release"; HUB_NOW="UNREADABLE"; }
-    WEB_NOW="$(deployed_sha web)" || { hard "cannot read the deployed web release"; WEB_NOW="UNREADABLE"; }
-    WORKER_NOW="$(deployed_sha worker)" || { hard "cannot read the deployed worker release"; WORKER_NOW="UNREADABLE"; }
-    [ "${HUB_NOW}" = "${HUB_SHA}" ] || hard "hub current is ${HUB_NOW}, expected ${HUB_SHA}"
-    [ "${WEB_NOW}" = "${WEB_SHA}" ] || hard "web build is ${WEB_NOW}, expected ${WEB_SHA}"
-    [ "${WORKER_NOW}" = "${WORKER_SHA}" ] || hard "worker current is ${WORKER_NOW}, expected ${WORKER_SHA}"
+    HUB_NOW="$(deployed_sha hub)" || { hard_code verify_versions "cannot read the deployed hub release"; HUB_NOW="UNREADABLE"; }
+    WEB_NOW="$(deployed_sha web)" || { hard_code verify_versions "cannot read the deployed web release"; WEB_NOW="UNREADABLE"; }
+    WORKER_NOW="$(deployed_sha worker)" || { hard_code verify_versions "cannot read the deployed worker release"; WORKER_NOW="UNREADABLE"; }
+    [ "${HUB_NOW}" = "${HUB_SHA}" ] || hard_code verify_versions "hub current is ${HUB_NOW}, expected ${HUB_SHA}"
+    [ "${WEB_NOW}" = "${WEB_SHA}" ] || hard_code verify_versions "web build is ${WEB_NOW}, expected ${WEB_SHA}"
+    [ "${WORKER_NOW}" = "${WORKER_SHA}" ] || hard_code verify_versions "worker current is ${WORKER_NOW}, expected ${WORKER_SHA}"
     log "versions: hub=${HUB_SHA} web=${WEB_SHA} worker=${WORKER_SHA}"
     HUB_REL_SHA="$(ssh_hub "grep '^sha=' $(shq "${HUB_RELEASES}/${HUB_NOW}/RELEASE")" | cut -d= -f2 || echo UNKNOWN)"
-    [ "${HUB_REL_SHA}" = "${HUB_SHA}" ] || hard "hub RELEASE sha is ${HUB_REL_SHA}, expected ${HUB_SHA}"
+    [ "${HUB_REL_SHA}" = "${HUB_SHA}" ] || hard_code verify_versions "hub RELEASE sha is ${HUB_REL_SHA}, expected ${HUB_SHA}"
     [ "$(grep '^sha=' "${WORKER_CURRENT}/RELEASE" 2>/dev/null | cut -d= -f2 || echo UNKNOWN)" = "${WORKER_SHA}" ] \
-        || hard "worker RELEASE sha mismatch"
+        || hard_code verify_versions "worker RELEASE sha mismatch"
     MIGR_MAX="$(hub_psql "select coalesce(max(version),0) from _sqlx_migrations where success")"
     MIGR_FAILED="$(hub_psql "select count(*) from _sqlx_migrations where not success")"
     log "migrations: max=${MIGR_MAX} failed=${MIGR_FAILED}"
-    [ "${MIGR_FAILED}" = "0" ] || hard "failed migrations present: ${MIGR_FAILED}"
+    [ "${MIGR_FAILED}" = "0" ] || hard_code verify_migrations "failed migrations present: ${MIGR_FAILED}"
     if [ -n "${EXPECTED_MIGR}" ]; then
-        [ "${MIGR_MAX}" = "${EXPECTED_MIGR}" ] || hard "migrations max ${MIGR_MAX}, expected ${EXPECTED_MIGR}"
+        [ "${MIGR_MAX}" = "${EXPECTED_MIGR}" ] || hard_code verify_migrations "migrations max ${MIGR_MAX}, expected ${EXPECTED_MIGR}"
     else
         not_run "migrations vs RELEASE (neither dist ${DIST_HUB}/RELEASE nor the deployed hub RELEASE is readable)"
     fi
     [ "$(systemctl --user is-active "${WORKER_UNIT}" 2>/dev/null)" = "active" ] \
-        || hard "worker unit not active"
+        || hard_code verify_worker "worker unit not active"
     WORKER_PID="$(systemctl --user show "${WORKER_UNIT}" -p MainPID --value 2>/dev/null || echo 0)"
     WORKER_EXE="$(readlink "/proc/${WORKER_PID}/exe" 2>/dev/null || echo unknown)"
     [ "${WORKER_EXE}" = "${WORKER_RELEASES}/${WORKER_SHA}/bin/canterlot-worker" ] \
-        || hard "worker process exe is ${WORKER_EXE}, expected release ${WORKER_SHA}"
+        || hard_code verify_worker "worker process exe is ${WORKER_EXE}, expected release ${WORKER_SHA}"
     log "worker unit: active, exe=${WORKER_EXE}, restarts=$(systemctl --user show "${WORKER_UNIT}" -p NRestarts --value 2>/dev/null || echo unknown)"
     check_worker_connected
     check_machine_catalog
     [ "$(ssh_hub "systemctl is-active '${HUB_UNIT}'" || echo unknown)" = "active" ] \
-        || hard "hub unit not active"
+        || hard_code verify_hub "hub unit not active"
     HUB_PID="$(ssh_hub "systemctl show '${HUB_UNIT}' -p MainPID --value" 2>/dev/null || echo 0)"
     HUB_EXE="$(ssh_hub "readlink '/proc/${HUB_PID}/exe'" 2>/dev/null || echo unknown)"
     [ "${HUB_EXE}" = "${HUB_RELEASES}/${HUB_SHA}/bin/canterlot-hub" ] \
-        || hard "hub process exe is ${HUB_EXE}, expected release ${HUB_SHA}"
+        || hard_code verify_hub "hub process exe is ${HUB_EXE}, expected release ${HUB_SHA}"
     READYZ="$(ssh_hub "curl -fsS -m 2 'http://${HUB_IP}:8080/readyz'" 2>/dev/null || echo FAIL)"
-    [ "${READYZ}" = '{"status":"ok"}' ] || hard "hub readyz not ok: ${READYZ}"
+    [ "${READYZ}" = '{"status":"ok"}' ] || hard_code verify_hub "hub readyz not ok: ${READYZ}"
     log "hub unit: active, exe=${HUB_EXE}, readyz=${READYZ}"
     # Журнал читается целиком; провал самого чтения — жёстко (а не «ноль ошибок»).
     if ! HUB_ERRLOG="$(ssh_hub "journalctl -u '${HUB_UNIT}' --since -${HUB_WINDOW_MIN}min --no-pager")"; then
-        hard "cannot read hub journal"
+        hard_code verify_hub "cannot read hub journal"
         HUB_ERRLOG=""
     fi
     if ! HUB_BASELOG="$(ssh_hub "journalctl -u '${HUB_UNIT}' --since -$((HUB_BASELINE_MIN + HUB_WINDOW_MIN))min --until -${HUB_WINDOW_MIN}min --no-pager")"; then
-        hard "cannot read the hub journal baseline (before the verification window)"
+        hard_code verify_hub "cannot read the hub journal baseline (before the verification window)"
         HUB_BASELOG=""
     fi
     MIGR_ERR="$(printf '%s' "${HUB_ERRLOG}" | grep -c migration_error || true)"
@@ -758,22 +758,22 @@ verify_read() {
     WARN_N="$(printf '%s' "${HUB_ERRLOG}" | grep -cE '[0-9]Z +WARN ' || true)"
     ERROR_N="$(printf '%s' "${HUB_ERRLOG}" | grep -cE '[0-9]Z +ERROR ' || true)"
     log "hub journal: ${MIGR_ERR} migration_error, ${PANIC} panic, ${WARN_N} WARN, ${ERROR_N} ERROR"
-    [ "${MIGR_ERR}" = "0" ] || hard "hub migration_error in journal"
-    [ "${PANIC}" = "0" ] || hard "hub panic in journal"
+    [ "${MIGR_ERR}" = "0" ] || hard_code verify_hub "hub migration_error in journal"
+    [ "${PANIC}" = "0" ] || hard_code verify_hub "hub panic in journal"
     check_hub_levels
     if ! WORKER_ERRLOG="$(journalctl --user -u "${WORKER_UNIT}" --since -30min --no-pager)"; then
-        hard "cannot read worker journal"
+        hard_code verify_worker "cannot read worker journal"
         WORKER_ERRLOG=""
     fi
     WORKER_ERR="$(printf '%s' "${WORKER_ERRLOG}" | grep -cE 'journal_refused|journal_stopped|state_divergence|ownership not verified|lost ownership|execution_fact_rejected|journal_record_mismatch|attach_rejected|journal_withheld|auth_required|local_state_reset|supervisor_protocol_incompatible|untested_cli_version|codexbar_poll_failed|runtime sweep failed|worktree build gc failed|panic|ERROR' || true)"
     log "worker journal errors: ${WORKER_ERR}"
-    [ "${WORKER_ERR}" = "0" ] || hard "worker journal errors: ${WORKER_ERR}"
+    [ "${WORKER_ERR}" = "0" ] || hard_code verify_worker "worker journal errors: ${WORKER_ERR}"
     if ! live_summary="$(hub_psql "select string_agg(left(id::text,8) || ':' || state, ' ' order by id) from executions where state='running'")"; then
-        hard "cannot summarize live executions"
+        hard_code verify_acks "cannot summarize live executions"
         live_summary="UNKNOWN"
     fi
     if ! live_ids="$(hub_psql "select id::text from executions where state='running' order by 1")"; then
-        hard "cannot list live executions"
+        hard_code verify_acks "cannot list live executions"
         live_ids=""
     fi
     log "live executions: ${live_summary:-none}"
@@ -781,20 +781,20 @@ verify_read() {
         log "exec ${exec_id}: sup=[$(proc_ticks "${exec_id}" | grep supervise | sed -n 1p)]"
         SJ="$(read_ack "${WORKER_DATA}/executions/${exec_id}/sj/ack" || echo unreadable)"
         if [ "${SJ}" = "unreadable" ] || [ -z "${SJ}" ]; then
-            ack_gone_is_end "${exec_id}" "sj ack not readable" || hard "cannot read sj ack for ${exec_id}"
+            ack_gone_is_end "${exec_id}" "sj ack not readable" || hard_code verify_acks "cannot read sj ack for ${exec_id}"
         else
             log "exec ${exec_id}: sj_ack=${SJ}"
         fi
     done
     CJ="$(read_ack "${WORKER_DATA}/cj/ack" || echo unreadable)"
     if [ "${CJ}" = "unreadable" ] || [ -z "${CJ}" ]; then
-        hard "cannot read cj ack"
+        hard_code verify_acks "cannot read cj ack"
     else
         log "cj_ack=${CJ}"
     fi
     CONTAINER_SHA="$(container_pwa_sha)"
     if ! sha_match "${CONTAINER_SHA:-}" "${WEB_SHA}"; then
-        hard "pwa version.json is not ${WEB_SHA} (container says ${CONTAINER_SHA:-unreadable})"
+        hard_code verify_pwa "pwa version.json is not ${WEB_SHA} (container says ${CONTAINER_SHA:-unreadable})"
     else
         log "pwa version.json ok (${CONTAINER_SHA} matches ${WEB_SHA})"
     fi
@@ -805,13 +805,13 @@ verify_read() {
     ENV_CSP=""
     CONTAINER_CSP=""
     if ! ENV_RAW="$(ssh_web "cat '${WEB_ENV}'")"; then
-        hard "cannot read web env CSP from ${WEB_ENV}"
+        hard_code verify_csp "cannot read web env CSP from ${WEB_ENV}"
     else
         ENV_CSP="$(printf '%s' "${ENV_RAW}" | sed 's/^CANTERLOT_CSP="//; s/"$//')"
         ENV_CSP_READ=1
     fi
     if ! CONTAINER_CSP="$(ssh_web "docker exec caddy printenv CANTERLOT_CSP")"; then
-        hard "cannot read container CSP"
+        hard_code verify_csp "cannot read container CSP"
     else
         CONTAINER_CSP_READ=1
     fi
@@ -819,7 +819,7 @@ verify_read() {
         if [ "${CONTAINER_CSP}" = "${ENV_CSP}" ]; then
             log "container CSP matches env file"
         else
-            hard "container CSP differs from env file"
+            hard_code verify_csp "container CSP differs from env file"
         fi
     fi
     if [ "${WEB_SHA}" != "${HUB_SHA}" ]; then
@@ -836,7 +836,7 @@ verify_read() {
             if [ -n "${REL_CSP}" ] && [ "${CONTAINER_CSP}" = "${REL_CSP}" ]; then
                 log "container CSP matches the deployed release's own record ${WEB_ENV##*/}.${WEB_SHA} (no dist ${DIST_HUB} to compare)"
             else
-                hard "container CSP differs from the deployed release's own record ${WEB_ENV##*/}.${WEB_SHA}"
+                hard_code verify_csp "container CSP differs from the deployed release's own record ${WEB_ENV##*/}.${WEB_SHA}"
             fi
         else
             log "SKIPPED: container CSP vs dist (no ${DIST_HUB}, and no release record ${WEB_ENV##*/}.${WEB_SHA}); the container was compared with the env file only"
@@ -846,11 +846,11 @@ verify_read() {
     else
         DIST_CSP=""
         if ! DIST_CSP="$(cat "${DIST_HUB}/csp.txt" 2>/dev/null)" || [ -z "${DIST_CSP}" ]; then
-            hard "cannot read dist CSP from ${DIST_HUB}/csp.txt"
+            hard_code verify_csp "cannot read dist CSP from ${DIST_HUB}/csp.txt"
         elif [ "${CONTAINER_CSP}" = "${DIST_CSP}" ]; then
             log "container CSP matches dist"
         else
-            hard "container CSP differs from dist"
+            hard_code verify_csp "container CSP differs from dist"
         fi
     fi
     check_precompressed
@@ -859,7 +859,7 @@ verify_read() {
     for pair in ${SITE_CODES}; do
         site="${pair%%:*}"; want="${pair##*:}"
         code="$(curl -sS -o /dev/null -w '%{http_code}' -m 10 "https://${site}/" 2>/dev/null || echo FAIL)"
-        [ "${code}" = "${want}" ] || hard "site ${site}: ${code}, expected ${want}"
+        [ "${code}" = "${want}" ] || hard_code verify_site "site ${site}: ${code}, expected ${want}"
         log "site ${site}: ${code}"
     done
 }
@@ -867,7 +867,7 @@ verify_read() {
 verify_read "1"
 [ -n "${STATE_FILE}" ] || log "no --state given: ticks checked against own snapshot only"
 if [ -n "${STATE_FILE}" ]; then
-    [ -f "${STATE_FILE}" ] || hard "state file missing: ${STATE_FILE}"
+    [ -f "${STATE_FILE}" ] || hard_code verify_ticks "state file missing: ${STATE_FILE}"
     [ -f "${STATE_FILE}" ] && check_ticks_file "${STATE_FILE}" "read 1"
 fi
 take_own_snapshot
@@ -899,7 +899,7 @@ if [ -n "${NOT_RUN_LIST}" ]; then
     if [ "${ALLOW_SKIPPED}" = "1" ]; then
         log "comparisons NOT RUN were explicitly allowed (--allow-skipped)"
     else
-        hard "comparisons NOT RUN (use --allow-skipped only to acknowledge a known gap)"
+        hard_code verify_not_run "comparisons NOT RUN (use --allow-skipped only to acknowledge a known gap)"
     fi
 fi
 summary_exit "verify PASS"
