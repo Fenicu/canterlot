@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest';
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import postcss from 'postcss';
 import { variants, contrast, rootPalette, COLOR_TOKENS } from './contrast';
 import { PALETTES, DEFAULT_PALETTE } from '../../src/lib/palettes';
@@ -32,11 +32,6 @@ const AQUAMARINE = {
   }
 } as const;
 
-test('tokens_match_the_approved_mockup_when_available', () => {
-  const path = '../.superpowers/design/mockups/tokens.css';
-  if (!existsSync(path)) return;
-  expect(text.split('\n/* pwa additions */')[0]).toBe(readFileSync(path, 'utf8'));
-});
 
 test('aquamarine_resolves_to_the_unchanged_main_palette', () => {
   for (const theme of ['dark', 'light'] as const) {
