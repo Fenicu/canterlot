@@ -17,7 +17,7 @@ log() { printf '[harness-run %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 STARTED="$(date +%s)"
 
 log "shellcheck"
-shellcheck scripts/check-proxy.sh scripts/deploy/*.sh scripts/deploy/tests/*.sh scripts/deploy/tests/fake-bin/*
+shellcheck scripts/check-proxy.sh scripts/release.sh scripts/deploy/*.sh scripts/deploy/tests/*.sh scripts/deploy/tests/fake-bin/*
 log "shellcheck clean"
 
 log "python syntax"
@@ -53,7 +53,7 @@ if in_lines bb "$(printf "a\nb")"; then fail "in_lines matched a substring"; fi
 '
 log "lib unit checks OK"
 
-ALL_SUITES="lint token guardrails invariants site-env preflight stage retain verify dryrun rehearse rollback-db cutover cutover-signals geoip speech check-proxy"
+ALL_SUITES="lint token guardrails invariants site-env preflight stage retain verify dryrun rehearse rollback-db cutover cutover-signals geoip speech check-proxy release"
 SUITES="${RUN_SUITES:-${ALL_SUITES}}"
 RUN_LOG_DIR="${RUN_LOG_DIR:-$(mktemp -d /tmp/canterlot-deploy-run.XXXXXX)}"
 mkdir -p "${RUN_LOG_DIR}"
