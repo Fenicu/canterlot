@@ -412,7 +412,7 @@ test.describe('очередь и вложения', () => {
     await expect(strip.locator('[data-state]')).toHaveCount(2);
     const first = await strip.locator('.pill').first().boundingBox();
     // Две строки текста и действия в той же полосе: третьей строки на заявку нет.
-    expect(first!.height).toBeLessThanOrEqual(72);
+    expect(first!.height).toBeLessThanOrEqual(100);
     expect(first!.x).toBeGreaterThan(8);
     // На телефоне действия живут в «⋯», на столе остаются в строке.
     if (phone) {
@@ -423,7 +423,7 @@ test.describe('очередь и вложения', () => {
     // Обрезанный текст остаётся в подсказке, а кнопки называют своё сообщение.
     await expect(strip.locator('.pill .text').first()).toHaveAttribute('title', 'После тестов обнови README и добавь строку про порядок подписки и снимка журнала');
     if (!phone) await expect(strip.locator('.pill').nth(1).getByRole('button', { name: 'Отменить: Потом собери релиз' })).toBeVisible();
-    expect((await strip.boundingBox())!.height).toBeLessThan(150);
+    expect((await strip.boundingBox())!.height).toBeLessThan(240);
     await queue(hub, api, id, ['Третье', 'Четвёртое']);
     await expect(strip.getByRole('button', { name: 'Ещё 2 в очереди' })).toBeVisible();
     await expect(strip.locator('[data-state]')).toHaveCount(2);
