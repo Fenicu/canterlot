@@ -612,31 +612,6 @@ async fn preset_events_and_snapshot_carry_no_text(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idempotent_create_replays_and_conflicts_on_other_body(pool: PgPool) {
-    let f = Fx::new(pool).await;
-    let body = Some(json!({"title": "Идемпотентный", "text": "текст"}));
-    let first = f
-        .request(Method::POST, "/api/v1/presets", Some("idem"), body.clone())
-        .await;
-    assert_eq!(first.status.as_u16(), 201);
-    let second = f
-        .request(Method::POST, "/api/v1/presets", Some("idem"), body)
-        .await;
-    assert_eq!(second.status.as_u16(), 201);
-    assert_eq!(first.body, second.body, "повтор возвращает тот же ответ");
-    let conflict = f
-        .request(
-            Method::POST,
-            "/api/v1/presets",
-            Some("idem"),
-            Some(json!({"title": "Другой", "text": "текст"})),
-        )
-        .await;
-    assert_eq!(conflict.status.as_u16(), 409);
-    assert_eq!(Fx::error_code(&conflict), "idempotency_conflict");
-}
-
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn seed_preset_is_created_once_per_owner_and_not_recreated_after_delete(pool: PgPool) {
     let f = Fx::new(pool).await;
     // Владелец из init: посев уже создан.

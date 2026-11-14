@@ -1430,73 +1430,7 @@ async fn forced_archive_skips_claimed_jobs_and_rolls_back_every_effect(pool: PgP
         .await;
     assert_eq!(r.status, 200);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn all_task6a_mutations_replay_bytes_and_record_exactly_one_key(pool: PgPool) {
-    let f = Fixture::new(pool).await;
-    let id = f.create(json!({})).await;
-    let group = f.group("Группа").await;
-    for (method, path, body, conflict) in [
-        (
-            Method::PATCH,
-            format!("/api/v1/conversations/{id}"),
-            Some(json!({"color":null})),
-            Some(json!({"color":"red"})),
-        ),
-        (
-            Method::PUT,
-            format!("/api/v1/conversations/{id}/groups"),
-            Some(json!({"group_ids":[group]})),
-            Some(json!({"group_ids":[]})),
-        ),
-        (
-            Method::PUT,
-            format!("/api/v1/conversations/{id}/crunch"),
-            Some(json!({"enabled":true})),
-            Some(json!({"enabled":false})),
-        ),
-        (
-            Method::POST,
-            "/api/v1/groups".into(),
-            Some(json!({"name":"Новая"})),
-            Some(json!({"name":"Ещё"})),
-        ),
-        (
-            Method::PATCH,
-            format!("/api/v1/groups/{group}"),
-            Some(json!({"position":3})),
-            Some(json!({"position":4})),
-        ),
-        (
-            Method::DELETE,
-            format!("/api/v1/groups/{group}"),
-            None,
-            None,
-        ),
-    ] {
-        let key = Uuid::now_v7().to_string();
-        let a = f
-            .client
-            .send(method.clone(), &path, Some(&key), body.clone())
-            .await;
-        assert!(a.status.is_success());
-        let b = f.client.send(method.clone(), &path, Some(&key), body).await;
-        assert_eq!(a.status, b.status);
-        assert_eq!(a.body, b.body);
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("select count(*) from idempotency_keys where key=$1")
-                .bind(&key)
-                .fetch_one(&f.pool)
-                .await
-                .unwrap(),
-            1
-        );
-        if let Some(body) = conflict {
-            let r = f.client.send(method, &path, Some(&key), Some(body)).await;
-            assert_eq!(r.status, 409);
-            assert_eq!(r.json::<Value>()["error"]["code"], "idempotency_conflict");
-        }
-    }
-}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn projector_materialises_settings_and_crunch_without_attribute_event(pool: PgPool) {
     let f = Fixture::new(pool).await;

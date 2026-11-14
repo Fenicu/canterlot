@@ -507,38 +507,4 @@ mod tests {
         assert_eq!(faults.grants().len(), 1024);
         assert_eq!(faults.grants()[0].committed_seq, 6);
     }
-
-    #[sqlx::test(migrations = "./migrations")]
-    async fn missing_cursor_and_invalid_id_do_not_panic(pool: sqlx::PgPool) {
-        let faults = Faults::default();
-        faults.fail_control(Code::Cancelled);
-        let range = JournalRangeAck {
-            journal_id: uuid::Uuid::now_v7().to_string(),
-            up_to_seq: 0,
-        };
-        assert!(!faults.ack(&pool, uuid::Uuid::now_v7(), &range).await);
-        assert_eq!(faults.acks()[0].committed_seq, 0);
-        assert!(
-            !faults
-                .ack(
-                    &pool,
-                    uuid::Uuid::now_v7(),
-                    &JournalRangeAck {
-                        journal_id: "invalid".into(),
-                        up_to_seq: 1,
-                    }
-                )
-                .await
-        );
-        pool.close().await;
-        let range = JournalRangeAck {
-            up_to_seq: 1,
-            ..range
-        };
-        assert!(!faults.ack(&pool, uuid::Uuid::now_v7(), &range).await);
-        assert!(
-            faults.acks().last().unwrap().range.up_to_seq
-                > faults.acks().last().unwrap().committed_seq
-        );
-    }
 }

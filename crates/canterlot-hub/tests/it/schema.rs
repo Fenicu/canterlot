@@ -200,8 +200,8 @@ async fn state_check_constraints(pool: PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn model_enums_roundtrip(_pool: PgPool) {
+#[test]
+fn model_enums_roundtrip() {
     for (value, name) in [
         (InputState::Queued, "queued"),
         (InputState::Dispatched, "dispatched"),

@@ -141,7 +141,7 @@ async fn send_audio(s: &mut UnixStream, pattern: &[(bool, u32)]) {
 }
 
 /// Сообщения службы до закрытия соединения.
-async fn read_all(s: &mut UnixStream) -> Vec<Value> {
+async fn read_all<R: tokio::io::AsyncRead + Unpin>(s: &mut R) -> Vec<Value> {
     let mut out = Vec::new();
     loop {
         match tokio::time::timeout(
@@ -342,17 +342,27 @@ async fn idle_and_lifetime_limits() {
     assert_eq!(t.last().unwrap(), "error:idle", "{t:?}");
     assert!(started.elapsed() < Duration::from_secs(2));
 
-    let mut s = svc.start().await;
+    let s = svc.start().await;
     let started = Instant::now();
-    let mut msgs = Vec::new();
-    for _ in 0..12 {
-        // Тишина по 50 мс каждые 300 мс: idle не наступает, звук не кончается.
-        frame::write_frame(&mut s, KIND_AUDIO, &frame::pcm_to_bytes(&[0; 800]))
-            .await
-            .unwrap_or_default();
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-    msgs.extend(read_all(&mut s).await);
+    // Тишина по 100 мс каждые 300 мс: idle не наступает, звук не кончается.
+    // Чтение идёт одновременно с отправкой и обрывается на итоге, а не после
+    // лишних секунд записи в закрытый сокет.
+    let (mut r, mut w) = s.into_split();
+    let heartbeats = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if frame::write_frame(&mut w, KIND_AUDIO, &frame::pcm_to_bytes(&[0; 800]))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let msgs = tokio::time::timeout(Duration::from_secs(10), read_all(&mut r))
+        .await
+        .expect("служба должна закрыть диктовку по сроку жизни");
+    heartbeats.abort();
     let t = types(&msgs);
     assert_eq!(t.last().unwrap(), "error:lifetime", "{t:?}");
     assert!(started.elapsed() >= Duration::from_secs(2));
@@ -393,31 +403,6 @@ async fn second_dictation_waits_third_is_busy() {
     send_json(&mut first, r#"{"type":"finish"}"#).await;
     assert_eq!(read_all(&mut first).await.last().unwrap()["type"], "final");
     assert_eq!(read_one(&mut waiting).await["state"], "listening");
-}
-
-#[tokio::test]
-async fn idle_unload_exits_engine_child() {
-    let svc = Service::launch("", "idle_unload = \"1s\"", "");
-    let mut s = svc.start().await;
-    send_audio(&mut s, &[(true, 3)]).await;
-    send_json(&mut s, r#"{"type":"finish"}"#).await;
-    read_all(&mut s).await;
-    let pid = spawned_pids(&svc.logs())[0];
-    assert!(pid_alive(pid));
-    assert_eq!(svc.health().await["engine"], "warm");
-    svc.wait_log("kind=\"engine_unloaded\"", 1).await;
-    assert!(svc.logs().contains("reason=\"idle\""));
-    assert!(!pid_alive(pid), "дочерний процесс завершён, VRAM свободна");
-    assert_eq!(svc.health().await["engine"], "cold");
-
-    let mut s = svc.start().await;
-    assert_eq!(
-        read_one(&mut s).await["state"],
-        "loading",
-        "следующая диктовка грузит заново"
-    );
-    drop(s);
-    svc.wait_log("kind=\"engine_spawned\"", 2).await;
 }
 
 #[tokio::test]
@@ -504,7 +489,13 @@ async fn idle_unload_is_a_clean_exit_without_running_atexit_handlers() {
     send_audio(&mut s, &[(true, 3)]).await;
     send_json(&mut s, r#"{"type":"finish"}"#).await;
     assert_eq!(read_all(&mut s).await.last().unwrap()["type"], "final");
-    svc.wait_log("reason=\"idle\"", 1).await;
+    let pid = spawned_pids(&svc.logs())[0];
+    assert!(pid_alive(pid));
+    assert_eq!(svc.health().await["engine"], "warm");
+    svc.wait_log("kind=\"engine_unloaded\"", 1).await;
+    assert!(svc.logs().contains("reason=\"idle\""));
+    assert!(!pid_alive(pid), "дочерний процесс завершён, VRAM свободна");
+    assert_eq!(svc.health().await["engine"], "cold");
     let logs = svc.logs();
     assert!(
         logs.contains("kind=\"engine_unloaded\"") && logs.contains("status=0"),
@@ -514,4 +505,13 @@ async fn idle_unload_is_a_clean_exit_without_running_atexit_handlers() {
         !logs.contains(" WARN ") && !logs.contains(" ERROR "),
         "чистая выгрузка без предупреждений:\n{logs}"
     );
+
+    let mut s = svc.start().await;
+    assert_eq!(
+        read_one(&mut s).await["state"],
+        "loading",
+        "следующая диктовка грузит заново"
+    );
+    drop(s);
+    svc.wait_log("kind=\"engine_spawned\"", 2).await;
 }

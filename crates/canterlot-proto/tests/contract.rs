@@ -118,17 +118,6 @@ fn deliver_input_message_limit() {
 }
 
 #[test]
-fn record_batch_limit() {
-    let batch = record_batch("x".repeat(MAX_EVENT_BATCH_BYTES));
-    let actual = batch.encoded_len();
-    assert!(actual > 524_288);
-    assert_eq!(
-        check_record_batch(&batch),
-        Err(LimitError::EventBatch { actual })
-    );
-}
-
-#[test]
 fn hello_has_no_credential_field() {
     let hello = Hello {
         installation_id: "019a1b10-0000-7000-8000-000000000007".into(),

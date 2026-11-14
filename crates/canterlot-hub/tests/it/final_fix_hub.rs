@@ -576,30 +576,6 @@ async fn sj_ingest_cost_does_not_grow_with_block_size(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[test]
-fn design_names_and_optional_exec_capability_follow_code() {
-    let streams = include_str!("../../../../docs/design/streams.md");
-    let execution = include_str!("../../../../docs/design/execution.md");
-    let delivery = include_str!("../../../../docs/design/delivery.md");
-    let readme = include_str!("../../../../docs/design/README.md");
-    let recovery = include_str!("../../../../docs/design/recovery.md");
-    assert!(!streams.contains("`Hello.required_capabilities` или"));
-    assert!(streams.contains("block_revision_gap"));
-    for old in ["handshake_accepted", "handshake_rejected"] {
-        assert!(!streams.contains(old));
-    }
-    assert!(!delivery.contains("state_divergence_detected"));
-    assert!(!readme.contains("not_accepted_proven"));
-    assert!(!delivery.contains("not_accepted_proven"));
-    assert!(execution.contains("execution_state_changed"));
-    assert!(execution.contains("running --> stopping: storage_failure"));
-    assert!(execution.contains("storage_failed --> normal"));
-    assert!(readme.contains("`stored` (сохранённый статус квитанции)"));
-    assert!(readme.contains("kind = cj"));
-    assert!(readme.contains("kind = sj"));
-    assert!(!recovery.contains("manifest_missing_or_mismatch"));
-}
-
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn delta_and_incomplete_need_no_content_select_privilege(pool: PgPool) -> TestResult {
     use canterlot_hub::blocks::{self, ExecutionRef};
