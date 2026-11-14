@@ -9,6 +9,7 @@
   import { limitThresholds } from '#lib/stores/limitThresholds.svelte.js';
   import type { components } from '#lib/api/generated/openapi.js';
   import { clock } from '#lib/clock.js';
+  import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import UsageChart from './UsageChart.svelte';
@@ -26,7 +27,7 @@
   let usage = $state<components['schemas']['UsageDay'][]>([]);
   let speed = $state<components['schemas']['ModelSpeedSummary'][]>([]);
   let days = $state<string[]>([]); let zone = $state(''); let error = $state(''); let loading = $state(true);
-  const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
+  const now = $derived.by(() => { void ticker.second; return connectionStale.now(); });
   const weekly = $derived(providersWithWeekly(runtime?.list.limits ?? []));
   const groups = $derived(usageGroups(usageRows(usage, days.at(-1) ?? '', runtime?.list.items ?? new Map(), weekly)));
   const subtitle = $derived(limitsSubtitle(runtime?.list.limits ?? []));

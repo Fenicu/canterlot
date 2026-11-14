@@ -24,6 +24,7 @@
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { originLabel } from '#lib/timeline/origin.js';
   import { timeTip } from '#lib/ui/time-tip.js';
+  import { waitingForLink } from '#lib/sync/link.js';
 
   let { input, chat, agentWorking = false, highlight = false, bookmarks = null }: { input: InputView; chat: ChatStore; agentWorking?: boolean; highlight?: boolean; bookmarks?: ConversationBookmarks | null } = $props();
   let ask = $state<string | null>(null);
@@ -48,7 +49,8 @@
     { id: 'accepted', label: 'принято' },
     { id: 'working', label: 'агент работает' }
   ];
-  const label = $derived(deliveryLabel(input.state, agentWorking));
+  const offline = $derived(waitingForLink());
+  const label = $derived(deliveryLabel(input.state, agentWorking, offline));
   const index = $derived(deliveryIndex(input.state));
   // Дорожка нужна, только пока доставка идёт; в истории она превратилась бы в самый громкий повторяющийся элемент.
   const settled = $derived(
@@ -244,6 +246,9 @@
         </div>
       {/if}
     </div>
+  {/if}
+  {#if input.state === 'saving' && offline}
+    <p class="reason">отправлю, когда связь вернётся</p>
   {/if}
   {#if unsure}
     <p class="reason">Отправка не подтверждена, повторяю</p>

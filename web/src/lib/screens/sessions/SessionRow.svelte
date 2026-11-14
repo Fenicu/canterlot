@@ -145,6 +145,9 @@
   /* Хвост «модель · машина» забирает остаток и сжимается первым. */
   .who { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--secondary); text-overflow: ellipsis; }
   .activity[data-tone='accent'] .text { color: var(--accent-link); }
+  /* Связь пропала: живой акцент замирает вместе с часами, слово остаётся. */
+  :global([data-stale]) .activity[data-tone='accent'] .text { color: var(--muted); }
+  :global([data-stale]) .live { background: var(--muted); }
   .activity[data-tone='warning'] .text { color: var(--warning); }
   .activity[data-tone='danger'] .text { color: var(--danger); }
   .live { display: inline-block; width: var(--mark); height: var(--mark); margin-right: var(--s2); border-radius: var(--radius-round); background: var(--accent); vertical-align: middle; }

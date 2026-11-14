@@ -27,10 +27,11 @@ export function isLaunchResult(result: BlockModel | null): boolean {
 export function deliveryLabel(
   state: InputUiState,
   agentWorking = false,
+  waitingForLink = false,
 ): string {
   switch (state) {
     case "saving":
-      return "Сохраняется";
+      return waitingForLink ? "Ждёт связи" : "Сохраняется";
     case "queued":
       return "В очереди";
     case "dispatched":

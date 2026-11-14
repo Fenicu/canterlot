@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
-  import { clock } from '#lib/clock.js';
+  import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import { theme } from '#lib/theme.js';
   import TopBar from '#lib/ui/TopBar.svelte';
@@ -17,7 +17,7 @@
   let sentinel = $state<HTMLElement | null>(null);
   const now = $derived.by(() => {
     void ticker.second;
-    return clock.serverNow();
+    return connectionStale.now();
   });
 
   onMount(() => {

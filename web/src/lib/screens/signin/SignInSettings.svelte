@@ -3,7 +3,7 @@
   let { embedded = false }: { embedded?: boolean } = $props();
   import { onMount, type Component } from 'svelte';
   import { page } from '$app/state';
-  import { clock } from '#lib/clock.js';
+  import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import { fmt } from '#lib/format/ru.js';
   import { me } from '#lib/api/client.js';
@@ -49,7 +49,7 @@
   let Approve = $state<Component<{ secret: string }> | null>(null);
   let recovered = $state(page.url.searchParams.get('from') === 'recovery');
 
-  const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
+  const now = $derived.by(() => { void ticker.second; return connectionStale.now(); });
   const sessions = $derived(view?.sessions ?? []);
   const current = $derived(sessions.find((session) => session.current) ?? null);
   const others = $derived(sessions.filter((session) => !session.current));

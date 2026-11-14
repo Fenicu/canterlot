@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { onMount } from 'svelte';
-  import { clock } from '#lib/clock.js';
+  import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import ChatGone from '#lib/screens/chat/ChatGone.svelte';
   import ChatTrashed from '#lib/screens/chat/ChatTrashed.svelte';
@@ -13,7 +13,7 @@
   let error = $state('');
   const now = $derived.by(() => {
     void ticker.second;
-    return clock.serverNow();
+    return connectionStale.now();
   });
   const id = $derived(page.params.id ?? '');
 

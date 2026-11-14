@@ -2,6 +2,7 @@
   import { page } from '$app/state';
   import { announce } from '#lib/a11y/announce.js';
   import { durationMs, easing, fadeMs, prefersReducedMotion } from '#lib/motion.js';
+  import { fmt } from '#lib/format/ru.js';
   import type { ConnectionPhase } from '#lib/sync/connection.js';
   import type { ScopeStatus } from '#lib/sync/scope.js';
   import Button from '#lib/ui/Button.svelte';
@@ -12,6 +13,9 @@
     since,
     now,
     scope,
+    stale = false,
+    lastAt = 0,
+    ownSlot = false,
     update = 'idle',
     updateMessage = '',
     failure = '',
@@ -22,6 +26,11 @@
     since: number;
     now: number;
     scope: ScopeStatus;
+    /** Снимок старше пяти секунд: подпись говорит, на какое время он снят. */
+    stale?: boolean;
+    lastAt?: number;
+    /** Своя полоса в потоке: список отдаёт место баннеру, а не прячет под ним строки. */
+    ownSlot?: boolean;
     update?: string;
     updateMessage?: string;
     failure?: string;
@@ -94,7 +103,7 @@
   $effect(() => {
     const node = layer;
     void page.url.pathname;
-    if (!node || !view) return;
+    if (!node || !view || ownSlot) return;
     place(node);
     const region = node.parentElement!;
     const observer = new ResizeObserver(() => place(node));
@@ -115,7 +124,7 @@
   }
 </script>
 
-<div class="layer" bind:this={layer} style:--banner-top={offset === null ? undefined : `${offset}px`}>
+<div class="layer" class:ownSlot={ownSlot && !!view} bind:this={layer} style:--banner-top={offset === null ? undefined : `${offset}px`}>
   {#if view && shown}
     <div
       class="banner"
@@ -125,7 +134,7 @@
       transition:arrive
     >
       <Icon name={shown.tone === 'warning' || shown.tone === 'danger' ? 'warning' : 'info'} />
-      <p>{shown.text}</p>
+      <p>{shown.text}{#if stale && lastAt > 0}<span class="stamp">· данные на {fmt.clock(lastAt)}</span>{/if}</p>
       {#if shown.action}<Button onclick={shown.action.run}>{shown.action.label}</Button>{/if}
     </div>
   {/if}
@@ -134,6 +143,8 @@
 <style>
   /* Слой вне потока: он не занимает места, а касания мимо карточки проходят к экрану под ним. */
   .layer { position: absolute; z-index: 4; inset: var(--banner-top, calc(env(safe-area-inset-top) + var(--s4))) var(--s0) auto; display: flex; justify-content: center; padding-inline: max(var(--gutter), env(safe-area-inset-left)) max(var(--gutter), env(safe-area-inset-right)); pointer-events: none; }
+  /* Список: баннеру отдана своя полоса, поэтому первая секция не прячется под ним. */
+  .layer.ownSlot { position: static; inset: auto; z-index: auto; padding-block: var(--s2); }
   .banner { display: flex; align-items: center; gap: var(--s4); width: 100%; max-width: var(--reading-max); min-height: var(--target); padding: var(--s3) var(--s3) var(--s3) var(--s6); border-radius: var(--radius-card); background: var(--raised); color: var(--text); font-size: var(--fs-meta); pointer-events: auto; }
   [data-tone='warning'] { background: var(--warning-soft); }
   [data-tone='danger'] { background: var(--danger-soft); }
@@ -142,4 +153,5 @@
   [data-tone='danger'] :global(svg) { color: var(--danger); }
   [data-tone='success'] :global(svg) { color: var(--success); }
   p { flex: 1; min-width: 0; margin: 0; padding-block: var(--s2); overflow-wrap: anywhere; }
+  .stamp { margin-inline-start: var(--s2); }
 </style>

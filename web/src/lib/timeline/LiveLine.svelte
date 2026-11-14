@@ -87,4 +87,7 @@
   @media (prefers-reduced-motion: reduce) {
     .write i { animation: none; }
   }
+  /* Снимок без связи: движение пера и акцент гаснут, текст остаётся на месте. */
+  :global([data-stale]) .write { color: var(--muted); }
+  :global([data-stale]) .write i { animation: none; }
 </style>

@@ -5,7 +5,7 @@
   import { effortLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
   import { untilText } from '#lib/format/countdown.js';
-  import { clock } from '#lib/clock.js';
+  import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import { onMount } from 'svelte';
   import { asDecision, skippedText, type Considered, type ModelTitles, type RouteDecision } from '#lib/routing/decision.js';
@@ -30,7 +30,7 @@
   let guard = $state<Guard | null>(null);
   let refused = $state<{ candidates: Considered[]; reset: number | null } | null>(null);
   // Отсчёт до ближайшего сброса идёт по общему маятнику приложения.
-  const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
+  const now = $derived.by(() => { void ticker.second; return connectionStale.now(); });
   onMount(() => ticker.retain());
 
   $effect(() => {

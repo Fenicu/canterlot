@@ -9,6 +9,7 @@
   import { cancelInput } from '#lib/timeline/QueueActions.js';
   import { STEER_RETURNED_LABEL, editInput, editInputCaption, sendNow, sendNowCaption, steerLabel, steerSupported } from '#lib/timeline/QueueActions.js';
   import { dismissable } from '#lib/ui/dismiss.js';
+  import { waitingForLink } from '#lib/sync/link.js';
   import type { InputView } from '#lib/stores/inputs.js';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { turnIsLive } from '#lib/composer/sendRules.js';
@@ -145,6 +146,7 @@
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
   const canSteer = $derived(steerSupported(harnessId));
   const steerText = $derived(steerLabel(harnessId));
+  const offline = $derived(waitingForLink());
   let sending = $state<Record<string, boolean>>({});
   let steerNotes = $state<Record<string, string | null>>({});
   let steered = $state<Record<string, boolean>>({});
@@ -230,7 +232,7 @@
     {@const op = getRuntime().journal.ops.get(input.key)}
     <div class="item" data-state={input.state}>
       <span class="pill">
-        <span class="label accent">{deliveryLabel(input.state)}</span>
+        <span class="label accent">{input.state === 'saving' && offline ? 'Ждёт связи' : deliveryLabel(input.state)}</span>
         <span class="text" title={input.text}>{input.text}</span>
         {#if input.state === 'queued' && input.id && turnLive && canSteer}
           <button
@@ -288,6 +290,7 @@
       {#if cancelNotes[input.key]}<p class="note" role="alert">{cancelNotes[input.key]}</p>{/if}
       {#if input.cancelRequested}<p class="note">{CANCEL_REQUESTED_LABEL}</p>{/if}
       {#if input.revision > 1}<p class="note">Изменено</p>{/if}
+      {#if input.state === 'saving' && offline}<p class="note">отправлю, когда связь вернётся</p>{/if}
       {#if editClosed[input.key] && !editing[input.key] && input.state === 'queued'}<p class="note">{editClosed[input.key]}</p>{/if}
       {#if editing[input.key]}
         <div data-unsaved-edit><Textarea label="Текст сообщения" id="strip-edit-{input.key}" bind:value={editTexts[input.key]} /></div>
@@ -417,6 +420,7 @@
   .failed { background: var(--danger-soft); }
   .label { flex: none; color: var(--secondary); }
   .label.accent { color: var(--accent-link); }
+  :global([data-stale]) .label.accent { color: var(--muted); }
   .label.danger { color: var(--danger); }
   .text { flex: 1 1 12ch; min-width: 0; display: -webkit-box; overflow: hidden; color: var(--text); text-overflow: clip; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   .pill :global(button) { color: var(--secondary); }

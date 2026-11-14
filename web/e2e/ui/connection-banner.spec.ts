@@ -53,24 +53,29 @@ const banner = (page: Page) => page.locator('[data-banner]');
 const arrived = (page: Page) =>
   banner(page).evaluate((card) => Promise.all(card.getAnimations().map((animation) => animation.finished)).then(() => undefined));
 
-async function cutAndRestore(page: Page, hub: FakeHub, targets: Locator[]) {
-  const before = await settled(page, targets);
+test('connection_banner_gets_its_own_row_above_the_sessions_list', async ({ page }, testInfo) => {
+  const phone = testInfo.project.name === 'phone';
+  const { hub } = await boot(page);
+  const list = page.locator('[data-list-scroll]');
   hub.acceptConnections = false;
   hub.chaos.cut();
   await expect(banner(page)).toContainText('Нет связи. Переподключаюсь…', { timeout: 8_000 });
-  expect(await positions(targets)).toEqual(before);
+  await arrived(page);
+  const card = (await banner(page).boundingBox())!;
+  if (phone) {
+    // Баннер не лежит поверх списка: он занимает свою полосу над ним,
+    // поэтому первая секция и её заголовок остаются видны.
+    const scroller = (await list.boundingBox())!;
+    expect(card.y + card.height).toBeLessThanOrEqual(scroller.y + 1);
+    expect(await banner(page).evaluate((node) => getComputedStyle(node.parentElement!).position)).toBe('static');
+  } else {
+    // Стол: баннер стоит в панели чата, списка он не касается.
+    const pane = (await page.locator('[data-pane="list"]').boundingBox())!;
+    expect(card.x).toBeGreaterThanOrEqual(pane.x + pane.width - 1);
+  }
   hub.acceptConnections = true;
   await expect(banner(page)).toContainText('Связь восстановлена', { timeout: 20_000 });
-  expect(await positions(targets)).toEqual(before);
   await expect(banner(page)).toHaveCount(0, { timeout: 5_000 });
-  expect(await positions(targets)).toEqual(before);
-}
-
-test('connection_banner_floats_over_the_sessions_list_without_moving_it', async ({ page }) => {
-  const { hub } = await boot(page);
-  const list = page.locator('[data-list-scroll]');
-  const row = page.locator('[data-list-scroll] a').first();
-  await cutAndRestore(page, hub, [list, row]);
 });
 
 test('connection_banner_floats_over_a_chat_and_keeps_the_header_free', async ({ page }) => {
@@ -98,7 +103,8 @@ test('connection_banner_floats_over_a_chat_and_keeps_the_header_free', async ({ 
 });
 
 test('connection_banner_lets_taps_through_outside_the_card', async ({ page }) => {
-  const { hub } = await boot(page);
+  const { hub, api, ids } = await boot(page);
+  await openChat(page, api, ids.pinned);
   hub.acceptConnections = false;
   hub.chaos.cut();
   await expect(banner(page)).toContainText('Нет связи. Переподключаюсь…', { timeout: 8_000 });
@@ -136,8 +142,6 @@ test('connection_banner_action_still_runs_from_the_overlay', async ({ page }) =>
 test('connection_banner_appears_without_a_slide_when_motion_is_reduced', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const { hub } = await boot(page);
-  const list = page.locator('[data-list-scroll]');
-  const [before] = await settled(page, [list]);
   hub.acceptConnections = false;
   hub.chaos.cut();
   await expect(banner(page)).toContainText('Нет связи. Переподключаюсь…', { timeout: 8_000 });
@@ -153,9 +157,7 @@ test('connection_banner_appears_without_a_slide_when_motion_is_reduced', async (
     step();
   }));
   expect(shifts.every((value) => value === 'none')).toBe(true);
-  expect(await top(list)).toBe(before);
   hub.acceptConnections = true;
   await expect(banner(page)).toContainText('Связь восстановлена', { timeout: 20_000 });
   await expect(banner(page)).toHaveCount(0, { timeout: 5_000 });
-  expect(await top(list)).toBe(before);
 });

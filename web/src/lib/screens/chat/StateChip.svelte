@@ -72,4 +72,7 @@
 		display: inline-block;
 		flex-shrink: 0;
 	}
+	/* Без связи «работает» — это снимок: акцент и точка гаснут, слово остаётся. */
+	:global([data-stale]) .state-chip.tone-accent { color: var(--muted); }
+	:global([data-stale]) .live-dot { background: var(--muted); }
 </style>

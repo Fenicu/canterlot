@@ -18,7 +18,7 @@
   import { errorText } from '#lib/api/errors.js';
   import { loadConfig } from '#lib/api/config.js';
   import type { Runtime } from '#lib/app/runtime.js';
-  import { clock } from '#lib/clock.js';
+  import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import { browserRuntime } from '#lib/app/browser.js';
   import Icon from '#lib/ui/Icon.svelte';
@@ -101,7 +101,7 @@
   let trashRequest = 0;
   const now = $derived.by(() => {
     void ticker.second;
-    return clock.serverNow();
+    return connectionStale.now();
   });
 
   async function reloadApp() {

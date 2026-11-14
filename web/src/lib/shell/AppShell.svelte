@@ -2,6 +2,7 @@
   import { page, updated } from '$app/state';
   import { version as appVersion } from '$app/env';
   import { clock } from '#lib/clock.js';
+  import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import { browserRuntime } from '#lib/app/browser.js';
   import type { ChatLease } from '#lib/screens/chat/open.js';
@@ -145,9 +146,25 @@
   const onNew = $derived(path === '/new');
   const harness = $derived(path.startsWith('/__test'));
   const nav = $derived(path.startsWith('/machines') ? 'machines' : path.startsWith('/limits') ? 'limits' : path.startsWith('/presets') ? 'presets' : path.startsWith('/settings') ? 'settings' : 'sessions');
-  const now = $derived.by(() => {
+  // Баннер говорит про связь, а не про данные: его собственные часы не замирают.
+  const wallNow = $derived.by(() => {
     void ticker.second;
     return clock.serverNow();
+  });
+
+  // Баннер связи уже виден пять секунд — картина замирает, пока связь не вернётся.
+  $effect(() => {
+    const status = runtime?.connection.status;
+    if (!status) return;
+    void status.phase;
+    void status.since;
+    void runtime?.list.status;
+    void ticker.second;
+    connectionStale.update(
+      status.phase === 'offline' ||
+        (status.phase === 'reconnecting' && clock.serverNow() - status.since >= 3000) ||
+        runtime?.list.status === 'degraded'
+    );
   });
 
   onMount(() => {
@@ -265,13 +282,16 @@
   });
 </script>
 
-<div class="shell" data-layout={laidOut ? mode : undefined} data-harness={harness ? '' : undefined}>
-  {#snippet banner()}
+<div class="shell" data-layout={laidOut ? mode : undefined} data-harness={harness ? '' : undefined} data-stale={connectionStale.stale ? '' : undefined}>
+  {#snippet banner(ownSlot = false)}
     <ConnectionBanner
       phase={runtime?.connection.status.phase ?? 'connecting'}
       since={runtime?.connection.status.since ?? 0}
-      now={now}
+      now={wallNow}
       scope={runtime?.list.status ?? 'idle'}
+      stale={connectionStale.stale}
+      lastAt={runtime?.connection.status.lastFrameAt ?? 0}
+      {ownSlot}
       update={updateState}
       updateMessage={updateMessage}
       failure={updateError}
@@ -285,9 +305,11 @@
     {@render banner()}
     <div class="page">{@render children()}</div>
   {:else if laidOut && mode === 'phone'}
-    {@render banner()}
     {#if onSessions || onNew}
+      {@render banner(true)}
       <SessionList main={onSessions} />
+    {:else}
+      {@render banner()}
     {/if}
 
     {#if !onSessions}

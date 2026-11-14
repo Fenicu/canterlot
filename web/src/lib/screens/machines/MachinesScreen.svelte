@@ -5,6 +5,7 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { loadConfig } from '#lib/api/config.js';
   import { clock } from '#lib/clock.js';
+  import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import { fmt } from '#lib/format/ru.js';
   import { modelLabel } from '#lib/format/labels.js';
@@ -17,7 +18,7 @@
 
   let runtime = $state<Runtime | null>(null);
   let selected = $state(''); let error = $state('');
-  const now = $derived.by(() => { void ticker.second; return clock.serverNow(); });
+  const now = $derived.by(() => { void ticker.second; return connectionStale.now(); });
   let config = $state({ disk_warn_pct: 85, disk_warn_free_gb: 30, disk_critical_free_gb: 10, metrics_stale_after_secs: 90 });
   const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
   $effect(() => { if (!machines.some(m => m.id === selected)) selected = machines[0]?.id ?? ''; });
