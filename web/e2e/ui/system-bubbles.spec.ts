@@ -142,6 +142,10 @@ test('a_session_message_is_an_agent_bubble_with_a_bookmark_and_no_edit', async (
   await expect(message).toContainText('Sonnet 5');
   await expect(message).not.toContainText('[canterlot]');
   await expect(message).toContainText('Проверь миграцию');
+  await expect(message.locator('strong')).toHaveText('миграцию');
+  await expect(message.locator('p code')).toHaveText('индексы');
+  // Короткое сообщение не сворачивается: кнопка появляется только при переполнении высоты.
+  await expect(message.getByRole('button', { name: 'Показать полностью' })).toHaveCount(0);
   await expect(message.getByRole('link', { name: 'Сессия «Сборка»' })).toHaveAttribute('href', `/c/${child}`);
   await expect(message.getByRole('button', { name: 'Изменить' })).toHaveCount(0);
   const bookmark = message.getByRole('button', { name: 'В избранное' });
@@ -157,17 +161,40 @@ test('a_session_message_is_an_agent_bubble_with_a_bookmark_and_no_edit', async (
   await expect(page.locator('article.bubble').filter({ hasText: 'Моё сообщение' })).toBeVisible();
 });
 
-test('a_spawn_brief_shows_twelve_lines_then_expands', async ({ page }) => {
+test('a_spawn_brief_renders_markdown_and_folds_by_height', async ({ page }) => {
   await boot(page, 'message');
   const brief = page.locator('[data-role="session-message"][data-origin="spawn"]');
   await brief.scrollIntoViewIfNeeded();
   await expect(brief).toContainText('Задание от сессии «Оркестратор»');
-  await expect(brief).toContainText('Шаг 12');
-  await expect(brief).not.toContainText('Шаг 13');
-  await brief.getByRole('button', { name: 'Показать полностью' }).click();
-  await expect(brief).toContainText('Шаг 18');
+  // Разметка брифа — та же, что у ответа агента, а не сырой markdown.
+  await expect(brief.locator('h2')).toHaveText('Goal');
+  await expect(brief.locator('strong')).toHaveText('Your area:');
+  await expect(brief.locator('p code').first()).toHaveText('timeline');
+  await expect(brief.locator('li')).toHaveCount(2);
+  await expect(brief).not.toContainText('## Goal');
+  await expect(brief).not.toContainText('**Your area:**');
+
+  const body = brief.locator('.body');
+  const pre = brief.locator('pre');
+  const toggle = brief.getByRole('button', { name: 'Показать полностью' });
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(pre).toContainText('Шаг 18');
+  // Забор не разрезан: блок кода один, прячет его высота тела карточки.
+  await expect(pre).toHaveCount(1);
+  const foldedBox = (await body.boundingBox())!;
+  const foldedPre = (await pre.boundingBox())!;
+  expect(foldedPre.y + foldedPre.height).toBeGreaterThan(foldedBox.y + foldedBox.height);
+
+  await toggle.click();
+  await expect(brief.getByRole('button', { name: 'Свернуть' })).toHaveAttribute('aria-expanded', 'true');
+  const expandedBox = (await body.boundingBox())!;
+  const expandedPre = (await pre.boundingBox())!;
+  expect(expandedBox.height).toBeGreaterThan(foldedBox.height);
+  expect(expandedPre.y + expandedPre.height).toBeLessThanOrEqual(expandedBox.y + expandedBox.height + 1);
+
   await brief.getByRole('button', { name: 'Свернуть' }).click();
-  await expect(brief).not.toContainText('Шаг 13');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  expect((await body.boundingBox())!.height).toBeLessThanOrEqual(foldedBox.height + 1);
 });
 
 test('the_service_bubbles_do_not_overflow_320_and_412_and_have_distinct_names', async ({ page }) => {

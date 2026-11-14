@@ -2,6 +2,9 @@
   import { resolve } from '$app/paths';
   import { fmt } from '#lib/format/ru.js';
   import type { ConversationBookmarks } from '#lib/bookmarks/store.svelte.js';
+  import { highlightWithin } from '#lib/render/highlight.js';
+  import Html from '#lib/render/Html.svelte';
+  import { sharedMarkdown } from '#lib/render/markdown.js';
   import type { InputView } from '#lib/stores/inputs.js';
   import { sessionMessageView } from '#lib/timeline/system.js';
   import IconButton from '#lib/ui/IconButton.svelte';
@@ -16,8 +19,36 @@
   } = $props();
 
   const view = $derived(sessionMessageView(input.origin, input.text));
+  // Текст чужой сессии статичен: разбор идёт один раз, без потока и проявления.
+  const html = $derived(view ? sharedMarkdown.render(view.body) : '');
   let expanded = $state(false);
+  let overflowing = $state(false);
+  let host = $state<HTMLDivElement>();
   const bookmarked = $derived(input.id !== null && bookmarks?.has('input', input.id) === true);
+  const folded = $derived(view?.foldable === true && !expanded);
+
+  // Подсветка кода — та же, что у готового ответа агента.
+  $effect(() => {
+    const node = host;
+    void html;
+    if (!node) return;
+    return highlightWithin(node);
+  });
+
+  // Свёрнутое тело обрезано по высоте: кнопка нужна, только если текст в него не влез.
+  $effect(() => {
+    const node = host;
+    if (!node || !folded) return;
+    void html;
+    const measure = () => {
+      overflowing = node.scrollHeight > node.clientHeight + 1;
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  });
 </script>
 
 {#if view}
@@ -46,8 +77,10 @@
         </div>
       {/if}
     </header>
-    <p class="text">{view.folded && !expanded ? view.folded : view.body}</p>
-    {#if view.folded}
+    <div class="body prose" class:folded class:faded={folded && overflowing} bind:this={host}>
+      <Html html={html} />
+    </div>
+    {#if view.foldable && overflowing}
       <button type="button" class="toggle" aria-expanded={expanded} onclick={() => { expanded = !expanded; }}>
         {expanded ? 'Свернуть' : 'Показать полностью'}
       </button>
@@ -84,7 +117,12 @@
   .title[href]:hover, .title[href]:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
   .model { color: var(--secondary); font-size: var(--fs-sm); }
   time { margin-left: auto; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
-  .text { margin: 0; color: var(--text); overflow-wrap: anywhere; white-space: pre-wrap; }
+  .body { min-width: 0; color: var(--text); }
+  /* Свёрнутый бриф — двенадцать строк тела; заборы кода и списки режет высота, а не текст. */
+  .body.folded { max-height: calc(var(--fs-body) * var(--lh-body) * 12); overflow: hidden; }
+  .body.faded { mask-image: linear-gradient(to bottom, var(--text) calc(100% - var(--s10)), var(--transparent)); }
+  /* Карточка компактнее ответа агента: заголовки не крупнее её названия. */
+  .body :global(:is(h1, h2, h3, h4, h5, h6)) { margin-block: var(--s5) var(--s2); font-size: var(--fs-body); }
   .toggle { align-self: flex-start; min-height: var(--target); padding-inline: var(--s2); color: var(--accent-link); font-size: var(--fs-sm); }
   /* Закладка стоит в строке заголовка: цель касания та же, высота строки не растёт. */
   .actions { display: flex; align-self: center; margin-left: var(--s2); margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2); }

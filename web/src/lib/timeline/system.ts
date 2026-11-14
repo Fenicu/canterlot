@@ -34,8 +34,8 @@ export type SessionMessageView = {
   model: string | null;
   href: string | null;
   body: string;
-  /** Бриф запуска длиннее двенадцати строк: сначала показывается начало. */
-  folded: string | null;
+  /** Бриф запуска сворачивается по высоте: тело бывает длинным. */
+  foldable: boolean;
 };
 
 type CompactCondition = {
@@ -369,12 +369,6 @@ function withoutServiceHeader(text: string): string {
   return head?.startsWith('[canterlot]') && rest.length > 0 ? rest.join('\n\n') : text;
 }
 
-function firstLines(text: string, count: number): string | null {
-  const lines = text.split('\n');
-  if (lines.length <= count) return null;
-  return `${lines.slice(0, count).join('\n')}\n…`;
-}
-
 /** Сообщение или бриф от другой сессии: заголовок, модель, ссылка и тело. */
 export function sessionMessageView(
   origin: InputOrigin | null | undefined,
@@ -397,6 +391,6 @@ export function sessionMessageView(
     model: deleted ? null : origin.model?.trim() ? modelLabel(origin.model.trim()) : null,
     href: deleted || !origin.from ? null : `/c/${origin.from}`,
     body,
-    folded: origin.kind === 'spawn' ? firstLines(body, 12) : null
+    foldable: origin.kind === 'spawn'
   };
 }

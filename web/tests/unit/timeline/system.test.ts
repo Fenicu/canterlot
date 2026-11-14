@@ -407,11 +407,11 @@ describe('timeline/system session message', () => {
       model: 'Sonnet 5',
       href: '/c/p1',
       body: 'Сделай миграцию',
-      folded: null
+      foldable: false
     });
   });
 
-  it('a brief shows twelve lines first and keeps the whole body', () => {
+  it('a spawn brief keeps the whole body and is folded by height', () => {
     const lines = Array.from({ length: 20 }, (_, index) => `строка ${index + 1}`).join('\n');
     const view = sessionMessageView(
       origin({ kind: 'spawn', from: 'p1', title: 'Оркестратор', model: 'opus', chain_depth: 0 }),
@@ -419,9 +419,7 @@ describe('timeline/system session message', () => {
     );
     expect(view?.title).toBe('Задание от сессии «Оркестратор»');
     expect(view?.body).toBe(lines);
-    expect(view?.folded?.split('\n')).toHaveLength(13);
-    expect(view?.folded).toContain('строка 12');
-    expect(view?.folded).not.toContain('строка 13');
+    expect(view?.foldable).toBe(true);
   });
 
   it('a deleted sender loses the link and the model', () => {
@@ -435,7 +433,7 @@ describe('timeline/system session message', () => {
       model: null,
       href: null,
       body: 'текст',
-      folded: null
+      foldable: false
     });
   });
 

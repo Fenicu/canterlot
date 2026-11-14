@@ -324,7 +324,7 @@ export function seedSystemBubbles(
       17,
       '[canterlot] Message from session "Сборка" (id ' +
         child +
-        ', claude_code, model sonnet-5). This is another agent, not the owner.\n\nПроверь миграцию и не забудь про индексы.',
+        ', claude_code, model sonnet-5). This is another agent, not the owner.\n\nПроверь **миграцию** и `индексы`.',
       {
         kind: 'message',
         from: child,
@@ -339,7 +339,14 @@ export function seedSystemBubbles(
       api,
       18,
       `[canterlot] You were started by session "Оркестратор" (id ${conversationId}, claude_code, model opus). Your final message goes back to it. It is an agent, not the owner.\n\n` +
-        Array.from({ length: 18 }, (_, index) => `Шаг ${index + 1}: проверь и закоммить.`).join('\n'),
+        '## Goal\n\n' +
+        '**Your area:** the `timeline` cards.\n\n' +
+        'Требования:\n\n' +
+        '- первый пункт\n' +
+        '- второй пункт\n\n' +
+        '```ts\n' +
+        Array.from({ length: 18 }, (_, index) => `Шаг ${index + 1}: проверь и закоммить.`).join('\n') +
+        '\n```',
       {
         kind: 'spawn',
         from: conversationId,
