@@ -46,6 +46,9 @@ fi
 #   Воркер ниже этого релиза не стартует с [execution].delegate_mcp_servers.
 # - PWA идёт после доказанно живого воркера; её ошибки мягкие всегда: записать,
 #   вернуть предыдущий build, продолжить; воркер ради неё не гасится никогда.
+# - Новый воркер доказанно жив (подключился к новому хабу): только вперёд. В блоке
+#   STOP обычный шаг — только возврат PWA; откат хаба, базы или воркера — лишь
+#   «reviewed recovery, causes state_divergence» (журналы могли уйти дальше дампа).
 # - Диктовка (canterlot-speech) мягкая всегда: после старта воркера юнит
 #   перезапускается (не дольше SPEECH_RESTART_TIMEOUT) или, если в релизе нет
 #   бинаря, останавливается и выключается; итог только в отчёте, токен и откат
@@ -751,8 +754,20 @@ report_block() {
     hub_unres_cmd="$(ssh_cmd_text "${HUB_SSH}" "$(locked_cmd_text "${HUB_BASE}/.deploy.lock" "${UNRESERVE_SCRIPT}" "${HUB_BASE}" "${SHA}" "${PREV_HUB_SHA}")")"
     web_unres_cmd="$(ssh_cmd_text "${WEB_SSH}" "$(locked_cmd_text "${WEB_SITES_BASE}/.deploy.lock" "${UNRESERVE_SCRIPT}" "${WEB_SITES_BASE}" "${SHA}" "${PREV_WEB_SHA}")")"
     worker_unres_cmd="$(locked_cmd_text "${WORKER_BASE}/.deploy.lock" "${UNRESERVE_SCRIPT}" "${WORKER_BASE}" "${SHA}" "${PREV_WORKER_SHA}")"
+    # Таблица восстановления — по записанным фактам: до flip хаба только воркер; хаб
+    # переключён, новый воркер не доказан — полная таблица; новый воркер жив — только вперёд.
+    local stage="post-flip"
+    if [ "${WORKER_PROVEN}" = "1" ]; then
+        stage="worker-live"
+    elif [ "${HUB_FLIP_STARTED}" = "0" ] && [ "${HUB_FLIPPED}" = "0" ]; then
+        stage="pre-flip"
+    fi
+    case "${stage}" in
+        pre-flip) printf 'STOP BEFORE THE HUB FLIP (phase %s): hub and database untouched; recovery by the script: %s.\n' "${PHASE}" "${RESULT_RECOVERY:-none}" ;;
+        worker-live) printf 'STOP-AND-REPORT (phase %s): automation halted; the new worker is live on %s, so recovery is forward-only.\n' "${PHASE}" "${SHA}" ;;
+        *) printf 'STOP-AND-REPORT (phase %s): automation halted, nothing else will be touched.\n' "${PHASE}" ;;
+    esac
     cat <<EOF
-STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touched.
   facts: $(facts_line)
   live state:
     hub current        = ${hub_link} (was ${PREV_HUB_SHA} before this run)
@@ -764,6 +779,39 @@ STOP-AND-REPORT (phase ${PHASE}): automation halted, nothing else will be touche
     speech unit        = ${SPEECH_UNIT}: ${speech_now} (dictation only, never blocks recovery)
     this run's dump   = ${HUB_BACKUP_DIR}/${RUN_DUMP} (quiesced after the worker stop, verified readable before the hub flip: $(yn "${DUMP_VERIFIED}"))
     this run's vzdump = notes pre-${SHA}-${RUN_TS}${VZ_ARCHIVE:+, archive ${VZ_ARCHIVE}} (whole CT, taken earlier, while the worker still ran)
+EOF
+    case "${stage}" in
+        pre-flip)
+            cat <<EOF
+  manual steps: no hub or database step (the hub was never flipped; the database is the one the old hub runs on).
+    1. only when the recovery above is needs_owner: put the worker back on its previous release ${PREV_WORKER_SHA}
+       (under the host lock), then start it:
+         ${worker_back_cmd}
+         systemctl --user start ${WORKER_UNIT}
+    2. if .reserved.* markers remain on a host, release this run's reservations:
+         ${hub_unres_cmd}
+         ${web_unres_cmd}
+         ${worker_unres_cmd}
+EOF
+            return 0 ;;
+        worker-live)
+            cat <<EOF
+  the new worker has connected to the new hub: only forward fixes remain. Its journals may already be past
+  this run's dump, and an older hub is not guaranteed to accept them (it stops on VersionMissing).
+  ordinary steps (run by hand, each takes the host lock):
+    1. PWA broken: restore the previous web build (PWA only; hub and worker keep running): build back, env back, one recreate:
+         ${web_back_cmd}
+    2. when everything is resolved, release this run's reservations:
+         ${hub_unres_cmd}
+         ${web_unres_cmd}
+         ${worker_unres_cmd}
+  hub flip back, DB restore from this run's dump or a worker downgrade: reviewed recovery, causes state_divergence.
+  Never an ordinary step: decide it with the owner first (docs/deploy/pilot.md §11, recovery by facts); the
+  prerequisites of an old hub (Caddy auth block, hub.toml keys, sign-in pushes, [dictation]) are listed there.
+EOF
+            return 0 ;;
+    esac
+    cat <<EOF
   manual recovery (Task 12 rollback table — run by hand, in this order).
   Every flip below takes the same host lock as cutover and retention, and re-checks
   the target release inside it:
@@ -813,7 +861,9 @@ recover_before_hub_flip() {
         log "STOP before hub flip (phase ${PHASE}): nothing was stopped or flipped (vzdump done: $(yn "${VZDUMP_DONE}")); worker ${WORKER_UNIT}, hub and DB untouched"
         release_reservations
         RESULT_RECOVERY="nothing_to_recover"
-        if [ "${VZDUMP_STARTED}" = "0" ]; then write_result refused 1; else write_result failed_before_flip 1; fi
+        if [ "${VZDUMP_STARTED}" = "0" ]; then write_result refused 1; exit 1; fi
+        report_and_stop
+        write_result failed_before_flip 1
         exit 1
     fi
     log "STOP before hub flip (phase ${PHASE}): hub and DB untouched, restarting worker"
@@ -822,6 +872,7 @@ recover_before_hub_flip() {
         log "worker current is ${PREV_LINK}, expected previous release ${PREV_WORKER_SHA}: NOT starting it"
         release_reservations
         RESULT_RECOVERY="needs_owner"
+        report_and_stop
         write_result failed_before_flip 1
         exit 1
     fi
@@ -848,6 +899,7 @@ recover_before_hub_flip() {
         log "worker was not active before the run; left stopped"
     fi
     release_reservations
+    report_and_stop
     write_result failed_before_flip 1
     exit 1
 }
@@ -922,7 +974,7 @@ on_end() {
         # Хаб, воркер и PWA остаются как есть, retention пропускается; сбой или
         # сигнал в шаге PWA тоже сюда: PWA идёт после доказанного воркера.
         if [ "${PHASE}" = "pwa" ]; then
-            log "stopped during the PWA step after the worker was verified live on ${SHA}: hub and worker keep running; the PWA state is below (row 3 restores the previous build); retention skipped"
+            log "stopped during the PWA step after the worker was verified live on ${SHA}: hub and worker keep running; the PWA state is below (step 1 restores the previous build, PWA only); retention skipped"
         else
             log "failure after the worker was verified live on ${SHA}: leaving hub, PWA and worker running (retention skipped)"
         fi
@@ -1456,16 +1508,16 @@ SOFT_NOW="$(soft_total)"
 log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s (worker stop -> live), hub interruption ${HUB_INTERRUPTION}s, soft failures ${SOFT_NOW}, speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
 owner_checklist
 cat <<EOF
-update note: the worker has connected to the new hub, so only forward fixes remain;
-an old hub stops on VersionMissing and a DB restore now causes state_divergence.
-hub back to a release without own sign-in (1.29 and older): restore the Caddy auth block first, remove [auth]
-and [http.ws].session_check_interval from hub.toml, cancel pending sign-in pushes (row 0 of the rollback table).
-worker back below this release: remove [execution].delegate_mcp_servers from worker.toml first.
-hub back below the dictation release: remove [dictation] from hub.toml first; after any hub flip back restart
-${SPEECH_UNIT}, or stop and disable it when that release has no bin/canterlot-speech (rollback-db.sh does it).
-restore points: ${RUN_DUMP} in ${HUB_BACKUP_DIR} (quiesced, verified: the one for a DB restore), vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS} (earlier, taken while the worker ran).
-PWA alone: build to releases/${PREV_WEB_SHA}, ${WEB_ENV}.${PREV_WEB_SHA}, one recreate.
-worker alone: flip current to ${PREV_WORKER_SHA}, restart (never below a live supervisor release).
+update note: the worker has connected to the new hub: forward-only. Its journals may already be past this run's
+dump, and an older hub stops on VersionMissing.
+PWA alone: restore the previous web build: build to releases/${PREV_WEB_SHA}, ${WEB_ENV}.${PREV_WEB_SHA}, one recreate.
+hub flip back, DB restore or worker downgrade: reviewed recovery, causes state_divergence; never an ordinary step.
+  If the owner decides on it after review: a hub without own sign-in (1.29 and older) needs the Caddy auth block
+  first, [auth] and [http.ws].session_check_interval out of hub.toml and pending sign-in pushes cancelled; a hub
+  below the dictation release needs [dictation] out of hub.toml, then ${SPEECH_UNIT} restarted, or stopped and
+  disabled when that release has no bin/canterlot-speech (rollback-db.sh does it); a worker below this release
+  needs [execution].delegate_mcp_servers out of worker.toml and never goes below a live supervisor release.
+restore points (reviewed recovery only): ${RUN_DUMP} in ${HUB_BACKUP_DIR} (quiesced, verified), vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS} (earlier, taken while the worker ran).
 
 === section template (paste into .superpowers/deploy/pilot-deploy-log.md; the script does not commit) ===
 ## Update to X.Y.Z (\`${SHA}\`), <N> live executions, DD.MM, HH:MM-HH:MM UTC

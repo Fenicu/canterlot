@@ -265,7 +265,11 @@ append_journal() {
                 "$(kv "$cr" speech_soft_failures)" "$(kv "$cr" worker_downtime_s)" "$(kv "$cr" hub_interruption_s)"
             [[ -z $(kv "$cr" dump) ]] || printf -- '- restore points: dump `%s`, vzdump `%s` notes `%s`\n' \
                 "$(kv "$cr" dump)" "$(kv "$cr" vzdump_archive)" "$(kv "$cr" vzdump_notes)"
-            [[ -z $(kv "$cr" stop_block) ]] || printf -- '- STOP block: `%s` (paste it here, call the owner)\n' "$(kv "$cr" stop_block)"
+            if [[ -n $(kv "$cr" stop_block) && $(kv "$cr" status) == stop_and_report ]]; then
+                printf -- '- STOP block: `%s` (paste it here, call the owner)\n' "$(kv "$cr" stop_block)"
+            elif [[ -n $(kv "$cr" stop_block) ]]; then
+                printf -- '- recovery report before the hub flip: `%s` (paste it here)\n' "$(kv "$cr" stop_block)"
+            fi
             [[ -z $(kv "$cr" recovery) ]] || printf -- '- recovery before the hub flip: %s\n' "$(kv "$cr" recovery)"
         fi
         printf '\n### Logs\n'

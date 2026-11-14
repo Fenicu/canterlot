@@ -182,5 +182,78 @@ assert_proc_alive "${NEWSUP}" "the new session survived the cutover"
 teardown_case
 case_end
 
+# --- блок STOP строится по фактам: до flip хаба, хаб переключён, новый воркер жив ---
+stop_block_of() { result_of "$(R_FILE)" stop_block; }
+
+case_begin "STOP block before the hub flip: pre-flip recovery only"
+setup_cutover facts-preflip
+run_cutover_bg
+wait_for_log "${FAKE_ROOT}/state/calls.log" "stop canterlot-worker" || case_fail "no stop call"
+kill -INT -- "-${CUTOVER_PID}" || case_fail "kill failed"
+rc=0; wait "${CUTOVER_PID}" || rc=$?
+[ "${rc}" = "1" ] && case_ok "exit 1" || case_fail "exit ${rc}"
+B="$(stop_block_of)"
+[ -n "${B}" ] && [ -f "${B}" ] && case_ok "result file: a STOP block file" || case_fail "result file: no STOP block [${B}]"
+assert_contains "${B}" "STOP BEFORE THE HUB FLIP" "block: pre-flip header"
+assert_contains "${B}" "recovery by the script: worker_restarted" "block: the recovery the script did"
+assert_contains "${B}" "no hub or database step" "block: no hub or DB step"
+assert_not_contains "${B}" "rollback-db.sh" "block: no DB restore"
+assert_not_contains "${B}" "hub broken" "block: no hub rows"
+assert_not_contains "${FAKE_ROOT}/cutover.log" "STOP-AND-REPORT" "no post-flip report on the early path"
+teardown_case
+case_end
+
+case_begin "STOP block after the hub flip, new worker not proven: today's recovery table"
+setup_cutover facts-hubflipped
+export FAKE_SYSTEMCTL_START_DELAY=3
+run_cutover_bg
+wait_for_log "${FAKE_ROOT}/cutover.log" "hub restarted once" || case_fail "no restart marker"
+kill -INT -- "-${CUTOVER_PID}" || case_fail "kill failed"
+rc=0; wait "${CUTOVER_PID}" || rc=$?
+unset FAKE_SYSTEMCTL_START_DELAY
+[ "${rc}" = "1" ] && case_ok "exit 1" || case_fail "exit ${rc}"
+B="$(stop_block_of)"
+assert_eq "$(result_of "$(R_FILE)" hub_flipped)/$(result_of "$(R_FILE)" worker_live)" "yes/no" "facts: hub flipped, worker not live"
+assert_contains "${B}" "STOP-AND-REPORT (phase" "block: post-flip header"
+assert_contains "${B}" "1. hub broken, no new migration (flip back + one restart)" "block: hub flip back row"
+assert_contains "${B}" "scripts/deploy/rollback-db.sh '" "block: DB restore row"
+assert_not_contains "${B}" "forward-only" "block: not forward-only"
+teardown_case
+case_end
+
+case_begin "STOP block after the new worker is live (TERM during PWA): forward-only"
+setup_cutover facts-workerlive
+export FAKE_CADDY_UP_DELAY=5
+run_cutover_bg
+wait_for_log "${FAKE_ROOT}/cutover.log" "PWA step (all failures soft)" || case_fail "no PWA marker"
+kill -TERM "${CUTOVER_PID}" || case_fail "kill failed"
+rc=0; wait "${CUTOVER_PID}" || rc=$?
+unset FAKE_CADDY_UP_DELAY
+[ "${rc}" = "1" ] && case_ok "exit 1" || case_fail "exit ${rc}"
+B="$(stop_block_of)"
+assert_eq "$(result_of "$(R_FILE)" worker_live)/$(result_of "$(R_FILE)" signal)" "yes/TERM" "facts: worker live, TERM"
+assert_contains "${B}" "STOP-AND-REPORT (phase pwa)" "block: header in the PWA phase"
+assert_contains "${B}" "forward-only" "block: forward-only"
+assert_contains "${B}" "restore the previous web build (PWA only" "block: the PWA-only restore is the ordinary step"
+grep -A1 'restore the previous web build (PWA only' "${B}" | grep -q 'docker compose up -d' \
+    && case_ok "block: the PWA restore command printed" || case_fail "block: no PWA restore command"
+assert_contains "${B}" "reviewed recovery, causes state_divergence" "block: hub/DB rollback only as reviewed recovery"
+assert_not_contains "${B}" "rollback-db.sh '" "block: no runnable DB restore command"
+assert_not_contains "${B}" "hub broken" "block: no ordinary hub rows"
+assert_not_contains "${B}" "canterlot-hub'" "block: no runnable hub restart"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker keeps running" || case_fail "worker was stopped"
+teardown_case
+case_end
+
+case_begin "the done note after a live worker is forward-only too"
+setup_cutover facts-done
+run_cutover && case_ok "cutover done" || case_fail "cutover failed"
+assert_contains "${FAKE_ROOT}/cutover.log" "update note: the worker has connected to the new hub: forward-only" "done note: forward-only"
+assert_contains "${FAKE_ROOT}/cutover.log" "PWA alone: restore the previous web build" "done note: the PWA-only restore"
+assert_contains "${FAKE_ROOT}/cutover.log" "reviewed recovery, causes state_divergence" "done note: hub/DB only as reviewed recovery"
+teardown_case
+case_end
+
 printf 'cutover-guarantees harness: %s passed, %s failed (cumulative)\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]
