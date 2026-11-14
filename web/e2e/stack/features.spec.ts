@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { PNG } from 'pngjs';
 import { getStack, STACK_STATE_FILE } from './global-setup';
 import { synthetic } from './synthetic';
-import { answerText, createHubClient, createSessionUI, fetchFrames, sendChaos, sendScript } from './hub';
+import { answerText, createHubClient, createSessionUI, fetchFrames, openNewSessionForm, sendChaos, sendScript } from './hub';
 
 const tag = { tag: '@stack' };
 
@@ -360,8 +360,8 @@ test.describe('stack: features and security', () => {
     const stack = getStack();
     mkdirSync(join(stack.workRoot, 'suggest-alpha', 'inner'), { recursive: true });
     writeFileSync(join(stack.workRoot, 'suggest-file.txt'), 'файл');
-    await page.goto(`${stack.baseUrl}/new`);
-    await expect(page.locator('[data-new-session]')).toBeVisible({ timeout: 15_000 });
+    // Прошлая сессия подставила бы свою папку: в пустой группе подставлять нечего, и виден дом воркера.
+    await openNewSessionForm(page, stack, { expanded: true, path: `/new?group=${randomUUID()}` });
     const field = page.getByRole('textbox', { name: 'Рабочая папка' });
     await expect(page.getByRole('combobox', { name: 'Машина' })).not.toHaveValue('');
     await expect(field).toHaveValue(homedir());

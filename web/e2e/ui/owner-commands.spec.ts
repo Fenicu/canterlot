@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, fillWorkdir, test } from './fixtures';
+import { expect, fillWorkdir, openNewSessionForm, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 
@@ -38,7 +38,7 @@ test('double_tap_on_create_makes_one_session', async ({ page }) => {
     await held;
     await route.fallback();
   });
-  await page.goto('/new');
+  await openNewSessionForm(page, { expanded: true });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await fillWorkdir(page, '/srv/canterlot');
   await page.getByRole('radio', { name: 'Claude Code' }).check();

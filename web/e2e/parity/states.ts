@@ -6,7 +6,7 @@ import { FakeHub, FakeHubApi, leaseEntry, seedLease, seedMachine } from '../../t
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockup04, seedMockup05, seedMockup06, seedMockup08, seedMockup11, seedMockupChat } from '../../testing/fixtures/mockup-chat';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect } from '../ui/fixtures';
+import { expect, openNewSessionForm } from '../ui/fixtures';
 import { bootSecondary } from '../ui/secondary-fixture';
 import { seedConversation, seedMachineWatch } from '../../testing/fake-hub/seed';
 import { seedFeedCards } from '../../testing/fixtures/feed-cards';
@@ -320,9 +320,28 @@ export const SCREENS: Screen[] = [
   screen('06-question', true, PHONE, 'dark', (page) => chat(page, seedMockup06)),
   screen('07-new-session', true, PHONE, 'dark', async (page) => {
     await sessions(page, '/sessions', '[data-list-ready]');
-    await page.goto('/new');
-    await expect(page.locator('[data-new-session]')).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole('combobox', { name: 'Машина' })).toBeVisible();
+    await openNewSessionForm(page, { expanded: true });
+  }),
+  // Свёрнутая форма: прошлая сессия целиком подставилась, выборы спрятаны за «Изменить».
+  screen('07-new-session-collapsed', false, PHONE, 'dark', async (page) => {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const ids = seedMockupSessions(api);
+    seedConversation(api, {
+      title: 'Прошлая сессия',
+      machine: { id: ids.machine, name: 'workstation' },
+      harness: { id: 'claude', title: 'Claude Code', provider: 'claude' },
+      workdir: '/srv/canterlot',
+      model: 'opus',
+      effort: 'medium',
+      created_at: '2026-11-10T10:00:00.000Z'
+    });
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    await openNewSessionForm(page);
+    await expect(page.locator('[data-role="new-session-summary"]')).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Машина' })).toHaveCount(0);
   }),
   screen('08-quota-paused', true, PHONE, 'dark', (page) => chat(page, seedMockup08)),
   screen('09-machine', true, PHONE, 'dark', async (page) => {

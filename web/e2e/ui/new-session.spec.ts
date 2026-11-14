@@ -4,7 +4,7 @@ import { FakeHub, FakeHubApi, seedConversation, seedPresets } from '../../testin
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import type { ListRow } from '../../src/lib/stores/list.svelte';
-import { expect, fillWorkdir, resizeViewport, test } from './fixtures';
+import { expect, fillWorkdir, openNewSessionForm, resizeViewport, test } from './fixtures';
 
 interface BootOptions {
   solo?: boolean;
@@ -60,7 +60,7 @@ const pathField = (page: Page) => page.getByRole('textbox', { name: 'Рабоч�
 const hint = (page: Page, name: string) => page.getByRole('option', { name, exact: true });
 
 async function openWithMachine(page: Page) {
-  await page.goto('/new');
+  await openNewSessionForm(page, { expanded: true });
   await expect(page.getByRole('combobox', { name: 'Машина' })).not.toHaveValue('');
 }
 
@@ -95,7 +95,7 @@ test('new_session_defaults_to_bypass_and_lets_the_owner_pick_a_labelled_mode', a
       bodies.push({ ...(request.postDataJSON() as { permission_mode?: string }) });
     }
   });
-  await page.goto('/new');
+  await openNewSessionForm(page, { expanded: true });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await fillWorkdir(page, '/srv/canterlot');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
@@ -128,7 +128,7 @@ test('new_session_antigravity_has_no_read_only_mode_and_explains_the_owner_catal
       bodies.push({ ...(request.postDataJSON() as { harness?: string }) });
     }
   });
-  await page.goto('/new');
+  await openNewSessionForm(page, { expanded: true });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
   await pathField(page).press('Escape');
@@ -159,7 +159,7 @@ test('new_session_offers_recent_workdirs_and_submits_a_typed_path', async ({ pag
       bodies.push({ ...(request.postDataJSON() as { workdir?: string }) });
     }
   });
-  await page.goto('/new');
+  await openNewSessionForm(page, { expanded: true });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await expect(page.getByRole('button', { name: '/srv/canterlot' })).toBeVisible();
   await expect(page.getByRole('button', { name: '/srv/notes' })).toBeVisible();
@@ -182,7 +182,7 @@ test('new_session_continues_a_claude_code_history_from_the_collapsed_list', asyn
       bodies.push({ ...(request.postDataJSON() as { resume_native_id?: string; harness?: string }) });
     }
   });
-  await page.goto('/new');
+  await openNewSessionForm(page, { expanded: true });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await fillWorkdir(page, '/srv/canterlot');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
@@ -206,7 +206,7 @@ test('new_session_continues_a_claude_code_history_from_the_collapsed_list', asyn
 
 test('new_session_hides_claude_history_for_a_worker_without_the_capability', async ({ page }) => {
   await boot(page);
-  await page.goto('/new');
+  await openNewSessionForm(page, { expanded: true });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await expect(page.locator('[data-role="claude-history"]')).toHaveCount(0);
@@ -316,7 +316,7 @@ test('new_session_in_a_group_prefills_from_that_group', async ({ page }) => {
 
 test('new_session_prefills_home_and_recent_folders_do_not_replace_it', async ({ page }) => {
   await boot(page, { home: '/home/owner', noSessions: true });
-  await page.goto('/new');
+  await openNewSessionForm(page, { expanded: true });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await expect(page.getByRole('button', { name: '/srv/notes' })).toBeVisible();
   await expect(pathField(page)).toHaveValue('/home/owner');
@@ -341,7 +341,7 @@ test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({
       { id: 'haiku', title: 'Haiku', efforts: ['medium'] }
     ]
   });
-  await page.goto('/new');
+  await openNewSessionForm(page, { expanded: true });
   await pathField(page).press('Escape');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   const field = page.getByRole('combobox', { name: 'Модель' });

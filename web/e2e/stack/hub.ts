@@ -227,9 +227,26 @@ export async function enableProbe(page: Page): Promise<void> {
   await page.addInitScript(() => localStorage.setItem('canterlot.probe', '1'));
 }
 
+/**
+ * Открыть форму новой сессии стенда и дождаться, пока она возьмёт прошлые настройки:
+ * до этого конца форма может ещё не свернуться в строку с «Изменить».
+ */
+export async function openNewSessionForm(
+  page: Page,
+  stack: Stack,
+  opts: { expanded?: boolean; path?: string } = {}
+): Promise<void> {
+  const { expanded = false, path = '/new' } = opts;
+  await page.goto(`${stack.baseUrl}${path}`);
+  await expect(page.locator('[data-prefill]')).toHaveAttribute('data-prefill', 'done', { timeout: 15_000 });
+  if (!expanded) return;
+  const edit = page.locator('[data-prefill]').getByRole('button', { name: 'Изменить' });
+  if (await edit.isVisible()) await edit.click();
+  await expect(page.getByRole('combobox', { name: 'Машина' })).toBeVisible();
+}
+
 export async function createSessionUI(page: Page, stack: Stack, opts: { agent?: string; crunch?: boolean; resumeText?: string } = {}): Promise<string> {
-  await page.goto(`${stack.baseUrl}/new`);
-  await expect(page.locator('[data-new-session]')).toBeVisible({ timeout: 15_000 });
+  await openNewSessionForm(page, stack, { expanded: true });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: stack.machineName });
   await page.getByRole('textbox', { name: 'Рабочая папка' }).fill(stack.workRoot);
   // Список подсказок лежит поверх формы: владелец закрывает его, прежде чем выбрать агента.

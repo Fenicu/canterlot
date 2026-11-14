@@ -1,4 +1,5 @@
 import { test as base, expect } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import { layoutMode } from '../../src/lib/shell/layout';
 
 export const test = base.extend({
@@ -24,6 +25,19 @@ export const test = base.extend({
 });
 
 export { expect };
+
+/**
+ * Открыть форму новой сессии и дождаться, пока она возьмёт прошлые настройки:
+ * до этого момента форма может ещё не свернуться в строку с «Изменить».
+ */
+export async function openNewSessionForm(page: Page, { expanded = false }: { expanded?: boolean } = {}): Promise<void> {
+  await page.goto('/new');
+  await expect(page.locator('[data-prefill]')).toHaveAttribute('data-prefill', 'done', { timeout: 15_000 });
+  if (!expanded) return;
+  const edit = page.locator('[data-prefill]').getByRole('button', { name: 'Изменить' });
+  if (await edit.isVisible()) await edit.click();
+  await expect(page.getByRole('combobox', { name: 'Машина' })).toBeVisible();
+}
 
 /**
  * Заполняет рабочую папку и гасит список подсказок: он лежит поверх формы,

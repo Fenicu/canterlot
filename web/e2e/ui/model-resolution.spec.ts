@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation, seedMachine, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
-import { expect, test } from './fixtures';
+import { expect, openNewSessionForm, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const MACHINE = '00000000-0000-4000-8000-0000000000e7';
@@ -114,9 +114,7 @@ test('model_picker_shows_what_each_alias_runs_now_and_a_one_time_change_notice',
 
 test('new_session_picker_names_the_current_version_of_each_alias', async ({ page }) => {
 	await boot(page);
-	await page.goto('/new');
-	// Форма взяла настройки прошлой сессии и свёрнута в одну строку.
-	await page.getByRole('button', { name: 'Изменить' }).click();
+	await openNewSessionForm(page, { expanded: true });
 	await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
 	await page.getByRole('radio', { name: 'Claude Code' }).check();
 	const model = page.getByRole('combobox', { name: 'Модель' });

@@ -287,7 +287,12 @@
 </script>
 
 {#snippet fields()}
-  <div class="fields" oninput={() => { touched = true; }} onchange={() => { touched = true; }}>
+  <div
+    class="fields"
+    data-prefill={prefillDone || touched ? 'done' : 'pending'}
+    oninput={() => { touched = true; }}
+    onchange={() => { touched = true; }}
+  >
     {#if collapsed}
       <div class="summary">
         <p class="summary-line" data-role="new-session-summary">{summary}</p>
