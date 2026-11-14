@@ -926,9 +926,15 @@ trap 'RESULT_SIGNAL=INT; on_end' INT
 trap 'RESULT_SIGNAL=TERM; on_end' TERM
 trap 'RESULT_SIGNAL=HUP; on_end' HUP
 # shellcheck disable=SC2317 # вызывается из функций выше и ниже
-cutover_hard() { FAIL_EXPLAINED=1; fail_code unknown; log "HARD-FAIL: $*"; exit 1; }
+cutover_hard() { FAIL_EXPLAINED=1; HARD_FAILURES=$((HARD_FAILURES + 1)); fail_code unknown; log "HARD-FAIL: $*"; exit 1; }
 # Отказ проверки, чья причина уже записана с кодом после fail_mark (иначе unknown).
-cutover_hard_after() { FAIL_EXPLAINED=1; [ "$(fail_count)" -gt "${FAIL_MARK}" ] || fail_code unknown; log "HARD-FAIL: $*"; exit 1; }
+cutover_hard_after() {
+    FAIL_EXPLAINED=1
+    HARD_FAILURES=$((HARD_FAILURES + 1))
+    [ "$(fail_count)" -gt "${FAIL_MARK}" ] || fail_code unknown
+    log "HARD-FAIL: $*"
+    exit 1
+}
 
 # Репетиция ожидания старта воркера против НАСТОЯЩЕГО юнита: тот же
 # wait_worker_exe, но первые опросы подменены состояниями, которые роняли
