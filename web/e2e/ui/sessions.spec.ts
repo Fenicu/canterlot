@@ -977,3 +977,28 @@ test('list_bottom_edge_fades_instead_of_slicing_the_next_row', async ({ page }) 
   // Строка под краем гаснет к навигации, а не стоит полоской верхушек букв.
   expect(await scroll.evaluate((node) => getComputedStyle(node).maskImage || getComputedStyle(node).webkitMaskImage)).toContain('linear-gradient');
 });
+
+// Под нагрузкой клик мыши в Firefox приходит с паузой больше 500 мс между нажатием и отпусканием:
+// удержание открывало меню сессии и съедало переход в чат.
+test('a_slow_mouse_click_on_a_row_opens_the_chat_not_the_menu', async ({ page }) => {
+  const { ids } = await boot(page);
+  const link = page.locator(`[data-session="${ids.plain}"]`).getByRole('link');
+  const box = (await link.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  // Пауза и есть проверяемое условие: кнопка мыши держится дольше порога удержания.
+  await page.waitForTimeout(800);
+  await page.mouse.up();
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page).toHaveURL(new RegExp(`/c/${ids.plain}$`));
+  await expect(page.getByRole('dialog', { name: /^(Сессия|Меню сессии)$/ })).toHaveCount(0);
+});
+
+test('a_touch_hold_on_a_row_still_opens_the_session_menu', async ({ page }) => {
+  const { ids } = await boot(page);
+  const link = page.locator(`[data-session="${ids.plain}"]`).getByRole('link');
+  await link.dispatchEvent('pointerdown', { pointerType: 'touch', isPrimary: true, button: 0 });
+  await expect(page.getByRole('dialog', { name: /^(Сессия|Меню сессии)$/ })).toBeVisible();
+  await link.dispatchEvent('pointerup', { pointerType: 'touch', isPrimary: true, button: 0 });
+  await expect(page).toHaveURL(/\/sessions$/);
+});

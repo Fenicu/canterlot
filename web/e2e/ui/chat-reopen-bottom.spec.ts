@@ -76,10 +76,7 @@ async function settledGap(page: Page): Promise<number> {
   });
 }
 
-// QUARANTINE: в полном гейте 1.30.1 (нагрузка от гейта и двух исполнителей) чат на десктопе не стал
-// готов за 15 с при повторном открытии; отдельно 9 из 9 на телефоне и десктопе, три прогона подряд.
-test.describe('quarantine reopening_from_the_list_lands_at_the_bottom', () => {
-  test.describe.configure({ retries: 2 });
+test.describe('reopening_from_the_list_lands_at_the_bottom', () => {
   for (const mix of ['image-long-markdown', 'code-only', 'text-only', 'tools-and-markdown'] as const) {
     test(`reopening_from_the_list_lands_at_the_bottom_${mix}`, async ({ page }) => {
       const hub = new FakeHub();

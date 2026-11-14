@@ -56,8 +56,11 @@
   let timer = 0;
   let held = false;
 
-  function down() {
+  function down(event: PointerEvent) {
     held = false;
+    // Удержание заменяет контекстное меню только пальцу и перу: у мыши есть правая кнопка,
+    // а медленный клик не должен открывать меню вместо чата.
+    if (event.pointerType === 'mouse') return;
     timer = window.setTimeout(() => {
       held = true;
       onopen(item.id);
