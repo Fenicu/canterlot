@@ -26,7 +26,15 @@ const results = await Promise.all(
     return new Promise((resolve) => {
       const child = spawn(
         'npx',
-        ['--no-install', 'playwright', 'test', 'e2e/stack', `--shard=${i + 1}/${shards}`, ...extraArgs],
+        [
+          '--no-install',
+          'playwright',
+          'test',
+          'e2e/stack',
+          `--shard=${i + 1}/${shards}`,
+          `--output=test-results/stack-slot-${slot}`,
+          ...extraArgs
+        ],
         {
           env: { ...process.env, CANTERLOT_STACK_SLOT: slot },
           stdio: ['ignore', 'pipe', 'pipe']
