@@ -23,8 +23,8 @@ test('session_row_reads_like_a_chat_with_title_time_and_model_line', async ({ pa
   const orchestrator = row(page, ids.orchestrator);
   await expect(orchestrator.locator('.title')).toHaveText('Кантерлот');
   await expect(orchestrator.locator('time')).toHaveText(/^\d{2}:\d{2}$/);
-  // Покой: вторая строка — начало последнего ответа, приглушённо.
-  await expect(orchestrator.locator('.who')).toHaveText('Opus:');
+  // Покой: вторая строка — начало последнего ответа, модель и машина ушли в хвост.
+  await expect(orchestrator.locator('.who')).toHaveText('· Opus');
   await expect(orchestrator.locator('.activity')).toHaveAttribute('data-preview', '');
   await expect(orchestrator.locator('.text')).toHaveText(ORCHESTRATOR_PREVIEW);
   await expect(orchestrator.locator('[data-role="plan-badge"]')).toContainText('3/4');
@@ -39,12 +39,12 @@ test('session_row_reads_like_a_chat_with_title_time_and_model_line', async ({ pa
 test('session_row_status_colours_and_avatar_vendor_follow_the_model', async ({ page }) => {
   const { ids } = await boot(page);
   const cases: [string, string, string, RegExp, string][] = [
-    [ids.waiting, 'openai', 'GPT-6.1 Sol:', /^Ждёт ответа · 2 варианта$/, 'warning'],
-    [ids.pinned, 'deepseek', 'DeepSeek V4.1:', new RegExp(`^${PINNED_PREVIEW}$`), 'default'],
-    [ids.stalled, 'meta', 'Muse Spark:', /^Подвисла\? Нет событий/, 'warning'],
-    [ids.paused, 'mimo', 'MiMo Flash:', /^Ожидание: недельный лимит$/, 'warning'],
-    [ids.kids[0], 'anthropic', 'Opus:', /^Генерирует$/, 'accent'],
-    [ids.kids[1], 'anthropic', 'Opus:', /^Выполняет cargo nextest · \d+ мин$/, 'accent']
+    [ids.waiting, 'openai', '· GPT-6.1 Sol', /^Ждёт ответа · 2 варианта$/, 'warning'],
+    [ids.pinned, 'deepseek', '· DeepSeek V4.1', new RegExp(`^${PINNED_PREVIEW}$`), 'default'],
+    [ids.stalled, 'meta', '· Muse Spark', /^Подвисла\? Нет событий/, 'warning'],
+    [ids.paused, 'mimo', '· MiMo Flash', /^Ожидание: недельный лимит$/, 'warning'],
+    [ids.kids[0], 'anthropic', '· Opus', /^Генерирует$/, 'accent'],
+    [ids.kids[1], 'anthropic', '· Opus', /^Выполняет cargo nextest · \d+ мин$/, 'accent']
   ];
   for (const [id, vendor, who, text, tone] of cases) {
     const item = row(page, id);
@@ -71,7 +71,7 @@ test('session_row_status_colours_and_avatar_vendor_follow_the_model', async ({ p
 
 test('session_row_names_the_machine_only_when_several_are_online', async ({ page }) => {
   const { ids } = await boot(page, { machines: 2 });
-  await expect(row(page, ids.orchestrator).locator('.who')).toHaveText('Opus · dev-vm:');
+  await expect(row(page, ids.orchestrator).locator('.who')).toHaveText('· Opus · dev-vm');
 });
 
 test('delegated_children_are_compact_nested_rows_under_the_fold_summary', async ({ page }) => {

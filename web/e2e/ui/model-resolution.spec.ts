@@ -57,7 +57,7 @@ test('session_row_and_header_name_the_concrete_version_behind_the_alias', async 
 	await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
 	// Строка называет семейство, подсказка — харнесс, версию, машину и псевдоним.
 	const who = page.locator(`[data-session="${id}"] .who`);
-	await expect(who).toHaveText('Fable:');
+	await expect(who).toHaveText('· Fable');
 	await expect(who).toHaveAttribute('title', 'Claude Code · Fable 5.2 1M · workstation · fable[1m] → claude-fable-5-2');
 
 	await page.goto(`/c/${id}`);

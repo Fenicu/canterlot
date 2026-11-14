@@ -90,9 +90,9 @@
       </span>
       <span class="l2">
         <span class="activity" data-tone={line.tone} data-preview={line.preview ? '' : undefined}>
-          <span class="who" title={modelNote}>{line.who}:</span>
           <span class="sr-only">{vendor ? VENDOR_TITLES[vendor] : ''}</span>
           {#if line.live}<span class="live" aria-hidden="true"></span>{/if}<span class="text">{line.text}</span>
+          {#if line.who}<span class="who" title={modelNote}>· {line.who}</span>{/if}
         </span>
         {#if depth > 0 && item.working_ms && !line.timed}
           <span class="worked" data-worked title={`работала ${fmt.durationCoarse(item.working_ms)}`}><span class="sr-only">{workedPrefix}</span>{fmt.durationCoarse(item.working_ms)}</span>
@@ -131,8 +131,11 @@
   .l1, .l2 { display: flex; align-items: center; gap: var(--s3); min-width: 0; }
   .title { flex: 1; min-width: 0; overflow: hidden; font-weight: var(--weight-semibold); text-overflow: ellipsis; white-space: nowrap; }
   time { flex: none; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
-  .activity { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--fs-meta); text-overflow: ellipsis; white-space: nowrap; }
-  .who { color: var(--secondary); }
+  .activity { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--fs-meta); white-space: nowrap; display: flex; align-items: baseline; gap: var(--s1); }
+  /* Состояние идёт первым и держит не меньше двенадцати знаков: модель и машина уступают ему дорогу. */
+  .text { flex: 0 1 auto; min-width: min(12ch, 100%); overflow: hidden; text-overflow: ellipsis; }
+  /* Хвост «модель · машина» сжимается и исчезает первым. */
+  .who { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--secondary); text-overflow: ellipsis; }
   .activity[data-tone='accent'] .text { color: var(--accent-link); }
   .activity[data-tone='warning'] .text { color: var(--warning); }
   .activity[data-tone='danger'] .text { color: var(--danger); }
@@ -157,7 +160,10 @@
   /* Под точным указателем плотный список обходится узкой кнопкой меню. */
   @media (pointer: fine) { button { min-width: var(--s12); } }
   :global([data-layout='phone']) .title { font-size: var(--fs-input); }
-  :global([data-layout='phone']) .activity { font-size: var(--fs-body); }
+  /* Состояние важнее размера: 12 px хватает, чтобы «Ждёт разрешения · Bash · 12 мин» влезло на 360 px даже со счётчиком. */
+  :global([data-layout='phone']) .activity { font-size: var(--fs-sm); }
+  /* На телефоне строка отдаёт состояние первой: отступы уже, чтобы «Ждёт разрешения · Bash · 12 мин» влезло целиком. */
+  :global([data-layout='phone']) .row:not(.child) a { gap: var(--s4); padding-inline-start: var(--s4); }
   /* Делегированная сессия: компактная строка под родителем. */
   .row.child a { gap: var(--s4); min-height: calc(var(--avatar-small) + var(--s5)); padding-block: var(--s2); }
   .row.child .title { font-size: var(--fs-meta); }
