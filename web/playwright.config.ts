@@ -4,9 +4,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fakeAudioFile } from './testing/fake-audio.mjs';
 
-const STACK_INFO_FILE = join(tmpdir(), 'canterlot-stack-info.json');
+const SLOT_SUFFIX = process.env.CANTERLOT_STACK_SLOT ? `-${process.env.CANTERLOT_STACK_SLOT}` : '';
+const STACK_INFO_FILE = join(tmpdir(), `canterlot-stack-info${SLOT_SUFFIX}.json`);
 // Cookie владельца, которую global-setup стенда получает по ссылке восстановления.
-const STACK_STATE_FILE = join(tmpdir(), 'canterlot-stack-state.json');
+const STACK_STATE_FILE = join(tmpdir(), `canterlot-stack-state${SLOT_SUFFIX}.json`);
 // Процессы-исполнители перечитывают конфиг без аргументов командной строки: признак стенда идёт им через окружение.
 const isStackOrPerf = process.env.CANTERLOT_STACK_RUN === '1' || process.argv.some(a => a.includes('e2e/stack') || a.includes('e2e/perf'));
 if (isStackOrPerf) process.env.CANTERLOT_STACK_RUN = '1';

@@ -3,8 +3,9 @@ import { existsSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const STACK_INFO_FILE = join(tmpdir(), 'canterlot-stack-info.json');
-const STACK_STATE_FILE = join(tmpdir(), 'canterlot-stack-state.json');
+const SLOT_SUFFIX = process.env.CANTERLOT_STACK_SLOT ? `-${process.env.CANTERLOT_STACK_SLOT}` : '';
+const STACK_INFO_FILE = join(tmpdir(), `canterlot-stack-info${SLOT_SUFFIX}.json`);
+const STACK_STATE_FILE = join(tmpdir(), `canterlot-stack-state${SLOT_SUFFIX}.json`);
 
 /** PID принадлежит стенду, только если в его командной строке есть каталог стенда. */
 function cmdline(pid: number): string {

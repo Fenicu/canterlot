@@ -26,9 +26,11 @@ export interface Stack {
 
 export interface SignedIn { session: string; device: string; id: string }
 
-const STACK_INFO_FILE = join(tmpdir(), 'canterlot-stack-info.json');
+const SLOT = process.env.CANTERLOT_STACK_SLOT ?? '';
+const SLOT_SUFFIX = SLOT ? `-${SLOT}` : '';
+const STACK_INFO_FILE = join(tmpdir(), `canterlot-stack-info${SLOT_SUFFIX}.json`);
 /** Cookie владельца для браузерных контекстов стенда; контексты, созданные вручную, передают его явно. */
-export const STACK_STATE_FILE = join(tmpdir(), 'canterlot-stack-state.json');
+export const STACK_STATE_FILE = join(tmpdir(), `canterlot-stack-state${SLOT_SUFFIX}.json`);
 export const SESSION_COOKIE = '__Host-canterlot_session';
 export const DEVICE_COOKIE = '__Host-canterlot_device';
 
@@ -136,7 +138,7 @@ export default async function globalSetup() {
   });
 
   // 3. Prepare temporary directories
-  const stackDir = mkdtempSync(join(tmpdir(), 'canterlot-stack-'));
+  const stackDir = mkdtempSync(join(tmpdir(), `canterlot-stack${SLOT_SUFFIX}-`));
   const dataDir = join(stackDir, 'data');
   const blobDir = join(dataDir, 'blobs');
   const workRoot = join(stackDir, 'work');
@@ -262,7 +264,7 @@ allowed_workdir_roots = ["${workRoot}"]
   writeFileSync(workerToml, workerConfigContent, 'utf8');
 
   // 11. Spawn Hub process
-  const logDir = resolve(process.cwd(), 'e2e/.stack');
+  const logDir = resolve(process.cwd(), `e2e/.stack${SLOT_SUFFIX}`);
   mkdirSync(logDir, { recursive: true });
   const hubLogFile = join(logDir, 'hub.log');
   const workerLogFile = join(logDir, 'worker.log');
