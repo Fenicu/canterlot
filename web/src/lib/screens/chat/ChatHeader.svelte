@@ -29,6 +29,7 @@
 	import { routingTitles } from '#lib/routing/titles.svelte.js';
 	import { getRuntime } from '#lib/app/runtime.js';
 	import { pendingItems } from '#lib/routing/queue.js';
+	import { waitFactsFromRequest } from '#lib/requests/waitCopy.js';
 
 	interface DetailLike {
 		title?: string;
@@ -115,6 +116,18 @@
 	const settings = $derived(chat.settings as SettingsLike | null);
 
 	const title = $derived(detail?.title || 'Сессия');
+	// Открытый запрос говорит в шапке своим видом и возрастом, а не общей фразой.
+	const pending = $derived.by(() => {
+		const stamp = (value?: string): number => {
+			const parsed = Date.parse(value ?? '');
+			return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+		};
+		const open = [...chat.requests.items.values()]
+			.filter((request) => request.state === 'open' || request.state === 'sending')
+			.sort((a, b) => stamp(a.createdAt) - stamp(b.createdAt));
+		const request = open[0];
+		return request ? waitFactsFromRequest(request.kind, request.payload, request.createdAt) : null;
+	});
 	// Знак шапки по тем же правилам, что у строки списка: кольцо, точка или серый кружок без процесса.
 	const mark = $derived(stateMark(effectiveActivity(chat.activity as Activity | null, chat.phase, (chat.execution as { state?: string })?.state)));
 	const harnessTitle = $derived(detail?.harness?.title || 'Claude Code');
@@ -246,6 +259,7 @@
 						phase={chat.phase}
 						executionState={(chat.execution as { state?: string })?.state}
 						now={now}
+						{pending}
 					/>
 					<div class="subtitle" title={aliasNote ? `${subtitle}\n${aliasNote}` : subtitle} data-model-alias={aliasNote || undefined}>{subtitle}</div>
 				{:else}

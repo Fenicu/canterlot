@@ -299,6 +299,7 @@
 				<RequestCard
 					request={req}
 					arrive
+					{now}
 					harnessId={sessionHarnessId}
 					permissionMode={sessionPermissionMode}
 					onDecision={async (decision) => {

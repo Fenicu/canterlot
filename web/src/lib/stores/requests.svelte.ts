@@ -28,6 +28,8 @@ export interface RequestItem {
   kind: RequestKind;
   state: RequestClientState;
   payload: unknown;
+  /** Время создания запроса на хабе: «12 мин назад» считается от него, а не от прихода в браузер. */
+  createdAt?: string;
   winnerDecision?: unknown;
   closedReason?: string;
   error?: string;
@@ -44,6 +46,7 @@ export function createRequestItem(init: RequestItem): RequestItem {
     kind: init.kind,
     state: init.state,
     payload: init.payload,
+    createdAt: init.createdAt,
     winnerDecision: init.winnerDecision,
     closedReason: init.closedReason,
     error: init.error
@@ -110,6 +113,7 @@ export class RequestsModel {
         state = 'sending';
       }
       const winnerDecision = r.decision_payload ?? r.winner_decision ?? r.winnerDecision;
+      const createdAt = typeof r.created_at === 'string' ? r.created_at : typeof r.createdAt === 'string' ? r.createdAt : undefined;
       const closedReason = typeof r.reason === 'string' ? r.reason : (typeof r.closed_reason === 'string' ? r.closed_reason : undefined);
 
       const existing = this.items.get(id);
@@ -121,6 +125,7 @@ export class RequestsModel {
         existing.kind = kind;
         existing.state = state;
         existing.payload = payload;
+        if (createdAt !== undefined) existing.createdAt = createdAt;
         if (winnerDecision !== undefined) existing.winnerDecision = winnerDecision;
         if (closedReason !== undefined) existing.closedReason = closedReason;
       } else {
@@ -130,6 +135,7 @@ export class RequestsModel {
           kind,
           state,
           payload,
+          createdAt,
           winnerDecision,
           closedReason
         }));
@@ -156,7 +162,7 @@ export class RequestsModel {
   }
 
   /** Строка истории: та же запись запроса, что и в снимке, только с местом в ленте. */
-  ingestHistory(row: { id: string; request_kind: string; state: string; request_payload: unknown; decision_payload?: unknown }): RequestItem {
+  ingestHistory(row: { id: string; request_kind: string; state: string; request_payload: unknown; created_at?: string; decision_payload?: unknown }): RequestItem {
     this.ingestSnapshot([{ ...row, kind: row.request_kind }]);
     return this.items.get(row.id)!;
   }
@@ -169,12 +175,14 @@ export class RequestsModel {
     const conversationId = String(ev.conversation_id ?? payload.conversation_id ?? this.conversationId ?? '');
     const kind = requestKind(payload.kind);
     const requestPayload = payload.payload ?? payload;
+    const createdAt = typeof ev.committed_at === 'string' ? ev.committed_at : undefined;
 
     const existing = this.items.get(id);
     if (existing) {
       existing.conversationId = conversationId;
       existing.kind = kind;
       existing.payload = requestPayload;
+      if (!existing.createdAt && createdAt) existing.createdAt = createdAt;
       if (existing.state !== 'sending' && existing.state !== 'saved') {
         existing.state = 'open';
       }
@@ -184,7 +192,8 @@ export class RequestsModel {
         conversationId,
         kind,
         state: 'open',
-        payload: requestPayload
+        payload: requestPayload,
+        createdAt
       }));
     }
   }

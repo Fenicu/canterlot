@@ -18,7 +18,8 @@
     onToggle,
     harnessId = '',
     permissionMode = '',
-    arrive = false
+    arrive = false,
+    now = Date.now()
   }: {
     request: RequestItem;
     onDecision: (d: DecisionBody) => Promise<void>;
@@ -29,6 +30,8 @@
     permissionMode?: string;
     /** Карточка у поля ввода: её появление показывается движением, строка ленты появляется молча. */
     arrive?: boolean;
+    /** Общие часы приложения: возраст ожидания меняется без своего таймера. */
+    now?: number;
   } = $props();
 
   // Решается один раз при создании: смена состояния карточки не запускает вход заново.
@@ -175,11 +178,11 @@
     {#if shown}
       <div class="applied-body">
         {#if request.kind === 'permission'}
-          <PermissionCard {request} {onDecision} {harnessId} {permissionMode} disabled={true} />
+          <PermissionCard {request} {onDecision} {harnessId} {permissionMode} {now} disabled={true} />
         {:else if request.kind === 'spawn_approval'}
           <SpawnApprovalCard {request} {onDecision} disabled={true} />
         {:else}
-          <QuestionCard {request} {onDecision} disabled={true} readonly />
+          <QuestionCard {request} {onDecision} {now} disabled={true} readonly />
         {/if}
       </div>
     {/if}
@@ -211,11 +214,11 @@
     {/if}
 
     {#if request.kind === 'permission'}
-      <PermissionCard {request} {onDecision} {harnessId} {permissionMode} disabled={request.state !== 'open'} />
+      <PermissionCard {request} {onDecision} {harnessId} {permissionMode} {now} disabled={request.state !== 'open'} />
     {:else if request.kind === 'spawn_approval'}
       <SpawnApprovalCard {request} {onDecision} disabled={request.state !== 'open'} />
     {:else}
-      <QuestionCard {request} {onDecision} disabled={request.state !== 'open'} />
+      <QuestionCard {request} {onDecision} {now} disabled={request.state !== 'open'} />
     {/if}
   </div>
 {/if}

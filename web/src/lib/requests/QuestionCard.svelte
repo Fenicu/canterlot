@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
+  import { waitFactsFromRequest, waitHeadText, waitIsLong } from './waitCopy';
   import TruncatedNote from './TruncatedNote.svelte';
 
   type QuestionOption = {
@@ -23,13 +24,16 @@
     request,
     onDecision,
     disabled = false,
-    readonly = false
+    readonly = false,
+    now = Date.now()
   }: {
     request: RequestItem;
     onDecision: (d: DecisionBody) => Promise<void>;
     disabled?: boolean;
     /** Решённый вопрос в ленте: история, а не форма. */
     readonly?: boolean;
+    /** Общие часы приложения: возраст ожидания меняется без своего таймера. */
+    now?: number;
   } = $props();
 
   const uid = $props.id();
@@ -103,6 +107,11 @@
 
   const questions = $derived(normalizeQuestions(request.payload));
   const isDisabled = $derived(disabled || request.state !== 'open');
+  const facts = $derived(
+    waitFactsFromRequest('question', request.payload, request.createdAt)
+  );
+  const head = $derived(waitHeadText(facts, now));
+  const headLong = $derived(waitIsLong(facts, now));
 
   function answerOf(q: QuestionDef): string | string[] {
     const raw = customValues[q.id] ?? '';
@@ -251,7 +260,7 @@
 {:else}
 <div class="question-card" data-disabled={isDisabled ? '' : undefined}>
   <div class="card-head">
-    <span class="meta">Вопрос от агента</span>
+    <span class="meta" data-wait-long={headLong ? '' : undefined}>{head}</span>
   </div>
 
   <form bind:this={formEl} onsubmit={handleSubmit} class="questions-form" use:keepInputInView>
@@ -369,6 +378,12 @@
   .meta {
     font-size: var(--fs-meta);
     color: var(--muted);
+  }
+
+  /* Долгое ожидание окрашивает подпись, но не полагается на цвет: те же слова и возраст. */
+  .meta[data-wait-long] {
+    color: var(--warning);
+    font-weight: var(--weight-semibold);
   }
 
   .questions-form {

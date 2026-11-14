@@ -2,6 +2,7 @@
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
   import { permissionView } from './permissionView';
+  import { waitFactsFromRequest, waitHeadText, waitIsLong } from './waitCopy';
   import TruncatedNote from './TruncatedNote.svelte';
 
   let {
@@ -9,13 +10,16 @@
     onDecision,
     disabled = false,
     harnessId = '',
-    permissionMode = ''
+    permissionMode = '',
+    now = Date.now()
   }: {
     request: RequestItem;
     onDecision: (d: DecisionBody) => Promise<void>;
     disabled?: boolean;
     harnessId?: string;
     permissionMode?: string;
+    /** Общие часы приложения: возраст ожидания меняется без своего таймера. */
+    now?: number;
   } = $props();
 
   // Claude Code спрашивает про rm, которое не может проверить, даже в режиме без подтверждений.
@@ -36,6 +40,9 @@
   );
 
   const isElicitation = $derived(toolName === 'mcp_elicitation');
+  const facts = $derived(waitFactsFromRequest(isElicitation ? 'elicitation' : 'permission', payload, request.createdAt));
+  const head = $derived(waitHeadText(facts, now));
+  const headLong = $derived(waitIsLong(facts, now));
   const elicitationMessage = $derived(
     isElicitation && typeof payload.message === 'string' ? payload.message : ''
   );
@@ -93,9 +100,9 @@
 <div class="permission-card" data-disabled={isDisabled ? '' : undefined}>
   <div class="card-head">
     {#if isElicitation}
-      <span class="meta">Запрос MCP-сервера</span>
+      <span class="meta" data-wait-long={headLong ? '' : undefined}>{head}</span>
     {:else}
-      <span class="meta">Запрос разрешения</span>
+      <span class="meta" data-wait-long={headLong ? '' : undefined}>{head}</span>
       {#if toolName}<span class="tool-tag">{toolName}</span>{/if}
     {/if}
   </div>
@@ -202,6 +209,11 @@
   .meta {
     font-size: var(--fs-meta);
     color: var(--muted);
+  }
+  /* Долгое ожидание окрашивает подпись, но не полагается на цвет: те же слова и возраст. */
+  .meta[data-wait-long] {
+    color: var(--warning);
+    font-weight: var(--weight-semibold);
   }
 
   .meta-line {

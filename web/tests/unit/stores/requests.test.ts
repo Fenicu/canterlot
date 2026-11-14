@@ -79,6 +79,7 @@ describe('RequestsModel', () => {
     expect(item.conversationId).toBe('conv-1');
     expect(item.kind).toBe('question');
     expect(item.state).toBe('open');
+    expect(item.createdAt).toBe('2026-10-29T12:00:00Z');
     const p = item.payload as { questions: { text: string }[] };
     expect(p.questions[0]?.text).toBe('Apply migrations?');
   });
@@ -91,6 +92,7 @@ describe('RequestsModel', () => {
         conversation_id: 'conv-1',
         kind: 'permission',
         state: 'open',
+        created_at: '2026-10-29T11:50:00Z',
         request_payload: {
           command: 'cargo test',
           description: 'Run unit tests'
@@ -112,6 +114,7 @@ describe('RequestsModel', () => {
     const perm = model.items.get('req-10')!;
     expect(perm.kind).toBe('permission');
     expect(perm.state).toBe('open');
+    expect(perm.createdAt).toBe('2026-10-29T11:50:00Z');
 
     const quest = model.items.get('req-20')!;
     expect(quest.kind).toBe('question');

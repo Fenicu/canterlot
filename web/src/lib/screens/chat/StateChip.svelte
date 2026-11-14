@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
+	import type { WaitFacts } from '#lib/requests/waitCopy.js';
 	import { announce } from '#lib/a11y/announce.js';
 	import { chatStateLine } from './stateLine';
 
@@ -7,15 +8,18 @@
 		activity = null,
 		phase = null,
 		executionState = null,
-		now = Date.now()
+		now = Date.now(),
+		pending = null
 	}: {
 		activity?: Activity | null;
 		phase?: { phase?: string } | null;
 		executionState?: string | null;
 		now?: number;
+		/** Открытый запрос: его вид и возраст важнее общей фразы «Ждёт ответа». */
+		pending?: WaitFacts | null;
 	} = $props();
 
-	const line = $derived(chatStateLine(activity, phase, executionState, now));
+	const line = $derived(chatStateLine(activity, phase, executionState, now, pending));
 
 	let prevText: string | null = null;
 	$effect(() => {

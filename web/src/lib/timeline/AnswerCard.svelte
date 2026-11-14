@@ -94,7 +94,7 @@
 
 {#snippet entryRow(entry: TimelineEntry)}
   {#if entry.kind === 'request'}
-    <RequestCard request={entry.request} onDecision={async () => undefined} open={folds.isOpen(entry.key)} onToggle={() => folds.toggle(entry.key)} />
+    <RequestCard request={entry.request} onDecision={async () => undefined} {now} open={folds.isOpen(entry.key)} onToggle={() => folds.toggle(entry.key)} />
   {:else if entry.kind === 'block'}
     {@const block = entry.block}
     {#if laneRoot && report(block)}

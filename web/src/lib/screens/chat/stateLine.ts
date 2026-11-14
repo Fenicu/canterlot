@@ -1,4 +1,5 @@
 import { activityLine, type Activity, type Tone } from '#lib/screens/sessions/activityText.js';
+import type { WaitFacts } from '#lib/requests/waitCopy.js';
 
 export interface ChatStateLine {
 	text: string;
@@ -12,12 +13,14 @@ export function chatStateLine(
 	activity: Activity | null,
 	phase: { phase?: string } | null,
 	executionState: string | null | undefined,
-	now: number
+	now: number,
+	pending: WaitFacts | null = null
 ): ChatStateLine {
 	const effective = effectiveActivity(activity, phase, executionState);
-	const line = activityLine(effective, { now });
+	const line = activityLine(effective, { now, pending });
 	// Вопрос целиком стоит в карточке прямо под шапкой, повторять его негде.
-	const text = effective.state === 'waiting_for_user' ? 'Ждёт ответа' : line.text;
+	// Без данных запроса остаётся прежняя короткая строка.
+	const text = effective.state === 'waiting_for_user' && !pending ? 'Ждёт ответа' : line.text;
 	return { ...line, text, quiet: effective.state === 'idle' && !line.live };
 }
 

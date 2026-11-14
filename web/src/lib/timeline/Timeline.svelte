@@ -747,7 +747,7 @@
         {:else if row.kind === 'event' && row.entries[0]?.kind === 'input'}
           <EventEntry input={row.entries[0].input} conversationId={chat.id} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
-          <RequestCard request={row.entries[0].request} onDecision={async () => undefined} {harnessId} {permissionMode} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
+          <RequestCard request={row.entries[0].request} onDecision={async () => undefined} {harnessId} {permissionMode} {now} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
           <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} />
         {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}

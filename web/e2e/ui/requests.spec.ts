@@ -105,7 +105,7 @@ test.describe('E2E Requests and Recovery', () => {
     hub.flush();
 
     // Question card is rendered
-    await expect(page.getByText('Вопрос от агента')).toBeVisible();
+    await expect(page.getByText(/^Вопрос · /)).toBeVisible();
     await expect(page.getByText('Выберите стратегию слияния ветки')).toBeVisible();
     await expect(page.getByText('Rebase and fast-forward')).toBeVisible();
 
@@ -725,7 +725,7 @@ test.describe('E2E Requests and Recovery', () => {
         });
         hub.flush();
 
-        await expect(page.getByText('Вопрос от агента')).toBeVisible();
+        await expect(page.getByText(/^Вопрос · /)).toBeVisible();
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
 
         // Шапка и поле ввода остаются на месте: карточка отнимает место у ленты, а не у них.

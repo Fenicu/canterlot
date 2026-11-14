@@ -1,6 +1,7 @@
 import type { ListRow } from '#lib/stores/list.svelte.js';
 import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 import { modelShortName } from '#lib/vendors/vendor.js';
+import { waitFactsFromActivity } from '#lib/requests/waitCopy.js';
 import { activityLine, type Activity, type Tone } from './activityText';
 
 export interface RowLine {
@@ -37,7 +38,7 @@ export function rowLine(
   now: number,
   context: { title?: string | null; machines?: number } = {}
 ): RowLine {
-  const line = activityLine(item.activity as Activity, { now });
+  const line = activityLine(item.activity as Activity, { now, pending: waitFactsFromActivity(item.activity) });
   const model = modelShortName(item.model, item.model_resolved, context.title);
   const who = (context.machines ?? 1) > 1 ? `${model} · ${item.machine.name}` : model;
   const calm = item.activity.state === 'idle' && line.tone === 'default';

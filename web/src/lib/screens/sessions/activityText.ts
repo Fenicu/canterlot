@@ -1,6 +1,7 @@
 import { failureLabel, providerLabel, retryLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import { leaseWaitText } from "#lib/format/lease.js";
+import { waitStatusText, type WaitFacts } from "#lib/requests/waitCopy.js";
 
 export type Tone = "accent" | "default" | "warning" | "danger";
 
@@ -39,7 +40,7 @@ export interface Activity {
 
 export function activityLine(
   activity: Activity,
-  ctx: { now: number },
+  ctx: { now: number; pending?: WaitFacts | null },
 ): { text: string; tone: Tone; live: boolean; timed?: boolean } {
   const evidence = activity.evidence ?? {};
   switch (activity.state) {
@@ -60,6 +61,9 @@ export function activityLine(
     case "working":
       return working(evidence, activity.since, ctx.now);
     case "waiting_for_user": {
+      if (ctx.pending) {
+        return { text: waitStatusText(ctx.pending, ctx.now), tone: "warning", live: false };
+      }
       const question = (evidence.question ?? "").trim().slice(0, 48);
       return {
         text: question ? `Ждёт ответа · ${question}` : "Ждёт ответа",
