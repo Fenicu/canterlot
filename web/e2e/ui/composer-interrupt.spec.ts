@@ -333,12 +333,13 @@ for (const motion of ['full', 'reduced'] as const) {
   });
 }
 
-test('the_header_stop_button_still_stops_the_session', async ({ page }) => {
+test('session_stop_from_the_menu_stops_the_session_and_does_not_interrupt', async ({ page }) => {
   const { hub, api, id } = await boot(page);
   const interrupts = await watch(page, '**/api/v1/conversations/*/interrupt');
   const stops = await watch(page, '**/api/v1/conversations/*/stop');
   startTurn(hub, api, id);
-  await page.locator('.chat-header').getByRole('button', { name: 'Остановить сессию' }).click();
+  await page.locator('.chat-header').getByRole('button', { name: 'Меню сессии' }).click();
+  await page.getByRole('menuitem', { name: 'Остановить сессию' }).click();
   await expect.poll(() => stops.length).toBe(1);
   expect(interrupts).toHaveLength(0);
 });

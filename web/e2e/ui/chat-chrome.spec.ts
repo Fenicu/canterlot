@@ -217,9 +217,9 @@ test('effort_changes_on_a_live_session_when_the_harness_applies_it_between_turns
 		}
 	});
 	await goLive(hub, id);
-	await expect(page.getByRole('button', { name: 'Остановить сессию' })).toBeVisible();
-
+	await expect(page.getByRole('button', { name: 'Меню сессии' })).toBeVisible();
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await expect(page.getByRole('menuitem', { name: 'Остановить сессию' })).toBeVisible();
 	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
 	const effort = page.locator('#effort');
 	await expect(effort).toBeEnabled();
@@ -237,9 +237,9 @@ test('effort_on_a_live_session_is_locked_with_the_reason_when_the_harness_needs_
 		}
 	});
 	await goLive(hub, id);
-	await expect(page.getByRole('button', { name: 'Остановить сессию' })).toBeVisible();
-
+	await expect(page.getByRole('button', { name: 'Меню сессии' })).toBeVisible();
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await expect(page.getByRole('menuitem', { name: 'Остановить сессию' })).toBeVisible();
 	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
 	await expect(page.locator('#effort')).toBeDisabled();
 	await expect(page.getByText(EFFORT_RESTART_REASON)).toBeVisible();
@@ -280,8 +280,9 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 	});
 	hub.flush();
 
-	// 1. Stop: one tap in the header, the menu does not open.
-	await page.getByRole('button', { name: 'Остановить сессию' }).click();
+	// 1. Stop: menu item, no one-tap control in the header.
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Остановить сессию' }).click();
 	await expect(page.getByRole('menu')).toHaveCount(0);
 
 	await expect.poll(() => calls.find((c) => c.url.endsWith('/stop') && c.body?.force === false)).toBeDefined();
@@ -331,10 +332,10 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 	await expect.poll(() => calls.find((c) => c.url.endsWith('/queue/continue'))).toBeDefined();
 });
 
-test('stop_button_lives_in_the_header_only_while_the_process_is_live_and_the_menu_keeps_only_force_stop', async ({ page }) => {
+test('header_has_no_session_stop_and_the_menu_keeps_stop_next_to_force_stop', async ({ page }) => {
 	const { hub, id } = await bootChat(page);
-	const stop = page.getByRole('button', { name: 'Остановить сессию' });
-	await expect(stop).toHaveCount(0);
+	const header = page.locator('.chat-header');
+	await expect(header.getByRole('button', { name: 'Остановить сессию' })).toHaveCount(0);
 
 	hub.append(`conversation:${id}`, {
 		kind: 'execution_state_changed',
@@ -342,10 +343,11 @@ test('stop_button_lives_in_the_header_only_while_the_process_is_live_and_the_men
 		payload: { generation: 1, outcome: null, state: 'running' }
 	});
 	hub.flush();
-	await expect(stop).toBeVisible();
+	// Живой ход не возвращает одно нажатие для остановки всей сессии.
+	await expect(header.getByRole('button', { name: 'Остановить сессию' })).toHaveCount(0);
 
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
-	await expect(page.getByRole('menuitem', { name: 'Остановить', exact: true })).toHaveCount(0);
+	await expect(page.getByRole('menuitem', { name: 'Остановить сессию' })).toBeVisible();
 	await expect(page.getByRole('menuitem', { name: 'Принудительно остановить' })).toBeVisible();
 	await page.keyboard.press('Escape');
 
@@ -355,10 +357,13 @@ test('stop_button_lives_in_the_header_only_while_the_process_is_live_and_the_men
 		payload: { generation: 1, state: 'stopped', outcome: 'stopped' }
 	});
 	hub.flush();
-	await expect(stop).toHaveCount(0);
+	await expect(header.getByRole('button', { name: 'Остановить сессию' })).toHaveCount(0);
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await expect(page.getByRole('menuitem', { name: 'Остановить сессию' })).toHaveCount(0);
+	await expect(page.getByRole('menuitem', { name: 'Принудительно остановить' })).toHaveCount(0);
 });
 
-test('stop_button_is_disabled_with_a_visible_reason_while_the_stop_is_in_flight', async ({ page }) => {
+test('stop_from_the_menu_shows_a_visible_reason_while_the_request_is_in_flight', async ({ page }) => {
 	const { hub, id } = await bootChat(page);
 	hub.append(`conversation:${id}`, {
 		kind: 'execution_state_changed',
@@ -373,12 +378,11 @@ test('stop_button_is_disabled_with_a_visible_reason_while_the_stop_is_in_flight'
 		await route.fallback();
 	});
 
-	const stop = page.getByRole('button', { name: 'Остановить сессию' });
-	await stop.click();
-	await expect(stop).toBeDisabled();
-	await expect(page.getByText('Останавливаю сессию')).toBeVisible();
-	await expect(page.getByText('Останавливаю сессию')).toHaveCount(0, { timeout: 5_000 });
-	await expect(stop).toBeEnabled();
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Остановить сессию' }).click();
+	const status = page.locator('.header-status');
+	await expect(status).toHaveText('Останавливаю сессию');
+	await expect(status).toHaveCount(0, { timeout: 5_000 });
 });
 
 test('live_header_does_not_scroll_sideways_at_320px', async ({ page }) => {
@@ -391,7 +395,7 @@ test('live_header_does_not_scroll_sideways_at_320px', async ({ page }) => {
 		payload: { generation: 1, outcome: null, state: 'running' }
 	});
 	hub.flush();
-	await expect(page.getByRole('button', { name: 'Остановить сессию' })).toBeVisible();
+	await expect(page.locator('.chat-header').getByRole('button', { name: 'Остановить сессию' })).toHaveCount(0);
 
 	const overflow = await page.evaluate(() => ({
 		scrollWidth: document.documentElement.scrollWidth,

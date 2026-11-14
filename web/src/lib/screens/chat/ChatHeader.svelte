@@ -173,7 +173,6 @@
 		: false);
 
 	const stopping = $derived(controlBusy(`stop:${chat.id}:false`));
-	const stopState = $derived(stopping ? { 'aria-disabled': true, 'aria-busy': true } : {});
 	const hasUserStop = $derived(chat.queue.pause_reasons.some((p) => (p as { reason?: string })?.reason === 'user_stop'));
 	const ownerLost = $derived((chat.execution as { state?: string } | null)?.state === 'owner_lost');
 
@@ -311,18 +310,6 @@
 					{#if running > 0}<span class="running-count">{running}</span>{/if}
 				</button>
 			{/if}
-			{#if isLive}
-				<button
-					type="button"
-					class="icon-button stop-btn"
-					aria-label="Остановить сессию"
-					title="Остановить сессию"
-					{...stopState}
-					onclick={() => { if (!stopping) void handleStop(false); }}
-				>
-					<Icon name="stop" />
-				</button>
-			{/if}
 			<button
 				bind:this={menuButton}
 				type="button"
@@ -427,6 +414,7 @@
 				{/if}
 
 				{#if isLive}
+					<MenuItem icon="stop" onclick={() => { if (!stopping) void handleStop(false); }}>{stopping ? 'Останавливаю сессию' : 'Остановить сессию'}</MenuItem>
 					{#if !confirmingForce}
 						<MenuItem icon="warning" danger onclick={() => { confirmingForce = true; }}>Принудительно остановить</MenuItem>
 					{:else}
@@ -590,10 +578,6 @@
 		width: var(--target);
 		height: var(--target);
 		border-radius: var(--radius-round);
-	}
-	.icon-button[aria-disabled='true'] {
-		color: var(--muted);
-		cursor: default;
 	}
 	.icon-button[aria-pressed='true'] {
 		background: var(--selected);
