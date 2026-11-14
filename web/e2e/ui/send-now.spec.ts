@@ -77,11 +77,10 @@ test('send_now_buttons_appear_while_a_turn_runs_and_post_to_the_hub', async ({ p
   const inputId = (api.histories.get(id) as { id: string }[])[1]!.id;
   working(hub, api, id, (api.histories.get(id) as { id: string }[])[0]!.id);
   // Полоса очереди показывает ожидающий ввод хаба.
-  const buttons = page.getByRole('button', { name: 'Отправить сейчас' });
+  const buttons = page.getByRole('button', { name: /^Влить: / });
   await expect(buttons).toHaveCount(1);
-  // «Отправить сейчас» не повторяет стрелку отправки из поля ввода.
-  const glyph = (locator: import('@playwright/test').Locator) => locator.locator('svg path').first().getAttribute('d');
-  expect(await glyph(buttons.first())).not.toBe(await glyph(page.getByRole('button', { name: 'Отправить', exact: true })));
+  // Действие названо словом: значок «play» больше не изображает «запустить».
+  await expect(buttons.first()).toHaveText('Влить');
   const hits: string[] = [];
   await page.route('**/send-now', async (route) => {
     hits.push(route.request().url());
@@ -101,7 +100,7 @@ test('rejected_steer_keeps_the_message_queued_with_a_caption', async ({ page }) 
   await page.route('**/send-now', async (route) => {
     await route.fulfill({ json: { data: { requested: { steer_command_id: steer } } } });
   });
-  await page.getByRole('button', { name: 'Отправить сейчас' }).first().click();
+  await page.getByRole('button', { name: /^Влить: / }).first().click();
   await expect(page.getByText('Вливается в идущий ход').first()).toBeVisible();
   // Агент отказался принять сообщение в идущий ход: оно остаётся в очереди.
   hub.append(`conversation:${id}`, {
@@ -135,7 +134,7 @@ test('send_now_button_appears_on_the_queued_owner_bubble', async ({ page }) => {
   await page.getByRole('textbox', { name: 'Сообщение' }).fill('Догоняющее сообщение');
   await page.getByRole('button', { name: 'Отправить', exact: true }).click();
   const bubble = page.locator('.bubble', { hasText: 'Догоняющее сообщение' });
-  const stripButton = page.locator('.strip').getByRole('button', { name: 'Отправить сейчас' });
+  const stripButton = page.locator('.strip').getByRole('button', { name: /^Влить: / });
   await expect(bubble).toBeVisible();
   await expect(bubble.getByRole('button', { name: 'Отправить сейчас' })).toHaveCount(0);
   // Ход начался: ввод ушёл в полосу очереди, кнопка появилась там.
@@ -168,7 +167,7 @@ test('send_now_button_appears_on_the_queued_owner_bubble', async ({ page }) => {
 
 test('send_now_hidden_without_a_running_turn', async ({ page }) => {
   await boot(page);
-  await expect(page.getByRole('button', { name: 'Отправить сейчас' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Влить: / })).toHaveCount(0);
 });
 
 test('send_now_refusal_shows_a_caption', async ({ page }) => {
@@ -189,16 +188,16 @@ test('send_now_refusal_shows_a_caption', async ({ page }) => {
       }
     });
   });
-  await expect(page.getByRole('button', { name: 'Отправить сейчас' })).toHaveCount(1);
-  await page.getByRole('button', { name: 'Отправить сейчас' }).first().click();
+  await expect(page.getByRole('button', { name: /^Влить: / })).toHaveCount(1);
+  await page.getByRole('button', { name: /^Влить: / }).first().click();
   await expect(page.getByText('Дождитесь ответа на запрос').first()).toBeVisible();
 });
 
 test('opencode_send_now_warns_that_the_step_is_interrupted', async ({ page }) => {
   const { hub, api, id } = await boot(page, 'opencode');
   working(hub, api, id, (api.histories.get(id) as { id: string }[])[0]!.id);
-  await expect(page.getByRole('button', { name: 'Отправить сейчас' })).toHaveCount(1);
-  await expect(page.getByText('Прервёт текущий шаг').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Влить \(прервёт шаг\): / })).toHaveCount(1);
+  await expect(page.getByText('Прервёт текущий шаг')).toHaveCount(0);
 });
 
 test('interrupted_turn_line_is_shown_for_a_live_execution', async ({ page }) => {

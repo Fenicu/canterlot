@@ -13,6 +13,16 @@ import { utf8Length } from "#lib/stores/blocks.js";
 import { attachmentKind } from "#lib/timeline/attachments.js";
 import { UploadLimitError } from "#lib/uploads/uploader.js";
 import { validateScheduleTime } from "#lib/composer/schedule.js";
+import { sendNow } from "#lib/timeline/QueueActions.js";
+
+/** Хаб отвечает SubmittedInput: идентификатор ввода бывает и в конверте, и наверху. */
+function submittedInputId(result: unknown): string | null {
+  if (!result || typeof result !== "object") return null;
+  const body = result as Record<string, unknown>;
+  const nested = body.data && typeof body.data === "object" ? (body.data as Record<string, unknown>) : null;
+  const id = body.input_id ?? body.id ?? nested?.input_id ?? nested?.id;
+  return typeof id === "string" ? id : null;
+}
 
 export const EMPTY_DRAFT_REASON = "Введите сообщение или прикрепите файл";
 
@@ -253,6 +263,30 @@ export class ComposerModel {
   async send(): Promise<void> {
     if (this.sending || !this.gate.ok) return;
     await this.#press(() => this.#accept());
+  }
+
+  /**
+   * «Влить в ход»: сообщение идёт обычным путём в очередь, и сразу после приёма
+   * хаб получает ту же команду send-now, что и кнопка «Влить» в полосе очереди.
+   */
+  async sendSteer(): Promise<void> {
+    if (this.sending || !this.gate.ok) return;
+    this.sending = true;
+    let accepted: Accepted | null = null;
+    try {
+      accepted = await this.#accept();
+    } finally {
+      this.sending = false;
+    }
+    if (!accepted) return;
+    await this.#deliver(accepted);
+    if (accepted.op.state !== "committed") return;
+    const inputId = submittedInputId(accepted.op.result);
+    if (!inputId) return;
+    const input = this.deps.chat.inputs.get(accepted.key);
+    if (input && !input.id) input.id = inputId;
+    const outcome = await sendNow({ id: inputId }, this.deps.conversationId);
+    if (input) input.steer = outcome === "requested" ? "pending" : "returned";
   }
 
   async #press(accept: () => Promise<Accepted | null>): Promise<void> {

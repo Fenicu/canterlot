@@ -139,7 +139,7 @@ test('the_composer_row_has_no_interrupt_and_the_live_line_interrupts_the_turn', 
   await expect(stop).toBeVisible();
   const box = (await stop.boundingBox())!;
   expect(box.height).toBeGreaterThanOrEqual(44);
-  const send = (await page.getByRole('button', { name: 'Отправить', exact: true }).boundingBox())!;
+  const send = (await page.getByRole('button', { name: 'В очередь', exact: true }).boundingBox())!;
   expect(send.y - (box.y + box.height), 'interrupt is far from send').toBeGreaterThan(44);
   await stop.click();
   await expect(page.locator('[data-working]').getByRole('button', { name: 'Прерываю…' })).toBeVisible();

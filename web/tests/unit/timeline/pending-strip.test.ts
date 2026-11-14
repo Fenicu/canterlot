@@ -60,7 +60,9 @@ describe("timeline/PendingStrip", () => {
     expect(target.textContent).toContain("ждёт");
     expect(target.textContent).not.toContain("ушло");
     expect(target.textContent).not.toContain("отменено");
-    expect(target.querySelectorAll("button")).toHaveLength(2);
+    // Изменить, отменить и «⋯»: на телефоне две первые живут в меню.
+    expect(target.querySelectorAll("button")).toHaveLength(3);
+    expect(target.querySelector('[aria-label^="Действия с сообщением"]')).not.toBeNull();
   });
 
   it("failed_job_is_named_and_its_text_can_be_taken_back", () => {

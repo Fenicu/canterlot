@@ -10,6 +10,7 @@
   import DictationPanel from '#lib/composer/DictationPanel.svelte';
   import { filesFromPayload, hasFileDrag } from '#lib/composer/intake.js';
   import { ComposerModel, EMPTY_DRAFT_REASON, type Limits } from '#lib/composer/model.svelte.js';
+  import { composerPlaceholder, sendActionLabel } from '#lib/composer/copy.js';
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
   import { getEnterPref } from '#lib/composer/prefs.js';
   import { insertDictated, type DraftAnchor } from '#lib/dictation/insertion.js';
@@ -19,7 +20,8 @@
   import { dictationEnabled } from '#lib/screens/settings/preferences.js';
   import { bindComposerRestore } from '#lib/composer/restore.js';
   import { bindReturned } from '#lib/composer/returned.js';
-  import { decideEnter, isTouchPrimary } from '#lib/composer/sendRules.js';
+  import { decideEnter, isTouchPrimary, turnIsLive } from '#lib/composer/sendRules.js';
+  import { steerSupported } from '#lib/timeline/QueueActions.js';
   import { acceptsWithTab, visibleSuggestion } from '#lib/composer/suggestion.js';
   import { getRuntime } from '#lib/app/runtime.js';
   import { sessionUploads } from '#lib/screens/chat/open.js';
@@ -139,6 +141,11 @@
     const gate = model.gate;
     return gate.ok || gate.reason === EMPTY_DRAFT_REASON ? '' : gate.reason;
   });
+  // Ход идёт: отправка ставит сообщение в очередь, а рядом появляется «Влить в ход».
+  const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
+  const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
+  const canSteer = $derived(turnLive && steerSupported(harnessId));
+  const placeholder = $derived(composerPlaceholder(turnLive, suggestion));
   const fitsContent = typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content');
 
   $effect(() => {
@@ -470,7 +477,7 @@
         onblur={() => void model.flushDraft()}
         rows="1"
         enterkeyhint="enter"
-        placeholder={suggestion ?? 'Сообщение агенту…'}
+        placeholder={placeholder}
         aria-label="Сообщение"
         aria-describedby={suggestion ? `${reasonId} ${suggestionId}` : reasonId}
         oncompositionstart={() => (composing = true)}
@@ -502,11 +509,25 @@
           <Icon name="clock" />
         </button>
       {/if}
+      {#if canSteer}
+        <button
+          type="button"
+          class="steer"
+          aria-label="Влить в ход"
+          title="Влить в ход"
+          use:markSend
+          onmousedown={(event) => event.preventDefault()}
+          onclick={() => void model.sendSteer()}
+        >
+          <Icon name="down" />
+        </button>
+      {/if}
       <button
         type="button"
         class="send"
         class:off={!model.gate.ok || model.sending}
-        aria-label="Отправить"
+        aria-label={sendActionLabel(turnLive)}
+        title={sendActionLabel(turnLive)}
         aria-busy={model.sending}
         use:markSend
         onpointerdown={pointerDown}
@@ -541,8 +562,8 @@
   .composer { display: flex; flex-direction: column; gap: var(--s2); max-height: var(--composer-limit); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
   .capsule {
     display: grid;
-    grid-template-columns: auto auto minmax(0, 1fr) auto auto;
-    grid-template-areas: 'input input input input input' 'attach mic context clock send';
+    grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
+    grid-template-areas: 'input input input input input input' 'attach mic context clock steer send';
     align-items: center;
     gap: var(--s2);
     min-width: 0;
@@ -555,7 +576,7 @@
   .capsule.receiving { outline: var(--focus-width) dashed var(--accent); outline-offset: var(--s1); background: var(--accent-soft); }
   .dropzone { position: absolute; inset: var(--s1); z-index: 1; display: flex; align-items: center; justify-content: center; margin: 0; border-radius: var(--radius-card); background: var(--accent-soft); color: var(--text); font-size: var(--fs-meta); pointer-events: none; }
   .capsule:has(:global(.tray)) {
-    grid-template-areas: 'tray tray tray tray tray' 'input input input input input' 'attach mic context clock send';
+    grid-template-areas: 'tray tray tray tray tray tray' 'input input input input input input' 'attach mic context clock steer send';
   }
   .capsule:has(textarea:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
   textarea {
@@ -597,6 +618,23 @@
   }
   .clock { grid-area: clock; background: var(--transparent); color: var(--text); }
   .send { grid-area: send; }
+  /* Вливание — второстепенное действие: узкая стрелка у самой кнопки отправки. */
+  .steer {
+    grid-area: steer;
+    width: var(--target);
+    height: var(--target);
+    min-width: var(--target);
+    min-height: var(--target);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-inline-end: calc(var(--s2) * -1);
+    border: var(--s0);
+    border-radius: var(--radius-round);
+    background: var(--transparent);
+    color: var(--secondary);
+  }
+  .steer :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .accept { grid-area: clock; min-height: var(--target); padding-inline: var(--s5); border: var(--s0); border-radius: var(--radius-round); background: var(--raised); color: var(--text); font-size: var(--fs-meta); }
   .off { background: var(--raised); color: var(--muted); }
   .reason, .hint, .notice { margin: 0; padding-inline: var(--s5); color: var(--muted); font-size: var(--fs-sm); }

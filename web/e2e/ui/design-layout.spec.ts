@@ -47,7 +47,7 @@ test.describe('поле ввода', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     const { hub, api, id } = await boot(page);
     await page.getByRole('textbox', { name: 'Сообщение' }).fill('уточнение');
-    const send = page.getByRole('button', { name: 'Отправить', exact: true });
+    const send = page.locator('[data-composer] button.send');
     await expect(send).toBeVisible();
     const before = await send.boundingBox();
     startTurn(hub, api, id);
@@ -403,21 +403,27 @@ test.describe('очередь и вложения', () => {
     hub.flush();
   }
 
-  test('queue_pills_are_one_line_stay_in_the_gutter_and_collapse_above_three', async ({ page }) => {
+  test('queue_pills_wrap_two_lines_and_keep_actions_in_one_row', async ({ page }, testInfo) => {
+    const phone = testInfo.project.name === 'phone';
     await page.setViewportSize({ width: 390, height: 844 });
     const { hub, api, id } = await boot(page);
     await queue(hub, api, id, ['После тестов обнови README и добавь строку про порядок подписки и снимка журнала', 'Потом собери релиз']);
     const strip = page.locator('.strip');
     await expect(strip.locator('[data-state]')).toHaveCount(2);
     const first = await strip.locator('.pill').first().boundingBox();
-    expect(first!.height).toBeLessThanOrEqual(48);
+    // Две строки текста и действия в той же полосе: третьей строки на заявку нет.
+    expect(first!.height).toBeLessThanOrEqual(72);
     expect(first!.x).toBeGreaterThan(8);
-    // Действия правки живут внутри строки, не добавляя второй строки к каждой заявке.
-    await expect(strip.locator('.pill').first().getByRole('button', { name: 'Изменить' })).toBeVisible();
-    // Обрезанный текст читается в подсказке, а кнопки называют своё сообщение.
+    // На телефоне действия живут в «⋯», на столе остаются в строке.
+    if (phone) {
+      await expect(strip.locator('.pill').first().getByRole('button', { name: /^Действия с сообщением/ })).toBeVisible();
+    } else {
+      await expect(strip.locator('.pill').first().getByRole('button', { name: 'Изменить' })).toBeVisible();
+    }
+    // Обрезанный текст остаётся в подсказке, а кнопки называют своё сообщение.
     await expect(strip.locator('.pill .text').first()).toHaveAttribute('title', 'После тестов обнови README и добавь строку про порядок подписки и снимка журнала');
-    await expect(strip.locator('.pill').nth(1).getByRole('button', { name: 'Отменить: Потом собери релиз' })).toBeVisible();
-    expect((await strip.boundingBox())!.height).toBeLessThan(110);
+    if (!phone) await expect(strip.locator('.pill').nth(1).getByRole('button', { name: 'Отменить: Потом собери релиз' })).toBeVisible();
+    expect((await strip.boundingBox())!.height).toBeLessThan(150);
     await queue(hub, api, id, ['Третье', 'Четвёртое']);
     await expect(strip.getByRole('button', { name: 'Ещё 2 в очереди' })).toBeVisible();
     await expect(strip.locator('[data-state]')).toHaveCount(2);

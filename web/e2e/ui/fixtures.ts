@@ -50,6 +50,17 @@ export async function fillWorkdir(page: import('@playwright/test').Page, path: s
   await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toBeHidden();
 }
 
+/** Действие строки очереди: на телефоне «Изменить» и «Отменить» живут в «⋯». */
+export async function queueAction(page: import('@playwright/test').Page, item: import('@playwright/test').Locator, name: string) {
+  const inline = item.getByRole('button', { name }).first();
+  if (await inline.isVisible().catch(() => false)) {
+    await inline.click();
+    return;
+  }
+  await item.getByRole('button', { name: /^Действия с сообщением/ }).first().click();
+  await page.getByRole('menuitem', { name }).click();
+}
+
 /** Сменить тему из чата: на телефоне переключатель живёт в меню сессии, на рабочем столе в шапке. */
 export async function toggleChatTheme(page: import('@playwright/test').Page) {
   const button = page.locator('.chat-header [data-theme-toggle]');

@@ -135,7 +135,7 @@ test('no_suggestion_for_other_harnesses_or_while_a_turn_runs', async ({ page }) 
   const codex = await boot(page, { harness: { id: 'codex', title: 'Codex', provider: 'codex' } });
   await expect(codex.area).toHaveAttribute('placeholder', PLACEHOLDER);
   const working = await boot(page, { working: true });
-  await expect(working.area).toHaveAttribute('placeholder', PLACEHOLDER);
+  await expect(working.area).toHaveAttribute('placeholder', 'Ход идёт: сообщение встанет в очередь');
 });
 
 test('turning_the_setting_off_hides_the_suggestion', async ({ page }) => {

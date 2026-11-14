@@ -7,7 +7,8 @@
   import { unconfirmed } from '#lib/ops/journal.js';
   import { returnToComposer } from '#lib/composer/returned.js';
   import { cancelInput } from '#lib/timeline/QueueActions.js';
-  import { STEER_RETURNED_LABEL, editInput, editInputCaption, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
+  import { STEER_RETURNED_LABEL, editInput, editInputCaption, sendNow, sendNowCaption, steerLabel, steerSupported } from '#lib/timeline/QueueActions.js';
+  import { dismissable } from '#lib/ui/dismiss.js';
   import type { InputView } from '#lib/stores/inputs.js';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { turnIsLive } from '#lib/composer/sendRules.js';
@@ -17,6 +18,7 @@
   import Button from '#lib/ui/Button.svelte';
   import Field from '#lib/ui/Field.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
+  import Icon from '#lib/ui/Icon.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
 
@@ -141,10 +143,12 @@
 
   const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
-  const steerSupported = $derived(harnessId === 'claude_code' || harnessId === 'codex' || harnessId === 'opencode' || harnessId === 'antigravity');
+  const canSteer = $derived(steerSupported(harnessId));
+  const steerText = $derived(steerLabel(harnessId));
   let sending = $state<Record<string, boolean>>({});
   let steerNotes = $state<Record<string, string | null>>({});
   let steered = $state<Record<string, boolean>>({});
+  let menuFor = $state<string | null>(null);
 
   async function doSendNow(input: InputView) {
     if (sending[input.key] || !input.id) return;
@@ -228,24 +232,59 @@
       <span class="pill">
         <span class="label accent">{deliveryLabel(input.state)}</span>
         <span class="text" title={input.text}>{input.text}</span>
-        {#if input.state === 'queued' && input.id && !editing[input.key]}
-          <IconButton icon="edit" label="Изменить: {short(input.text)}" onclick={() => startEdit(input)} />
-        {/if}
-        {#if input.state === 'queued' && input.id && turnLive && steerSupported}
-          {#if sending[input.key]}
-            <IconButton icon="play" label="Отправляется: {short(input.text)}" inert={true} />
-          {:else}
-            <IconButton icon="play" label="Отправить сейчас: {short(input.text)}" onclick={() => void doSendNow(input)} />
-          {/if}
+        {#if input.state === 'queued' && input.id && turnLive && canSteer}
+          <button
+            type="button"
+            class="steer"
+            aria-label="{sending[input.key] ? 'Вливается' : steerText}: {short(input.text)}"
+            aria-busy={sending[input.key] ? 'true' : undefined}
+            onclick={() => { if (!sending[input.key]) void doSendNow(input); }}
+          >{sending[input.key] ? 'Вливается…' : steerText}</button>
         {/if}
         {#if input.state === 'queued' || input.state === 'on_machine'}
-          {#if input.id && intents.busy(`cancel:${input.id}`)}
-            <IconButton icon="close" label="Отменяется…" inert={true} />
-          {:else}
-            <IconButton icon="close" label="Отменить: {short(input.text)}" onclick={() => cancel(input.key)} />
-          {/if}
+          <span class="row-actions">
+            <span class="inline-actions">
+              {#if input.state === 'queued' && input.id && !editing[input.key]}
+                <IconButton icon="edit" label="Изменить: {short(input.text)}" onclick={() => startEdit(input)} />
+              {/if}
+              {#if input.state === 'queued' || input.state === 'on_machine'}
+                {#if input.id && intents.busy(`cancel:${input.id}`)}
+                  <IconButton icon="close" label="Отменяется…" inert={true} />
+                {:else}
+                  <IconButton icon="close" label="Отменить: {short(input.text)}" onclick={() => cancel(input.key)} />
+                {/if}
+              {/if}
+            </span>
+            <button
+              type="button"
+              class="overflow"
+              data-row-menu-button
+              aria-label="Действия с сообщением: {short(input.text)}"
+              aria-expanded={menuFor === input.key}
+              onclick={() => { menuFor = menuFor === input.key ? null : input.key; }}
+            ><Icon name="more" /></button>
+          </span>
         {/if}
       </span>
+      {#if menuFor === input.key}
+        <div
+          class="row-menu"
+          role="menu"
+          aria-label="Действия с сообщением: {short(input.text)}"
+          use:dismissable={{ onclose: () => { menuFor = null; }, keep: (target) => target.closest('[data-row-menu-button]') !== null }}
+        >
+          {#if input.state === 'queued' && input.id && !editing[input.key]}
+            <button type="button" role="menuitem" onclick={() => { menuFor = null; startEdit(input); }}>Изменить</button>
+          {/if}
+          {#if input.state === 'queued' || input.state === 'on_machine'}
+            <button
+              type="button"
+              role="menuitem"
+              onclick={() => { if (input.id && intents.busy(`cancel:${input.id}`)) return; menuFor = null; cancel(input.key); }}
+            >{input.id && intents.busy(`cancel:${input.id}`) ? 'Отменяется…' : 'Отменить'}</button>
+          {/if}
+        </div>
+      {/if}
       {#if cancelNotes[input.key]}<p class="note" role="alert">{cancelNotes[input.key]}</p>{/if}
       {#if input.cancelRequested}<p class="note">{CANCEL_REQUESTED_LABEL}</p>{/if}
       {#if input.revision > 1}<p class="note">Изменено</p>{/if}
@@ -271,9 +310,6 @@
           {/if}
           <Button onclick={() => { editing = { ...editing, [input.key]: false }; }}>Отмена</Button>
         </span>
-      {/if}
-      {#if input.state === 'queued' && input.id && turnLive && steerSupported && (harnessId === 'opencode' || harnessId === 'antigravity')}
-        <p class="note">Прервёт текущий шаг</p>
       {/if}
       {#if steerNotes[input.key]}<p class="note">{steerNotes[input.key]}</p>{/if}
       {#if input.state === 'queued' && input.steer === 'returned'}<p class="note">{STEER_RETURNED_LABEL}</p>
@@ -301,14 +337,41 @@
         <span class="label">{atOf(item)}</span>
         <span class="text" title={textOf(item)}>{textOf(item)}</span>
         {#if notes[item.id] !== 'Уже отправлено'}
-          <IconButton icon="edit" label="Изменить: {short(textOf(item))}" onclick={() => openEdit(item.id, textOf(item), item.run_at)} />
-          {#if intents.busy(`scheduled-cancel:${item.id}`)}
-            <IconButton icon="close" label="Отменяется…" inert={true} />
-          {:else}
-            <IconButton icon="close" label="Отменить: {short(textOf(item))}" onclick={() => cancelScheduled(item.id)} />
-          {/if}
+          <span class="row-actions">
+            <span class="inline-actions">
+              <IconButton icon="edit" label="Изменить: {short(textOf(item))}" onclick={() => openEdit(item.id, textOf(item), item.run_at)} />
+              {#if intents.busy(`scheduled-cancel:${item.id}`)}
+                <IconButton icon="close" label="Отменяется…" inert={true} />
+              {:else}
+                <IconButton icon="close" label="Отменить: {short(textOf(item))}" onclick={() => cancelScheduled(item.id)} />
+              {/if}
+            </span>
+            <button
+              type="button"
+              class="overflow"
+              data-row-menu-button
+              aria-label="Действия с сообщением: {short(textOf(item))}"
+              aria-expanded={menuFor === item.id}
+              onclick={() => { menuFor = menuFor === item.id ? null : item.id; }}
+            ><Icon name="more" /></button>
+          </span>
         {/if}
       </span>
+      {#if menuFor === item.id}
+        <div
+          class="row-menu"
+          role="menu"
+          aria-label="Действия с сообщением: {short(textOf(item))}"
+          use:dismissable={{ onclose: () => { menuFor = null; }, keep: (target) => target.closest('[data-row-menu-button]') !== null }}
+        >
+          <button type="button" role="menuitem" onclick={() => { menuFor = null; openEdit(item.id, textOf(item), item.run_at); }}>Изменить</button>
+          <button
+            type="button"
+            role="menuitem"
+            onclick={() => { if (intents.busy(`scheduled-cancel:${item.id}`)) return; menuFor = null; cancelScheduled(item.id); }}
+          >{intents.busy(`scheduled-cancel:${item.id}`) ? 'Отменяется…' : 'Отменить'}</button>
+        </div>
+      {/if}
       {#if notes[item.id]}<p class="note">{notes[item.id]}</p>{/if}
     </div>
   {/each}
@@ -349,14 +412,41 @@
 
 <style>
   .strip { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--gutter); }
-  .item { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
-  .pill { display: flex; align-items: center; gap: var(--s4); min-width: 0; min-height: var(--target); padding: var(--s0) var(--s1) var(--s0) var(--s6); border-radius: var(--radius-pill); background: var(--surface); font-size: var(--fs-sm); }
+  .item { position: relative; display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+  .pill { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4); row-gap: var(--s1); min-width: 0; min-height: var(--target); padding: var(--s0) var(--s1) var(--s0) var(--s6); border-radius: var(--radius-pill); background: var(--surface); font-size: var(--fs-sm); }
   .failed { background: var(--danger-soft); }
   .label { flex: none; color: var(--secondary); }
   .label.accent { color: var(--accent-link); }
   .label.danger { color: var(--danger); }
-  .text { flex: 1; min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+  .text { flex: 1 1 12ch; min-width: 0; display: -webkit-box; overflow: hidden; color: var(--text); text-overflow: clip; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   .pill :global(button) { color: var(--secondary); }
+  /* Вливание — текстовое действие: значок «play» читался как «запустить». */
+  .steer { flex: none; min-height: var(--target); padding-inline: var(--s4); border: var(--s0); border-radius: var(--radius-pill); background: var(--raised); color: var(--accent-link); font-size: var(--fs-sm); font-weight: var(--weight-medium); white-space: nowrap; }
+  .row-actions { flex: none; display: inline-flex; align-items: center; }
+  .inline-actions { display: inline-flex; align-items: center; }
+  .overflow { display: none; min-width: var(--target); min-height: var(--target); align-items: center; justify-content: center; border: var(--s0); border-radius: var(--radius-round); background: var(--transparent); color: var(--secondary); }
+  /* На телефоне редкие действия строки живут в «⋯», а вливание — отдельной строкой:
+     длинная подпись не отнимает ширину у текста. */
+  @media (pointer: coarse) {
+    .pill {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas:
+        'label text text'
+        'steer . actions';
+      column-gap: var(--s4);
+      row-gap: var(--s1);
+    }
+    .label { grid-area: label; align-self: start; padding-block: var(--s3); }
+    .text { grid-area: text; align-self: start; padding-block: var(--s3); }
+    .steer { grid-area: steer; justify-self: start; }
+    .row-actions { grid-area: actions; justify-self: end; }
+    .inline-actions { display: none; }
+    .overflow { display: inline-flex; }
+  }
+  .row-menu { position: absolute; z-index: 3; right: var(--s6); top: calc(var(--target) + var(--s1)); display: flex; flex-direction: column; min-width: var(--preview-height); padding: var(--s3); border-radius: var(--radius-card); background: var(--popover); box-shadow: var(--shadow); }
+  .row-menu button { min-height: var(--target); padding-inline: var(--s5); border: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); color: var(--text); font-size: var(--fs-meta); text-align: start; }
+  .row-menu button:hover { background: var(--hover); }
   .note { margin: 0; padding-inline: var(--s6); color: var(--muted); font-size: var(--fs-sm); }
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); padding-inline: var(--s2); }
   .files { display: flex; flex-wrap: wrap; gap: var(--s2); margin: 0; padding: 0; list-style: none; }

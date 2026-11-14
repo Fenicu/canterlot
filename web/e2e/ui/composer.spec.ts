@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation, seedHistory } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
-import { expect, resizeViewport, test } from './fixtures';
+import { expect, queueAction, resizeViewport, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const AT = '2026-10-28T12:00:00.000Z';
@@ -357,9 +357,10 @@ test('queue_and_scheduled_chips_have_cancel_and_edit_actions', async ({ page }) 
   });
   hub.flush();
   await expect(page.getByText('в очереди', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Отменить' }).first().click();
-  const chip = page.locator('.strip div').filter({ hasText: 'вечером' });
-  await chip.getByRole('button', { name: 'Изменить' }).click();
+  const queuedChip = page.locator('.strip .item', { hasText: 'в очереди' });
+  await queueAction(page, queuedChip, 'Отменить');
+  const chip = page.locator('.strip .item').filter({ hasText: 'вечером' });
+  await queueAction(page, chip, 'Изменить');
   await expect(page.getByRole('dialog', { name: 'Изменить отправку' })).toBeVisible();
   await page.getByRole('button', { name: 'Закрыть' }).click();
   await page.route('**/api/v1/scheduled/**', async (route) => {
@@ -378,7 +379,7 @@ test('queue_and_scheduled_chips_have_cancel_and_edit_actions', async ({ page }) 
       }
     });
   });
-  await chip.getByRole('button', { name: 'Отменить' }).click();
+  await queueAction(page, chip, 'Отменить');
   await expect(page.getByText('Уже отправлено')).toBeVisible();
 });
 

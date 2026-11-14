@@ -1,7 +1,7 @@
 import type { Locator } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
-import { expect, test } from './fixtures';
+import { expect, queueAction, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const AT = '2026-10-28T12:00:00.000Z';
@@ -214,8 +214,7 @@ test('edit_strip_item_while_turn_runs_and_remove_attachment', async ({ page }) =
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
   turnRunning(hub, id, (api.histories.get(id) as { id: string }[])[0]!.id);
   const item = page.locator('.strip .item', { hasText: 'С файлом' });
-  await expect(item.getByRole('button', { name: 'Изменить' })).toBeVisible();
-  await item.getByRole('button', { name: 'Изменить' }).click();
+  await queueAction(page, item, 'Изменить');
   await expectThemedField(item.getByLabel('Текст сообщения'));
   await item.getByRole('button', { name: /Убрать вложение/ }).click();
   const hits: { body: unknown }[] = [];
@@ -244,8 +243,7 @@ test('edit_strip_conflict_uses_revision_from_start', async ({ page }) => {
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
   turnRunning(hub, id, runningInput.id);
   const item = page.locator('.strip .item', { hasText: 'В очереди' });
-  await expect(item.getByRole('button', { name: 'Изменить' })).toBeVisible();
-  await item.getByRole('button', { name: 'Изменить' }).click();
+  await queueAction(page, item, 'Изменить');
   hub.append(`conversation:${id}`, {
     kind: 'input_state_changed',
     conversation_id: id,
