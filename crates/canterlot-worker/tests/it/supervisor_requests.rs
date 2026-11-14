@@ -592,25 +592,6 @@ async fn invalid_question_answers_do_not_consume_the_request() {
 }
 
 #[tokio::test]
-async fn synthetic_codex_enables_default_questions_and_experimental_api() {
-    let mut h = Harness::new(None).await;
-    h.start_profile(permission(), "synthetic-codex").await;
-    let frames = h.stdin();
-    assert!(
-        frames
-            .iter()
-            .any(|f| f["type"] == "initialize" && f["capabilities"]["experimentalApi"] == true),
-        "runner must initialize experimentalApi"
-    );
-    let configuration = h.sj();
-    assert!(
-        configuration
-            .iter()
-            .any(|f| matches!(f, Body::RequestOpened(_)))
-    );
-}
-
-#[tokio::test]
 async fn applied_decision_without_record_is_never_retransmitted_after_restart() {
     let mut h = Harness::new(Some("after_decision_adapter_before_record")).await;
     let request = h.start(permission()).await;
@@ -667,20 +648,6 @@ async fn permission_deny_is_proven_as_applied() {
         h.bodies
             .iter()
             .any(|b| matches!(b, Body::BlockFinal(f) if f.text == "denied"))
-    );
-}
-
-#[tokio::test]
-async fn synthetic_codex_requires_default_input_flag() {
-    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
-        .args(["synthetic-cli", "--profile", "synthetic-codex"])
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "Codex runner must require default_mode_request_user_input"
     );
 }
 

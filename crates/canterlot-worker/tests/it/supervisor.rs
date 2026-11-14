@@ -1223,28 +1223,6 @@ async fn unknown_required_event_fails_with_protocol_incompatible() {
 }
 
 #[tokio::test]
-async fn unknown_profile_fails_start() {
-    let mut harness = Harness::start(&[]).await;
-    harness.attach_and_ship(0).await;
-    harness
-        .send(down::Msg::StartCli(StartCli {
-            profile: "no-such-adapter".into(),
-            workdir: harness._root.path().to_string_lossy().into_owned(),
-            native_conversation_id: String::new(),
-            ..Default::default()
-        }))
-        .await;
-    let bodies = harness
-        .wait_records("closed", |b| {
-            b.iter().any(|x| matches!(x, Body::JournalClosed(_)))
-        })
-        .await;
-    assert!(index(&bodies, |b| state(b, "stopping")).is_some());
-    assert!(bodies.iter().any(|b| matches!(b, Body::ExecutionState(f) if f.state == "failed" && f.outcome == "start_failed")));
-    assert!(harness.wait_exit().await.success());
-}
-
-#[tokio::test]
 async fn oversized_answer_final_is_checksum_only() {
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
@@ -1972,17 +1950,6 @@ async fn pilot_supervisor_case(case: &str) {
             assert!(f.duration_ms >= 30);
             assert!(f.machine_time_ms > 1_700_000_000_000);
         }
-        "limit_reached_precedes_run_finished_in_sj" => {
-            let reached = index(&bodies, |b| matches!(b, Body::LimitReached(_))).unwrap();
-            let finished = index(&bodies, |b| matches!(b, Body::RunFinished(_))).unwrap();
-            assert!(reached < finished);
-            let Body::LimitReached(f) = &bodies[reached] else {
-                panic!()
-            };
-            assert_eq!(f.input_command_id, id.to_string());
-            assert_eq!(f.provider, "claude");
-            assert!(f.resets_at_ms > 0);
-        }
         "limit_observed_is_journaled_in_order_with_blocks" => {
             let before = index(
                 &bodies,
@@ -1998,6 +1965,15 @@ async fn pilot_supervisor_case(case: &str) {
             );
             let (before, observed, after) = (before.unwrap(), observed.unwrap(), after.unwrap());
             assert!(before < observed && observed < after);
+            let reached = index(&bodies, |b| matches!(b, Body::LimitReached(_))).unwrap();
+            let finished = index(&bodies, |b| matches!(b, Body::RunFinished(_))).unwrap();
+            assert!(reached < finished);
+            let Body::LimitReached(f) = &bodies[reached] else {
+                panic!()
+            };
+            assert_eq!(f.input_command_id, id.to_string());
+            assert_eq!(f.provider, "claude");
+            assert!(f.resets_at_ms > 0);
         }
         "context_exhausted_fails_the_execution_with_its_outcome" => {
             assert!(bodies.iter().any(|b| matches!(b,
@@ -2045,7 +2021,6 @@ macro_rules! pilot_supervisor_tests {
 pilot_supervisor_tests!(
     phase_detail_and_block_fields_reach_sj,
     run_finished_carries_usage_context_and_duration,
-    limit_reached_precedes_run_finished_in_sj,
     limit_observed_is_journaled_in_order_with_blocks,
     context_exhausted_fails_the_execution_with_its_outcome,
     deliver_files_reach_the_adapter_as_local_files,
@@ -3071,7 +3046,7 @@ async fn an_unknown_profile_start_is_a_diagnostic_in_the_journal() {
         }))
         .await;
     let bodies = harness
-        .wait_records("start failure diagnostic", |bodies| {
+        .wait_records("start failure diagnostic and closed", |bodies| {
             let diagnostic = bodies.iter().any(|body| {
                 matches!(body, Body::AdapterDiagnostic(fact)
                     if fact.kind == "start_failed" && fact.event_type == "unknown_profile")
@@ -3079,9 +3054,17 @@ async fn an_unknown_profile_start_is_a_diagnostic_in_the_journal() {
             let failed = bodies.iter().any(
                 |body| matches!(body, Body::ExecutionState(fact) if fact.outcome == "start_failed"),
             );
-            diagnostic && failed
+            let closed = bodies
+                .iter()
+                .any(|body| matches!(body, Body::JournalClosed(_)));
+            diagnostic && failed && closed
         })
         .await;
+    assert!(
+        index(&bodies, |b| state(b, "stopping")).is_some(),
+        "the failed start still goes through stopping: {:?}",
+        bodies.iter().map(kind).collect::<Vec<_>>()
+    );
     assert!(
         bodies.iter().any(
             |body| matches!(body, Body::ExecutionState(fact) if fact.outcome == "start_failed")
@@ -3089,5 +3072,5 @@ async fn an_unknown_profile_start_is_a_diagnostic_in_the_journal() {
         "the execution must still fail: {:?}",
         bodies.iter().map(kind).collect::<Vec<_>>()
     );
-    harness.shutdown().await;
+    assert!(harness.wait_exit().await.success());
 }

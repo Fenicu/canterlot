@@ -45,20 +45,16 @@ cases!(
     resume_keeps_native_id,
     error_script_yields_error_block_and_run_finished,
     deltas_are_chunked_to_the_bound,
-    registry_knows_only_synthetic_profiles,
     next_event_is_cancel_safe,
-    debug_redacts_payloads,
     tool_result_links_to_call,
     plain_text_echoes_three_utf8_deltas,
     exit_script_reports_code,
     one_adapter_never_starts_a_second_cli,
     oversized_input_is_rejected_before_writing,
-    capabilities_describe_profiles,
     wave_w_member_signals_use_supplied_containment,
     blocks_carry_agent_and_model,
     model_step_switches_model_for_following_blocks,
     subagent_step_emits_child_blocks_with_parent_agent_and_model,
-    subagent_call_block_carries_task_summary_and_children_carry_the_name,
     usage_step_accumulates_per_model_and_agent,
     default_usage_is_derived_from_text,
     limit_steps_emit_observed_and_reached_with_resets_at,
@@ -66,10 +62,99 @@ cases!(
     settings_in_transmission_change_the_model_before_the_turn,
     unsupported_setting_is_rejected_before_any_byte_reaches_the_cli,
     read_attachment_step_echoes_the_file_sha256,
-    catalog_lists_synthetic_harnesses_with_models_and_efforts,
-    synthetic_codex_profile_has_provider_codex,
     deferred_restart_announces_ready,
 );
+
+#[test]
+fn capabilities_describe_profiles() {
+    use canterlot_worker::adapter::Support;
+    let capabilities = SyntheticAdapter::new("synthetic").capabilities();
+    assert_eq!(capabilities.streaming, Support::Supported);
+    assert_eq!(capabilities.resume, Support::Supported);
+    assert_eq!(capabilities.interrupt, Support::Supported);
+    assert_eq!(capabilities.approvals, Support::Supported);
+    assert_eq!(capabilities.questions, Support::Supported);
+    assert!(capabilities.interrupt_keeps_process);
+    assert!(
+        !SyntheticAdapter::new("synthetic-exit-on-interrupt")
+            .capabilities()
+            .interrupt_keeps_process
+    );
+}
+
+#[test]
+fn registry_knows_only_synthetic_profiles() {
+    assert!(registry("synthetic").is_some());
+    assert!(registry("synthetic-exit-on-interrupt").is_some());
+    assert!(registry("codex").is_none());
+    assert!(registry("other").is_none());
+}
+
+#[test]
+fn debug_redacts_payloads() {
+    let secret = "private payload";
+    let transmission = |text: &str| Transmission {
+        command_id: Uuid::now_v7(),
+        attempt: 1,
+        text: text.into(),
+        files: vec![],
+        settings: None,
+    };
+    assert!(!format!("{:?}", transmission(secret)).contains(secret));
+    assert!(
+        !format!(
+            "{:?}",
+            AdapterEvent::BlockDelta {
+                block_id: Uuid::now_v7(),
+                append: secret.into()
+            }
+        )
+        .contains(secret)
+    );
+    assert!(
+        !format!(
+            "{:?}",
+            AdapterEvent::BlockFinal {
+                block_id: Uuid::now_v7(),
+                text: secret.into(),
+                summary: Some(secret.into())
+            }
+        )
+        .contains(secret)
+    );
+}
+
+#[test]
+fn catalog_lists_synthetic_harnesses_with_models_and_efforts() {
+    use canterlot_worker::adapter::catalog;
+    let entries = catalog();
+    assert_eq!(entries.len(), 3);
+    for entry in entries {
+        assert!(!entry.title.is_empty());
+        assert!(entry.images && entry.settings_midsession);
+        assert!(!entry.permission_modes.is_empty());
+        assert!(
+            entry
+                .models
+                .iter()
+                .any(|m| m.id == "synthetic-large" && m.efforts.iter().any(|e| e == "high"))
+        );
+    }
+}
+
+#[test]
+fn synthetic_codex_profile_has_provider_codex() {
+    use canterlot_worker::adapter::catalog;
+    assert!(registry("synthetic-codex").is_some());
+    assert_eq!(
+        catalog()
+            .iter()
+            .find(|e| e.harness == "synthetic-codex")
+            .unwrap()
+            .provider,
+        "codex"
+    );
+}
 
 async fn event(adapter: &mut SyntheticAdapter) -> AdapterEvent {
     tokio::time::timeout(Duration::from_secs(5), adapter.next_event())
@@ -153,21 +238,6 @@ async fn adapter_child() {
             adapter.close(CloseMode::Force, &group).await.unwrap();
             assert!(group.signals.load(std::sync::atomic::Ordering::Relaxed) > 0);
         }
-        "capabilities_describe_profiles" => {
-            use canterlot_worker::adapter::Support;
-            let capabilities = adapter.capabilities();
-            assert_eq!(capabilities.streaming, Support::Supported);
-            assert_eq!(capabilities.resume, Support::Supported);
-            assert_eq!(capabilities.interrupt, Support::Supported);
-            assert_eq!(capabilities.approvals, Support::Supported);
-            assert_eq!(capabilities.questions, Support::Supported);
-            assert!(capabilities.interrupt_keeps_process);
-            assert!(
-                !make("synthetic-exit-on-interrupt")
-                    .capabilities()
-                    .interrupt_keeps_process
-            );
-        }
         "oversized_input_is_rejected_before_writing" => {
             assert!(matches!(
                 adapter.transmit(&input(&"x".repeat(262145)), &group).await,
@@ -198,37 +268,6 @@ async fn adapter_child() {
                     break;
                 }
             }
-        }
-        "registry_knows_only_synthetic_profiles" => {
-            assert!(registry("synthetic").is_some());
-            assert!(registry("synthetic-exit-on-interrupt").is_some());
-            assert!(registry("codex").is_none());
-            assert!(registry("other").is_none());
-        }
-        "debug_redacts_payloads" => {
-            let secret = "private payload";
-            assert!(!format!("{:?}", input(secret)).contains(secret));
-            assert!(
-                !format!(
-                    "{:?}",
-                    AdapterEvent::BlockDelta {
-                        block_id: Uuid::now_v7(),
-                        append: secret.into()
-                    }
-                )
-                .contains(secret)
-            );
-            assert!(
-                !format!(
-                    "{:?}",
-                    AdapterEvent::BlockFinal {
-                        block_id: Uuid::now_v7(),
-                        text: secret.into(),
-                        summary: Some(secret.into())
-                    }
-                )
-                .contains(secret)
-            );
         }
         "acceptance_requires_the_cli_frame_not_the_write" => {
             let before = tokio::time::Instant::now();
@@ -516,7 +555,6 @@ const PILOT_CASES: &[&str] = &[
     "blocks_carry_agent_and_model",
     "model_step_switches_model_for_following_blocks",
     "subagent_step_emits_child_blocks_with_parent_agent_and_model",
-    "subagent_call_block_carries_task_summary_and_children_carry_the_name",
     "usage_step_accumulates_per_model_and_agent",
     "default_usage_is_derived_from_text",
     "limit_steps_emit_observed_and_reached_with_resets_at",
@@ -535,42 +573,13 @@ async fn pilot_case(
     directory: &tempfile::TempDir,
     input: &impl Fn(&str) -> Transmission,
 ) {
-    use canterlot_worker::adapter::{LimitFact, LimitWindow, LocalFile, SettingsChange, catalog};
+    use canterlot_worker::adapter::{LimitFact, LimitWindow, LocalFile, SettingsChange};
     use serde_json::json;
-    if name == "catalog_lists_synthetic_harnesses_with_models_and_efforts" {
-        let entries = catalog();
-        assert_eq!(entries.len(), 3);
-        for entry in entries {
-            assert!(!entry.title.is_empty());
-            assert!(entry.images && entry.settings_midsession);
-            assert!(!entry.permission_modes.is_empty());
-            assert!(
-                entry
-                    .models
-                    .iter()
-                    .any(|m| m.id == "synthetic-large" && m.efforts.iter().any(|e| e == "high"))
-            );
-        }
-        return;
-    }
-    if name == "synthetic_codex_profile_has_provider_codex" {
-        assert!(registry("synthetic-codex").is_some());
-        assert_eq!(
-            catalog()
-                .iter()
-                .find(|e| e.harness == "synthetic-codex")
-                .unwrap()
-                .provider,
-            "codex"
-        );
-        return;
-    }
     let script = match name {
         "model_step_switches_model_for_following_blocks" => {
             json!({"synthetic":[{"delta":"first"},{"model":"synthetic-small"},{"delta":"second"}]})
         }
-        "subagent_step_emits_child_blocks_with_parent_agent_and_model"
-        | "subagent_call_block_carries_task_summary_and_children_carry_the_name" => {
+        "subagent_step_emits_child_blocks_with_parent_agent_and_model" => {
             json!({"synthetic":[{"subagent":{"name":"Explore","model":"synthetic-small","task":"private task","steps":[{"delay_ms":200},{"delta":"child"}]}}]})
         }
         "usage_step_accumulates_per_model_and_agent" => {
@@ -701,8 +710,7 @@ async fn pilot_case(
         "settings_in_transmission_change_the_model_before_the_turn" => {
             assert!(blocks.iter().all(|b| b.2 == "synthetic-small"))
         }
-        "subagent_step_emits_child_blocks_with_parent_agent_and_model"
-        | "subagent_call_block_carries_task_summary_and_children_carry_the_name" => {
+        "subagent_step_emits_child_blocks_with_parent_agent_and_model" => {
             let call = blocks
                 .iter()
                 .find(|b| b.4.as_deref() == Some("Agent"))

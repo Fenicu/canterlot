@@ -5,6 +5,33 @@
 
 mod support;
 
+// Помощник с проверкой чистки процессов включается один раз на весь бинарник:
+// локальные копии модуля нужны только самим сценариям.
+#[path = "support/process_guard.rs"]
+mod process_guard;
+
+#[test]
+fn process_guard_cleans_orphaned_cli_on_panic() {
+    let root = tempfile::tempdir().unwrap();
+    let check = process_guard::ProcessGuard::new(root.path());
+    let result = std::panic::catch_unwind(|| {
+        let _guard = process_guard::ProcessGuard::new(root.path());
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+            .args(["synthetic-cli", "--profile", "__detach_session"])
+            .current_dir(root.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(!check.members().is_empty());
+        panic!("exercise process cleanup during unwind");
+    });
+    assert!(result.is_err());
+    assert!(check.members().is_empty(), "orphan survived guard unwind");
+}
+
 #[cfg(feature = "synthetic-adapter")]
 #[path = "support/antigravity.rs"]
 mod antigravity;

@@ -13,6 +13,7 @@ pub struct ProcessGuard {
 }
 
 impl ProcessGuard {
+    #[allow(dead_code)] // Не каждый модуль, включивший помощник, сам запускает CLI.
     pub fn new(root: &Path) -> Self {
         let executable = match std::env::var_os("CANTERLOT_E2E_SUPERVISOR_BIN") {
             Some(path) => fs::canonicalize(path).unwrap(),
@@ -119,26 +120,4 @@ impl Drop for ProcessGuard {
     fn drop(&mut self) {
         self.cleanup();
     }
-}
-
-#[test]
-fn process_guard_cleans_orphaned_cli_on_panic() {
-    let root = tempfile::tempdir().unwrap();
-    let check = ProcessGuard::new(root.path());
-    let result = std::panic::catch_unwind(|| {
-        let _guard = ProcessGuard::new(root.path());
-        let status = std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
-            .args(["synthetic-cli", "--profile", "__detach_session"])
-            .current_dir(root.path())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        assert!(!check.members().is_empty());
-        panic!("exercise process cleanup during unwind");
-    });
-    assert!(result.is_err());
-    assert!(check.members().is_empty(), "orphan survived guard unwind");
 }

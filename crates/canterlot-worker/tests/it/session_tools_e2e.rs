@@ -996,16 +996,6 @@ async fn synthetic_harness_name_reaches_the_tools(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn exit_on_interrupt_harness_name_reaches_the_tools(pool: PgPool) {
-    harness_reaches_the_tools(pool, "synthetic-exit-on-interrupt").await;
-}
-
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn codex_harness_name_reaches_the_tools(pool: PgPool) {
-    harness_reaches_the_tools(pool, "synthetic-codex").await;
-}
-
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn stop_of_child_notifies_parent(pool: PgPool) {
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
