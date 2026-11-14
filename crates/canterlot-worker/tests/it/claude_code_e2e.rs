@@ -2768,18 +2768,22 @@ async fn interrupt_after_a_torn_steer_falls_back_to_sigint() {
 
 #[tokio::test]
 async fn sigint_fallback_fires_with_a_transmit_deadline_below_the_receipt_wait() {
+    use canterlot_worker::adapter::claude_code::input::CONTROL_TIMEOUT;
     let _sigint =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
-    let (mut f, id) = stalled_turn(Duration::from_secs(1));
+    // Срок передачи служит и окном итога после SIGINT: простоявший 10 с двойник под нагрузкой
+    // памяти и диска отвечал на сигнал позже секунды.
+    let (mut f, id) = stalled_turn(CONTROL_TIMEOUT / 2);
     f.start().await;
     f.send(&tx(id)).await;
     f.wait_point().await;
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(30), f.adapter.interrupt())
-            .await
-            .unwrap(),
-        adapter::InterruptOutcome::Acknowledged
-    ));
+    let outcome = tokio::time::timeout(Duration::from_secs(30), f.adapter.interrupt())
+        .await
+        .expect("interrupt is bounded by the receipt wait and the signal window");
+    assert!(
+        matches!(outcome, adapter::InterruptOutcome::Acknowledged),
+        "the fallback SIGINT ends the turn: {outcome:?}"
+    );
     f.close().await;
 }
 
