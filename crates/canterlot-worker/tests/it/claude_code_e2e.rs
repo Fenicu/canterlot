@@ -2740,9 +2740,13 @@ async fn steer_with_a_slow_replay_is_transmitting_until_the_proof() {
 
 #[tokio::test]
 async fn interrupt_after_a_torn_steer_falls_back_to_sigint() {
+    use canterlot_worker::adapter::claude_code::input::CONTROL_TIMEOUT;
     let _sigint =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
-    let (mut f, id) = stalled_turn(Duration::from_secs(1));
+    // Срок передачи служит и окном итога после SIGINT: простоявший двойник под нагрузкой
+    // памяти и диска отвечал на сигнал позже секунды. Он остаётся ниже срока квитанции,
+    // поэтому запасной SIGINT по-прежнему наступает первым.
+    let (mut f, id) = stalled_turn(CONTROL_TIMEOUT / 2);
     f.start().await;
     f.send(&tx(id)).await;
     f.wait_point().await;
