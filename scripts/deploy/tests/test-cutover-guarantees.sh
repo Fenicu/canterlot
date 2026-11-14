@@ -104,5 +104,83 @@ assert_eq "$(result_of "${FAKE_ROOT}/dry.result" status)/$(result_of "${FAKE_ROO
 teardown_case
 case_end
 
+# --- сверка сессий после vzdump в обе стороны ---
+# Строка running без супервизора, появившаяся во время vzdump: отказ до стопа воркера.
+case_begin "a running row without a supervisor added during vzdump aborts before the worker stop"
+setup_cutover inv-row-nosup
+GHOST="$(new_exec_id)"
+cat >"${FAKE_ROOT}/ghost-row.sh" <<HOOK
+#!/usr/bin/env bash
+printf '%s\n' "${GHOST}" >>"${FAKE_ROOT}/state/live-ids"
+HOOK
+export FAKE_SSH_AFTER_CMD="--notes-template" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/ghost-row.sh"
+run_cutover && case_fail "exit 0 with a running row without a supervisor" || case_ok "exit nonzero"
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+grep -q '^vzdump ' "${FAKE_ROOT}/state/calls.log" && case_ok "vzdump ran" || case_fail "vzdump never ran"
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub flipped"
+assert_contains "${FAKE_ROOT}/cutover.log" "live hub execution ${GHOST} has no supervisor process" "the row is named"
+assert_eq "$(result_of "$(R_FILE)" status)/$(result_of "$(R_FILE)" fail_codes)" "failed_before_flip/session_inventory" "result file: before the flip, code session_inventory"
+teardown_case
+case_end
+
+# Неосвобождённая запись ownership без строки и без супервизора во время vzdump: отказ.
+case_begin "an orphan unreleased ownership record added during vzdump aborts before the worker stop"
+setup_cutover inv-orphan-own
+ORPHAN="$(new_exec_id)"
+KEEP_EXEC1="${EXEC1}"; EXEC1="${ORPHAN}"; write_ownership; EXEC1="${KEEP_EXEC1}"
+mv "${WORKER_DATA}/ownership/snapshot.toml" "${FAKE_ROOT}/orphan-ownership.toml"
+write_ownership
+cat >"${FAKE_ROOT}/orphan-own.sh" <<HOOK
+#!/usr/bin/env bash
+cp "${FAKE_ROOT}/orphan-ownership.toml" "${WORKER_DATA}/ownership/snapshot.toml"
+HOOK
+export FAKE_SSH_AFTER_CMD="--notes-template" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/orphan-own.sh"
+run_cutover && case_fail "exit 0 with an orphan ownership record" || case_ok "exit nonzero"
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+assert_contains "${FAKE_ROOT}/cutover.log" "orphan unreleased ownership for ${ORPHAN}" "the record is named"
+assert_eq "$(result_of "$(R_FILE)" fail_codes)" "session_inventory" "result file: code session_inventory"
+teardown_case
+case_end
+
+# Новая полноценная сессия во время vzdump (своя строка running, супервизор, CLI,
+# релей; бинарь нового релиза): входит в снимок тиков, spec_compat — и против её бинаря.
+case_begin "a valid session started during vzdump enters the snapshot and the spec checks"
+setup_cutover inv-new-valid
+NEWID="$(new_exec_id)"
+NEWREL=cccccccccccc
+NEWBIN="${WORKER_RELEASES}/${NEWREL}/bin"
+mkdir -p "${NEWBIN}" "${WORKER_DATA}/executions/${NEWID}/sj"
+cp "${FAKE_WORKER_BIN}" "${NEWBIN}/canterlot-worker"
+cp /bin/sleep "${NEWBIN}/sleep-cli"
+cp "${REPO_ROOT}/crates/canterlot-worker/tests/it/fixtures/spec/1dbdd180ffce.toml" "${WORKER_DATA}/executions/${NEWID}/spec.toml"
+python3 -c "import struct,sys; sys.stdout.buffer.write(struct.pack('<Q', 300) + b'\0'*4)" >"${WORKER_DATA}/executions/${NEWID}/sj/ack"
+python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' "${WORKER_SOCKET_DIR}/${NEWID}.sock"
+cat >"${FAKE_ROOT}/new-session.sh" <<HOOK
+#!/usr/bin/env bash
+setsid bash -c "
+    ( exec -a 'opencode --session ${NEWID}' '${NEWBIN}/sleep-cli' 1000 ) &
+    ( exec -a '${NEWBIN}/canterlot-worker' '${NEWBIN}/canterlot-worker' mcp-relay --socket '${WORKER_DATA}/executions/${NEWID}/mcp.sock' ) &
+    exec -a '${NEWBIN}/canterlot-worker' '${NEWBIN}/canterlot-worker' supervise --exec-dir '${WORKER_DATA}/executions/${NEWID}'
+" >/dev/null 2>&1 <&- &
+command sleep 0.5
+printf '%s\n' "${NEWID}" >>"${FAKE_ROOT}/state/live-ids"
+HOOK
+export FAKE_SSH_AFTER_CMD="--notes-template" FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/new-session.sh"
+run_cutover && case_ok "cutover done" || { case_fail "cutover failed"; tail -15 "${FAKE_ROOT}/cutover.log"; }
+unset FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_HOOK
+grep -q "^${NEWID} sup=" "${FAKE_ROOT}/snap.state" && case_ok "the new session is in the tick snapshot" || case_fail "the new session is not in the snapshot"
+grep -q "^${EXEC1} sup=" "${FAKE_ROOT}/snap.state" && grep -q "^${EXEC2} sup=" "${FAKE_ROOT}/snap.state" \
+    && case_ok "the recorded sessions stay in the snapshot" || case_fail "recorded sessions lost from the snapshot"
+assert_contains "${FAKE_ROOT}/cutover.log" "session ${NEWID} started after the preflight: reconciled and added to the tick snapshot" "the new session is reported"
+assert_contains "${FAKE_ROOT}/cutover.log" "spec_compat against ${NEWBIN}/canterlot-worker" "spec_compat ran against the new supervisor binary"
+assert_contains "${FAKE_ROOT}/cutover.log" "spec ${NEWID}:" "the new spec shape was checked"
+assert_eq "$(result_of "$(R_FILE)" status)" "done" "result file: done"
+NEWSUP="$(sup_pid_of "${NEWID}")"
+assert_proc_alive "${NEWSUP}" "the new session survived the cutover"
+teardown_case
+case_end
+
 printf 'cutover-guarantees harness: %s passed, %s failed (cumulative)\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

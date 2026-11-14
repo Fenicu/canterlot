@@ -143,18 +143,22 @@ assert_contains "${FAKE_ROOT}/cutover.log" "cannot query compactions table" "que
 teardown_case
 case_end
 
-# --- B. набор супервизоров изменился после preflight: новый допустим, записанный пропавший — нет ---
-case_begin "new supervisor is allowed, a recorded one disappearing is not"
+# --- B. супервизор без строки хаба появился после preflight: сверка после vzdump
+# (как ворота 1) отказывает до стопа воркера. Новая полноценная сессия со строкой
+# running допустима и входит в снимок (test-cutover-guarantees.sh).
+case_begin "a new supervisor without a hub row after the preflight aborts before the worker stop"
 setup_cutover supset
 run_cutover_bg
 wait_for_log "${FAKE_ROOT}/cutover.log" "preflight PASS" || case_fail "no preflight marker"
-# Новый супервизор (без строки хаба) — это не дрейф записанных процессов.
 SUPX_DIR="${WORKER_DATA}/executions/ffffffff-ffff-4fff-8fff-ffffffffffff"
 mkdir -p "${SUPX_DIR}"
 setsid bash -c "exec -a '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' '${WORKER_RELEASES}/${SHA_PREV}/bin/canterlot-worker' supervise --exec-dir '${SUPX_DIR}'" >/dev/null 2>&1 <&- &
 rc=0; wait "${CUTOVER_PID}" || rc=$?
-[ "${rc}" = "0" ] && case_ok "exit 0 with a new supervisor (set equality not required)" || case_fail "exit ${rc} on a new supervisor"
-hub_is "${SHA_NEW}" && case_ok "hub flipped" || case_fail "hub not flipped"
+[ "${rc}" != "0" ] && case_ok "exit ${rc} on a supervisor without a hub row" || case_fail "exit 0 with a leaked supervisor"
+assert_contains "${FAKE_ROOT}/cutover.log" "supervisor runs for execution ffffffff-ffff-4fff-8fff-ffffffffffff with no live hub row" "the supervisor is named"
+worker_stopped_ever && case_fail "worker was stopped" || case_ok "worker never stopped"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub flipped"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" fail_codes)" "session_inventory" "result file: code session_inventory"
 assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end

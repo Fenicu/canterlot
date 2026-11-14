@@ -688,29 +688,31 @@ control_worker_exact() {
     return 0
 }
 
-# Инвентарь сессий после vzdump: каждый записанный процесс жив с тем же тиком, и
-# ни одна сессия не меняет состояние (строка created/starting/stopping/owner_lost
-# при живом супервизоре после ожидания). Новый супервизор без строки — к сведению,
-# как и перед стопом раньше.
+# Инвентарь сессий после vzdump: каждый записанный процесс жив с тем же тиком, затем
+# сверка в обе стороны, как в воротах 1 preflight (строки running <-> супервизоры <->
+# неосвобождённые записи ownership), заново: строка без супервизора, супервизор без
+# строки, сиротская запись или переходная сессия — отказ до стопа. Сессия, начатая
+# после preflight и прошедшая сверку, входит в снимок тиков (её сторожат дальше), её
+# spec проверяется, spec_compat — против нового бинаря супервизора.
 inventory_recheck() {
-    local label="$1" extra_id extra_state bad=0
+    local label="$1" before="${STATE_FILE}.before-regate" id
     if ! snapshot_drift "${STATE_FILE}" "${label}"; then
         log "a recorded session process disappeared or changed its start tick ${label}"
+        fail_code session_inventory
         return 1
     fi
     log "recorded session PIDs and ticks intact ${label} (new children allowed)"
-    settle_supervisor_rows "${WORKER_DATA}/executions" || { log "cannot reconcile supervisors with the hub ${label}"; return 1; }
-    while read -r extra_id extra_state; do
-        [ -n "${extra_id:-}" ] || continue
-        if is_transient_exec_state "${extra_state}"; then
-            log "session ${extra_id} is ${extra_state} ${label}: a session is changing state"
-            fail_code "$(session_code "${extra_state}")"
-            bad=1
-        else
-            log "supervisor ${extra_id} (hub row: ${extra_state}) appeared after the preflight: not in the tick snapshot (allowed)"
-        fi
-    done <<<"${SETTLED_EXTRA}"
-    return "${bad}"
+    cp "${STATE_FILE}" "${before}" || { log "cannot keep the preflight snapshot as ${before}"; return 1; }  # lint: local-temp
+    if ! run_child "${SCRIPT_DIR}/preflight.sh" "${SHA}" --inventory "${label}" --source "${SOURCE_DIR}" \
+            --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}"; then
+        log "sessions, supervisors and ownership do not agree ${label}"
+        return 1
+    fi
+    while read -r id _; do
+        case "${id}" in "" | worker) continue ;; esac
+        grep -q "^${id} " "${before}" || log "session ${id} started after the preflight: reconciled and added to the tick snapshot"
+    done <"${STATE_FILE}"
+    return 0
 }
 
 # Блок доклада печатается и кладётся в файл рядом с результатом (путь — в результате).

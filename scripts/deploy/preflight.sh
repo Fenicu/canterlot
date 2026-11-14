@@ -12,6 +12,11 @@ fi
 # KillMode=process; нет vzdump и блокировки CT (провал осмотра — жёсткая ошибка);
 # новые миграции с пометкой о риске блокировок.
 # Использование: scripts/deploy/preflight.sh SHA --source DIR [--dist DIR] [--state FILE] [--dry-run]
+#   [--inventory LABEL]
+# --inventory LABEL: только ворота 1 и 2 (повторный инвентарь cutover после vzdump,
+#   прямо перед стопом воркера): переходная строка при живом супервизоре — отказ,
+#   снимок тиков переписывается по текущему составу (новые сессии входят в него),
+#   spec_compat — только против бинарей, которых не было в прежнем снимке.
 # --dry-run: SHA цели обязателен (развёрнутый релиз никогда не подставляется молча);
 #   все проверки только читают, spec_compat выполняется по-настоящему против каждого
 #   релиза живого супервизора (пишет лишь артефакты сборки cargo в SOURCE/target).
@@ -27,12 +32,14 @@ SOURCE_DIR=""
 DIST_BASE=""
 STATE_FILE=""
 DRY_RUN=0
+INVENTORY=""
 while (($#)); do
     case "$1" in
         --source) SOURCE_DIR="$2"; shift 2 ;;
         --dist) DIST_BASE="$2"; shift 2 ;;
         --state) STATE_FILE="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
+        --inventory) INVENTORY="$2"; shift 2 ;;
         -*) die "unknown flag: $1" ;;
         *) SHA="$(short_sha "$1")"; shift ;;
     esac
@@ -43,7 +50,8 @@ done
 if [ "${DRY_RUN}" = "1" ] && [ -z "${SHA}" ]; then
     die "dry-run needs the TARGET sha: preflight.sh SHA --dry-run (the deployed release is never substituted)"
 fi
-[ -n "${SHA}" ] || die "usage: preflight.sh SHA --source DIR [--dist DIR] [--state FILE] [--dry-run]"
+[ -n "${SHA}" ] || die "usage: preflight.sh SHA --source DIR [--dist DIR] [--state FILE] [--dry-run] [--inventory LABEL]"
+[ -z "${INVENTORY}" ] || [ -n "${STATE_FILE}" ] || die "--inventory needs --state (the snapshot to extend)"
 require_release_id "${SHA}"
 [ "${DRY_RUN}" = "0" ] || log "dry-run mode: checking TARGET ${SHA} (deployed hub is $(deployed_sha hub), the baseline); read-only"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -89,12 +97,15 @@ TRANSIENT_IDS=""
 UNEXPLAINED_IDS=""
 while read -r extra_id extra_state; do
     [ -n "${extra_id:-}" ] || continue
-    if is_transient_exec_state "${extra_state}"; then
+    if [ -n "${INVENTORY}" ] && is_transient_exec_state "${extra_state}"; then
+        # Перед стопом воркера переходная сессия — отказ: её состояние меняется сейчас.
+        hard_code "$(session_code "${extra_state}")" "session ${extra_id} is ${extra_state} ${INVENTORY}: a session is changing state"
+    elif is_transient_exec_state "${extra_state}"; then
         TRANSIENT_IDS+="${extra_id}"$'\n'
         soft_code "$(session_code "${extra_state}")" "supervisor runs for execution ${extra_id} whose hub row is still ${extra_state} after ${SUPERVISOR_SETTLE_WAIT} s (not in the tick snapshot)"
     else
         UNEXPLAINED_IDS+="${extra_id}"$'\n'
-        hard "supervisor runs for execution ${extra_id} with no live hub row (hub row: ${extra_state})"
+        hard_code session_inventory "supervisor runs for execution ${extra_id} with no live hub row (hub row: ${extra_state})"
     fi
 done <<<"${SETTLED_EXTRA}"
 # Пустой список хаба при живых процессах — жёсткая ошибка, а не пропуск. Переходные
@@ -104,13 +115,13 @@ for own_id in ${OWNERSHIP_UNRELEASED:-}; do
     in_lines "${own_id}" "${TRANSIENT_IDS}" || UNEXPLAINED_OWN+="${own_id}"$'\n'
 done
 if [ -z "${LIVE_EXECS}" ] && { [ -n "${UNEXPLAINED_IDS}" ] || [ -n "${UNEXPLAINED_OWN}" ]; }; then
-    hard "hub reports no live executions while supervisors or unreleased ownership exist"
+    hard_code session_inventory "hub reports no live executions while supervisors or unreleased ownership exist"
 fi
 # Живая строка без супервизора — жёстко.
 # shellcheck disable=SC2086
 for exec_id in ${LIVE_EXECS:-}; do
     in_lines "${exec_id}" "${PROC_IDS}" \
-        || hard "live hub execution ${exec_id} has no supervisor process"
+        || hard_code session_inventory "live hub execution ${exec_id} has no supervisor process"
 done
 # Неосвобождённая запись без строки хаба и без процесса — утечка: жёстко.
 # Запись супервизора с переходной строкой уже учтена мягко выше.
@@ -120,7 +131,7 @@ for own_id in ${OWNERSHIP_UNRELEASED:-}; do
         if in_lines "${own_id}" "${TRANSIENT_IDS}"; then
             log "unreleased ownership for ${own_id} belongs to a supervisor with a transitional hub row (reported above)"
         elif ! in_lines "${own_id}" "${PROC_IDS}"; then
-            hard "orphan unreleased ownership for ${own_id}: no hub row, no supervisor"
+            hard_code session_inventory "orphan unreleased ownership for ${own_id}: no hub row, no supervisor"
         else
             soft "unreleased ownership for ${own_id} with supervisor but no hub row"
         fi
@@ -132,11 +143,11 @@ done
 SNAPSHOT=""
 for exec_id in ${LIVE_EXECS:-}; do
     EXEC_DIR="${WORKER_DATA}/executions/${exec_id}"
-    [ -d "${EXEC_DIR}" ] || { hard "exec dir missing for live execution ${exec_id}"; continue; }
+    [ -d "${EXEC_DIR}" ] || { hard_code session_inventory "exec dir missing for live execution ${exec_id}"; continue; }
     # Точное совпадение: любой агентский процесс (playwright-профиль в exec-dir)
     # может содержать exec id в командной строке и затмить сопровождение в head -1.
     SUP_LINE="$(proc_ticks "${exec_id}" | grep supervise | grep -v mcp-relay | sed -n 1p)"
-    [ -n "${SUP_LINE}" ] || { hard "no supervisor process for live execution ${exec_id}"; continue; }
+    [ -n "${SUP_LINE}" ] || { hard_code session_inventory "no supervisor process for live execution ${exec_id}"; continue; }
     SUP_PID="${SUP_LINE%% *}"
     SUP_TICK="$(printf '%s' "${SUP_LINE}" | cut -d' ' -f2)"
     SUP_EXE="$(readlink "/proc/${SUP_PID}/exe")"
@@ -153,7 +164,7 @@ for exec_id in ${LIVE_EXECS:-}; do
     # а не любой процесс; тот же помощник использует verify.
     CLI_LINE="$(session_cli_pid "${SUP_PID}")"
     [ -n "${REL_LINE}" ] || soft "no mcp-relay for live execution ${exec_id}"
-    [ -n "${CLI_LINE}" ] || { hard "no CLI child of supervisor ${SUP_PID} for ${exec_id}"; continue; }
+    [ -n "${CLI_LINE}" ] || { hard_code session_inventory "no CLI child of supervisor ${SUP_PID} for ${exec_id}"; continue; }
     log "exec ${exec_id}: supervisor ${SUP_LINE} exe=${SUP_EXE}; CLI ${CLI_LINE}; relay ${REL_LINE:-none}"
     SNAPSHOT+="${exec_id} sup=${SUP_PID}:${SUP_TICK} cli=$(printf '%s' "${CLI_LINE}" | tr ' ' ':') relay=${REL_FIELD:-none} sup_exe=${SUP_EXE}"$'\n'
 done
@@ -163,6 +174,11 @@ if [ -n "${WORKER_PID}" ] && [ "${WORKER_PID}" != "0" ]; then
     WORKER_TICK="$(tr ' ' '\n' <"/proc/${WORKER_PID}/stat" 2>/dev/null | sed -n '22p')"
     log "worker control service PID ${WORKER_PID} tick ${WORKER_TICK}"
     SNAPSHOT+="worker pid=${WORKER_PID}:${WORKER_TICK:-?}"$'\n'
+fi
+# Бинари супервизоров прежнего снимка: их spec_compat уже прошёл в первом preflight.
+KNOWN_BINS=""
+if [ -n "${INVENTORY}" ] && [ -f "${STATE_FILE}" ]; then
+    KNOWN_BINS="$(grep -o 'sup_exe=[^ ]*' "${STATE_FILE}" | cut -d= -f2 | sort -u || true)"
 fi
 if [ -n "${STATE_FILE}" ] && [ "${DRY_RUN}" = "0" ]; then
     printf '%s' "${SNAPSHOT}" >"${STATE_FILE}"
@@ -177,7 +193,8 @@ log "gate 2: spec.toml shapes and binary compatibility"
 # 1.4.0), форму не ломают: допустимые ключи выводит spec-shape.py из кода цели.
 FIXTURES="$(find "${SOURCE_DIR}/crates/canterlot-worker/tests/it/fixtures/spec" -maxdepth 1 -name '*.toml' -printf '%p\n' | sort)"
 [ -n "${FIXTURES}" ] || die "no spec fixtures in ${SOURCE_DIR}"
-for exec_id in ${LIVE_EXECS:-}; do
+# Спека — у каждой сессии снимка; строка без каталога или супервизора уже отказ выше.
+for exec_id in $(printf '%s' "${SNAPSHOT}" | grep -v '^worker ' | cut -d' ' -f1); do
     SPEC="${WORKER_DATA}/executions/${exec_id}/spec.toml"
     # shellcheck disable=SC2086 # newline list, intentional word splitting
     if SHAPE_OUT="$(python3 -I "${SCRIPT_DIR}/spec-shape.py" \
@@ -192,6 +209,10 @@ done
 # (урок: короткая TMPDIR, иначе путь сокета длиннее 108 байт).
 OLD_BINS="$(printf '%s\n' "${SNAPSHOT}" | grep -o 'sup_exe=[^ ]*' | cut -d= -f2 | sort -u || true)"
 for old_bin in ${OLD_BINS:-}; do
+    if in_lines "${old_bin}" "${KNOWN_BINS}"; then
+        log "spec_compat against ${old_bin}: already passed in the first preflight"
+        continue
+    fi
     [ -x "${old_bin}" ] || { hard "old supervisor binary not executable: ${old_bin}"; continue; }
     # spec_compat только читает (бинарь старого релиза и собственные тест-каталоги в
     # коротком TMPDIR), поэтому в dry-run он ВЫПОЛНЯЕТСЯ: пишутся только артефакты
@@ -205,6 +226,11 @@ for old_bin in ${OLD_BINS:-}; do
             cargo test --locked -p canterlot-worker --all-features --test it spec_compat::
     ) || hard "spec_compat failed against ${old_bin}"
 done
+
+if [ -n "${INVENTORY}" ]; then
+    summary_exit "preflight inventory PASS for ${SHA} ${INVENTORY}: rows, supervisors and ownership agree; snapshot ${STATE_FILE}"
+    exit 0
+fi
 
 log "gate 3: every table and key of worker.toml, hub.toml and speech.toml against the new structs"
 if ! python3 "${SCRIPT_DIR}/config-check.py" \
