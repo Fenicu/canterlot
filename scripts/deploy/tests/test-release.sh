@@ -507,5 +507,24 @@ hub_is "${SHA_PREV}" && worker_is "${SHA_PREV}" && case_ok "production untouched
 teardown_case
 case_end
 
+case_begin "a crashed child after a transient code in the real rehearsal is not retried"
+setup_cutover release-real-crash
+wire_real_cutover
+EXEC3="$(new_exec_id)"
+spawn_session "${EXEC3}" "${SHA_PREV}" 300
+printf '%s starting\n' "${EXEC3}" >"${FAKE_ROOT}/state/exec-states"
+install_exe_readlink_fault
+FAKE_READLINK_FAIL_EXE=1 run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "1" "exit 1"
+CODES="$(sed -n 's/^fail_codes=//p' "${RDIR}/rehearsal-${RVER}-1.result")"
+[[ ",${CODES}," == *",unknown,"* && ",${CODES}," == *",session_starting,"* ]] \
+    && case_ok "real rehearsal codes: session_starting and unknown (${CODES})" || case_fail "real rehearsal codes [${CODES}]"
+[ ! -e "${RDIR}/rehearsal-${RVER}-2.result" ] && case_ok "no second rehearsal" || case_fail "the rehearsal was retried"
+assert_not_contains "${FAKE_ROOT}/release.out" "one fresh rehearsal" "no retry announced"
+assert_eq "$(rres status)/$(rres rehearsal_retried)" "failed_before_cutover/no" "result: stopped, not retried"
+assert_eq "$(calls_count '--execute')" "0" "no real cutover"
+teardown_case
+case_end
+
 printf 'release harness: %s passed, %s failed (cumulative)\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

@@ -306,4 +306,4 @@ fi
 log "outside the 03:30 backup window (${UTC_HOUR} UTC)"
 
 [ "${SPEECH_ISSUES}" = "0" ] || log "speech: ${SPEECH_ISSUES} speech soft issue(s) above (dictation only, not counted)"
-check_summary && log "preflight PASS for ${SHA}"
+summary_exit "preflight PASS for ${SHA}"

@@ -97,6 +97,25 @@ remove_target_hub_file() {
     dist_resync
 }
 
+# readlink, который при FAKE_READLINK_FAIL_EXE=1 не читает /proc/<pid>/exe (сбой
+# чтения посреди preflight, как ENOENT у процесса на переходе exec).
+install_exe_readlink_fault() {
+    local real
+    real="$(command -v readlink)"
+    cat >"${FAKE_ROOT}/fake-bin/readlink" <<EOF
+#!/usr/bin/env bash
+if [ "\${FAKE_READLINK_FAIL_EXE:-0}" = "1" ]; then
+    for a in "\$@"; do
+        case "\${a}" in
+            /proc/*/exe) echo "readlink-fault \${a}" >>"${FAKE_ROOT}/state/calls.log"; echo "readlink: \${a}: No such file or directory" >&2; exit 1 ;;
+        esac
+    done
+fi
+exec "${real}" "\$@"
+EOF
+    chmod +x "${FAKE_ROOT}/fake-bin/readlink"
+}
+
 setup_cutover() {
     setup_case "cutover-$1"
     export SITE_CODES="meeting.example.com:200 git.example.com:200 caddy.example.com:302 gotify.example.com:200 immich.example.com:200 bookshelf.example.com:200 hub.example.com:200"

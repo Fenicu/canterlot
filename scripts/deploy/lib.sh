@@ -15,7 +15,7 @@ log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # него (set -e, необработанный сбой) файл результата записывает как unknown.
 # shellcheck disable=SC2034 # читает cutover.sh (ловушки выхода)
 FAIL_EXPLAINED=0
-die() { FAIL_EXPLAINED=1; fail_code unknown; printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
+die() { FAIL_EXPLAINED=1; fail_code unknown; printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; handled_exit 1; }
 
 # Коды отказов прогона (fail_codes в файле результата cutover): строка на отказ в
 # файле DEPLOY_FAIL_LOG, его наследуют дочерние preflight.sh, target-check.sh,
@@ -36,7 +36,48 @@ die_after() {
     FAIL_EXPLAINED=1
     [ "$(fail_count)" -gt "${FAIL_MARK}" ] || fail_code unknown
     printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
-    exit 1
+    handled_exit 1
+}
+# Обработанный выход дочернего скрипта выката (preflight, target-check, verify):
+# перед своим отказом он пишет отметку «rc=N codes=…» в файл DEPLOY_HANDLED_FILE,
+# который дал ему run_child родителя. Пишет только сам процесс скрипта, не его
+# подоболочка; внукам файл не передаётся.
+HANDLED_FILE="${DEPLOY_HANDLED_FILE:-}"
+unset DEPLOY_HANDLED_FILE
+FAIL_START="$(fail_count)"
+handled_exit() {
+    local rc="$1" codes=""
+    if [ -n "${HANDLED_FILE}" ] && [ "${BASHPID}" = "$$" ]; then
+        if [ -n "${DEPLOY_FAIL_LOG:-}" ] && [ -f "${DEPLOY_FAIL_LOG}" ]; then
+            codes="$(tail -n +"$((FAIL_START + 1))" "${DEPLOY_FAIL_LOG}" | paste -sd, -)" || codes=""
+        fi
+        printf 'rc=%s codes=%s\n' "${rc}" "${codes}" >"${HANDLED_FILE}" 2>/dev/null || true
+    fi
+    exit "${rc}"
+}
+# Итог проверок дочернего скрипта: PASS или обработанный отказ.
+summary_exit() {
+    if check_summary; then log "$1"; else handled_exit 1; fi
+}
+# Запуск дочернего скрипта выката. Отказ без отметки обработанного выхода (set -e,
+# необработанный сбой, сигнал) записывается кодом unknown: коды, которые ребёнок
+# успел записать до этого, такой выход не объясняют.
+run_child() {
+    local f rc=0 got=""
+    if [ -z "${DEPLOY_FAIL_LOG:-}" ]; then
+        "$@" || rc=$?
+        return "${rc}"
+    fi
+    f="${DEPLOY_FAIL_LOG}.handled"
+    rm -f "${f}"  # lint: local-temp
+    DEPLOY_HANDLED_FILE="${f}" "$@" || rc=$?
+    if [ -f "${f}" ]; then got="$(sed -n 's/^rc=\([0-9]*\) .*/\1/p' "${f}")"; fi
+    rm -f "${f}"  # lint: local-temp
+    if [ "${rc}" != "0" ] && [ "${got}" != "${rc}" ]; then
+        log "${1##*/} exited ${rc} outside its handled failure path (crash, set -e or signal): recorded as unknown"
+        fail_code unknown
+    fi
+    return "${rc}"
 }
 
 # Все вызовы ssh только с -n либо с явным конвейером (урок: ssh ел stdin).

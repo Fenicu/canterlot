@@ -324,4 +324,4 @@ if [ -n "${NOT_RUN_LIST}" ]; then
         hard "target comparisons NOT RUN (stage the release or use --allow-skipped only to acknowledge a known gap)"
     fi
 fi
-check_summary && log "target check PASS for ${SHA}"
+summary_exit "target check PASS for ${SHA}"

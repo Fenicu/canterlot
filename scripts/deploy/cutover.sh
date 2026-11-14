@@ -179,7 +179,7 @@ write_result() {
             log "${RESULT_LOG}"
     } >"${RESULT_FILE}" 2>/dev/null || log "could not write the result file ${RESULT_FILE}"
     if [ -n "${DEPLOY_SOFT_LOG}" ]; then rm -f "${DEPLOY_SOFT_LOG}"; fi  # lint: local-temp
-    if [ -n "${DEPLOY_FAIL_LOG}" ]; then rm -f "${DEPLOY_FAIL_LOG}"; fi  # lint: local-temp
+    if [ -n "${DEPLOY_FAIL_LOG}" ]; then rm -f "${DEPLOY_FAIL_LOG}" "${DEPLOY_FAIL_LOG}.handled"; fi  # lint: local-temp
     log "result file: ${RESULT_FILE} (status ${status})"
 }
 yn() { if [ "$1" = "1" ]; then printf yes; else printf no; fi; }
@@ -455,7 +455,7 @@ if [ "${DRY_RUN}" = "1" ]; then
     SOFT_BEFORE="${SOFT_FAILURES}"
     HARD_BEFORE="${HARD_FAILURES}"
     NOT_RUN=0
-    if ! "${SCRIPT_DIR}/preflight.sh" "${SHA}" --dry-run --source "${SOURCE_DIR}" \
+    if ! run_child "${SCRIPT_DIR}/preflight.sh" "${SHA}" --dry-run --source "${SOURCE_DIR}" \
             --dist "${DIST_BASE:-${REPO_ROOT}/dist}"; then
         hard "preflight --dry-run failed"
         NOT_RUN=1
@@ -463,7 +463,7 @@ if [ "${DRY_RUN}" = "1" ]; then
     # Цель: dist, залитые каталоги на каждом хосте, версии, миграции, CSP.
     TARGET_EXTRA=()
     [ "${ALLOW_SKIPPED}" = "0" ] || TARGET_EXTRA=(--allow-skipped)
-    if ! "${SCRIPT_DIR}/target-check.sh" "${SHA}" --source "${SOURCE_DIR}" \
+    if ! run_child "${SCRIPT_DIR}/target-check.sh" "${SHA}" --source "${SOURCE_DIR}" \
             --dist "${DIST_BASE:-${REPO_ROOT}/dist}" "${TARGET_EXTRA[@]}"; then
         hard "target-check failed for ${SHA}"
         NOT_RUN=1
@@ -501,7 +501,7 @@ if [ "${DRY_RUN}" = "1" ]; then
     esac
     VERIFY_EXTRA=()
     [ "${ALLOW_SKIPPED}" = "0" ] || VERIFY_EXTRA=(--allow-skipped)
-    if ! "${SCRIPT_DIR}/verify.sh" --dry-run --dist "${DIST_BASE:-${REPO_ROOT}/dist}" "${VERIFY_EXTRA[@]}"; then
+    if ! run_child "${SCRIPT_DIR}/verify.sh" --dry-run --dist "${DIST_BASE:-${REPO_ROOT}/dist}" "${VERIFY_EXTRA[@]}"; then
         hard "verify --dry-run failed"
         NOT_RUN=1
     fi
@@ -556,10 +556,10 @@ PHASE="preflight"
 export DEPLOY_SOFT_KIND=preflight
 log "common preflight: preflight.sh and target-check.sh for ${SHA}"
 fail_mark
-"${SCRIPT_DIR}/preflight.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" \
+run_child "${SCRIPT_DIR}/preflight.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" \
     || die_after "preflight failed for ${SHA}: refusing before any write"
 fail_mark
-"${SCRIPT_DIR}/target-check.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" \
+run_child "${SCRIPT_DIR}/target-check.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" \
     || die_after "target check failed for ${SHA}: refusing before any write"
 
 # CSP, который уйдёт в canterlot.env.<sha>, обязан быть выведен из финального PWA-билда
@@ -1402,9 +1402,9 @@ log "running verification (two reads)"
 if is_rehearse; then
     # Репетиция проверяет живое состояние (развёрнутые релизы) тем же verify.sh;
     # его единственная запись (loopback-проба) печатается через run_write.
-    "${SCRIPT_DIR}/verify.sh" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}"
+    run_child "${SCRIPT_DIR}/verify.sh" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}"
 else
-    "${SCRIPT_DIR}/verify.sh" "${SHA}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" --web-sha "${WEB_SHA_EFF}"
+    run_child "${SCRIPT_DIR}/verify.sh" "${SHA}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" --web-sha "${WEB_SHA_EFF}"
 fi
 # База GeoIP для мест входа: после проверки, ошибки мягкие (место входа просто пусто).
 PHASE="geoip"

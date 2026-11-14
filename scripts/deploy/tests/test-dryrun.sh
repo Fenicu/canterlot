@@ -112,7 +112,7 @@ setup_dryrun() {
 # Хэши содержимого, не только имена: dry-run мог перезаписать существующий
 # файл тем же набором имён, и сравнение списков это пропускало.
 snapshot_tree() {
-    find "${FAKE_ROOT}" -type f ! -name '*.log' ! -name '*.result' ! -name '*.result.soft' ! -name '*.result.codes' -print0 2>/dev/null \
+    find "${FAKE_ROOT}" -type f ! -name '*.log' ! -name '*.result' ! -name '*.result.soft' ! -name '*.result.codes' ! -name '*.result.codes.handled' -print0 2>/dev/null \
         | LC_ALL=C sort -z \
         | xargs -0 -r sha256sum 2>/dev/null || true
 }
@@ -131,17 +131,19 @@ fs_unchanged() {
 }
 
 # Дозор во время прогона: фиксирует любой новый файл внутри FAKE_ROOT
-# с шагом 0.2 c. Нарушение — в файл вне FAKE_ROOT.
+# с шагом 0.2 c. Нарушение — в файл вне FAKE_ROOT. Свои локальные файлы прогона
+# (лог, результат, .soft, .codes и отметка выхода дочернего скрипта .codes.handled)
+# не в счёт.
 watch_start() {
     WATCH_BASE="/tmp/canterlot-watch-base-${RANDOM}.txt"
     WATCH_LOG="/tmp/canterlot-watch-${RANDOM}.log"
     export WATCH_BASE WATCH_LOG
-    find "${FAKE_ROOT}" -type f | grep -vE '/dry\.(log|result|result\.soft|result\.codes)$' | LC_ALL=C sort >"${WATCH_BASE}"
+    find "${FAKE_ROOT}" -type f | grep -vE '/dry\.(log|result|result\.soft|result\.codes|result\.codes\.handled)$' | LC_ALL=C sort >"${WATCH_BASE}"
     ( while true; do
-        if ! find "${FAKE_ROOT}" -type f 2>/dev/null | grep -vE '/dry\.(log|result|result\.soft|result\.codes)$' | LC_ALL=C sort | cmp -s "${WATCH_BASE}" -; then
+        if ! find "${FAKE_ROOT}" -type f 2>/dev/null | grep -vE '/dry\.(log|result|result\.soft|result\.codes|result\.codes\.handled)$' | LC_ALL=C sort | cmp -s "${WATCH_BASE}" -; then
             echo "NEW FILE DURING DRY-RUN at $(date -u +%T)" >>"${WATCH_LOG}"
-            find "${FAKE_ROOT}" -type f 2>/dev/null | grep -vE '/dry\.(log|result|result\.soft|result\.codes)$' | LC_ALL=C sort | comm -13 "${WATCH_BASE}" - | head -5 >>"${WATCH_LOG}"
-            find "${FAKE_ROOT}" -type f 2>/dev/null | grep -vE '/dry\.(log|result|result\.soft|result\.codes)$' | LC_ALL=C sort >"${WATCH_BASE}"
+            find "${FAKE_ROOT}" -type f 2>/dev/null | grep -vE '/dry\.(log|result|result\.soft|result\.codes|result\.codes\.handled)$' | LC_ALL=C sort | comm -13 "${WATCH_BASE}" - | head -5 >>"${WATCH_LOG}"
+            find "${FAKE_ROOT}" -type f 2>/dev/null | grep -vE '/dry\.(log|result|result\.soft|result\.codes|result\.codes\.handled)$' | LC_ALL=C sort >"${WATCH_BASE}"
         fi
         sleep 0.2
       done ) &
