@@ -30,6 +30,7 @@
 	import { getRuntime } from '#lib/app/runtime.js';
 	import { pendingItems } from '#lib/routing/queue.js';
 	import { waitFactsFromRequest } from '#lib/requests/waitCopy.js';
+	import { WAITING_SECTION, focusListSection, otherWaitingCount } from '#lib/screens/sessions/waiting.js';
 
 	interface DetailLike {
 		title?: string;
@@ -114,6 +115,20 @@
 	const parentId = $derived(((chat.detail as AcceptDetail | null)?.parent_id) ?? null);
 	const accept = $derived(acceptView(chat.detail as AcceptDetail | null));
 	const settings = $derived(chat.settings as SettingsLike | null);
+
+	// Другие сессии, которые ждут владельца прямо сейчас: счёт живёт на списке и меняется событиями.
+	const waitingOthers = $derived.by(() => {
+		try {
+			return otherWaitingCount(getRuntime().list.items.values(), chat.id);
+		} catch {
+			return 0;
+		}
+	});
+	const waitingTitle = $derived(
+		waitingOthers > 0
+			? `Ждут ответа: ${waitingOthers} ${fmt.plural(waitingOthers, ['сессия', 'сессии', 'сессий'])}`
+			: ''
+	);
 
 	const title = $derived(detail?.title || 'Сессия');
 	// Открытый запрос говорит в шапке своим видом и возрастом, а не общей фразой.
@@ -237,9 +252,13 @@
 		{#if !pane.desktop}
 			<a
 				class="icon-button back"
+				class:waiting={waitingOthers > 0}
 				href={resolve('sessions')}
-				aria-label="Все сессии"
-			><Icon name="back" /></a>
+				aria-label={waitingOthers > 0 ? `Назад, ждут ответа: ${waitingOthers}` : 'Все сессии'}
+				title={waitingTitle || undefined}
+				data-back-waiting={waitingOthers > 0 ? waitingOthers : undefined}
+				onclick={() => { if (waitingOthers > 0) focusListSection(WAITING_SECTION); }}
+			><Icon name="back" />{#if waitingOthers > 0}<span class="back-count" aria-hidden="true">{waitingOthers}</span>{/if}</a>
 		{/if}
 
 		<div class="header-info">
@@ -565,6 +584,18 @@
 	}
 	.back {
 		margin-left: var(--icon-hang);
+	}
+	/* Ожидание в других сессиях: янтарный счёт рядом со стрелкой, мишень шире на цифру. */
+	.back.waiting {
+		width: auto;
+		gap: var(--s1);
+		padding-inline: var(--s2);
+		color: var(--warning);
+	}
+	.back-count {
+		font-size: var(--fs-meta);
+		font-weight: var(--weight-bold);
+		font-variant-numeric: tabular-nums;
 	}
 	.icon-button {
 		background: var(--transparent);

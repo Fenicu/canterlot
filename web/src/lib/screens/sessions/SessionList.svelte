@@ -39,6 +39,7 @@
   import GroupRail from './GroupRail.svelte';
   import GroupTabs from './GroupTabs.svelte';
   import { buildSections, tabCounts, type Tab, type TreeNode } from './grouping';
+  import { WAITING_SECTION, takeFocusSection, waitingRows } from './waiting';
   import { readTab, resolveTab, writeTab } from './listTab';
   import { activeGroupId, setActiveGroupId } from './activeGroup.svelte';
   import LimitsStrip from './LimitsStrip.svelte';
@@ -185,6 +186,8 @@
       : buildSections(rows, groups, tab, collapsedSet(collapsed), kids)
   );
   const view = $derived(results ? `search:${query.trim()}` : JSON.stringify(tab));
+  // Ждущие владельца во «Все»: янтарный счёт полосы групп говорит о них и без раздела.
+  const waitingAll = $derived(waitingRows(rows, { kind: 'all' }).length);
   const emptyTab = $derived.by(() => {
     if (results || !ready || rows.length === 0 || sections.some((section) => section.items.length > 0)) return '';
     if (tab.kind === 'archive') return 'В архиве пока пусто';
@@ -268,10 +271,23 @@
   $effect(() => {
     const node = scroller;
     if (!node || rows.length === 0 || !restore) return;
+    // Переход из шапки чата просит открыть список на разделе ожидания.
+    const focus = takeFocusSection();
     let alive = true;
     let frames = 0;
     const apply = () => {
       if (!alive) return;
+      const target = focus ? node.querySelector<HTMLElement>(`[data-section-slot="${CSS.escape(focus)}"]`) : null;
+      if (target) {
+        node.scrollTop += Math.round(target.getBoundingClientRect().top - node.getBoundingClientRect().top);
+        restore = false;
+        return;
+      }
+      if (focus && frames <= 12) {
+        frames += 1;
+        requestAnimationFrame(apply);
+        return;
+      }
       const top = storedScroll();
       node.scrollTop = top;
       frames += 1;
@@ -305,8 +321,8 @@
     writeKidsChoice({ collapsed: kidsCollapsed, expanded: kidsExpanded });
   }
 
-  function openSheet(id: string) {
-    const row = listNode?.querySelector(`[data-session="${CSS.escape(id)}"]`);
+  function openSheet(id: string, node: HTMLElement | null = null) {
+    const row = node ?? listNode?.querySelector(`[data-session="${CSS.escape(id)}"]`);
     if (row && listNode) {
       const box = row.getBoundingClientRect();
       const origin = listNode.getBoundingClientRect().top;
@@ -390,6 +406,7 @@
       current={tab}
       icons={groupIcons}
       counted={counted}
+      waiting={waitingAll}
       {section}
       onselect={(next) => tab = next}
     />
@@ -513,7 +530,11 @@
           {...section}
           now={now}
           current={openRow?.id ?? ''}
-          heading={!results && (tab.kind === 'all' || (tab.kind === 'group' && sections.some((section) => section.id.startsWith('pinned:'))))}
+          copy={section.id === WAITING_SECTION}
+          keyPrefix={section.id === WAITING_SECTION ? `${WAITING_SECTION}:` : ''}
+          headingLabel={section.id === WAITING_SECTION ? `${section.title} · ${section.count}` : ''}
+          tone={section.id === WAITING_SECTION ? 'warning' : null}
+          heading={!results && (section.id === WAITING_SECTION || tab.kind === 'all' || (tab.kind === 'group' && sections.some((section) => section.id.startsWith('pinned:'))))}
           ontoggle={toggle}
           ontoggleKids={toggleKids}
           onopen={openSheet}

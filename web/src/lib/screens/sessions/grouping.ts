@@ -1,4 +1,5 @@
 import type { Counts, ListRow } from "#lib/stores/list.svelte.js";
+import { WAITING_SECTION, waitingRows } from "./waiting";
 
 export type Tab =
   | { kind: "all" }
@@ -111,6 +112,9 @@ export function buildSections(
     const pinnedIds = new Set(pinned.map((item) => item.id));
     const rest = members.filter((item) => !pinnedIds.has(item.id));
     const sections: Section[] = [];
+    // В группе раздел знает только её ждущих: владелец работает в этой вкладке.
+    const lane = waitingSection(active, tab, collapsed);
+    if (lane) sections.push(lane);
     if (pinned.length > 0)
       sections.push(
         section(
@@ -138,6 +142,8 @@ export function buildSections(
   const roots = nest(active, null, kids);
   const used = new Set<string>();
   const sections: Section[] = [];
+  const lane = waitingSection(active, tab, collapsed);
+  if (lane) sections.push(lane);
   const pinned = roots.filter((node) => node.item.pinned);
   for (const node of pinned) used.add(node.item.id);
   if (pinned.length > 0)
@@ -328,6 +334,29 @@ function section(
     items,
     collapsed: collapsed.has(id),
   };
+}
+
+/** Раздел «Ждут вас»: копии строк, самые долгие первыми. */
+function waitingSection(
+  items: ListRow[],
+  tab: Tab,
+  collapsed: ReadonlySet<string>,
+): Section | null {
+  const rows = waitingRows(items, tab);
+  if (rows.length === 0) return null;
+  return section(
+    WAITING_SECTION,
+    "Ждут вас",
+    rows.map((item) => ({
+      item,
+      depth: 0,
+      open: true,
+      running: 0,
+      waiting: 0,
+      children: [],
+    })),
+    collapsed,
+  );
 }
 
 /** Заголовок детей: сколько работает и сколько ждёт владельца, раздельно. */

@@ -13,6 +13,10 @@
     now,
     current = '',
     heading = true,
+    copy = false,
+    keyPrefix = '',
+    headingLabel = '',
+    tone = null,
     ontoggle,
     ontoggleKids,
     onopen
@@ -25,9 +29,16 @@
     now: number;
     current?: string;
     heading?: boolean;
+    /** Копия строки в сводном разделе: у неё свой ключ и своя метка, без `data-session`. */
+    copy?: boolean;
+    /** Префикс ключей копий: тот же id в своей группе остаётся отдельной строкой. */
+    keyPrefix?: string;
+    /** Имя заголовка целиком, если счёт читается вместе с ним: «Ждут вас · 2». */
+    headingLabel?: string;
+    tone?: 'warning' | null;
     ontoggle: (id: string) => void;
     ontoggleKids: (id: string) => void;
-    onopen: (id: string) => void;
+    onopen: (id: string, node?: HTMLElement | null) => void;
   } = $props();
 </script>
 
@@ -62,18 +73,18 @@
 <section>
   {#if heading}
     <h2>
-      <button type="button" class="section-head" aria-expanded={!collapsed} onclick={() => ontoggle(id)}>
-        <span class="title">{title}</span>
+      <button type="button" class="section-head" aria-expanded={!collapsed} aria-label={headingLabel || undefined} onclick={() => ontoggle(id)}>
+        <span class="title" data-tone={tone}>{title}</span>
         <span class="chevron" class:open={!collapsed}><Icon name="chevron" /></span>
-        <span class="count">{count}</span>
+        <span class="count" data-tone={tone}>{count}</span>
       </button>
     </h2>
   {/if}
   {#if !heading || !collapsed}
-    {#each items as node (node.item.id)}
+    {#each items as node (`${keyPrefix}${node.item.id}`)}
       <!-- Строка, ушедшая в архив или удалённая, схлопывается; вернувшаяся раскрывается на своём месте. -->
-      <div class="slot" data-slot={node.item.id} transition:rowFold>
-        <SessionRow item={node.item} {now} depth={node.depth} current={node.item.id === current} {onopen} />
+      <div class="slot" data-slot={`${keyPrefix}${node.item.id}`} transition:rowFold>
+        <SessionRow item={node.item} {now} depth={node.depth} current={!copy && node.item.id === current} {copy} {onopen} />
         {@render branch(node)}
       </div>
     {/each}
@@ -100,7 +111,10 @@
   .section-head .chevron.open { opacity: 0; }
   .section-head:hover .chevron.open, .section-head:focus-visible .chevron.open { opacity: 1; }
   .title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Раздел ожидания красит подпись янтарём; слово «Ждут вас» читается и без цвета. */
+  .title[data-tone='warning'] { color: var(--warning); }
   .count { flex: none; margin-left: auto; color: var(--time); font-variant-numeric: tabular-nums; }
+  .count[data-tone='warning'] { color: var(--warning); font-weight: var(--weight-bold); }
   @media (pointer: fine) {
     .section-head { min-height: var(--s11); }
   }

@@ -805,14 +805,20 @@ test('unread_dot_and_counts_update_from_events', async ({ page }) => {
 });
 
 test('phone_navigation_list_chat_back_preserves_list_scroll', async ({ page }) => {
+  // Без чужих ожиданий: стрелка назад возвращает к прежнему месту, а не к разделу «Ждут вас».
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  for (let index = 1; index <= 12; index += 1) seedConversation(api, { title: `Сессия ${index}` });
+  await installChatRoutes(page, hub, api, OWNER);
   await page.setViewportSize({ width: 390, height: 500 });
-  await boot(page);
+  await page.goto('/sessions');
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   const scroller = page.locator('[data-list-scroll]');
   await scroller.evaluate((node) => {
     node.scrollTop = 180;
   });
   await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(100);
-  await page.getByRole('link', { name: /Глава/ }).click();
+  await page.getByRole('link', { name: /Сессия 4/ }).click();
   await page.getByRole('link', { name: 'Все сессии' }).click();
   await expect(page.locator('[data-list-ready]')).toBeVisible();
   await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(100);
@@ -983,6 +989,7 @@ test('list_bottom_edge_fades_instead_of_slicing_the_next_row', async ({ page }) 
 test('a_slow_mouse_click_on_a_row_opens_the_chat_not_the_menu', async ({ page }) => {
   const { ids } = await boot(page);
   const link = page.locator(`[data-session="${ids.plain}"]`).getByRole('link');
+  await link.scrollIntoViewIfNeeded();
   const box = (await link.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();

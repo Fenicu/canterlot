@@ -28,17 +28,20 @@ test('group_pin_lifts_the_session_inside_its_group_only_and_survives_reload', as
   const id = targetId(api);
   const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
   const scroll = page.locator('[data-list-scroll]');
-  const titles = scroll.locator('article .title');
+  // Раздел «Ждут вас» стоит первым и держит копии: порядок группы читаем в её разделе.
+  const groupTitles = scroll.locator(`[data-section-slot="${ids.canterlot}"] article .title`);
+  const groupPinned = scroll.locator(`[data-section-slot="pinned:${ids.canterlot}"] article .title`);
+  const allPinned = scroll.locator('[data-section-slot="pinned"] article .title');
   const groupTab = tablist.getByRole('tab', { name: /canterlot/ });
 
   await groupTab.click();
   await expect(groupTab).toHaveAttribute('aria-selected', 'true');
   await expect(groupTab).toContainText('3');
   await expect(page.getByRole('button', { name: /^Закреплённые/ })).toHaveCount(0);
-  await expect(titles.nth(2)).toHaveText(TARGET);
+  await expect(groupTitles.nth(2)).toHaveText(TARGET);
 
   // Меню открыто с вкладки группы: закрепляет в ней, а не в «Все».
-  await page.getByRole('button', { name: `Действия: ${TARGET}` }).click();
+  await page.locator(`[data-session="${id}"]`).getByRole('button', { name: `Действия: ${TARGET}` }).click();
   const pin = page.getByRole('switch', { name: 'Закрепить в группе «canterlot»' });
   await expect(pin).not.toBeChecked();
   await pin.click();
@@ -48,14 +51,14 @@ test('group_pin_lifts_the_session_inside_its_group_only_and_survives_reload', as
 
   // Верх группы занимает «Закреплённые», счёт вкладки не меняется.
   await expect(page.getByRole('button', { name: /^Закреплённые/ })).toBeVisible();
-  await expect(titles.first()).toHaveText(TARGET);
+  await expect(groupPinned.first()).toHaveText(TARGET);
   await expect(groupTab).toContainText('3');
 
   // Во «Все» сессия не закреплена и остаётся в своей группе.
   await tablist.getByRole('tab', { name: /^Все/ }).click();
-  await expect(titles.first()).toHaveText('Восстановление потока');
+  await expect(allPinned.first()).toHaveText('Восстановление потока');
   await expect.poll(() => api.list.get(id)?.pinned).toBe(false);
-  const beforeGroup = await titles.allTextContents();
+  const beforeGroup = await groupTitles.allTextContents();
   expect(beforeGroup.indexOf(TARGET)).toBeGreaterThan(1);
 
   // Перезагрузка сохраняет закрепление и выбранную вкладку.
@@ -64,19 +67,19 @@ test('group_pin_lifts_the_session_inside_its_group_only_and_survives_reload', as
   await expect(page.locator('[data-list-ready]')).toBeVisible();
   await expect(tablist.getByRole('tab', { name: /canterlot/ })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('button', { name: /^Закреплённые/ })).toBeVisible();
-  await expect(titles.first()).toHaveText(TARGET);
+  await expect(groupPinned.first()).toHaveText(TARGET);
 
   // Открепление возвращает обычный порядок и тоже переживает перезагрузку.
-  await page.getByRole('button', { name: `Действия: ${TARGET}` }).click();
+  await page.locator(`[data-session="${id}"]`).getByRole('button', { name: `Действия: ${TARGET}` }).click();
   const unpin = page.getByRole('switch', { name: 'Открепить в группе «canterlot»' });
   await unpin.click();
   await expect(page.getByRole('switch', { name: 'Закрепить в группе «canterlot»' })).not.toBeChecked();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: /^Закреплённые/ })).toHaveCount(0);
-  await expect(titles.nth(2)).toHaveText(TARGET);
+  await expect(groupTitles.nth(2)).toHaveText(TARGET);
   await page.reload();
   await expect(page.locator('[data-list-ready]')).toBeVisible();
   await expect(page.getByRole('button', { name: /^Закреплённые/ })).toHaveCount(0);
-  await expect(titles.nth(2)).toHaveText(TARGET);
+  await expect(groupTitles.nth(2)).toHaveText(TARGET);
   await expect.poll(() => api.list.get(id)?.group_pins).toEqual([]);
 });

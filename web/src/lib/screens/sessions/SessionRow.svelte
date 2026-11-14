@@ -19,13 +19,16 @@
     now,
     current = false,
     depth = 0,
+    copy = false,
     onopen
   }: {
     item: ListRow;
     now: number;
     current?: boolean;
     depth?: number;
-    onopen: (id: string) => void;
+    /** Копия в разделе «Ждут вас»: отдельная метка строки, без `data-session`. */
+    copy?: boolean;
+    onopen: (id: string, node?: HTMLElement | null) => void;
   } = $props();
 
   function runtime() {
@@ -61,9 +64,10 @@
     // Удержание заменяет контекстное меню только пальцу и перу: у мыши есть правая кнопка,
     // а медленный клик не должен открывать меню вместо чата.
     if (event.pointerType === 'mouse') return;
+    const node = (event.currentTarget as HTMLElement | null)?.closest('article') ?? null;
     timer = window.setTimeout(() => {
       held = true;
-      onopen(item.id);
+      onopen(item.id, node);
     }, 500);
   }
   function up() {
@@ -74,9 +78,13 @@
     event.preventDefault();
     held = false;
   }
+  function open(event: Event) {
+    const node = (event.currentTarget as HTMLElement | null)?.closest('article') ?? null;
+    onopen(item.id, node);
+  }
 </script>
 
-<article class="row" data-state={mark.state} class:dim={mark.dim} class:strong={mark.strong} class:current class:child={depth > 0} class:depth-1={depth === 1} class:depth-2={depth >= 2} data-session={item.id} data-vendor={vendor ?? 'letter'} oncontextmenu={(event) => { event.preventDefault(); onopen(item.id); }}>
+<article class="row" data-state={mark.state} class:dim={mark.dim} class:strong={mark.strong} class:current class:child={depth > 0} class:depth-1={depth === 1} class:depth-2={depth >= 2} data-session={copy ? undefined : item.id} data-waiting={copy ? item.id : undefined} data-vendor={vendor ?? 'letter'} oncontextmenu={(event) => { event.preventDefault(); open(event); }}>
   {#if owner}<span class="owner" data-owner-color={item.color} style:--owner="var({owner})" aria-hidden="true"></span>{/if}
   <a href={resolve(`/c/${item.id}` as '/')} aria-current={current ? 'page' : undefined} onpointerdown={down} onpointerup={up} onpointercancel={up} onclick={click}>
     <VendorAvatar {vendor} model={item.model_resolved || item.model} title={item.title} tone={mark.dot ?? 'none'} halo={mark.halo} dashed={mark.dashed} dim={mark.dim} size={depth > 0 ? 'small' : 'row'} />
@@ -114,7 +122,7 @@
       </span>
     </span>
   </a>
-  <button type="button" aria-label={`Действия: ${item.title}`} onpointerdown={(event) => event.stopPropagation()} onclick={() => onopen(item.id)}>
+  <button type="button" aria-label={`Действия: ${item.title}`} onpointerdown={(event) => event.stopPropagation()} onclick={open}>
     <Icon name="more" />
   </button>
 </article>

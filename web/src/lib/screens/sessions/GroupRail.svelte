@@ -10,6 +10,7 @@
     current,
     icons,
     counted = true,
+    waiting = 0,
     section,
     onselect
   }: {
@@ -18,6 +19,8 @@
     /** Значки групп по идентификатору. */
     icons: Record<string, string | null | undefined>;
     counted?: boolean;
+    /** Сколько сессий ждёт владельца: счёт «Все» становится янтарным. */
+    waiting?: number;
     /** Открытый раздел приложения: подсвечивает его внизу полосы. */
     section: 'sessions' | 'machines' | 'limits' | 'presets' | 'settings';
     onselect: (tab: Tab) => void;
@@ -55,6 +58,7 @@
   <div bind:this={list} class="tabs" role="tablist" aria-label="Группы сессий" aria-orientation="vertical" tabindex="-1" onkeydown={move}>
     {#each tabs as item, index (item.label + index)}
       {@const selected = same(item.tab, current)}
+      {@const amber = item.tab.kind === 'all' && waiting > 0}
       <button
         type="button"
         role="tab"
@@ -63,12 +67,12 @@
         tabindex={selected ? 0 : -1}
         data-tab={item.tab.kind}
         title={item.label}
-        aria-label={counted ? `${item.label} ${item.count}` : item.label}
+        aria-label={counted ? `${item.label} ${item.count}${amber ? `, ждут вас: ${waiting}` : ''}` : item.label}
         onclick={() => onselect(item.tab)}
       >
         <span class="icon"><Icon name={iconOf(item.tab)} /></span>
         <span class="label">{SHORT[item.tab.kind] ?? item.label}</span>
-        {#if counted && item.count > 0}<span class="count">{item.count}</span>{/if}
+        {#if counted && item.count > 0}<span class="count" data-tone={amber ? 'warning' : undefined}>{item.count}</span>{/if}
       </button>
     {/each}
   </div>
@@ -98,5 +102,8 @@
   .item[aria-selected='true'], .item[aria-current='page'] { background: var(--selected); color: var(--accent-link); }
   .item[aria-selected='true'] .icon, .item[aria-current='page'] .icon { color: var(--accent-link); }
   .item[aria-selected='true'] .count { background: var(--accent); color: var(--accent-ink); }
+  /* Счёт «Все» янтарный, когда среди сессий есть ждущие: слово о них говорит раздел списка. */
+  .count[data-tone='warning'] { background: var(--warning); color: var(--bg); }
+  .item[aria-selected='true'] .count[data-tone='warning'] { background: var(--warning); color: var(--bg); }
   .item:focus-visible { outline: var(--focus-width) solid var(--accent); outline-offset: calc(var(--focus-width) * -1); }
 </style>
