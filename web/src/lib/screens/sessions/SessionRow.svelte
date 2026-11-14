@@ -132,9 +132,9 @@
   .title { flex: 1; min-width: 0; overflow: hidden; font-weight: var(--weight-semibold); text-overflow: ellipsis; white-space: nowrap; }
   time { flex: none; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .activity { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--fs-meta); white-space: nowrap; display: flex; align-items: baseline; gap: var(--s1); }
-  /* Состояние идёт первым и держит не меньше двенадцати знаков: модель и машина уступают ему дорогу. */
-  .text { flex: 0 1 auto; min-width: min(12ch, 100%); overflow: hidden; text-overflow: ellipsis; }
-  /* Хвост «модель · машина» сжимается и исчезает первым. */
+  /* Состояние занимает ровно свою ширину: короткий статус не добивается отступом до хвоста. */
+  .text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* Хвост «модель · машина» забирает остаток и сжимается первым. */
   .who { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--secondary); text-overflow: ellipsis; }
   .activity[data-tone='accent'] .text { color: var(--accent-link); }
   .activity[data-tone='warning'] .text { color: var(--warning); }

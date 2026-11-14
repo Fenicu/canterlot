@@ -22,6 +22,13 @@ test('at_360px_the_status_is_whole_and_the_model_machine_suffix_is_what_truncate
       since: at
     } as never
   });
+  const short = seedConversation(api, {
+    title: 'Генерация',
+    machine: { id: workstation.id, name: 'workstation' },
+    harness: { id: 'claude_code', title: 'Claude Code', provider: 'claude' },
+    model: 'opus-5.5',
+    activity: { state: 'working', evidence: { phase: 'generating' }, since: at } as never
+  });
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
@@ -44,4 +51,16 @@ test('at_360px_the_status_is_whole_and_the_model_machine_suffix_is_what_truncate
   else expect(suffix.client).toBe(0);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
+
+  // Короткий статус занимает свою ширину: до хвоста остаётся только зазор строки.
+  const shortRow = page.locator(`[data-session="${short}"]`);
+  await expect(shortRow.locator('.text')).toHaveText('Генерирует');
+  await expect(shortRow.locator('.who')).toContainText('Opus · workstation');
+  const gap = await shortRow.locator('.activity').evaluate((node) => {
+    const status = node.querySelector('.text')!.getBoundingClientRect();
+    const suffix = node.querySelector('.who')!.getBoundingClientRect();
+    return suffix.left - status.right;
+  });
+  expect(gap).toBeGreaterThanOrEqual(0);
+  expect(gap).toBeLessThanOrEqual(4);
 });
