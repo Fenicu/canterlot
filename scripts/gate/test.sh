@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Быстрые проверки аргументов и предусловий scripts/gate-remote.sh и
-# scripts/gate/in-container.sh: без сети, без docker и без прогона гейта.
-# Полный прогон проверяет scripts/gate-remote.sh --local.
+# Быстрые проверки аргументов и предусловий scripts/gate.sh,
+# scripts/gate-remote.sh и scripts/gate/in-container.sh: без сети, без docker
+# и без прогона гейта. Полный прогон проверяет scripts/gate-remote.sh --local.
 set -euo pipefail
 export LC_ALL=C
 
@@ -67,8 +67,44 @@ run 1 bash scripts/gate/in-container.sh --src "$tmp/src" --out "$tmp/full-out" \
     --sha "$sha12"
 grep -q 'не пуст' "$out" || { cat "$out" >&2; fail "нет отказа для непустого --out"; }
 
+# --- scripts/gate.sh: отказы и аренда без прогона проверок ---
+# Гейт проверяет чистоту копии до аренды, а аренду — до npm ci: это проверяется
+# в пустом репозитории, без единого реального шага.
+scratch="$tmp/scratch"
+mkdir -p "$scratch/scripts"
+cp scripts/gate.sh scripts/lease.sh "$scratch/scripts/"
+chmod 0755 "$scratch/scripts/gate.sh"
+(
+    cd "$scratch"
+    git init -q
+    git config user.email gate@example.invalid
+    git config user.name gate
+    git config commit.gpgsign false
+    : >tracked
+    git add tracked scripts
+    git commit -qm init
+)
+: >"$scratch/dirty"
+run 1 env CANTERLOT_LEASE_DRY=1 bash "$scratch/scripts/gate.sh"
+grep -q -- '--no-attest' "$out" || { cat "$out" >&2; fail 'грязная копия: нет подсказки --no-attest'; }
+[[ ! -e "$scratch/.superpowers" ]] || fail 'грязная копия успела создать .superpowers'
+run 0 env CANTERLOT_LEASE_DRY=1 bash "$scratch/scripts/gate.sh" --no-attest
+grep -q 'kind=gate' "$out" || { cat "$out" >&2; fail '--no-attest не дошёл до аренды'; }
+rm -f "$scratch/dirty"
+run 0 env CANTERLOT_LEASE_DRY=1 bash "$scratch/scripts/gate.sh"
+grep -q 'kind=gate' "$out" || { cat "$out" >&2; fail 'чистая копия не дошла до аренды'; }
+run 2 bash "$scratch/scripts/gate.sh" --bogus
+run 0 bash "$scratch/scripts/gate.sh" --help
+
+# Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
+# пропустить аттестацию из-за пустого вывода.
+printf 'garbage' >"$scratch/.git/index"
+run 1 env CANTERLOT_LEASE_DRY=1 bash "$scratch/scripts/gate.sh"
+grep -q 'грязная' "$out" || { cat "$out" >&2; fail 'битый индекс не остановил гейт'; }
+
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck scripts/gate-remote.sh scripts/gate/in-container.sh scripts/gate/test.sh \
+    shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate-remote.sh \
+        scripts/gate/in-container.sh scripts/gate/test.sh \
         || fail "shellcheck"
 fi
 

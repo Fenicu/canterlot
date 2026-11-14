@@ -146,6 +146,30 @@ scripts/release.sh ship 1.35.0       # тег, push, сборка, stage, реп
 
 `ship` можно запускать в фоне: ход — в `.superpowers/deploy/release-1.35.0.log`, итог — в `release-1.35.0.result`. Он публикует только после `cutover done` без мягких ошибок, репетицию повторяет один раз и только на переходных кодах (стартующая сессия, идущий vzdump), боевой прогон не повторяет никогда; после остановки — `scripts/release.sh ship 1.35.0 --continue`.
 
+### Гейт перед выпуском
+
+Полный гейт на рабочей VM — `scripts/gate.sh`. Он держит одну аренду `gate` весь
+прогон и гоняет веб ровно один раз: один `npm ci` в `web/`,
+`scripts/check.sh --all --no-web` (версия, fmt, clippy, nextest и
+`canterlot-speech` без веб-половины) и один `scripts/check-web.sh --stack`
+(статические проверки, vitest, две сборки PWA, `vitest.build`, Playwright
+`e2e/ui` + `e2e/parity` и сквозные сценарии на настоящем хабе). Порт тестовой
+PostgreSQL по умолчанию 55441, временный каталог — `/tmp` (длинный путь ломает
+сокеты супервизоров), бинарник воркера для аренды — установка в
+`$HOME/.local/opt/canterlot/current/bin/canterlot-worker`; все три (`CANTERLOT_TEST_PG_PORT`,
+`CANTERLOT_GATE_TMPDIR`, `CANTERLOT_WORKER_BIN`) перекрываются окружением.
+
+Сводка в формате прежнего `result.txt` и логи складываются в
+`.superpowers/gate/<sha8>/` и печатаются в stdout. При полном успехе, чистой
+рабочей копии и неизменном HEAD гейт атомарно пишет аттестацию
+`.superpowers/gate/<full sha>.ok`; её требует `release.sh ship`. Грязная копия
+аттестации не даёт: такой прогон возможен только с `--no-attest`, и аттестация
+тогда не пишется. Каталог `.superpowers/` не отслеживается git.
+
+Совпадение набора тестов с прежней последовательностью (веб дважды) проверяет
+`scripts/gate-coverage.sh`: он сравнивает идентичности Playwright (проект,
+спека, тест) из `playwright test --list` и шаги Rust, речи, статики и vitest.
+
 ### Полный гейт на сборочной машине
 
 Тот же прогон, что перед выпуском, можно снять на сборочной машине
@@ -159,7 +183,8 @@ scripts/gate-remote.sh 4d884712 --local    # то же на местном docke
 
 `REV` — любой коммит, не только тег (по умолчанию `HEAD`). Скрипт отправляет его
 в `~/canterlot.git` как `refs/gate/<sha12>`, создаёт отсоединённую рабочую копию
-`~/gate/src-<sha12>` и запускает в контейнере ровно три шага `/tmp/gate/run.sh`:
+`~/gate/src-<sha12>` и запускает в контейнере прежнюю трёхшаговую последовательность
+(как у частного `/tmp/gate/run.sh`):
 
 1. `VITE_UI_TESTS=1 npm run build` (после своего `npm ci`);
 2. `scripts/check.sh --all` — fmt, clippy, nextest с тестовой PostgreSQL;
@@ -191,8 +216,10 @@ Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестов�
 сборочной машине убираются автоматически (`git worktree remove --force` и
 `update-ref -d`, без `rm`).
 
-Гейт на самой VM (`/tmp/gate/run.sh` с `CANTERLOT_TEST_PG_PORT=55441`) продолжает
-работать и остаётся эталоном: контейнер повторяет его шаги.
+Гейт на самой VM — `scripts/gate.sh` с `CANTERLOT_TEST_PG_PORT=55441`. Контейнерный
+`scripts/gate-remote.sh` повторяет прежнюю трёхшаговую последовательность (отдельная
+сборка web, `check.sh --all` с веб-половиной и `check-web.sh --stack`) и остаётся для
+сборочной машины.
 
 ## Развёртывание из готовых архивов
 

@@ -125,7 +125,7 @@ scripts/test-db.sh down
 
 `CANTERLOT_NO_LEASE=1` отключает обёртку (для отладки). Очередь не защищает от обмана, у машины один владелец: подделанная метка `CANTERLOT_EXECUTION_GROUP` только неверно подписывает держателя, а `CANTERLOT_NO_LEASE=1` или `CANTERLOT_LEASE_HELD=x` только выводят прогон из очереди. `sudo`, `env -i`, `systemd-run` и `docker run` теряют метку и сокет: такой прогон идёт как `owner` или без аренды. Голый `cargo test`, набранный моделью, не арендуется.
 
-Свой скрипт гейта (например `/tmp/gate/run.sh`, который ставит зависимости веба и зовёт `check.sh --all` и `check-web.sh --stack`) берёт одну аренду `gate` на весь прогон, иначе между двумя гейтами в очередь вклиниваются сборки. Проще всего — обернуть запуск: `canterlot-worker lease run --kind gate --label gate -- bash /tmp/gate/run.sh`. Чтобы скрипт делал это сам, первые строки после `set -euo pipefail`:
+Свой скрипт гейта (например `scripts/gate.sh`, который ставит зависимости веба один раз и зовёт `check.sh --all --no-web` и `check-web.sh --stack`) берёт одну аренду `gate` на весь прогон, иначе между двумя гейтами в очередь вклиниваются сборки. Проще всего — обернуть запуск: `canterlot-worker lease run --kind gate --label gate -- bash scripts/gate.sh`. Чтобы скрипт делал это сам, первые строки после `set -euo pipefail`:
 
 ```bash
 source /path/to/canterlot/scripts/lease.sh
@@ -133,6 +133,22 @@ lease_self_wrap gate gate bash "$(realpath "$0")" "$@"
 ```
 
 Вложенные `check.sh` и `check-web.sh` видят `CANTERLOT_LEASE_HELD` и второй аренды не берут. `CANTERLOT_LEASE_DRY=1` печатает решение обёртки (вид и причину) и завершает скрипт без прогона: так тест `tests/it/lease_scripts.rs` проверяет классификацию.
+
+## Гейт перед выпуском
+
+Полный гейт перед выпуском — `scripts/gate.sh`. Он берёт одну аренду `gate` на весь прогон и проводит веб ровно один раз:
+
+1. один `npm ci` в `web/`;
+2. `scripts/check.sh --all --no-web` — версия, fmt, clippy, nextest и `canterlot-speech`; флаг `--no-web` снимает только веб-этап, остальные шаги не меняются;
+3. `scripts/check-web.sh --stack` — вся веб-половина (сверка типов API, svelte-check, eslint, токены, vitest, две сборки PWA, `vitest.build`, Playwright `e2e/ui` и `e2e/parity`) и сквозные сценарии на настоящем хабе.
+
+Прежняя последовательность (`check.sh --all`, внутри которого полный `check-web.sh`, затем `check-web.sh --stack`) гоняла веб и Playwright дважды; новый гейт делает это один раз и не собирает web отдельным шагом — `check-web.sh` собирает сам.
+
+Порт тестовой PostgreSQL по умолчанию 55441 (`CANTERLOT_TEST_PG_PORT`), временный каталог — `/tmp` (`CANTERLOT_GATE_TMPDIR`: сокет исполнения не влезает в `SUN_LEN` при длинном пути), бинарник воркера для аренды — установка воркера в `$HOME/.local/opt/canterlot/current/bin/canterlot-worker` (`CANTERLOT_WORKER_BIN`); все три переменные перекрываются окружением.
+
+Сводка в формате прежнего `result.txt` (sha, коды возврата, длительности, строки nextest и Playwright, первые упавшие тесты) печатается в stdout и пишется в `.superpowers/gate/<sha8>/` вместе с логами `npm-ci.log`, `check.log` и `web.log`. При полном успехе, чистой рабочей копии в начале и в конце и неизменном HEAD гейт атомарно (временный файл и `rename`) пишет аттестацию `.superpowers/gate/<full sha>.ok` с sha, временем начала и конца, длительностями и строками сводки — её требует `release.sh ship`. Грязная рабочая копия аттестации не даёт: гейт отказывается работать, пока его не попросят явно с `--no-attest` (тогда прогон идёт, аттестация не пишется). `.superpowers/` не отслеживается git.
+
+Совпадение покрытия с прежней последовательностью проверяет `scripts/gate-coverage.sh`: он перечисляет идентичности Playwright (проект, спека, тест) через `playwright test --list` в конфигурациях обоих путей и проверяет, что новый гейт запускает ровно объединение прежних прогонов; там же сверяются шаги версии, Rust, речи, статики и vitest.
 
 ## Сборка выпуска и кэш
 

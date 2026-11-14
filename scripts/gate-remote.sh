@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Полный гейт Canterlot (scripts/check.sh --all + scripts/check-web.sh --stack)
-# в контейнере Debian 13 на сборочной машине: те же шаги, что /tmp/gate/run.sh на
-# этой VM, но изолированно от хоста и на быстром железе.
+# в контейнере Debian 13 на сборочной машине: прежняя трёхшаговая
+# последовательность /tmp/gate/run.sh (scripts/gate.sh на VM гоняет её без повторов).
 #
 #   scripts/gate-remote.sh [REV]            REV на CANTERLOT_BUILD_HOST (по умолчанию canterlot-build)
 #   scripts/gate-remote.sh [REV] --local    то же на местном docker (для проверки)
