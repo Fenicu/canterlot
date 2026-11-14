@@ -11,7 +11,33 @@ source "${DEPLOY_DIR}/deploy.conf"
 
 # Журнал и ошибки — по-английски; комментарии — по-русски.
 log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
-die() { printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
+# FAIL_EXPLAINED=1 — выход объяснён (die, die_after, cutover_hard): выход с ошибкой без
+# него (set -e, необработанный сбой) файл результата записывает как unknown.
+# shellcheck disable=SC2034 # читает cutover.sh (ловушки выхода)
+FAIL_EXPLAINED=0
+die() { FAIL_EXPLAINED=1; fail_code unknown; printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
+
+# Коды отказов прогона (fail_codes в файле результата cutover): строка на отказ в
+# файле DEPLOY_FAIL_LOG, его наследуют дочерние preflight.sh, target-check.sh,
+# verify.sh. Явный код — у узнаваемых причин; отказ без кода пишется как unknown.
+# Переходные (release.sh повторяет по ним репетицию): session_starting, vzdump_busy.
+fail_code() {
+    if [ -n "${DEPLOY_FAIL_LOG:-}" ]; then printf '%s\n' "$1" >>"${DEPLOY_FAIL_LOG}" 2>/dev/null || true; fi
+}
+fail_count() {
+    if [ -n "${DEPLOY_FAIL_LOG:-}" ] && [ -f "${DEPLOY_FAIL_LOG}" ]; then wc -l <"${DEPLOY_FAIL_LOG}" | tr -d ' '; else printf 0; fi
+}
+# fail_mark перед проверкой, die_after — её отказ: причина уже записана с кодом
+# после метки (внутри проверки или дочернего скрипта); иначе — unknown.
+FAIL_MARK=0
+fail_mark() { FAIL_MARK="$(fail_count)"; }
+# shellcheck disable=SC2034 # FAIL_EXPLAINED читает cutover.sh
+die_after() {
+    FAIL_EXPLAINED=1
+    [ "$(fail_count)" -gt "${FAIL_MARK}" ] || fail_code unknown
+    printf '[%s] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    exit 1
+}
 
 # Все вызовы ssh только с -n либо с явным конвейером (урок: ssh ел stdin).
 # Все вызовы docker только с </dev/null (урок: docker без stdin виснет в скрипте).
@@ -674,11 +700,23 @@ check_ct_node() {
 # Счётчик жёстких и мягких сбоев для cutover: жёсткие откатывают, мягкие пишутся и идут дальше.
 HARD_FAILURES=0
 SOFT_FAILURES=0
-hard() { printf '[%s] HARD-FAIL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; HARD_FAILURES=$((HARD_FAILURES + 1)); }
+hard() {
+    printf '[%s] HARD-FAIL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
+    HARD_FAILURES=$((HARD_FAILURES + 1))
+    fail_code "${HARD_CODE:-unknown}"
+    HARD_CODE=""
+}
+# Ошибка с явным кодом отказа: hard_code|soft_code КОД СООБЩЕНИЕ.
+HARD_CODE=""
+hard_code() { HARD_CODE="$1"; shift; hard "$@"; }
+SOFT_CODE=""
+soft_code() { SOFT_CODE="$1"; shift; soft "$@"; }
 soft() {
     printf '[%s] SOFT-FAIL: %s (recorded, continuing)\n' "$(date -u +%H:%M:%S)" "$*" >&2
     SOFT_FAILURES=$((SOFT_FAILURES + 1))
     soft_record "${PHASE:-${DEPLOY_SOFT_KIND:-other}}"
+    fail_code "${SOFT_CODE:-unknown}"
+    SOFT_CODE=""
 }
 # Файл мягких ошибок прогона cutover (DEPLOY_SOFT_LOG): строка — вид шага; его
 # наследуют verify.sh и retain.sh, так что их ошибки тоже попадают в результат.
@@ -1012,6 +1050,14 @@ settle_supervisor_rows() {
 is_transient_exec_state() {
     case " ${SUPERVISOR_TRANSIENT_STATES} " in *" $1 "*) return 0 ;; esac
     return 1
+}
+# Код отказа для сессии в переходном состоянии: старт (created/starting) проходит
+# сам за секунды, остановка и потеря владельца — нет.
+session_code() {
+    case "$1" in
+        created | starting) printf session_starting ;;
+        *) printf session_stopping ;;
+    esac
 }
 
 # Все потомки PID (дети, внуки, ...): ps один раз, без pgrep -f.

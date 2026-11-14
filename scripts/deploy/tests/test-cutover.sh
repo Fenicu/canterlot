@@ -62,6 +62,7 @@ export FAKE_CT_LOCK=1
 if run_cutover; then case_fail "exit 0 despite failed gates"; else case_ok "exit nonzero"; fi
 assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" status)" "refused" "result file: refused (gates)"
 assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" worker_stopped)" "no" "result file: worker not stopped"
+assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" fail_codes)" "vzdump_busy" "result file: the CT backup lock coded vzdump_busy"
 unset FAKE_CT_LOCK
 hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
 worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved"

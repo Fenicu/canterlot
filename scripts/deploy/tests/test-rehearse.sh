@@ -213,6 +213,76 @@ worker_is "${SHA_PREV}" && case_ok "worker untouched" || case_fail "worker moved
 teardown_case
 case_end
 
+# --- коды отказа (fail_codes): release.sh повторяет репетицию только при переходных ---
+case_begin "a clean rehearsal reports no failure codes"
+setup_cutover codes-pass
+if run_rehearse; then case_ok "exit 0"; else case_fail "rehearsal failed"; tail -10 "${FAKE_ROOT}/rehearse.log"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "" "result file: fail_codes empty"
+grep -q '^fail_codes=' "${FAKE_ROOT}/rehearse.result" && case_ok "result file: fail_codes key present" || case_fail "result file: no fail_codes key"
+[ ! -e "${FAKE_ROOT}/rehearse.result.codes" ] && case_ok "codes log removed" || case_fail "codes log left behind"
+teardown_case
+case_end
+
+case_begin "a CT backup lock fails the rehearsal with the transient code vzdump_busy"
+setup_cutover codes-ctlock
+export FAKE_CT_LOCK=1
+if run_rehearse; then case_fail "rehearsal passed with a CT lock"; else case_ok "rehearsal failed"; fi
+unset FAKE_CT_LOCK
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)" "fail" "result file: fail"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "vzdump_busy" "result file: only vzdump_busy"
+teardown_case
+case_end
+
+case_begin "a session that stays starting fails the rehearsal with the transient code session_starting"
+setup_cutover codes-starting
+EXEC3="$(new_exec_id)"
+spawn_session "${EXEC3}" "${SHA_PREV}" 300
+printf '%s starting\n' "${EXEC3}" >"${FAKE_ROOT}/state/exec-states"
+if run_rehearse; then case_fail "rehearsal passed with a starting session"; else case_ok "rehearsal failed"; fi
+assert_contains "${FAKE_ROOT}/rehearse.log" "whose hub row is still starting" "starting row named"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "session_starting" "result file: only session_starting"
+teardown_case
+case_end
+
+case_begin "a session that stays stopping is not transient"
+setup_cutover codes-stopping
+EXEC3="$(new_exec_id)"
+spawn_session "${EXEC3}" "${SHA_PREV}" 300
+printf '%s stopping\n' "${EXEC3}" >"${FAKE_ROOT}/state/exec-states"
+if run_rehearse; then case_fail "rehearsal passed with a stopping session"; else case_ok "rehearsal failed"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "session_stopping" "result file: session_stopping"
+teardown_case
+case_end
+
+case_begin "a failure without a known cause is coded unknown"
+setup_cutover codes-unknown
+export FAKE_SITE_FAIL=meeting.example.com
+if run_rehearse; then case_fail "rehearsal passed with a broken site"; else case_ok "rehearsal failed"; fi
+unset FAKE_SITE_FAIL
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "unknown" "result file: unknown"
+teardown_case
+case_end
+
+case_begin "a rejected token is coded and happens before any write"
+setup_cutover codes-token
+OLD="$(issue_token "${SHA_NEW}" "${FAKE_ROOT}/dist" "$(( $(date -u +%s) - 7300 ))")"
+bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${OLD}" --source "${REPO_ROOT}" \
+    --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && case_fail "expired token accepted" || case_ok "expired token refused"
+R="${FAKE_ROOT}/cutover.result"
+assert_eq "$(result_of "${R}" status)/$(result_of "${R}" phase)/$(result_of "${R}" fail_codes)" "refused/token/token_expired" "result file: expired token before any write"
+run_rehearse || true
+TOKEN="$(token_from "${FAKE_ROOT}/rehearse.log")"
+printf '\n' >>"${DIST_DIR}/SHA256SUMS"
+bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${TOKEN}" --source "${REPO_ROOT}" \
+    --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && case_fail "changed plan accepted" || case_ok "changed plan refused"
+assert_eq "$(result_of "${R}" status)/$(result_of "${R}" phase)/$(result_of "${R}" fail_codes)" "refused/token/token_plan_changed" "result file: changed plan before any write"
+bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm 1-2-3 --source "${REPO_ROOT}" \
+    --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1 && case_fail "malformed token accepted" || case_ok "malformed token refused"
+assert_eq "$(result_of "${R}" fail_codes)" "token_invalid" "result file: token_invalid"
+assert_eq "$(grep -cE 'stop canterlot-worker|^vzdump ' "${FAKE_ROOT}/state/calls.log" || true)" "0" "nothing stopped or backed up"
+teardown_case
+case_end
+
 case_begin "shadow rehearsal of the deployed release (what production runs at the end)"
 setup_cutover shadow
 # dist развёрнутого релиза (как в проде: dist/255ccb1bbe37 лежит в сборочном worktree).

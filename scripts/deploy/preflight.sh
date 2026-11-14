@@ -91,7 +91,7 @@ while read -r extra_id extra_state; do
     [ -n "${extra_id:-}" ] || continue
     if is_transient_exec_state "${extra_state}"; then
         TRANSIENT_IDS+="${extra_id}"$'\n'
-        soft "supervisor runs for execution ${extra_id} whose hub row is still ${extra_state} after ${SUPERVISOR_SETTLE_WAIT} s (not in the tick snapshot)"
+        soft_code "$(session_code "${extra_state}")" "supervisor runs for execution ${extra_id} whose hub row is still ${extra_state} after ${SUPERVISOR_SETTLE_WAIT} s (not in the tick snapshot)"
     else
         UNEXPLAINED_IDS+="${extra_id}"$'\n'
         hard "supervisor runs for execution ${extra_id} with no live hub row (hub row: ${extra_state})"
@@ -262,7 +262,7 @@ if assert_no_remote_proc "${PROXMOX_SSH}" "vzdump" "vzdump"; then
 elif [ "$?" -eq 2 ]; then
     hard "cannot inspect for vzdump on ${PROXMOX_SSH}"
 else
-    hard "vzdump running on ${PROXMOX_SSH}"
+    hard_code vzdump_busy "vzdump running on ${PROXMOX_SSH}"
 fi
 CT_LOCK=""
 CT_STATUS=""
@@ -274,11 +274,12 @@ else
         hard "cannot query CT ${HUB_CTID} lock state (pvesh/ssh failed)"
     else
         CT_LOCK="$(printf '%s' "${CT_STATUS}" | grep -o 'lock[^,]*' | sed -n 1p || true)"
-        if [ -n "${CT_LOCK}" ]; then
-            hard "CT ${HUB_CTID} locked: ${CT_LOCK}"
-        else
-            log "no CT lock"
-        fi
+        # Блокировка backup — идущий vzdump (плановый бэкап); остальные — нет.
+        case "${CT_LOCK}" in
+            *backup*) hard_code vzdump_busy "CT ${HUB_CTID} locked: ${CT_LOCK}" ;;
+            ?*) hard_code ct_locked "CT ${HUB_CTID} locked: ${CT_LOCK}" ;;
+            *) log "no CT lock" ;;
+        esac
     fi
 fi
 
@@ -300,7 +301,7 @@ fi
 # Ежедневное PBS-задание в 03:30 чистит старые vzdump (keep-last=1): не стартовать рядом.
 UTC_HOUR="$(date -u +%H:%M)"
 if [[ "${UTC_HOUR}" > "02:45" && "${UTC_HOUR}" < "03:45" ]]; then
-    hard "inside the 03:30 backup window (${UTC_HOUR} UTC); wait until 03:45"
+    hard_code backup_window "inside the 03:30 backup window (${UTC_HOUR} UTC); wait until 03:45"
 fi
 log "outside the 03:30 backup window (${UTC_HOUR} UTC)"
 

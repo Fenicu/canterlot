@@ -83,6 +83,7 @@ RESULT_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RESULT_LOG="$(readlink "/proc/$$/fd/1" 2>/dev/null)" || RESULT_LOG=""
 [ -f "${RESULT_LOG}" ] || RESULT_LOG=""
 DEPLOY_SOFT_LOG=""
+DEPLOY_FAIL_LOG=""
 VZDUMP_STARTED=0
 VZDUMP_DONE=0
 WORKER_STOPPED=0
@@ -107,8 +108,10 @@ result_path() {
 result_soft_log_start() {
     result_path
     DEPLOY_SOFT_LOG="${RESULT_FILE}.soft"
-    export DEPLOY_SOFT_LOG
+    DEPLOY_FAIL_LOG="${RESULT_FILE}.codes"
+    export DEPLOY_SOFT_LOG DEPLOY_FAIL_LOG
     : >"${DEPLOY_SOFT_LOG}"
+    : >"${DEPLOY_FAIL_LOG}"
 }
 result_soft_kind() {
     case "$1" in
@@ -122,7 +125,7 @@ result_soft_kind() {
 one_line() { printf '%s' "$1" | tr '\n\r=' '  :'; }
 # $1 статус, $2 код выхода. Пишется один раз; провал записи только печатается.
 write_result() {
-    local status="$1" code="$2" soft_n=0 speech_n=0 kinds="" k n restore=0
+    local status="$1" code="$2" soft_n=0 speech_n=0 kinds="" k n restore=0 codes=""
     [ "${RESULT_WRITTEN}" = "0" ] || return 0
     RESULT_WRITTEN=1
     result_path
@@ -133,6 +136,9 @@ write_result() {
             [ -n "${k:-}" ] || continue
             kinds="${kinds:+${kinds},}${k}:${n}"
         done < <(grep -vx speech "${DEPLOY_SOFT_LOG}" | while read -r k; do result_soft_kind "${k}"; printf '\n'; done | LC_ALL=C sort | uniq -c)
+    fi
+    if [ -n "${DEPLOY_FAIL_LOG}" ] && [ -f "${DEPLOY_FAIL_LOG}" ]; then
+        codes="$(LC_ALL=C sort -u "${DEPLOY_FAIL_LOG}" | paste -sd, -)"
     fi
     # Простой и точки восстановления — только у боевого прогона: репетиция ничего не останавливает.
     if [ "$(result_mode)" = "execute" ]; then restore=1; fi
@@ -159,6 +165,7 @@ write_result() {
             hard_failures "${HARD_FAILURES:-0}" \
             soft_failures "${soft_n}" \
             soft_by_kind "${kinds}" \
+            fail_codes "${codes}" \
             speech_soft_failures "${speech_n}" \
             speech_summary "$(one_line "${SPEECH_SUMMARY:-}")" \
             web_release "${WEB_SHA_EFF:-}" \
@@ -172,6 +179,7 @@ write_result() {
             log "${RESULT_LOG}"
     } >"${RESULT_FILE}" 2>/dev/null || log "could not write the result file ${RESULT_FILE}"
     if [ -n "${DEPLOY_SOFT_LOG}" ]; then rm -f "${DEPLOY_SOFT_LOG}"; fi  # lint: local-temp
+    if [ -n "${DEPLOY_FAIL_LOG}" ]; then rm -f "${DEPLOY_FAIL_LOG}"; fi  # lint: local-temp
     log "result file: ${RESULT_FILE} (status ${status})"
 }
 yn() { if [ "$1" = "1" ]; then printf yes; else printf no; fi; }
@@ -183,6 +191,7 @@ result_exit() {
     set +e
     if declare -F release_reservations >/dev/null; then release_reservations; fi
     if [ -n "${REHEARSE_COUNT_FILE:-}" ]; then rm -f "${REHEARSE_COUNT_FILE}"; fi  # lint: local-temp
+    if [ "${rc}" != "0" ] && [ "${FAIL_EXPLAINED}" = "0" ]; then fail_code unknown; fi
     if [ "${rc}" = "0" ]; then
         write_result "$([ "$(result_mode)" = "execute" ] && printf "done" || printf pass)" 0
     elif [ "$(result_mode)" = "execute" ]; then
@@ -255,8 +264,16 @@ BASE_WEB="$(deployed_sha web)"
 BASE_WORKER="$(deployed_sha worker)"
 PLAN_HASH="$(plan_hash "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}")"
 if [ "${DRY_RUN}" = "0" ] && [ "${REHEARSE}" = "0" ]; then
+    # Проверка токена — до любой записи: phase=token в результате это доказывает.
+    PHASE="token"
     if ! TOKEN_PROBLEM="$(confirm_token_check "${CONFIRM}" "${SHA}" "${PLAN_HASH}")"; then
-        die "refusing the real cutover: ${TOKEN_PROBLEM}"
+        fail_mark
+        case "${TOKEN_PROBLEM}" in
+            *"token expired"*) fail_code token_expired ;;
+            *"plan changed"*) fail_code token_plan_changed ;;
+            *) fail_code token_invalid ;;
+        esac
+        die_after "refusing the real cutover: ${TOKEN_PROBLEM}"
     fi
     log "confirm token accepted: release ${SHA}, plan ${PLAN_HASH}, issued $(date -u -d "@${CONFIRM%%-*}" +%H:%M:%S) UTC"
 fi
@@ -348,7 +365,7 @@ read_gates() {
     if assert_no_remote_proc "${PROXMOX_SSH}" "vzdump" "vzdump"; then
         log "gate: no vzdump running"
     else
-        if [ "$?" -eq 2 ]; then soft "cannot inspect for vzdump (ssh failed)"; else soft "vzdump running"; fi
+        if [ "$?" -eq 2 ]; then soft "cannot inspect for vzdump (ssh failed)"; else soft_code vzdump_busy "vzdump running"; fi
         return 1
     fi
     # Провал осмотра — жёсткое «нельзя продолжать», а не молчаливое «всё чисто».
@@ -365,17 +382,21 @@ read_gates() {
         return 1
     fi
     CT_LOCK="$(printf '%s' "${CT_STATUS}" | grep -o 'lock[^,]*' | sed -n 1p || true)"
-    if [ -n "${CT_LOCK}" ]; then soft "CT locked: ${CT_LOCK}"; return 1; fi
+    # Блокировка backup — это идущий vzdump (плановый бэкап); остальные — нет.
+    case "${CT_LOCK}" in
+        *backup*) soft_code vzdump_busy "CT locked: ${CT_LOCK}"; return 1 ;;
+        ?*) soft_code ct_locked "CT locked: ${CT_LOCK}"; return 1 ;;
+    esac
     log "gate: no vzdump, no CT lock"
     # readyz проверяется внутри CT: dev VM -> 8080 режет nftables по дизайну.
     if [ "$(ssh_hub "curl -fsS -m 5 'http://${HUB_IP}:8080/readyz'" 2>/dev/null)" = '{"status":"ok"}' ]; then
         log "gate: hub readyz ok"
     else
-        soft "hub readyz not ok from the CT"; return 1
+        soft_code hub_readyz "hub readyz not ok from the CT"; return 1
     fi
     UTC_HOUR="$(date -u +%H:%M)"
     if [[ "${UTC_HOUR}" > "02:45" && "${UTC_HOUR}" < "03:45" ]]; then
-        soft "inside the 03:30 backup window"
+        soft_code backup_window "inside the 03:30 backup window"
         return 1
     fi
     log "gate: outside the 03:30 backup window"
@@ -534,10 +555,12 @@ fi
 PHASE="preflight"
 export DEPLOY_SOFT_KIND=preflight
 log "common preflight: preflight.sh and target-check.sh for ${SHA}"
+fail_mark
 "${SCRIPT_DIR}/preflight.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" --state "${STATE_FILE}" \
-    || die "preflight failed for ${SHA}: refusing before any write"
+    || die_after "preflight failed for ${SHA}: refusing before any write"
+fail_mark
 "${SCRIPT_DIR}/target-check.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" \
-    || die "target check failed for ${SHA}: refusing before any write"
+    || die_after "target check failed for ${SHA}: refusing before any write"
 
 # CSP, который уйдёт в canterlot.env.<sha>, обязан быть выведен из финального PWA-билда
 # этого же dist: проверка до любого изменения (урок 1.5.0).
@@ -593,7 +616,8 @@ if ssh_hub "test -e '${HUB_BASE}/current.new'"; then
 fi
 EXPECTED_MIGR="$(grep '^migrations_last=' "${DIST}/RELEASE" | cut -d= -f2 | grep -oE '^[0-9]+' | sed 's/^0*//' || true)"
 [ -n "${EXPECTED_MIGR}" ] || die "bad migrations_last in ${DIST}/RELEASE"
-read_gates || die "read gates failed before any write"
+fail_mark
+read_gates || die_after "read gates failed before any write"
 
 # Миграции ДО первого изменения.
 PREV_MIGR_MAX="$(hub_psql "select coalesce(max(version),0) from _sqlx_migrations where success")"
@@ -670,6 +694,7 @@ inventory_recheck() {
         [ -n "${extra_id:-}" ] || continue
         if is_transient_exec_state "${extra_state}"; then
             log "session ${extra_id} is ${extra_state} ${label}: a session is changing state"
+            fail_code "$(session_code "${extra_state}")"
             bad=1
         else
             log "supervisor ${extra_id} (hub row: ${extra_state}) appeared after the preflight: not in the tick snapshot (allowed)"
@@ -850,6 +875,7 @@ on_end() {
     if is_rehearse; then
         # Репетиция ничего не меняла: никакого восстановления, только доклад.
         log "REHEARSAL FAIL at phase ${PHASE}: nothing was written (every write above was printed only); fix the cause before a real run"
+        if [ "${FAIL_EXPLAINED}" = "0" ]; then fail_code unknown; fi
         release_reservations
         rm -f "${REHEARSE_COUNT_FILE}"  # lint: local-temp
         write_result fail 1
@@ -900,7 +926,9 @@ trap 'RESULT_SIGNAL=INT; on_end' INT
 trap 'RESULT_SIGNAL=TERM; on_end' TERM
 trap 'RESULT_SIGNAL=HUP; on_end' HUP
 # shellcheck disable=SC2317 # вызывается из функций выше и ниже
-cutover_hard() { log "HARD-FAIL: $*"; exit 1; }
+cutover_hard() { FAIL_EXPLAINED=1; fail_code unknown; log "HARD-FAIL: $*"; exit 1; }
+# Отказ проверки, чья причина уже записана с кодом после fail_mark (иначе unknown).
+cutover_hard_after() { FAIL_EXPLAINED=1; [ "$(fail_count)" -gt "${FAIL_MARK}" ] || fail_code unknown; log "HARD-FAIL: $*"; exit 1; }
 
 # Репетиция ожидания старта воркера против НАСТОЯЩЕГО юнита: тот же
 # wait_worker_exe, но первые опросы подменены состояниями, которые роняли
@@ -951,9 +979,6 @@ rehearse_start_wait_scenarios() {
     log "rehearse: real exec transitions: ${i} own short-lived children, exe unreadable ${misses} times, readable ${seen} times, no abort"
 }
 
-# shellcheck disable=SC2317 # вызывается из функций выше и ниже
-cutover_hard() { log "HARD-FAIL: $*"; exit 1; }
-
 log "deployed hub release before cutover: ${PREV_HUB_SHA}"
 log "order: vzdump (everything runs) -> read gates + session inventory again -> worker stop -> quiesced pg_dump + verify -> hub flip + restart -> worker flip + start + live -> PWA flip + Caddy recreate -> speech, chunk merge, maintenance, verify x2, geoip, retention"
 
@@ -983,9 +1008,11 @@ VZDUMP_DONE=1
 # 2. vzdump идёт до минуты: ворота чтения и инвентарь сессий заново, прямо перед стопом.
 PHASE="regating"
 log "re-checking read gates and the session inventory after vzdump"
-read_gates || cutover_hard "read gates failed after vzdump"
+fail_mark
+read_gates || cutover_hard_after "read gates failed after vzdump"
 [ "$(ssh_hub "readlink '${HUB_CURRENT}'" | sed 's|.*/||')" = "${PREV_HUB_SHA}" ] || cutover_hard "hub current moved unexpectedly"
-inventory_recheck "after vzdump" || cutover_hard "the session inventory changed after vzdump: refusing before the worker stop"
+fail_mark
+inventory_recheck "after vzdump" || cutover_hard_after "the session inventory changed after vzdump: refusing before the worker stop"
 control_worker_exact "before the worker stop" || cutover_hard "control-worker scan before the worker stop"
 
 # 3. Стоп воркера: писатели базы затихают для pg_dump.
