@@ -255,5 +255,63 @@ assert_contains "${FAKE_ROOT}/cutover.log" "reviewed recovery, causes state_dive
 teardown_case
 case_end
 
+# --- сигнал во время итогового отчёта: результат говорит о нём, не чистый done ---
+# cat, который на итоговом тексте (stdin содержит FAKE_CAT_HOOK_MATCH) отмечается и ждёт.
+install_slow_report_cat() {
+    local real
+    real="$(command -v cat)"
+    cat >"${FAKE_ROOT}/fake-bin/cat" <<EOF
+#!/usr/bin/env bash
+if [ "\$#" = 0 ] && [ -n "\${FAKE_CAT_HOOK_MATCH:-}" ]; then
+    data="\$("${real}"; printf x)"; data="\${data%x}"
+    if [[ "\${data}" == *"\${FAKE_CAT_HOOK_MATCH}"* ]]; then
+        : >"${FAKE_ROOT}/state/cat-hook"
+        /bin/sleep 2
+    fi
+    printf '%s' "\${data}"
+    exit 0
+fi
+exec "${real}" "\$@"
+EOF
+    chmod +x "${FAKE_ROOT}/fake-bin/cat"
+}
+
+case_begin "TERM during the final report of a real run yields no clean done"
+setup_cutover late-term
+install_slow_report_cat
+export FAKE_CAT_HOOK_MATCH="=== section template"
+run_cutover_bg
+for _ in $(seq 1 1800); do [ -e "${FAKE_ROOT}/state/cat-hook" ] && break; sleep 0.1; done
+[ -e "${FAKE_ROOT}/state/cat-hook" ] && case_ok "the final report is printing" || case_fail "the final report never printed"
+kill -TERM "${CUTOVER_PID}" || case_fail "kill failed"
+rc=0; wait "${CUTOVER_PID}" || rc=$?
+unset FAKE_CAT_HOOK_MATCH
+[ "${rc}" != "0" ] && case_ok "process exit ${rc}" || case_fail "process exit 0 after TERM"
+assert_eq "$(result_of "$(R_FILE)" signal)" "TERM" "result file: signal TERM"
+[ "$(result_of "$(R_FILE)" status)" != "done" ] && case_ok "result file: status $(result_of "$(R_FILE)" status), not done" || case_fail "result file: clean done after TERM"
+assert_eq "$(result_of "$(R_FILE)" exit_code)" "${rc}" "result file: exit_code equals the process exit"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker \
+    && case_ok "worker keeps running" || case_fail "worker was stopped"
+teardown_case
+case_end
+
+case_begin "TERM during the final report of a rehearsal issues no token"
+setup_cutover late-term-rehearse
+install_slow_report_cat
+export FAKE_CAT_HOOK_MATCH="=== owner checklist"
+bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --rehearse --source "${REPO_ROOT}" --dist "${FAKE_ROOT}/dist" \
+    --state "${FAKE_ROOT}/rehearse.state" >"${FAKE_ROOT}/rehearse.log" 2>&1 &
+RPID=$!
+for _ in $(seq 1 1800); do [ -e "${FAKE_ROOT}/state/cat-hook" ] && break; sleep 0.1; done
+[ -e "${FAKE_ROOT}/state/cat-hook" ] && case_ok "the checklist is printing" || case_fail "the checklist never printed"
+kill -TERM "${RPID}" || case_fail "kill failed"
+rc=0; wait "${RPID}" || rc=$?
+unset FAKE_CAT_HOOK_MATCH
+[ "${rc}" != "0" ] && case_ok "process exit ${rc}" || case_fail "process exit 0 after TERM"
+assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" status)/$(result_of "${FAKE_ROOT}/rehearse.result" signal)/$(result_of "${FAKE_ROOT}/rehearse.result" token)" "fail/TERM/" "result file: fail, TERM, no token"
+assert_not_contains "${FAKE_ROOT}/rehearse.log" "CONFIRM=" "no token printed"
+teardown_case
+case_end
+
 printf 'cutover-guarantees harness: %s passed, %s failed (cumulative)\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

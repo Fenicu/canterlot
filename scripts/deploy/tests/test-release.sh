@@ -288,6 +288,44 @@ assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done"
 teardown_case
 case_end
 
+# ---------------------------------------------------------------- согласованность итога cutover
+case_begin "a done result with a signal or a non-zero exit stops before the publication"
+for plan in "execute done exit_code=143 signal=TERM" "execute done proc_exit=143" "execute done signal=TERM"; do
+    setup_release "inconsistent-${plan// /-}"
+    cutover_plan "rehearse pass" "${plan}"
+    run_release ship "${RVER}"
+    assert_eq "${RREL_RC}" "1" "[${plan}] exit 1"
+    assert_eq "$(calls_count publish-release)" "0" "[${plan}] publish-release never ran"
+    assert_eq "$(rres status)/$(rres published)" "stopped_before_publish/no" "[${plan}] result: stopped before publish"
+    assert_contains "${RDIR}/release-${RVER}.result" "inconsistent" "[${plan}] reason: inconsistent cutover result"
+    assert_eq "$(rstate phase_execute)" "inconsistent" "[${plan}] state: execute inconsistent"
+    : >"${FAKE_ROOT}/state/calls.log"
+    run_release ship "${RVER}" --continue
+    assert_eq "${RREL_RC}" "1" "[${plan}] --continue: exit 1"
+    assert_eq "$(calls_count publish-release)$(calls_count 'cutover ')" "00" "[${plan}] --continue: nothing published, nothing re-run"
+    teardown_case
+done
+case_end
+
+case_begin "the process exit of execute and rehearsal is persisted"
+setup_release exits
+cutover_plan "${HAPPY_PLAN[@]}"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "0" "exit 0"
+assert_eq "$(sed -n 's/^execute_exit=//p' "${RDIR}/release-${RVER}.state")/$(sed -n 's/^rehearsal_exit=//p' "${RDIR}/release-${RVER}.state")" "0/0" "state: execute_exit and rehearsal_exit"
+teardown_case
+case_end
+
+case_begin "a pass rehearsal with a non-zero process exit gives no token to the real run"
+setup_release rehearsal-exit
+cutover_plan "rehearse pass proc_exit=143" "execute done"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "1" "exit 1"
+assert_eq "$(calls_count '--execute')" "0" "no real cutover"
+assert_eq "$(rres status)" "failed_before_cutover" "result: failed before the cutover"
+teardown_case
+case_end
+
 # ---------------------------------------------------------------- повторы репетиции
 case_begin "a transient rehearsal failure is retried once, then the release goes on"
 setup_release transient-once

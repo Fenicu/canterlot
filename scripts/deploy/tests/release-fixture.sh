@@ -167,7 +167,8 @@ keys="format mode status exit_code signal release plan token token_valid_until s
 if [ "${status}" = pass ] || [ "${status}" = done ]; then
     printf '=== owner checklist: authenticated checks (the toolkit does not do these) ===\n  [ ] fixture item\n  [ ] paste the result of each line into the deploy log section\n'
 fi
-exit "${kv[exit_code]}"
+# proc_exit=N — код выхода процесса, отличный от exit_code в файле результата.
+exit "${kv[proc_exit]:-${kv[exit_code]}}"
 EOF
     chmod +x "${FAKE_ROOT}/gitbin/git" "${FAKE_ROOT}/fake-bin/cargo" "${r}"/scripts/*.sh "${r}"/scripts/deploy/*.sh
 }

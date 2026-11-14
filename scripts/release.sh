@@ -154,6 +154,7 @@ REHEARSAL_CODES=""
 TOKEN=""
 CUTOVER_RESULT=""
 CUTOVER_LOG=""
+CUTOVER_RC=""
 PROXY_CHECK=not_run
 PUBLISHED=no
 
@@ -537,12 +538,14 @@ run_rehearsal() {
     REHEARSAL_RC=0
     scripts/deploy/cutover.sh "$SHA12" --rehearse --source "$repo" --dist "$DIST_ROOT" \
         --result "$REHEARSAL_RESULT" >"$REHEARSAL_LOG" 2>&1 || REHEARSAL_RC=$?
+    state_set rehearsal_exit "$REHEARSAL_RC"
 }
 
 rehearsal_passed() {
     local r=$REHEARSAL_RESULT
     [[ $REHEARSAL_RC == 0 ]] && cutover_result_complete "$r" && [[ $(kv "$r" status) == pass ]] \
-        && [[ -z $(kv "$r" signal) ]] && [[ $(kv "$r" soft_failures) == 0 ]] && [[ -n $(kv "$r" token) ]]
+        && [[ $(kv "$r" exit_code) == 0 && -z $(kv "$r" signal) ]] && [[ $(kv "$r" soft_failures) == 0 ]] \
+        && [[ -n $(kv "$r" token) ]]
 }
 
 phase_rehearsal() {
@@ -605,7 +608,19 @@ run_execute() {
     log "real cutover: scripts/deploy/cutover.sh --execute $SHA12 --confirm <rehearsal token> (log $CUTOVER_LOG)"
     scripts/deploy/cutover.sh --execute "$SHA12" --confirm "$TOKEN" --source "$repo" --dist "$DIST_ROOT" \
         --result "$CUTOVER_RESULT" >"$CUTOVER_LOG" 2>&1 || rc=$?
+    CUTOVER_RC=$rc
+    state_set execute_exit "$rc"
     log "cutover exited $rc"
+}
+
+# Боевой прогон завершён чисто, только если согласны все признаки: статус done,
+# exit_code=0 в файле, настоящий код выхода процесса 0 и пустой signal.
+# Иначе — пусто (согласовано) или описание расхождения.
+cutover_inconsistency() {
+    local r=$1 rc=$2
+    [[ $(kv "$r" status) == "done" && $(kv "$r" exit_code) == 0 && $rc == 0 && -z $(kv "$r" signal) ]] && return 0
+    printf 'status %s, exit_code %s, process exit %s, signal %s' \
+        "$(kv "$r" status)" "$(kv "$r" exit_code)" "${rc:-unknown}" "$(kv "$r" signal)"
 }
 
 phase_execute() {
@@ -629,7 +644,14 @@ phase_execute() {
     fi
     status=$(kv "$r" status)
     case "$status" in
-        "done") phase_set execute "done" ;;
+        "done")
+            local bad
+            bad=$(cutover_inconsistency "$r" "$CUTOVER_RC")
+            if [[ -n $bad ]]; then
+                phase_set execute inconsistent
+                finish stopped_before_publish 1 "the real cutover result is inconsistent ($bad): production may be on $SHA12, nothing published; read $CUTOVER_LOG and the STOP block, if any"
+            fi
+            phase_set execute "done" ;;
         stop_and_report)
             phase_set execute stop_and_report
             finish stop_and_report 1 "cutover STOP-AND-REPORT after the hub flip (block $(kv "$r" stop_block)); nothing published" ;;
@@ -686,10 +708,11 @@ resume_after_execute() {
     CUTOVER_LOG=$(state_get log_cutover)
     REHEARSAL_RESULT=$(state_get rehearsal_result)
     REHEARSAL_LOG=$(state_get log_rehearsal)
-    if ! cutover_result_complete "$r" || [[ $(kv "$r" status) != "done" ]]; then
+    if ! cutover_result_complete "$r" || [[ $(kv "$r" status) != "done" ]] \
+        || [[ -n $(cutover_inconsistency "$r" "$(state_get execute_exit)") ]]; then
         log "the real cutover already ran (phase execute: $(state_get phase_execute)); it is never re-run"
         if cutover_result_complete "$r"; then
-            log "cutover status $(kv "$r" status); STOP block: $(kv "$r" stop_block)"
+            log "cutover status $(kv "$r" status), process exit $(state_get execute_exit); $(cutover_inconsistency "$r" "$(state_get execute_exit)"); STOP block: $(kv "$r" stop_block)"
         else
             log "no complete cutover result ($r): read $CUTOVER_LOG and check whether cutover.sh still runs"
         fi

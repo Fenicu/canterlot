@@ -163,8 +163,8 @@ write_result() {
             signal "${RESULT_SIGNAL}" \
             release "${SHA:-}" \
             plan "${PLAN_HASH:-}" \
-            token "${RESULT_TOKEN}" \
-            token_valid_until "${RESULT_TOKEN_UNTIL}" \
+            token "$([ "${status}" = pass ] && printf '%s' "${RESULT_TOKEN}")" \
+            token_valid_until "$([ "${status}" = pass ] && printf '%s' "${RESULT_TOKEN_UNTIL}")" \
             started_at "${RESULT_STARTED}" \
             finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             phase "${PHASE:-}" \
@@ -551,6 +551,7 @@ EOF
         exit 1
     fi
     owner_checklist
+    trap '' INT TERM HUP
     print_token
     log "dry-run PASS: every read-only preflight/verify gate ran, nothing written"
     write_result pass 0
@@ -654,6 +655,7 @@ WORKER_DOWNTIME=""
 HUB_INTERRUPTION=""
 VZ_ARCHIVE=""
 DONE=0
+FINAL_RC=0
 ROLLING_BACK=0
 RUN_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DUMP="canterlot-pre-${SHA}-${RUN_TS}.dump"
@@ -935,7 +937,7 @@ on_end() {
     fi
     ROLLING_BACK=1
     set +e
-    if [ "${DONE}" = "1" ]; then exit 0; fi
+    if [ "${DONE}" = "1" ]; then exit "${FINAL_RC:-0}"; fi
     if is_rehearse; then
         # Репетиция ничего не меняла: никакого восстановления, только доклад.
         log "REHEARSAL FAIL at phase ${PHASE}: nothing was written (every write above was printed only); fix the cause before a real run"
@@ -1485,8 +1487,16 @@ elif ! "${SCRIPT_DIR}/retain.sh" --apply "${RETAIN_ARGS[@]}"; then
     soft "retention failed; artifacts stay, rerun retain.sh --apply after review"
 fi
 release_reservations
-trap - INT TERM HUP
-trap result_exit EXIT
+# Ловушка прогона остаётся взведённой и в итоговом отчёте: сигнал в нём — тот же
+# STOP по фактам (репетиция — fail), а не чистый done. Сигналы глушатся только на
+# последнем шаге: токен (у репетиции), запись результата и выход — одно целое.
+finish_run() {
+    trap '' INT TERM HUP
+    DONE=1
+    FINAL_RC="$2"
+    write_result "$1" "$2"
+    exit "$2"
+}
 if is_rehearse; then
     WRITES_PRINTED="$(wc -l <"${REHEARSE_COUNT_FILE}" 2>/dev/null || echo '?')"
     rm -f "${REHEARSE_COUNT_FILE}"  # lint: local-temp
@@ -1495,14 +1505,13 @@ if is_rehearse; then
     SOFT_NOW="$(soft_total)"
     if [ "${HARD_FAILURES}" != "0" ] || [ "${SOFT_NOW}" != "0" ]; then
         log "rehearsal FAIL: ${HARD_FAILURES} hard, ${SOFT_NOW} soft failures (with child scripts); ${WRITES_PRINTED} writes printed, none executed; no confirm token"
-        write_result fail 1
-        exit 1
+        finish_run fail 1
     fi
     owner_checklist
+    trap '' INT TERM HUP
     print_token
     log "rehearsal PASS: the whole write path ran against the live system; ${WRITES_PRINTED} writes printed as WOULD-WRITE, none executed"
-    write_result pass 0
-    exit 0
+    finish_run pass 0
 fi
 SOFT_NOW="$(soft_total)"
 log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s (worker stop -> live), hub interruption ${HUB_INTERRUPTION}s, soft failures ${SOFT_NOW}, speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
@@ -1535,4 +1544,8 @@ Release: \`${SHA}\` (\`<full sha>\`, tag \`vX.Y.Z\`), built by \`scripts/build-r
 ### Left for the owner
 - Authenticated checks (checklist above); <other>
 EOF
+# Как finish_run, но без вызова-выхода в конце файла: выход — по EXIT-ловушке (DONE=1).
+trap '' INT TERM HUP
+DONE=1
+FINAL_RC=0
 write_result "done" 0
