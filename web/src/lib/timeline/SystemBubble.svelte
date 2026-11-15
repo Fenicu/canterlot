@@ -34,7 +34,7 @@
   <header>
     <span class="icon"><Icon name={view.icon} /></span>
     {#if view.titleHref}
-      <a class="title" href={resolve(view.titleHref as '/')}>{view.title}</a>
+      <a class="title tap-target" href={resolve(view.titleHref as '/')}>{view.title}</a>
     {:else}
       <span class="title">{view.title}</span>
     {/if}
@@ -71,7 +71,7 @@
       {#each view.rows as row, index (`${row.title}:${row.href ?? ''}:${index}`)}
         <li>
           {#if row.href}
-            <a href={resolve(row.href as '/')}>{row.title}</a>
+            <a class="tap-target" href={resolve(row.href as '/')}>{row.title}</a>
           {:else}
             <span class="row-title">{row.title}</span>
           {/if}
@@ -161,7 +161,7 @@
     font-weight: var(--weight-semibold);
     overflow-wrap: anywhere;
   }
-  .title[href] { display: inline-flex; align-items: center; min-height: var(--target); margin-block: calc((var(--target) - var(--fs-body) * var(--lh-body)) / -2); color: var(--accent-link); text-decoration: none; }
+  .title[href] { color: var(--accent-link); text-decoration: none; }
   .title[href]:hover, .title[href]:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   /* Время и закладка ходят парой в правой колонке шапки. */
@@ -181,7 +181,7 @@
   .rows { display: flex; flex-direction: column; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
   .rows li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s6); min-width: 0; }
   .rows a, .row-title { min-width: 0; color: var(--text); font-size: var(--fs-sm); overflow-wrap: anywhere; }
-  .rows a { display: inline-flex; align-items: center; min-height: var(--target); margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2); color: var(--accent-link); text-decoration: none; }
+  .rows a { color: var(--accent-link); text-decoration: none; }
   .rows a:hover, .rows a:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
   .row-value { color: var(--secondary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .note { margin: 0; color: var(--secondary); font-size: var(--fs-sm); overflow-wrap: anywhere; white-space: pre-wrap; }
