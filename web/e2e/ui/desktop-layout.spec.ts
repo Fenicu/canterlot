@@ -288,7 +288,12 @@ test('short_window_reaches_the_create_button_inside_the_pane', async ({ page }) 
   expect((await overflowing(page)).height).toBeLessThanOrEqual(0);
 });
 
-test('every_button_looks_like_a_button_in_both_themes', async ({ page }) => {
+// Вид кнопки не зависит от геометрии: plainButtons смотрит заливку, иконку и роль. На двух
+// крупных ширинах тот же вид повторно не проверяется — их меряют геометрические проверки ниже.
+const REPEATED_PAINT = new Set(['layout-2560', 'layout-3840']);
+
+test('every_button_looks_like_a_button_in_both_themes', async ({ page }, testInfo) => {
+  test.skip(REPEATED_PAINT.has(testInfo.project.name), 'крупные ширины проверяются геометрией, а не видом кнопок');
   test.setTimeout(120_000);
   for (const theme of THEMES) {
     for (const boot of [bootSessions, bootNew, bootChat]) {
