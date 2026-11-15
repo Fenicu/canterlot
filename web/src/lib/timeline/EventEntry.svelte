@@ -70,7 +70,7 @@
   <article class="card" data-event-kind={event.kind} data-event-state={event.state}>
     <header>
       {#if link}
-        <a class="title" href={resolve(`/c/${link}` as '/')}>{title}</a>
+        <a class="title tap-target" href={resolve(`/c/${link}` as '/')}>{title}</a>
       {:else}
         <span class="title">{title}</span>
       {/if}
@@ -168,9 +168,11 @@
     border-radius: var(--radius-card);
     background: var(--surface);
   }
+  /* Заголовок и состояние стоят одной строкой сетки: длинный заголовок переносится в своей
+     колонке, а состояние остаётся в полосе его первой строки. */
   header {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: baseline;
     gap: var(--s3) var(--s6);
     min-width: 0;
@@ -181,8 +183,7 @@
     font-weight: var(--weight-semibold);
     overflow-wrap: anywhere;
   }
-  /* Цель касания не меньше --target, а строка шапки той же высоты: поле съедается отрицательным отступом. */
-  .title[href] { display: inline-flex; align-items: center; min-height: var(--target); margin-block: calc((var(--target) - var(--fs-body) * var(--lh-body)) / -2); color: var(--accent-link); text-decoration: none; }
+  .title[href] { color: var(--accent-link); text-decoration: none; }
   .title[href]:hover, .title[href]:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
   .status { color: var(--secondary); font-size: var(--fs-sm); white-space: nowrap; }
   .status[data-state='idle'] { color: var(--success); }
