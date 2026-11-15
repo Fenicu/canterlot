@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { getStack } from './global-setup';
 import { synthetic } from './synthetic';
-import { composerOf, createHubClient, createSessionUI, sendButtonOf, sendChaos, sendScript } from './hub';
+import { composerOf, createHubClient, createSessionUI, idleSendButtonOf, queueAction, sendChaos, sendScript } from './hub';
 
 const tag = { tag: '@stack' };
 const chromiumOnly = { tag: ['@stack', '@chromium'] };
@@ -19,7 +19,7 @@ test.describe('stack: input and queue', () => {
     const hub = createHubClient(stack);
     const id = await createSessionUI(page, stack);
     const composer = composerOf(page);
-    const send = sendButtonOf(page);
+    const send = idleSendButtonOf(page);
     const cdp = await page.context().newCDPSession(page);
     expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches), 'профиль телефона: грубый указатель').toBe(true);
 
@@ -91,7 +91,7 @@ test.describe('stack: input and queue', () => {
     await sendChaos(stack.control, { action: 'blackhole', on: true, ws: true });
     await sendChaos(stack.control, { action: 'drop_response_once', pathRegex: '/conversations/[^/]+/inputs$', method: 'POST' });
     await composerOf(page).fill(synthetic.script([synthetic.delta('ответ на потерянный ответ')]));
-    await sendButtonOf(page).click();
+    await idleSendButtonOf(page).click();
 
     try {
       // Firefox сам повторяет POST на оборванном соединении: страница не видит ни отказа, ни второго запроса.
@@ -124,7 +124,7 @@ test.describe('stack: input and queue', () => {
     await context.setOffline(true);
     await sendChaos(stack.control, { action: 'cut' });
     await composer.fill('черновик без связи');
-    await sendButtonOf(page).click();
+    await idleSendButtonOf(page).click();
     await expect(page.locator('[data-composer] .reason')).toContainText('Нет связи');
     await expect(composer).toHaveValue('черновик без связи');
 
@@ -135,7 +135,7 @@ test.describe('stack: input and queue', () => {
     await expect(page.locator('article.bubble')).toHaveCount(0);
 
     // Только явное нажатие отправляет черновик.
-    await sendButtonOf(page).click();
+    await idleSendButtonOf(page).click();
     await expect.poll(async () => (await hub.inputs(id)).length, { timeout: 15_000 }).toBe(1);
     expect((await hub.inputs(id))[0]!.content[0]!.text).toBe('черновик без связи');
   });
@@ -150,20 +150,24 @@ test.describe('stack: input and queue', () => {
     await sendScript(page, synthetic.script([synthetic.delta('A-идёт'), synthetic.hang()]));
     await expect(page.locator('article.card [data-block]')).toContainText('A-идёт', { timeout: 20_000 });
 
-    // Два сообщения встают в очередь за зависшим ходом.
-    await sendScript(page, synthetic.script([synthetic.delta('Q1-ответ')]));
-    await sendScript(page, synthetic.script([synthetic.delta('Q2-ответ')]));
+    // Два сообщения встают в очередь за зависшим ходом: кнопка отправки называет очередь.
+    await sendScript(page, synthetic.script([synthetic.delta('Q1-ответ')]), 'live');
+    await sendScript(page, synthetic.script([synthetic.delta('Q2-ответ')]), 'live');
     const strip = page.locator('.strip');
-    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(2, { timeout: 15_000 });
+    const queued = strip.locator('[data-state="queued"]');
+    await expect(queued).toHaveCount(2, { timeout: 15_000 });
+    await expect(queued.filter({ hasText: 'Q1-ответ' })).toHaveCount(1);
+    await expect(queued.filter({ hasText: 'Q2-ответ' })).toHaveCount(1);
 
     // Отложенное сообщение через 5 с появляется в полосе и ждёт своей очереди.
     const runAt = new Date(Date.now() + 5000).toISOString();
     await hub.json(`/api/v1/conversations/${id}/scheduled`, { method: 'POST', body: JSON.stringify({ run_at: runAt, content: [{ type: 'text', text: synthetic.script([synthetic.delta('S-ответ')]) }] }) });
-    await expect(strip.locator('.item:not([data-state])').getByRole('button', { name: 'Изменить' })).toHaveCount(1, { timeout: 15_000 });
+    await expect(strip.locator('.item:not([data-state])').filter({ hasText: 'S-ответ' })).toHaveCount(1, { timeout: 15_000 });
 
-    // Отменяем второе сообщение очереди: остаётся одно «Отменить» очереди.
-    await strip.locator('[data-state]').filter({ hasText: 'Q2-ответ' }).getByRole('button', { name: 'Отменить' }).click();
+    // Отменяем второе сообщение очереди: в очереди остаётся одно.
+    await queueAction(queued.filter({ hasText: 'Q2-ответ' }), 'Отменить');
     await expect.poll(async () => (await hub.inputLog(id)).find((item) => item.text.includes('Q2-ответ'))?.state, { timeout: 15_000 }).toBe('cancelled');
+    await expect(queued).toHaveCount(1);
 
     // Отложенное время наступило, но ход A ещё занят: сообщение уходит в очередь.
     await expect.poll(async () => (await hub.inputLog(id)).some((item) => item.text.includes('S-ответ')), { timeout: 30_000 }).toBe(true);
@@ -193,20 +197,22 @@ test.describe('stack: input and queue', () => {
 
     await sendScript(page, synthetic.script([synthetic.delta('Z-идёт'), synthetic.hang()]));
     await expect(page.locator('article.card [data-block]')).toContainText('Z-идёт', { timeout: 20_000 });
-    await sendScript(page, synthetic.script([synthetic.delta('Z-ответ')]));
+    await sendScript(page, synthetic.script([synthetic.delta('Z-ответ')]), 'live');
     const strip = page.locator('.strip');
-    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(1, { timeout: 15_000 });
+    const queued = strip.locator('[data-state="queued"]');
+    await expect(queued).toHaveCount(1, { timeout: 15_000 });
+    await expect(queued).toContainText('Z-ответ');
 
     await page.reload();
     await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
-    await expect(strip.locator('[data-state="queued"]')).toContainText('Z-ответ', { timeout: 15_000 });
-    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(1);
+    await expect(queued).toContainText('Z-ответ', { timeout: 15_000 });
+    await expect(queued).toHaveCount(1);
 
     await page.getByRole('button', { name: 'Прервать', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Продолжить очередь', exact: true })).toHaveCount(0);
     await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-ответ' })).toBeVisible({ timeout: 40_000 });
     await expect(page.locator('article.bubble').filter({ hasText: 'Z-ответ' })).toBeVisible();
-    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(0);
+    await expect(queued).toHaveCount(0);
     await hub.waitIdle(id);
     expect(await hub.inputs(id)).toHaveLength(2);
   });
@@ -217,23 +223,24 @@ test.describe('stack: input and queue', () => {
     const hub = createHubClient(stack);
     const id = await createSessionUI(page, stack);
     const strip = page.locator('.strip');
+    const scheduledRows = strip.locator('.item:not([data-state])');
     const schedule = (run_at: string, text: string) =>
       hub.json(`/api/v1/conversations/${id}/scheduled`, { method: 'POST', body: JSON.stringify({ run_at, content: [{ type: 'text', text }] }) });
 
     await schedule(new Date(Date.now() + 3_600_000).toISOString(), 'Z-отменить');
     await expect(strip).toContainText('Z-отменить', { timeout: 15_000 });
-    await strip.getByRole('button', { name: 'Отменить: Z-отменить', exact: true }).click();
+    await queueAction(scheduledRows.filter({ hasText: 'Z-отменить' }), 'Отменить');
     await expect(strip).not.toContainText('Z-отменить', { timeout: 15_000 });
 
     await schedule(new Date(Date.now() + 3000).toISOString(), synthetic.script([synthetic.delta('Z-сработало')]));
-    await expect(strip.locator('.item:not([data-state])').getByRole('button', { name: 'Изменить' })).toHaveCount(1, { timeout: 15_000 });
+    await expect(scheduledRows.filter({ hasText: 'Z-сработало' })).toHaveCount(1, { timeout: 15_000 });
     await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-сработало' })).toBeVisible({ timeout: 30_000 });
-    await expect(strip.locator('.item:not([data-state])').getByRole('button', { name: 'Изменить' })).toHaveCount(0);
+    await expect(scheduledRows.filter({ hasText: 'Z-сработало' })).toHaveCount(0);
 
     await page.reload();
     await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-сработало' })).toBeVisible({ timeout: 15_000 });
-    await expect(strip.locator('.item:not([data-state])').getByRole('button', { name: 'Изменить' })).toHaveCount(0);
+    await expect(scheduledRows.filter({ hasText: 'Z-сработало' })).toHaveCount(0);
     await expect(strip).not.toContainText('Z-отменить');
   });
 
@@ -245,8 +252,10 @@ test.describe('stack: input and queue', () => {
 
     await sendScript(page, synthetic.script([synthetic.delta('висим'), synthetic.hang()]));
     await expect(page.locator('article.card [data-block]')).toContainText('висим', { timeout: 20_000 });
-    await sendScript(page, synthetic.script([synthetic.delta('ответ из очереди после возобновления')]));
-    await expect(page.locator('.strip').getByRole('button', { name: 'Отменить' })).toHaveCount(1, { timeout: 15_000 });
+    await sendScript(page, synthetic.script([synthetic.delta('ответ из очереди после возобновления')]), 'live');
+    const queued = page.locator('.strip').locator('[data-state="queued"]');
+    await expect(queued).toHaveCount(1, { timeout: 15_000 });
+    await expect(queued).toContainText('ответ из очереди после возобновления');
 
     await page.getByRole('button', { name: 'Прервать', exact: true }).click();
     // Процесс вышел: новая сессия нужна, но паузы очереди нет — продолжаем без «Продолжить очередь».

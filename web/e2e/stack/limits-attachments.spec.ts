@@ -4,7 +4,7 @@ import { open, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getStack } from './global-setup';
 import { synthetic } from './synthetic';
-import { answerText, composerOf, createHubClient, createSessionUI, sendButtonOf, sendChaos, sendScript, type HubClient } from './hub';
+import { answerText, composerOf, createHubClient, createSessionUI, idleSendButtonOf, sendChaos, sendScript, type HubClient } from './hub';
 import { writeSyntheticLimits } from './worker';
 
 const tag = { tag: '@stack' };
@@ -114,8 +114,8 @@ test.describe('stack: limits and attachments', () => {
     expect(new Set(patches).size, 'ни одно смещение не отправлено дважды').toBe(patches.length);
 
     await composerOf(page).fill(synthetic.script([synthetic.readAttachment(0)]));
-    await expect(sendButtonOf(page)).toHaveAttribute('aria-disabled', 'false', { timeout: 60_000 });
-    await sendButtonOf(page).click();
+    await expect(idleSendButtonOf(page)).toHaveAttribute('aria-disabled', 'false', { timeout: 60_000 });
+    await idleSendButtonOf(page).click();
 
     await expect.poll(() => answerText(page), { timeout: 90_000 }).toBe(`sha256:${expected}`);
     await hub.waitIdle(id);

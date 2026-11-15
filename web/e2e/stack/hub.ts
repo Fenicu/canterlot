@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { getStack, SESSION_COOKIE, type Stack } from './global-setup';
@@ -220,7 +220,26 @@ export async function fetchFrames(control: string | number): Promise<FrameLogIte
 }
 
 export const composerOf = (page: Page) => page.getByRole('textbox', { name: 'Сообщение' });
-export const sendButtonOf = (page: Page) => page.getByRole('button', { name: 'Отправить', exact: true });
+/** Кнопка отправки вне хода: сообщение начнёт новый ход. */
+export const idleSendButtonOf = (page: Page) => page.getByRole('button', { name: 'Отправить', exact: true });
+/** Кнопка отправки во время хода: сообщение встанет в очередь. */
+export const queueSendButtonOf = (page: Page) => page.getByRole('button', { name: 'В очередь', exact: true });
+/** Кнопка отправки в текущем состоянии: её имя называет, что произойдёт с сообщением. */
+export const sendButtonOf = (page: Page) => page.getByRole('button', { name: /^(Отправить|В очередь)$/ });
+
+/**
+ * Действие строки очереди: на телефоне «Изменить» и «Отменить» живут в меню «⋯».
+ * Имя действия сверяется с началом подписи: текст сообщения тоже попадает в неё.
+ */
+export async function queueAction(item: Locator, name: 'Изменить' | 'Отменить'): Promise<void> {
+  const inline = item.getByRole('button', { name: new RegExp(`^${name}: `) }).first();
+  if (await inline.isVisible().catch(() => false)) {
+    await inline.click();
+    return;
+  }
+  await item.getByRole('button', { name: /^Действия с сообщением: / }).first().click();
+  await item.getByRole('menuitem', { name, exact: true }).click();
+}
 
 /** Включает пробу клиента (ledger, отметки) до загрузки страницы. */
 export async function enableProbe(page: Page): Promise<void> {
@@ -270,10 +289,15 @@ export async function openSession(page: Page, stack: Stack, conversationId: stri
   await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
 }
 
-/** Печатает скрипт синтетического адаптера в поле ввода и нажимает «Отправить». */
-export async function sendScript(page: Page, script: string): Promise<void> {
+/**
+ * Печатает скрипт синтетического адаптера в поле ввода и отправляет его.
+ * Состояние задаётся явно: во время хода кнопка называется «В очередь», иначе «Отправить».
+ */
+export async function sendScript(page: Page, script: string, state: 'idle' | 'live' = 'idle'): Promise<void> {
   await composerOf(page).fill(script);
-  await sendButtonOf(page).click();
+  const send = state === 'live' ? queueSendButtonOf(page) : idleSendButtonOf(page);
+  await expect(send, state === 'live' ? 'ход идёт: сообщение встанет в очередь' : 'ход не идёт: сообщение начнёт ход').toBeVisible({ timeout: 15_000 });
+  await send.click();
 }
 
 /** Текст ответа агента из ленты: только текстовые блоки карточек, без пузыря владельца с самим скриптом. */
