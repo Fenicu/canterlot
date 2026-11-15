@@ -380,3 +380,125 @@ test('a single request card still scrolls itself and leaves the slot alone', asy
   expect(geometry.cardScrolls).toBe(true);
   expect(Math.abs(geometry.cardTop - geometry.slotTop)).toBeLessThanOrEqual(1);
 });
+
+/** Две отдельные карточки-вопроса: у каждой своя закреплённая «Ответить». */
+function openTwoQuestions(hub: FakeHub, api: FakeHubApi, id: string) {
+  for (const n of [1, 2]) {
+    openRequest(hub, api, id, 'question', {
+      questions: [
+        {
+          id: `q${n}`,
+          header: n === 1 ? 'ПЕРВЫЙ' : 'ВТОРОЙ',
+          text: `Вопрос ${n}: какой вариант собрать?`,
+          options: LONG_OPTIONS.slice(0, 4)
+        }
+      ]
+    });
+  }
+}
+
+type TwoBars = {
+  slot: { top: number; bottom: number; scrollTop: number; scrollHeight: number; clientHeight: number };
+  first: { card: Box; bar: Box };
+  second: { card: Box; bar: Box; hit: boolean };
+};
+
+/** Геометрия двух карточек-вопросов и их «Ответить» относительно видимой части слота. */
+async function measureTwoBars(page: Page): Promise<TwoBars> {
+  return page.evaluate(() => {
+    const rect = (element: Element) => {
+      const box = element.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom, left: box.left, right: box.right, height: box.height };
+    };
+    const slot = document.querySelector<HTMLElement>('.request-cards-slot')!;
+    const cards = [...slot.querySelectorAll<HTMLElement>(':scope > .card-root')];
+    const info = (card: HTMLElement) => {
+      const bar = card.querySelector<HTMLElement>('.actions')!;
+      return { card: rect(card), bar: rect(bar) };
+    };
+    const secondBar = cards[1].querySelector<HTMLElement>('.actions')!;
+    const secondBox = secondBar.getBoundingClientRect();
+    const hit = document.elementFromPoint((secondBox.left + secondBox.right) / 2, (secondBox.top + secondBox.bottom) / 2);
+    return {
+      slot: { ...rect(slot), scrollTop: slot.scrollTop, scrollHeight: slot.scrollHeight, clientHeight: slot.clientHeight },
+      first: info(cards[0]),
+      second: { ...info(cards[1]), hit: Boolean(hit?.closest('.actions')) }
+    };
+  });
+}
+
+for (const { width, height } of [
+  { width: 360, height: 740 },
+  { width: 412, height: 450 }
+] as const) {
+  test(`two question cards keep both answer bars reachable at ${width}x${height}`, async ({ page, browserName }) => {
+    const { hub, api, id } = await boot(page, { theme: 'dark', viewport: { width, height } });
+    openTwoQuestions(hub, api, id);
+    await settle(page);
+
+    // 1. Первая карточка целиком в видимой части слота: её «Ответить» не срезана краем.
+    const initial = await measureTwoBars(page);
+    expect(initial.slot.scrollTop).toBe(0);
+    expect(initial.first.bar.top).toBeGreaterThanOrEqual(initial.slot.top - 1);
+    expect(initial.first.bar.bottom).toBeLessThanOrEqual(initial.slot.bottom + 1);
+
+    const scrolls = () =>
+      page.evaluate(() => {
+        const slot = document.querySelector<HTMLElement>('.request-cards-slot')!;
+        return {
+          slot: slot.scrollTop,
+          cards: [...slot.querySelectorAll<HTMLElement>(':scope > .card-root')].map((card) => card.scrollTop)
+        };
+      });
+
+    if (browserName === 'chromium') {
+      // 2. Жест колесом начинается на первой карточке: когда она доскроллена до конца,
+      // прокрутка переходит к слоту, и вторая карточка доезжает до своей «Ответить».
+      // Синтетическое колесо Firefox не перекидывает прокрутку между вложенными
+      // скроллерами, поэтому там ниже проверяется только раскладка.
+      const start = await page.evaluate(() => {
+        const slot = document.querySelector<HTMLElement>('.request-cards-slot')!;
+        const card = slot.querySelector<HTMLElement>(':scope > .card-root')!.getBoundingClientRect();
+        const box = slot.getBoundingClientRect();
+        return {
+          x: (card.left + card.right) / 2,
+          y: (Math.max(card.top, box.top) + Math.min(card.bottom, box.bottom)) / 2
+        };
+      });
+      await page.mouse.move(start.x, start.y);
+      let previous = '';
+      for (let step = 0; step < 40; step++) {
+        await page.mouse.wheel(0, 200);
+        await page.waitForTimeout(150);
+        const now = JSON.stringify(await scrolls());
+        if (now === previous) break;
+        previous = now;
+      }
+      const chained = await measureTwoBars(page);
+      // Слот действительно прокрутился дальше первой карточки.
+      expect(chained.slot.scrollTop).toBeGreaterThan(0);
+      expect(chained.second.bar.top).toBeGreaterThanOrEqual(chained.slot.top - 1);
+      expect(chained.second.bar.bottom).toBeLessThanOrEqual(chained.slot.bottom + 1);
+      expect(chained.second.hit).toBe(true);
+    } else {
+      // Та же достижимость без жеста: слот прокручивается до второй карточки.
+      await page.locator('.request-cards-slot').evaluate((slot) => slot.scrollTo({ top: 99999 }));
+      await page.waitForTimeout(120);
+      const chained = await measureTwoBars(page);
+      expect(chained.slot.scrollTop).toBeGreaterThan(0);
+      expect(chained.second.bar.top).toBeGreaterThanOrEqual(chained.slot.top - 1);
+      expect(chained.second.bar.bottom).toBeLessThanOrEqual(chained.slot.bottom + 1);
+      expect(chained.second.hit).toBe(true);
+    }
+
+    // Карточка отдаёт прокрутку слоту: иначе жест навсегда остаётся в первой карточке.
+    expect(
+      await page.locator('.request-cards-slot > .card-root').first().evaluate((card) => getComputedStyle(card).overscrollBehaviorY)
+    ).toBe('auto');
+
+    // Сжатая клавиатурой высота не выдавливает кнопку отправки за экран.
+    const send = await page.locator('[data-composer] button.send').evaluate((button) => button.getBoundingClientRect().bottom);
+    expect(send).toBeLessThanOrEqual(height + 1);
+  });
+}
+
