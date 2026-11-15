@@ -57,6 +57,34 @@ if in_lines bb "$(printf "a\nb")"; then fail "in_lines matched a substring"; fi
 '
 log "lib unit checks OK"
 
+# Контракт подменённого pg_restore: -f /dev/null только читает дамп и базу не трогает.
+# Стенду cutover здесь нечего делать — нужны сам файл дампа и фейковая база.
+log "fake pg_restore -f /dev/null is read-only"
+pgroot="$(mktemp -d /tmp/canterlot-fake-pg.XXXXXX)"
+mkdir -p "${pgroot}/state" "${pgroot}/fake-bin"
+cp scripts/deploy/tests/fake-bin/pg_restore "${pgroot}/fake-bin/"
+printf 'TOC-LINE-01\nTOC-LINE-02 _sqlx_migrations table\npayload-in-dump\n' >"${pgroot}/readonly.dump"
+printf 'MIGR_MAX=40\nFAILED=0\npayload-predump\n' >"${pgroot}/state/db.txt"
+cp "${pgroot}/state/db.txt" "${pgroot}/db-before.txt"
+: >"${pgroot}/state/calls.log"
+if ! FAKE_ROOT="${pgroot}" "${pgroot}/fake-bin/pg_restore" -f /dev/null "${pgroot}/readonly.dump" >/dev/null 2>&1; then
+    rm -rf "${pgroot}"
+    echo '[harness-run] fake pg_restore: -f /dev/null failed' >&2
+    exit 1
+fi
+if ! cmp -s "${pgroot}/db-before.txt" "${pgroot}/state/db.txt"; then
+    rm -rf "${pgroot}"
+    echo '[harness-run] fake pg_restore: -f /dev/null changed the fake database' >&2
+    exit 1
+fi
+if ! grep -q '^pg_restore .*-f /dev/null ' "${pgroot}/state/calls.log"; then
+    rm -rf "${pgroot}"
+    echo '[harness-run] fake pg_restore: -f /dev/null not logged as read-only' >&2
+    exit 1
+fi
+rm -rf "${pgroot}"
+log "fake pg_restore contract OK"
+
 ALL_SUITES="changed lint token guardrails invariants site-env preflight stage retain verify dryrun rehearse rollback-db cutover cutover-signals cutover-guarantees geoip speech check-proxy release"
 SUITES="${RUN_SUITES:-${ALL_SUITES}}"
 RUN_LOG_DIR="${RUN_LOG_DIR:-$(mktemp -d /tmp/canterlot-deploy-run.XXXXXX)}"
