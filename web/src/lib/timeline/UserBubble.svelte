@@ -8,7 +8,7 @@
   import IconButton from '#lib/ui/IconButton.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
-  import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
+  import { attachmentKind, attachmentUrl, showsThumb } from '#lib/timeline/attachments.js';
   import type { Component } from 'svelte';
   import type { GalleryAnchor } from '#lib/viewer/gallery.js';
   import type { ViewerShot } from '#lib/viewer/shots.js';
@@ -205,7 +205,7 @@
   {#if input.attachments.length > 0}
     <ul class="files">
       {#each input.attachments as file (file.attachment_id)}
-        <li><AttachmentTile {file} onopen={() => void view(file.attachment_id)} /></li>
+        <li class:image={showsThumb(file)}><AttachmentTile {file} onopen={() => void view(file.attachment_id)} /></li>
       {/each}
     </ul>
   {/if}
@@ -353,6 +353,10 @@
   [data-state='acceptance_unconfirmed'] .status { color: var(--warning); }
   .files { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
   li { display: flex; min-width: 0; max-width: 100%; }
+  /* Картинки делят строку попарно: одна держит 160 px, две сжимаются до половины списка. */
+  li.image { flex: 0 1 calc(var(--s15) * 2.5); }
+  li.image:has(~ li.image), li.image ~ li.image { flex-basis: calc((100% - var(--s2)) / 2); }
+  li.image :global(.thumb) { width: 100%; }
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
   .edit-file { align-items: center; gap: var(--s2); }
   .edited { color: var(--secondary); font-size: var(--fs-sm); }
