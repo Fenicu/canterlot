@@ -319,7 +319,8 @@
   .plaque .pct[data-tone='warning'] { color: var(--warning); }
   .plaque .pct[data-tone='danger'] { color: var(--danger); }
   .plaque .pct.dim { color: var(--muted); font-weight: var(--weight-normal); }
-  .plaque .bar { display: flex; --gauge-width: 100%; }
+  /* Полоска прижата к низу плашки: у соседей с переносом текста она стоит на одной высоте. */
+  .plaque .bar { display: flex; margin-top: auto; --gauge-width: 100%; }
   .plaques { min-height: var(--target); }
   .status { display: flex; align-items: center; gap: var(--s4); color: var(--secondary); }
   .status a { margin-inline-start: auto; }
