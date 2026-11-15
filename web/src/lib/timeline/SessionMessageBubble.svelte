@@ -55,25 +55,31 @@
   <!-- Сообщение другой сессии — на стороне агента: тише пузыря владельца и без его действий. -->
   <article class="message" data-origin={input.origin?.kind} data-role="session-message">
     <header>
-      {#if view.href}
-        <a class="title" href={resolve(view.href as '/')}>{view.title}</a>
-      {:else}
-        <span class="title">{view.title}</span>
-      {/if}
-      {#if view.model}<span class="model">{view.model}</span>{/if}
-      {#if input.createdAt !== null}
-        <time datetime={new Date(input.createdAt).toISOString()} use:timeTip={input.createdAt}>{fmt.clock(input.createdAt)}</time>
-      {/if}
-      {#if input.id && bookmarks}
-        <div class="actions" data-role="bubble-actions">
-          <IconButton
-            icon="bookmark"
-            solid={bookmarked}
-            pressed={bookmarked}
-            active={bookmarked}
-            label={bookmarked ? 'Убрать из избранного' : 'В избранное'}
-            onclick={() => bookmarks && void bookmarks.toggle('input', input.id!)}
-          />
+      <div class="lead">
+        {#if view.href}
+          <a class="title tap-target" href={resolve(view.href as '/')}>{view.title}</a>
+        {:else}
+          <span class="title">{view.title}</span>
+        {/if}
+        {#if view.model}<span class="model">{view.model}</span>{/if}
+      </div>
+      {#if input.createdAt !== null || (input.id && bookmarks)}
+        <div class="meta">
+          {#if input.createdAt !== null}
+            <time datetime={new Date(input.createdAt).toISOString()} use:timeTip={input.createdAt}>{fmt.clock(input.createdAt)}</time>
+          {/if}
+          {#if input.id && bookmarks}
+            <div class="actions" data-role="bubble-actions">
+              <IconButton
+                icon="bookmark"
+                solid={bookmarked}
+                pressed={bookmarked}
+                active={bookmarked}
+                label={bookmarked ? 'Убрать из избранного' : 'В избранное'}
+                onclick={() => bookmarks && void bookmarks.toggle('input', input.id!)}
+              />
+            </div>
+          {/if}
         </div>
       {/if}
     </header>
@@ -100,23 +106,31 @@
     /* Тише пузыря владельца: чужое сообщение не спорит с собственным. */
     background: var(--raised);
   }
+  /* Заголовок, время и закладка стоят одной строкой сетки: длинный заголовок переносится
+     в своей колонке, а пара справа остаётся в полосе его первой строки и не уезжает
+     отдельной строкой под ним. */
   header {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: baseline;
     gap: var(--s2) var(--s4);
     min-width: 0;
   }
+  /* Заголовок и модель делят первую колонку: модель остаётся на строке заголовка, пока
+     тот может ужаться, как и в прежнем общем ряду. */
+  .lead { display: flex; align-items: baseline; gap: var(--s2) var(--s4); min-width: 0; }
   .title {
     min-width: 0;
     color: var(--text);
     font-weight: var(--weight-medium);
     overflow-wrap: anywhere;
   }
-  .title[href] { display: inline-flex; align-items: center; min-height: var(--target); margin-block: calc((var(--target) - var(--fs-body) * var(--lh-body)) / -2); color: var(--accent-link); text-decoration: none; }
+  .title[href] { color: var(--accent-link); text-decoration: none; }
   .title[href]:hover, .title[href]:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
-  .model { color: var(--secondary); font-size: var(--fs-sm); }
-  time { margin-left: auto; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+  .model { flex: none; color: var(--secondary); font-size: var(--fs-sm); }
+  /* Время и закладка ходят парой в правой колонке шапки. */
+  .meta { display: flex; align-items: center; justify-self: end; gap: var(--s2); }
+  time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .body { min-width: 0; color: var(--text); }
   /* Свёрнутый бриф — двенадцать строк тела; заборы кода и списки режет высота, а не текст. */
   .body.folded { max-height: calc(var(--fs-body) * var(--lh-body) * 12); overflow: hidden; }
@@ -125,5 +139,5 @@
   .body :global(:is(h1, h2, h3, h4, h5, h6)) { margin-block: var(--s5) var(--s2); font-size: var(--fs-body); }
   .toggle { align-self: flex-start; min-height: var(--target); padding-inline: var(--s2); color: var(--accent-link); font-size: var(--fs-sm); }
   /* Закладка стоит в строке заголовка: цель касания та же, высота строки не растёт. */
-  .actions { display: flex; align-self: center; margin-left: var(--s2); margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2); }
+  .actions { display: flex; align-self: center; margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2); }
 </style>
