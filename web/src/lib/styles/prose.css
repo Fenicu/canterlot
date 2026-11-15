@@ -104,5 +104,11 @@
 .prose :is(.code-block, blockquote):focus-within > .copy-button,
 .prose .copy-button:focus-visible { opacity: 1; pointer-events: auto; }
 @media (hover: none) {
+  /* Кнопка копирования выше строки цитаты: цитата уступает ей место справа, как блок кода,
+     и не бывает ниже кнопки, иначе цель касания свисает за нижний край. */
+  .prose blockquote:has(> .copy-button) {
+    padding-inline-end: calc(var(--s2) * 2 + var(--target));
+    min-height: calc(var(--target) + var(--s2) * 2);
+  }
   .prose .copy-button { min-width: var(--target); min-height: var(--target); opacity: 1; pointer-events: auto; }
 }
