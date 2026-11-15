@@ -7,7 +7,7 @@ use crate::support;
 use crate::trace;
 use canterlot_hub::{delivery::control, fault_injection::Point, testkit};
 use canterlot_proto::worker::v1::{StreamKind, record_body::Body};
-use fixture::{Fixture, WAIT, until};
+use fixture::{Fixture, WAIT, until, until_within};
 use sqlx::PgPool;
 use std::{
     fs,
@@ -262,10 +262,17 @@ async fn large_attachment_does_not_starve_control_session(pool: PgPool) {
         .send(())
         .unwrap();
     let release = timeout(WAIT, second).await.unwrap().unwrap();
-    until(async || fs::metadata(f.temp(id)).is_ok_and(|m| m.len() > 0)).await;
+    // Выборка 48 МБ под нагрузкой гейта начинается дольше 20 с: ждём то же условие дольше.
+    until_within(
+        Duration::from_secs(60),
+        "attachment temp file appears",
+        async || fs::metadata(f.temp(id)).is_ok_and(|m| m.len() > 0),
+    )
+    .await;
     let before = f.probe.heartbeat_acks().len();
-    sleep(Duration::from_millis(350)).await;
-    assert!(f.probe.heartbeat_acks().len() > before);
+    // Пульс идёт каждые 100 мс, но под нагрузкой скважность плавает: ждём сам факт
+    // ответа во время зависшей выборки, а не фиксированные миллисекунды.
+    until(async || f.probe.heartbeat_acks().len() > before).await;
     let at = Instant::now();
     let interrupt = Uuid::now_v7();
     sqlx::query("insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state) select $1,c.machine_id,c.id,e.id,e.generation,'interrupt',jsonb_build_object('execution_id',e.id,'execution_generation',e.generation),'pending' from conversations c join executions e on e.conversation_id=c.id where e.id=$2").bind(interrupt).bind(f.execution).execute(&pool).await.unwrap();

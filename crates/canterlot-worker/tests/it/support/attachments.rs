@@ -43,6 +43,15 @@ pub async fn until(mut condition: impl AsyncFnMut() -> bool) {
     .await
     .expect("condition timed out");
 }
+pub async fn until_within(limit: Duration, what: &str, mut condition: impl AsyncFnMut() -> bool) {
+    timeout(limit, async {
+        while !condition().await {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("condition timed out: {what}"));
+}
 pub fn sha(bytes: &[u8]) -> String {
     canterlot_hub::attachments::blobstore::hex(&Sha256::digest(bytes))
 }
