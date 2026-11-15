@@ -53,12 +53,6 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 filter = 'test(=exec_attachments::large_attachment_does_not_starve_control_session)'
 retries = 2
 
-# QUARANTINE: старт воркера и переподключение ждутся по 45 с; в полном гейте под нагрузкой окно мало,
-# отдельно тест проходит. Повтор разрешён.
-[[profile.default.overrides]]
-filter = 'test(=settings::settings_survive_worker_restart_between_dispatch_and_accept)'
-retries = 2
-
 # QUARANTINE: ожидание подъёма сессии (60 с) после убийства супервизора не укладывается в полный гейт
 # под нагрузкой; отдельно проходит. Повтор разрешён.
 [[profile.default.overrides]]
