@@ -34,21 +34,36 @@ setup_stage() {
     deploy_release worker "${SHA_OLD}"
 }
 
-# S1: корректный релиз — staged везде, current/build не тронуты, tmp чист.
-case_begin "stage happy"
+# S1: корректный релиз под LC_ALL=C — staged везде, current/build не тронуты, tmp чист;
+# повтор идемпотентен, worker публикуется целиком и без stage-каталогов.
+case_begin "stage happy: C locale, idempotent rerun, atomic worker"
+# Порядок сортировки — C-локаль: RELEASE < SHA256SUMS < bin.
+[ "$(printf 'bin\nRELEASE\nSHA256SUMS\n' | LC_ALL=C sort | tr '\n' ' ')" = "RELEASE SHA256SUMS bin " ] \
+    && case_ok "C-sorted hub order" || case_fail "unexpected C order"
 setup_stage happy
-if bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/stage.log" 2>&1; then
-    case_ok "exit 0"
+if LC_ALL=C bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/stage.log" 2>&1; then
+    case_ok "exit 0 under LC_ALL=C"
 else
-    case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/stage.log"
+    case_fail "exit nonzero under LC_ALL=C"; tail -5 "${FAKE_ROOT}/stage.log"
 fi
 [ "$(readlink "${HUB_CURRENT}")" = "releases/${SHA_OLD}" ] && case_ok "hub current untouched" || case_fail "hub current moved"
 [ "$(readlink "${WEB_BUILD_LINK}")" = "releases/${SHA_OLD}" ] && case_ok "web build untouched" || case_fail "web build moved"
 [ "$(readlink "${WORKER_CURRENT}")" = "releases/${SHA_OLD}" ] && case_ok "worker current untouched" || case_fail "worker current moved"
 [ -x "${HUB_RELEASES}/${SHA_NEW}/bin/canterlot-hub" ] && case_ok "hub staged" || case_fail "hub not staged"
 [ -f "${WEB_RELEASES}/${SHA_NEW}/_app/version.json" ] && case_ok "web staged" || case_fail "web not staged"
-[ -x "${WORKER_RELEASES}/${SHA_NEW}/bin/canterlot-worker" ] && case_ok "worker staged" || case_fail "worker not staged"
+[ -x "${WORKER_RELEASES}/${SHA_NEW}/bin/canterlot-worker" ] \
+    && [ -f "${WORKER_RELEASES}/${SHA_NEW}/RELEASE" ] \
+    && case_ok "worker staged (binary and RELEASE)" || case_fail "worker not staged or incomplete"
+[ -z "$(find "${WORKER_RELEASES}" -maxdepth 1 -name '.stage-*' -print -quit)" ] \
+    && case_ok "no stage dir left behind" || case_fail "stage dir left behind"
 [ -z "$(ls -A "${FAKE_ROOT}/tmp" 2>/dev/null)" ] && case_ok "no tmp leftovers" || case_fail "tmp junk left"
+if LC_ALL=C bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/stage2.log" 2>&1; then
+    case_ok "second run exit 0"
+else
+    case_fail "second run failed"
+fi
+[ "$(grep -c "already staged identically, skipping" "${FAKE_ROOT}/stage2.log")" = "3" ] \
+    && case_ok "all three skipped" || case_fail "skip count wrong"
 teardown_case
 case_end
 
@@ -113,34 +128,6 @@ assert_contains "${FAKE_ROOT}/stage.log" "staged version.json is not" "version a
 teardown_case
 case_end
 
-# S4: повтор идемпотентен.
-case_begin "stage idempotent"
-setup_stage idempotent
-bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist" >/dev/null 2>&1 \
-    || { case_fail "first run failed"; teardown_case; case_end; }
-if bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/stage2.log" 2>&1; then
-    case_ok "second run exit 0"
-else
-    case_fail "second run failed"
-fi
-[ "$(grep -c "already staged identically, skipping" "${FAKE_ROOT}/stage2.log")" = "3" ] \
-    && case_ok "all three skipped" || case_fail "skip count wrong"
-teardown_case
-case_end
-
-# S5: порядок сортировки — C-локаль: RELEASE < SHA256SUMS < bin.
-case_begin "stage C locale order"
-[ "$(printf 'bin\nRELEASE\nSHA256SUMS\n' | LC_ALL=C sort | tr '\n' ' ')" = "RELEASE SHA256SUMS bin " ] \
-    && case_ok "C-sorted hub order" || case_fail "unexpected C order"
-setup_stage order
-if LC_ALL=C bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist" >/dev/null 2>&1; then
-    case_ok "exit 0 under LC_ALL=C"
-else
-    case_fail "exit nonzero under LC_ALL=C"
-fi
-teardown_case
-case_end
-
 # S6: stagedir с отличающимся содержимым — громкий отказ, не молчаливое использование.
 case_begin "stage differing stagedir"
 setup_stage differs
@@ -197,18 +184,6 @@ else
 fi
 assert_contains "${FAKE_ROOT}/stage.log" "SHA256SUMS does not verify" "dist manifest failure reported"
 [ ! -e "${HUB_RELEASES}/${SHA_NEW}" ] && case_ok "nothing staged" || case_fail "hub staged despite bad manifest"
-teardown_case
-case_end
-
-# S11: worker публикуется только целиком, без stage-каталогов.
-case_begin "stage worker publishes atomically"
-setup_stage atomicworker
-bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist" >/dev/null 2>&1
-[ -x "${WORKER_RELEASES}/${SHA_NEW}/bin/canterlot-worker" ] \
-    && [ -f "${WORKER_RELEASES}/${SHA_NEW}/RELEASE" ] \
-    && case_ok "worker release complete" || case_fail "worker release incomplete"
-[ -z "$(find "${WORKER_RELEASES}" -maxdepth 1 -name '.stage-*' -print -quit)" ] \
-    && case_ok "no stage dir left behind" || case_fail "stage dir left behind"
 teardown_case
 case_end
 
