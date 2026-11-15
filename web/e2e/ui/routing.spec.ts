@@ -260,7 +260,7 @@ test.describe('очередь запусков и маршрут в чате', (
 
     await page.goto(`/c/${child}`);
     const line = page.locator('[data-role="route-state-line"]');
-    await expect(line).toHaveText('Выбрана маршрутом «Исправление по ясному брифу»');
+    await expect(line).toHaveText('Исправление по ясному брифу');
     await line.click();
     const sheet = page.getByRole('dialog', { name: 'Выбор маршрута' });
     await expect(sheet.locator('[data-role="route-chosen"]')).toHaveText('DeepSeek · высокое');

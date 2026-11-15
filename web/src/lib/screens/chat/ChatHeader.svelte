@@ -150,6 +150,7 @@
 	const provider = $derived(detail?.harness?.provider || 'claude');
 	const nudgeText = $derived(chat.nudge ? nudgeStateText(chat.nudge) : '');
 	const route = $derived(asDecision((chat.detail as { routing?: unknown } | null)?.routing));
+	const routeTitle = $derived(route ? routingTitles.title(route.task_type) : '');
 	$effect(() => {
 		if (!route) return;
 		let revision: number | null = null;
@@ -248,7 +249,7 @@
 
 
 <div class="chat-header" role="region" aria-label="Шапка чата" data-top-chrome>
-	<div class="topbar" class:tall={!!parentId || !!route || !!nudgeText}>
+	<div class="topbar" class:tall={!!parentId || !!route || !!nudgeText} class:context={!!route || !!nudgeText}>
 		{#if !pane.desktop}
 			<a
 				class="icon-button back"
@@ -292,11 +293,11 @@
 			{#if route || nudgeText}
 				<div class="context-row">
 					{#if route}
-						<button type="button" class="context-link route-link" data-role="route-state-line" onclick={onOpenRoute}>Выбрана маршрутом «{routingTitles.title(route.task_type)}»</button>
+						<button type="button" class="context-link route-link" data-role="route-state-line" aria-label={`Маршрут: ${routeTitle}`} onclick={onOpenRoute}><span class="context-text">{routeTitle}</span></button>
 					{/if}
 					{#if route && nudgeText}<span class="context-sep" aria-hidden="true">·</span>{/if}
 					{#if nudgeText}
-						<button type="button" class="context-link nudge-link" data-role="nudge-state-line" onclick={onOpenNudge}>{nudgeText}</button>
+						<button type="button" class="context-link nudge-link" data-role="nudge-state-line" onclick={onOpenNudge}><span class="context-text">{nudgeText}</span></button>
 					{/if}
 				</div>
 			{/if}
@@ -498,11 +499,15 @@
 	.topbar.tall {
 		align-items: flex-start;
 	}
+	/* Цели маршрута и автопинка растут вниз: оставляем им место до полосы лимитов. */
+	.topbar.context {
+		margin-bottom: calc(var(--s10) + var(--s1));
+	}
 	.header-info {
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		gap: var(--s1);
+		gap: var(--s3);
 		min-width: 0;
 	}
 	.title-row {
@@ -564,6 +569,7 @@
 	}
 	.parent-row {
 		min-width: 0;
+		margin-top: var(--s1);
 		padding-left: calc(var(--mark-large) + var(--s3));
 	}
 	.parent-link {
@@ -580,13 +586,13 @@
 		white-space: nowrap;
 		text-overflow: ellipsis;
 	}
-	/* Цель 44px выходит за строку, но не двигает соседние строки. */
+	/* Цель 44px растёт вверх, в неинтерактивный подзаголовок, и не двигает строки. */
 	.parent-link::after {
 		content: '';
 		position: absolute;
 		left: var(--s0);
 		right: var(--s0);
-		top: calc((100% - var(--target)) / 2);
+		top: calc(100% - var(--target));
 		height: var(--target);
 	}
 	.parent-link:focus-visible {
@@ -709,32 +715,44 @@
 		font-size: var(--fs-meta);
 		color: var(--danger);
 	}
-	/* Маршрут и автопинок — одна тихая строка с двумя целями: две отдельные строки по 44 px
-	   утроили бы шапку, а общая строка даёт каждой цели свои 44 px без наложения текста. */
+	/* Маршрут и автопинок — одна тихая строка с двумя целями: строка в одну текстовую
+	   высоту, а 44 px каждой цели растут вниз, в запас до полосы лимитов. */
 	.context-row {
 		display: flex;
 		align-items: center;
-		gap: var(--s3);
+		gap: var(--s1);
 		min-width: 0;
-		min-height: var(--target);
+		margin-top: var(--s1);
 		padding-left: calc(var(--mark-large) + var(--s3));
 	}
 	.context-link {
+		position: relative;
 		display: block;
 		min-width: 0;
-		height: var(--target);
 		padding: var(--s0);
 		border: var(--s0);
 		background: transparent;
 		color: var(--muted);
-		font-size: var(--fs-meta);
-		line-height: var(--target);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
+		font-size: var(--fs-sm);
+		line-height: var(--lh-tight);
 		text-align: left;
 	}
-	/* Маршрут забирает свободное место, автопинок — не больше 45%: обе строки остаются читаемыми. */
+	.context-text {
+		display: block;
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	/* Цель 44px растёт вниз от строки, не меняя её высоту. */
+	.context-link::after {
+		content: '';
+		position: absolute;
+		left: var(--s0);
+		right: var(--s0);
+		top: var(--s0);
+		height: var(--target);
+	}
+	/* Название маршрута забирает свободное место, автопинок — свою короткую строку. */
 	.route-link {
 		flex: 1 1 0;
 	}
@@ -749,7 +767,7 @@
 	.context-sep {
 		flex: none;
 		color: var(--muted);
-		font-size: var(--fs-meta);
+		font-size: var(--fs-sm);
 		line-height: var(--lh-tight);
 	}
 	.context-link:hover,
