@@ -309,23 +309,33 @@ test('browser_back_closes_the_viewer_and_stays_in_the_chat', async ({ page }) =>
   await expect(page).toHaveURL(url);
 });
 
-// QUARANTINE: в полном гейте 1.22.3 упал на телефоне под нагрузкой; отдельно проходит.
-test.describe('quarantine controls_hide_after_a_tap_and_the_next_tap_brings_them_back', () => {
-  test.describe.configure({ retries: 2 });
-  test('controls_hide_after_a_tap_and_the_next_tap_brings_them_back', async ({ page }, info) => {
-    await openChat(page, 'owner');
-    const dialog = await open(page, 'owner', 0);
-    await expect(dialog).toHaveAttribute('data-chrome', 'shown');
-    const { stage } = await frameState(page);
-    const point = { x: stage.left + stage.width / 2, y: stage.top + stage.height * 0.8 };
-    const tap = async () => (phone(info.project.name) ? (await Fingers.on(page)).tap(point) : page.mouse.click(point.x, point.y));
-    await tap();
-    await expect(dialog).toHaveAttribute('data-chrome', 'hidden');
-    // Кнопки гаснут CSS-переходом: атрибут меняется раньше, чем прозрачность.
-    await expect.poll(async () => Number(await dialog.locator('.chrome').evaluate((node) => getComputedStyle(node).opacity))).toBeLessThan(0.5);
-    await tap();
-    await expect(dialog).toHaveAttribute('data-chrome', 'shown');
-  });
+test('controls_hide_after_a_tap_and_the_next_tap_brings_them_back', async ({ page }, info) => {
+  // Снимки рисуются и раскодируются под нагрузкой гейта втрое дольше: тесту нужен свой бюджет,
+  // а не общие тридцать секунд, которых открытие галереи не укладывается.
+  test.setTimeout(120_000);
+  // Проверка про органы просмотрщика, а не про листание: одной картинки хватает.
+  await openChat(page, 'owner', [PICTURES[0]!]);
+  const dialog = await open(page, 'owner', 0);
+  await expect(dialog).toHaveAttribute('data-chrome', 'shown');
+  const { stage } = await frameState(page);
+  const point = { x: stage.left + stage.width / 2, y: stage.top + stage.height * 0.8 };
+  // Мышь поднимает спрятанные кнопки уже наведением: второй щелчок идёт без движения,
+  // иначе наведение покажет кнопки, а отложенное касание снова их спрячет.
+  const tap = async (move: boolean) => {
+    if (phone(info.project.name)) {
+      await (await Fingers.on(page)).tap(point);
+      return;
+    }
+    if (move) await page.mouse.move(point.x, point.y);
+    await page.mouse.down();
+    await page.mouse.up();
+  };
+  await tap(true);
+  await expect(dialog).toHaveAttribute('data-chrome', 'hidden');
+  // Кнопки гаснут CSS-переходом: атрибут меняется раньше, чем прозрачность.
+  await expect.poll(async () => Number(await dialog.locator('.chrome').evaluate((node) => getComputedStyle(node).opacity))).toBeLessThan(0.5);
+  await tap(false);
+  await expect(dialog).toHaveAttribute('data-chrome', 'shown');
 });
 
 test('focus_stays_inside_the_viewer_and_controls_are_labelled', async ({ page }) => {
