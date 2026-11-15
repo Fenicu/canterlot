@@ -41,12 +41,40 @@
     if (item.phase === 'failed') return 'сбой загрузки';
     return `Загрузка · ${percent(item)}%`;
   }
+
+  let strip = $state<HTMLUListElement | null>(null);
+  let fadeStart = $state(false);
+  let fadeEnd = $state(false);
+
+  // В строке клавиатуры край гаснет только там, где за ним правда остались чипы.
+  function measure() {
+    if (!strip) return;
+    fadeStart = strip.scrollLeft > 1;
+    fadeEnd = strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1;
+  }
+
+  $effect(() => {
+    // Список вырос или сменил направление — пересчитать края и подписаться на новые чипы.
+    void items.length;
+    const node = strip;
+    if (!node) return;
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    for (const child of node.children) observer.observe(child);
+    return () => observer.disconnect();
+  });
 </script>
 
 {#if items.length > 0}
   <section class="tray" aria-label="Вложения">
     <header><strong>Вложения · {items.length}</strong>{#if tally}<span>{tally}</span>{/if}</header>
-    <ul>
+    <ul
+      bind:this={strip}
+      data-fade-start={fadeStart ? '' : undefined}
+      data-fade-end={fadeEnd ? '' : undefined}
+      onscroll={measure}
+    >
       {#each items as item (item.id)}
         <li data-phase={item.phase}>
           <span class="tile" aria-hidden="true">{extension(item.name)}</span>
@@ -89,9 +117,13 @@
   .error { margin: 0; font-size: var(--fs-sm); }
   .retry { display: flex; }
   /* Клавиатура открыта: вложения едут одной строкой вбок, чтобы поле ввода осталось видно. */
-  :global(html[data-compact]) .tray { max-height: none; gap: var(--s2); padding: var(--s0) var(--s3) var(--s2); overflow: visible; }
+  :global(html[data-compact]) .tray { max-height: none; gap: var(--s2); padding: var(--s5) var(--s3) var(--s2); overflow: visible; }
   :global(html[data-compact]) header { display: none; }
-  :global(html[data-compact]) ul { flex-direction: row; overflow-x: auto; padding-bottom: var(--s1); }
+  :global(html[data-compact]) ul { flex-direction: row; overflow-x: auto; scrollbar-width: none; scroll-padding-inline: var(--s6); padding-bottom: var(--s0); }
+  :global(html[data-compact]) ul::-webkit-scrollbar { display: none; }
+  :global(html[data-compact]) ul[data-fade-end] { mask-image: linear-gradient(to left, var(--transparent), var(--text) var(--s6)); }
+  :global(html[data-compact]) ul[data-fade-start] { mask-image: linear-gradient(to right, var(--transparent), var(--text) var(--s6)); }
+  :global(html[data-compact]) ul[data-fade-start][data-fade-end] { mask-image: linear-gradient(to right, var(--transparent), var(--text) var(--s6), var(--text) calc(100% - var(--s6)), var(--transparent)); }
   :global(html[data-compact]) li { flex: 0 0 auto; max-width: calc(var(--target) * 5); min-height: var(--target); padding: var(--s2) var(--s3); }
   :global(html[data-compact]) .tile { width: var(--s10); height: var(--s10); }
   :global(html[data-compact]) .meta,

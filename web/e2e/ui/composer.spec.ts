@@ -598,6 +598,33 @@ test('the_bubble_does_not_animate_under_reduced_motion', async ({ page }) => {
   expect(await sendWatchingMotion(page)).toBe(0);
 });
 
+test('compact_attachment_chips_have_even_insets_without_a_scrollbar_and_fade_the_cut_edge', async ({ page }, info) => {
+  test.skip(info.project.name !== 'phone', 'экранная клавиатура телефона');
+  await boot(page);
+  await page.setInputFiles('input[type=file]', [
+    { name: 'Screenshot_20261115_204905_Chrome.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('one') },
+    { name: 'Screenshot_20261115_204911_Chrome.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('two') }
+  ]);
+  const tray = page.locator('[data-composer] .tray');
+  await expect(tray.getByText('Загружено')).toHaveCount(2, { timeout: 30_000 });
+  await page.setViewportSize({ width: 412, height: 520 });
+  await expect(page.locator('html')).toHaveAttribute('data-compact', '');
+
+  const capsule = (await page.locator('[data-composer] .capsule').boundingBox())!;
+  const chip = (await tray.locator('li').first().boundingBox())!;
+  expect(Math.abs(chip.y - capsule.y - (chip.x - capsule.x))).toBeLessThanOrEqual(2);
+
+  const strip = tray.locator('ul');
+  expect(await strip.evaluate((node) => getComputedStyle(node).scrollbarWidth)).toBe('none');
+  // Край строки гаснет, пока за ним остаются чипы.
+  await expect(strip).toHaveAttribute('data-fade-end', '');
+  expect(await strip.evaluate((node) => getComputedStyle(node).maskImage)).toContain('linear-gradient');
+
+  // Прокрутка вбок осталась, а у конца списка край больше не гаснет.
+  await expect.poll(() => strip.evaluate((node) => { node.scrollLeft = node.scrollWidth; return node.scrollLeft; })).toBeGreaterThan(0);
+  await expect.poll(() => strip.getAttribute('data-fade-end')).toBeNull();
+});
+
 test('keyboard_sized_viewport_keeps_the_attachment_text_and_caret_above_the_keyboard', async ({ page }, info) => {
   test.skip(info.project.name !== 'phone', 'экранная клавиатура телефона');
   await boot(page);
