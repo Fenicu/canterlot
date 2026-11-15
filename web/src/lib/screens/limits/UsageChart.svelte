@@ -30,6 +30,20 @@
     // Подписи ближе 12 пунктов друг к другу слипаются: остаётся первая, пороги важнее сетки.
     return all.filter((tick, index) => all.slice(0, index).every(other => Math.abs(other.value - tick.value) >= 12));
   });
+  /** Высота подписи и зазор над точкой в процентах поля: 13,75 px и 6 px при поле 104 px. */
+  const LABEL_HEIGHT = 13.5;
+  const LABEL_LIFT = 5.8;
+  /** Низ подписи значения: над точкой, а если там проходит линия порога — над самой линией.
+      Порог важнее привычного места: подпись «8%» не должна читаться как зачёркнутая линией 20%. */
+  function labelBottom(value: number): number {
+    let bottom = value + LABEL_LIFT;
+    for (let step = 0; step < lines.length + 1; step++) {
+      const crossing = lines.filter((line) => line.value > bottom - 0.5 && line.value < bottom + LABEL_HEIGHT - 0.5);
+      if (!crossing.length) break;
+      bottom = Math.max(...crossing.map((line) => line.value)) + LABEL_LIFT / 3;
+    }
+    return bottom;
+  }
   /** Точка дня на поле: доля ширины и остаток, в CSS-переменных — разметка без встроенных стилей. */
   function place(node: HTMLElement, at: { x: string; y: string }) {
     const update = (next: typeof at) => { node.style.setProperty('--x', next.x); node.style.setProperty('--y', next.y); };
@@ -56,9 +70,9 @@
             </svg>
             {#each chart.days as day, index (day.day)}
               {#if day.value !== null}
-                {@const at = { x: `${((index + .5) / 7) * 100}%`, y: `${day.value}` }}
-                <span class="dot" data-series="weekly" data-tone={meterTone(day.value, thresholds)} use:place={at}></span>
-                <span class="num" data-tone={meterTone(day.value, thresholds)} use:place={at}>{day.text}</span>
+                {@const x = `${((index + .5) / 7) * 100}%`}
+                <span class="dot" data-series="weekly" data-tone={meterTone(day.value, thresholds)} use:place={{ x, y: `${day.value}` }}></span>
+                <span class="num" data-tone={meterTone(day.value, thresholds)} use:place={{ x, y: `${labelBottom(day.value)}` }}>{day.text}</span>
               {/if}
             {/each}
           </div>
@@ -76,7 +90,8 @@
   {#each charts as chart (chart.provider)}{#if chart.known}{#each chart.days as day (day.day)}<tr><th>{day.day}</th><td>{chart.label}</td><td>{day.text || 'Нет данных'}</td></tr>{/each}{/if}{/each}
 </tbody></table></div>
 <style>
-  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--limits-column)), 1fr)); align-items: stretch; gap: var(--s4); }
+  /* Колонка не уже 224 px: в панели 636 px три графика по 206 px режут дни и наезжают подписями. */
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--gauge-width) * 2)), 1fr)); align-items: stretch; gap: var(--s4); }
   .chart { min-width: 0; margin: var(--s0); padding: var(--s6) var(--s8) var(--s6); background: var(--surface); border-radius: var(--radius-card); }
   figcaption { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s4); }
   .name { font-size: var(--fs-body); font-weight: var(--weight-semibold); }
@@ -100,8 +115,9 @@
   .dot { position: absolute; left: var(--x); bottom: calc(var(--y) * 1%); width: var(--mark); height: var(--mark); transform: translate(-50%, 50%); background: var(--accent); border-radius: var(--radius-round); }
   .dot[data-tone='warning'] { background: var(--warning); }
   .dot[data-tone='danger'] { background: var(--danger); }
-  /* Значение читается без наведения: подпись над каждой точкой. */
-  .num { position: absolute; left: var(--x); bottom: calc(var(--y) * 1%); transform: translate(-50%, calc(-1 * var(--s3))); color: var(--secondary); line-height: var(--lh-tight); white-space: nowrap; }
+  /* Значение читается без наведения: подпись над каждой точкой. Низ подписи считает labelBottom:
+     она поднимается над линией порога, а не пересекается с ней. */
+  .num { position: absolute; left: var(--x); bottom: calc(var(--y) * 1%); transform: translateX(-50%); color: var(--secondary); line-height: var(--lh-tight); white-space: nowrap; }
   .num[data-tone='warning'] { color: var(--warning); }
   .num[data-tone='danger'] { color: var(--danger); }
   .days { grid-column: 2; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
