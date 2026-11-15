@@ -68,7 +68,7 @@
 
   {#if data.kind === 'comment_add'}
     {#if data.comment}
-      <div class="quote" class:clamped={!commentOpen && commentLong} data-role="taiga-comment">{data.comment}</div>
+      <div class="quote" class:clamped={!commentOpen && commentLong} data-role="taiga-comment"><div class="quote-text" class:clamped={!commentOpen && commentLong}>{data.comment}</div></div>
       {#if commentLong}
         <button type="button" class="more" aria-expanded={commentOpen} data-role="taiga-comment-toggle" onclick={() => env.folds.toggle(commentKey)}>{commentOpen ? 'Свернуть' : 'Развернуть'}</button>
       {/if}
@@ -115,7 +115,8 @@
   .ref { color: var(--secondary); font-variant-numeric: tabular-nums; }
   .status { color: var(--muted); }
   .quote { padding: var(--s4) var(--s6); border-radius: var(--radius-sm); background: var(--surface); color: var(--secondary); overflow-wrap: anywhere; white-space: pre-wrap; }
-  .quote.clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; }
+  /* Зажим живёт на внутреннем блоке без отступов: обрезка идёт по границе строки, а не по отступу. */
+  .quote-text.clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; }
   .author { color: var(--muted); }
   .more { align-self: flex-start; min-width: var(--target); min-height: var(--target); margin-block: calc(var(--s2) * -1); padding: var(--s0); background: var(--transparent); color: var(--accent-link); }
 </style>
