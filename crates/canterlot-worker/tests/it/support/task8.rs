@@ -328,7 +328,9 @@ mod real {
     use support::data_proxy::DataProxy;
 
     async fn until(mut predicate: impl FnMut() -> bool) {
-        timeout(Duration::from_secs(10), async {
+        // Подтверждение журнала идёт через настоящий хаб и базу: под нагрузкой
+        // гейта дольше 10 с. Ждём то же условие, окно шире.
+        timeout(Duration::from_secs(60), async {
             while !predicate() {
                 sleep(Duration::from_millis(10)).await;
             }
