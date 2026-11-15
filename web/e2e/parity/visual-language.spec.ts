@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 import type { Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { PALETTES } from '../../src/lib/palettes';
 import { expect, test } from '../ui/fixtures';
 import { bootScreen, SCREENS, type Theme } from './states';
 
@@ -12,8 +13,128 @@ const COLOR_TOKENS = [...readFileSync(resolve(process.cwd(), 'src/lib/styles/tok
 // В SCREENS они остаются ради контактного листа и снимков макетов.
 const ALIASES = new Set(['03-chat-light', 'docx-viewer-light', 'xlsx-viewer-light']);
 const AUDITED = SCREENS.filter((screen) => !ALIASES.has(screen.name));
+// Минимум узлов color-contrast, которые axe обязан проверить на каждом экране. Порог — 60 % от
+// сегодняшнего покрытия (но не меньше трёх узлов): правка фикстуры на пару слов его не сломает,
+// а ставшее неприменимым правило (0–2 узла) — сломает.
+const CONTRAST_FLOOR: Record<string, number> = {
+  '01-sessions': 36,
+  '02-chat': 9,
+  '04-info-sheet': 18,
+  '05-subagent-lane': 11,
+  '06-question': 7,
+  '07-new-session': 11,
+  '07-new-session-collapsed': 7,
+  '08-quota-paused': 7,
+  '09-machine': 19,
+  '09-machine-lease-queue': 20,
+  '10-limits-history': 36,
+  '11-desktop': 31,
+  attachments: 12,
+  bookmarks: 24,
+  'bookmarks-desktop': 37,
+  'chat-trashed': 3,
+  'delegation-queued': 9,
+  diagnostics: 16,
+  'docx-viewer': 19,
+  'docx-viewer-desktop': 18,
+  'feed-cards': 40,
+  'feed-cards-desktop': 39,
+  'feed-cards-top': 12,
+  'group-manager': 7,
+  'image-viewer': 3,
+  'image-viewer-desktop': 3,
+  'limits-desktop': 117,
+  'machine-watch': 21,
+  'machine-watch-desktop': 58,
+  'markdown-viewer': 13,
+  'permission-request': 12,
+  'plan-cards': 57,
+  'plan-cards-desktop': 38,
+  'plan-cards-top': 32,
+  'plan-screen-desktop': 36,
+  'plan-tab': 22,
+  'plan-tab-desktop': 47,
+  'plans-list': 3,
+  'question-request': 16,
+  queue: 12,
+  'route-sheet': 10,
+  'routing-editor': 40,
+  'routing-preview': 80,
+  search: 28,
+  'search-desktop': 58,
+  'search-session': 14,
+  'send-later': 6,
+  'session-menu': 13,
+  'session-popover': 4,
+  'session-sheet': 10,
+  settings: 8,
+  'settings-pane': 34,
+  'settings-sheet': 15,
+  share: 3,
+  'spawn-queue': 16,
+  'system-bubbles': 51,
+  'taiga-cards': 50,
+  'taiga-cards-comment': 40,
+  'taiga-cards-desktop': 33,
+  'taiga-cards-list': 87,
+  trash: 17,
+  'url-request': 13,
+  'xlsx-viewer': 14,
+  'xlsx-viewer-desktop': 5
+};
+const PALETTE_KEYS = PALETTES.map((palette) => palette.key);
+// Экраны, где видны все пары из F-18: активная вкладка навигации, пилюля действующей политики
+// и состояние задачи плана. Остальные экраны идут в палитре по умолчанию.
+const PALETTE_SCREENS = ['01-sessions', 'routing-editor', 'plan-cards'];
+
+type AxeResults = Awaited<ReturnType<AxeBuilder['analyze']>>;
 
 interface Audit { rule: string; where: string; count: number; example: string }
+
+function contrastNodes(results: AxeResults): number {
+  return [...results.passes, ...results.violations, ...results.incomplete]
+    .filter((result) => result.id === 'color-contrast')
+    .reduce((total, result) => total + result.nodes.length, 0);
+}
+
+function contrastProblems(results: AxeResults, label: string): string[] {
+  return results.violations
+    .filter((violation) => violation.id === 'color-contrast')
+    .flatMap((violation) => violation.nodes.slice(0, 3).map((node) => `${label}: ${node.target.join(' ')} — ${node.any[0]?.message ?? violation.help}`));
+}
+
+/**
+ * Продукт держит html нулевой высоты: оболочка `position: fixed`, а
+ * `html:not(:has([data-harness]))` прячет переполнение. axe считает потомков нулевого клипующего
+ * предка скрытыми, поэтому на время аудита поднимаем корень. Меняем только страницу теста:
+ * base.css остаётся продуктовым поведением.
+ */
+async function liftRootClipping(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty('overflow', 'visible', 'important');
+    document.documentElement.style.setProperty('min-height', '100dvh');
+    document.body.style.setProperty('min-height', '100dvh');
+    // Лист делает оболочку inert, и axe выбрасывает весь лист вместе с фоном. Снимаем только на время аудита.
+    document.getElementById('app-shell')?.removeAttribute('inert');
+  });
+}
+
+/** Ставит палитру и тему атрибутами корня, как theme.svelte.ts, и ждёт устоявшихся цветов. */
+async function setVariant(page: Page, palette: string, theme: Theme): Promise<void> {
+  await page.evaluate(({ palette, theme }) => {
+    const root = document.documentElement;
+    root.dataset.themeSwitching = '';
+    root.dataset.palette = palette;
+    root.dataset.theme = theme;
+  }, { palette, theme });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.evaluate(() => { delete document.documentElement.dataset.themeSwitching; });
+  await page.waitForFunction(() => document.getAnimations().every((animation) => {
+    const timing = animation.effect?.getComputedTiming();
+    const finite = typeof timing?.duration === 'number' && Number.isFinite(timing.duration) && timing.iterations !== Infinity;
+    return animation.playState !== 'running' || !finite;
+  }));
+}
 
 /** Язык оформления страницы: формы, цвета, цели нажатия, шрифт. Возвращает расхождения с подписью экрана. */
 async function visualLanguageProblems(page: Page, label: string): Promise<string[]> {
@@ -140,6 +261,8 @@ for (const screen of AUDITED) {
       test.setTimeout(120_000);
       const label = `${screen.name} (${theme})`;
       await bootScreen(page, screen, theme);
+      // Последний щелчок оставляет указатель над строкой: аудит смотрит покой, а не случайный :hover.
+      await page.mouse.move(0, 0);
       const results = await new AxeBuilder({ page }).analyze();
       const serious = results.violations
         .filter((violation) => violation.impact === 'serious' || violation.impact === 'critical')
@@ -147,8 +270,44 @@ for (const screen of AUDITED) {
       expect(serious, label).toEqual([]);
       const problems = await visualLanguageProblems(page, label);
       expect(problems, problems.join('\n')).toEqual([]);
+      // color-contrast разбирается отдельно: продукт держит корень обрезанным, и axe молча пропускает текст.
+      await liftRootClipping(page);
+      const contrastResults = await new AxeBuilder({ page }).withRules(['color-contrast']).analyze();
+      const evaluated = contrastNodes(contrastResults);
+      const floor = CONTRAST_FLOOR[screen.name];
+      expect(floor, `${label}: no contrast floor`).toBeDefined();
+      expect(evaluated, `${label}: color-contrast evaluated ${evaluated} nodes, floor ${floor}`).toBeGreaterThanOrEqual(floor!);
+      const contrast = contrastProblems(contrastResults, label);
+      expect(contrast, contrast.join('\n')).toEqual([]);
     });
   }
+}
+
+// Полная матрица «экран × палитра × тема» на всех маршрутах слишком дорога для обычного прогона:
+// каждый экран в палитре по умолчанию уже прошёл выше. Здесь каждая палитра и обе темы проверяются
+// на нескольких экранах, где видны пары из F-18. Токены не зависят от движка, поэтому матрица
+// идёт один раз, в проекте phone.
+for (const name of PALETTE_SCREENS) {
+  const screen = SCREENS.find((item) => item.name === name)!;
+  test(`color_contrast_holds_in_every_palette_and_both_themes: ${name}`, async ({ page }, info) => {
+    test.skip(info.project.name !== 'phone', 'Палитры проверяются в одном браузере: токены не зависят от движка.');
+    test.setTimeout(240_000);
+    await bootScreen(page, screen, screen.theme);
+    await page.mouse.move(0, 0);
+    await liftRootClipping(page);
+    const floor = CONTRAST_FLOOR[name]!;
+    for (const palette of PALETTE_KEYS) {
+      for (const theme of THEMES) {
+        await setVariant(page, palette, theme);
+        const results = await new AxeBuilder({ page }).withRules(['color-contrast']).analyze();
+        const label = `${name} ${palette} (${theme})`;
+        const evaluated = contrastNodes(results);
+        expect(evaluated, `${label}: color-contrast evaluated ${evaluated} nodes, floor ${floor}`).toBeGreaterThanOrEqual(floor);
+        const problems = contrastProblems(results, label);
+        expect(problems, problems.join('\n')).toEqual([]);
+      }
+    }
+  });
 }
 
 for (const screen of AUDITED.filter((item) => item.viewport.width < 1000)) {
