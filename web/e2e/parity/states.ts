@@ -6,7 +6,7 @@ import { FakeHub, FakeHubApi, leaseEntry, seedLease, seedMachine } from '../../t
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockup04, seedMockup05, seedMockup06, seedMockup08, seedMockup11, seedMockupChat } from '../../testing/fixtures/mockup-chat';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
-import { expect, openNewSessionForm } from '../ui/fixtures';
+import { expect as baseExpect, openNewSessionForm } from '../ui/fixtures';
 import { bootSecondary } from '../ui/secondary-fixture';
 import { seedConversation, seedMachineWatch } from '../../testing/fake-hub/seed';
 import { seedFeedCards } from '../../testing/fixtures/feed-cards';
@@ -32,6 +32,10 @@ export interface Screen {
 }
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
+// Экран под полной нагрузкой гейта открывается дольше пяти секунд по умолчанию: докс и таблица
+// разбираются в браузере, а очередь запусков рисуется после щелчка. Ожидание готовности идёт
+// с запасом вдвое больше, чем у `[data-ready]` ниже, а не с пятисекундным сроком проверки.
+const expect = baseExpect.configure({ timeout: 30_000 });
 const PHONE = { width: 412, height: 892 };
 const DESKTOP = { width: 1440, height: 900 };
 

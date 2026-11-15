@@ -134,10 +134,6 @@ async function visualLanguageProblems(page: Page, label: string): Promise<string
 // Один заход на экран отдаёт обе проверки: axe и инварианты языка смотрят одну и ту же страницу,
 // а заходов у маршрута с двумя темами было вдвое больше, чем нужно. Каждая пара «экран, тема»
 // остаётся отдельным тестом: проверки идут параллельно, а падение называет экран.
-// QUARANTINE: экран не успевает открыться под полной нагрузкой гейта (1.19.1: spawn-queue и docx-viewer,
-// 4 из 1722 при check.sh --all; 518 из 518 отдельно)
-test.describe('quarantine visual_language_and_axe_hold_on_every_route_in_both_themes', () => {
-test.describe.configure({ retries: 2 });
 for (const screen of AUDITED) {
   for (const theme of THEMES) {
     test(`visual_language_and_axe_hold_on_every_route_in_both_themes: ${screen.name} ${theme}`, async ({ page }) => {
@@ -154,7 +150,6 @@ for (const screen of AUDITED) {
     });
   }
 }
-});
 
 for (const screen of AUDITED.filter((item) => item.viewport.width < 1000)) {
   for (const width of [360, 320]) {
