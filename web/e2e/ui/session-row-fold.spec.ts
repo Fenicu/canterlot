@@ -89,6 +89,40 @@ async function nextRow(page: Page, id: string, nextSection: boolean): Promise<st
 	}, { id, nextSection });
 }
 
+/**
+ * Без движения: кадр за кадром до конечного состояния следим, что складки высоты не появилось,
+ * и снимаем высоту места с соседом тем же кадром — она уже конечная, перехода ждать нечего.
+ * Ожидание ограничено состоянием, а не сроком: у отсутствующего перехода нет конца.
+ */
+async function still(page: Page, watched: string, end: { selector: string; count: number }, neighbour: string, act: () => unknown): Promise<{ folds: string[]; slot: number; below: number }> {
+	const watching = page.evaluate(({ watched, end, neighbour }) => new Promise<{ folds: string[]; slot: number; below: number }>((resolve) => {
+		const folds: string[] = [];
+		const started = performance.now();
+		const look = () => {
+			for (const node of document.querySelectorAll(watched)) {
+				for (const animation of node.getAnimations()) {
+					if (!(animation.effect instanceof KeyframeEffect)) continue;
+					// Нулевая длина — не движение: Svelte ставит такую вводную анимацию всегда.
+					if (Number(animation.effect.getComputedTiming().duration) <= 0) continue;
+					if (animation.effect.getKeyframes().some((frame) => 'height' in frame || 'gridTemplateRows' in frame)) folds.push(animation.playState);
+				}
+			}
+			if (document.querySelectorAll(end.selector).length !== end.count && performance.now() - started < 5_000) return requestAnimationFrame(look);
+			const slot = document.querySelector<HTMLElement>(watched);
+			const next = document.querySelector<HTMLElement>(`[data-session="${neighbour}"]`)!;
+			const scroller = next.closest<HTMLElement>('[data-list-scroll]')!;
+			resolve({
+				folds,
+				slot: slot ? slot.getBoundingClientRect().height : Number.NaN,
+				below: next.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+			});
+		};
+		look();
+	}), { watched, end, neighbour });
+	await act();
+	return watching;
+}
+
 /** Верх строки в содержимом списка: прокрутка, которую двигает меню строки, на него не влияет. */
 const topOf = (page: Page, id: string) => page.locator(`[data-session="${id}"]`).evaluate((el) => {
 	const scroller = el.closest<HTMLElement>('[data-list-scroll]')!;
@@ -112,12 +146,12 @@ for (const motion of ['full', 'reduced'] as const) for (const which of ['pinned'
 		const neighbour = await nextRow(page, id, which === 'plain');
 		const top = await topOf(page, neighbour);
 
-		const gone = await slices(page, trace, neighbour, () => setArchived(hub, api, id, true));
-		await expect(row).toHaveCount(0);
-		await expect(page.locator(trace)).toHaveCount(0);
+		const gone = motion === 'reduced' ? null : await slices(page, trace, neighbour, () => setArchived(hub, api, id, true));
 		if (motion === 'reduced') {
-			// Без движения строка уходит сразу, сосед встаёт на её место одним шагом.
-			expect(gone).toBeNull();
+			// Без движения строка уходит сразу: складки нет, сосед встаёт на её место тем же кадром.
+			const out = await still(page, trace, { selector: trace, count: 0 }, neighbour, () => setArchived(hub, api, id, true));
+			expect(out.folds).toEqual([]);
+			expect(out.below).toBeCloseTo(top - height, 0);
 		} else {
 			// Высота сходится только вниз, сосед едет следом: на каждом срезе он между прежним и новым местом.
 			expect(gone).not.toBeNull();
@@ -131,12 +165,18 @@ for (const motion of ['full', 'reduced'] as const) for (const which of ['pinned'
 				expect(y).toBeLessThan(top - 0.5);
 			}
 		}
+		await expect(row).toHaveCount(0);
+		await expect(page.locator(trace)).toHaveCount(0);
 		await expect.poll(() => topOf(page, neighbour)).toBeCloseTo(top - height, 0);
 
-		const back = await slices(page, trace, neighbour, () => setArchived(hub, api, id, false));
-		await expect(row).toBeVisible();
-		if (motion === 'reduced') expect(back).toBeNull();
-		else {
+		if (motion === 'reduced') {
+			// Возврат тоже одним шагом: строка уже на прежней высоте, сосед сдвинут вниз.
+			const out = await still(page, trace, { selector: `[data-slot="${id}"]`, count: 1 }, neighbour, () => setArchived(hub, api, id, false));
+			expect(out.folds).toEqual([]);
+			expect(out.slot).toBeCloseTo(height, 0);
+			expect(out.below).toBeCloseTo(top, 0);
+		} else {
+			const back = await slices(page, trace, neighbour, () => setArchived(hub, api, id, false));
 			expect(back).not.toBeNull();
 			const [a, b, c] = back!.slot;
 			expect(a!).toBeGreaterThan(0.5);
@@ -144,6 +184,7 @@ for (const motion of ['full', 'reduced'] as const) for (const which of ['pinned'
 			expect(c!).toBeGreaterThan(b!);
 			expect(c!).toBeLessThan(height - 0.5);
 		}
+		await expect(row).toBeVisible();
 		// Строка вернулась на прежнее место, сосед под ней тоже.
 		await expect.poll(() => topOf(page, neighbour)).toBeCloseTo(top, 0);
 	});
