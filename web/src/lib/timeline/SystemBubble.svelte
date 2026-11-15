@@ -82,26 +82,32 @@
   {/if}
   {#if hasNote}
     <p class="note" class:clamped={!noteOpen} data-role="system-note">{view.note}</p>
-    <button type="button" class="link-button" aria-expanded={noteOpen} onclick={() => { noteOpen = !noteOpen; }}>
-      {noteOpen ? 'Скрыть заметку' : 'Показать заметку'}
-    </button>
   {/if}
-  {#if view.action}
-    {#if view.action.kind === 'link'}
-      {#if view.action.external}
-        <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-        <a class="action" href={view.action.href} target="_blank" rel="noopener noreferrer">{view.action.label}</a>
-      {:else}
-        <a class="action" href={resolve(view.action.href as '/')}>{view.action.label}</a>
-      {/if}
-    {:else}
-      <Button onclick={() => onCompact?.()}>{view.action.label}</Button>
+  <!-- Действия карточки стоят одной строкой: у каждой цель касания var(--target), а зазор
+       между ними не сходится внахлёст, как это делали отрицательные отступы в столбце. -->
+  <div class="controls" data-role="system-controls">
+    {#if hasNote}
+      <button type="button" class="link-button" aria-expanded={noteOpen} onclick={() => { noteOpen = !noteOpen; }}>
+        {noteOpen ? 'Скрыть заметку' : 'Показать заметку'}
+      </button>
     {/if}
-  {/if}
-  <button type="button" class="text-toggle" aria-expanded={open} onclick={onToggle}>
-    <span class="chevron" data-open={open ? '' : undefined}><Icon name="chevron" /></span>
-    {view.foldLabel ?? 'Текст для агента'}
-  </button>
+    {#if view.action}
+      {#if view.action.kind === 'link'}
+        {#if view.action.external}
+          <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+          <a class="action" href={view.action.href} target="_blank" rel="noopener noreferrer">{view.action.label}</a>
+        {:else}
+          <a class="action" href={resolve(view.action.href as '/')}>{view.action.label}</a>
+        {/if}
+      {:else}
+        <Button onclick={() => onCompact?.()}>{view.action.label}</Button>
+      {/if}
+    {/if}
+    <button type="button" class="text-toggle" aria-expanded={open} onclick={onToggle}>
+      <span class="chevron" data-open={open ? '' : undefined}><Icon name="chevron" /></span>
+      {view.foldLabel ?? 'Текст для агента'}
+    </button>
+  </div>
   {#if open}
     <div class="fold">
       {#if view.plain}
@@ -169,21 +175,40 @@
   .row-value { color: var(--secondary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .note { margin: 0; color: var(--secondary); font-size: var(--fs-sm); overflow-wrap: anywhere; white-space: pre-wrap; }
   .note.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4) var(--s6); }
   .link-button, .text-toggle {
     display: inline-flex;
     align-items: center;
     gap: var(--s3);
     min-height: var(--target);
+    padding: var(--s0);
+    background: var(--transparent);
     color: var(--accent-link);
     font-size: var(--fs-sm);
     text-align: left;
   }
-  .link-button { align-self: flex-start; margin-block: calc(var(--s4) * -1); }
-  .text-toggle { align-self: flex-start; margin-block: calc(var(--s4) * -1); }
+  /* Раскрытие — ссылка карточки, как «Показать полностью» в пузыре сессии: заливка
+     --raised на поверхности --surface превращала две соседние кнопки в одну фигуру. */
+  .link-button:hover, .link-button:focus-visible,
+  .text-toggle:hover, .text-toggle:focus-visible {
+    background: var(--transparent);
+    text-decoration: underline;
+    text-underline-offset: var(--s1);
+  }
+  .link-button:active, .text-toggle:active { background: var(--transparent); }
+  /* На мягкой заливке предупреждения и опасности accent-link не держит 4.5:1 в части светлых
+     палитр: там раскрытие читается цветом текста карточки с подчёркиванием, как ссылка провайдера. */
+  .system[data-tone='warning'] :is(.link-button, .text-toggle),
+  .system[data-tone='danger'] :is(.link-button, .text-toggle) {
+    color: var(--text);
+    text-decoration: underline;
+    text-underline-offset: var(--s1);
+    text-decoration-color: var(--accent-link);
+  }
   .chevron { display: inline-flex; color: var(--muted); transition: transform var(--duration-expand) var(--ease-expand); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .chevron[data-open] { transform: rotate(90deg); }
-  .action { display: inline-flex; align-items: center; align-self: flex-start; min-height: var(--target); color: var(--accent-link); font-size: var(--fs-sm); text-decoration: none; }
+  .action { display: inline-flex; align-items: center; min-height: var(--target); color: var(--accent-link); font-size: var(--fs-sm); text-decoration: none; }
   .action:hover, .action:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
   /* Ссылка провайдера на мягкой заливке: цвет текста держит 4.5:1 во всех палитрах,
      а подчёркивание оставляет её ссылкой. */

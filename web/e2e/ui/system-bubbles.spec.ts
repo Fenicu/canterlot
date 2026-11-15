@@ -25,6 +25,20 @@ async function noOverflow(page: Page) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 }
 
+type Box = { x: number; y: number; width: number; height: number };
+
+/** Зазоры по осям, где прямоугольники расходятся: касание и нахлёст дают 0 или меньше и отсеиваются. */
+function clearGap(a: Box, b: Box) {
+  return [
+    Math.max(a.x, b.x) - Math.min(a.x + a.width, b.x + b.width),
+    Math.max(a.y, b.y) - Math.min(a.y + a.height, b.y + b.height)
+  ].filter((gap) => gap > 0);
+}
+
+async function tapTarget(page: Page) {
+  return page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--target')));
+}
+
 test('alarm_bubbles_carry_the_condition_note_targets_and_the_folded_text', async ({ page }) => {
   const { child } = await boot(page, 'alarm');
   const single = page.locator('article.system[data-event-kind="alarm"]').filter({ hasText: 'Будильник «gate»' }).first();
@@ -59,6 +73,65 @@ test('alarm_bubbles_carry_the_condition_note_targets_and_the_folded_text', async
   // Старый будильник без новых полей остаётся прежней тонкой строкой.
   await expect(page.locator('[data-role="alarm"]')).toContainText('Будильник «old»: сработал');
   await noOverflow(page);
+});
+
+test('the_alarm_note_and_agent_text_are_separate_tap_targets', async ({ page }) => {
+  await boot(page, 'alarm');
+  const card = page.locator('article.system[data-event-kind="alarm"]').filter({ hasText: 'Будильник «gate»' }).first();
+  await card.scrollIntoViewIfNeeded();
+  const note = card.getByRole('button', { name: 'Показать заметку' });
+  const fold = card.getByRole('button', { name: 'Текст для агента' });
+  await expect(note).toBeVisible();
+  await expect(fold).toBeVisible();
+  const [noteBox, foldBox] = [(await note.boundingBox())!, (await fold.boundingBox())!];
+  // Обе кнопки остаются целями касания, но между ними виден зазор: иначе две заливки
+  // сливаются в одну фигуру и читаются одной кнопкой.
+  const gaps = clearGap(noteBox, foldBox);
+  expect(gaps.length, 'кнопки не соприкасаются').toBeGreaterThan(0);
+  expect(Math.min(...gaps), 'между кнопками виден зазор').toBeGreaterThanOrEqual(4);
+  expect(Math.min(...gaps), 'зазор не раздувает карточку').toBeLessThanOrEqual(20);
+  const target = await tapTarget(page);
+  expect(noteBox.height).toBeGreaterThanOrEqual(target);
+  expect(foldBox.height).toBeGreaterThanOrEqual(target);
+  // Ни у одной кнопки нет своей заливки: как у ссылок карточки, она сливалась бы с соседней.
+  for (const box of [note, fold]) {
+    const alpha = await box.evaluate((node) => {
+      const parts = (getComputedStyle(node).backgroundColor.match(/[\d.]+/g) ?? []).map(Number);
+      return parts.length >= 4 ? parts[3]! : 1;
+    });
+    expect(alpha, 'у кнопки нет собственного фона').toBe(0);
+  }
+});
+
+test('the_system_card_controls_do_not_merge_or_spread_out', async ({ page }) => {
+  // Заметка, действие-ссылка и кнопка сжатия контекста — три вида соседних контролов.
+  for (const group of ['alarm', 'machine', 'context'] as const) {
+    await boot(page, group);
+    const target = await tapTarget(page);
+    await expect(page.locator('[data-role="system-controls"] > :nth-child(2)').first()).toBeVisible();
+    let seen = 0;
+    for (const card of await page.locator('article.system').all()) {
+      const controls = card.locator('[data-role="system-controls"] > *');
+      if ((await controls.count()) < 2) continue;
+      seen += 1;
+      const boxes = (await controls.evaluateAll((nodes) =>
+        nodes.map((node) => {
+          const rect = node.getBoundingClientRect();
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        })
+      )) as Box[];
+      for (const [index, box] of boxes.entries()) {
+        expect(box.height, `высота контрола ${index}`).toBeGreaterThanOrEqual(target);
+        const next = boxes[index + 1];
+        if (!next) continue;
+        const gaps = clearGap(box, next);
+        expect(gaps.length, `${group}: контролы ${index} и ${index + 1} не соприкасаются`).toBeGreaterThan(0);
+        expect(Math.min(...gaps), `${group}: зазор между ${index} и ${index + 1}`).toBeGreaterThanOrEqual(4);
+        expect(Math.min(...gaps), `${group}: зазор между ${index} и ${index + 1}`).toBeLessThanOrEqual(20);
+      }
+    }
+    expect(seen, `пара контролов в группе ${group}`).toBeGreaterThan(0);
+  }
 });
 
 test('machine_bubbles_show_numbers_and_open_the_machines_screen', async ({ page }) => {
