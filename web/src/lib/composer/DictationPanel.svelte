@@ -29,6 +29,22 @@
           : ''
   );
   const levelLabel = $derived(`Уровень входа: ${bars} из 5`);
+
+  let transcript = $state<HTMLDivElement | null>(null);
+  // Пока владелец не ушёл вверх, поле держится за хвостом: новые слова видны без прокрутки.
+  let follow = $state(true);
+  function trackFollow(): void {
+    const el = transcript;
+    if (!el) return;
+    follow = el.scrollHeight - el.scrollTop - el.clientHeight < 4;
+  }
+  $effect(() => {
+    void view.committed;
+    void view.tentative;
+    const el = transcript;
+    if (!el || !follow) return;
+    el.scrollTop = el.scrollHeight;
+  });
 </script>
 
 <div class="dictation" data-dictation data-phase={view.phase} role="group" aria-label="Диктовка">
@@ -41,7 +57,7 @@
       {/each}
     </span>
   </div>
-  <div class="transcript" data-dictation-transcript aria-label="Распознанный текст">
+  <div class="transcript" data-dictation-transcript aria-label="Распознанный текст" bind:this={transcript} onscroll={trackFollow}>
     {#if hasText}
       {#if view.committed}<span class="committed" data-dictation-committed>{view.committed}</span>{/if}
       {#if view.tentative}<span class="tentative" data-dictation-tentative>{view.tentative}</span>{/if}
@@ -86,8 +102,8 @@
   .bar:nth-child(5) { height: var(--s6); }
   .bar.on { background: var(--accent); }
   .transcript {
-    min-height: calc(var(--fs-input) * var(--lh-body) * 2);
-    max-height: calc(var(--fs-input) * var(--lh-body) * 5);
+    min-height: calc(var(--fs-input) * var(--lh-body) * 2 + var(--s4) * 2);
+    max-height: calc(var(--fs-input) * var(--lh-body) * 5 + var(--s4) * 2);
     overflow: auto;
     padding: var(--s4) var(--s5);
     border-radius: var(--radius);

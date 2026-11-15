@@ -89,9 +89,9 @@ export class FakeDictation {
     const listen = () => {
       if (record.closed) return;
       send({ type: "state", state: "listening", mode: this.mode });
-      for (const update of this.script.texts ?? []) {
+      for (const [index, update] of (this.script.texts ?? []).entries()) {
         schedule(update.afterMs, () =>
-          send({ type: "text", committed: update.committed, tentative: update.tentative, seq: 1 }),
+          send({ type: "text", committed: update.committed, tentative: update.tentative, seq: index + 1 }),
         );
       }
       if (this.script.tooLongAfterMs !== undefined) {
