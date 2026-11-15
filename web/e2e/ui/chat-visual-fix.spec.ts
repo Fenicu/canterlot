@@ -347,6 +347,7 @@ test('queue_card_aligns_its_text_and_actions_and_spaces_them_evenly', async ({ p
       bottom: Math.max(...steerRects.map((rect) => rect.bottom))
     };
     const bodyBox = body.getBoundingClientRect();
+    const overflowBox = (pill.querySelector('.row-actions .overflow') as HTMLElement).getBoundingClientRect();
     const pad = getComputedStyle(pill);
     const paddingTop = Number.parseFloat(pad.paddingTop);
     const paddingLeft = Number.parseFloat(pad.paddingLeft);
@@ -374,6 +375,11 @@ test('queue_card_aligns_its_text_and_actions_and_spaces_them_evenly', async ({ p
       top: bodyText.top - pillBox.top,
       middle: steerText.top - bodyText.bottom,
       bottom: pillBox.bottom - steerText.bottom,
+      // Чернила текста упираются в поля карточки: слева — началом строки, справа — самым длинным её концом.
+      leftInset: bodyText.left - pillBox.left,
+      rightInset: pillBox.right - bodyText.right,
+      // Кнопка «⋯» держит цель касания, поэтому её рамка, а не чернила значка, мерится до края.
+      overflowInset: pillBox.right - overflowBox.right,
       steerHeight: steer.getBoundingClientRect().height,
       target: Number.parseFloat(root.getPropertyValue('--target')),
       radius,
@@ -386,6 +392,9 @@ test('queue_card_aligns_its_text_and_actions_and_spaces_them_evenly', async ({ p
   expect(Math.abs(measured.bodyLeft - measured.steerLeft), 'текст и «Влить» на одной линии').toBeLessThanOrEqual(1);
   expect(measured.top, 'отступ над текстом как под действиями').toBeCloseTo(measured.bottom, 0);
   expect(measured.middle, 'зазор текста до действий как сверху').toBeCloseTo(measured.top, 0);
+  // Справа текст не упирается в край: его правый зазор не меньше левого (допуск на перенос строки).
+  expect(measured.rightInset, 'правый зазор текста не меньше левого').toBeGreaterThanOrEqual(measured.leftInset - 1);
+  expect(measured.overflowInset, '«⋯» стоит от правого края как подпись от левого').toBeCloseTo(measured.leftInset, 0);
   expect(measured.steerHeight, 'цель нажатия не меньше --target').toBeGreaterThanOrEqual(measured.target - 0.5);
   expect(measured.firstLineInPadding, 'первая строка внутри поля карточки').toBe(true);
   expect(measured.escaping, 'текст не заходит в скругление карточки').toEqual([]);
