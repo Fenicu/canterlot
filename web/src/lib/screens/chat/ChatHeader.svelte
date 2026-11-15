@@ -248,7 +248,7 @@
 
 
 <div class="chat-header" role="region" aria-label="Шапка чата" data-top-chrome>
-	<div class="topbar" class:tall={!!parentId}>
+	<div class="topbar" class:tall={!!parentId || !!nudgeText}>
 		{#if !pane.desktop}
 			<a
 				class="icon-button back"
@@ -700,6 +700,7 @@
 	}
 	.nudge-row {
 		margin-top: var(--s1);
+		padding-left: calc(var(--mark-large) + var(--s3));
 	}
 	/* Строка маршрута стоит под ссылкой на родителя и начинается с той же линии. */
 	.route-row {
