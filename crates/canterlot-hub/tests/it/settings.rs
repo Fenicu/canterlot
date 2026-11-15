@@ -880,6 +880,16 @@ async fn settings_survive_worker_restart_between_dispatch_and_accept(pool: PgPoo
     })
     .await
     .unwrap();
+    // Состояние «queued» живёт один проход диспетчера: опрос строки ввода под нагрузкой
+    // его пропускает. Переход долговечен в событиях, поэтому ждём событие, а не строку.
+    let queued_before: i64 = sqlx::query_scalar(
+        "select count(*) from events where scope=$1 and kind='input_state_changed' and payload->>'input_id'=$2 and payload->>'state'='queued'",
+    )
+    .bind(format!("conversation:{id}"))
+    .bind(input.input_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     control::request_stop(
         &pool,
         hub.installation.owner_id,
@@ -891,12 +901,15 @@ async fn settings_survive_worker_restart_between_dispatch_and_accept(pool: PgPoo
     .unwrap();
     timeout(Duration::from_secs(45), async {
         loop {
-            let state: String = sqlx::query_scalar("select state from inputs where id=$1")
-                .bind(input.input_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-            if state == "queued" {
+            let seen: i64 = sqlx::query_scalar(
+                "select count(*) from events where scope=$1 and kind='input_state_changed' and payload->>'input_id'=$2 and payload->>'state'='queued'",
+            )
+            .bind(format!("conversation:{id}"))
+            .bind(input.input_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if seen > queued_before {
                 break;
             }
             sleep(Duration::from_millis(25)).await;
