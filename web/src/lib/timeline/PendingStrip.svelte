@@ -448,10 +448,15 @@
         'body body'
         'steer actions';
       column-gap: var(--s4);
-      row-gap: var(--s1);
-      /* Действия держат цель касания и стоят по центру её высоты: верхний отступ повторяет этот запас,
-         иначе текст прижат к верхнему краю, а действия отодвинуты от него. */
-      padding-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / 2 + var(--s2)) var(--s2);
+      row-gap: var(--s0);
+      /* Действия держат цель касания и стоят по центру её высоты: половина остатка цели над строкой текста
+         задаёт верхний зазор, а нижний и средний даёт сама цель, поэтому отступов снизу и между строками нет.
+         Иначе карточка в две строки перерастает свою высоту: две строки, цель и зазоры сверх них. */
+      padding-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / 2) var(--s0);
+    }
+    /* Карточка без строки действий — один текст: нижний зазор повторяет верхний, иначе строка ложится на нижнее скругление. */
+    .pill:not(:has(.steer, .row-actions)) {
+      padding-block-end: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / 2);
     }
     .body {
       grid-area: body;
@@ -468,6 +473,10 @@
     .label::after { content: ' · '; color: var(--secondary); }
     .text { display: inline; flex: none; overflow: visible; }
     .steer { grid-area: steer; justify-self: start; padding-inline: var(--s0); background: var(--transparent); }
+    /* «Влить» стоит по центру своей цели касания, а цель выше чернил строки: строка действий заходит
+       на запас под выносные буквы последней строки текста, иначе средний зазор выходит на этот запас больше нижнего. */
+    .steer,
+    .row-actions { margin-block-start: calc(-1 * var(--s1)); }
     .row-actions { grid-area: actions; justify-self: end; }
     .inline-actions { display: none; }
     .overflow { display: inline-flex; }

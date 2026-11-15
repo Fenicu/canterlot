@@ -334,13 +334,19 @@ test('queue_card_aligns_its_text_and_actions_and_spaces_them_evenly', async ({ p
       return [...node.getClientRects()];
     };
     // Отступы меряются по чернилам строк, а рамки блока текста и действия — для проверки скругления:
-    // верх блока текста и есть рамка первой строки, низ действия — низ его цели касания.
+    // верх блока текста и есть рамка первой строки, а «Влить» — его чернила, не цель касания.
     const whole = document.createRange();
     whole.selectNodeContents(body);
     const bodyText = whole.getBoundingClientRect();
-    const steerText = range(steer)[0]!;
+    const steerRects = range(steer);
+    // Чернила действия могут лечь несколькими прямоугольниками: берём общий охват.
+    const steerText = {
+      left: Math.min(...steerRects.map((rect) => rect.left)),
+      right: Math.max(...steerRects.map((rect) => rect.right)),
+      top: Math.min(...steerRects.map((rect) => rect.top)),
+      bottom: Math.max(...steerRects.map((rect) => rect.bottom))
+    };
     const bodyBox = body.getBoundingClientRect();
-    const steerBox = steer.getBoundingClientRect();
     const pad = getComputedStyle(pill);
     const paddingTop = Number.parseFloat(pad.paddingTop);
     const paddingLeft = Number.parseFloat(pad.paddingLeft);
@@ -359,8 +365,8 @@ test('queue_card_aligns_its_text_and_actions_and_spaces_them_evenly', async ({ p
     const escaping = [
       { corner: 'первая строка слева', x: bodyBox.left, y: bodyBox.top },
       { corner: 'первая строка справа', x: bodyBox.right, y: bodyBox.top },
-      { corner: 'действия слева', x: steerBox.left, y: steerBox.bottom },
-      { corner: 'действия справа', x: steerBox.right, y: steerBox.bottom }
+      { corner: 'действия слева', x: steerText.left, y: steerText.bottom },
+      { corner: 'действия справа', x: steerText.right, y: steerText.bottom }
     ].filter((point) => outside(point.x, point.y)).map((point) => point.corner);
     return {
       bodyLeft: bodyText.left,
