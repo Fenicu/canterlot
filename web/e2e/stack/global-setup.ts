@@ -264,7 +264,8 @@ allowed_workdir_roots = ["${workRoot}"]
   writeFileSync(workerToml, workerConfigContent, 'utf8');
 
   // 11. Spawn Hub process
-  const logDir = resolve(process.cwd(), `e2e/.stack${SLOT_SUFFIX}`);
+  // Логи шардов лежат рядом, внутри уже игнорируемого каталога.
+  const logDir = SLOT ? resolve(process.cwd(), 'e2e/.stack', `slot-${SLOT}`) : resolve(process.cwd(), 'e2e/.stack');
   mkdirSync(logDir, { recursive: true });
   const hubLogFile = join(logDir, 'hub.log');
   const workerLogFile = join(logDir, 'worker.log');
