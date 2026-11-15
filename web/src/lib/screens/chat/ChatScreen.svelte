@@ -461,6 +461,11 @@
 		min-height: var(--s15);
 	}
 
+	/* Открытый запрос важнее ленты: на сжатой клавиатурой высоте место отдаётся карточке. */
+	.screen:has(> .request-cards-slot) > :global(.feed-wrap) {
+		min-height: 0;
+	}
+
 	.waiting-notice {
 		display: flex;
 		flex-direction: column;
@@ -521,7 +526,7 @@
 	}
 
 	.request-cards-slot:global(:has(> :nth-child(2))) > :global(.card-root) {
-		min-height: min(16rem, 100%);
+		min-height: min(calc(var(--s15) * 4), 100%);
 		overscroll-behavior-y: auto;
 	}
 </style>
