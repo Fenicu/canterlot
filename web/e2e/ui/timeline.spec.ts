@@ -63,7 +63,9 @@ async function drift(page: import('@playwright/test').Page, anchor: { key: strin
   return top === null ? 99 : Math.abs(top - anchor.y);
 }
 
-test('dom_is_bounded_with_10000_items_in_a_chat', async ({ page }) => {
+// Одна история на 10 000 записей и две границы в ней: сколько строк держит DOM и сколько
+// записей держит загруженная модель после отрыва от хвоста. Заход в историю дорогой — он общий.
+test('a_history_of_10000_items_stays_bounded_in_dom_and_in_loaded_memory', async ({ page }) => {
   test.setTimeout(120_000);
   await boot(page, 10_000);
   const feed = page.locator('.feed');
@@ -73,11 +75,7 @@ test('dom_is_bounded_with_10000_items_in_a_chat', async ({ page }) => {
   }
   await expect.poll(async () => page.locator('[data-row]').count()).toBeLessThanOrEqual(80);
   expect(await page.evaluate(() => document.getElementsByTagName('*').length)).toBeLessThanOrEqual(6000);
-});
 
-test('memory_is_bounded_after_scrolling_through_10000_items', async ({ page }) => {
-  test.setTimeout(120_000);
-  await boot(page, 10_000);
   await detachTail(page);
   await expect.poll(async () => Number(await page.locator('.feed').getAttribute('data-loaded'))).toBeLessThanOrEqual(3000);
   await expect(page.getByRole('button', { name: 'К последним сообщениям' })).toBeVisible();
