@@ -60,6 +60,18 @@ fn hub_timers() -> HubTimers {
     }
 }
 
+fn worker_timers() -> WorkerTimers {
+    WorkerTimers {
+        handshake: Duration::from_secs(5),
+        heartbeat: Duration::from_millis(100),
+        heartbeat_ack: Duration::from_secs(5),
+        range_ack: Duration::from_secs(3),
+        backoff_min: Duration::from_millis(250),
+        backoff_max: Duration::from_millis(500),
+        ..Default::default()
+    }
+}
+
 async fn until(what: &str, mut condition: impl AsyncFnMut() -> bool) {
     timeout(WAIT, async {
         while !condition().await {
@@ -257,6 +269,27 @@ impl Fixture {
         auto_start: bool,
         opencode: Option<OpenCodeConfig>,
     ) -> Self {
+        Self::new_full_with_timers(
+            pool,
+            profile,
+            env,
+            long_dir,
+            auto_start,
+            opencode,
+            worker_timers(),
+        )
+        .await
+    }
+
+    async fn new_full_with_timers(
+        pool: &PgPool,
+        profile: &str,
+        env: &[(&str, &str)],
+        long_dir: bool,
+        auto_start: bool,
+        opencode: Option<OpenCodeConfig>,
+        timers: WorkerTimers,
+    ) -> Self {
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let root = tempfile::tempdir().unwrap();
         let guard = Arc::new(ProcessGuard::new(root.path()));
@@ -314,15 +347,7 @@ impl Fixture {
             } else {
                 root.path().join("store")
             },
-            timers: WorkerTimers {
-                handshake: Duration::from_secs(5),
-                heartbeat: Duration::from_millis(100),
-                heartbeat_ack: Duration::from_secs(5),
-                range_ack: Duration::from_secs(3),
-                backoff_min: Duration::from_millis(250),
-                backoff_max: Duration::from_millis(500),
-                ..Default::default()
-            },
+            timers,
             execution: ExecutionConfig {
                 allowed_workdir_roots: vec![workdir.clone()],
                 supervisor_exe: Some(wrapper),
@@ -2335,7 +2360,16 @@ async fn wave_w_runtime_child(pool: PgPool, case: &str) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave_w_data_reattach_discards_stale_sj_batches(pool: PgPool) {
-    let fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    // Под нагрузкой подтверждения идут медленно: отказ по таймауту дал бы лишние
+    // переподключения и ложно обвинил бы несвежие пакеты. Окно шире, а отказ хаба
+    // переподключает сразу при любом окне, так что счёт по-прежнему ловит его.
+    let timers = WorkerTimers {
+        range_ack: Duration::from_secs(30),
+        heartbeat_ack: Duration::from_secs(30),
+        ..worker_timers()
+    };
+    let fixture =
+        Fixture::new_full_with_timers(&pool, "synthetic", &[], false, true, None, timers).await;
     let paused = fixture.faults().pause_next(Point::BeforeSjCommit);
     let (script, expected) = answer(1200, 0);
     let input = fixture.submit(script).await;
@@ -2352,6 +2386,12 @@ async fn wave_w_data_reattach_discards_stale_sj_batches(pool: PgPool) {
     .await;
     let hellos = fixture.session_probe.data_attaches();
     fixture.faults().fail_data(Code::Cancelled);
+    // Переподключение ждём до снятия паузы: ответ хаба точно видит старое
+    // подтверждение, воркер пересылает несвежее, и гонки «успел/не успел» нет.
+    until("data reattached after transport error", async || {
+        fixture.session_probe.data_attaches() == hellos + 1
+    })
+    .await;
     resume.send(()).unwrap();
     fixture.assert_answer(&input, &expected, 1200).await;
     assert_eq!(
