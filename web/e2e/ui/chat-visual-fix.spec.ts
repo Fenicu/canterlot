@@ -431,6 +431,7 @@ interface CardShape {
   firstLineBottom: number;
   iconTop: number | null;
   targetHeight: number | null;
+  line: number;
   target: number;
   radius: number;
   radiusCard: number;
@@ -486,6 +487,7 @@ function shapeOf(pill: Locator): Promise<CardShape> {
       firstLineBottom: bodyBox.top + line,
       iconTop: iconBox ? iconBox.top : null,
       targetHeight: overflowBox ? overflowBox.height : null,
+      line,
       target: Number.parseFloat(root.getPropertyValue('--target')),
       radius,
       radiusCard: Number.parseFloat(root.getPropertyValue('--radius-card')),
@@ -526,6 +528,8 @@ test('scheduled_card_puts_its_overflow_on_the_first_text_line', async ({ page },
   expect(shape.textHeight, 'отложенное заняло две строки').toBeGreaterThan(20);
   expect(shape.clipped, 'текст занимает обе строки целиком').toBe(false);
   expectCompactCard(shape);
+  // Две строки и по половине цели касания сверху и снизу: выше — воздух сверх цели, а не зазоры.
+  expect(shape.height, 'карточка в две строки не выше строк и цели касания').toBeLessThanOrEqual(2 * shape.line + (shape.target - shape.line) + 1);
   expect(shape.iconTop ?? Number.NEGATIVE_INFINITY, '«⋯» стоит на первой строке, а не отдельной').toBeGreaterThanOrEqual(shape.firstLineTop - 0.5);
   expect(shape.iconTop ?? Number.POSITIVE_INFINITY, '«⋯» стоит на первой строке, а не отдельной').toBeLessThanOrEqual(shape.firstLineBottom + 0.5);
   expect(shape.textToIcon ?? Number.NEGATIVE_INFINITY, 'текст переносится до «⋯», а не уходит под него').toBeGreaterThanOrEqual(0);
@@ -542,6 +546,8 @@ test('one_line_scheduled_card_keeps_even_gaps', async ({ page }, info) => {
   const shape = await shapeOf(card.locator('.pill'));
   expect(shape.textHeight, 'отложенное заняло одну строку').toBeLessThan(30);
   expectCompactCard(shape);
+  // Одна строка и по половине цели касания сверху и снизу: карточка не выше самой цели.
+  expect(shape.height, 'карточка в одну строку не выше цели касания').toBeLessThanOrEqual(shape.target + 1);
   expect(shape.iconTop ?? Number.NEGATIVE_INFINITY, '«⋯» стоит на первой строке').toBeGreaterThanOrEqual(shape.firstLineTop - 0.5);
   expect(shape.iconTop ?? Number.POSITIVE_INFINITY, '«⋯» стоит на первой строке').toBeLessThanOrEqual(shape.firstLineBottom + 0.5);
 });
