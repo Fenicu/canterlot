@@ -8,6 +8,15 @@ button, a, summary, input, select, textarea { -webkit-tap-highlight-color: var(-
 button, a, summary { touch-action: manipulation; }
 button, summary, select { cursor: pointer; }
 a { color: inherit; text-decoration: none; }
+/* Ссылка в строке текста остаётся строкой: цель касания в 44 px живёт в псевдоэлементе
+   и не участвует в раскладке. У одной строки она даёт те же 44 px, что прежний min-height,
+   а на переносе ничего не сдвигает: зазоры до соседних строк остаются зазорами карточки. */
+.tap-target { position: relative; display: inline-block; }
+.tap-target::after {
+  content: '';
+  position: absolute;
+  inset: min(0px, calc((100% - var(--target)) / 2)) 0;
+}
 button { border: var(--s0); background: var(--raised); border-radius: var(--radius-pill); }
 button, a, summary { transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), transform var(--duration-press) var(--ease-press); }
 textarea { resize: none; }
