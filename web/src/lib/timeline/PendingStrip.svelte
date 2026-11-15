@@ -422,7 +422,9 @@
 <style>
   .strip { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--gutter); }
   .item { position: relative; display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
-  .pill { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4); row-gap: var(--s1); min-width: 0; min-height: var(--target); padding: var(--s0) var(--s1) var(--s0) var(--s6); border-radius: var(--radius-pill); background: var(--surface); font-size: var(--fs-sm); }
+  /* Карточка очереди бывает в две строки: радиус пилюли на такой высоте съедает углы, и текст первой строки
+     выходит за фон. Радиус карточки на одной строке даёт те же двадцать два пикселя, что и пилюля. */
+  .pill { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4); row-gap: var(--s1); min-width: 0; min-height: var(--target); padding: var(--s0) var(--s1) var(--s0) var(--s6); border-radius: var(--radius-card); background: var(--surface); font-size: var(--fs-sm); }
   .failed { background: var(--danger-soft); }
   .label { flex: none; color: var(--secondary); }
   .label.accent { color: var(--accent-link); }
@@ -447,7 +449,9 @@
         'steer actions';
       column-gap: var(--s4);
       row-gap: var(--s1);
-      padding-block: var(--s2);
+      /* Действия держат цель касания и стоят по центру её высоты: верхний отступ повторяет этот запас,
+         иначе текст прижат к верхнему краю, а действия отодвинуты от него. */
+      padding-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / 2 + var(--s2)) var(--s2);
     }
     .body {
       grid-area: body;
@@ -463,7 +467,7 @@
     .label.danger { color: var(--danger); }
     .label::after { content: ' · '; color: var(--secondary); }
     .text { display: inline; flex: none; overflow: visible; }
-    .steer { grid-area: steer; justify-self: start; padding-inline: var(--s2); background: var(--transparent); }
+    .steer { grid-area: steer; justify-self: start; padding-inline: var(--s0); background: var(--transparent); }
     .row-actions { grid-area: actions; justify-self: end; }
     .inline-actions { display: none; }
     .overflow { display: inline-flex; }

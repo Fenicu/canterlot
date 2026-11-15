@@ -1,10 +1,12 @@
 import type { Page } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
 import { FakeHub, FakeHubApi, seedConversation, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelte';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
+const SHOTS = process.env.CHAT_VISUAL_SHOTS;
 
 const HARNESS = { id: 'opencode', title: 'OpenCode', provider: 'opencode' };
 const MACHINE = { id: '00000000-0000-4000-8000-000000000101', name: 'workstation' };
@@ -146,6 +148,14 @@ function appendActivity(hub: FakeHub, api: FakeHubApi, id: string, activity: Rec
     }
   });
   hub.flush();
+}
+
+async function shot(page: Page, name: string): Promise<void> {
+  if (!SHOTS) return;
+  mkdirSync(SHOTS, { recursive: true });
+  await page.emulateMedia({ media: 'screen' });
+  await page.evaluate(() => document.fonts.ready);
+  await page.screenshot({ path: `${SHOTS}/${name}.png`, animations: 'disabled' });
 }
 
 /**
@@ -307,3 +317,106 @@ test('expanded_tool_output_is_inset_symmetrically_like_the_card_head', async ({ 
   expect(measured.left, 'вывод вложен как шапка карточки').toBeCloseTo(measured.headInset, 0);
   expect(measured.right, 'отступ вывода справа такой же, как слева').toBeCloseTo(measured.left, 0);
 });
+test('queue_card_aligns_its_text_and_actions_and_spaces_them_evenly', async ({ page }, info) => {
+  test.skip(info.project.name !== 'phone', 'раскладка очереди в две строки живёт на телефоне');
+  await boot(page);
+  const pill = page.locator('.strip .pill').first();
+  await expect(pill).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Влить/ }).first()).toBeVisible();
+  const measured = await page.evaluate(() => {
+    const pill = document.querySelector('.strip .pill') as HTMLElement;
+    const body = pill.querySelector('.body') as HTMLElement;
+    const steer = pill.querySelector('.steer') as HTMLElement;
+    const pillBox = pill.getBoundingClientRect();
+    const range = (el: Element) => {
+      const node = document.createRange();
+      node.selectNodeContents(el);
+      return [...node.getClientRects()];
+    };
+    // Отступы меряются по чернилам строк, а рамки блока текста и действия — для проверки скругления:
+    // верх блока текста и есть рамка первой строки, низ действия — низ его цели касания.
+    const whole = document.createRange();
+    whole.selectNodeContents(body);
+    const bodyText = whole.getBoundingClientRect();
+    const steerText = range(steer)[0]!;
+    const bodyBox = body.getBoundingClientRect();
+    const steerBox = steer.getBoundingClientRect();
+    const pad = getComputedStyle(pill);
+    const paddingTop = Number.parseFloat(pad.paddingTop);
+    const paddingLeft = Number.parseFloat(pad.paddingLeft);
+    const root = getComputedStyle(document.documentElement);
+    const radiusCard = Number.parseFloat(root.getPropertyValue('--radius-card'));
+    const radius = Number.parseFloat(getComputedStyle(pill).borderTopLeftRadius);
+    // Браузер не даёт радиусу быть больше половины меньшей стороны.
+    const used = Math.min(radius, pillBox.width / 2, pillBox.height / 2);
+    // Точка внутри скруглённого прямоугольника: расстояние до ближайшего центра угла не больше радиуса.
+    const outside = (x: number, y: number) => {
+      const dx = Math.max(pillBox.left + used - x, 0, x - (pillBox.right - used));
+      const dy = Math.max(pillBox.top + used - y, 0, y - (pillBox.bottom - used));
+      return dx * dx + dy * dy > used * used + 0.5;
+    };
+    // Углы текста не должны заходить в скругление карточки: там фон уже не нарисован.
+    const escaping = [
+      { corner: 'первая строка слева', x: bodyBox.left, y: bodyBox.top },
+      { corner: 'первая строка справа', x: bodyBox.right, y: bodyBox.top },
+      { corner: 'действия слева', x: steerBox.left, y: steerBox.bottom },
+      { corner: 'действия справа', x: steerBox.right, y: steerBox.bottom }
+    ].filter((point) => outside(point.x, point.y)).map((point) => point.corner);
+    return {
+      bodyLeft: bodyText.left,
+      steerLeft: steerText.left,
+      top: bodyText.top - pillBox.top,
+      middle: steerText.top - bodyText.bottom,
+      bottom: pillBox.bottom - steerText.bottom,
+      steerHeight: steer.getBoundingClientRect().height,
+      target: Number.parseFloat(root.getPropertyValue('--target')),
+      radius,
+      radiusCard,
+      escaping,
+      // Рамка первой строки целиком лежит в поле карточки, а не в её скруглении.
+      firstLineInPadding: bodyBox.top >= pillBox.top + paddingTop - 0.5 && bodyBox.left >= pillBox.left + paddingLeft - 0.5 && bodyBox.right <= pillBox.right + 0.5
+    };
+  });
+  expect(Math.abs(measured.bodyLeft - measured.steerLeft), 'текст и «Влить» на одной линии').toBeLessThanOrEqual(1);
+  expect(measured.top, 'отступ над текстом как под действиями').toBeCloseTo(measured.bottom, 0);
+  expect(measured.middle, 'зазор текста до действий как сверху').toBeCloseTo(measured.top, 0);
+  expect(measured.steerHeight, 'цель нажатия не меньше --target').toBeGreaterThanOrEqual(measured.target - 0.5);
+  expect(measured.firstLineInPadding, 'первая строка внутри поля карточки').toBe(true);
+  expect(measured.escaping, 'текст не заходит в скругление карточки').toEqual([]);
+  expect(measured.radius, 'скругление многострочной карточки как у карточки').toBe(measured.radiusCard);
+});
+
+test('chat_screen_for_before_and_after_shots', async ({ page }, info) => {
+  test.skip(!SHOTS, 'снимки для отчёта снимаются отдельным прогоном');
+  if (info.project.name === 'desktop') {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await boot(page, { palette: 'aquamarine', theme: 'dark' });
+    await expect(page.locator('.prose pre code')).toBeVisible();
+    await settle(page);
+    await shot(page, 'chat-desktop-aquamarine-dark');
+    return;
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await boot(page, { palette: 'aquamarine', theme: 'dark' });
+  await expect(page.locator('.prose pre code')).toBeVisible();
+  await page.locator('.tool .head').last().click();
+  await expect(page.locator('.tool .out pre')).toContainText('test result: ok. 3 passed');
+  await settle(page);
+  await shot(page, 'chat-phone-aquamarine-dark');
+
+  await boot(page, { palette: 'standard', theme: 'light' });
+  await expect(page.locator('.prose pre code')).toBeVisible();
+  await page.locator('.tool .head').last().click();
+  await expect(page.locator('.tool .out pre')).toContainText('test result: ok. 3 passed');
+  await settle(page);
+  await shot(page, 'chat-phone-standard-light');
+});
+
+async function settle(page: Page): Promise<void> {
+  await page.evaluate(() => document.fonts.ready);
+  await page.evaluate(() => {
+    delete document.documentElement.dataset.themeSwitching;
+    document.documentElement.dataset.motion = 'off';
+  });
+  await page.waitForTimeout(150);
+}
