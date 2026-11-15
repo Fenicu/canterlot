@@ -189,26 +189,29 @@ test('reading_the_tail_marks_the_chat_read_and_reading_old_history_does_not', as
   await expect.poll(() => reads.at(-1), { timeout: 5000 }).toBe(opened.scope_seq);
 });
 
-// QUARANTINE: подгрузка не укладывается в 5 с под нагрузкой (1 раз при нагрузке 40; 8 из 8 отдельно)
-test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the_viewport', () => {
-  test.describe.configure({ retries: 2 });
-  test('older_page_loads_on_scroll_to_top_without_shifting_the_viewport', async ({ page }) => {
-    await boot(page, 180);
-    let release = (): void => {};
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await page.route('**/history**', async (route) => {
-      await gate;
-      await route.fallback();
-    });
-    const feed = page.locator('.feed');
-    await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
-    const before = await rowAnchor(page, 1);
-    await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
-    release();
-    await expect.poll(() => drift(page, before)).toBeLessThanOrEqual(1);
+test('older_page_loads_on_scroll_to_top_without_shifting_the_viewport', async ({ page }) => {
+  test.setTimeout(120_000);
+  await boot(page, 180);
+  let release = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
   });
+  await page.route('**/history**', async (route) => {
+    await gate;
+    await route.fallback();
+  });
+  const feed = page.locator('.feed');
+  const loaded = Number(await feed.getAttribute('data-loaded'));
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
+  const before = await rowAnchor(page, 1);
+  await feed.evaluate((el) => { el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); el.scrollTop = 0; });
+  release();
+  // Приход страницы — это рост модели и снятая отметка доводки, а не удачный замер сдвига:
+  // под нагрузкой страница встаёт и доводится якорь дольше пяти секунд опроса.
+  await expect.poll(async () => Number(await feed.getAttribute('data-loaded')), { timeout: 60_000 }).toBeGreaterThan(loaded);
+  await expect(feed).not.toHaveAttribute('data-paging', '', { timeout: 60_000 });
+  // Строка стоит на месте после постановки страницы, а не в одном случайно поймавшем её кадре.
+  expect(await settled(() => drift(page, before), (a, b) => Math.abs(a - b) <= 0.5)).toBeLessThanOrEqual(1);
 });
 
 test('feed_marks_an_older_page_in_flight_until_it_is_placed', async ({ page }) => {
