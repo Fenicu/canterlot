@@ -1516,14 +1516,18 @@ async fn killed_supervisor_with_nothing_left_fails_and_the_session_resumes(pool:
     assert_eq!(fixture.outcome().await.as_deref(), Some("supervisor_died"));
     assert!(fixture.paused("fatal_error").await);
     assert_eq!(fixture.event_count("execution_fact_rejected").await, 0);
-    let open: i64 = sqlx::query_scalar(
-        "select count(*) from blocks where execution_id = $1 and state = 'streaming'",
-    )
-    .bind(fixture.execution)
-    .fetch_one(&fixture.pool)
-    .await
-    .unwrap();
-    assert_eq!(open, 0, "nothing keeps streaming after the exit");
+    // Финал записей догоняет смену состояния под нагрузкой: ждём условие, а не миг.
+    until("nothing keeps streaming after the exit", async || {
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from blocks where execution_id = $1 and state = 'streaming'",
+        )
+        .bind(fixture.execution)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+            == 0
+    })
+    .await;
     until("execution directory removed", async || {
         !fixture.exec_dir().exists()
     })
