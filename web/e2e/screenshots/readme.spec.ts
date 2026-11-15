@@ -604,21 +604,21 @@ async function shoot(page: Page, name: string, options: Parameters<Page['screens
   optimize(path);
 }
 
-/** Настоящий экран приложения для картинки, которую агент отдал в ленту: чат с кодом, очередью и контекстом. */
+/** Настоящий широкий экран приложения для картинки, которую агент отдал в ленту. */
 async function sharedScreenshot(context: BrowserContext): Promise<Buffer> {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
-  const id = seedChat(api);
+  const ids = seedReadmeSessions(api);
   const page = await context.newPage();
-  // Экран чуть ниже сцены просмотрщика: кнопки и подпись ложатся на чёрные поля, а не на сам снимок.
-  await page.setViewportSize({ width: 390, height: 700 });
-  await prepare(page, 'aquamarine', 'dark');
+  // Рабочий стол: широкая картинка оставляет чёрные поля сверху и снизу, и просмотрщик читается как просмотрщик.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await prepare(page, 'standard', 'dark');
   await installChatRoutes(page, hub, api, OWNER);
-  await page.goto(`/c/${id}`);
-  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.prose pre code')).toBeVisible();
-  await page.locator('.tool .head').last().click();
-  await expect(page.locator('.tool .out pre')).toContainText('test result: ok. 3 passed');
+  await seedSecondaryScreens(page, api, { machine: ids.machine, pinned: ids.themes });
+  await page.goto('/limits');
+  await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('heading', { name: 'Сейчас' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'История лимитов' })).toBeVisible();
   await settle(page);
   const body = await page.screenshot({ animations: 'disabled' });
   await page.close();
