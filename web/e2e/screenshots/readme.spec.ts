@@ -6,14 +6,17 @@ import { FakeHub, FakeHubApi, leaseEntry, seedLease, seedMachine } from '../../t
 import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/http-playwright';
 import { seedConversation } from '../../testing/fake-hub/seed';
 import { Feed, hubText } from '../../testing/fixtures/feed-cards';
+import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
+import { FOUR, openViewer, seedFour, showChrome, thumb } from '../ui/image-gallery-fixture';
+import { screenshotPng } from '../ui/image-viewer-fixture';
 import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelte';
 import type { PlanTask } from '../../src/lib/stores/plan.svelte';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const OUT = resolve(import.meta.dirname, '../../../docs/screenshots');
-// Часы страницы стоят, а заголовок X-Server-Time-Ms у FakeHub берётся из настоящего
-// времени процесса: база «сейчас» должна совпадать с ним, иначе свежие лимиты выглядят устаревшими.
-const NOW_MS = Math.floor(Date.now() / 1000) * 1000;
+// Часы страницы и заголовок X-Server-Time-Ms у FakeHub стоят на одном мгновении:
+// иначе свежие лимиты выглядели бы устаревшими, а снимки менялись бы от прогона к прогону.
+const NOW_MS = Date.parse('2026-11-15T15:00:00.000Z');
 const NOW = new Date(NOW_MS).toISOString();
 
 const MACHINES = {
@@ -121,7 +124,7 @@ function input(api: FakeHubApi, text: string, seq: string, at: number): HistoryI
   };
 }
 
-function seedReadmeSessions(api: FakeHubApi): { pinned: string; themes: string; adapter: string; review: string; machine: string } {
+function seedReadmeSessions(api: FakeHubApi): { pinned: string; themes: string; build: string; review: string; machine: string } {
   seedMachines(api);
   seedLimits(api);
 
@@ -162,19 +165,20 @@ function seedReadmeSessions(api: FakeHubApi): { pinned: string; themes: string; 
     }
   });
 
-  const adapter = seedConversation(api, {
-    title: 'Адаптер Antigravity',
-    color: 'amber',
+  // Второе ожидание в разделе «Ждут вас»: строка списка начинается с состояния и возраста запроса.
+  const build = seedConversation(api, {
+    title: 'Сборка хаба',
+    color: 'success',
     groups: [canterlot],
-    model: 'gpt-6.1-sol',
-    harness: { id: 'codex', title: 'Codex', provider: 'codex' },
-    machine: MACHINES.mini,
-    created_at: stamp(-120),
-    last_activity_at: stamp(-11),
+    model: 'opus-5.5',
+    harness: { id: 'claude_code', title: 'Claude Code', provider: 'claude' },
+    machine: MACHINES.workstation,
+    created_at: stamp(-34),
+    last_activity_at: stamp(-12),
     activity: {
-      state: 'working',
-      evidence: { phase: 'running_tool', tool_name: 'Bash', summary: 'cargo test', phase_since: stamp(-18) },
-      since: stamp(-20)
+      state: 'waiting_for_user',
+      evidence: { phase: 'awaiting_permission', request_kind: 'permission', request_tool: 'Bash', question: 'Bash: cargo test -p canterlot-hub' },
+      since: stamp(-12)
     }
   });
 
@@ -201,7 +205,7 @@ function seedReadmeSessions(api: FakeHubApi): { pinned: string; themes: string; 
     ]
   };
 
-  return { pinned, themes, adapter, review: reviewSession, machine: MACHINES.workstation.id };
+  return { pinned, themes, build, review: reviewSession, machine: MACHINES.workstation.id };
 }
 
 function seedChat(api: FakeHubApi, existing?: string): string {
@@ -210,12 +214,12 @@ function seedChat(api: FakeHubApi, existing?: string): string {
   const patch = {
     title: 'Темы оформления',
     color: 'blue',
-    model: 'deepseek',
-    harness: { id: 'opencode', title: 'OpenCode', provider: 'opencode' },
+    model: 'opus-5.5',
+    harness: { id: 'claude_code', title: 'Claude Code', provider: 'claude' },
     machine: MACHINES.workstation,
     created_at: stamp(-38),
-    last_activity_at: stamp(-7),
-    activity: { state: 'waiting_for_user' as const, evidence: { question: 'Какую палитру взять за основу?' }, since: stamp(-7) }
+    last_activity_at: stamp(-1),
+    activity: { state: 'working' as const, evidence: { phase: 'generating', phase_since: stamp(-2) }, since: stamp(-2) }
   };
   const id = existing ?? seedConversation(api, patch);
   if (existing) {
@@ -262,11 +266,19 @@ function seedChat(api: FakeHubApi, existing?: string): string {
     created_seq: '6',
     created_at: stamp(-1)
   });
-  api.histories.set(id, [user, answer, read, readResult, tests, testsResult]);
+  // Ждущее сообщение живёт только в очереди: полоса над полем ввода показывает текст и кнопку «Влить».
+  const queued = { ...input(api, 'Добавь вариант «Норд» и проверь контраст в светлой теме.', '7', -1), state: 'queued' as const };
+  api.histories.set(id, [user, answer, read, readResult, tests, testsResult, queued]);
   for (const block of [answer, read, readResult, tests, testsResult]) {
-    block.agent = 'OpenCode';
-    block.model = 'deepseek';
+    block.agent = 'Claude Code';
+    block.model = 'opus-5.5';
     api.blocks.set(block.id, { text: block.content, rev: 1, state: 'final' });
+  }
+  // Ход идёт, поэтому полоса очереди предлагает влить сообщение в него.
+  const queue = { queued: 1, pause_reasons: [], hold_reasons: [], run_slot: { running: { input_id: user.id } } };
+  for (const store of [api.list, api.details]) {
+    const row = store.get(id);
+    if (row) (row as { queue: unknown }).queue = queue;
   }
   api.bindConversation(id);
   api.pushContext(id, 127_600, 200_000);
@@ -304,8 +316,38 @@ function seedRequest(api: FakeHubApi, kind: 'permission' | 'question'): string {
     created_seq: '2',
     created_at: stamp(-7)
   });
-  api.histories.set(id, kind === 'permission' ? [user, answer] : [user]);
-  if (kind === 'permission') api.blocks.set(answer.id, { text: answer.content, rev: 1, state: 'final' });
+  if (kind === 'permission') {
+    // Перед карточкой разрешения видны шаги, которые к ней привели.
+    const read = historyItem(api, run, {
+      block_kind: 'tool_call',
+      content: 'Прочитал 1 файл',
+      tool_name: 'Read',
+      summary: 'web/src/lib/theme.svelte.ts',
+      created_seq: '3',
+      created_at: stamp(-12)
+    });
+    const readResult = historyItem(api, run, {
+      block_kind: 'tool_result',
+      content: 'export function initTheme(): () => void {\n  // ...\n}',
+      parent_block_id: read.id,
+      created_seq: '4',
+      created_at: stamp(-12)
+    });
+    const bash = historyItem(api, run, {
+      block_kind: 'tool_call',
+      content: '',
+      tool_name: 'Bash',
+      summary: 'cargo test -p canterlot-hub',
+      created_seq: '5',
+      created_at: stamp(-12)
+    });
+    api.histories.set(id, [user, answer, read, readResult, bash]);
+    for (const block of [answer, read, readResult, bash]) {
+      api.blocks.set(block.id, { text: block.content, rev: 1, state: 'final' });
+    }
+  } else {
+    api.histories.set(id, [user]);
+  }
   api.bindConversation(id);
 
   const payload = kind === 'permission'
@@ -336,6 +378,8 @@ function seedRequest(api: FakeHubApi, kind: 'permission' | 'question'): string {
   api.hub.append(`conversation:${id}`, {
     kind: 'request_opened',
     conversation_id: id,
+    // Запрос ждёт 12 минут: возраст в шапке и на карточке показывает время ожидания.
+    at: stamp(-12),
     payload: { request_id: api.id(), kind, payload }
   });
   api.hub.flush();
@@ -361,7 +405,7 @@ function seedOrchestrator(api: FakeHubApi): OrchestratorSeed {
   seedLimits(api);
   const machine = MACHINES.workstation;
   const orchestrator = seedConversation(api, {
-    title: 'Выпуск 1.24',
+    title: 'Выпуск 1.36',
     pinned: true,
     color: 'accent',
     model: 'opus-5.5',
@@ -437,7 +481,7 @@ function seedOrchestrator(api: FakeHubApi): OrchestratorSeed {
   const asOf = (task: PlanTask, patch: Partial<PlanTask>): PlanTask => ({ ...task, ...patch });
   const feed = new Feed(api, NOW_MS - 45 * 60_000);
   const run = api.id();
-  feed.input('Разложи выпуск 1.24 на задачи и раздай делегатам. Гейт гоняй через очередь машины.');
+  feed.input('Разложи выпуск 1.36 на задачи и раздай делегатам. Гейт гоняй через очередь машины.');
   feed.text(run, 'Завожу план выпуска.');
   feed.call(run, 'add', 'mcp__canterlot__plan_add', { tasks: tasks.slice(1, 6).map((task) => ({ title: task.title })) }, hubText({
     numbers: [2, 3, 4, 5, 6],
@@ -519,7 +563,8 @@ async function prepare(page: Page, palette: 'aquamarine' | 'standard' | 'vscode'
     localStorage.setItem('canterlot.theme', theme);
     localStorage.setItem('canterlot.motion', 'off');
   }, { palette, theme });
-  await page.clock.install({ time: new Date(NOW) });
+  // Дата закреплена, а таймеры и анимации идут как обычно: иначе лимиты уезжали бы к настоящему «сейчас».
+  await page.clock.setFixedTime(new Date(NOW));
 }
 
 async function settle(page: Page): Promise<void> {
@@ -541,6 +586,18 @@ function optimize(path: string): void {
   }
 }
 
+/** Экран второго уровня прокручивается к элементу: его край встаёт к краю контейнера. */
+async function alignSecondary(page: Page, target: import('@playwright/test').Locator | string, edge: 'start' | 'end' = 'start'): Promise<void> {
+  const body = page.locator('.secondary-body');
+  const element = typeof target === 'string' ? body.locator(target) : target;
+  const frame = (await body.boundingBox())!;
+  const box = (await element.boundingBox())!;
+  const current = await body.evaluate((node) => node.scrollTop);
+  const top = box.y - frame.y + current;
+  const next = edge === 'start' ? top - 8 : top + box.height - frame.height + 8;
+  await body.evaluate((node, value) => { node.scrollTop = Math.max(0, value); }, next);
+}
+
 async function shoot(page: Page, name: string, options: Parameters<Page['screenshot']>[0] = {}): Promise<void> {
   await settle(page);
   const path = resolve(OUT, name);
@@ -552,8 +609,17 @@ test.use({ timezoneId: 'Europe/Moscow', browserName: 'chromium' });
 test.beforeAll(() => mkdirSync(OUT, { recursive: true }));
 
 // Скриншоты собирает только проект phone: остальные проекты Playwright пропускают файл.
+let restoreServerClock: (() => void) | null = null;
 test.beforeEach(({ browserName }, testInfo) => {
   test.skip(browserName !== 'chromium' || testInfo.project.name !== 'phone', 'скриншоты README собирает проект phone');
+  // Заголовок времени FakeHub читает Date.now процесса: без этой подмены «сейчас» уезжало бы с каждым прогоном.
+  const real = Date.now;
+  Date.now = () => NOW_MS;
+  restoreServerClock = () => { Date.now = real; };
+});
+test.afterEach(() => {
+  restoreServerClock?.();
+  restoreServerClock = null;
 });
 
 test.describe('скриншоты README для телефона', () => {
@@ -567,12 +633,16 @@ test.describe('скриншоты README для телефона', () => {
   test('сессии в Аквамарине, тёмная', async ({ page }) => {
     const hub = new FakeHub();
     const api = new FakeHubApi(hub);
-    seedReadmeSessions(api);
+    const ids = seedReadmeSessions(api);
     await prepare(page, 'aquamarine', 'dark');
     await installChatRoutes(page, hub, api, OWNER);
     await page.goto('/sessions');
     await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('[data-session]')).toHaveCount(4);
+    // Раздел ожидания наверху, остаток на плашках лимитов и состояние в начале строки.
+    await expect(page.getByRole('button', { name: 'Ждут вас · 2' })).toBeVisible();
+    await expect(page.locator(`[data-waiting="${ids.build}"]`)).toContainText('Ждёт разрешения · Bash · 12 мин');
+    await expect(page.locator('[data-limit-plaques]')).toContainText('ост.');
     await shoot(page, 'sessions-dark.png');
   });
 
@@ -588,6 +658,9 @@ test.describe('скриншоты README для телефона', () => {
     await expect(page.locator('.tool .head')).toHaveCount(2);
     await page.locator('.tool .head').last().click();
     await expect(page.locator('.tool .out pre')).toContainText('test result: ok. 3 passed');
+    // 1.36.0: очередь сообщений с кнопкой «Влить» и остаток контекста в поле ввода.
+    await expect(page.locator('.strip').getByRole('button', { name: /^Влить: / })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^Контекст: ост\./ })).toBeVisible();
     await shoot(page, 'chat-dark.png');
   });
 
@@ -619,14 +692,8 @@ test.describe('скриншоты README для телефона', () => {
     const hub = new FakeHub();
     const api = new FakeHubApi(hub);
     const ids = seedReadmeSessions(api);
-    // На экране лимитов видны все четыре провайдера: у Antigravity два окна, у OpenCode ещё и месяц.
+    // Три провайдера: карточки текущих окон и начало истории помещаются в один кадр.
     api.limits.push(
-      {
-        provider: 'antigravity',
-        weekly_reserve_active: false,
-        five_hour: { used_permille: 180, resets_at: stamp(3 * 60 + 12), observed_at: stamp(-1) },
-        weekly: { used_permille: 470, resets_at: stamp(5 * 24 * 60), observed_at: stamp(-1) }
-      },
       {
         provider: 'opencode',
         weekly_reserve_active: false,
@@ -718,9 +785,9 @@ test.describe('скриншоты README для телефона', () => {
           usageRow({ conversation_id: ids.themes, model: 'opus-5.5', input_tokens: 126_000, output_tokens: 8_400, cache_write_tokens: 2_000, weekly_delta_permille: 32, runs: 3 }),
           usageRow({ conversation_id: ids.pinned, agent: 'agent-1', model: 'haiku', input_tokens: 18_000, output_tokens: 1_200, weekly_delta_permille: 2, overlapped_runs: 1 })
         ],
-        codex: [usageRow({ conversation_id: ids.adapter, model: 'gpt-6.1-sol', input_tokens: 98_000, output_tokens: 6_700, cache_write_tokens: 1_400, weekly_delta_permille: 18, runs: 2 })],
+        codex: [usageRow({ conversation_id: ids.pinned, model: 'gpt-6.1-sol', input_tokens: 98_000, output_tokens: 6_700, cache_write_tokens: 1_400, weekly_delta_permille: 18, runs: 2 })],
         opencode: [usageRow({ conversation_id: ids.themes, model: 'deepseek', input_tokens: 84_000, output_tokens: 5_200, cache_write_tokens: 1_800, weekly_delta_permille: 12, runs: 2 })],
-        antigravity: [usageRow({ conversation_id: ids.adapter, model: 'gemini-3-pro', input_tokens: 54_000, output_tokens: 3_100, cache_write_tokens: 900, weekly_delta_permille: 8 })]
+        antigravity: [usageRow({ conversation_id: ids.pinned, model: 'gemini-3-pro', input_tokens: 54_000, output_tokens: 3_100, cache_write_tokens: 900, weekly_delta_permille: 8 })]
       }[provider] ?? [];
       await route.fulfill({ json: { series, usage, speed } });
     });
@@ -728,7 +795,7 @@ test.describe('скриншоты README для телефона', () => {
     await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('heading', { name: 'История лимитов' })).toBeVisible();
     await expect(page.getByRole('table', { name: 'Скорость моделей' })).toBeVisible();
-    await expect(page.getByRole('table', { name: 'Скорость моделей' })).toContainText('deepseek');
+    await expect(page.getByRole('table', { name: 'Скорость моделей' })).toContainText('OpenCode');
     // Расход по сессиям показывает все четыре провайдера, а не только Claude и Codex.
     const usage = page.getByRole('table', { name: 'Сегодня по сессиям' });
     // Строки сессий идут под заголовками провайдеров: считаем только строки со ссылкой на сессию.
@@ -736,9 +803,12 @@ test.describe('скриншоты README для телефона', () => {
     await expect(usage.getByRole('rowheader', { name: 'OpenCode' })).toHaveCount(1);
     await expect(usage.getByRole('rowheader', { name: 'Antigravity' })).toHaveCount(1);
     await expect(usage.locator('tbody tr').filter({ hasText: 'gemini-3-pro' })).toHaveCount(1);
-    // Прокручиваем весь экран истории: в кадр попадают график, текущие лимиты, расход и скорость.
-    await page.setViewportSize({ width: 390, height: Math.max(844, await page.locator('.secondary-body').evaluate((node) => node.scrollHeight + 120)) });
-    await page.locator('.secondary-body').evaluate((node) => { node.scrollTop = 0; });
+    // Кадр один и того же размера: сверху текущие окна с остатком, ниже — начало истории.
+    await alignSecondary(page, '[data-region="now"]');
+    await expect(page.getByRole('heading', { name: 'Сейчас' })).toBeInViewport({ ratio: 1 });
+    await expect(page.getByRole('heading', { name: 'История лимитов' })).toBeInViewport({ ratio: 1 });
+    // Часы закреплены: показания минутной давности не должны выглядеть устаревшими.
+    await expect(page.locator('[data-region="now"]')).not.toContainText('устарело');
     await shoot(page, 'limits-light.png');
   });
 
@@ -808,6 +878,46 @@ test.describe('скриншоты README для телефона', () => {
     await shoot(page, 'search-light.png');
   });
 
+  test('просмотрщик картинок сессии в Стандартной, светлая', async ({ page }) => {
+    await prepare(page, 'standard', 'light');
+    // Пять картинок сессии, вторая открыта: счётчик «2 из 5» и кнопка «Показать в чате» в шапке.
+    await seedFour(page);
+    // Вторая картинка вертикальная, как снимок телефона: в кадре она занимает почти всю сцену.
+    await page.route('**/api/v1/attachments/g-2/content', (route) => route.fulfill({ contentType: 'image/png', body: screenshotPng(900, 1400, 190) }));
+    const dialog = await openViewer(page, thumb(page, FOUR.second));
+    await expect(dialog.locator('.counter')).toHaveText('2 из 5');
+    await expect(dialog.getByRole('button', { name: 'Показать в чате' })).toBeVisible();
+    await settle(page);
+    await showChrome(page);
+    const path = resolve(OUT, 'gallery-light.png');
+    await page.screenshot({ path, animations: 'disabled' });
+    optimize(path);
+  });
+
+  test('новая сессия по прошлой в Стандартной, светлая', async ({ page }) => {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const ids = seedMockupSessions(api);
+    api.machines.get(ids.machine)!.home_dir = '/srv';
+    // Прошлая сессия задаёт машину, папку, модель и усилие: форма сворачивается в одну строку.
+    seedConversation(api, {
+      title: 'Скрипт выкатки',
+      machine: { id: ids.machine, name: 'workstation' },
+      harness: { id: 'claude', title: 'Claude Code', provider: 'claude' },
+      workdir: '/srv/canterlot',
+      model: 'opus',
+      effort: 'medium',
+      created_at: stamp(-2),
+      last_activity_at: stamp(-2)
+    });
+    await prepare(page, 'standard', 'light');
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto('/new');
+    await expect(page.locator('[data-prefill]')).toHaveAttribute('data-prefill', 'done', { timeout: 15_000 });
+    await expect(page.locator('[data-role="new-session-summary"]')).toHaveText('Как в прошлый раз · workstation · ~/canterlot · opus-5.5 · Обычное');
+    await shoot(page, 'new-session-light.png');
+  });
+
   test('очередь и сторож машины в Норде, тёмная', async ({ page }) => {
     const hub = new FakeHub();
     const api = new FakeHubApi(hub);
@@ -816,18 +926,35 @@ test.describe('скриншоты README для телефона', () => {
     await installChatRoutes(page, hub, api, OWNER);
     await seedSecondaryScreens(page, api, { machine: seed.machine, pinned: seed.orchestrator });
     seedMachineReport(api, seed);
+    // Кадр 390×844 держит ресурсы, сторожа и очередь целиком: один кэш вместо каталога,
+    // две сборки в работе и одна в ожидании вместо четырёх строк.
+    const machine = api.machines.get(seed.machine)!;
+    machine.metrics = { ...machine.metrics!, mem_available_bytes: Math.round(19.2 * 1024 ** 3), disks: [] };
+    machine.warnings = [];
+    machine.watch = {
+      observed_at: stamp(0),
+      hotspots: [{ path: '/home/owner/src/canterlot/target', kind: 'target', bytes: 64_000_000_000, incremental_bytes: 22_000_000_000, newest_at: stamp(-2 * 60), measured_at: stamp(-1), conversation_id: null, title: null }],
+      leaked: [],
+      unleased_count: 0
+    } as never;
+    seedLease(api, seed.machine, [
+      leaseEntry({ lease_id: 'h1', kind: 'build', conversation_id: seed.executors.gotify, since: stamp(-12) }),
+      leaseEntry({ lease_id: 'h2', kind: 'build', label: 'check.sh --fast', dir: 'canterlot', since: stamp(-7) })
+    ], [
+      leaseEntry({ lease_id: 'w1', kind: 'gate', conversation_id: seed.executors.watch, requested_at: stamp(-4), position: 1 })
+    ]);
     await page.goto('/machines');
     await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
     const main = page.locator('main');
     await expect(main.locator('[data-lease-queue] [data-lease-holder]')).toHaveCount(2);
-    await expect(main.locator('[data-lease-queue] [data-lease-waiter]')).toHaveCount(2);
-    await expect(main.locator('[data-watch="memory"]')).toBeVisible();
+    await expect(main.locator('[data-lease-queue] [data-lease-waiter]')).toHaveCount(1);
     await expect(main.getByRole('region', { name: 'Крупные кэши сборки' })).toBeVisible();
-    await page.setViewportSize({ width: 390, height: Math.max(844, await page.locator('.secondary-body').evaluate((node) => node.scrollHeight + 120)) });
-    await page.locator('.secondary-body').evaluate((node) => { node.scrollTop = 0; });
-    // Кадр кончается очередью: список сессий машины ниже ничего нового не показывает.
-    const queue = (await main.locator('[data-lease-queue]').boundingBox())!;
-    await shoot(page, 'machines-dark.png', { clip: { x: 0, y: 0, width: 390, height: Math.ceil(queue.y + queue.height + 6) } });
+    // Ресурсы сверху, очередь внизу — оба края кадра на месте.
+    const cpu = main.locator('section', { has: page.getByRole('heading', { name: 'CPU', exact: true }) }).first();
+    await alignSecondary(page, cpu);
+    await expect(cpu).toBeInViewport({ ratio: 1 });
+    await expect(main.locator('[data-lease-queue]')).toBeInViewport({ ratio: 1 });
+    await shoot(page, 'machines-dark.png');
   });
 });
 
@@ -851,6 +978,9 @@ test.describe('скриншот README для стола', () => {
     await expect(page.locator('[data-layout="desktop"]')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('[data-pane="list"] [data-list-ready]')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('[data-pane="chat"] [data-ready]')).toBeVisible({ timeout: 15_000 });
+    // Свёрнутое дерево делегатов освобождает место: все группы списка видны целиком.
+    await page.locator('[data-pane="list"]').getByRole('button', { name: /^Свернуть делегированные: 5$/ }).click();
+    await expect(page.locator('[data-pane="list"]').getByRole('button', { name: /^Развернуть делегированные: 5$/ })).toBeVisible();
     await page.locator('[data-role="plan-strip"] button').click();
     const plan = page.locator('[data-pane="lane"] [data-role="plan-tab"]');
     await expect(plan.locator('[data-plan-group="in_progress"]')).toBeVisible();
