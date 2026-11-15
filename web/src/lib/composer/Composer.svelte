@@ -489,7 +489,10 @@
       {#if canDictate}
         <span class="mic"><IconButton icon="mic" label="Диктовка" inert={composerBusy} onclick={startDictation} /></span>
       {/if}
-      <ContextIndicator {chat} />
+      <!-- Подсказка добавляет в нижнюю строку ещё одну кнопку: на телефоне счётчик уступает ей место, пока поле пустое. -->
+      {#if !(touch && suggestion)}
+        <ContextIndicator {chat} />
+      {/if}
       {#if suggestion}
         <p class="sr-only" id={suggestionId}>Подсказка: {suggestion}. {touch ? 'Кнопка «Подставить» вставит её в поле' : 'Tab вставит её в поле'}</p>
       {/if}
