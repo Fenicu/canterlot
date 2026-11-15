@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
@@ -131,6 +131,125 @@ function queueText(index: number, long: boolean): string {
   return long
     ? `Сообщение ${index + 1}: проверь гонку двух подписок при переподключении и собери короткий итог по каждому делегату`
     : `Сообщение ${index + 1}: собери итог`;
+}
+
+function appendQueued(hub: FakeHub, api: FakeHubApi, id: string, text: string, index = 0): void {
+  hub.append(`conversation:${id}`, {
+    kind: 'input_queued',
+    conversation_id: id,
+    payload: {
+      input_id: api.id(),
+      input_seq: String(index + 50),
+      idempotency_key: api.id(),
+      state: 'queued',
+      content: [{ type: 'text', text }]
+    }
+  });
+  hub.flush();
+}
+
+function appendScheduled(hub: FakeHub, api: FakeHubApi, id: string, text: string): void {
+  hub.append(`conversation:${id}`, {
+    kind: 'scheduled_changed',
+    conversation_id: id,
+    payload: {
+      id: api.id(),
+      conversation_id: id,
+      run_at: new Date(Date.now() + 3_600_000).toISOString(),
+      content: [{ type: 'text', text }],
+      attachment_ids: [],
+      state: 'pending',
+      input_id: null,
+      attempts: 0
+    }
+  });
+  hub.flush();
+}
+
+/** Меню «⋯» раскрыто, каждый его пункт целиком в окне и не перекрыт ни одним предком. */
+async function openRowMenu(item: Locator): Promise<Locator> {
+  const more = item.getByRole('button', { name: /^Действия с сообщением/ });
+  await expect(more).toBeVisible();
+  await more.click();
+  const menu = item.getByRole('menu');
+  await expect(menu).toBeVisible();
+  return menu;
+}
+
+async function expectMenuReachable(page: Page, menu: Locator, viewport: { width: number; height: number }): Promise<void> {
+  const items = menu.getByRole('menuitem');
+  const count = await items.count();
+  expect(count, 'в меню есть пункты').toBeGreaterThan(0);
+  for (let index = 0; index < count; index++) {
+    const item = items.nth(index);
+    await expect(item).toBeVisible();
+    const box = await item.boundingBox();
+    expect(box, `у пункта ${index + 1} есть рамка`).not.toBeNull();
+    expect(box!.y, `верх пункта ${index + 1} в окне`).toBeGreaterThanOrEqual(-0.5);
+    expect(box!.y + box!.height, `низ пункта ${index + 1} в окне`).toBeLessThanOrEqual(viewport.height + 0.5);
+    expect(box!.x, `левый край пункта ${index + 1} в окне`).toBeGreaterThanOrEqual(-0.5);
+    expect(box!.x + box!.width, `правый край пункта ${index + 1} в окне`).toBeLessThanOrEqual(viewport.width + 0.5);
+    // Точка в центре пункта принадлежит ему: меню не обрезано прокручиваемым блоком и не накрыто другим слоем.
+    const onTop = await item.evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      const found = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return !!found && (found === el || el.contains(found));
+    });
+    expect(onTop, `пункт ${index + 1} не перекрыт`).toBe(true);
+  }
+}
+
+const MENU_VIEWPORTS = [
+  { width: 412, height: 892 },
+  { width: 412, height: 450 }
+];
+
+for (const viewport of MENU_VIEWPORTS) {
+  const label = `${viewport.width}x${viewport.height}`;
+
+  test(`меню «⋯» одного сообщения в очереди не обрезается ${label}`, async ({ page }) => {
+    test.skip(test.info().project.name !== 'phone', '«⋯» показывает только сенсорная раскладка');
+    await page.setViewportSize(viewport);
+    const { hub, api, id } = await boot(page, (api) => seedMockupChat(api));
+    appendQueued(hub, api, id, 'Сообщение в очереди');
+    const strip = page.locator('.strip');
+    await expect(strip.locator('.item')).toHaveCount(1);
+
+    const menu = await openRowMenu(strip.locator('.item').first());
+    await page.waitForTimeout(120);
+    await shoot(page, 'menu-queued');
+    await expectMenuReachable(page, menu, viewport);
+  });
+
+  test(`меню «⋯» отложенного сообщения не обрезается ${label}`, async ({ page }) => {
+    test.skip(test.info().project.name !== 'phone', '«⋯» показывает только сенсорная раскладка');
+    await page.setViewportSize(viewport);
+    const { hub, api, id } = await boot(page, (api) => seedMockupChat(api));
+    appendScheduled(hub, api, id, 'Отправить позже');
+    const strip = page.locator('.strip');
+    await expect(strip.locator('.item')).toHaveCount(1);
+
+    const menu = await openRowMenu(strip.locator('.item').first());
+    await page.waitForTimeout(120);
+    await shoot(page, 'menu-scheduled');
+    await expectMenuReachable(page, menu, viewport);
+  });
+
+  test(`меню «⋯» последнего сообщения раскрытой очереди не обрезается ${label}`, async ({ page }) => {
+    test.skip(test.info().project.name !== 'phone', '«⋯» показывает только сенсорная раскладка');
+    await page.setViewportSize(viewport);
+    const { hub, api, id } = await boot(page, (api) => seedMockupChat(api));
+    for (let index = 0; index < 14; index++) appendQueued(hub, api, id, queueText(index, false), index);
+    const strip = page.locator('.strip');
+    await strip.getByRole('button', { name: /^Ещё \d+ в очереди/ }).click();
+    await expect(strip.locator('.item')).toHaveCount(14);
+
+    const last = strip.locator('.item').last();
+    const menu = await openRowMenu(last);
+    await page.waitForTimeout(120);
+    await shoot(page, 'menu-last');
+    await expectMenuReachable(page, menu, viewport);
+  });
 }
 
 for (const viewport of VIEWPORTS) {

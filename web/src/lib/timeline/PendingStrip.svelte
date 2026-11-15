@@ -22,6 +22,7 @@
   import Icon from '#lib/ui/Icon.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
+  import { tick } from 'svelte';
 
   let { chat }: { chat: ChatStore } = $props();
   const items = $derived(chat.strip());
@@ -151,6 +152,26 @@
   let steerNotes = $state<Record<string, string | null>>({});
   let steered = $state<Record<string, boolean>>({});
   let menuFor = $state<string | null>(null);
+  /** Открытое меню «⋯»: его нужно подвести к виду внутри прокручиваемой очереди. */
+  let menuHost = $state<HTMLDivElement | null>(null);
+
+  /** Меню живёт в потоке карточки: строка под ним сдвигается, а не прячется за прокруткой.
+      После раскрытия подводим его к нижней кромке очереди, оставляя место закреплённой «Свернуть». */
+  async function toggleMenu(key: string) {
+    menuFor = menuFor === key ? null : key;
+    if (!menuFor) return;
+    await tick();
+    const menu = menuHost;
+    const strip = menu?.closest('.strip');
+    if (!menu || !(strip instanceof HTMLElement)) return;
+    menu.scrollIntoView({ block: 'nearest' });
+    const fold = strip.querySelector(':scope > .more[data-fold]');
+    const view = strip.getBoundingClientRect();
+    const limit = view.bottom - (fold instanceof HTMLElement ? fold.offsetHeight : 0);
+    const box = menu.getBoundingClientRect();
+    if (box.bottom > limit) strip.scrollTop += box.bottom - limit;
+    if (box.top < view.top) strip.scrollTop -= view.top - box.top;
+  }
 
   async function doSendNow(input: InputView) {
     if (sending[input.key] || !input.id) return;
@@ -265,7 +286,7 @@
               data-row-menu-button
               aria-label="Действия с сообщением: {short(input.text)}"
               aria-expanded={menuFor === input.key}
-              onclick={() => { menuFor = menuFor === input.key ? null : input.key; }}
+              onclick={() => void toggleMenu(input.key)}
             ><Icon name="more" /></button>
           </span>
         {/if}
@@ -275,6 +296,7 @@
           class="row-menu"
           role="menu"
           aria-label="Действия с сообщением: {short(input.text)}"
+          bind:this={menuHost}
           use:dismissable={{ onclose: () => { menuFor = null; }, keep: (target) => target.closest('[data-row-menu-button]') !== null }}
         >
           {#if input.state === 'queued' && input.id && !editing[input.key]}
@@ -359,7 +381,7 @@
               data-row-menu-button
               aria-label="Действия с сообщением: {short(textOf(item))}"
               aria-expanded={menuFor === item.id}
-              onclick={() => { menuFor = menuFor === item.id ? null : item.id; }}
+              onclick={() => void toggleMenu(item.id)}
             ><Icon name="more" /></button>
           </span>
         {/if}
@@ -369,6 +391,7 @@
           class="row-menu"
           role="menu"
           aria-label="Действия с сообщением: {short(textOf(item))}"
+          bind:this={menuHost}
           use:dismissable={{ onclose: () => { menuFor = null; }, keep: (target) => target.closest('[data-row-menu-button]') !== null }}
         >
           <button type="button" role="menuitem" onclick={() => { menuFor = null; openEdit(item.id, textOf(item), item.run_at); }}>Изменить</button>
@@ -523,7 +546,9 @@
     .inline-actions { display: none; }
     .overflow { display: inline-flex; }
   }
-  .row-menu { position: absolute; z-index: 3; right: var(--s6); top: calc(var(--target) + var(--s1)); display: flex; flex-direction: column; min-width: var(--preview-height); padding: var(--s3); border-radius: var(--radius-card); background: var(--popover); box-shadow: var(--shadow); }
+  /* Меню «⋯» стоит в потоке карточки, а не поверх прокручиваемой очереди: обрезать его нечему.
+     Прижато к правому краю, как раньше, и сохраняет вид всплывающей карточки. */
+  .row-menu { align-self: flex-end; margin-inline-end: var(--s6); display: flex; flex-direction: column; min-width: var(--preview-height); padding: var(--s3); border-radius: var(--radius-card); background: var(--popover); box-shadow: var(--shadow); }
   .row-menu button { min-height: var(--target); padding-inline: var(--s5); border: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); color: var(--text); font-size: var(--fs-meta); text-align: start; }
   .row-menu button:hover { background: var(--hover); }
   .note { margin: 0; padding-inline: var(--s6); color: var(--muted); font-size: var(--fs-sm); }
