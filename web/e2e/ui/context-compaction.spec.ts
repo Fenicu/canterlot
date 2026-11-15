@@ -208,3 +208,18 @@ for (const theme of ['dark', 'light'] as const) {
 		await expect(details.getByRole('button', { name: 'Сжать контекст' })).toBeDisabled();
 	});
 }
+
+test('token_only_context_keeps_the_label_and_draws_no_empty_track', async ({ page }) => {
+	const { hub, api, id } = await boot(page, (seed, conversation) => {
+		seed.pushContext(conversation, 81_700, null);
+	});
+	const ctx = await indicator(page);
+	await expect(ctx).toContainText('Контекст: 81,7 тыс.');
+	await expect(ctx.getByRole('meter')).toHaveCount(0);
+
+	// Доля известна — дорожке есть что показать, и она возвращается.
+	api.pushContext(id, 817_000, 1_000_000);
+	hub.flush();
+	await expect(ctx).toContainText('Контекст: ост. 19%');
+	await expect(ctx.getByRole('meter')).toHaveCount(1);
+});

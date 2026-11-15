@@ -86,7 +86,9 @@
 		aria-label={label.startsWith('Контекст') ? label : `Контекст: ${label}`}
 		onclick={toggle}
 	>
-		<span class="track"><Gauge value={remaining ?? 0} tone={gaugeTone} quiet dim={remaining === null} label={badge} /></span>
+		{#if remaining !== null}
+			<span class="track"><Gauge value={remaining} tone={gaugeTone} quiet label={badge} /></span>
+		{/if}
 		<span class="label">{label}</span>
 	</button>
 	{#if open}
