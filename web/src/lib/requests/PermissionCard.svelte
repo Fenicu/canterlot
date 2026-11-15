@@ -196,6 +196,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--s3);
+    min-width: 0;
     color: var(--text);
   }
 
@@ -207,6 +208,8 @@
   }
 
   .meta {
+    min-width: 0;
+    overflow-wrap: anywhere;
     font-size: var(--fs-meta);
     color: var(--muted);
   }
@@ -264,6 +267,7 @@
     font-size: var(--fs-title);
     font-weight: var(--weight-semibold);
     line-height: var(--lh-tight);
+    overflow-wrap: anywhere;
   }
 
   .url:focus-visible {
@@ -277,12 +281,14 @@
   }
 
   .tool-tag {
+    min-width: 0;
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     padding: var(--s1) var(--s2);
     border-radius: var(--radius-sm);
     background: var(--raised);
     color: var(--secondary);
+    overflow-wrap: anywhere;
   }
 
   .description {
@@ -290,6 +296,7 @@
     font-size: var(--fs-body);
     line-height: var(--lh-body);
     color: var(--text);
+    overflow-wrap: anywhere;
   }
 
   .command-block {

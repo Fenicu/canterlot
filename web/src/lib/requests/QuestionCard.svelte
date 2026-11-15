@@ -366,6 +366,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--s3);
+    min-width: 0;
     color: var(--text);
   }
 
@@ -390,12 +391,14 @@
     display: flex;
     flex-direction: column;
     gap: var(--s4);
+    min-width: 0;
   }
 
   .question-section {
     display: flex;
     flex-direction: column;
     gap: var(--s2);
+    min-width: 0;
   }
 
   .q-head {
@@ -403,9 +406,11 @@
     align-items: baseline;
     justify-content: space-between;
     gap: var(--s4);
+    min-width: 0;
   }
 
   .counter {
+    flex: none;
     margin-left: auto;
     color: var(--muted);
     font-size: var(--fs-sm);
@@ -413,11 +418,13 @@
   }
 
   .q-header {
+    min-width: 0;
     font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: var(--tracking-normal);
     color: var(--secondary);
     font-weight: var(--weight-semibold);
+    overflow-wrap: anywhere;
   }
 
   .q-text {
@@ -426,6 +433,7 @@
     font-weight: var(--weight-semibold);
     line-height: var(--lh-tight);
     color: var(--text);
+    overflow-wrap: anywhere;
   }
 
   .selection-mode {

@@ -227,7 +227,10 @@
   .card-root {
     --card-pad-block: var(--s5);
     flex: 0 1 auto;
+    min-width: 0;
     min-height: 0;
+    /* Текст приходит от агента: длинный путь не должен делать карточку боковым скроллером. */
+    overflow-x: clip;
     overflow-y: auto;
     overscroll-behavior: contain;
     scroll-padding-block: var(--s4) calc(var(--target) + var(--s8));
