@@ -5,6 +5,11 @@ import { bootRealisticLimits } from './limits-seed';
 
 const phone = () => test.info().project.name === 'phone';
 
+// Представители палитр: обычная, аквамарин и высокий контраст, в обоих режимах. Токены всех
+// пятнадцати вариантов и их пары дёшево и полностью проверяет styles.test.ts; здесь — что
+// страница действительно взяла токены выбранной палитры и перекрасилась.
+const SWEEP = PALETTES.filter((palette) => ['standard', 'aquamarine', 'high-contrast'].includes(palette.key));
+
 /** Элементы содержимого, вылезающие за свой экран или за ближайший контейнер-карточку. */
 async function overflowing(page: Page) {
   return page.locator('main .secondary-content').evaluate((content) => {
@@ -143,11 +148,11 @@ test('empty_history_usage_and_speed_each_say_so_in_place', async ({ page }) => {
   expect(await overflowing(page)).toEqual([]);
 });
 
-test('every_palette_keeps_limits_text_readable_in_both_themes', async ({ page }) => {
+test('representative_palettes_keep_limits_text_readable_in_both_themes', async ({ page }) => {
   test.setTimeout(180_000);
   await bootRealisticLimits(page);
   const failures: string[] = [];
-  for (const palette of PALETTES) {
+  for (const palette of SWEEP) {
     for (const theme of ['dark', 'light']) {
       await page.evaluate(([p, t]) => { localStorage.setItem('canterlot.palette', p!); localStorage.setItem('canterlot.theme', t!); }, [palette.key, theme]);
       await page.reload();

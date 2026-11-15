@@ -69,15 +69,20 @@ test('old_routing_and_sign_in_addresses_still_open_their_pages', async ({ page }
   await expect(page.locator('main [data-role="routing-link"]')).toHaveAttribute('href', '/settings?c=routing');
 });
 
-test('chosen_palette_and_mode_stand_out_in_every_palette_and_mode', async ({ page }) => {
-  // Тридцать смен темы: проверяется контраст, а не анимация смены, поэтому без перехода вида.
+// Представители палитр: обычная, аквамарин и высокий контраст, в обоих режимах.
+// Числа всех пятнадцати вариантов с парами токенов дёшево проверяет styles.test.ts;
+// здесь важно, что страница взяла токен выбранной палитры и перекрасилась.
+const SWEEP = PALETTES.filter((palette) => ['standard', 'aquamarine', 'high-contrast'].includes(palette.key));
+
+test('chosen_palette_and_mode_stand_out_in_representative_palettes_and_modes', async ({ page }) => {
+  // Шесть смен темы: проверяется контраст, а не анимация смены, поэтому без перехода вида.
   test.setTimeout(60_000);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await bootSecondary(page, '/settings?c=appearance');
   const main = page.locator('main');
   const palettes = main.getByRole('radiogroup', { name: 'Тема' });
   const modes = main.getByRole('radiogroup', { name: 'Режим' });
-  for (const { key, name } of PALETTES) {
+  for (const { key, name } of SWEEP) {
     await palettes.getByRole('radio', { name, exact: true }).check();
     for (const mode of ['Тёмный', 'Светлый']) {
       await modes.getByRole('radio', { name: mode, exact: true }).check();
