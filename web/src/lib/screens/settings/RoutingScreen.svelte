@@ -236,9 +236,11 @@
                     <button type="button" class="grip" aria-label="Перетащить {name}" title="Перетащить" onpointerdown={(event) => dragStart(event, task, candidate)} onpointermove={dragMove} onpointerup={dragEnd} onpointercancel={dragEnd}><Icon name="grip" /></button>
                     <span class="order">{index + 1}</span>
                     <span class="name">{name}<small>{candidate.harness}{candidate.effort ? ` · ${effortLabel(candidate.effort).toLocaleLowerCase('ru-RU')}` : ''}</small></span>
-                    {#if index > 0}<IconButton icon="up" label="Поднять {name}" onclick={() => (draft = moveCandidate(draft!, task.uid, index, index - 1))} />{:else}<IconButton icon="up" label="{name} уже первый" inert />{/if}
-                    {#if index < task.candidates.length - 1}<IconButton icon="down" label="Опустить {name}" onclick={() => (draft = moveCandidate(draft!, task.uid, index, index + 1))} />{:else}<IconButton icon="down" label="{name} уже последний" inert />{/if}
-                    <IconButton icon="trash" label="Убрать {name}" onclick={() => (draft = removeCandidate(draft!, task.uid, candidate.uid))} />
+                    <div class="moves">
+                      {#if index > 0}<IconButton icon="up" label="Поднять {name}" onclick={() => (draft = moveCandidate(draft!, task.uid, index, index - 1))} />{:else}<IconButton icon="up" label="{name} уже первый" inert />{/if}
+                      {#if index < task.candidates.length - 1}<IconButton icon="down" label="Опустить {name}" onclick={() => (draft = moveCandidate(draft!, task.uid, index, index + 1))} />{:else}<IconButton icon="down" label="{name} уже последний" inert />{/if}
+                      <IconButton icon="trash" label="Убрать {name}" onclick={() => (draft = removeCandidate(draft!, task.uid, candidate.uid))} />
+                    </div>
                   </div>
                   {#if !allowed(candidate)}<p class="warn" data-role="not-whitelisted"><Pill color="amber">{NOT_IN_WHITELIST}</Pill></p>{/if}
                   {#each candidateIssues as message (message)}<p class="error" role="alert">{message}</p>{/each}
@@ -423,11 +425,13 @@
   .candidates { display: grid; gap: var(--s3); margin: var(--s0); padding: var(--s0); list-style: none; }
   .candidate { --field-bg: var(--surface); display: grid; gap: var(--s2); padding: var(--s3) var(--s4); border-radius: var(--radius-card); background: var(--raised); }
   .candidate.dragging { background: var(--selected); }
-  .row { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+  /* На телефоне имя занимает свою строку во всю ширину, три кнопки уходят под него: в узкой колонке имя рвалось посередине слова. */
+  .row { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: var(--s2); min-width: 0; }
   .grip { display: inline-flex; align-items: center; justify-content: center; min-width: var(--target); min-height: var(--target); padding: var(--s0); background: var(--transparent); color: var(--muted); cursor: grab; touch-action: none; }
   .order { min-width: var(--s8); color: var(--muted); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
-  .name { flex: 1; display: grid; min-width: 0; overflow-wrap: anywhere; }
-  .name small { color: var(--muted); font-size: var(--fs-sm); }
+  .name { grid-column: 3; flex: 1; display: grid; min-width: 0; overflow-wrap: break-word; }
+  .name small { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--fs-sm); text-overflow: ellipsis; white-space: nowrap; }
+  .moves { grid-column: 2 / -1; display: flex; align-items: center; justify-self: end; gap: var(--s2); }
   .row :global(button[aria-disabled]) { color: var(--muted); }
   .warn, .error { margin: var(--s0); font-size: var(--fs-sm); }
   .more summary { min-height: var(--target); display: flex; align-items: center; color: var(--accent-link); font-size: var(--fs-meta); cursor: pointer; }
@@ -456,5 +460,5 @@
   [data-embedded] .actions.sticky { bottom: calc(-1 * var(--s12)); padding-bottom: calc(var(--s6) + var(--s12)); }
   .actions .error, .actions .note { flex-basis: 100%; margin: var(--s0); }
   .actions :global(.reason) { margin-block: var(--s0); }
-  @media (min-width: 700px) { .add { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; } .grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .levels, .exclude, .nudge { grid-column: 1 / -1; } }
+  @media (min-width: 700px) { .row { display: flex; } .moves { margin-left: auto; } .add { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; } .grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .levels, .exclude, .nudge { grid-column: 1 / -1; } }
 </style>
