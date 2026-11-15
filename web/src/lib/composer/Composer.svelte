@@ -562,7 +562,7 @@
 </section>
 
 <style>
-  .composer { display: flex; flex-direction: column; gap: var(--s2); max-height: var(--composer-limit); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
+  .composer { display: flex; flex-direction: column; gap: var(--s2); flex: none; max-height: var(--composer-limit); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
   .capsule {
     display: grid;
     grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;

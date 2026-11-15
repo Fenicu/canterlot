@@ -457,6 +457,8 @@
 
 	.screen > :global(.feed-wrap) {
 		max-width: none;
+		/* Лента не схлопывается в полоску, когда очереди и карточки паузы занимают верх. */
+		min-height: var(--s15);
 	}
 
 	.waiting-notice {

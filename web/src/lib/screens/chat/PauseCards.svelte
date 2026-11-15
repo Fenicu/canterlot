@@ -271,6 +271,12 @@
 	.pause-cards-feed {
 		display: flex;
 		flex-direction: column;
+		flex: 0 1 auto;
+		min-height: 0;
+		/* Карточки паузы выше своего предела прокручиваются сами, а не выдавливают поле ввода. */
+		max-height: var(--stack-max);
+		overflow-y: auto;
+		overscroll-behavior: contain;
 		gap: var(--s3);
 		padding: var(--s3) var(--gutter);
 		box-sizing: border-box;

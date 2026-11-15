@@ -396,7 +396,7 @@
   {#if hidden > 0}
     <button type="button" class="more" onclick={() => { expanded = true; }}>Ещё {hidden} в очереди</button>
   {:else if expanded && total > COLLAPSE_ABOVE}
-    <button type="button" class="more" onclick={() => { expanded = false; }}>Свернуть</button>
+    <button type="button" class="more" data-fold onclick={() => { expanded = false; }}>Свернуть</button>
   {/if}
 </div>
 
@@ -420,7 +420,29 @@
 {/if}
 
 <style>
-  .strip { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--gutter); }
+  /* Раскрытая очередь выше своего предела прокручивается сама, а не выдавливает поле ввода. */
+  .strip { display: flex; flex-direction: column; gap: var(--s2); flex: 0 1 auto; min-height: 0; max-height: var(--stack-max); overflow-y: auto; overscroll-behavior: contain; padding: var(--s3) var(--gutter); }
+  /* «Свернуть» закреплена полосой у нижней кромки прокручиваемой очереди: раскрытый список не прячет её. */
+  .strip > .more[data-fold] {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    align-self: stretch;
+    margin-inline: calc(-1 * var(--gutter));
+    padding-inline: calc(var(--gutter) + var(--s6));
+    border-radius: 0;
+    background: var(--bg);
+    text-align: center;
+  }
+  /* Строка под полосой гаснет, а не обрезается половиной строки. */
+  .strip > .more[data-fold]::before {
+    content: '';
+    position: absolute;
+    inset: auto 0 100%;
+    height: var(--s8);
+    background: linear-gradient(to bottom, var(--transparent), var(--bg));
+    pointer-events: none;
+  }
   .item { position: relative; display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
   /* Карточка очереди бывает в две строки: радиус пилюли на такой высоте съедает углы, и текст первой строки
      выходит за фон. Радиус карточки на одной строке даёт те же двадцать два пикселя, что и пилюля. */
