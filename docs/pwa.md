@@ -101,6 +101,7 @@ npm run stack:build             # хаб и воркер с `--features canterlo
 npm run test:stack              # сквозной набор в Chromium (телефон) и Firefox (рабочий стол)
 npm run test:perf               # замеры P-01…P-06 и P-13/P-14, только телефонный профиль
 npm run test:parity             # доступность, рефлоу, визуальный язык, контактный лист
+npm run test:budget             # бюджет прыжка к сообщению (4× замедление) — только в тихом окне, не в общем прогоне
 node scripts/contact-sheet.mjs  # только контактный лист: web/e2e/.contact/index.html
 bash ../scripts/check-web.sh --stack   # весь цикл: проверки, UI, parity и сквозной набор
 ```

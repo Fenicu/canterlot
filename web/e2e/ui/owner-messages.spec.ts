@@ -234,11 +234,9 @@ test('owner_messages_refresh_when_the_owner_sends_while_the_panel_is_open', asyn
 	await expect(page.getByText(/^4 сообщения$/)).toBeVisible();
 });
 
-// QUARANTINE: бюджет прыжка (250 мс самой длинной задачи и 1 с до видимости при замедлении
-// процессора вчетверо) упирается в соседние процессы полного гейта. Отдельно под нагрузкой
-// 100–150 мс и 420–560 мс; это замер производительности, а не проверка логики. Повтор разрешён.
-test.describe('quarantine owner_messages_jump_long_task_stays_within_budget_and_is_visible_fast', () => {
-test.describe.configure({ retries: 2 });
+// Бюджет прыжка — замер производительности, а не проверка логики: под нагрузкой полного гейта
+// самая длинная задача доходит до двух секунд (133 мс в тихом окне), поэтому прогон вынесен
+// в PW_BUDGET=1 (npm run test:budget) и идёт в тихом окне.
 test('owner_messages_jump_long_task_stays_within_budget_and_is_visible_fast', async ({ page, browserName }) => {
 	test.skip(browserName !== 'chromium', 'chromium only');
 	test.setTimeout(180_000);
@@ -267,13 +265,12 @@ test('owner_messages_jump_long_task_stays_within_budget_and_is_visible_fast', as
 		() => (window as unknown as { __tasks?: { start: number; duration: number }[] }).__tasks ?? []
 	);
 	const longest = Math.max(0, ...tasks.map((task) => task.duration));
-	// Процессор замедлен вчетверо: 250 мс здесь — около 60 мс на настоящем, а запас гасит гонку с соседними тестами гейта.
+	// Процессор замедлен вчетверо: 250 мс здесь — около 60 мс на настоящем, а запас гасит разброс тихого окна.
 	expect(longest).toBeLessThan(250);
 	expect(visibleMs).toBeLessThan(1000);
 	process.stdout.write(
 		`owner-messages jump: longest task ${Math.round(longest)} ms, visible in ${visibleMs} ms\n`
 	);
-});
 });
 
 for (const motion of ['full', 'reduced'] as const) {
