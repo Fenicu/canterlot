@@ -508,4 +508,16 @@
 		min-height: 0;
 		max-height: var(--request-card-max);
 	}
+
+	/* Две карточки делят слот, а не давят друг друга: у каждой остаётся высота хотя бы
+	   под один вариант ответа, и прокручивается она сама. Слот становится скроллером
+	   только когда обе не помещаются, чтобы вторая карточка не уехала за край. */
+	.request-cards-slot:global(:has(> :nth-child(2))) {
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
+
+	.request-cards-slot:global(:has(> :nth-child(2))) > :global(.card-root) {
+		min-height: 16rem;
+	}
 </style>

@@ -202,3 +202,181 @@ test('mcp elicitation message with an unbroken token wraps inside the permission
   await expect(page.locator('.description')).toHaveText(/^Подтвердите доступ/);
   await expectTextInsideCard(page, '.description');
 });
+
+async function settle(page: Page) {
+  const cards = page.locator('.request-cards-slot > .card-root');
+  await expect(cards).toHaveCount(2);
+  await expect
+    .poll(() => cards.evaluateAll((elements) => elements.every((element) => element.getAnimations().length === 0)), { timeout: 5_000 })
+    .toBe(true);
+}
+
+type Box = { top: number; bottom: number; left: number; right: number; height: number };
+
+/** Геометрия двух карточек, закреплённой кнопки и вариантов ответа. */
+async function measureTwoCards(page: Page) {
+  return page.evaluate(() => {
+    const rect = (element: Element | null): Box | null => {
+      if (!element) return null;
+      const box = element.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom, left: box.left, right: box.right, height: box.height };
+    };
+    const slot = document.querySelector<HTMLElement>('.request-cards-slot')!;
+    const cards = [...slot.querySelectorAll<HTMLElement>(':scope > .card-root')];
+    const permission = cards.find((card) => card.querySelector('.permission-card'))!;
+    const question = cards.find((card) => card.querySelector('.question-card'))!;
+    const actions = question.querySelector<HTMLElement>('.actions')!;
+    const options = [...question.querySelectorAll<HTMLElement>('[data-option]')];
+    const hit = (box: Box | null) => {
+      if (!box) return null;
+      const element = document.elementFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
+      return element?.closest('[data-option]')?.getAttribute('data-option') ?? null;
+    };
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      slot: {
+        ...rect(slot)!,
+        scrollTop: slot.scrollTop,
+        scrollHeight: slot.scrollHeight,
+        clientHeight: slot.clientHeight,
+        clientBottom: slot.getBoundingClientRect().bottom - parseFloat(getComputedStyle(slot).paddingBottom)
+      },
+      permission: rect(permission),
+      permissionScrolls: permission.scrollHeight > permission.clientHeight + 1,
+      question: rect(question),
+      questionScrolls: question.scrollHeight > question.clientHeight + 1,
+      actions: rect(actions),
+      firstOption: { box: rect(options[0]), hit: hit(rect(options[0])) },
+      lastOption: { box: rect(options.at(-1)!), hit: hit(rect(options.at(-1)!)) }
+    };
+  });
+}
+
+for (const { width, height } of [
+  { width: 412, height: 892 },
+  { width: 360, height: 740 }
+] as const) {
+  for (const theme of ['dark', 'light'] as const) {
+    test(`two request cards stay usable at ${width}x${height} ${theme}`, async ({ page }) => {
+      const { hub, api, id } = await boot(page, { theme, viewport: { width, height } });
+      openPermissionAndQuestion(hub, api, id);
+      await settle(page);
+
+      const permission = page.locator('.request-cards-slot > .card-root', { has: page.locator('.permission-card') });
+      const question = page.locator('.request-cards-slot > .card-root', { has: page.locator('.question-card') });
+
+      // Одна карточка не съедает место второй: у каждой видимый кусок больше одного касания.
+      const shapes = await page.evaluate(() => {
+        const slot = document.querySelector<HTMLElement>('.request-cards-slot')!;
+        return [...slot.querySelectorAll<HTMLElement>(':scope > .card-root')].map((card) => ({
+          kind: card.querySelector('.question-card') ? 'question' : 'permission',
+          height: card.getBoundingClientRect().height
+        }));
+      });
+      expect(shapes.find((item) => item.kind === 'permission')!.height).toBeGreaterThanOrEqual(44);
+      expect(shapes.find((item) => item.kind === 'question')!.height).toBeGreaterThanOrEqual(44);
+
+      // Первый вариант виден над закреплённой «Ответить» и принимает касание без прокрутки.
+      const before = await measureTwoCards(page);
+      expect(before.firstOption.box).not.toBeNull();
+      expect(before.firstOption.box!.top).toBeGreaterThanOrEqual(before.question!.top - 1);
+      expect(before.firstOption.box!.top).toBeGreaterThanOrEqual(0);
+      expect(before.firstOption.box!.bottom).toBeLessThanOrEqual(before.actions!.top + 1);
+      expect(before.firstOption.box!.bottom).toBeLessThanOrEqual(before.viewport.height + 1);
+      expect(before.firstOption.hit).toBe('Вариант 1');
+      await page.mouse.click(
+        (before.firstOption.box!.left + before.firstOption.box!.right) / 2,
+        (before.firstOption.box!.top + before.firstOption.box!.bottom) / 2
+      );
+      await expect(question.locator('[data-option="Вариант 1"]')).toHaveAttribute('aria-checked', 'true');
+
+      // Последний вариант достижим прокруткой самой карточки.
+      await question.locator('.question-card').evaluate((element) => {
+        element.closest<HTMLElement>('.card-root')!.scrollTo({ top: 99999 });
+      });
+      await page.waitForTimeout(120);
+      const after = await measureTwoCards(page);
+      expect(after.lastOption.box).not.toBeNull();
+      expect(after.lastOption.box!.bottom).toBeLessThanOrEqual(after.actions!.top + 1);
+      expect(after.lastOption.hit).toBe('Вариант 8');
+      await page.mouse.click(
+        (after.lastOption.box!.left + after.lastOption.box!.right) / 2,
+        (after.lastOption.box!.top + after.lastOption.box!.bottom) / 2
+      );
+      await expect(question.locator('[data-option="Вариант 8"]')).toHaveAttribute('aria-checked', 'true');
+
+      // Кнопки разрешения достижимы внутри своей карточки.
+      await permission.locator('.permission-card').evaluate((element) => {
+        element.closest<HTMLElement>('.card-root')!.scrollTo({ top: 99999 });
+      });
+      await page.waitForTimeout(120);
+      const allow = await permission.locator('button[data-action="allow"]').evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const slot = element.closest<HTMLElement>('.request-cards-slot')!.getBoundingClientRect();
+        const hit = document.elementFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
+        return {
+          bottom: box.bottom,
+          slotTop: slot.top,
+          slotBottom: slot.bottom,
+          hit: Boolean(hit?.closest('button[data-action="allow"]')),
+          viewport: innerHeight
+        };
+      });
+      expect(allow.bottom).toBeLessThanOrEqual(Math.min(allow.slotBottom, allow.viewport) + 1);
+      expect(allow.bottom).toBeGreaterThan(allow.slotTop);
+      expect(allow.hit).toBe(true);
+
+      // Слот прокручивается, если карточки не помещаются: вторая карточка достижима целиком.
+      const scroll = await page.evaluate(() => {
+        const slot = document.querySelector<HTMLElement>('.request-cards-slot')!;
+        slot.scrollTo({ top: 99999 });
+        const slotBox = slot.getBoundingClientRect();
+        const cards = [...slot.querySelectorAll<HTMLElement>(':scope > .card-root')];
+        return {
+          scrollable: slot.scrollHeight > slot.clientHeight + 1,
+          reachable: cards.every((card) => {
+            const box = card.getBoundingClientRect();
+            return box.bottom <= slotBox.bottom + 1 && box.height > 0;
+          }),
+          composerInView: (() => {
+            const composer = document.querySelector('[data-composer]');
+            return composer ? composer.getBoundingClientRect().bottom <= innerHeight + 1 : true;
+          })()
+        };
+      });
+      expect(scroll.reachable).toBe(true);
+      expect(scroll.composerInView).toBe(true);
+    });
+  }
+}
+
+test('a single request card still scrolls itself and leaves the slot alone', async ({ page }) => {
+  const { hub, api, id } = await boot(page, { theme: 'dark', viewport: { width: 412, height: 892 } });
+  openRequest(hub, api, id, 'question', {
+    questions: [
+      {
+        id: 'q0',
+        header: 'ВЕРСИЯ',
+        text: 'Какую версию считать основной?',
+        options: LONG_OPTIONS
+      }
+    ]
+  });
+  await expect(page.locator('.question-card')).toBeVisible();
+  await expect
+    .poll(() => page.locator('.request-cards-slot > .card-root').evaluateAll((elements) => elements.every((element) => element.getAnimations().length === 0)), { timeout: 5_000 })
+    .toBe(true);
+  const geometry = await page.evaluate(() => {
+    const slot = document.querySelector<HTMLElement>('.request-cards-slot')!;
+    const card = slot.querySelector<HTMLElement>(':scope > .card-root')!;
+    return {
+      slotScrolls: slot.scrollHeight > slot.clientHeight + 1,
+      cardScrolls: card.scrollHeight > card.clientHeight + 1,
+      cardTop: card.getBoundingClientRect().top,
+      slotTop: slot.getBoundingClientRect().top + parseFloat(getComputedStyle(slot).paddingTop)
+    };
+  });
+  expect(geometry.slotScrolls).toBe(false);
+  expect(geometry.cardScrolls).toBe(true);
+  expect(Math.abs(geometry.cardTop - geometry.slotTop)).toBeLessThanOrEqual(1);
+});
