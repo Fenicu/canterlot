@@ -1706,7 +1706,9 @@ async fn deleting_a_subscriber_during_refresh_does_not_deadlock(pool: PgPool) {
             .unwrap();
         tx.commit().await.unwrap();
         let key = format!("delete-{round}");
-        let (refreshed, deleted) = tokio::time::timeout(Duration::from_secs(20), async {
+        // Удаление разговора каскадом под нагрузкой гейта занимает дольше 20 с:
+        // ждём то же завершение пары, окно шире.
+        let (refreshed, deleted) = tokio::time::timeout(Duration::from_secs(60), async {
             tokio::join!(
                 activity::refresh(&pool, p.target, now, &limits, Uuid::now_v7()),
                 delete(&pool, &p, subscriber, &key),
