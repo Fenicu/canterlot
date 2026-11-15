@@ -163,7 +163,7 @@ test('phone_keeps_chips_bottom_nav_and_search_icon', async ({ page, isMobile }) 
   await expect(page.locator('[data-search-field]')).toHaveCount(0);
 });
 
-test('limits_show_one_plaque_per_provider_in_a_row', async ({ page }) => {
+test('limits_show_one_plaque_per_provider_and_collapse_the_strip_on_tap', async ({ page }) => {
   await boot(page);
   const plaques = page.locator('[data-limit-plaques] .plaque');
   await expect(plaques).toHaveCount(3);
@@ -171,7 +171,8 @@ test('limits_show_one_plaque_per_provider_in_a_row', async ({ page }) => {
   await expect(plaques.nth(1)).toContainText(/Codex\s*осталось\s*ост\.\s*10%\s*нед/);
   await expect(plaques.nth(2)).toContainText(/OpenCode\s*осталось\s*ост\.\s*54%\s*мес/);
   const boxes = await plaques.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().top));
-  expect(new Set(boxes.map(Math.round)).size).toBe(1);
+  // На телефоне все три в ряд; в тесной боковой колонке стола — по две, чтобы текст не сжимался в столбик.
+  expect(new Set(boxes.map(Math.round)).size).toBe(test.info().project.name === 'phone' ? 1 : 2);
   await page.locator('[data-limit-plaques]').click();
   await expect(page.locator('[data-limit-plaques]')).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'История лимитов' })).toBeVisible();

@@ -253,10 +253,11 @@
   .limits:not([open]) .reset[data-forecast='before'] { color: var(--warning); }
   .limits:not([open]) .forecast { display: none; }
   /* Узкая полоса отдаёт место отсчёту сброса: полоски повторяют проценты и уходят первыми,
-     затем отсчёт оставляет старшую единицу («23ч» вместо «23ч59м»), точный остаток — в раскрытой полосе. */
+     затем отсчёт оставляет старшую единицу («23ч» вместо «23ч59м»), точный остаток — в раскрытой полосе.
+     Правило относится к строкам, а не к плашкам: у плашки своя полоска на всю ширину. */
   @container (max-width: 25em) {
     .limits:not([open]) .rows { --gauge-width: var(--s0); }
-    .limits:not([open]) .bar { display: none; }
+    .limits:not([open]) .rows .bar { display: none; }
   }
   @container (max-width: 19em) {
     .limits:not([open]) .reset-tail { display: none; }
@@ -321,7 +322,17 @@
   .plaque .pct.dim { color: var(--muted); font-weight: var(--weight-normal); }
   /* Полоска прижата к низу плашки: у соседей с переносом текста она стоит на одной высоте. */
   .plaque .bar { display: flex; margin-top: auto; --gauge-width: 100%; }
+  /* «Нет данных» в тесной плашке обрезается многоточием, а не по букве. */
+  .plaque .none { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .plaques { min-height: var(--target); }
+  /* В тесной колонке (боковая полоса рабочего стола) четыре плашки в ряд сжимаются в столбик:
+     по две в ряд текст и полоска остаются читаемыми. Телефон не трогаем. */
+  @media (min-width: 44rem) {
+    @container (max-width: 25em) {
+      .plaques { flex-wrap: wrap; }
+      .plaque { flex: 1 1 calc(50% - var(--s3)); }
+    }
+  }
   .status { display: flex; align-items: center; gap: var(--s4); color: var(--secondary); }
   .status a { margin-inline-start: auto; }
   .refresh.pending :global(svg) { animation: spin var(--duration-stage-spin) var(--ease-stage-spin) infinite; }

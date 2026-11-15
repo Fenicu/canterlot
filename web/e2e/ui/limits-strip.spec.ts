@@ -588,7 +588,7 @@ function expectColumnsAligned(items: WindowMetrics[], column: string): void {
   for (const x of positions) expect(Math.abs(x - positions[0]!), column).toBeLessThanOrEqual(1);
 }
 
-/** Свёрнутая полоса списка: плашка на провайдера, все в один ряд и в пределах полосы. */
+/** Свёрнутая полоса списка: плашка на провайдера, в пределах полосы; тесная боковая колонка стола кладёт их по две в ряд. */
 async function expectPlaques(page: Page, names: readonly string[]): Promise<void> {
   const strip = page.locator('.limits').first();
   const plaques = strip.locator('[data-limit-plaques] .plaque');
@@ -596,8 +596,10 @@ async function expectPlaques(page: Page, names: readonly string[]): Promise<void
   for (const [index, name] of names.entries()) await expect(plaques.nth(index).locator('.pname')).toHaveText(name);
   const boxes = await plaques.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect()).map((box) => ({ top: box.top, left: box.left, right: box.right })));
   const outer = (await strip.boundingBox())!;
+  // Телефон держит один ряд; в узкой колонке стола трём-четырём плашкам тесно, и они идут по две.
+  const rows = new Set(boxes.map((box) => Math.round(box.top)));
+  expect(rows.size).toBeLessThanOrEqual(names.length > 2 ? 2 : 1);
   for (const box of boxes) {
-    expect(Math.abs(box.top - boxes[0]!.top)).toBeLessThanOrEqual(1);
     expect(box.left).toBeGreaterThanOrEqual(outer.x - 0.5);
     expect(box.right).toBeLessThanOrEqual(outer.x + outer.width + 0.5);
   }
