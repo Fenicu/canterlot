@@ -162,7 +162,7 @@
     white-space: nowrap;
   }
   .fold { display: grid; grid-template-rows: 1fr; }
-  .body { display: flex; flex-direction: column; gap: var(--s2); min-height: 0; overflow: hidden; padding-inline: var(--s2); }
+  .body { display: flex; flex-direction: column; gap: var(--s2); min-height: 0; overflow: hidden; padding-inline: var(--s4); }
   .body > :global(:last-child) { margin-bottom: var(--s2); }
   .shots { display: flex; flex-wrap: wrap; gap: var(--s2); padding: var(--s0) var(--s2) var(--s2); }
   .files { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s2); margin: 0; padding: var(--s0) var(--s2) var(--s2); list-style: none; }

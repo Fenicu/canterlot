@@ -286,3 +286,24 @@ test('long_code_line_scrolled_to_the_end_stops_before_the_copy_button', async ({
   expect(measured.scrollLeft, 'длинная строка листается вбок').toBeGreaterThan(0);
   expect(measured.codeRight, 'конец длинной строки не уходит под кнопку').toBeLessThanOrEqual(measured.buttonLeft + 0.5);
 });
+test('expanded_tool_output_is_inset_symmetrically_like_the_card_head', async ({ page }) => {
+  await boot(page);
+  await page.locator('.tool .head').last().click();
+  await expect(page.locator('.tool .out pre')).toContainText('test result: ok. 3 passed');
+  const measured = await page.evaluate(() => {
+    // Раскрытый вывод живёт в карточке инструмента, а не в прозе ответа.
+    const tool = [...document.querySelectorAll<HTMLElement>('.tool')].find((node) => node.querySelector('.out'));
+    if (!tool) throw new Error('нет раскрытого вывода инструмента');
+    const head = tool.querySelector('.head') as HTMLElement;
+    const out = tool.querySelector('.out') as HTMLElement;
+    const toolBox = tool.getBoundingClientRect();
+    const outBox = out.getBoundingClientRect();
+    return {
+      left: outBox.left - toolBox.left,
+      right: toolBox.right - outBox.right,
+      headInset: Number.parseFloat(getComputedStyle(head).paddingLeft)
+    };
+  });
+  expect(measured.left, 'вывод вложен как шапка карточки').toBeCloseTo(measured.headInset, 0);
+  expect(measured.right, 'отступ вывода справа такой же, как слева').toBeCloseTo(measured.left, 0);
+});
