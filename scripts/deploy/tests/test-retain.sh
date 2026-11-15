@@ -103,6 +103,18 @@ fi
 [ ! -e "${HUB_BACKUP_DIR}/canterlot-pre-000000000002.dump" ] \
     && [ ! -e "${HUB_BACKUP_DIR}/canterlot-pre-000000000001.dump" ] \
     && case_ok "old dumps removed" || case_fail "old dumps kept"
+# Финальная проверка current и удаление — одна удалённая команда под flock на каждом хосте.
+HUB_DEL="$(awk -F'\t' '$1 == "fakehub" && $2 ~ /flock/ && $2 ~ /readlink/ && $2 ~ /rm -rf/ {print $2}' "${FAKE_ROOT}/state/ssh-cmds.log" | head -1)"
+if [ -n "${HUB_DEL}" ] && [[ "${HUB_DEL}" == *"${HUB_BASE}/.deploy.lock"* ]]; then
+    case_ok "hub check+delete runs under the deploy-root lock"
+else
+    case_fail "hub check+delete not under one locked invocation"
+fi
+WEB_DEL="$(awk -F'\t' '$1 == "fakeweb" && $2 ~ /flock/ && $2 ~ /docker exec/ && $2 ~ /rm -rf/ {print $2}' "${FAKE_ROOT}/state/ssh-cmds.log" | head -1)"
+[ -n "${WEB_DEL}" ] \
+    && case_ok "web guard+delete runs under one lock" || case_fail "web check+delete not locked"
+[ -f "${WORKER_BASE}/.deploy.lock" ] \
+    && case_ok "worker lock file exists" || case_fail "worker lock file missing"
 teardown_case
 case_end
 
@@ -118,30 +130,6 @@ else
 fi
 assert_contains "${FAKE_ROOT}/retain.log" "refusing odd path" "odd path refused loudly"
 [ -d "${HUB_RELEASES}/waytoolongdirname" ] && case_ok "odd dir itself not removed" || case_fail "odd dir removed!"
-teardown_case
-case_end
-
-# R4: финальная проверка current и удаление — одна удалённая команда под flock.
-case_begin "retain locks the final check and deletion"
-setup_retain lockapply
-export FAKE_SSH_LOG_CMDS=1
-if bash "${DEPLOY_DIR}/retain.sh" --apply >"${FAKE_ROOT}/retain.log" 2>&1; then
-    case_ok "exit 0"
-else
-    case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/retain.log"
-fi
-unset FAKE_SSH_LOG_CMDS
-HUB_DEL="$(awk -F'\t' '$1 == "fakehub" && $2 ~ /flock/ && $2 ~ /readlink/ && $2 ~ /rm -rf/ {print $2}' "${FAKE_ROOT}/state/ssh-cmds.log" | head -1)"
-if [ -n "${HUB_DEL}" ] && [[ "${HUB_DEL}" == *"${HUB_BASE}/.deploy.lock"* ]]; then
-    case_ok "hub check+delete runs under the deploy-root lock"
-else
-    case_fail "hub check+delete not under one locked invocation"
-fi
-WEB_DEL="$(awk -F'\t' '$1 == "fakeweb" && $2 ~ /flock/ && $2 ~ /docker exec/ && $2 ~ /rm -rf/ {print $2}' "${FAKE_ROOT}/state/ssh-cmds.log" | head -1)"
-[ -n "${WEB_DEL}" ] \
-    && case_ok "web guard+delete runs under one lock" || case_fail "web check+delete not locked"
-[ -f "${WORKER_BASE}/.deploy.lock" ] \
-    && case_ok "worker lock file exists" || case_fail "worker lock file missing"
 teardown_case
 case_end
 
