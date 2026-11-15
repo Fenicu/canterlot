@@ -461,6 +461,21 @@
     .pill:not(:has(.steer, .row-actions)) {
       padding-block-end: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / 2);
     }
+    /* Карточка без «Влить» — отложенная: «⋯» стоит в первой строке справа от текста, а не отдельной
+       строкой ниже, иначе под текстом остаётся пустая полоса во всю ширину карточки. */
+    .pill:not(:has(.steer)):has(.row-actions) {
+      grid-template-areas: 'body actions';
+      /* Текст и цель касания делят строку цели и стоят по её центру: видимые зазоры сверху и снизу равны. */
+      align-items: center;
+      padding-block: var(--s6);
+    }
+    /* Значок «⋯» стоит по центру цели касания и без сдвига висит над полосой первой строки:
+       сдвиг возвращает его в строку, не отнимая у цели её высоту. */
+    .pill:not(:has(.steer)):has(.row-actions) .row-actions {
+      position: relative;
+      inset-block-start: var(--s2);
+      margin-block-start: var(--s0);
+    }
     .body {
       grid-area: body;
       display: -webkit-box;

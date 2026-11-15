@@ -1,8 +1,8 @@
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { FakeHub, FakeHubApi, seedConversation, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
-import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelte';
+import type { HistoryBlock, HistoryInput, ScheduledMessage } from '../../src/lib/stores/chat.svelte';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
@@ -399,6 +399,189 @@ test('queue_card_aligns_its_text_and_actions_and_spaces_them_evenly', async ({ p
   expect(measured.firstLineInPadding, 'первая строка внутри поля карточки').toBe(true);
   expect(measured.escaping, 'текст не заходит в скругление карточки').toEqual([]);
   expect(measured.radius, 'скругление многострочной карточки как у карточки').toBe(measured.radiusCard);
+});
+
+/** Отложенные живут в снимке беседы, а не в истории: их кладут в снимок до перезагрузки. */
+function seedScheduled(api: FakeHubApi, id: string, rows: { text: string; state?: ScheduledMessage['state'] }[]): void {
+  const snap = api.conversationData(id);
+  snap.scheduled = rows.map((row, index) => ({
+    id: api.id(),
+    conversation_id: id,
+    run_at: stamp(60 * (index + 1)),
+    content: [{ type: 'text', text: row.text }],
+    attachment_ids: [],
+    state: row.state ?? 'pending',
+    input_id: null,
+    attempts: row.state === 'failed' ? 1 : 0
+  }));
+  api.hub.setSnapshot(`conversation:${id}`, () => snap);
+}
+
+interface CardShape {
+  height: number;
+  textHeight: number;
+  clipped: boolean;
+  topInset: number;
+  bottomInset: number;
+  leftInset: number;
+  textRightInset: number;
+  actionInset: number | null;
+  textToIcon: number | null;
+  firstLineTop: number;
+  firstLineBottom: number;
+  iconTop: number | null;
+  targetHeight: number | null;
+  target: number;
+  radius: number;
+  radiusCard: number;
+  escaping: string[];
+}
+
+/**
+ * Карточка меряется по строкам блока текста, а не по чернилам отдельных букв: зазоры владелец
+ * видит между строкой и краем карточки, а запас под выносные буквы — частью строки.
+ * «⋯» меряется по значку: цель касания выше него и в строку не помещается.
+ */
+function shapeOf(pill: Locator): Promise<CardShape> {
+  return pill.evaluate((node) => {
+    const pillBox = node.getBoundingClientRect();
+    const body = node.querySelector('.body') as HTMLElement;
+    const bodyBox = body.getBoundingClientRect();
+    const bodyStyle = getComputedStyle(body);
+    const line = Number.parseFloat(bodyStyle.lineHeight) || Number.parseFloat(bodyStyle.fontSize) * 1.4;
+    const overflow = node.querySelector('.row-actions .overflow') as HTMLElement | null;
+    const overflowBox = overflow?.getBoundingClientRect() ?? null;
+    const iconBox = (overflow?.querySelector('svg') as SVGSVGElement | null)?.getBoundingClientRect() ?? null;
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    const rects = [...range.getClientRects()];
+    // Строки за пределом обрезки остаются в прямоугольниках диапазона, но владелец их не видит.
+    const text = {
+      left: Math.max(Math.min(...rects.map((rect) => rect.left)), bodyBox.left),
+      right: Math.min(Math.max(...rects.map((rect) => rect.right)), bodyBox.right),
+      bottom: Math.min(Math.max(...rects.map((rect) => rect.bottom)), bodyBox.bottom)
+    };
+    const root = getComputedStyle(document.documentElement);
+    const radius = Number.parseFloat(getComputedStyle(node).borderTopLeftRadius);
+    const used = Math.min(radius, pillBox.width / 2, pillBox.height / 2);
+    // Точка внутри скруглённого прямоугольника: расстояние до ближайшего центра угла не больше радиуса.
+    const outside = (x: number, y: number) => {
+      const dx = Math.max(pillBox.left + used - x, 0, x - (pillBox.right - used));
+      const dy = Math.max(pillBox.top + used - y, 0, y - (pillBox.bottom - used));
+      return dx * dx + dy * dy > used * used + 0.5;
+    };
+    return {
+      height: pillBox.height,
+      textHeight: bodyBox.height,
+      clipped: Math.max(...rects.map((rect) => rect.bottom)) > bodyBox.bottom + 0.5,
+      topInset: bodyBox.top - pillBox.top,
+      bottomInset: pillBox.bottom - bodyBox.bottom,
+      leftInset: text.left - pillBox.left,
+      textRightInset: pillBox.right - text.right,
+      // Кнопка «⋯» держит цель касания, поэтому её рамка, а не чернила значка, мерится до края.
+      actionInset: overflowBox ? pillBox.right - overflowBox.right : null,
+      textToIcon: iconBox ? iconBox.left - text.right : null,
+      // Полоса первой строки — это её место в блоке текста, а не чернила подписи другим кеглем.
+      firstLineTop: bodyBox.top,
+      firstLineBottom: bodyBox.top + line,
+      iconTop: iconBox ? iconBox.top : null,
+      targetHeight: overflowBox ? overflowBox.height : null,
+      target: Number.parseFloat(root.getPropertyValue('--target')),
+      radius,
+      radiusCard: Number.parseFloat(root.getPropertyValue('--radius-card')),
+      // Углы текста не должны заходить в скругление карточки: там фон уже не нарисован.
+      escaping: [
+        { corner: 'первая строка слева', x: text.left, y: bodyBox.top },
+        { corner: 'первая строка справа', x: text.right, y: bodyBox.top },
+        { corner: 'последняя строка слева', x: text.left, y: text.bottom },
+        { corner: 'последняя строка справа', x: text.right, y: text.bottom }
+      ].filter((point) => outside(point.x, point.y)).map((point) => point.corner)
+    };
+  });
+}
+
+/** Общие требования к карточке без «Влить»: «⋯» в первой строке, равные зазоры, 12 px по бокам. */
+function expectCompactCard(shape: CardShape): void {
+  // Пустой строки под текстом нет: высота карточки — это строки текста и по зазору сверху и снизу.
+  expect(shape.height, 'под текстом нет отдельной строки действий').toBeLessThanOrEqual(shape.textHeight + 2 * shape.topInset + 1);
+  expect(Math.abs(shape.topInset - shape.bottomInset), 'верхний и нижний зазоры равны').toBeLessThanOrEqual(1);
+  expect(shape.leftInset, 'текст от левого края на 12 px').toBeCloseTo(12, 0);
+  expect(shape.actionInset, '«⋯» от правого края на 12 px').not.toBeNull();
+  expect(shape.actionInset ?? Number.NaN, '«⋯» от правого края на 12 px').toBeCloseTo(12, 0);
+  expect(shape.textRightInset, 'текст не упирается в правый край').toBeGreaterThanOrEqual(shape.leftInset - 1);
+  expect(shape.targetHeight ?? 0, 'цель нажатия не меньше --target').toBeGreaterThanOrEqual(shape.target - 0.5);
+  expect(shape.escaping, 'текст не заходит в скругление карточки').toEqual([]);
+  expect(shape.radius, 'скругление карточки как у очереди').toBe(shape.radiusCard);
+}
+
+test('scheduled_card_puts_its_overflow_on_the_first_text_line', async ({ page }, info) => {
+  test.skip(info.project.name !== 'phone', 'раскладка очереди в две строки живёт на телефоне');
+  const { api, id } = await boot(page);
+  seedScheduled(api, id, [{ text: 'можно тестировать, это отложенное сообщение, у тебя весь день' }]);
+  await page.reload();
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  const card = page.locator('.strip .item').filter({ hasText: 'Отправится в' });
+  await expect(card).toHaveCount(1);
+  const shape = await shapeOf(card.locator('.pill'));
+  expect(shape.textHeight, 'отложенное заняло две строки').toBeGreaterThan(20);
+  expect(shape.clipped, 'текст занимает обе строки целиком').toBe(false);
+  expectCompactCard(shape);
+  expect(shape.iconTop ?? Number.NEGATIVE_INFINITY, '«⋯» стоит на первой строке, а не отдельной').toBeGreaterThanOrEqual(shape.firstLineTop - 0.5);
+  expect(shape.iconTop ?? Number.POSITIVE_INFINITY, '«⋯» стоит на первой строке, а не отдельной').toBeLessThanOrEqual(shape.firstLineBottom + 0.5);
+  expect(shape.textToIcon ?? Number.NEGATIVE_INFINITY, 'текст переносится до «⋯», а не уходит под него').toBeGreaterThanOrEqual(0);
+});
+
+test('one_line_scheduled_card_keeps_even_gaps', async ({ page }, info) => {
+  test.skip(info.project.name !== 'phone', 'раскладка очереди в две строки живёт на телефоне');
+  const { api, id } = await boot(page);
+  seedScheduled(api, id, [{ text: 'позже' }]);
+  await page.reload();
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  const card = page.locator('.strip .item').filter({ hasText: 'Отправится в' });
+  await expect(card).toHaveCount(1);
+  const shape = await shapeOf(card.locator('.pill'));
+  expect(shape.textHeight, 'отложенное заняло одну строку').toBeLessThan(30);
+  expectCompactCard(shape);
+  expect(shape.iconTop ?? Number.NEGATIVE_INFINITY, '«⋯» стоит на первой строке').toBeGreaterThanOrEqual(shape.firstLineTop - 0.5);
+  expect(shape.iconTop ?? Number.POSITIVE_INFINITY, '«⋯» стоит на первой строке').toBeLessThanOrEqual(shape.firstLineBottom + 0.5);
+});
+
+test('failed_card_keeps_even_gaps_without_an_action_row', async ({ page }, info) => {
+  test.skip(info.project.name !== 'phone', 'раскладка очереди в две строки живёт на телефоне');
+  const { api, id } = await boot(page);
+  seedScheduled(api, id, [{ text: 'не ушло', state: 'failed' }]);
+  await page.reload();
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  const card = page.locator('.strip .item').filter({ hasText: 'Не отправлено' });
+  await expect(card).toHaveCount(1);
+  const shape = await shapeOf(card.locator('.pill'));
+  expect(shape.textHeight, 'неотправленное заняло одну строку').toBeLessThan(30);
+  expect(shape.height, 'высота — строки текста и равные зазоры').toBeLessThanOrEqual(shape.textHeight + 2 * shape.topInset + 1);
+  expect(Math.abs(shape.topInset - shape.bottomInset), 'верхний и нижний зазоры равны').toBeLessThanOrEqual(1);
+  expect(shape.leftInset, 'текст от левого края на 12 px').toBeCloseTo(12, 0);
+  expect(shape.escaping, 'текст не заходит в скругление карточки').toEqual([]);
+  expect(shape.radius, 'скругление карточки как у очереди').toBe(shape.radiusCard);
+});
+
+test('scheduled_card_shots', async ({ page }, info) => {
+  test.skip(!SHOTS, 'снимки для отчёта снимаются отдельным прогоном');
+  test.skip(info.project.name !== 'phone', 'карточки снимаются на телефоне');
+  const dir = SHOTS;
+  if (!dir) return;
+  mkdirSync(dir, { recursive: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const [palette, theme] of [['aquamarine', 'dark'], ['standard', 'light']] as const) {
+    const { api, id } = await boot(page, { palette, theme });
+    seedScheduled(api, id, [
+      { text: 'можно тестировать, это отложенное сообщение, у тебя весь день' },
+      { text: 'позже' }
+    ]);
+    await page.reload();
+    await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.strip .item').filter({ hasText: 'Отправится в' })).toHaveCount(2);
+    await settle(page);
+    await page.locator('.strip').screenshot({ path: `${dir}/scheduled-cards-${palette}-${theme}.png`, animations: 'disabled' });
+  }
 });
 
 test('chat_screen_for_before_and_after_shots', async ({ page }, info) => {
