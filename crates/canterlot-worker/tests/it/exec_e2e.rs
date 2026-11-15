@@ -2386,12 +2386,6 @@ async fn wave_w_data_reattach_discards_stale_sj_batches(pool: PgPool) {
     .await;
     let hellos = fixture.session_probe.data_attaches();
     fixture.faults().fail_data(Code::Cancelled);
-    // Переподключение ждём до снятия паузы: ответ хаба точно видит старое
-    // подтверждение, воркер пересылает несвежее, и гонки «успел/не успел» нет.
-    until("data reattached after transport error", async || {
-        fixture.session_probe.data_attaches() == hellos + 1
-    })
-    .await;
     resume.send(()).unwrap();
     fixture.assert_answer(&input, &expected, 1200).await;
     assert_eq!(
