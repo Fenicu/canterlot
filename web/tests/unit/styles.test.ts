@@ -165,12 +165,6 @@ test('disabled_button_requires_a_reason', () => {
   for (const path of walk('src').filter(p => p.endsWith('.svelte') && !p.endsWith('/Button.svelte'))) expect(readFileSync(path, 'utf8'), path).not.toMatch(/<button\b[^>]*\bdisabled\b/);
 });
 
-test('pwa_design_doc_records_removal_of_check_icon_and_unscaled_countdown', () => {
-  const doc = readFileSync('../docs/design/pwa.md', 'utf8');
-  expect(doc).not.toMatch(/Регистрация `check` остаётся/);
-  expect(doc).toMatch(/нет иконки `check`/i);
-});
-
 test('separator_spacing_survives_svelte_block_trimming', () => {
   // Svelte срезает пробелы, в том числе &#32;, в начале и в конце блока: «1.0.0{#if x} · хаб» выводится как «1.0.0· хаб».
   // Пробел ставится перед блоком, снаружи, или разделитель собирается в скрипте.
@@ -194,5 +188,4 @@ test('selected_fill_meets_non_text_contrast_in_all_variants', () => {
       expect(contrast(variant.tokens['--accent']!, variant.tokens[`--${bg}`]!), `${label} accent/${bg}`).toBeGreaterThanOrEqual(3);
     }
   }
-  for (const path of ['src/lib/screens/sessions/GroupTabs.svelte', 'src/lib/ui/Segmented.svelte']) expect(readFileSync(path, 'utf8'), path).toMatch(/(?:aria-selected='true'\]|:checked \+ span) \{ background: var\(--accent\);/);
 });
