@@ -625,6 +625,21 @@ test('compact_attachment_chips_have_even_insets_without_a_scrollbar_and_fade_the
   await expect.poll(() => strip.getAttribute('data-fade-end')).toBeNull();
 });
 
+test('expanded_attachment_tray_keeps_its_scrollbar_off_the_composer_border', async ({ page }, info) => {
+  test.skip(info.project.name !== 'phone', 'телефонный лоток');
+  await boot(page);
+  await page.setInputFiles('input[type=file]', [
+    { name: 'Screenshot_20261115_204905_Chrome.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('one') },
+    { name: 'Screenshot_20261115_204911_Chrome.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('two') }
+  ]);
+  const tray = page.locator('[data-composer] .tray');
+  await expect(tray.getByText('Загружено')).toHaveCount(2, { timeout: 30_000 });
+  expect(await tray.evaluate((node) => getComputedStyle(node).scrollbarWidth)).toBe('none');
+  expect(await tray.evaluate((node) => node.offsetWidth - node.clientWidth)).toBe(0);
+  // Список по-прежнему листается колесом и пальцем.
+  await expect.poll(() => tray.evaluate((node) => { node.scrollTop = node.scrollHeight; return node.scrollTop; })).toBeGreaterThan(0);
+});
+
 test('keyboard_sized_viewport_keeps_the_attachment_text_and_caret_above_the_keyboard', async ({ page }, info) => {
   test.skip(info.project.name !== 'phone', 'экранная клавиатура телефона');
   await boot(page);

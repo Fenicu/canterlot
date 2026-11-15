@@ -95,7 +95,8 @@
 {/if}
 
 <style>
-  .tray { grid-area: tray; display: flex; flex-direction: column; gap: var(--s3); min-width: 0; max-height: calc(var(--composer-limit) * .36); overflow-y: auto; padding: var(--s1) var(--s3) var(--s3); }
+  .tray { grid-area: tray; display: flex; flex-direction: column; gap: var(--s3); min-width: 0; max-height: calc(var(--composer-limit) * .36); overflow-y: auto; scrollbar-width: none; padding: var(--s1) var(--s3) var(--s3); }
+  .tray::-webkit-scrollbar { display: none; }
   header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4); padding-inline: var(--s3); font-size: var(--fs-meta); }
   strong { font-weight: var(--weight-semibold); }
   header span { color: var(--secondary); font-size: var(--fs-sm); }
