@@ -13,6 +13,11 @@ const isStackOrPerf = process.env.CANTERLOT_STACK_RUN === '1' || process.argv.so
 if (isStackOrPerf) process.env.CANTERLOT_STACK_RUN = '1';
 // Скриншоты тем и README снимаются отдельно: в обычный прогон они не входят.
 const screenshots = process.env.PW_SCREENSHOTS === '1';
+// Самопроверки обвязки — контактный лист макетов и провод fake-hub в Playwright — проверяют
+// инструменты, а не продукт. В обычный прогон они не входят и включаются PW_HARNESS=1
+// (npm run test:harness), когда меняется сама обвязка.
+const harness = process.env.PW_HARNESS === '1';
+const HARNESS_SPEC = /(?:contact-sheet|fake-hub-wire)\.spec\.ts$/;
 
 let origin = `http://127.0.0.1:${Number(process.env.PORT ?? 4173)}`;
 if (isStackOrPerf && existsSync(STACK_INFO_FILE)) {
@@ -32,7 +37,7 @@ const LAYOUT_SPEC = /desktop-layout\.spec\.ts$/;
 // testIgnore проекта заменяет общий, а не дополняет: проекты phone и desktop повторяют его сами.
 const baseIgnore = isStackOrPerf
   ? [LAYOUT_SPEC]
-  : ['**/e2e/stack/**', '**/e2e/perf/**', ...(screenshots ? [] : ['**/e2e/screenshots/**']), LAYOUT_SPEC];
+  : ['**/e2e/stack/**', '**/e2e/perf/**', ...(screenshots ? [] : ['**/e2e/screenshots/**']), LAYOUT_SPEC, ...(harness ? [] : [HARNESS_SPEC])];
 const firefoxLayout = (name: string, width: number, height: number) => ({
   name,
   workers: 1,

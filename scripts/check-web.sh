@@ -137,7 +137,17 @@ export PATH="${HOME}/.cargo/bin:${PATH}"
 if ((fast)); then
     if ((${#specs[@]})); then
         printf '\n==> Playwright: изменённые спеки на phone\n'
-        npx --no-install playwright test --project=phone "${specs[@]}"
+        # Самопроверки обвязки (контактный лист, провод fake-hub) в обычный прогон не входят:
+        # изменившуюся из них запускает PW_HARNESS=1, иначе она молча пропустилась бы.
+        plain=() harness_specs=()
+        for spec in "${specs[@]}"; do
+            case "$spec" in
+                *contact-sheet.spec.ts|*fake-hub-wire.spec.ts) harness_specs+=("$spec") ;;
+                *) plain+=("$spec") ;;
+            esac
+        done
+        if ((${#plain[@]})); then npx --no-install playwright test --project=phone "${plain[@]}"; fi
+        if ((${#harness_specs[@]})); then PW_HARNESS=1 npx --no-install playwright test --project=phone "${harness_specs[@]}"; fi
     fi
 else
     printf '\n==> Playwright e2e/ui и e2e/parity\n'
