@@ -220,12 +220,14 @@
   /* Свёрнутая полоса компактна: одна строка на провайдера, 5ч и нед рядом, месяц скрыт.
      У каждого окна свой сжатый отсчёт до сброса: колонки 5 и 9. */
   .limits:not([open]) .rows {
-    grid-template-columns: minmax(0, 1fr) minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content max-content minmax(calc(var(--s4) * 2.5), max-content) var(--gauge-width) max-content max-content var(--chevron-column);
+    grid-template-columns: minmax(0, 1fr) max-content var(--gauge-width) max-content max-content max-content var(--gauge-width) max-content max-content var(--chevron-column);
     column-gap: var(--s1);
   }
   /* В свёрнутой полосе слово «ост.» занимает место: оно мельче числа и не раздувает колонку. */
   .limits:not([open]) .row { padding-inline: var(--s4); }
   .limits:not([open]) .unit { font-size: var(--fs-xs); }
+  /* Метка окна отдаёт зазор общей сетке, а не своей колонке: иначе «нед» шире «5ч» и его полоска прилипает к буквам. */
+  .limits:not([open]) .meter > .tag { padding-inline-end: var(--s2); }
   .limits:not([open]) .meter[data-window='week'] > .tag { padding-inline-start: var(--s2); }
   .limits:not([open]) .meter { display: contents; }
   .limits:not([open]) .meter[data-window='fable'], .limits:not([open]) .meter[data-window='month'] { display: none; }

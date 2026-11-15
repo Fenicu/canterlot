@@ -187,3 +187,63 @@ test('header_status_ring_keeps_the_same_gap_to_the_title_in_every_state', async 
     expect(state.gap, `зазор кольца (${name}) равен зазору точки`).toBeCloseTo(idle.gap, 0);
   }
 });
+
+test('limits_strip_spaces_both_windows_the_same_way', async ({ page }) => {
+  await boot(page);
+  const segments = await page.evaluate(() => {
+    const read = (window: string) => {
+      const meter = document.querySelector(`.limits .meter[data-window="${window}"]`);
+      if (!meter) throw new Error(`нет окна ${window}`);
+      const rect = (selector: string) => (meter.querySelector(selector) as HTMLElement).getBoundingClientRect();
+      // Метка растянута по своей колонке: глаз меряет зазор от букв, а не от края колонки.
+      const ink = (selector: string) => {
+        const range = document.createRange();
+        range.selectNodeContents(meter.querySelector(selector)!);
+        return range.getBoundingClientRect();
+      };
+      const tag = ink('.tag');
+      const bar = rect('.bar');
+      const pct = ink('.pct');
+      return {
+        tag: (meter.querySelector('.tag') as HTMLElement).textContent?.trim() ?? '',
+        pct: (meter.querySelector('.pct') as HTMLElement).textContent?.trim() ?? '',
+        tagToBar: bar.left - tag.right,
+        barToPct: pct.left - bar.right,
+        barWidth: bar.width
+      };
+    };
+    return { five: read('five'), week: read('week') };
+  });
+
+  expect(segments.five.tag, 'первое окно — пятичасовое').toBe('5ч');
+  expect(segments.week.tag, 'второе окно — недельное').toBe('нед');
+  expect(segments.five.tagToBar, 'зазор после метки недели как после метки 5ч').toBeCloseTo(segments.week.tagToBar, 0);
+  expect(segments.week.tagToBar, 'зазор после метки недели').toBeGreaterThanOrEqual(1.5);
+  expect(segments.five.barToPct, 'зазор после полоски недели как после полоски 5ч').toBeCloseTo(segments.week.barToPct, 0);
+  expect(segments.week.barToPct, 'зазор после полоски недели').toBeGreaterThanOrEqual(1.5);
+  expect(segments.week.barWidth, 'полоски одной ширины').toBeCloseTo(segments.five.barWidth, 0);
+});
+
+test('small_gauge_fill_is_clipped_by_its_track', async ({ page }) => {
+  await boot(page);
+  const fill = await page.evaluate(() => {
+    // Недельное окно заполнено на шестнадцать процентов: заливка уже, чем её скругление.
+    const track = document.querySelector('.limits .meter[data-window="week"] .bar [role="meter"]') as HTMLElement | null;
+    if (!track) throw new Error('нет полоски недели');
+    const span = track.querySelector('span') as HTMLElement;
+    const trackStyle = getComputedStyle(track);
+    const fillStyle = getComputedStyle(span);
+    return {
+      trackOverflow: trackStyle.overflow,
+      trackRadius: Number.parseFloat(trackStyle.borderTopLeftRadius),
+      trackHeight: track.getBoundingClientRect().height,
+      fillRadius: Number.parseFloat(fillStyle.borderTopLeftRadius),
+      now: track.getAttribute('aria-valuenow')
+    };
+  });
+  expect(fill.now, 'неделя заполнена на 16%').toBe('16');
+  expect(fill.trackOverflow, 'дорожка обрезает заливку').toBe('hidden');
+  expect(fill.trackRadius, 'дорожка круглая').toBeGreaterThanOrEqual(fill.trackHeight / 2 - 0.5);
+  expect(fill.fillRadius, 'заливка не скругляет сама себя').toBe(0);
+});
+
