@@ -229,6 +229,8 @@
   /* Метка окна отдаёт зазор общей сетке, а не своей колонке: иначе «нед» шире «5ч» и его полоска прилипает к буквам. */
   .limits:not([open]) .meter > .tag { padding-inline-end: var(--s2); }
   .limits:not([open]) .meter[data-window='week'] > .tag { padding-inline-start: var(--s2); }
+  /* Полоска получает такой же воздух справа, как и слева: без него «▬ост. 39%» читается одним знаком. */
+  .limits:not([open]) .meter > .pct { padding-inline-start: var(--s2); }
   .limits:not([open]) .meter { display: contents; }
   .limits:not([open]) .meter[data-window='fable'], .limits:not([open]) .meter[data-window='month'] { display: none; }
   .limits:not([open]) .name:empty { display: none; }
