@@ -247,3 +247,42 @@ test('small_gauge_fill_is_clipped_by_its_track', async ({ page }) => {
   expect(fill.fillRadius, 'заливка не скругляет сама себя').toBe(0);
 });
 
+test('copy_button_centres_its_icon_and_the_code_reserves_room_for_it', async ({ page }) => {
+  await boot(page);
+  await expect(page.locator('.prose .copy-button')).toBeVisible();
+  const measured = await page.evaluate(() => {
+    const button = document.querySelector('.prose .copy-button') as HTMLElement;
+    const icon = button.querySelector('svg') as SVGElement;
+    const pre = document.querySelector('.prose pre') as HTMLElement;
+    const buttonBox = button.getBoundingClientRect();
+    const iconBox = icon.getBoundingClientRect();
+    const preBox = pre.getBoundingClientRect();
+    const paddingRight = Number.parseFloat(getComputedStyle(pre).paddingRight);
+    return {
+      iconCentre: iconBox.left + iconBox.width / 2,
+      buttonCentre: buttonBox.left + buttonBox.width / 2,
+      codeRight: preBox.right - paddingRight,
+      buttonLeft: buttonBox.left
+    };
+  });
+  expect(Math.abs(measured.iconCentre - measured.buttonCentre), 'значок по центру кнопки').toBeLessThanOrEqual(1);
+  expect(measured.codeRight, 'строка кода кончается до кнопки').toBeLessThanOrEqual(measured.buttonLeft + 0.5);
+});
+
+test('long_code_line_scrolled_to_the_end_stops_before_the_copy_button', async ({ page }) => {
+  await boot(page, { longCode: true });
+  const pre = page.locator('.prose pre');
+  await expect(pre.locator('code')).toContainText('end');
+  const measured = await pre.evaluate((node) => {
+    node.scrollLeft = node.scrollWidth;
+    const code = node.querySelector('code') as HTMLElement;
+    const button = document.querySelector('.prose .copy-button') as HTMLElement;
+    return {
+      scrollLeft: node.scrollLeft,
+      codeRight: code.getBoundingClientRect().right,
+      buttonLeft: button.getBoundingClientRect().left
+    };
+  });
+  expect(measured.scrollLeft, 'длинная строка листается вбок').toBeGreaterThan(0);
+  expect(measured.codeRight, 'конец длинной строки не уходит под кнопку').toBeLessThanOrEqual(measured.buttonLeft + 0.5);
+});

@@ -60,7 +60,8 @@
 .prose code { font-size: var(--fs-meta); }
 .prose :not(pre) > code { padding-inline: var(--s1); border-radius: var(--radius-sm); background: var(--raised); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
 .prose .code-block { position: relative; margin-block: var(--s6); }
-.prose .code-block > pre { width: 100%; margin-block: var(--s0); }
+/* Строка кода не заезжает под кнопку копирования: место под неё оставлено в отступе блока. */
+.prose .code-block > pre { width: 100%; margin-block: var(--s0); padding-inline-end: calc(var(--s2) * 2 + var(--target)); }
 .prose pre { max-width: 100%; padding: var(--s5) var(--s6); overflow-x: auto; overflow-wrap: normal; border-radius: var(--radius-sm); background: var(--code); }
 .prose pre code { font-size: inherit; overflow-wrap: normal; }
 .prose pre[data-fade='end'] { mask-image: linear-gradient(to right, var(--text) calc(100% - var(--s9)), var(--transparent)); }
@@ -82,6 +83,7 @@
   right: var(--s2);
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: var(--s1);
   min-height: var(--s12);
   padding: var(--s1) var(--s2);
