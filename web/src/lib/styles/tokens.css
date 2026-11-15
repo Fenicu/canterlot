@@ -284,7 +284,7 @@
   --warning-soft: #fff1cc;
   --danger: #b42318;
   --danger-soft: #fde8e6;
-  --blue: #2f6fb2;
+  --blue: #2e6dae;
   --code: #f0f2f4;
   --scrim: #e8ebee;
   --chart-secondary: #4f6f8f;
@@ -309,7 +309,7 @@
   --surface: #252526;
   --raised: #2b2b2b;
   --hover: #2a2d2e;
-  --selected: #1f3a52;
+  --selected: #192f43;
   --text: #cccccc;
   --secondary: #c0c0c0;
   --muted: #b0b0b0;
@@ -456,7 +456,7 @@
   --chip-text: #1c1c1c;
   --badge: #8b8b89;
   --accent: #0b7285;
-  --accent-link: #0b7285;
+  --accent-link: #0b7083;
   --accent-ink: #ffffff;
   --accent-soft: #deebec;
   --success: #22703d;
@@ -593,7 +593,7 @@
   --chip-text: #e3e7ec;
   --badge: #7d8590;
   --accent: #7aa7d8;
-  --accent-link: #7aa7d8;
+  --accent-link: #87b0dc;
   --accent-ink: #1d2229;
   --accent-soft: #2a3542;
   --success: #8cc7a1;
@@ -638,7 +638,7 @@
   --chip-text: #1f2933;
   --badge: #858e98;
   --accent: #3b6ea8;
-  --accent-link: #386aa4;
+  --accent-link: #3768a2;
   --accent-ink: #ffffff;
   --accent-soft: #dee6ee;
   --success: #29714e;
@@ -775,7 +775,7 @@
   --chip-text: #f2e3dc;
   --badge: #938077;
   --accent: #e8875f;
-  --accent-link: #e8875f;
+  --accent-link: #ea9470;
   --accent-ink: #2a1d1a;
   --accent-soft: #452c24;
   --success: #adc58e;
@@ -1184,7 +1184,7 @@
   --chip-text: #3d1f2a;
   --badge: #a0808a;
   --accent: #d6336c;
-  --accent-link: #c51e5e;
+  --accent-link: #c01d5b;
   --accent-ink: #ffffff;
   --accent-soft: #fadae4;
   --success: #367141;
@@ -1275,7 +1275,7 @@
   --chip-text: #2b2a14;
   --badge: #8f8b6a;
   --accent: #4e7a0e;
-  --accent-link: #4b7606;
+  --accent-link: #497206;
   --accent-ink: #ffffff;
   --accent-soft: #eaeccc;
   --success: #297546;
@@ -1321,7 +1321,7 @@
   --chip-text: #eceff4;
   --badge: #9ba2af;
   --accent: #88c0d0;
-  --accent-link: #97cfe0;
+  --accent-link: #a9d8e6;
   --accent-ink: #2e3440;
   --accent-soft: #3b4854;
   --success: #aac693;
@@ -1366,7 +1366,7 @@
   --chip-text: #2e3440;
   --badge: #7a8292;
   --accent: #5578a2;
-  --accent-link: #42648d;
+  --accent-link: #41628b;
   --accent-ink: #ffffff;
   --accent-soft: #d4dbe7;
   --success: #51693b;

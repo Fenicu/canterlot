@@ -97,7 +97,10 @@ const textPairs: [string, string[]][] = [
   ]),
   ['chip-text', ['chip']],
   ['accent-ink', ['accent']],
-  ['accent-link', ['bg', 'surface', 'raised']],
+  // Активная вкладка нижней навигации и пилюля действующей политики маршрутизации.
+  ['accent-link', ['bg', 'surface', 'raised', 'selected', 'accent-soft']],
+  // Состояние задачи плана «на проверке».
+  ['blue', ['raised']],
   ...['success', 'warning', 'danger'].flatMap(fg => [
     [fg, ['bg', 'surface', `${fg}-soft`]] as [string, string[]]
   ])
@@ -181,6 +184,14 @@ test('separator_spacing_survives_svelte_block_trimming', () => {
     const markup = readFileSync(path, 'utf8').replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/g, '');
     expect(markup.match(opening)?.[0], path).toBeUndefined();
     expect(markup.match(closing)?.[0], path).toBeUndefined();
+  }
+});
+
+test('focus_ring_meets_non_text_contrast_on_selected_controls', () => {
+  // Кольцо фокуса рисуется токеном --accent поверх заливки выбранного элемента.
+  for (const variant of palettes) {
+    const label = `${variant.palette}/${variant.theme}`;
+    expect(contrast(variant.tokens['--accent']!, variant.tokens['--selected']!), `${label} accent/selected`).toBeGreaterThanOrEqual(3);
   }
 });
 
