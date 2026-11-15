@@ -272,6 +272,25 @@ test('new_session_summary_expands_into_the_prefilled_pickers', async ({ page }) 
   await expect(page.getByRole('button', { name: 'Создать' })).toBeEnabled();
 });
 
+test('new_session_keeps_the_folder_list_closed_after_prefill_and_expand', async ({ page }) => {
+  const asks: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.endsWith('/workdirs/suggest')) asks.push(request.url());
+  });
+  await boot(page, { home: '/srv', latest: {} });
+  const suggestions = page.getByRole('listbox', { name: 'Подсказки папок' });
+  await openNewSessionForm(page);
+  await expect(page.locator('[data-role="new-session-summary"]')).toBeVisible();
+  // Список открывается только вводом владельца: подстановка прошлой папки его не открывает.
+  await page.waitForTimeout(400);
+  await expect(suggestions).toHaveCount(0);
+  await page.getByRole('button', { name: 'Изменить' }).click();
+  await expect(pathField(page)).toHaveValue('/srv/canterlot');
+  await page.waitForTimeout(400);
+  await expect(suggestions).toHaveCount(0);
+  expect(asks).toEqual([]);
+});
+
 test('new_session_removed_model_opens_the_full_form_with_an_empty_model', async ({ page }) => {
   const { machine } = await boot(page, { home: '/srv', latest: { model: 'opus-5.4-removed' } });
   await page.getByRole('link', { name: 'Новая сессия', exact: true }).click();

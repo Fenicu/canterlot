@@ -588,6 +588,7 @@
 	/* Ожидание в других сессиях: янтарный счёт рядом со стрелкой, мишень шире на цифру. */
 	.back.waiting {
 		width: auto;
+		min-width: var(--target);
 		gap: var(--s1);
 		padding-inline: var(--s2);
 		color: var(--warning);

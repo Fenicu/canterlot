@@ -435,8 +435,8 @@
     min-height: var(--target);
     border: var(--s0);
     border-radius: var(--radius-pill);
-    background: var(--transparent);
-    color: var(--secondary);
+    background: var(--raised);
+    color: var(--text);
     padding: var(--s2) var(--s4);
     font-family: var(--font-mono);
     font-size: var(--fs-sm);
