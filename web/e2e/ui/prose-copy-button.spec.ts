@@ -230,14 +230,38 @@ for (const width of WIDTHS) {
       // Кнопка не выходит за нижний край цитаты: цель касания целиком внутри блока.
       expect(shape.button.bottom, `низ кнопки внутри цитаты (${name})`).toBeLessThanOrEqual(shape.quote.bottom + 0.5);
       expect(shape.quote.right, `цитата внутри карточки (${name})`).toBeLessThanOrEqual(shape.card.right + 0.5);
-      // Текст остаётся на своём месте: запас под кнопку не добавляет цитате вертикальных полей.
-      expect(shape.text.top - shape.quote.top, `верхнее поле цитаты (${name})`).toBeCloseTo(8, 0);
+      // Многострочная цитата не растёт под кнопку: её поля остаются полями вёрстки.
+      if (shape.lines.length > 1) expect(shape.text.top - shape.quote.top, `верхнее поле цитаты (${name})`).toBeCloseTo(8, 0);
       const hit = shape.lines.filter((line) => overlaps(shape.button, line));
       expect(hit, `кнопка накрывает строки цитаты (${name})`).toEqual([]);
       // Строка целиком слева от кнопки: она не подходит под неё и не выглядывает справа.
       for (const line of shape.lines) {
         expect(line.right, `строка не заходит под кнопку (${name})`).toBeLessThanOrEqual(shape.button.left + 0.5);
       }
+    }
+  });
+
+  test(`blockquote_keeps_even_top_and_bottom_gaps_${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 892 });
+    await boot(page);
+    const quotes = await quoteShapes(page);
+
+    expect(quotes, 'три цитаты с кнопками').toHaveLength(3);
+    const [single, two, three] = quotes as [QuoteShape, QuoteShape, QuoteShape];
+    expect(single.lines.length, 'первая цитата в одну строку').toBe(1);
+    expect(two.lines.length, 'вторая цитата не короче двух строк').toBeGreaterThanOrEqual(2);
+    expect(three.lines.length, 'третья цитата не короче трёх строк').toBeGreaterThanOrEqual(3);
+
+    for (const [name, shape] of [['в одну строку', single], ['в две строки', two], ['в три строки', three]] as const) {
+      // Поля цитаты — то, чем владелец меряет ровность карточки: рамка текста сверху и снизу.
+      const boxTop = shape.text.top - shape.quote.top;
+      const boxBottom = shape.quote.bottom - shape.text.bottom;
+      expect(Math.abs(boxTop - boxBottom), `поля цитаты сверху и снизу (${name})`).toBeLessThanOrEqual(0.5);
+      // Чернила строки лежат в своей строке не по центру (полулидинг кегля), поэтому здесь запас 2 px:
+      // при ровных полях карточки чернила расходятся на 1,5 px, и это свойство шрифта, а не отступа.
+      const inkTop = shape.lines[0]!.top - shape.quote.top;
+      const inkBottom = shape.quote.bottom - shape.lines[shape.lines.length - 1]!.bottom;
+      expect(Math.abs(inkTop - inkBottom), `чернила первой и последней строки (${name})`).toBeLessThanOrEqual(2);
     }
   });
 
@@ -262,6 +286,10 @@ for (const width of WIDTHS) {
       // Строка кода не уезжает под кнопку.
       expect(shape.code.right, `строка кода кончается до кнопки (${name})`).toBeLessThanOrEqual(shape.button.left + 0.5);
       expect(shape.block.right, `блок внутри карточки (${name})`).toBeLessThanOrEqual(shape.card.right + 0.5);
+      // Полей у блока кода нет: чернила стоят на равном отступе от его верха и низа (с тем же полулидингом).
+      const inkTop = shape.code.top - shape.pre.top;
+      const inkBottom = shape.pre.bottom - shape.code.bottom;
+      expect(Math.abs(inkTop - inkBottom), `строка кода по центру блока (${name})`).toBeLessThanOrEqual(2);
     }
 
     // Зазор до следующего абзаца одинаков у однострочного и у двухстрочного блока.

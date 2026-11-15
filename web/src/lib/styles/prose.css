@@ -70,6 +70,9 @@
 .prose blockquote { position: relative; margin-inline: var(--s0); padding: var(--s4) var(--s6); border-radius: var(--radius-sm); background: var(--raised); color: var(--secondary); }
 .prose blockquote > :first-child { margin-top: var(--s0); }
 .prose blockquote > :last-child { margin-bottom: var(--s0); }
+/* Кнопка копирования — последний ребёнок цитаты, а не её текст: без этого правила нижнее поле
+   последнего абзаца оставалось и низ цитаты выходил на 12 px тяжелее верха. */
+.prose blockquote:has(> .copy-button) > :has(+ .copy-button:last-child) { margin-block-end: var(--s0); }
 .prose table { display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; border-collapse: separate; border-spacing: var(--s0); font-size: var(--fs-meta); touch-action: pan-x pan-y; -webkit-overflow-scrolling: touch; }
 .prose :is(th, td) { padding: var(--s3) var(--s5); text-align: left; vertical-align: top; }
 .prose th { color: var(--secondary); font-weight: var(--weight-medium); }
@@ -109,6 +112,7 @@
   .prose blockquote:has(> .copy-button) {
     padding-inline-end: calc(var(--s2) * 2 + var(--target));
     min-height: calc(var(--target) + var(--s2) * 2);
+    align-content: center;
   }
   /* Однострочный блок кода ниже кнопки: он подрастает до её высоты и держит строку по центру,
      иначе кнопка свисает за нижний край и отнимает зазор у следующего абзаца. */
