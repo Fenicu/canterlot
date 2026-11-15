@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { FakeHub, FakeHubApi, seedConversation, seedPresets } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, seedConversation, seedMachine, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import type { ListRow } from '../../src/lib/stores/list.svelte';
@@ -331,6 +331,67 @@ test('new_session_in_a_group_prefills_from_that_group', async ({ page }) => {
   await expect(page.locator('[data-role="new-session-summary"]')).toHaveText(
     'Как в прошлый раз · workstation · ~/grouped · opus-5.5 · Обычное'
   );
+});
+
+test('new_session_prefills_from_the_last_manual_session_and_not_from_a_delegate', async ({ page }) => {
+  const { api, ids } = await boot(page, { home: '/srv' });
+  // Машина субагента тоже есть в каталоге: иначе подставить его настройки было бы нельзя и проверка была бы слабее.
+  const host = seedMachine(api, {
+    name: 'delegate-host',
+    availability: 'ready',
+    harnesses: [
+      {
+        id: 'codex',
+        title: 'Codex',
+        provider: 'codex',
+        models: [{ id: 'gpt-6.1-sol', title: 'gpt-6.1-sol', efforts: ['high'] }],
+        permission_modes: ['owner']
+      }
+    ]
+  });
+  host.capabilities = ['pilot_v1'];
+  const manual = seedConversation(api, {
+    title: 'Ручная сессия',
+    machine: { id: ids.machine, name: 'workstation' },
+    harness: { id: 'claude', title: 'Claude Code', provider: 'claude' },
+    workdir: '/srv/canterlot',
+    model: 'opus',
+    effort: 'medium',
+    created_at: '2026-11-10T10:00:00.000Z'
+  });
+  seedConversation(api, {
+    title: 'Субагент',
+    parent_id: manual,
+    machine: { id: host.id, name: 'delegate-host' },
+    harness: { id: 'codex', title: 'Codex', provider: 'codex' },
+    workdir: '/srv/delegate',
+    model: 'gpt-6.1-sol',
+    effort: 'high',
+    created_at: '2026-11-14T10:00:00.000Z'
+  });
+  await openNewSessionForm(page);
+  await expect(page.locator('[data-role="new-session-summary"]')).toHaveText(
+    'Как в прошлый раз · workstation · ~/canterlot · opus-5.5 · Обычное'
+  );
+});
+
+test('new_session_stays_open_when_only_agents_started_sessions', async ({ page }) => {
+  const { api, ids } = await boot(page, { home: '/srv', noSessions: true });
+  seedConversation(api, {
+    title: 'Субагент',
+    parent_id: ids.pinned,
+    machine: { id: ids.machine, name: 'workstation' },
+    harness: { id: 'claude', title: 'Claude Code', provider: 'claude' },
+    workdir: '/srv/delegate',
+    model: 'opus',
+    effort: 'medium',
+    created_at: '2026-11-14T10:00:00.000Z'
+  });
+  await openNewSessionForm(page);
+  await expect(page.locator('[data-role="new-session-summary"]')).toHaveCount(0);
+  await expect(page.getByText('Как в прошлый раз')).toHaveCount(0);
+  await expect(page.getByRole('combobox', { name: 'Машина' })).toHaveValue('');
+  await expect(pathField(page)).toHaveValue('');
 });
 
 test('new_session_prefills_home_and_recent_folders_do_not_replace_it', async ({ page }) => {

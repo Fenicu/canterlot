@@ -11,6 +11,8 @@ export interface PrefillSession {
   created_at: string;
   groups: string[];
   trashed_at?: string | null;
+  /** Сессия запущена агентом: её настройки владелец не выбирал. */
+  parent_id?: string | null;
 }
 
 export interface SessionPrefill {
@@ -21,7 +23,10 @@ export interface SessionPrefill {
   effort: string;
 }
 
-/** Прошлая сессия — самая свежая по времени создания; в группе — самая свежая из неё. */
+/**
+ * Прошлая сессия — самая свежая по времени создания из созданных владельцем; в группе —
+ * самая свежая из неё.
+ */
 export function latestSession(
   sessions: Iterable<PrefillSession>,
   group = "",
@@ -30,6 +35,8 @@ export function latestSession(
   let bestAt = -Infinity;
   for (const item of sessions) {
     if (item.trashed_at) continue;
+    // Субагент получил машину, модель и папку от оркестратора: это не выбор владельца.
+    if (item.parent_id) continue;
     if (group && !item.groups.includes(group)) continue;
     const at = Date.parse(item.created_at);
     const stamp = Number.isFinite(at) ? at : 0;

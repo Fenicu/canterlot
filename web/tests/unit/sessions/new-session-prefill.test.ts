@@ -80,6 +80,46 @@ describe("sessions/new prefill", () => {
     expect(latestSession([grouped, newer], "missing")).toBeNull();
   });
 
+  it("new_session_prefill_ignores_a_session_started_by_an_agent", () => {
+    const manual = session({
+      created_at: "2026-11-01T10:00:00.000Z",
+      workdir: "/srv/manual",
+    });
+    const delegate = session({
+      created_at: "2026-11-02T10:00:00.000Z",
+      workdir: "/srv/delegate",
+      parent_id: "orchestrator",
+    });
+
+    expect(latestSession([delegate, manual])).toBe(manual);
+    expect(
+      prefillFromSession(latestSession([manual, delegate]), [machine()])?.workdir,
+    ).toBe("/srv/manual");
+  });
+
+  it("new_session_prefill_ignores_an_agent_session_of_the_open_group", () => {
+    const grouped = session({
+      created_at: "2026-10-05T10:00:00.000Z",
+      groups: ["g1"],
+      workdir: "/srv/grouped",
+    });
+    const delegate = session({
+      created_at: "2026-11-05T10:00:00.000Z",
+      groups: ["g1"],
+      workdir: "/srv/delegate",
+      parent_id: "orchestrator",
+    });
+
+    expect(latestSession([grouped, delegate], "g1")).toBe(grouped);
+  });
+
+  it("new_session_prefill_stays_empty_when_only_agents_started_sessions", () => {
+    const delegate = session({ parent_id: "orchestrator" });
+
+    expect(latestSession([delegate])).toBeNull();
+    expect(prefillFromSession(latestSession([delegate]), [machine()])).toBeNull();
+  });
+
   it("new_session_prefill_leaves_an_offline_or_unknown_machine_empty", () => {
     for (const availability of ["unavailable", "degraded"]) {
       const prefill = prefillFromSession(session(), [
