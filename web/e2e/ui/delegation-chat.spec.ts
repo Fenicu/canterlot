@@ -86,8 +86,19 @@ test('parent_link_opens_parent', async ({ page }) => {
 
   const link = page.getByRole('link', { name: 'Запущена сессией Оркестратор' });
   await expect(link).toBeVisible();
-  // Ссылка держит зону нажатия 44px, а кнопки шапки стоят у названия, не посередине трёх строк.
-  expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  // Ссылка держит зону нажатия 44px вне строки, а кнопки шапки стоят у названия, не посередине трёх строк.
+  const hitHeight = await link.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const x = rect.x + rect.width / 2;
+    const y = rect.y + rect.height / 2;
+    const hits = (point: number) => document.elementFromPoint(x, point)?.closest('[data-parent-link]') === node;
+    let up = 0;
+    let down = 0;
+    while (up < 48 && hits(y - up - 1)) up += 1;
+    while (down < 48 && hits(y + down + 1)) down += 1;
+    return up + down + 1;
+  });
+  expect(hitHeight).toBeGreaterThanOrEqual(44);
   const title = (await page.locator('.chat-header .header-title').boundingBox())!;
   const menu = (await page.getByRole('button', { name: 'Меню сессии' }).boundingBox())!;
   expect(menu.y).toBeLessThanOrEqual(title.y + title.height);

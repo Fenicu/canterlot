@@ -248,7 +248,7 @@
 
 
 <div class="chat-header" role="region" aria-label="Шапка чата" data-top-chrome>
-	<div class="topbar" class:tall={!!parentId || !!nudgeText}>
+	<div class="topbar" class:tall={!!parentId || !!route || !!nudgeText}>
 		{#if !pane.desktop}
 			<a
 				class="icon-button back"
@@ -286,17 +286,18 @@
 			</div>
 			{#if parentId}
 				<div class="parent-row">
-					<a class="parent-link" data-parent-link href={resolve(`c/${parentId}`)}>Запущена сессией {parentTitle || 'без названия'}</a>
+					<a class="parent-link" data-parent-link href={resolve(`c/${parentId}`)}><span class="parent-text">Запущена сессией {parentTitle || 'без названия'}</span></a>
 				</div>
 			{/if}
-			{#if route}
-				<div class="nudge-row route-row">
-					<button type="button" class="nudge-link" data-role="route-state-line" onclick={onOpenRoute}>Выбрана маршрутом «{routingTitles.title(route.task_type)}»</button>
-				</div>
-			{/if}
-			{#if nudgeText}
-				<div class="nudge-row">
-					<button type="button" class="nudge-link" data-role="nudge-state-line" onclick={onOpenNudge}>{nudgeText}</button>
+			{#if route || nudgeText}
+				<div class="context-row">
+					{#if route}
+						<button type="button" class="context-link route-link" data-role="route-state-line" onclick={onOpenRoute}>Выбрана маршрутом «{routingTitles.title(route.task_type)}»</button>
+					{/if}
+					{#if route && nudgeText}<span class="context-sep" aria-hidden="true">·</span>{/if}
+					{#if nudgeText}
+						<button type="button" class="context-link nudge-link" data-role="nudge-state-line" onclick={onOpenNudge}>{nudgeText}</button>
+					{/if}
 				</div>
 			{/if}
 		</div>
@@ -565,18 +566,28 @@
 		min-width: 0;
 		padding-left: calc(var(--mark-large) + var(--s3));
 	}
-	/* Зона нажатия 44px держится отступами, а не высотой строки, чтобы ссылка не раздвигала шапку. */
 	.parent-link {
-		--pad: calc((var(--target) - var(--fs-sm) * var(--lh-tight)) / 2);
+		position: relative;
 		display: block;
-		padding-block: var(--pad);
-		margin-block: calc(-1 * var(--pad));
 		line-height: var(--lh-tight);
 		font-size: var(--fs-sm);
 		color: var(--accent-link);
-		white-space: nowrap;
+	}
+	/* Многоточие живёт на внутренней строке: якорь не обрезает свою цель 44 px. */
+	.parent-text {
+		display: block;
 		overflow: hidden;
+		white-space: nowrap;
 		text-overflow: ellipsis;
+	}
+	/* Цель 44px выходит за строку, но не двигает соседние строки. */
+	.parent-link::after {
+		content: '';
+		position: absolute;
+		left: var(--s0);
+		right: var(--s0);
+		top: calc((100% - var(--target)) / 2);
+		height: var(--target);
 	}
 	.parent-link:focus-visible {
 		outline: var(--focus-width) solid var(--accent);
@@ -698,25 +709,51 @@
 		font-size: var(--fs-meta);
 		color: var(--danger);
 	}
-	.nudge-row {
-		margin-top: var(--s1);
-		padding-left: calc(var(--mark-large) + var(--s3));
-	}
-	/* Строка маршрута стоит под ссылкой на родителя и начинается с той же линии. */
-	.route-row {
-		margin-top: var(--s0);
-		padding-left: calc(var(--mark-large) + var(--s3));
-	}
-	.nudge-link {
+	/* Маршрут и автопинок — одна тихая строка с двумя целями: две отдельные строки по 44 px
+	   утроили бы шапку, а общая строка даёт каждой цели свои 44 px без наложения текста. */
+	.context-row {
+		display: flex;
+		align-items: center;
+		gap: var(--s3);
+		min-width: 0;
 		min-height: var(--target);
-		padding: 0;
+		padding-left: calc(var(--mark-large) + var(--s3));
+	}
+	.context-link {
+		display: block;
+		min-width: 0;
+		height: var(--target);
+		padding: var(--s0);
+		border: var(--s0);
 		background: transparent;
 		color: var(--muted);
 		font-size: var(--fs-meta);
+		line-height: var(--target);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 		text-align: left;
 	}
-	.nudge-link:hover,
-	.nudge-link:focus-visible {
+	/* Маршрут забирает свободное место, автопинок — не больше 45%: обе строки остаются читаемыми. */
+	.route-link {
+		flex: 1 1 0;
+	}
+	.nudge-link {
+		flex: 0 0 auto;
+		max-width: 60%;
+	}
+	.context-link:only-child {
+		flex: 1 1 0;
+		max-width: 100%;
+	}
+	.context-sep {
+		flex: none;
+		color: var(--muted);
+		font-size: var(--fs-meta);
+		line-height: var(--lh-tight);
+	}
+	.context-link:hover,
+	.context-link:focus-visible {
 		color: var(--secondary);
 		text-decoration: underline;
 		text-underline-offset: var(--s1);

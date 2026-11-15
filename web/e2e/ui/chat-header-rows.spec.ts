@@ -2,6 +2,8 @@ import type { Page } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { FakeHub, FakeHubApi, seedConversation, seedMachine, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
+import { ROUTE_DECISION } from '../../testing/fixtures/routing';
+import { PALETTES } from '../../src/lib/palettes';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
@@ -21,15 +23,17 @@ const CATALOG = {
 	]
 };
 
-type Variant = 'plain' | 'parent' | 'nudge';
-const VARIANTS: Variant[] = ['plain', 'parent', 'nudge'];
+type Variant = 'plain' | 'parent' | 'route' | 'nudge' | 'parent-route-nudge';
+const VARIANTS: Variant[] = ['plain', 'parent', 'route', 'nudge', 'parent-route-nudge'];
 const WIDTHS = [360, 412] as const;
 
-/** Потолок шапки для варианта. */
+/** Потолок шапки для варианта: родитель + одна строка маршрута и толчка. */
 const MAX_HEIGHT: Record<Variant, number> = {
 	plain: 130,
 	parent: 150,
-	nudge: 180
+	route: 180,
+	nudge: 180,
+	'parent-route-nudge': 195
 };
 
 function nudgeRule(id: string) {
@@ -79,8 +83,9 @@ async function boot(
 	await page.setViewportSize({ width: opts.width, height: opts.height ?? 892 });
 	await page.addInitScript(
 		({ theme, palette }) => {
-			localStorage.setItem('canterlot.theme', theme);
-			localStorage.setItem('canterlot.palette', palette);
+			// Матрица палитр меняет значения перед reload: стартовый скрипт не должен их перетирать.
+			if (localStorage.getItem('canterlot.theme') === null) localStorage.setItem('canterlot.theme', theme);
+			if (localStorage.getItem('canterlot.palette') === null) localStorage.setItem('canterlot.palette', palette);
 		},
 		{ theme: opts.theme ?? 'dark', palette: opts.palette ?? 'standard' }
 	);
@@ -99,6 +104,7 @@ async function boot(
 	const detail = api.details.get(id)!;
 	detail.harness = { id: 'claude', title: 'Claude Code', provider: 'claude' };
 	detail.machine = { id: 'workstation', name: 'workstation' };
+	if (opts.variant.includes('route')) detail.routing = ROUTE_DECISION;
 	if (opts.variant.includes('nudge')) api.nudgeRules.set(id, nudgeRule(id) as never);
 	api.limits = LIMITS;
 
@@ -321,3 +327,40 @@ for (const width of WIDTHS) {
 		});
 	}
 }
+
+test('header_rows_hold_in_every_palette_and_both_themes', async ({ page }, info) => {
+	test.skip(info.project.name !== 'phone', 'телефонная шапка');
+	test.setTimeout(240_000);
+	await boot(page, { width: 360, theme: 'dark', palette: 'standard', variant: 'parent-route-nudge' });
+	for (const theme of ['dark', 'light']) {
+		for (const palette of PALETTES) {
+			await page.evaluate(
+				({ palette, theme }) => {
+					localStorage.setItem('canterlot.palette', palette);
+					localStorage.setItem('canterlot.theme', theme);
+				},
+				{ palette: palette.key, theme }
+			);
+			await page.reload();
+			await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
+			await expect(page.locator('html')).toHaveAttribute('data-palette', palette.key);
+			await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+			const g = await geometry(page);
+			expectAlignedWithTitle(g);
+			expectRowsInset(g);
+			expectOneLineRows(g);
+			expect(g.header.height, `${palette.key}/${theme}`).toBeLessThanOrEqual(MAX_HEIGHT['parent-route-nudge']);
+		}
+	}
+});
+
+test('desktop_header_keeps_one_line_rows', async ({ page }, info) => {
+	test.skip(info.project.name !== 'desktop', 'настольная шапка');
+	await boot(page, { width: 1440, height: 900, theme: 'dark', variant: 'parent-route-nudge' });
+	const g = await geometry(page);
+	expect(g.back, 'на столе стрелки назад нет').toBeNull();
+	expectAlignedWithTitle(g);
+	expectRowsInset(g);
+	expectOneLineRows(g);
+	expectTapTargets(g);
+});
