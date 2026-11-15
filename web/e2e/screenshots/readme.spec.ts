@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -8,7 +8,6 @@ import { seedConversation } from '../../testing/fake-hub/seed';
 import { Feed, hubText } from '../../testing/fixtures/feed-cards';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { FOUR, openViewer, seedFour, showChrome, thumb } from '../ui/image-gallery-fixture';
-import { screenshotPng } from '../ui/image-viewer-fixture';
 import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelte';
 import type { PlanTask } from '../../src/lib/stores/plan.svelte';
 
@@ -605,6 +604,27 @@ async function shoot(page: Page, name: string, options: Parameters<Page['screens
   optimize(path);
 }
 
+/** Настоящий экран приложения для картинки, которую агент отдал в ленту: чат с кодом, очередью и контекстом. */
+async function sharedScreenshot(context: BrowserContext): Promise<Buffer> {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const id = seedChat(api);
+  const page = await context.newPage();
+  // Экран чуть ниже сцены просмотрщика: кнопки и подпись ложатся на чёрные поля, а не на сам снимок.
+  await page.setViewportSize({ width: 390, height: 700 });
+  await prepare(page, 'aquamarine', 'dark');
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.prose pre code')).toBeVisible();
+  await page.locator('.tool .head').last().click();
+  await expect(page.locator('.tool .out pre')).toContainText('test result: ok. 3 passed');
+  await settle(page);
+  const body = await page.screenshot({ animations: 'disabled' });
+  await page.close();
+  return body;
+}
+
 test.use({ timezoneId: 'Europe/Moscow', browserName: 'chromium' });
 test.beforeAll(() => mkdirSync(OUT, { recursive: true }));
 
@@ -880,10 +900,11 @@ test.describe('скриншоты README для телефона', () => {
 
   test('просмотрщик картинок сессии в Стандартной, светлая', async ({ page }) => {
     await prepare(page, 'standard', 'light');
+    // Агент отдал в ленту настоящий снимок приложения: его и открывает просмотрщик.
+    const shared = await sharedScreenshot(page.context());
     // Пять картинок сессии, вторая открыта: счётчик «2 из 5» и кнопка «Показать в чате» в шапке.
     await seedFour(page);
-    // Вторая картинка вертикальная, как снимок телефона: в кадре она занимает почти всю сцену.
-    await page.route('**/api/v1/attachments/g-2/content', (route) => route.fulfill({ contentType: 'image/png', body: screenshotPng(900, 1400, 190) }));
+    await page.route('**/api/v1/attachments/g-2/content', (route) => route.fulfill({ contentType: 'image/png', body: shared }));
     const dialog = await openViewer(page, thumb(page, FOUR.second));
     await expect(dialog.locator('.counter')).toHaveText('2 из 5');
     await expect(dialog.getByRole('button', { name: 'Показать в чате' })).toBeVisible();
