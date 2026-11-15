@@ -190,7 +190,7 @@
   .system[data-event-kind='api_error'] .action { color: var(--text); text-decoration: underline; text-underline-offset: var(--s1); text-decoration-color: var(--accent-link); }
   .fold { display: grid; grid-template-rows: 1fr; animation: fold var(--duration-expand) var(--ease-expand); }
   .body { min-height: 0; overflow: hidden; color: var(--secondary); }
-  /* Исходный текст ошибки — как есть: разметку провайдера не разбираем. */
-  .body.plain { margin: 0; padding-block: var(--s2); white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* Исходный текст ошибки — вторичная подробность: как пояснение, а не как тело ответа. */
+  .body.plain { margin: 0; padding-block: var(--s2); color: var(--secondary); font-size: var(--fs-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
   @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
 </style>

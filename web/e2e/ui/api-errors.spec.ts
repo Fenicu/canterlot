@@ -68,7 +68,9 @@ test('a_403_verification_error_is_its_own_bubble_with_the_provider_link_and_fold
   // Вид отказа назван словами: цвет не единственный носитель состояния.
   await expect(bubble).toHaveAttribute('aria-label', 'Claude: аккаунт требует проверки');
   await expect(bubble).toContainText('аккаунт требует проверки');
-  await expect(bubble).toContainText('Сессия ждёт, пока аккаунт не пройдёт проверку на странице провайдера.');
+  await expect(bubble).toContainText(
+    'Провайдер не отвечает этому аккаунту, пока он не пройдёт проверку. После проверки отправьте сообщение снова.'
+  );
 
   const link = bubble.getByRole('link', { name: 'Открыть страницу провайдера' });
   await expect(link).toHaveAttribute('href', VERIFY_URL);
@@ -86,7 +88,10 @@ test('a_403_verification_error_is_its_own_bubble_with_the_provider_link_and_fold
   await expect(details).toHaveAttribute('aria-expanded', 'true');
   const body = bubble.locator('[data-role="system-body"]');
   await expect(body).toHaveText(VERIFY_TEXT);
-  // Исходный текст — простой текст: ни ссылок, ни разметки провайдера.
+  // Исходный текст — вторичная подробность того же размера, что и пояснение.
+  const reasonSize = await bubble.locator('.reason').evaluate((node) => getComputedStyle(node).fontSize);
+  await expect(body).toHaveCSS('font-size', reasonSize);
+  // И простой текст: ни ссылок, ни разметки провайдера.
   await expect(body.locator('a, strong, code, h1, h2, h3')).toHaveCount(0);
 
   // Ошибка не повторяется уведомлением в карточке ответа, и пустой карточки не осталось.

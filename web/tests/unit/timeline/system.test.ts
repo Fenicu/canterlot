@@ -402,7 +402,7 @@ describe('timeline/system api error', () => {
       icon: 'warning',
       title: 'Claude: аккаунт требует проверки',
       tone: 'danger',
-      reason: 'Сессия ждёт, пока аккаунт не пройдёт проверку на странице провайдера.',
+      reason: 'Провайдер не отвечает этому аккаунту, пока он не пройдёт проверку. После проверки отправьте сообщение снова.',
       action: {
         kind: 'link',
         label: 'Открыть страницу провайдера',
@@ -422,7 +422,7 @@ describe('timeline/system api error', () => {
     expect(view).toMatchObject({
       title: 'Claude: нужен повторный вход',
       tone: 'danger',
-      reason: 'Провайдер не принял вход. Проверьте вход в аккаунт на машине и повторите запрос.'
+      reason: 'Нужно войти заново на машине, затем отправить сообщение снова.'
     });
     expect(view?.action).toBeUndefined();
   });
