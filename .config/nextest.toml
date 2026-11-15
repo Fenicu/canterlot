@@ -45,34 +45,3 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 # ничего не перезапускается. Запись помечается строкой с причиной (слово в верхнем регистре, см. выше), её показывает
 # scripts/list-quarantine.sh. Правила карантина идут выше; в вебе карантин
 # ведётся такими же пометками в спеках Playwright.
-
-# QUARANTINE: под нагрузкой гейта не укладывалось ожидание файла вложения. 15.11 сон заменён условием,
-# окно 60 с; без нагрузки 10/10, под нагрузкой не проверено. Повтор разрешён.
-[[profile.default.overrides]]
-filter = 'test(=exec_attachments::large_attachment_does_not_starve_control_session)'
-retries = 2
-
-# QUARANTINE: под нагрузкой висящий блок не успевал закрыться к проверке. 15.11 проверка стала ожиданием
-# условия; без нагрузки 10/10, под нагрузкой не проверено. Повтор разрешён.
-[[profile.default.overrides]]
-filter = 'test(=exec_e2e::killed_supervisor_with_nothing_left_fails_and_the_session_resumes)'
-retries = 2
-
-# QUARANTINE: ожидание подтверждения журнала (10 с) мало под нагрузкой гейта. 15.11 окно 60 с; без нагрузки
-# 10/10, под нагрузкой не проверено. Повтор разрешён.
-[[profile.default.overrides]]
-filter = 'test(=session::task8::real::sj_batches_are_acked_and_compacted)'
-retries = 2
-
-# QUARANTINE: в гейте 1.22.3 шёл 67 с и упал под нагрузкой; 15.11 не воспроизвёлся, вывода падения нет.
-# Повтор разрешён.
-[[profile.default.overrides]]
-filter = 'test(=exec_e2e::transport_errors_never_stop_an_execution)'
-retries = 2
-
-# QUARANTINE: под нагрузкой лишние переподключения данных (3–5 вместо 2) при верном ответе: таймаут
-# квитанций, не отказ по несвежему. 15.11 окна квитанций 30 с; без нагрузки 10/10, под нагрузкой не
-# проверено. Повтор разрешён.
-[[profile.default.overrides]]
-filter = 'test(=exec_e2e::wave_w_data_reattach_discards_stale_sj_batches)'
-retries = 2
