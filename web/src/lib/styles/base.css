@@ -15,7 +15,7 @@ a { color: inherit; text-decoration: none; }
 .tap-target::after {
   content: '';
   position: absolute;
-  inset: min(0px, calc((100% - var(--target)) / 2)) 0;
+  inset: calc((min(100%, var(--target)) - var(--target)) / 2) 0;
 }
 button { border: var(--s0); background: var(--raised); border-radius: var(--radius-pill); }
 button, a, summary { transition: background-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), transform var(--duration-press) var(--ease-press); }
