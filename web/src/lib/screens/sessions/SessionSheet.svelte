@@ -510,8 +510,11 @@
   .chips { display: flex; flex-wrap: wrap; gap: var(--s3); }
   .link { min-height: var(--target); padding-inline: var(--s2); border-radius: var(--radius-sm); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); }
   .note { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
-  .archive { display: flex; align-items: center; gap: var(--s6); width: 100%; min-height: var(--target); padding: var(--s2) var(--s6); border-radius: var(--radius-pill); background: var(--raised); color: var(--text); text-align: left; }
-  .archive span { flex: 1; }
+  /* Подпись и подсказка стоят друг под другом: строка не ломает название и обе строки листа одной высоты. */
+  .archive { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--s6); row-gap: var(--s1); align-items: center; width: 100%; min-height: var(--target); padding: var(--s2) var(--s6); border-radius: var(--radius-card); background: var(--raised); color: var(--text); text-align: left; }
+  .archive > :global(svg) { grid-row: 1 / span 2; align-self: center; }
+  .archive span { grid-column: 2; min-width: 0; }
+  .archive small { grid-column: 2; min-width: 0; }
   .remove { background: var(--danger-soft); color: var(--danger); }
   .error { margin: 0; color: var(--danger); font-size: var(--fs-sm); }
 </style>
