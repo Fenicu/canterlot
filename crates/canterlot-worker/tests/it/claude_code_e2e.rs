@@ -3167,7 +3167,8 @@ import sys, pathlib, json
 d = pathlib.Path(__file__).parent
 if '--version' in sys.argv:
     print((d / 'version').read_text()); sys.exit(0)
-(d / 'argv.json').write_text(json.dumps(sys.argv[1:]))
+(d / 'argv.tmp').write_text(json.dumps(sys.argv[1:]))
+(d / 'argv.tmp').replace(d / 'argv.json')
 sys.stdin.read()
 "#;
     for (version, enabled, isolate, expected) in [
