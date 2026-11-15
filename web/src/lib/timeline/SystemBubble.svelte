@@ -104,8 +104,10 @@
       {/if}
     {/if}
     <button type="button" class="text-toggle" aria-expanded={open} onclick={onToggle}>
+      <span class="fold-label">{view.foldLabel ?? 'Текст для агента'}</span>
+      <!-- Стрелка стоит после подписи, как в меню и плане: перед подписью она читалась
+           разделителем между соседними действиями карточки. -->
       <span class="chevron" data-open={open ? '' : undefined}><Icon name="chevron" /></span>
-      {view.foldLabel ?? 'Текст для агента'}
     </button>
   </div>
   {#if open}
@@ -133,14 +135,23 @@
   }
   .system[data-tone='warning'] { background: var(--warning-soft); }
   .system[data-tone='danger'] { background: var(--danger-soft); }
+  /* Заголовок, время и закладка стоят одной строкой сетки: длинный заголовок переносится
+     в своей колонке, а пара справа остаётся в полосе его первой строки и не уезжает
+     отдельной строкой под ним. */
   header {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: baseline;
     gap: var(--s3) var(--s6);
     min-width: 0;
   }
-  .icon { display: inline-flex; align-self: center; color: var(--muted); }
+  header:has(.meta) { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .icon {
+    display: inline-flex;
+    align-self: start;
+    margin-block-start: calc((var(--fs-body) * var(--lh-body) - var(--icon-small)) / 2);
+    color: var(--muted);
+  }
   .icon :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   [data-tone='warning'] .icon, [data-tone='warning'] .title { color: var(--warning); }
   [data-tone='danger'] .icon, [data-tone='danger'] .title { color: var(--danger); }
@@ -153,8 +164,8 @@
   .title[href] { display: inline-flex; align-items: center; min-height: var(--target); margin-block: calc((var(--target) - var(--fs-body) * var(--lh-body)) / -2); color: var(--accent-link); text-decoration: none; }
   .title[href]:hover, .title[href]:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
-  /* Время и закладка ходят парой: на телефоне строка заголовка переносится целиком. */
-  .meta { display: flex; align-items: center; gap: var(--s2); margin-left: auto; }
+  /* Время и закладка ходят парой в правой колонке шапки. */
+  .meta { display: flex; align-items: center; justify-self: end; gap: var(--s2); }
   .actions { display: flex; align-self: center; margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2); }
   .reason { margin: 0; color: var(--secondary); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .facts {

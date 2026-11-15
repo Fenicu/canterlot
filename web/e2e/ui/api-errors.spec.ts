@@ -32,6 +32,8 @@ function apiBubble(page: Page, title: string) {
   return page.locator('article.system[data-event-kind="api_error"]').filter({ hasText: title });
 }
 
+type Box = { x: number; y: number; width: number; height: number };
+
 /** Контраст текста элемента с ближайшим непрозрачным фоном под ним, по формуле WCAG. */
 function textContrast(locator: ReturnType<typeof apiBubble>) {
   return locator.evaluate((node) => {
@@ -112,6 +114,74 @@ test('a_403_verification_error_is_its_own_bubble_with_the_provider_link_and_fold
   });
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('the_long_403_header_keeps_the_time_and_bookmark_on_the_title_first_line', async ({ page }) => {
+  await boot(page);
+  // Проверка именно телефонной ширины из задачи: на 390 заголовок не помещается целиком.
+  if (test.info().project.name === 'phone') await page.setViewportSize({ width: 390, height: 844 });
+  const bubble = apiBubble(page, 'Claude: аккаунт требует проверки');
+  await bubble.scrollIntoViewIfNeeded();
+
+  const header = (await bubble.locator('header').boundingBox())!;
+  const titleBox = (await bubble.locator('header .title').boundingBox())!;
+  const line = await bubble
+    .locator('header .title')
+    .evaluate((node) => parseFloat(getComputedStyle(node).lineHeight));
+  const timeBox = (await bubble.locator('header time').boundingBox())!;
+  const bookmarkBox = (await bubble.getByRole('button', { name: 'В избранное' }).boundingBox())!;
+
+  // Время и закладка стоят в полосе первой строки заголовка, а не отдельной строкой под ним.
+  const firstLineTop = titleBox.y;
+  const firstLineBottom = titleBox.y + line;
+  for (const [name, box] of [
+    ['время', timeBox],
+    ['закладка', bookmarkBox]
+  ] as const) {
+    const center = box.y + box.height / 2;
+    expect(center, `${name} в первой строке заголовка`).toBeGreaterThanOrEqual(firstLineTop - 1);
+    expect(center, `${name} в первой строке заголовка`).toBeLessThanOrEqual(firstLineBottom + 1);
+  }
+  // Заголовок переносится в своей колонке: время и закладка остаются правее него.
+  expect(timeBox.x, 'время правее заголовка').toBeGreaterThan(titleBox.x + 1);
+  expect(bookmarkBox.x, 'закладка правее заголовка').toBeGreaterThan(timeBox.x);
+  // Лишней строки заголовка ради времени нет: высота шапки — высота самого заголовка.
+  expect(header.height, 'шапка без отдельной строки времени').toBeLessThanOrEqual(titleBox.height + 1);
+
+  // Цель касания закладки не уменьшилась.
+  const target = await page.evaluate(() =>
+    parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--target'))
+  );
+  expect(bookmarkBox.width).toBeGreaterThanOrEqual(target);
+  expect(bookmarkBox.height).toBeGreaterThanOrEqual(target);
+});
+
+test('the_fold_chevron_sits_after_its_label_and_not_between_the_controls', async ({ page }) => {
+  await boot(page);
+  const bubble = apiBubble(page, 'Claude: аккаунт требует проверки');
+  await bubble.scrollIntoViewIfNeeded();
+
+  const controls = bubble.locator('[data-role="system-controls"]');
+  const previous = controls.locator(':scope > :first-child');
+  const toggle = bubble.getByRole('button', { name: 'Подробнее' });
+  const label = toggle.locator('.fold-label');
+  const chevron = toggle.locator('.chevron');
+  await expect(label).toHaveText('Подробнее');
+
+  const [previousBox, toggleBox, labelBox, chevronBox] = (await Promise.all([
+    previous.boundingBox(),
+    toggle.boundingBox(),
+    label.boundingBox(),
+    chevron.boundingBox()
+  ])) as Box[];
+
+  // Стрелка стоит после своей подписи, а не перед ней: иначе она читается разделителем
+  // между ссылкой провайдера и «Подробнее».
+  expect(chevronBox.x, 'стрелка после подписи').toBeGreaterThanOrEqual(labelBox.x + labelBox.width - 1);
+  const labelGap = chevronBox.x - (labelBox.x + labelBox.width);
+  const controlGap = toggleBox.x - (previousBox.x + previousBox.width);
+  expect(labelGap, 'подпись и стрелка рядом').toBeLessThanOrEqual(12);
+  expect(controlGap, 'до соседнего контрола заметно дальше').toBeGreaterThan(labelGap + 4);
 });
 
 test('a_529_overload_is_a_warning_bubble_without_an_action_link', async ({ page }) => {

@@ -134,6 +134,49 @@ test('the_system_card_controls_do_not_merge_or_spread_out', async ({ page }) => 
   }
 });
 
+test('the_fold_chevron_stays_with_its_label_in_every_service_card', async ({ page }) => {
+  // То же раскрытие стоит в будильнике, машине и контексте: стрелка должна читаться частью
+  // подписи, а не разделителем между соседними действиями.
+  for (const group of ['alarm', 'machine', 'context'] as const) {
+    await boot(page, group);
+    await expect(page.locator('article.system').filter({ has: page.locator('.text-toggle') }).first()).toBeVisible();
+    let seen = 0;
+    let compared = 0;
+    for (const card of await page.locator('article.system').all()) {
+      const toggle = card.locator('.text-toggle');
+      if ((await toggle.count()) === 0) continue;
+      const label = toggle.locator('.fold-label');
+      const chevron = toggle.locator('.chevron');
+      await expect(label).not.toBeEmpty();
+      const index = await toggle.evaluate((node) => Array.prototype.indexOf.call(node.parentElement!.children, node));
+      const controls = card.locator('[data-role="system-controls"] > *');
+      const [toggleBox, labelBox, chevronBox] = (await Promise.all([
+        toggle.boundingBox(),
+        label.boundingBox(),
+        chevron.boundingBox()
+      ])) as Box[];
+      expect(chevronBox.x, `${group}: стрелка после подписи`).toBeGreaterThanOrEqual(
+        labelBox.x + labelBox.width - 1
+      );
+      const labelGap = chevronBox.x - (labelBox.x + labelBox.width);
+      expect(labelGap, `${group}: подпись и стрелка рядом`).toBeLessThanOrEqual(12);
+      if (index > 0) {
+        const previous = (await controls.nth(index - 1).boundingBox())!;
+        if (Math.abs(previous.y - toggleBox.y) < 4) {
+          compared += 1;
+          const controlGap = toggleBox.x - (previous.x + previous.width);
+          expect(controlGap, `${group}: до соседнего контрола дальше, чем до стрелки`).toBeGreaterThan(
+            labelGap + 4
+          );
+        }
+      }
+      seen += 1;
+    }
+    expect(seen, `раскрытие в группе ${group}`).toBeGreaterThan(0);
+    expect(compared, `соседний контрол в группе ${group}`).toBeGreaterThan(0);
+  }
+});
+
 test('machine_bubbles_show_numbers_and_open_the_machines_screen', async ({ page }) => {
   await boot(page, 'machine');
   const disk = page.locator('article.system[data-event-kind="machine"]').filter({ hasText: 'Машина dev-vm: мало места' });
