@@ -528,9 +528,15 @@
 		border-radius: var(--radius-round);
 		flex-shrink: 0;
 		background: var(--mark-color);
+		background-clip: content-box;
 	}
-	/* Кольцо — идёт ход, ждёт владельца, беда или пауза; точка — процесс жив; полый серый кружок — процесса нет. */
-	.mark[data-halo] { outline: var(--s1) solid var(--mark-color); outline-offset: var(--s1); }
+	/* Кольцо — идёт ход, ждёт владельца, беда или пауза; точка — процесс жив; полый серый кружок — процесса нет.
+	   Кольцо живёт внутри тех же рамок, что и точка: контур снаружи съедал зазор до названия. */
+	.mark[data-halo] {
+		padding: calc(var(--s1) + var(--hairline));
+		outline: var(--s1) solid var(--mark-color);
+		outline-offset: calc(var(--s1) * -1);
+	}
 	.mark[data-halo='--accent'] { --mark-color: var(--accent); }
 	.mark[data-halo='--warning'] { --mark-color: var(--warning); }
 	.mark[data-halo='--danger'] { --mark-color: var(--danger); }
