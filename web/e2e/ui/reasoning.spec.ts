@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { sha256Hex } from '../../src/lib/stores/blocks';
-import type { HistoryBlock } from '../../src/lib/stores/chat.svelte';
+import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelte';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { expect, test } from './fixtures';
@@ -8,6 +8,21 @@ import { bootSecondary } from './secondary-fixture';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const HISTORY_AT = '2026-10-28T12:00:00.000Z';
+
+/** Рассуждение с тем, что не переносится: длинная строка кода и широкая таблица. */
+const WIDE_REASONING = [
+  'he parent asks: in phone grid, make right inset equal to left inset (padding-left 12).',
+  '',
+  'So on phone, set `padding-inline` (right) to s6 = 12. But careful: the text is clamped to 2 (`-webkit-line-clamp: 2`), and `.overflow` (···) sits at `calc((var(--target) - var(--fs-sm) * var(--lh-body)) / 2)` from the edge.',
+  '',
+  '```css',
+  '.card { padding-inline-end: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / 2); outline-color: #3a3a3a; }',
+  '```',
+  '',
+  '| Провайдер | Окно | Строка |',
+  '| --- | --- | --- |',
+  `| OpenCode | мес | ${'очень длинная строка таблицы '.repeat(6)} |`
+].join('\n');
 
 type Boot = { hub: FakeHub; api: FakeHubApi; id: string };
 
@@ -26,7 +41,7 @@ const base = (api: FakeHubApi) => ({
 });
 
 /** История с готовыми блоками: рассуждение в ней должно ждать владельца, а не открываться само. */
-function seedBlocks(api: FakeHubApi, id: string, items: { kind: 'text' | 'reasoning'; content: string }[]): void {
+function seedBlocks(api: FakeHubApi, id: string, items: { kind: 'text' | 'reasoning'; content: string }[], owner?: string): void {
   const blocks: HistoryBlock[] = items.map((item, index) => {
     const blockId = api.id();
     api.blocks.set(blockId, { text: item.content, rev: 1, state: 'final' });
@@ -37,11 +52,18 @@ function seedBlocks(api: FakeHubApi, id: string, items: { kind: 'text' | 'reason
       agent: 'claude', model: 'opus-5.5', tool_name: null, summary: null, parent_block_id: null, input_command_id: null, line_count: 1
     };
   });
-  api.histories.set(id, blocks);
+  const list: (HistoryBlock | HistoryInput)[] = owner
+    ? [{
+        kind: 'input', id: api.id(), idempotency_key: 'owner-reasoning', state: 'accepted',
+        content: [{ type: 'text', text: owner }], attachments: [],
+        created_seq: '0', feed_seq: '0', created_at: HISTORY_AT
+      }, ...blocks]
+    : blocks;
+  api.histories.set(id, list);
   api.bindConversation(id);
 }
 
-async function boot(page: Page, opts: { history?: number; blocks?: { kind: 'text' | 'reasoning'; content: string }[]; pref?: 'line' | 'live' | 'expanded' } = {}): Promise<Boot> {
+async function boot(page: Page, opts: { history?: number; blocks?: { kind: 'text' | 'reasoning'; content: string }[]; pref?: 'line' | 'live' | 'expanded'; owner?: string } = {}): Promise<Boot> {
   await page.addInitScript((pref) => {
     if (pref) localStorage.setItem('canterlot.reasoning', pref);
     else localStorage.removeItem('canterlot.reasoning');
@@ -51,7 +73,7 @@ async function boot(page: Page, opts: { history?: number; blocks?: { kind: 'text
   const id = seedConversation(api, { title: 'рассуждение', model: 'opus-5.5' });
   if (opts.history || opts.blocks) {
     const items = opts.blocks ?? Array.from({ length: opts.history! }, (_, index) => ({ kind: 'text' as const, content: `строка истории ${index + 1}` }));
-    seedBlocks(api, id, items);
+    seedBlocks(api, id, items, opts.owner);
   }
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(`/c/${id}`);
@@ -335,6 +357,50 @@ test('an_automatic_fold_does_not_move_what_the_owner_reads', async ({ page }) =>
   const afterBox = await anchor.boundingBox();
   expect(afterBox).not.toBeNull();
   expect(Math.abs(afterBox!.y - before), 'anchor stays under the finger').toBeLessThanOrEqual(1);
+});
+
+test('wide_markdown_in_expanded_reasoning_does_not_scroll_the_feed_sideways', async ({ page }) => {
+  await boot(page, {
+    pref: 'expanded',
+    owner: 'Сверь отступ слева и справа в карточке.',
+    blocks: [{ kind: 'reasoning', content: WIDE_REASONING }]
+  });
+  const feed = page.locator('.feed');
+  await expect(page.locator('.reasoning .fold')).toBeVisible();
+  await expect(page.locator('.reasoning .fold pre')).toBeVisible();
+
+  // Лента не получила запаса по ширине: косое движение пальцем не уводит её вбок.
+  const feedSize = await feed.evaluate((el) => ({ width: el.clientWidth, content: el.scrollWidth }));
+  expect(feedSize.content, 'feed scrollWidth').toBeLessThanOrEqual(feedSize.width + 1);
+  expect(await feed.evaluate((el) => { el.scrollLeft = 120; const at = el.scrollLeft; el.scrollLeft = 0; return at; }), 'feed scrollLeft').toBe(0);
+  const docSize = await page.evaluate(() => ({ width: document.scrollingElement!.clientWidth, content: document.scrollingElement!.scrollWidth }));
+  expect(docSize.content, 'document scrollWidth').toBeLessThanOrEqual(docSize.width + 1);
+
+  // Карточка не раздута: ни один её элемент не выходит за правый край, кроме содержимого
+  // собственных прокручиваемых блоков — код и таблица листаются внутри себя.
+  const card = page.locator('article.card').last();
+  const geometry = await card.evaluate((node) => {
+    const edge = node.getBoundingClientRect().right;
+    const outside = [...node.querySelectorAll<HTMLElement>('*')]
+      .filter((el) => el.matches('pre, table') || !el.closest('pre, table'))
+      .map((el) => ({ tag: el.tagName, cls: el.className, right: el.getBoundingClientRect().right }))
+      .filter((el) => el.right > edge + 1);
+    const scrollers = [...node.querySelectorAll<HTMLElement>('pre, table')]
+      .map((el) => ({ tag: el.tagName, right: el.getBoundingClientRect().right, width: el.clientWidth, content: el.scrollWidth }));
+    return { edge, width: node.clientWidth, content: node.scrollWidth, outside, scrollers };
+  });
+  expect(geometry.content, 'card scrollWidth').toBeLessThanOrEqual(geometry.width + 1);
+  expect(geometry.outside.map((el) => `${el.tag}.${el.cls}`), 'elements past the card edge').toEqual([]);
+  expect(geometry.scrollers.length).toBeGreaterThan(0);
+  for (const el of geometry.scrollers) {
+    expect(el.right, `${el.tag} right edge`).toBeLessThanOrEqual(geometry.edge + 1);
+  }
+  // Длинная строка кода листается внутри блока, а не тянет карточку.
+  expect(geometry.scrollers.some((el) => el.tag === 'PRE' && el.content > el.width), 'code scrolls inside itself').toBe(true);
+
+  // Сообщение владельца не уехало за левый край: лента стоит на месте.
+  const bubble = await page.locator('.row[data-kind="input"] .bubble').first().boundingBox();
+  expect(bubble!.x, 'owner bubble left edge').toBeGreaterThanOrEqual(0);
 });
 
 for (const width of [320, 412] as const) {

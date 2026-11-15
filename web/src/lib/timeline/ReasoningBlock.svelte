@@ -121,7 +121,9 @@
   .duration { flex: none; margin-inline-start: auto; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   /* В живом окне часы стоят рядом со словом, как в строке хода: «Рассуждает · 12 с». */
   .duration.live { margin-inline-start: var(--s0); }
-  .fold { display: grid; grid-template-rows: 1fr; }
+  /* Колонка сетки не берёт ширину содержимого: строка кода и таблица шире карточки
+     прокручиваются внутри себя, а не растягивают тело рассуждения и всю ленту вбок. */
+  .fold { display: grid; grid-template-rows: 1fr; grid-template-columns: minmax(0, 1fr); }
   /* clip, а не hidden: иначе тело прокручиваемо, и ссылка внутри уезжает из-под пальца посреди раскрытия. */
   .body { min-height: 0; overflow: clip; font-size: var(--fs-meta); }
   /* Окно держит шесть строк на любой длине потока: высота не меняется от дельты к дельте. */
