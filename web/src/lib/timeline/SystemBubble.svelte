@@ -5,6 +5,7 @@
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import Button from '#lib/ui/Button.svelte';
   import Icon from '#lib/ui/Icon.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
   import { timeTip } from '#lib/ui/time-tip.js';
 
   let {
@@ -12,13 +13,16 @@
     createdAt,
     open,
     onToggle,
-    onCompact
+    onCompact,
+    bookmark = null
   }: {
     view: SystemView;
     createdAt: number | null;
     open: boolean;
     onToggle: () => void;
     onCompact?: () => void;
+    /** Закладка на блок пузыря: у ошибки API своя отметка, как у карточки ответа. */
+    bookmark?: { marked: boolean; label: string; onToggle: () => void } | null;
   } = $props();
 
   let noteOpen = $state(false);
@@ -26,7 +30,7 @@
 </script>
 
 <!-- Служебный пузырь: слева, как карточка итога делегата, с тем же набором фактов. -->
-<article class="system" data-event-kind={view.kind} data-tone={view.tone}>
+<article class="system" data-event-kind={view.kind} data-tone={view.tone} aria-label={view.title}>
   <header>
     <span class="icon"><Icon name={view.icon} /></span>
     {#if view.titleHref}
@@ -34,8 +38,24 @@
     {:else}
       <span class="title">{view.title}</span>
     {/if}
-    {#if createdAt !== null}
-      <time datetime={new Date(createdAt).toISOString()} use:timeTip={createdAt}>{fmt.clock(createdAt)}</time>
+    {#if createdAt !== null || bookmark}
+      <div class="meta">
+        {#if createdAt !== null}
+          <time datetime={new Date(createdAt).toISOString()} use:timeTip={createdAt}>{fmt.clock(createdAt)}</time>
+        {/if}
+        {#if bookmark}
+          <div class="actions" data-role="bubble-actions">
+            <IconButton
+              icon="bookmark"
+              solid={bookmark.marked}
+              pressed={bookmark.marked}
+              active={bookmark.marked}
+              label={bookmark.label}
+              onclick={bookmark.onToggle}
+            />
+          </div>
+        {/if}
+      </div>
     {/if}
   </header>
   {#if view.reason}<p class="reason">{view.reason}</p>{/if}
@@ -68,20 +88,29 @@
   {/if}
   {#if view.action}
     {#if view.action.kind === 'link'}
-      <a class="action" href={resolve(view.action.href as '/')}>{view.action.label}</a>
+      {#if view.action.external}
+        <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+        <a class="action" href={view.action.href} target="_blank" rel="noopener noreferrer">{view.action.label}</a>
+      {:else}
+        <a class="action" href={resolve(view.action.href as '/')}>{view.action.label}</a>
+      {/if}
     {:else}
       <Button onclick={() => onCompact?.()}>{view.action.label}</Button>
     {/if}
   {/if}
   <button type="button" class="text-toggle" aria-expanded={open} onclick={onToggle}>
     <span class="chevron" data-open={open ? '' : undefined}><Icon name="chevron" /></span>
-    Текст для агента
+    {view.foldLabel ?? 'Текст для агента'}
   </button>
   {#if open}
     <div class="fold">
-      <div class="body" data-role="system-body">
-        <TextBlock block={{ id: `system:${view.kind}:${view.title}`, text: view.text, state: 'final' }} />
-      </div>
+      {#if view.plain}
+        <p class="body plain" data-role="system-body">{view.text}</p>
+      {:else}
+        <div class="body" data-role="system-body">
+          <TextBlock block={{ id: `system:${view.kind}:${view.title}`, text: view.text, state: 'final' }} />
+        </div>
+      {/if}
     </div>
   {/if}
 </article>
@@ -97,6 +126,7 @@
     background: var(--surface);
   }
   .system[data-tone='warning'] { background: var(--warning-soft); }
+  .system[data-tone='danger'] { background: var(--danger-soft); }
   header {
     display: flex;
     flex-wrap: wrap;
@@ -107,6 +137,7 @@
   .icon { display: inline-flex; align-self: center; color: var(--muted); }
   .icon :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   [data-tone='warning'] .icon, [data-tone='warning'] .title { color: var(--warning); }
+  [data-tone='danger'] .icon, [data-tone='danger'] .title { color: var(--danger); }
   .title {
     min-width: 0;
     color: var(--text);
@@ -115,7 +146,10 @@
   }
   .title[href] { display: inline-flex; align-items: center; min-height: var(--target); margin-block: calc((var(--target) - var(--fs-body) * var(--lh-body)) / -2); color: var(--accent-link); text-decoration: none; }
   .title[href]:hover, .title[href]:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
-  time { margin-left: auto; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+  time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+  /* Время и закладка ходят парой: на телефоне строка заголовка переносится целиком. */
+  .meta { display: flex; align-items: center; gap: var(--s2); margin-left: auto; }
+  .actions { display: flex; align-self: center; margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2); }
   .reason { margin: 0; color: var(--secondary); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .facts {
     display: grid;
@@ -151,7 +185,12 @@
   .chevron[data-open] { transform: rotate(90deg); }
   .action { display: inline-flex; align-items: center; align-self: flex-start; min-height: var(--target); color: var(--accent-link); font-size: var(--fs-sm); text-decoration: none; }
   .action:hover, .action:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
+  /* Ссылка провайдера на мягкой заливке: цвет текста держит 4.5:1 во всех палитрах,
+     а подчёркивание оставляет её ссылкой. */
+  .system[data-event-kind='api_error'] .action { color: var(--text); text-decoration: underline; text-underline-offset: var(--s1); text-decoration-color: var(--accent-link); }
   .fold { display: grid; grid-template-rows: 1fr; animation: fold var(--duration-expand) var(--ease-expand); }
   .body { min-height: 0; overflow: hidden; color: var(--secondary); }
+  /* Исходный текст ошибки — как есть: разметку провайдера не разбираем. */
+  .body.plain { margin: 0; padding-block: var(--s2); white-space: pre-wrap; overflow-wrap: anywhere; }
   @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
 </style>

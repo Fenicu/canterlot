@@ -7,6 +7,7 @@
   import type { FeedFolds } from '#lib/timeline/folds.js';
   import { agentTitle, handBackText, isMainAgent, toolTitle } from '#lib/timeline/present.js';
   import { liveLineQuiet } from '#lib/timeline/reasoning.js';
+  import { apiErrorView } from '#lib/timeline/system.js';
   import { shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import { foldSteps } from '#lib/timeline/steps.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
@@ -105,7 +106,7 @@
     {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
       <ToolCard {block} result={links.result(block.id)} background={links.background(block.id)} {working} {now} {load} {links} {folds} {conversationId} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
     {:else if block.kind === 'warning' || block.kind === 'error'}
-      <NoticeBlock {block} />
+      {#if !apiErrorView(block, harness)}<NoticeBlock {block} />{/if}
     {:else if block.kind === 'reasoning'}
       <ReasoningBlock {block} {folds} {now} />
     {:else}

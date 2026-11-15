@@ -5,6 +5,7 @@ import { isDocked } from "#lib/stores/requests.svelte.js";
 import type { RequestItem } from "#lib/stores/requests.svelte.js";
 import type { InputView } from "#lib/stores/inputs.js";
 import type { CompactionModel, TimelineEntry } from "#lib/stores/timeline.js";
+import { providerApiError, providerOf, type ProviderId } from "./apiError";
 import { isMainAgent } from "./present";
 import { isEventOrigin } from "./hubEvent";
 import { toolId } from "./cards/toolId";
@@ -259,8 +260,9 @@ function modelOf(entry: TimelineEntry): BlockModel | RequestItem | InputView | C
 /**
  * Поля записи, от которых зависит состав строк: видимость в ленте, карточка хода,
  * вид строки и подпись дня. Чтение этих полей подписывает ленту на их обновление.
+ * У блока ошибки читается и текст: от него зависит, станет ли ошибка провайдера отдельным пузырём.
  */
-function shapeOf(entry: TimelineEntry): string {
+function shapeOf(entry: TimelineEntry, provider: ProviderId | null = null): string {
   if (entry.kind === "block") {
     const block = entry.block;
     return [
@@ -272,6 +274,7 @@ function shapeOf(entry: TimelineEntry): string {
       block.inputCommandId,
       block.toolName,
       block.agent,
+      block.kind === "error" && providerApiError(block.text, provider) ? "api" : "",
     ].join("|");
   }
   if (entry.kind === "request") {
@@ -306,7 +309,10 @@ class RowAccumulator {
   readonly seenRuns = new Set<string>();
   readonly #labels = new Map<number, string>();
 
-  constructor(readonly now: number) {}
+  constructor(
+    readonly now: number,
+    readonly provider: ProviderId | null = null,
+  ) {}
 
   label(stamp: number): string {
     const key = dayStart(stamp);
@@ -353,6 +359,16 @@ class RowAccumulator {
     if (entry.kind === "compaction") {
       this.card = null;
       this.#push({ key: entry.key, kind: "compaction", entries: [entry] }, fork);
+      return true;
+    }
+    // Ошибка API провайдера стоит своим пузырём: ответ, оставшийся без текста, не рисуется.
+    if (
+      entry.kind === "block" &&
+      entry.block.kind === "error" &&
+      providerApiError(entry.block.text, this.provider)
+    ) {
+      this.card = null;
+      this.#push({ key: `system:${entry.key}`, kind: "system", entries: [entry] }, fork);
       return true;
     }
     const run = entry.block.inputCommandId;
@@ -559,7 +575,12 @@ class RowAccumulator {
 
 export function buildRows(
   entries: TimelineEntry[],
-  opts?: { laneRoot?: string; now?: number; links?: BlockLinks },
+  opts?: {
+    laneRoot?: string;
+    now?: number;
+    links?: BlockLinks;
+    harness?: { id?: string; provider?: string } | null;
+  },
 ): Row[] {
   const links = opts?.links ?? blockLinks(entries);
   const source = opts?.laneRoot
@@ -567,7 +588,7 @@ export function buildRows(
     : entries.filter(
         (entry) => entry.kind !== "block" || links.parent(entry.block) === null,
       );
-  const rows = new RowAccumulator(opts?.now ?? Date.now());
+  const rows = new RowAccumulator(opts?.now ?? Date.now(), providerOf(opts?.harness));
   for (const entry of source) rows.add(entry);
   return rows.rows;
 }
@@ -581,6 +602,7 @@ export class RowsCache {
   #entries: TimelineEntry[] | null = null;
   #records = new Map<string, EntryRecord>();
   #now = 0;
+  #provider: ProviderId | null = null;
   #laneRoot: string | undefined;
   #background: ReadonlyMap<string, BackgroundFact> | undefined;
   #linksIndex: LinksIndex | null = null;
@@ -594,12 +616,18 @@ export class RowsCache {
       now?: number;
       laneRoot?: string;
       background?: ReadonlyMap<string, BackgroundFact>;
+      harness?: { id?: string; provider?: string } | null;
     } = {},
   ): { links: BlockLinks; rows: Row[] } {
     const now = opts.now ?? Date.now();
     const laneRoot = opts.laneRoot;
-    const { records, changed } = this.#scan(entries);
-    const same = this.#entries === entries && now === this.#now && laneRoot === this.#laneRoot;
+    const provider = providerOf(opts.harness);
+    const { records, changed } = this.#scan(entries, provider);
+    const same =
+      this.#entries === entries &&
+      now === this.#now &&
+      laneRoot === this.#laneRoot &&
+      provider === this.#provider;
 
     if (same && changed.length === 0) {
       if (opts.background !== this.#background) {
@@ -612,6 +640,7 @@ export class RowsCache {
     if (
       this.#entries !== null &&
       now === this.#now &&
+      provider === this.#provider &&
       laneRoot === undefined &&
       this.#laneRoot === undefined
     ) {
@@ -622,15 +651,18 @@ export class RowsCache {
       }
     }
 
-    return this.#rebuild(entries, records, now, laneRoot, opts.background);
+    return this.#rebuild(entries, records, now, laneRoot, provider, opts.background);
   }
 
-  #scan(entries: TimelineEntry[]): { records: Map<string, EntryRecord>; changed: number[] } {
+  #scan(
+    entries: TimelineEntry[],
+    provider: ProviderId | null,
+  ): { records: Map<string, EntryRecord>; changed: number[] } {
     const records = new Map<string, EntryRecord>();
     const changed: number[] = [];
     let index = 0;
     for (const entry of entries) {
-      const shape = shapeOf(entry);
+      const shape = shapeOf(entry, provider);
       const model = modelOf(entry);
       records.set(entry.key, { entry, model, shape });
       const old = this.#records.get(entry.key);
@@ -713,6 +745,7 @@ export class RowsCache {
     records: Map<string, EntryRecord>,
     now: number,
     laneRoot: string | undefined,
+    provider: ProviderId | null,
     background: ReadonlyMap<string, BackgroundFact> | undefined,
   ): { links: BlockLinks; rows: Row[] } {
     const linksIndex = new LinksIndex();
@@ -723,7 +756,7 @@ export class RowsCache {
       : entries.filter(
           (entry) => entry.kind !== "block" || links.parent(entry.block) === null,
         );
-    const accumulator = new RowAccumulator(now);
+    const accumulator = new RowAccumulator(now, provider);
     for (const entry of source) accumulator.add(entry);
     // Объекты неизменившихся строк переживают пересборку: окно не перерисовывает их заново.
     const previous = this.#rowsByKey;
@@ -743,6 +776,7 @@ export class RowsCache {
     this.#entries = entries;
     this.#records = records;
     this.#now = now;
+    this.#provider = provider;
     this.#laneRoot = laneRoot;
     this.#background = background;
     this.#linksIndex = linksIndex;

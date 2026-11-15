@@ -1,10 +1,11 @@
-export type RowKind = 'day' | 'input' | 'event' | 'answer' | 'notice' | 'request' | 'compaction';
+export type RowKind = 'day' | 'input' | 'event' | 'answer' | 'notice' | 'system' | 'request' | 'compaction';
 
 export function rowEstimate(kind: RowKind): number {
   if (kind === 'day') return 32;
   if (kind === 'input') return 96;
   if (kind === 'event') return 120;
   if (kind === 'notice') return 48;
+  if (kind === 'system') return 132;
   return 120;
 }
 

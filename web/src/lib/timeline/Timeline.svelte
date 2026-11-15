@@ -11,6 +11,7 @@
   import type { ConversationBookmarks } from '#lib/bookmarks/store.svelte.js';
   import type { TimelineSource } from '#lib/stores/timeline.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
+  import ApiErrorBubble from '#lib/timeline/ApiErrorBubble.svelte';
   import { INTERRUPT_FAILED, INTERRUPT_FAILED_OUTCOME, INTERRUPT_IDLE, type InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import CompactionRow from '#lib/timeline/CompactionRow.svelte';
   import EventEntry from '#lib/timeline/EventEntry.svelte';
@@ -97,9 +98,10 @@
   const today = $derived(dayStart(now));
   const entries = $derived(feed ? feed.entries : chat.timeline.entries);
   const hasOlder = $derived(feed ? feed.hasOlder : chat.timeline.hasOlder);
+  const harness = $derived(chat.detail?.harness as { id?: string; title?: string; provider?: string } | undefined);
   const rowsCache = new RowsCache();
   const view = $derived(
-    rowsCache.build(entries, { now: today, laneRoot, background: chat.backgroundFacts })
+    rowsCache.build(entries, { now: today, laneRoot, background: chat.backgroundFacts, harness })
   );
   const links = $derived(view.links);
   const rows = $derived(view.rows);
@@ -136,7 +138,6 @@
   });
   const streaming = $derived(entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
   const failed = $derived(entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || (entry.block.state === 'incomplete' && shownInCard(entry.block)))));
-  const harness = $derived(chat.detail?.harness as { title?: string; provider?: string } | undefined);
   // Карточки инструментов читают ленту через контекст: свой ли это оркестратор, прошлый список задач, события хаба.
   setFeedCards({
     get root() {
@@ -746,6 +747,14 @@
           {/if}
         {:else if row.kind === 'event' && row.entries[0]?.kind === 'input'}
           <EventEntry input={row.entries[0].input} conversationId={chat.id} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
+        {:else if row.kind === 'system' && row.entries[0]?.kind === 'block'}
+          <ApiErrorBubble
+            block={row.entries[0].block}
+            {harness}
+            {bookmarks}
+            open={folds.isOpen(row.key)}
+            onToggle={() => folds.toggle(row.key)}
+          />
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
           <RequestCard request={row.entries[0].request} onDecision={async () => undefined} {harnessId} {permissionMode} {now} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}

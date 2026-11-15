@@ -1,19 +1,20 @@
 import { modelLabel, providerLabel } from '#lib/format/labels.js';
 import { fmt } from '#lib/format/ru.js';
+import { providerApiError, providerOf, type ProviderApiError, type ProviderId } from '#lib/timeline/apiError.js';
 import { SESSION_STATE_WORD, windowLabel } from '#lib/timeline/hubEvent.js';
 import type { InputOrigin } from '#lib/stores/inputs.js';
 import type { IconName } from '#lib/ui/icons.js';
 
-export type SystemTone = 'neutral' | 'warning';
+export type SystemTone = 'neutral' | 'warning' | 'danger';
 export type SystemFact = { label: string; value: string };
 export type SystemRow = { title: string; value?: string; href?: string };
 export type SystemAction =
-  | { kind: 'link'; label: string; href: string }
+  | { kind: 'link'; label: string; href: string; external?: boolean }
   | { kind: 'compact'; label: string };
 
 /** Общий вид служебного пузыря: заголовок, причина, факты, строки и свёрнутый текст. */
 export type SystemView = {
-  kind: 'alarm' | 'machine' | 'context' | 'limit_resumed' | 'quota_paused' | 'quota_note';
+  kind: 'alarm' | 'machine' | 'context' | 'limit_resumed' | 'quota_paused' | 'quota_note' | 'api_error';
   icon: IconName;
   title: string;
   titleHref?: string;
@@ -23,6 +24,10 @@ export type SystemView = {
   rows: SystemRow[];
   note?: string;
   action?: SystemAction;
+  /** Подпись кнопки свёрнутого текста; у ошибки API это «Подробнее». */
+  foldLabel?: string;
+  /** Текст показывается как есть: разметка провайдера не разбирается. */
+  plain?: boolean;
   /** Полный текст, который получил агент. */
   text: string;
 };
@@ -361,6 +366,82 @@ export function limitView(
     facts: [],
     rows: [],
     text
+  };
+}
+
+const API_PROVIDER_NAME: Record<ProviderId, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+  antigravity: 'Antigravity'
+};
+
+/** Заголовок ошибки API: провайдер и вид отказа, без подробностей текста. */
+function apiErrorTitle(error: ProviderApiError): string {
+  const name = error.provider ? API_PROVIDER_NAME[error.provider] : 'Провайдер';
+  switch (error.kind) {
+    case 'account':
+      if (error.status === 403)
+        return error.href ? `${name}: аккаунт требует проверки` : `${name}: нет доступа к аккаунту`;
+      return `${name}: нужен повторный вход`;
+    case 'rate_limit':
+      return `${name}: слишком много запросов`;
+    case 'overloaded':
+      return `${name} перегружен`;
+    case 'server':
+      return `${name}: ошибка на стороне провайдера`;
+    default:
+      return error.status !== null
+        ? `${name}: ошибка API ${error.status >= 500 ? '5xx' : '4xx'}`
+        : `${name}: ошибка API`;
+  }
+}
+
+/** Что значит отказ и что делать: только то, что продукт действительно делает. */
+function apiErrorReason(error: ProviderApiError): string {
+  switch (error.kind) {
+    case 'account':
+      if (error.status === 403)
+        return error.href
+          ? 'Сессия ждёт, пока аккаунт не пройдёт проверку на странице провайдера.'
+          : 'Провайдер не дал доступ к аккаунту. Проверьте вход и права аккаунта.';
+      return 'Провайдер не принял вход. Проверьте вход в аккаунт на машине и повторите запрос.';
+    case 'rate_limit':
+      return 'Провайдер ограничил частоту запросов. Повторите запрос позже.';
+    case 'overloaded':
+      return 'Сервер провайдера перегружен. Повторите запрос позже.';
+    case 'server':
+      return 'Провайдер ответил ошибкой на своей стороне. Повторите запрос позже.';
+    default:
+      return 'Провайдер отклонил запрос. Подробности — в тексте ошибки.';
+  }
+}
+
+/**
+ * Ошибка API провайдера отдельным служебным пузырём. Пустой — обычное уведомление
+ * (отказ инструмента, ошибка адаптера или воркера) остаётся в карточке ответа.
+ */
+export function apiErrorView(
+  block: { kind: string; text: string },
+  harness?: { id?: string; provider?: string } | null
+): SystemView | null {
+  if (block.kind !== 'error') return null;
+  const error = providerApiError(block.text, providerOf(harness));
+  if (!error) return null;
+  return {
+    kind: 'api_error',
+    icon: 'warning',
+    title: apiErrorTitle(error),
+    tone: error.kind === 'rate_limit' || error.kind === 'overloaded' ? 'warning' : 'danger',
+    reason: apiErrorReason(error),
+    facts: [],
+    rows: [],
+    action: error.href
+      ? { kind: 'link', label: 'Открыть страницу провайдера', href: error.href, external: true }
+      : undefined,
+    foldLabel: 'Подробнее',
+    plain: true,
+    text: error.text
   };
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { fmt } from '#lib/format/ru.js';
 import {
   alarmView,
+  apiErrorView,
   contextView,
   limitView,
   machineView,
@@ -386,6 +387,91 @@ describe('timeline/system limits', () => {
     });
     expect(view?.action).toBeUndefined();
     expect(NOW).toBeGreaterThan(0);
+  });
+});
+
+describe('timeline/system api error', () => {
+  const HARNESS = { id: 'claude_code', provider: 'claude' };
+  const VERIFY =
+    "403: API Error: Your account can't receive replies from Claude right now. You can find the next step in the Anthropic Verification Portal: https://portal.anthropic.com/verify?org=01a1dfb1-10bc-7230-8b59-a74abd632567";
+
+  it('a 403 verification error is a danger bubble with the provider link and the folded text', () => {
+    const view = apiErrorView({ kind: 'error', text: VERIFY }, HARNESS);
+    expect(view).toMatchObject({
+      kind: 'api_error',
+      icon: 'warning',
+      title: 'Claude: аккаунт требует проверки',
+      tone: 'danger',
+      reason: 'Сессия ждёт, пока аккаунт не пройдёт проверку на странице провайдера.',
+      action: {
+        kind: 'link',
+        label: 'Открыть страницу провайдера',
+        href: 'https://portal.anthropic.com/verify?org=01a1dfb1-10bc-7230-8b59-a74abd632567',
+        external: true
+      },
+      foldLabel: 'Подробнее',
+      plain: true,
+      text: VERIFY
+    });
+    expect(view?.facts).toEqual([]);
+    expect(view?.rows).toEqual([]);
+  });
+
+  it('a 401 asks for the login again without a link', () => {
+    const view = apiErrorView({ kind: 'error', text: '401: Please run /login' }, HARNESS);
+    expect(view).toMatchObject({
+      title: 'Claude: нужен повторный вход',
+      tone: 'danger',
+      reason: 'Провайдер не принял вход. Проверьте вход в аккаунт на машине и повторите запрос.'
+    });
+    expect(view?.action).toBeUndefined();
+  });
+
+  it('rate limits are warnings and an overload names the provider without a colon', () => {
+    expect(apiErrorView({ kind: 'error', text: '429: usage_limit_reached' }, HARNESS)).toMatchObject({
+      title: 'Claude: слишком много запросов',
+      tone: 'warning'
+    });
+    expect(apiErrorView({ kind: 'error', text: '529: API Error: Overloaded' }, HARNESS)).toMatchObject({
+      title: 'Claude перегружен',
+      tone: 'warning'
+    });
+  });
+
+  it('a provider side failure and a rejected request keep their own names', () => {
+    expect(apiErrorView({ kind: 'error', text: '503: unavailable' }, HARNESS)).toMatchObject({
+      title: 'Claude: ошибка на стороне провайдера',
+      tone: 'danger'
+    });
+    expect(
+      apiErrorView({ kind: 'error', text: '400: API Error: 400 invalid_request_error: bad' }, HARNESS)
+    ).toMatchObject({ title: 'Claude: ошибка API 4xx', tone: 'danger' });
+  });
+
+  it('codex and opencode keep their own provider names', () => {
+    expect(
+      apiErrorView(
+        { kind: 'error', text: 'Сервер перегружен (HTTP 503)' },
+        { id: 'codex', provider: 'codex' }
+      )
+    ).toMatchObject({ title: 'Codex перегружен', tone: 'warning' });
+    expect(
+      apiErrorView(
+        { kind: 'error', text: 'Ошибка OpenCode (provider.auth): invalid api key' },
+        { id: 'opencode', provider: 'opencode' }
+      )
+    ).toMatchObject({ title: 'OpenCode: нужен повторный вход' });
+  });
+
+  it('a non provider error stays a notice inside the card', () => {
+    for (const text of [
+      'Ошибка Codex',
+      'Запуск остановлен: делегированной сессии доступны чужие серверы MCP (x).',
+      'trajectory not found'
+    ])
+      expect(apiErrorView({ kind: 'error', text }, HARNESS), text).toBeNull();
+    expect(apiErrorView({ kind: 'warning', text: '401: Please run /login' }, HARNESS)).toBeNull();
+    expect(apiErrorView({ kind: 'text', text: VERIFY }, HARNESS)).toBeNull();
   });
 });
 

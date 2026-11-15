@@ -91,6 +91,10 @@ const textPairs: [string, string[]][] = [
   ...['secondary', 'muted', 'time'].flatMap(fg => [
     [fg, ['bg', 'chat-bg', 'surface', 'raised', 'selected']] as [string, string[]]
   ]),
+  // Мягкие заливки несут служебные пузыри: их текст и пояснение тоже держат AA.
+  ...['text', 'secondary', 'muted'].flatMap(fg => [
+    [fg, ['warning-soft', 'danger-soft']] as [string, string[]]
+  ]),
   ['chip-text', ['chip']],
   ['accent-ink', ['accent']],
   ['accent-link', ['bg', 'surface', 'raised']],
