@@ -74,6 +74,11 @@ REHEARSE_OLD_N="$(find "${WEB_RELEASES}/${SHA_PREV}/_app/immutable" -type f | wc
 assert_contains "${FAKE_ROOT}/rehearse.log" "rehearse: chunk merge from ${SHA_PREV} would copy 1 of ${REHEARSE_OLD_N} files" "chunk merge counted"
 assert_contains "${FAKE_ROOT}/rehearse.log" "maintenance: no current.new/build.new/.stage-* on any host" "maintenance ran"
 assert_contains "${FAKE_ROOT}/rehearse.log" "verify PASS" "verify ran against the live state"
+# Цель проверена в общей предпроверке: staged-деревья против dist, база не впереди цели.
+assert_contains "${FAKE_ROOT}/rehearse.log" "target check PASS for ${SHA_NEW}" "target check ran inside the rehearsal"
+assert_contains "${FAKE_ROOT}/rehearse.log" "web ${SHA_NEW}: staged tree equals the dist (every file hash)" "staged web tree compared"
+assert_contains "${FAKE_ROOT}/rehearse.log" "worker ${SHA_NEW}: staged tree equals the dist (every file hash)" "staged worker tree compared"
+assert_contains "${FAKE_ROOT}/rehearse.log" "migrations: database at 40, target ends at 41" "DB-not-ahead compared"
 assert_contains "${FAKE_ROOT}/rehearse.log" "rehearse: loopback Caddy probe printed above, not started" "loopback probe only printed"
 assert_contains "${FAKE_ROOT}/rehearse.log" "live: hub exe from" "retention plan ran"
 assert_not_contains "${FAKE_ROOT}/rehearse.log" "] removed " "retention removed nothing"
@@ -91,20 +96,18 @@ assert_eq "$(result_of "${R}" vzdump_done)" "no" "result file: no restore point 
 assert_eq "$(result_of "${R}" dump)" "" "result file: no dump from a rehearsal"
 assert_eq "$(result_of "${R}" worker_downtime_s)/$(result_of "${R}" hub_interruption_s)/$(result_of "${R}" worker_stop_at)" "//" "result file: no downtime from a rehearsal"
 assert_contains "${FAKE_ROOT}/rehearse.log" "result file: ${R} (status pass)" "result path printed at the end"
+# Чистая репетиция не оставляет кодов отказа: release.sh повторяет только переходные.
+assert_eq "$(result_of "${R}" fail_codes)" "" "result file: fail_codes empty"
+assert_eq "$(result_of "${R}" hard_failures)" "0" "result file: hard_failures 0"
+grep -q '^fail_codes=' "${R}" && case_ok "result file: fail_codes key present" || case_fail "result file: no fail_codes key"
+[ ! -e "${R}.codes" ] && case_ok "codes log removed" || case_fail "codes log left behind"
+[ ! -e "${R}.hard" ] && case_ok "hard log removed" || case_fail "hard log left behind"
 grep -q 'docker fakeweb exec -i' "${FAKE_ROOT}/state/calls.log" && case_fail "loopback probe started" || case_ok "loopback probe never started"
 teardown_case
 case_end
 
-# --- V3: репетиция — надмножество dry-run: target-check в общей предпроверке ---
-case_begin "rehearsal runs the target check (staged trees, dist, DB not ahead)"
-setup_cutover rehearse-target
-if run_rehearse; then case_ok "exit 0"; else case_fail "rehearsal failed"; tail -10 "${FAKE_ROOT}/rehearse.log"; fi
-assert_contains "${FAKE_ROOT}/rehearse.log" "target check PASS for ${SHA_NEW}" "target check ran inside the rehearsal"
-assert_contains "${FAKE_ROOT}/rehearse.log" "web ${SHA_NEW}: staged tree equals the dist (every file hash)" "staged web tree compared"
-assert_contains "${FAKE_ROOT}/rehearse.log" "worker ${SHA_NEW}: staged tree equals the dist (every file hash)" "staged worker tree compared"
-assert_contains "${FAKE_ROOT}/rehearse.log" "migrations: database at 40, target ends at 41" "DB-not-ahead compared"
-teardown_case
-case_end
+# --- V3: цель (staged-деревья против dist и база не впереди) проверяется в чистом
+# прогоне выше; здесь остаются отказы цели.
 
 case_begin "a staged-tree mismatch fails the rehearsal like the dry-run"
 setup_cutover rehearse-staged-mismatch
@@ -214,17 +217,6 @@ teardown_case
 case_end
 
 # --- коды отказа (fail_codes): release.sh повторяет репетицию только при переходных ---
-case_begin "a clean rehearsal reports no failure codes"
-setup_cutover codes-pass
-if run_rehearse; then case_ok "exit 0"; else case_fail "rehearsal failed"; tail -10 "${FAKE_ROOT}/rehearse.log"; fi
-assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" fail_codes)" "" "result file: fail_codes empty"
-assert_eq "$(result_of "${FAKE_ROOT}/rehearse.result" hard_failures)" "0" "result file: hard_failures 0"
-grep -q '^fail_codes=' "${FAKE_ROOT}/rehearse.result" && case_ok "result file: fail_codes key present" || case_fail "result file: no fail_codes key"
-[ ! -e "${FAKE_ROOT}/rehearse.result.codes" ] && case_ok "codes log removed" || case_fail "codes log left behind"
-[ ! -e "${FAKE_ROOT}/rehearse.result.hard" ] && case_ok "hard log removed" || case_fail "hard log left behind"
-teardown_case
-case_end
-
 case_begin "a CT backup lock fails the rehearsal with the transient code vzdump_busy"
 setup_cutover codes-ctlock
 export FAKE_CT_LOCK=1
