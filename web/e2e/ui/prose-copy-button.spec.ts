@@ -120,10 +120,21 @@ interface QuoteShape {
   quote: Box;
   button: Box;
   icon: Box;
-  /** Рамка текста цитаты: зазоры сверху и снизу от неё меряются. */
+  /** Рамка текста цитаты: по ней меряется верхнее поле. */
   text: Box;
   /** Прямоугольники строк текста, без кнопки и её подписи. */
   lines: Box[];
+}
+
+interface CodeShape {
+  card: Box;
+  block: Box;
+  pre: Box;
+  button: Box;
+  icon: Box;
+  code: Box;
+  /** Верх следующего абзаца: им меряется зазор под блоком. */
+  nextTop: number | null;
 }
 
 function overlaps(a: Box, b: Box): boolean {
@@ -168,6 +179,30 @@ async function quoteShapes(page: Page): Promise<QuoteShape[]> {
   });
 }
 
+async function codeShapes(page: Page): Promise<CodeShape[]> {
+  return page.locator('.prose .code-block').evaluateAll((blocks) => {
+    const box = (rect: DOMRect) => ({
+      left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height
+    });
+    return blocks.map((frame) => {
+      const pre = frame.querySelector('pre') as HTMLElement;
+      const button = frame.querySelector(':scope > .copy-button') as HTMLElement;
+      const icon = button.querySelector('svg') as SVGElement;
+      const code = pre.querySelector('code') as HTMLElement;
+      const next = frame.nextElementSibling as HTMLElement | null;
+      const card = frame.closest('article.card') as HTMLElement;
+      return {
+        card: box(card.getBoundingClientRect()),
+        block: box(frame.getBoundingClientRect()),
+        pre: box(pre.getBoundingClientRect()),
+        button: box(button.getBoundingClientRect()),
+        icon: box(icon.getBoundingClientRect()),
+        code: box(code.getBoundingClientRect()),
+        nextTop: next ? next.getBoundingClientRect().top : null
+      };
+    });
+  });
+}
 
 function iconCentreGap(shape: { button: Box; icon: Box }): number {
   return Math.abs((shape.icon.left + shape.icon.right) / 2 - (shape.button.left + shape.button.right) / 2);
@@ -206,6 +241,35 @@ for (const width of WIDTHS) {
     }
   });
 
+  test(`one_line_code_block_contains_the_copy_button_${width}`, async ({ page }, info) => {
+    test.skip(info.project.name !== 'phone', 'кнопка видна всегда только на сенсорном экране');
+    await page.setViewportSize({ width, height: 892 });
+    await boot(page);
+    const blocks = await codeShapes(page);
+
+    expect(blocks, 'два блока кода с кнопками').toHaveLength(2);
+    const [single, multi] = blocks as [CodeShape, CodeShape];
+    expect(single.code.height, 'первый блок в одну строку').toBeLessThan(30);
+    expect(multi.code.height, 'второй блок в две строки').toBeGreaterThan(30);
+
+    for (const [name, shape] of [['однострочный', single], ['двухстрочный', multi]] as const) {
+      expect(shape.button.width, `ширина кнопки (${name})`).toBeGreaterThanOrEqual(44 - 0.5);
+      expect(shape.button.height, `высота кнопки (${name})`).toBeGreaterThanOrEqual(44 - 0.5);
+      expect(iconCentreGap(shape), `значок по центру кнопки (${name})`).toBeLessThanOrEqual(1);
+      // Кнопка не свисает ниже блока и не отнимает зазор у следующего абзаца.
+      expect(shape.button.bottom, `низ кнопки внутри блока (${name})`).toBeLessThanOrEqual(shape.block.bottom + 0.5);
+      expect(shape.button.bottom, `низ кнопки внутри поля блока (${name})`).toBeLessThanOrEqual(shape.pre.bottom + 0.5);
+      // Строка кода не уезжает под кнопку.
+      expect(shape.code.right, `строка кода кончается до кнопки (${name})`).toBeLessThanOrEqual(shape.button.left + 0.5);
+      expect(shape.block.right, `блок внутри карточки (${name})`).toBeLessThanOrEqual(shape.card.right + 0.5);
+    }
+
+    // Зазор до следующего абзаца одинаков у однострочного и у двухстрочного блока.
+    const singleGap = single.nextTop! - single.block.bottom;
+    const multiGap = multi.nextTop! - multi.block.bottom;
+    expect(singleGap, 'зазор под однострочным блоком как под двухстрочным').toBeCloseTo(multiGap, 0);
+    expect(singleGap, 'зазор под блоком по вёрстке').toBeGreaterThan(6);
+  });
 }
 
 test('touch_reservations_leave_the_hover_layout_alone', async ({ page }, info) => {
@@ -262,6 +326,9 @@ test('prose_copy_button_shots', async ({ page }, info) => {
   await page.setViewportSize({ width: 412, height: 892 });
   await boot(page, 'dark');
   await clipAround('.prose blockquote >> nth=1', 'two-line-blockquote-412');
+  await clipAround('.prose blockquote >> nth=2', 'three-line-blockquote-412');
+  await clipAround('.prose .code-block >> nth=0', 'one-line-code-block-412');
+  await clipAround('.prose .code-block >> nth=1', 'multi-line-code-block-412-dark');
 
   await page.setViewportSize({ width: 360, height: 740 });
   await page.reload();
@@ -269,4 +336,8 @@ test('prose_copy_button_shots', async ({ page }, info) => {
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(200);
   await clipAround('.prose blockquote >> nth=1', 'two-line-blockquote-360');
+
+  await page.setViewportSize({ width: 412, height: 892 });
+  await boot(page, 'light');
+  await clipAround('.prose .code-block >> nth=1', 'multi-line-code-block-412-light');
 });

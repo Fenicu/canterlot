@@ -110,5 +110,11 @@
     padding-inline-end: calc(var(--s2) * 2 + var(--target));
     min-height: calc(var(--target) + var(--s2) * 2);
   }
+  /* Однострочный блок кода ниже кнопки: он подрастает до её высоты и держит строку по центру,
+     иначе кнопка свисает за нижний край и отнимает зазор у следующего абзаца. */
+  .prose .code-block > pre {
+    min-height: calc(var(--target) + var(--s2) * 2);
+    align-content: center;
+  }
   .prose .copy-button { min-width: var(--target); min-height: var(--target); opacity: 1; pointer-events: auto; }
 }
