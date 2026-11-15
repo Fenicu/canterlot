@@ -239,25 +239,6 @@ FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-wo
 teardown_case
 case_end
 
-# --- F2. pg_restore -f /dev/null — проверка чтением, база не меняется ---
-case_begin "pg_restore -f /dev/null is read-only"
-setup_cutover pgreadonly
-READONLY_DUMP="${FAKE_ROOT}/hub/backups/readonly.dump"
-printf 'TOC-LINE-01\nTOC-LINE-02 _sqlx_migrations table\npayload-in-dump\n' >"${READONLY_DUMP}"
-cp "${FAKE_ROOT}/state/db.txt" "${FAKE_ROOT}/state/db-before-readonly.txt"
-if "${FAKE_ROOT}/fake-bin/pg_restore" -f /dev/null "${READONLY_DUMP}" >/dev/null 2>&1; then
-    case_ok "read-only pg_restore exit 0"
-else
-    case_fail "read-only pg_restore failed"
-fi
-cmp -s "${FAKE_ROOT}/state/db-before-readonly.txt" "${FAKE_ROOT}/state/db.txt" \
-    && case_ok "fake database untouched by -f /dev/null" \
-    || case_fail "fake database changed by -f /dev/null"
-grep -q '^pg_restore .*-f /dev/null ' "${FAKE_ROOT}/state/calls.log" \
-    && case_ok "read-only restore was logged as such" || case_fail "read-only restore not logged"
-teardown_case
-case_end
-
 # --- G. hub flip падает до смены current: безопасное допеределочное восстановление ---
 case_begin "hub flip fails with current unchanged"
 setup_cutover flipfail
@@ -472,33 +453,32 @@ assert_proc_alive "${SUP1}" "session 1 alive"
 teardown_case
 case_end
 
-# --- L. счастливый путь: всё новое, verify PASS, один recreate ---
-case_begin "cutover happy"
+# --- L. счастливый путь: порядок, токен, ожидание старта, слияние чанков, обслуживание,
+# проба, чек-лист; всё новое, verify PASS, один recreate ---
+case_begin "cutover happy: order, token, chunk merge, maintenance, probe, checklist"
 setup_cutover happy
-if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -3 "${FAKE_ROOT}/cutover.log"; fi
+printf 'old tab chunk\n' >"${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/old-tab.js"
+# Окно activating: два пустых MainPID и один 0 перед настоящим (урок 1.18.1).
+export FAKE_MAINPID_FAULTS="empty empty zero"
+# calls.log чистится после стенда: в журнале остаются только команды самого прогона.
+: >"${FAKE_ROOT}/state/calls.log"
+if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
+unset FAKE_MAINPID_FAULTS
+C="${FAKE_ROOT}/state/calls.log"
+L="${FAKE_ROOT}/cutover.log"
+# Итог прогона: все три цели на новом, база промигрирована, восстановления не было.
 hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
 worker_is "${SHA_NEW}" && case_ok "worker on new" || case_fail "worker not new"
 web_is "${SHA_NEW}" && case_ok "web on new" || case_fail "web not new"
 db_migr_is 41 0 && case_ok "db migrated" || case_fail "db not migrated"
 restore_logged && case_fail "database restore ran on happy path" || case_ok "no dropdb/createdb/pg_restore restore"
 [ "$(compose_up_count)" = "1" ] && case_ok "exactly one caddy recreate" || case_fail "recreate count wrong"
-grep -q "compose run" "${FAKE_ROOT}/state/calls.log" && case_fail "compose run used" || case_ok "no compose run"
-grep -q '^pg_dump -Fc -Z zstd:3 -f ' "${FAKE_ROOT}/state/calls.log" && case_ok "pg_dump uses zstd:3" || case_fail "pg_dump is not zstd:3"
-assert_contains "${FAKE_ROOT}/cutover.log" "verify PASS" "verify passed inside cutover"
+grep -q "compose run" "${C}" && case_fail "compose run used" || case_ok "no compose run"
+grep -q '^pg_dump -Fc -Z zstd:3 -f ' "${C}" && case_ok "pg_dump uses zstd:3" || case_fail "pg_dump is not zstd:3"
+assert_contains "${L}" "verify PASS" "verify passed inside cutover"
 assert_proc_alive "${SUP1}" "session 1 supervisor alive"
 assert_proc_alive "${SUP2}" "session 2 supervisor alive"
-teardown_case
-case_end
-
-# --- L2. счастливый путь: новые шаги боевого прогона видны в журнале ---
-case_begin "cutover happy: token, start wait, chunk merge, maintenance, probe, checklist"
-setup_cutover happy-new-steps
-printf 'old tab chunk\n' >"${WEB_RELEASES}/${SHA_PREV}/_app/immutable/chunks/old-tab.js"
-# Окно activating: два пустых MainPID и один 0 перед настоящим (урок 1.18.1).
-export FAKE_MAINPID_FAULTS="empty empty zero"
-if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
-unset FAKE_MAINPID_FAULTS
-L="${FAKE_ROOT}/cutover.log"
+# Новые шаги боевого прогона видны в журнале.
 assert_contains "${L}" "confirm token accepted: release ${SHA_NEW}" "token checked before anything"
 assert_contains "${L}" "vzdump done: archive ct/130/" "vzdump success and archive id parsed"
 assert_contains "${L}" "NRestarts=0" "hub NRestarts checked"
@@ -519,6 +499,37 @@ assert_contains "${L}" "owner checklist: authenticated checks" "authenticated ch
 assert_contains "${L}" "check-proxy.sh https://hub.example.com --positive" "checklist names the self-contained sign-in check"
 assert_contains "${L}" "dbip-city-lite.mmdb is 0 days old, no update" "geoip step ran after verify and kept the fresh database"
 assert_not_contains "${L}" "SOFT-FAIL" "no soft failures"
+# Порядок: vzdump при работающем всём, повторные ворота, стоп, дамп, хаб, воркер, PWA.
+in_order "${C}" "vzdump ${HUB_CTID} --mode snapshot" "stop canterlot-worker" "pg_dump -Fc" "pg_restore --list" \
+    "restart canterlot-hub" "start canterlot-worker" "compose up -d caddy" \
+    && case_ok "commands: vzdump -> worker stop -> pg_dump -> dump verify -> hub restart -> worker start -> caddy recreate" \
+    || case_fail "commands out of order"
+in_order "${L}" "control-worker scan before vzdump: exactly the unit process" "vzdump done:" \
+    "re-checking read gates and the session inventory after vzdump" \
+    "recorded session PIDs and ticks intact after vzdump" "control-worker scan before the worker stop: exactly the unit process" \
+    "stopping worker" "dump fully readable" "hub restarted once" 'worker state="live" after start' \
+    "PWA step (all failures soft" "speech:" "chunk merge: " "running verification" \
+    && case_ok "log: the new order, gates and inventory re-run between vzdump and the stop" \
+    || case_fail "log out of order"
+REGATES="$(sed -n '/vzdump done:/,/stopping worker/p' "${L}" | grep -c 'read gates for target' || true)"
+[ "${REGATES}" -ge 1 ] && case_ok "read gates ran again between vzdump and the stop" || case_fail "no read gates between vzdump and the stop"
+assert_contains "${L}" "downtime: worker " "worker downtime printed"
+grep -qE 'downtime: worker [0-9]+ s \(stop -> state=live\), hub [0-9]+ s \(restart -> readyz ok\)' "${L}" \
+    && case_ok "downtime line names both components" || case_fail "downtime line malformed: $(grep 'downtime:' "${L}")"
+assert_contains "${L}" "hub interruption: " "hub interruption measured"
+R="${FAKE_ROOT}/cutover.result"
+assert_eq "$(result_of "${R}" status)" "done" "result file: done"
+assert_eq "$(result_of "${R}" mode)" "execute" "result file: mode execute"
+assert_eq "$(result_of "${R}" soft_failures)/$(result_of "${R}" speech_soft_failures)" "0/0" "result file: no soft failures"
+[[ "$(result_of "${R}" worker_downtime_s)" =~ ^[0-9]+$ ]] && case_ok "result file: worker downtime" || case_fail "result file: worker downtime missing"
+[[ "$(result_of "${R}" hub_interruption_s)" =~ ^[0-9]+$ ]] && case_ok "result file: hub interruption" || case_fail "result file: hub interruption missing"
+assert_eq "$(result_of "${R}" vzdump_notes)" "$(sed -n 's/.*notes pre-\([^ ,)]*\).*/pre-\1/p' "${L}" | head -1)" "result file: vzdump notes"
+[ -n "$(result_of "${R}" dump)" ] && case_ok "result file: dump named" || case_fail "result file: no dump"
+assert_eq "$(result_of "${R}" token)" "" "result file: no token from a real run"
+assert_eq "$(result_of "${R}" log)" "${L}" "result file: log path"
+assert_eq "$(grep -c 'stop canterlot-worker' "${C}")" "1" "worker stopped once"
+assert_eq "$(grep -c 'start canterlot-worker' "${C}")" "1" "worker started once"
+hub_is "${SHA_NEW}" && web_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "all on new" || case_fail "not all on new"
 teardown_case
 case_end
 
@@ -616,47 +627,6 @@ if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -3 "$
 unset FAKE_DUMP_SIZE_BYTES
 assert_contains "${FAKE_ROOT}/cutover.log" "dump fully readable" "65 MB dump accepted by the default gate"
 hub_is "${SHA_NEW}" && case_ok "hub on new" || case_fail "hub not new"
-teardown_case
-case_end
-
-# --- O1. новый порядок: vzdump при работающем всём, повторные ворота, стоп, дамп, хаб, воркер, PWA ---
-case_begin "cutover order: vzdump first, gates again, stop, dump, hub, worker live, then PWA"
-setup_cutover order
-: >"${FAKE_ROOT}/state/calls.log"
-if run_cutover; then case_ok "exit 0"; else case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
-C="${FAKE_ROOT}/state/calls.log"
-L="${FAKE_ROOT}/cutover.log"
-in_order "${C}" "vzdump ${HUB_CTID} --mode snapshot" "stop canterlot-worker" "pg_dump -Fc" "pg_restore --list" \
-    "restart canterlot-hub" "start canterlot-worker" "compose up -d caddy" \
-    && case_ok "commands: vzdump -> worker stop -> pg_dump -> dump verify -> hub restart -> worker start -> caddy recreate" \
-    || case_fail "commands out of order"
-in_order "${L}" "control-worker scan before vzdump: exactly the unit process" "vzdump done:" \
-    "re-checking read gates and the session inventory after vzdump" \
-    "recorded session PIDs and ticks intact after vzdump" "control-worker scan before the worker stop: exactly the unit process" \
-    "stopping worker" "dump fully readable" "hub restarted once" 'worker state="live" after start' \
-    "PWA step (all failures soft" "speech:" "chunk merge: " "running verification" \
-    && case_ok "log: the new order, gates and inventory re-run between vzdump and the stop" \
-    || case_fail "log out of order"
-REGATES="$(sed -n '/vzdump done:/,/stopping worker/p' "${L}" | grep -c 'read gates for target' || true)"
-[ "${REGATES}" -ge 1 ] && case_ok "read gates ran again between vzdump and the stop" || case_fail "no read gates between vzdump and the stop"
-assert_contains "${L}" "downtime: worker " "worker downtime printed"
-grep -qE 'downtime: worker [0-9]+ s \(stop -> state=live\), hub [0-9]+ s \(restart -> readyz ok\)' "${L}" \
-    && case_ok "downtime line names both components" || case_fail "downtime line malformed: $(grep 'downtime:' "${L}")"
-assert_contains "${L}" "hub interruption: " "hub interruption measured"
-R="${FAKE_ROOT}/cutover.result"
-assert_eq "$(result_of "${R}" status)" "done" "result file: done"
-assert_eq "$(result_of "${R}" mode)" "execute" "result file: mode execute"
-assert_eq "$(result_of "${R}" soft_failures)/$(result_of "${R}" speech_soft_failures)" "0/0" "result file: no soft failures"
-[[ "$(result_of "${R}" worker_downtime_s)" =~ ^[0-9]+$ ]] && case_ok "result file: worker downtime" || case_fail "result file: worker downtime missing"
-[[ "$(result_of "${R}" hub_interruption_s)" =~ ^[0-9]+$ ]] && case_ok "result file: hub interruption" || case_fail "result file: hub interruption missing"
-assert_eq "$(result_of "${R}" vzdump_notes)" "$(sed -n 's/.*notes pre-\([^ ,)]*\).*/pre-\1/p' "${L}" | head -1)" "result file: vzdump notes"
-[ -n "$(result_of "${R}" dump)" ] && case_ok "result file: dump named" || case_fail "result file: no dump"
-assert_eq "$(result_of "${R}" token)" "" "result file: no token from a real run"
-assert_eq "$(result_of "${R}" log)" "${L}" "result file: log path"
-assert_eq "$(grep -c 'stop canterlot-worker' "${C}")" "1" "worker stopped once"
-assert_eq "$(grep -c 'start canterlot-worker' "${C}")" "1" "worker started once"
-assert_eq "$(compose_up_count)" "1" "exactly one caddy recreate"
-hub_is "${SHA_NEW}" && web_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "all on new" || case_fail "not all on new"
 teardown_case
 case_end
 
