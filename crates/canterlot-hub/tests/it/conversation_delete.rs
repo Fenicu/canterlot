@@ -629,6 +629,11 @@ async fn delete_leaves_no_row_in_any_table_that_references_the_conversation(pool
     assert_eq!(told.len(), 1, "the delegate's event: {told:?}");
     assert!(told[0].contains("session_task") && told[0].contains("deleted"));
     assert!(!told[0].contains("секретный"));
+    // Отзыв секрета переживает разговор намеренно: файл на машине должен
+    // исчезнуть, поэтому команда отвязана от строки, но помнит каталог в payload.
+    let commands = left.remove("commands").unwrap_or_default();
+    assert_eq!(commands.len(), 1, "the detached revoke: {commands:?}");
+    assert!(commands[0].contains("revoke_secret"));
     assert!(left.is_empty(), "rows still reference it: {left:?}");
 
     assert_eq!(
@@ -1170,11 +1175,17 @@ async fn a_reference_from_a_neighbour_hands_the_attachment_over(pool: PgPool) {
             .all(|job| job.contains("session_task") && job.contains("deleted"))
     );
     assert!(
-        left.keys()
-            .all(|table| table == "attachments" || table == "input_attachments"),
+        left.keys().all(|table| table == "attachments"
+            || table == "input_attachments"
+            || table == "commands"),
         "{left:#?}"
     );
-    for rows in left.values() {
+    for (table, rows) in &left {
+        if table == "commands" {
+            // Отзыв секрета переживает разговор и помнит его каталог.
+            assert!(rows.iter().all(|row| row.contains("revoke_secret")));
+            continue;
+        }
         assert!(
             rows.iter().all(|row| row.contains(&shared.to_string())),
             "{left:#?}"
@@ -1394,9 +1405,17 @@ async fn late_journal_records_are_acknowledged_and_change_nothing(pool: PgPool) 
     let left = mentions(&f.pool, &needles).await;
     assert_eq!(
         left.keys().collect::<Vec<_>>(),
-        ["conversation_tombstones", "events", "scheduled_jobs"],
-        "the job is the subscriber's event about the deletion"
+        [
+            "commands",
+            "conversation_tombstones",
+            "events",
+            "scheduled_jobs"
+        ],
+        "the job is the subscriber's event about the deletion, the revoke outlives it"
     );
+    let commands = left.get("commands").expect("detached revoke");
+    assert_eq!(commands.len(), 1);
+    assert!(commands[0].contains("revoke_secret"));
     let conversation_events: i64 =
         sqlx::query_scalar("select count(*) from events where scope like 'conversation:%'")
             .fetch_one(&f.pool)
