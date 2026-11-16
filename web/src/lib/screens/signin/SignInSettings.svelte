@@ -45,7 +45,7 @@
   let login = $state('');
   let scanning = $state(false);
   let secret = $state('');
-  let Scanner = $state<Component<{ onsecret: (secret: string) => void; oncancel: () => void }> | null>(null);
+  let Scanner = $state<Component<{ onsecret: (secret: string) => void; oncancel: () => void; embedded?: boolean }> | null>(null);
   let Approve = $state<Component<{ secret: string }> | null>(null);
   let recovered = $state(page.url.searchParams.get('from') === 'recovery');
 
@@ -157,14 +157,6 @@
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if notice}<p class="ok" role="status">{notice}</p>{/if}
 
-    {#if scanning}
-      <section class="panel">
-        {#if secret && Approve}<Approve {secret} /><Button variant="text" onclick={() => { scanning = false; secret = ''; }}>Закрыть</Button>
-        {:else if Scanner}<Scanner onsecret={(value) => { secret = value; }} oncancel={() => { scanning = false; }} />
-        {:else}<p role="status">Открываю сканер…</p>{/if}
-      </section>
-    {/if}
-
     {#if view}
       <section aria-labelledby="sessions-title">
         <h2 id="sessions-title">Сеансы</h2>
@@ -230,6 +222,14 @@
   </div></div>
 </svelte:element>
 
+<Sheet open={scanning} title="Сканировать код" routeKey="qr-scan" onclose={() => { scanning = false; secret = ''; }}>
+  {#if scanning}<div class="panel">
+    {#if secret && Approve}<Approve {secret} /><Button variant="text" onclick={() => { scanning = false; secret = ''; }}>Закрыть</Button>
+    {:else if Scanner}<Scanner embedded onsecret={(value) => { secret = value; }} oncancel={() => { scanning = false; }} />
+    {:else}<p role="status">Открываю сканер…</p>{/if}
+  </div>{/if}
+</Sheet>
+
 <Sheet open={selected !== null} title={selected ? sessionTitle(selected) : ''} routeKey="session-details" onclose={() => { selectedId = null; renameOpen = false; }}>
   {#if selected}
     <dl class="details" data-session-details>
@@ -287,7 +287,7 @@
   .gap { margin-top: var(--s6); }
   .banner { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4); padding: var(--s5) var(--s8); border-radius: var(--radius-card); background: var(--warning-soft); }
   .banner p { flex: 1; min-width: 0; margin: var(--s0); }
-  .panel { padding: var(--s8); border-radius: var(--radius-card); background: var(--surface); display: grid; gap: var(--s6); }
+  .panel { display: grid; gap: var(--s6); }
   .ok { color: var(--success); }
   .password, .rename { display: grid; gap: var(--s6); }
   .hidden-login { position: absolute; width: var(--hairline); height: var(--hairline); opacity: 0; pointer-events: none; }

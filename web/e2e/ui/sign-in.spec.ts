@@ -324,6 +324,20 @@ test('limit_and_idle_endings_show_sign_in_but_keep_local_data', async ({ page })
   expect(await page.evaluate(() => localStorage.getItem('canterlot.theme'))).toBe('light');
 });
 
+test('scan_code_opens_the_scanner_where_the_owner_is_looking', async ({ page }) => {
+  await boot(page, '/settings/sign-in', (auth) => {
+    const [, sample] = auth.sessions;
+    for (let n = 0; n < 8; n++) auth.sessions.push({ ...sample, id: `00000000-0000-4000-8000-0000000002${n}0`, name: `Устройство ${n}`, approved: [] });
+  });
+  const button = page.getByRole('button', { name: 'Сканировать код' });
+  await button.scrollIntoViewIfNeeded();
+  await button.click();
+  await expect(page.locator('[data-scanner]')).toBeInViewport({ timeout: 10_000 });
+  // Закрытие шторки размонтирует сканер: иначе камера осталась бы включённой.
+  await page.getByRole('dialog').getByRole('button', { name: 'Закрыть' }).click();
+  await expect(page.locator('[data-scanner]')).toHaveCount(0);
+});
+
 test('scan_code_without_a_camera_says_so_in_words', async ({ page }) => {
   await boot(page, '/settings/sign-in');
   await page.getByRole('button', { name: 'Сканировать код' }).click();

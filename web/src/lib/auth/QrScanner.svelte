@@ -3,7 +3,7 @@
   import Button from '#lib/ui/Button.svelte';
   import { cameraErrorText, qrSecret } from './scan.js';
 
-  let { onsecret, oncancel }: { onsecret: (secret: string) => void; oncancel: () => void } = $props();
+  let { onsecret, oncancel, embedded = false }: { onsecret: (secret: string) => void; oncancel: () => void; embedded?: boolean } = $props();
 
   type Detector = { detect(source: CanvasImageSource): Promise<{ rawValue: string }[]> };
   type DetectorClass = new (options: { formats: string[] }) => Detector;
@@ -73,8 +73,8 @@
   });
 </script>
 
-<section class="scanner" aria-labelledby="scan-title" data-scanner>
-  <h2 id="scan-title">Сканировать код</h2>
+<section class="scanner" aria-labelledby={embedded ? undefined : 'scan-title'} aria-label={embedded ? 'Сканер кода входа' : undefined} data-scanner>
+  {#if !embedded}<h2 id="scan-title">Сканировать код</h2>{/if}
   <p class="note">Наведите камеру на код входа, который показан на другом устройстве</p>
   {#if error}<p class="error" role="alert">{error}</p>
   {:else}
