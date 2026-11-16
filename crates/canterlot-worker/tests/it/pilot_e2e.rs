@@ -1797,14 +1797,63 @@ async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
         &marker,
         &hashes,
     );
+    let state_files = files_under(&p.config.data_dir);
     let mut state_text = String::new();
-    for path in files_under(&p.config.data_dir) {
-        if let Ok(bytes) = fs::read(&path) {
+    for path in &state_files {
+        if let Ok(bytes) = fs::read(path) {
             state_text.push_str(&String::from_utf8_lossy(&bytes));
         }
     }
     assert_clean("worker state", &state_text, &marker, &hashes);
-    assert_clean("logs", &capture.read(), &marker, &hashes);
+    let logs = capture.read();
+    assert_clean("logs", &logs, &marker, &hashes);
+    // Полный дамп базы: то же, что видит `pg_dump`, а не только отдельные таблицы.
+    // Адрес тестовой базы — `DATABASE_URL` с именем базы этого теста.
+    let database = pool.connect_options().get_database().map(str::to_owned);
+    let url = match (std::env::var("DATABASE_URL").ok(), database) {
+        (Some(base), Some(database)) => base
+            .rsplit_once('/')
+            .map(|(prefix, _)| format!("{prefix}/{database}")),
+        _ => None,
+    };
+    let output = url.as_ref().map(|url| {
+        std::process::Command::new("pg_dump")
+            .args([
+                "--data-only",
+                "--no-owner",
+                "--no-privileges",
+                "--schema=public",
+            ])
+            .arg("--dbname")
+            .arg(url)
+            .output()
+    });
+    match output {
+        Some(Ok(output)) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert_clean("pg_dump", &text, &marker, &hashes);
+            eprintln!(
+                "pg_dump: {} bytes, plaintext + sha256 + sha1 absent",
+                text.len()
+            );
+        }
+        // Локальный `pg_dump` может быть старее сервера: тогда остаётся скан таблиц.
+        Some(Ok(output)) => eprintln!(
+            "pg_dump unusable: {}; the per-table scan above is the fallback",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .next()
+                .unwrap_or("failed")
+        ),
+        _ => eprintln!("pg_dump unavailable; the per-table scan above is the fallback"),
+    }
+    // Итог скана виден в выводе теста: таблицы базы, файлы состояния и журналы.
+    eprintln!(
+        "secret scan: {} tables, {} worker state files, {} log bytes; plaintext + sha256 + sha1 absent",
+        tables.len(),
+        state_files.len(),
+        logs.len()
+    );
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
